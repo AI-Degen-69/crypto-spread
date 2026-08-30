@@ -19,9 +19,7 @@ from .engine import _json_or_skip
 
 
 def _index_path(source: Path) -> Path:
-    """`<file>.idx` for files, `<dir>/_index.jsonl` for directories."""
-    if source.is_dir():
-        return source / "_index.jsonl"
+    """`<file>.idx` sidecar for a single tick file (never inside a tick dir)."""
     return source.with_suffix(source.suffix + ".idx")
 
 
@@ -79,10 +77,12 @@ def build_index(source: Path) -> tuple[Path, int]:
 
 
 def is_fresh(source: Path, idx_path: Path) -> bool:
-    """True if index exists and source mtime is older than index mtime."""
+    """True if index exists and source mtime is strictly older than index mtime."""
     if not idx_path.exists():
         return False
-    return idx_path.stat().st_mtime >= source.stat().st_mtime
+    # Strict > (not >=) so a source written in the same second as the index
+    # is not considered fresh — the index may have missed the last write.
+    return idx_path.stat().st_mtime > source.stat().st_mtime
 
 
 def load_index(source: Path) -> list[IndexEntry]:

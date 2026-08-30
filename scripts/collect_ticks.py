@@ -41,7 +41,7 @@ CLOB_HOST = "https://clob.polymarket.com"
 TRADES_API = "https://data-api.polymarket.com/trades"
 
 POLL_INTERVAL = 1.0
-JITTER_SEC = 0.080
+JITTER_SEC = 0.010
 SPREAD_OFFSET = 0.02
 TAPE_LIMIT = 200
 TICK_BUDGET_MS = 2000.0
@@ -157,6 +157,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
     tick_start = time.perf_counter()
     closed: list[str] = []
     errs: list[str] = []
+    deadline = tick_start + 1.0  # target 1s cadence
 
     for series_slug, duration, label in SERIES:
         info, err = fetch_live_for_series(series_slug)
@@ -173,7 +174,6 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
                 "label": label, "duration": duration,
             }
         w = windows[cid]
-        time.sleep(random.uniform(0.0, JITTER_SEC))
 
         # Per-call isolation: one CLOB hiccup must not kill the collector
         # (Plan D2 hardening — earlier version let ReadTimeout propagate
@@ -195,15 +195,15 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
             db_err = db["err"]
         time.sleep(random.uniform(0.0, JITTER_SEC))
 
-        tape: list[dict] = []
+        tape_list: list[dict] = []
         tape_err = ""
         try:
             tape_map = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT)
-            tape = list(tape_map.get(w["up_token"], {}).items())
+            for tok in (w["up_token"], w["down_token"]):
+                for p, s in tape_map.get(tok, {}).items():
+                    tape_list.append({"asset": tok, "price": p, "size": s})
         except Exception as e:
             tape_err = f"tape:{e}"
-        tape_list = [{"asset": w["up_token"], "price": p, "size": s}
-                     for p, s in tape]
 
         mid = compute_mid(ub)
         touch_pair = None

@@ -45,6 +45,10 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--fill-model", choices=["tape", "book", "both"],
                     default="tape", help="tape=conservative, book=optimistic")
     ap.add_argument("--gas", type=float, default=0.05)
+    ap.add_argument("--start", type=str, default=None,
+                    help="inclusive start ISO timestamp, e.g. 2026-08-29T00:00:00Z")
+    ap.add_argument("--end", type=str, default=None,
+                    help="inclusive end ISO timestamp, e.g. 2026-08-30T23:59:59Z")
     ap.add_argument("--out", type=Path, default=None,
                     help="write full JSON to this path")
     args = ap.parse_args(argv)
@@ -67,6 +71,16 @@ def main(argv: list[str] | None = None):
 
     t0 = time.perf_counter()
     snaps = list(iter_ticks(args.source))
+    # Optional date-range filter (for midnight-crossing targeted replay)
+    if args.start or args.end:
+        from datetime import datetime, timezone
+        def _to_ts(s: str) -> float:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s).timestamp()
+        start_ts = _to_ts(args.start) if args.start else 0.0
+        end_ts = _to_ts(args.end) if args.end else float("inf")
+        snaps = [s for s in snaps if start_ts <= s.get("ts", 0) <= end_ts]
     elapsed_load = time.perf_counter() - t0
     if not snaps:
         print("no ticks found", file=sys.stderr)

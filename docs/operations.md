@@ -74,8 +74,10 @@ Per series:
 
 - **pair_rate**: fraction of windows where both sides filled and merged for
   4¢ gross (minus a share of merge gas).
-- **exit_rate**: fraction of windows where one side filled and the other
-  never did — the bot paid `1 - best_bid` to lift the stuck leg.
+- **exit_rate**: fraction of windows where the simulator's exit rule fired
+  (`exit_taken` in `backtest/engine.py`) — one side filled and mid drifted past
+  threshold without reversal. Unresolved one-sided positions that never hit the
+  exit threshold are *not* counted as exits.
 - **osc/mono**: count of oscillating vs monotonic windows, classified by
   `classify_window` (max excursion in each direction vs 0.50).
 
@@ -109,7 +111,8 @@ python -m pytest tests/ -v
 49 tests covering: classification thresholds, fill-model A vs B, queue
 gating (including 0=disabled), monotonic exit (with and without reversal),
 replay determinism (same input + params = identical pnl hash), gzip
-roundtrip, index freshness + multi-file cids, CLI smoke.
+roundtrip, per-file cid sidecars (5 tests), CLI smoke (4 tests).
+Total: 44 (engine) + 5 (index) + 4 (smoke) = 49.
 
 ## What this lab does not do
 

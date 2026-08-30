@@ -25,16 +25,31 @@ def load_summary():
     except: return {"ts": 0, "per_series": {}}
 
 def load_windows(limit=200):
+    return _load_all_windows()[:limit]
+
+
+def _load_all_windows():
+    """Cached load of all windows; invalidates when file mtime/size changes."""
     f = RUN / "oscillation_windows.jsonl"
     if not f.exists():
         return []
-    rows=[]
+    # Simple cache keyed on mtime + size
+    cache = getattr(_load_all_windows, "_cache", None)
+    stat = f.stat()
+    key = (stat.st_mtime, stat.st_size)
+    if cache and cache[0] == key:
+        return cache[1]
+    rows = []
     for line in f.read_text(encoding="utf-8").splitlines():
-        if not line.strip(): continue
-        try: rows.append(json.loads(line))
-        except: continue
-    rows.sort(key=lambda x: x.get("end_ts",0), reverse=True)
-    return rows[:limit]
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    rows.sort(key=lambda x: x.get("end_ts", 0), reverse=True)
+    _load_all_windows._cache = (key, rows)  # type: ignore[attr-defined]
+    return rows
 
 # --- goal counts per duration (editable in dashboard, persisted in localStorage) ---
 DEFAULT_GOALS = {300: 500, 900: 150}
@@ -76,28 +91,13 @@ def api():
     summary = load_summary()
     wins = load_windows(200)
     live = load_live_snaps()
-    # full rows for goal aggregation (all windows, not 200)
-    all_rows=[]
-    wf = RUN / "oscillation_windows.jsonl"
-    if wf.exists():
-        for line in wf.read_text(encoding="utf-8").splitlines():
-            if not line.strip(): continue
-            try: all_rows.append(json.loads(line))
-            except: continue
-    goals = _agg_goals(all_rows)
+    goals = _agg_goals(_load_all_windows())
     now=time.time()
     return {"now": now, "summary": summary, "windows": wins, "live": live, "goals": goals, "default_goals": DEFAULT_GOALS}
 
 @app.get("/api/goals")
 def api_goals():
-    rows=[]
-    f=RUN / "oscillation_windows.jsonl"
-    if f.exists():
-        for line in f.read_text(encoding="utf-8").splitlines():
-            if not line.strip(): continue
-            try: rows.append(json.loads(line))
-            except: continue
-    return _agg_goals(rows)
+    return _agg_goals(_load_all_windows())
 
 
 # --- backtest API (Plan T4) -------------------------------------------------
@@ -125,19 +125,6 @@ def api_ticks_manifest():
     return out
 
 
-def _parse_floats(args, keys, cast=float):
-    out = {}
-    for k in keys:
-        v = args.get(k)
-        if v is None or v == "":
-            continue
-        try:
-            out[k] = cast(v)
-        except (TypeError, ValueError):
-            pass
-    return out
-
-
 @app.get("/api/backtest")
 def api_backtest(
     file: str = "",
@@ -160,10 +147,6 @@ def api_backtest(
         "default_5m": exit_default_5m,
         "default_15m": exit_default_15m,
     }
-    for slug in ("btc-up-or-down-5m", "btc-up-or-down-15m",
-                 "sol-up-or-down-5m", "sol-up-or-down-15m"):
-        v = _parse_floats({"v": None}, ["v"])  # noop; per-asset exits come via query
-        pass
 
     params = BacktestParams(
         offset=offset, queue_gate=queue, pair_cost_gate=pair_cost,

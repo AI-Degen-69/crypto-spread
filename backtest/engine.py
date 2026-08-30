@@ -42,11 +42,13 @@ def _open_text(path: Path) -> Iterator[str]:
                 yield line
 
 
-def load_ticks(source) -> Iterator[dict]:
+def load_ticks(source) -> Iterator[dict | None]:
     """Yield tick dicts from a file, directory of tick files, or list of paths.
 
     `.jsonl` and `.jsonl.gz` are both supported. Each non-blank line must be
-    a JSON object. Bad lines are skipped silently (logged at INFO upstream).
+    a JSON object. Blank or malformed lines yield ``None`` (skipped by
+    :func:`iter_ticks`, the safe entry point for callers that need only valid
+    dicts). This preserves the existing skip behavior without changing callers.
     """
     if isinstance(source, (str, Path)):
         path = Path(source)
@@ -340,6 +342,21 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):
             fees_cents += _taker_fee(0.50, params.taker_fee_rate) * 100.0
+        # Mark any still-open naked leg to the final observed price so the
+        # window's P&L reflects settlement. Use the last snap's best_bid for
+        # the held side (executable quote). Charge the taker fee only on the
+        # actual close; preserve pair-capture and exit behavior above.
+        if not pair_captured and not exit_taken:
+            last = window_snaps[-1] if window_snaps else {}
+            lb = (last.get("up_book") or {}).get("best_bid")
+            db_bid = (last.get("down_book") or {}).get("best_bid")
+            if filled_up and not filled_down and lb is not None:
+                pnl_cents -= lb * 100.0
+                fees_cents += _taker_fee(lb, params.taker_fee_rate) * 100.0
+            elif filled_down and not filled_up and db_bid is not None:
+                # DOWN leg held: value is 1 - mid, approximated by down best_bid
+                pnl_cents -= db_bid * 100.0
+                fees_cents += _taker_fee(db_bid, params.taker_fee_rate) * 100.0
 
     return WindowResult(
         cid=cid, series=series, slug=slug, duration=duration,
@@ -368,8 +385,10 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         }
       }
     """
+    snaps_list = list(snaps)
+    n_snaps = len(snaps_list)
     per_window: list[WindowResult] = []
-    for _cid, group in group_by_cid(snaps):
+    for _cid, group in group_by_cid(snaps_list):
         per_window.append(_simulate_window(group, params))
 
     per_series: dict[str, dict] = defaultdict(lambda: {
@@ -422,6 +441,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
     }
     return {
         "params_hash": params.params_hash(),
+        "n_snaps": n_snaps,
         "n_windows": len(per_window),
         "per_window": [asdict(w) for w in per_window],
         "aggregate": {
