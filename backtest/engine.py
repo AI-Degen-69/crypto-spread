@@ -283,15 +283,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # --- FILL DETECTION (Plan fill_model: tape conservative default) ---
         # Tape-confirmed: a real trade printed at our resting price.
         # Book-only: best_ask <= resting_price means book crossed us.
+        # Hoist token lookups and guard empty identifiers (prevents "" == "" match).
+        up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
+        dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
         for trade in s.get("tape_delta") or []:
+            tasset = str(trade.get("asset", "")).strip()
+            if not tasset:
+                continue
             tprice = float(trade.get("price", 0))
-            tasset = str(trade.get("asset", ""))
-            up_token = first.get("up_token") or (ub.get("token_id") or "")
-            dn_token = first.get("down_token") or (db.get("token_id") or "")
-            if abs(tprice - resting_up) <= params.tick_size and tasset == up_token:
+            if up_token and tasset == up_token and abs(tprice - resting_up) <= params.tick_size:
                 if params.fill_model in ("tape", "both"):
                     filled_up = True
-            if abs(tprice - resting_down) <= params.tick_size and tasset == dn_token:
+            if dn_token and tasset == dn_token and abs(tprice - resting_down) <= params.tick_size:
                 if params.fill_model in ("tape", "both"):
                     filled_down = True
         if params.fill_model in ("book", "both"):
@@ -330,8 +333,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         if filled_up and filled_down and not pair_captured:
             pair_captured = True
             pnl_cents += 4.0
-            pnl_cents -= (params.merge_gas_usd * 100.0 /
-                          max(1, params.quote_shares // params.min_quote_shares))
+            # merge_gas_usd is a per-transaction cost; amortize over the
+            # actual shares in the pair so pnl_cents stays per-share.
+            pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
 
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):

@@ -173,8 +173,18 @@ def api_backtest(
     if not TICKS_DIR.exists():
         return {"error": "no ticks dir", "params_hash": params.params_hash()}
     if file:
-        source = TICKS_DIR / file
-        if not source.exists():
+        # Prevent arbitrary file read: only allow files inside TICKS_DIR with
+        # expected suffixes and no path traversal.
+        if "/" in file or "\\" in file or ".." in file:
+            return {"error": "invalid file param", "params_hash": params.params_hash()}
+        if not (file.endswith(".jsonl") or file.endswith(".jsonl.gz")):
+            return {"error": "invalid file suffix", "params_hash": params.params_hash()}
+        source = (TICKS_DIR / file).resolve()
+        try:
+            source.relative_to(TICKS_DIR.resolve())
+        except ValueError:
+            return {"error": "invalid file path", "params_hash": params.params_hash()}
+        if not source.exists() or not source.is_file():
             return {"error": f"file not found: {file}"}
     else:
         source = TICKS_DIR
