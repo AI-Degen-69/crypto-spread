@@ -25,16 +25,52 @@ def load_summary():
     except: return {"ts": 0, "per_series": {}}
 
 def load_windows(limit=200):
+    return _load_all_windows()[:limit]
+
+
+def _load_all_windows():
+    """Cached load of all windows; invalidates when file mtime/size changes."""
     f = RUN / "oscillation_windows.jsonl"
     if not f.exists():
         return []
-    rows=[]
+    # Simple cache keyed on mtime + size
+    cache = getattr(_load_all_windows, "_cache", None)
+    stat = f.stat()
+    key = (stat.st_mtime, stat.st_size)
+    if cache and cache[0] == key:
+        return cache[1]
+    rows = []
     for line in f.read_text(encoding="utf-8").splitlines():
-        if not line.strip(): continue
-        try: rows.append(json.loads(line))
-        except: continue
-    rows.sort(key=lambda x: x.get("end_ts",0), reverse=True)
-    return rows[:limit]
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    rows.sort(key=lambda x: x.get("end_ts", 0), reverse=True)
+    _load_all_windows._cache = (key, rows)  # type: ignore[attr-defined]
+    return rows
+
+# --- goal counts per duration (editable in dashboard, persisted in localStorage) ---
+DEFAULT_GOALS = {300: 500, 900: 150}
+
+def _agg_goals(rows):
+    from collections import defaultdict
+    by_dur = defaultdict(list)
+    for r in rows:
+        by_dur[r.get("duration", 300)].append(r)
+    out = {}
+    for dur in (300, 900):
+        ws = by_dur.get(dur, [])
+        n = len(ws)
+        any2 = sum(1 for w in ws if max(w.get("max_up", 0), w.get("max_down", 0)) >= 0.02)
+        mono = sum(1 for w in ws if w.get("class") == "monotonic")
+        osc = sum(1 for w in ws if w.get("class") == "oscillating")
+        flat = sum(1 for w in ws if w.get("class") == "flat")
+        out[str(dur)] = {"label": "5m" if dur == 300 else "15m", "duration": dur, "goal": DEFAULT_GOALS[dur], "n": n, "any_2c": any2, "oscillating": osc, "monotonic": mono, "flat": flat}
+    total = len(rows)
+    out["total"] = {"n": total, "any_2c": sum(1 for r in rows if max(r.get("max_up",0), r.get("max_down",0))>=0.02), "oscillating": sum(1 for r in rows if r.get("class")=="oscillating"), "monotonic": sum(1 for r in rows if r.get("class")=="monotonic")}
+    return out
 
 def load_live_snaps():
     f = RUN / "oscillation_snapshots.jsonl"
@@ -55,8 +91,135 @@ def api():
     summary = load_summary()
     wins = load_windows(200)
     live = load_live_snaps()
+    goals = _agg_goals(_load_all_windows())
     now=time.time()
-    return {"now": now, "summary": summary, "windows": wins, "live": live}
+    return {"now": now, "summary": summary, "windows": wins, "live": live, "goals": goals, "default_goals": DEFAULT_GOALS}
+
+@app.get("/api/goals")
+def api_goals():
+    return _agg_goals(_load_all_windows())
+
+
+# --- backtest API (Plan T4) -------------------------------------------------
+TICKS_DIR = RUN / "ticks"
+
+@app.get("/api/ticks/manifest")
+def api_ticks_manifest():
+    """List available tick files + manifest stats for the slider UI."""
+    out = {"files": [], "manifest": None}
+    if not TICKS_DIR.exists():
+        return out
+    mf = TICKS_DIR / "manifest.json"
+    if mf.exists():
+        try:
+            out["manifest"] = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    for f in sorted(TICKS_DIR.iterdir()):
+        if f.suffix in (".jsonl", ".gz") and f.is_file():
+            out["files"].append({
+                "name": f.name,
+                "bytes": f.stat().st_size,
+                "mtime": f.stat().st_mtime,
+            })
+    return out
+
+
+@app.get("/api/backtest")
+def api_backtest(
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 50.0,
+    pair_cost: float = 0.995,
+    exit_default_5m: float = 0.12,
+    exit_default_15m: float = 0.13,
+    exit_reversal: float = 0.02,
+    size: int = 120,
+    fill_model: str = "tape",
+    gas: float = 0.05,
+    limit_windows: int = 0,
+):
+    """Run backtest on selected tick file or all files in run/ticks/."""
+    from backtest import BacktestParams, iter_ticks, replay
+    from backtest.engine import _simulate_window, group_by_cid
+
+    exit_thresh = {
+        "default_5m": exit_default_5m,
+        "default_15m": exit_default_15m,
+    }
+
+    params = BacktestParams(
+        offset=offset, queue_gate=queue, pair_cost_gate=pair_cost,
+        exit_thresh_by_slug=exit_thresh, exit_reversal=exit_reversal,
+        quote_shares=size, fill_model=fill_model, merge_gas_usd=gas,
+    )
+    if not TICKS_DIR.exists():
+        return {"error": "no ticks dir", "params_hash": params.params_hash()}
+    if file:
+        # Prevent arbitrary file read: only allow files inside TICKS_DIR with
+        # expected suffixes and no path traversal.
+        if "/" in file or "\\" in file or ".." in file:
+            return {"error": "invalid file param", "params_hash": params.params_hash()}
+        if not (file.endswith(".jsonl") or file.endswith(".jsonl.gz")):
+            return {"error": "invalid file suffix", "params_hash": params.params_hash()}
+        source = (TICKS_DIR / file).resolve()
+        try:
+            source.relative_to(TICKS_DIR.resolve())
+        except ValueError:
+            return {"error": "invalid file path", "params_hash": params.params_hash()}
+        if not source.exists() or not source.is_file():
+            return {"error": f"file not found: {file}"}
+    else:
+        source = TICKS_DIR
+
+    snaps = list(iter_ticks(source))
+    if not snaps:
+        return {"error": "no snaps", "params_hash": params.params_hash()}
+
+    grouped = group_by_cid(snaps)
+    if limit_windows and limit_windows > 0:
+        grouped = grouped[:limit_windows]
+    per_window = [_simulate_window(g, params) for _cid, g in grouped]
+
+    from collections import defaultdict
+    per_series = defaultdict(lambda: {"windows": 0, "pair": 0, "exit": 0,
+                                      "total_pnl_cents": 0.0})
+    for w in per_window:
+        a = per_series[w.series]
+        a["windows"] += 1
+        if w.pair_captured: a["pair"] += 1
+        if w.exit_taken:    a["exit"] += 1
+        a["total_pnl_cents"] += w.pnl_cents
+    overall = {
+        "windows": sum(a["windows"] for a in per_series.values()),
+        "pair": sum(a["pair"] for a in per_series.values()),
+        "exit": sum(a["exit"] for a in per_series.values()),
+        "total_pnl_cents": sum(a["total_pnl_cents"] for a in per_series.values()),
+    }
+    def _fini(d):
+        n = d.get("windows", 0) or 1
+        if d.get("windows", 0) == 0:
+            n = 1
+        return {
+            "windows": d["windows"],
+            "pair_rate": round(d["pair"] / n, 4) if d["windows"] else 0.0,
+            "exit_rate": round(d["exit"] / n, 4) if d["windows"] else 0.0,
+            "total_pnl_cents": round(d["total_pnl_cents"], 4),
+            "avg_pnl_cents": round(d["total_pnl_cents"] / n, 4) if d["windows"] else 0.0,
+        }
+    return {
+        "params_hash": params.params_hash(),
+        "params": {
+            "offset": offset, "queue": queue, "pair_cost": pair_cost,
+            "exit_default_5m": exit_default_5m, "exit_default_15m": exit_default_15m,
+            "exit_reversal": exit_reversal, "size": size,
+            "fill_model": fill_model, "gas": gas,
+        },
+        "n_snaps": len(snaps),
+        "n_windows": len(per_window),
+        "per_series": {k: _fini(v) for k, v in per_series.items()},
+        "overall": _fini(overall),
+    }
 
 @app.get("/api/analysis")
 def api_analysis():
@@ -154,6 +317,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     </div>
   </div>
 
+  <div id="goalBar" class="card" style="margin-bottom:12px;border-top:2px solid var(--gold)"></div>
   <div id="liveBar" class="card" style="margin-bottom:12px"></div>
   <div id="grid" class="grid"></div>
   <div id="tables" style="margin-top:12px"></div>
@@ -169,6 +333,23 @@ async function tick(){
   let data; try{data=await (await fetch('/api/oscillation',{cache:'no-store'})).json();}catch(e){return;}
   const sum=data.summary||{}, per=sum.per_series||{}, live=data.live||{}, wins=data.windows||[];
   $('updated').textContent = sum.ts? `עודכן לפני ${hms((data.now||Date.now()/1000)-sum.ts)} · ${wins.length} חלונות סגורים` : 'אין נתונים עדיין — המדידה רצה';
+  // goal bar — 🎯 n goal / n passed / +-2c touched / monotonic
+  (function(){
+    const g=data.goals||{}, dg=data.default_goals||{'300':500,'900':150};
+    const fmt=(dur)=>{
+      const k=String(dur), cur=g[k]||{goal:dg[k],n:0,any_2c:0,monotonic:0,oscillating:0};
+      const goal=parseInt(localStorage.getItem('goal_'+k)||cur.goal,10);
+      const n=cur.n, any2=cur.any_2c, mono=cur.monotonic, osc=cur.oscillating;
+      const pctGoal=Math.min(100,Math.round(n/goal*100));
+      const remain=Math.max(0,goal-n);
+      return {goal,n,any2,mono,osc,pctGoal,remain,label:dur===300?'5 דקות (300s)':'15 דקות (900s)', short:dur===300?'5m':'15m'};
+    };
+    const g5=fmt(300), g15=fmt(900);
+    const gt=g.total||{n:0,any_2c:0,monotonic:0,oscillating:0};
+    const bar=(x)=>`<div class="card" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">🎯 ${x.short} — ${x.label}</div><div class="mono" style="font-size:18px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:12px;color:var(--dim)">goal</span> / ${x.n} <span style="font-size:12px;color:var(--up)">passed</span> / ${x.any2} <span style="font-size:12px;color:var(--gold)">±2¢ touched</span> / ${x.mono} <span style="font-size:12px;color:var(--down)">monotonic</span></div><div style="display:flex;gap:6px;align-items:center"><div class="bar" style="flex:1;height:8px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><span class="mono" style="font-size:11px;color:var(--dim)">${x.pctGoal}%</span></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">oscillating ${x.osc} · flat ${g[String(x.short==='5m'?300:900)]?.flat||0} · נותר ${x.remain} ליעד · <span style="color:var(--faint)">יעד ניתן לעריכה ↓</span></div><div style="margin-top:6px;display:flex;gap:6px;align-items:center"><span class="mono" style="font-size:10px;color:var(--dim)">יעד:</span><input id="goalIn${x.short}" type="number" min="1" step="10" value="${x.goal}" style="width:90px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:500 12px var(--mono)"><button onclick="(function(){const v=parseInt(document.getElementById('goalIn${x.short}').value,10);if(v>0){localStorage.setItem('goal_${x.short==='5m'?300:900}',v);tick();}})()" style="background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 11px var(--disp);cursor:pointer">שמור</button></div></div>`;
+    const tot=`<div class="card" style="flex:0 0 180px;min-width:160px;background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">סה״כ</div><div class="mono" style="font-size:16px;font-weight:700;margin-top:4px">${gt.n} חלונות</div><div class="mono" style="font-size:10px;color:var(--dim)">${gt.any_2c} touched · ${gt.monotonic} mono · ${gt.oscillating} osc</div></div>`;
+    $('goalBar').innerHTML=`<h3>🎯 Goal Count — יעדים לספירת חלונות</h3><div style="font-size:11px;color:var(--dim);margin-bottom:10px">פורמט: <b style="color:var(--tx)">n goal</b> / <b style="color:var(--up)">n passed</b> / <b style="color:var(--gold)">±2¢ touched</b> / <b style="color:var(--down)">monotonic</b> · היעד ברירת מחדל 500 ל-5m / 150 ל-15m — ערוך ושמור (נשמר בדפדפן).</div><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>`;
+  })();
   // live bar
   let liveHtml = '<h3>חלונות חיים עכשיו — Live mids</h3><div class="live-grid">';
   const order=['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'];
@@ -276,6 +457,7 @@ a{color:var(--proj)} .mono{font-family:var(--mono)}
   <a href="/" style="font-size:12px;border:1px solid var(--line);padding:6px 12px;border-radius:99px;background:var(--panel2)">Live</a>
 </div>
 <div class="wrap">
+  <div id="goalBarSummary" class="card" style="margin-bottom:16px;border-top:2px solid var(--gold)"></div>
   <div class="hero">
     <div class="card" style="border-top:2px solid var(--up)">
       <h3>מסקנה — האם ספרד 2 עובד?</h3>
@@ -327,6 +509,23 @@ async function load(){
   const sum=d.summary.per_series;
   const totalWindows = Object.values(sum).reduce((acc,s)=>acc+(s.windows||0),0);
   document.getElementById('totalBadge').textContent = totalWindows+' חלונות סגורים · '+Object.keys(sum).length+' סדרות';
+  // goal bar same as main page
+  (function(){
+    const g=d.goals||{}, dg=d.default_goals||{'300':500,'900':150};
+    const fmt=(dur)=>{
+      const k=String(dur), cur=g[k]||{goal:dg[k],n:0,any_2c:0,monotonic:0,oscillating:0};
+      const goal=parseInt(localStorage.getItem('goal_'+k)||cur.goal,10);
+      const n=cur.n, any2=cur.any_2c, mono=cur.monotonic, osc=cur.oscillating;
+      const pctGoal=Math.min(100,Math.round(n/goal*100));
+      const remain=Math.max(0,goal-n);
+      return {goal,n,any2,mono,osc,pctGoal,remain,label:dur===300?'5m':'15m'};
+    };
+    const g5=fmt(300), g15=fmt(900);
+    const gt=g.total||{n:0,any_2c:0,monotonic:0,oscillating:0};
+    const box=(x)=>`<div style="flex:1;min-width:240px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);color:var(--faint)">🎯 ${x.label}</div><div class="mono" style="font-size:16px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:11px;color:var(--dim)">goal</span> / ${x.n} <span style="color:var(--up)">passed</span> / ${x.any2} <span style="color:var(--gold)">±2¢</span> / ${x.mono} <span style="color:var(--down)">mono</span></div><div class="bar" style="height:7px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">${x.pctGoal}% · נותר ${x.remain} · osc ${x.osc}</div></div>`;
+    const el=document.getElementById('goalBarSummary');
+    if(el) el.innerHTML=`<h3>🎯 Goal Count — יעדים לספירת חלונות</h3><div style="font-size:11px;color:var(--dim);margin-bottom:10px">פורמט: goal / passed / ±2¢ touched / monotonic — ערוך ב-live אם צריך.</div><div style="display:flex;gap:10px;flex-wrap:wrap">${box(g5)}${box(g15)}<div style="flex:0 0 160px;background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center"><div style="font:700 11px var(--disp);color:var(--faint)">סה״כ</div><div class="mono" style="font-size:15px;font-weight:700">${gt.n} חלונות</div><div class="mono" style="font-size:10px;color:var(--dim)">${gt.any_2c} touched · ${gt.monotonic} mono</div></div></div>`;
+  })();
   // 1. per asset bar
   const order=['BTC 5m','ETH 5m','BNB 5m','SOL 5m','XRP 5m','BTC 15m','ETH 15m','BNB 15m','SOL 15m','XRP 15m'];
   const labels=[], osc=[], mono=[];
