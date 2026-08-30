@@ -23,6 +23,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 
 import requests
+from strategy.series import SERIES
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
@@ -34,19 +35,6 @@ SUMMARY_FILE = RUN / "oscillation_summary.json"
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
-
-SERIES = [
-    ("btc-up-or-down-5m", 300, "BTC 5m"),
-    ("eth-up-or-down-5m", 300, "ETH 5m"),
-    ("bnb-up-or-down-5m", 300, "BNB 5m"),
-    ("sol-up-or-down-5m", 300, "SOL 5m"),
-    ("xrp-up-or-down-5m", 300, "XRP 5m"),
-    ("btc-up-or-down-15m", 900, "BTC 15m"),
-    ("eth-up-or-down-15m", 900, "ETH 15m"),
-    ("bnb-up-or-down-15m", 900, "BNB 15m"),
-    ("sol-up-or-down-15m", 900, "SOL 15m"),
-    ("xrp-up-or-down-15m", 900, "XRP 15m"),
-]
 
 # offset for SPREAD=2 -> 0.02 below mid, pair = 1.00 - 0.04 = 0.96
 SPREAD_OFFSET = 0.02

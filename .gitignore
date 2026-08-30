@@ -5,5 +5,14 @@ venv/
 .venv/
 run/
 logs/
+.env
+.env.*
+*.key
+.opencode_tmp/
+ten-bankrolls/*/run/
+ten-bankrolls/*/paper.log
+ten-bankrolls/watcher.log
+ten-bankrolls/*/hunter.db
+ten-bankrolls/*/shared_feed.jsonl
 .DS_Store
 Thumbs.db
