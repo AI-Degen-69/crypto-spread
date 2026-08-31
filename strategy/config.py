@@ -98,6 +98,13 @@ class MakerConfig:
     # spring above, and U3's size ladder (`risk.size_for`), which decays resting
     # size as base*(1-utilization)^2 so the last order before the cap is 16% of
     # full size rather than 100% of it.
+    # Pct-based caps — B) 1% per-market + 6.6% fleet on any bankroll.
+    # e.g. 100 -> 1.00 / 6.60, 6000 -> 60 / 396, 1000 -> 10 / 66
+    per_market_risk_pct: float = 0.01
+    fleet_risk_pct: float = 0.066
+    # Absolute fallbacks when bankroll==0 (paper / unfunded). Used only then.
+    max_naked_usd_abs: float = 120.0
+    max_fleet_naked_usd_abs: float = 400.0
     max_naked_usd: float = 120.0
     # Switchable so the dollar gates can be measured on their own rather than
     # bundled with the rest of a release -- the same convention as
@@ -442,11 +449,23 @@ class MakerConfig:
     # $800 is roughly half the observed exposure, which halves the swing while
     # leaving room for the light side to keep flattening. It costs rent:
     # capped markets quote one-sided and score at 1/c, c=3.0.
-    max_fleet_naked_usd: float = 400.0
+    max_fleet_naked_usd: float = 400.0  # kept for compat; effective value via effective_fleet_cap()
     # Current fleet-wide unhedged cost, injected each cycle by the fleet
     # runner. Zero here so a single-market bot (archived on the legacy-bot-8788
     # branch) is unaffected -- it has no fleet to be over budget.
     fleet_naked_usd: float = 0.0
+
+    def effective_naked_cap(self) -> float:
+        """1% of bankroll when funded, else absolute fallback."""
+        if self.bankroll_usd > 0:
+            return self.bankroll_usd * self.per_market_risk_pct
+        return self.max_naked_usd_abs
+
+    def effective_fleet_cap(self) -> float:
+        """6.6% of bankroll when funded, else absolute fallback."""
+        if self.bankroll_usd > 0:
+            return self.bankroll_usd * self.fleet_risk_pct
+        return self.max_fleet_naked_usd_abs
 
     # TOTAL COMMITTED CAPITAL (U3). Everything above bounds the UNHEDGED leg;
     # nothing bounded the hedged one. A matched pair cannot lose -- it pays
