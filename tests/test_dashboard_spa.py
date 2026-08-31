@@ -129,7 +129,7 @@ def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
     content = '{"ts": 1}\n{"ts": 2}\n'.encode("utf-8")
     part1 = content[:8]
     part2 = content[8:]
-    upload_id = "test_upload_123"
+    upload_id = "up_test_upload_123"
     filename = "uploaded_ticks.jsonl"
 
     # Send Chunk 0
@@ -160,10 +160,27 @@ def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
 
 
 def test_api_safe_origin_rejected():
-    """Verify cross-origin or external host requests are rejected on state-changing endpoints."""
+    """Verify cross-origin, invalid port, and path traversal requests are rejected."""
+    # Malicious external origin
     res = client.post(
         "/api/collector/start",
         headers={"Origin": "https://malicious-site.evil.com"}
     )
     assert res.status_code == 403
+
+    # Invalid port on loopback origin
+    res_port = client.post(
+        "/api/collector/start",
+        headers={"Origin": "http://127.0.0.1:9999"}
+    )
+    assert res_port.status_code == 403
+
+    # Invalid uploadId format / path traversal
+    res_traversal = client.post(
+        "/api/ticks/upload-chunk?filename=test.jsonl&uploadId=../../etc&chunkIndex=0&totalChunks=1",
+        content=b"test",
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res_traversal.status_code == 400
+
 

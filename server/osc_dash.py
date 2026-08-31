@@ -10,13 +10,17 @@ Serves on :8802
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 import gzip
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -45,13 +49,15 @@ def _verify_safe_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Forbidden: local access only")
     origin = request.headers.get("origin")
     if origin:
-        from urllib.parse import urlparse
-        p = urlparse(origin)
+        p = urllib.parse.urlparse(origin)
         if p.hostname not in ("127.0.0.1", "localhost", "::1", "testclient"):
             raise HTTPException(status_code=403, detail="Forbidden: cross-origin request rejected")
+        if p.port is not None and p.port not in (8802, 8000, 80, 443):
+            raise HTTPException(status_code=403, detail="Forbidden: invalid origin port")
     sec_site = request.headers.get("sec-fetch-site")
     if sec_site == "cross-site":
         raise HTTPException(status_code=403, detail="Forbidden: cross-site request rejected")
+
 
 
 def load_summary() -> dict[str, Any]:
@@ -595,6 +601,41 @@ def api_delete_tick_file(request: Request, filename: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+def _finalize_upload(upload_dir: Path, target_file: Path, total_chunks: int) -> tuple[int, int]:
+    """Atomically assemble chunks, count lines, and build index in worker thread."""
+    for i in range(total_chunks):
+        part = upload_dir / f"chunk_{i:06d}"
+        if not part.exists():
+            raise FileNotFoundError(f"missing chunk {i}")
+
+    tmp_target = target_file.with_suffix(target_file.suffix + f".tmp_{time.time_ns()}")
+    try:
+        with open(tmp_target, "wb") as out_f:
+            for i in range(total_chunks):
+                part = upload_dir / f"chunk_{i:06d}"
+                out_f.write(part.read_bytes())
+        os.replace(tmp_target, target_file)
+    finally:
+        if tmp_target.exists():
+            try:
+                tmp_target.unlink()
+            except Exception:
+                pass
+
+    shutil.rmtree(upload_dir, ignore_errors=True)
+
+    lines_count = _count_lines_fast(target_file)
+    windows_indexed = 0
+    try:
+        from backtest.index import build_index, load_index
+        idx_path, _ = build_index(target_file)
+        windows_indexed = len(load_index(idx_path))
+    except Exception:
+        pass
+
+    return lines_count, windows_indexed
+
+
 @app.post("/api/ticks/upload-chunk")
 async def api_upload_chunk(
     request: Request,
@@ -610,33 +651,50 @@ async def api_upload_chunk(
     if not (filename.endswith(".jsonl") or filename.endswith(".jsonl.gz") or filename.endswith(".gz")):
         return JSONResponse(status_code=400, content={"error": "file must be .jsonl or .gz"})
 
-    upload_dir = RUN / "_uploads" / uploadId
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    if not re.match(r"^up_[A-Za-z0-9_-]+$", uploadId):
+        return JSONResponse(status_code=400, content={"error": "invalid uploadId"})
 
+    uploads_root = (RUN / "_uploads").resolve()
+    upload_dir = (RUN / "_uploads" / uploadId).resolve()
+    if not str(upload_dir).startswith(str(uploads_root)):
+        return JSONResponse(status_code=400, content={"error": "path traversal detected"})
+
+    target_file = (TICKS_DIR / filename).resolve()
+    if not str(target_file).startswith(str(TICKS_DIR.resolve())):
+        return JSONResponse(status_code=400, content={"error": "invalid target path"})
+
+    # If retry arrives after assembly completed and upload_dir was removed
+    if chunkIndex == totalChunks - 1 and not upload_dir.exists() and target_file.exists():
+        lines_count = _count_lines_fast(target_file)
+        windows_indexed = 0
+        idx_file = TICKS_DIR / f"{filename}.idx"
+        if idx_file.exists():
+            try:
+                from backtest.index import load_index
+                windows_indexed = len(load_index(idx_file))
+            except Exception:
+                pass
+        return {
+            "ok": True,
+            "filename": filename,
+            "lines": lines_count,
+            "windows_indexed": windows_indexed,
+        }
+
+    upload_dir.mkdir(parents=True, exist_ok=True)
     chunk_path = upload_dir / f"chunk_{chunkIndex:06d}"
     body = await request.body()
     chunk_path.write_bytes(body)
 
     if chunkIndex == totalChunks - 1:
-        target_file = TICKS_DIR / filename
-        with open(target_file, "wb") as out_f:
-            for i in range(totalChunks):
-                part = upload_dir / f"chunk_{i:06d}"
-                if not part.exists():
-                    return JSONResponse(status_code=400, content={"error": f"missing chunk {i}"})
-                out_f.write(part.read_bytes())
-
-        import shutil
-        shutil.rmtree(upload_dir, ignore_errors=True)
-
-        lines_count = _count_lines_fast(target_file)
-        windows_indexed = 0
         try:
-            from backtest.index import build_index, load_index
-            idx_path = build_index(target_file)
-            windows_indexed = len(load_index(idx_path))
-        except Exception:
-            pass
+            lines_count, windows_indexed = await asyncio.to_thread(
+                _finalize_upload, upload_dir, target_file, totalChunks
+            )
+        except FileNotFoundError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)})
 
         return {
             "ok": True,
@@ -1334,42 +1392,94 @@ async function loadManifest(){
     const sel = $('btFileSelect');
     if(sel && d.files){
       const currentVal = sel.value || window.selectedBacktestFile;
-      let opts = '<option value="">כל הקבצים / 2,820 חלונות (ברירת מחדל)</option>';
+      sel.innerHTML = '';
+      const defOpt = document.createElement('option');
+      defOpt.value = '';
+      defOpt.textContent = 'כל הקבצים / 2,820 חלונות (ברירת מחדל)';
+      sel.appendChild(defOpt);
+
       for(const f of d.files){
+        const opt = document.createElement('option');
+        opt.value = f.name;
         const linesFormatted = (f.lines||0).toLocaleString();
         const estPrefix = f.lines_estimated ? '~' : '';
-        opts += `<option value="${esc(f.name)}">${esc(f.name)} (${estPrefix}${linesFormatted} שורות)</option>`;
+        opt.textContent = `${f.name} (${estPrefix}${linesFormatted} שורות)`;
+        sel.appendChild(opt);
       }
-      sel.innerHTML = opts;
       if(currentVal && Array.from(sel.options).some(o => o.value === currentVal)){
         sel.value = currentVal;
       }
     }
 
-    let tbl = '<table class="tbl"><tr><th>שם קובץ</th><th>גודל</th><th>שורות / דגימות</th><th>עדכון אחרון</th><th>פעולות</th></tr>';
+    const wrap = $('manifestTableWrap');
+    if(!wrap) return;
+    wrap.innerHTML = '';
+
+    const tbl = document.createElement('table');
+    tbl.className = 'tbl';
+    const thead = document.createElement('tr');
+    thead.innerHTML = '<th>שם קובץ</th><th>גודל</th><th>שורות / דגימות</th><th>עדכון אחרון</th><th>פעולות</th>';
+    tbl.appendChild(thead);
+
     if(!d.files || d.files.length === 0){
-      tbl += '<tr><td colspan="5" style="text-align:center;color:var(--faint);padding:18px">אין קבצים בתיקיית ticks/</td></tr>';
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td colspan="5" style="text-align:center;color:var(--faint);padding:18px">אין קבצים בתיקיית ticks/</td>';
+      tbl.appendChild(tr);
     } else {
       for(const f of d.files){
+        const tr = document.createElement('tr');
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
         const linesFormatted = (f.lines||0).toLocaleString();
-        const linesCell = f.lines_estimated
+        const linesHtml = f.lines_estimated
           ? `~${linesFormatted} <span style="color:var(--dim);font-size:10px">(הערכה)</span>`
           : linesFormatted;
-        tbl+=`<tr>
-          <td class="mono" style="font-weight:700">${esc(f.name)}</td>
-          <td class="mono">${mb}</td>
-          <td class="mono">${linesCell}</td>
-          <td class="mono">${new Date(f.mtime*1000).toLocaleString('he-IL')}</td>
-          <td style="display:flex;gap:6px;align-items:center">
-            <button class="btn" style="padding:4px 10px;font-size:11px" onclick="runBacktestOnFile('${esc(f.name)}')">הרץ בקטסט ⚡</button>
-            <button class="btn" style="padding:4px 10px;font-size:11px;background:rgba(255,87,87,0.12);color:var(--down);border-color:rgba(255,87,87,0.3);cursor:pointer" onclick="deleteTickFile('${esc(f.name)}')">🗑️ מחק</button>
-          </td>
-        </tr>`;
+
+        const tdName = document.createElement('td');
+        tdName.className = 'mono';
+        tdName.style.fontWeight = '700';
+        tdName.textContent = f.name;
+
+        const tdSize = document.createElement('td');
+        tdSize.className = 'mono';
+        tdSize.textContent = mb;
+
+        const tdLines = document.createElement('td');
+        tdLines.className = 'mono';
+        tdLines.innerHTML = linesHtml;
+
+        const tdMtime = document.createElement('td');
+        tdMtime.className = 'mono';
+        tdMtime.textContent = new Date(f.mtime*1000).toLocaleString('he-IL');
+
+        const tdActions = document.createElement('td');
+        tdActions.style.display = 'flex';
+        tdActions.style.gap = '6px';
+        tdActions.style.alignItems = 'center';
+
+        const btnRun = document.createElement('button');
+        btnRun.className = 'btn';
+        btnRun.style.cssText = 'padding:4px 10px;font-size:11px';
+        btnRun.textContent = 'הרץ בקטסט ⚡';
+        btnRun.addEventListener('click', () => runBacktestOnFile(f.name));
+
+        const btnDel = document.createElement('button');
+        btnDel.className = 'btn';
+        btnDel.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(255,87,87,0.12);color:var(--down);border-color:rgba(255,87,87,0.3);cursor:pointer';
+        btnDel.textContent = '🗑️ מחק';
+        btnDel.addEventListener('click', () => deleteTickFile(f.name));
+
+        tdActions.appendChild(btnRun);
+        tdActions.appendChild(btnDel);
+
+        tr.appendChild(tdName);
+        tr.appendChild(tdSize);
+        tr.appendChild(tdLines);
+        tr.appendChild(tdMtime);
+        tr.appendChild(tdActions);
+        tbl.appendChild(tr);
       }
     }
-    tbl+='</table>';
-    $('manifestTableWrap').innerHTML = tbl;
+    wrap.appendChild(tbl);
   }catch(err){
     $('manifestTableWrap').innerHTML = '<div style="color:var(--down);padding:12px">שגיאה בטעינת רשימת הקבצים</div>';
   }
