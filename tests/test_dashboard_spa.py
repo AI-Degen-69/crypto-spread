@@ -213,3 +213,31 @@ def test_api_safe_origin_rejected():
     assert res_traversal.status_code == 400
 
 
+def test_api_upload_stream(tmp_path, monkeypatch):
+    """Verify single direct stream upload of JSONL payload."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "RUN", tmp_path)
+
+    content = '{"ts": 100}\n{"ts": 200}\n{"ts": 300}\n'.encode("utf-8")
+    filename = "streamed_ticks.jsonl"
+
+    res_bad = client.post(
+        "/api/ticks/upload-stream?filename=../bad.jsonl",
+        content=content,
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res_bad.status_code == 400
+
+    res = client.post(
+        f"/api/ticks/upload-stream?filename={filename}",
+        content=content,
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res.status_code == 200
+    d = res.json()
+    assert d.get("ok") is True
+    assert d.get("filename") == filename
+    assert d.get("lines") == 3
+    assert (tmp_path / filename).exists()
+
+

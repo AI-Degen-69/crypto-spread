@@ -734,7 +734,7 @@ async def api_upload_chunk(
                     if chunk_path.exists():
                         chunk_path.unlink()
                     return JSONResponse(status_code=413, content={"error": "chunk exceeds 5MB size limit"})
-                f_chunk.write(chunk)
+                await asyncio.to_thread(f_chunk.write, chunk)
     except Exception as e:
         if chunk_path.exists():
             try:
@@ -761,6 +761,64 @@ async def api_upload_chunk(
         }
 
     return {"ok": True, "chunkIndex": chunkIndex}
+
+
+def _finalize_stream_upload(tmp_target: Path, target_file: Path) -> tuple[int, int]:
+    """Atomically commit streamed temp file, count lines, and build index under lock in worker thread."""
+    lock = _get_target_lock(target_file.name)
+    with lock:
+        os.replace(tmp_target, target_file)
+        lines_count = _count_lines_fast(target_file)
+        windows_indexed = 0
+        try:
+            from backtest.index import build_index
+            _, total_snaps = build_index(target_file)
+            windows_indexed = total_snaps
+        except Exception:
+            pass
+        return lines_count, windows_indexed
+
+
+@app.post("/api/ticks/upload-stream")
+async def api_upload_stream(
+    request: Request,
+    filename: str,
+):
+    """Directly stream raw JSONL payload into run/ticks/ directory and build index."""
+    _verify_safe_origin(request)
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return JSONResponse(status_code=400, content={"error": "invalid filename"})
+    if not (filename.endswith(".jsonl") or filename.endswith(".jsonl.gz") or filename.endswith(".gz")):
+        return JSONResponse(status_code=400, content={"error": "file must be .jsonl or .gz"})
+
+    target_file = (TICKS_DIR / filename).resolve()
+    if not str(target_file).startswith(str(TICKS_DIR.resolve())):
+        return JSONResponse(status_code=400, content={"error": "invalid target path"})
+
+    tmp_target = target_file.with_suffix(target_file.suffix + f".tmp_{time.time_ns()}")
+    try:
+        with open(tmp_target, "wb") as out_f:
+            async for chunk in request.stream():
+                if chunk:
+                    await asyncio.to_thread(out_f.write, chunk)
+        lines_count, windows_indexed = await asyncio.to_thread(
+            _finalize_stream_upload, tmp_target, target_file
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        if tmp_target.exists():
+            try:
+                tmp_target.unlink()
+            except Exception:
+                pass
+
+    return {
+        "ok": True,
+        "filename": filename,
+        "lines": lines_count,
+        "windows_indexed": windows_indexed,
+    }
 
 
 # --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
