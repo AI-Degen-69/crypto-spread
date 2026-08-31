@@ -763,6 +763,54 @@ async def api_upload_chunk(
     return {"ok": True, "chunkIndex": chunkIndex}
 
 
+@app.post("/api/ticks/upload-stream")
+async def api_upload_stream(
+    request: Request,
+    filename: str,
+):
+    """Directly stream raw JSONL payload into run/ticks/ directory and build index."""
+    _verify_safe_origin(request)
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return JSONResponse(status_code=400, content={"error": "invalid filename"})
+    if not (filename.endswith(".jsonl") or filename.endswith(".jsonl.gz") or filename.endswith(".gz")):
+        return JSONResponse(status_code=400, content={"error": "file must be .jsonl or .gz"})
+
+    target_file = (TICKS_DIR / filename).resolve()
+    if not str(target_file).startswith(str(TICKS_DIR.resolve())):
+        return JSONResponse(status_code=400, content={"error": "invalid target path"})
+
+    lock = _get_target_lock(filename)
+    tmp_target = target_file.with_suffix(target_file.suffix + f".tmp_{time.time_ns()}")
+    try:
+        with open(tmp_target, "wb") as out_f:
+            async for chunk in request.stream():
+                out_f.write(chunk)
+        with lock:
+            os.replace(tmp_target, target_file)
+    finally:
+        if tmp_target.exists():
+            try:
+                tmp_target.unlink()
+            except Exception:
+                pass
+
+    lines_count = _count_lines_fast(target_file)
+    windows_indexed = 0
+    try:
+        from backtest.index import build_index
+        _, total_snaps = build_index(target_file)
+        windows_indexed = total_snaps
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "filename": filename,
+        "lines": lines_count,
+        "windows_indexed": windows_indexed,
+    }
+
+
 # --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
 
 FULL_APP_HTML = r"""<!doctype html><html lang="he" dir="rtl"><head>
