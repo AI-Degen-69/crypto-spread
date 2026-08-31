@@ -10,7 +10,7 @@ Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP. Isolated fro
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 53 tests
+pip install pytest                          # dev: 60 tests
 python -m pytest -q                         # all tests
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test
@@ -28,7 +28,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `docs/` — `operations.md` (runbook for capture + replay), `research-spread-bot-conclusions.md` (findings).
-- `tests/` — 53 tests: `test_backtest_engine.py` (44), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (4), `test_rebuild_windows.py` (4).
+- `tests/` — 60 tests: `test_backtest_engine.py` (40), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (4), `test_rebuild_windows.py` (4), `test_dashboard_spa.py` (7).
 
 ## Data Model / Classification
 - Window classification in `scripts/measure_5m_oscillation.py:125` (`classify_window`): vs base 0.50, `max_up=max(mids)-0.50`, `max_down=0.50-min(mids)`. `oscillating` = both ≥0.02, `monotonic` = one ≥0.02, `flat` = neither. Thresholds at `OSC_THRESH_CENTS=[2.0,3.0]`.
