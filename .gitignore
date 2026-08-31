@@ -16,3 +16,9 @@ ten-bankrolls/*/hunter.db
 ten-bankrolls/*/shared_feed.jsonl
 .DS_Store
 Thumbs.db
+.gstack/
+.freebuff/
+bot/
+ten-bankrolls/
+# local scratch generator (not part of repo)
+# scripts/gen_fake.py is kept under scripts/ intentionally

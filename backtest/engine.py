@@ -276,9 +276,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents -= bb_up * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
             # Update reversal flags before skipping so mid drift isn't lost.
-            if max_down >= exit_thr:
-                reversal_seen_up = True
             if max_up >= exit_thr:
+                reversal_seen_up = True
+            if max_down >= exit_thr:
                 reversal_seen_down = True
             continue
 
