@@ -21,7 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -38,7 +38,24 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 _collector_proc: subprocess.Popen | None = None
 
 
+def _verify_safe_origin(request: Request) -> None:
+    """Verify request is originating locally and reject suspicious cross-site requests."""
+    client_host = request.client.host if request.client else "unknown"
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        raise HTTPException(status_code=403, detail="Forbidden: local access only")
+    origin = request.headers.get("origin")
+    if origin:
+        from urllib.parse import urlparse
+        p = urlparse(origin)
+        if p.hostname not in ("127.0.0.1", "localhost", "::1", "testclient"):
+            raise HTTPException(status_code=403, detail="Forbidden: cross-origin request rejected")
+    sec_site = request.headers.get("sec-fetch-site")
+    if sec_site == "cross-site":
+        raise HTTPException(status_code=403, detail="Forbidden: cross-site request rejected")
+
+
 def load_summary() -> dict[str, Any]:
+    """Load latest oscillation summary metrics from disk."""
     f = RUN / "oscillation_summary.json"
     if not f.exists():
         return {"ts": 0, "per_series": {}}
@@ -72,6 +89,7 @@ def _load_all_windows() -> list[dict[str, Any]]:
 
 
 def load_windows(limit: int = 200) -> list[dict[str, Any]]:
+    """Load most recent closed windows up to the specified limit."""
     return _load_all_windows()[:limit]
 
 
@@ -79,6 +97,7 @@ DEFAULT_GOALS = {300: 500, 900: 150}
 
 
 def _agg_goals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate window counts and metrics against target goals for 5m and 15m."""
     by_dur = defaultdict(list)
     for r in rows:
         by_dur[r.get("duration", 300)].append(r)
@@ -121,11 +140,17 @@ def _agg_goals(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def load_live_snaps() -> dict[str, Any]:
+    """Load latest live market snapshots from the tail of snapshots log."""
     f = RUN / "oscillation_snapshots.jsonl"
     if not f.exists():
         return {}
     last: dict[str, Any] = {}
-    for line in f.read_text(encoding="utf-8").splitlines()[-2000:]:
+    with f.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - 2_000_000))
+        tail = fh.read().decode("utf-8", errors="ignore")
+    for line in tail.splitlines()[-2000:]:
         if not line.strip():
             continue
         try:
@@ -141,6 +166,7 @@ def load_live_snaps() -> dict[str, Any]:
 
 @app.get("/api/oscillation")
 def api_oscillation():
+    """Return dashboard payload with live status, recent windows, and goal progress."""
     summary = load_summary()
     wins = load_windows(200)
     live = load_live_snaps()
@@ -158,6 +184,7 @@ def api_oscillation():
 
 @app.get("/api/goals")
 def api_goals():
+    """Return aggregated progress metrics toward window collection goals."""
     return _agg_goals(_load_all_windows())
 
 
@@ -191,15 +218,16 @@ def api_ticks_manifest():
             and f.is_file()
             and not f.name.endswith(".idx")
         ):
-            # Estimate lines by size (~1KB per tick) or exact count if small
             size = f.stat().st_size
+            is_est = size >= 20_000_000
             lines = (
-                _count_lines_fast(f) if size < 20_000_000 else int(size / 950)
+                int(size / 950) if is_est else _count_lines_fast(f)
             )
             out["files"].append({
                 "name": f.name,
                 "bytes": size,
                 "lines": lines,
+                "lines_estimated": is_est,
                 "mtime": f.stat().st_mtime,
             })
     return out
@@ -488,6 +516,7 @@ def api_analysis():
 # Collector endpoints
 @app.get("/api/collector/status")
 def api_collector_status():
+    """Return status of the background tick collector and today's total ticks."""
     global _collector_proc
     running = _collector_proc is not None and _collector_proc.poll() is None
     # Count total tick lines collected today
@@ -505,7 +534,9 @@ def api_collector_status():
 
 
 @app.post("/api/collector/start")
-def api_collector_start():
+def api_collector_start(request: Request):
+    """Start background tick collection process if not already running."""
+    _verify_safe_origin(request)
     global _collector_proc
     if _collector_proc is None or _collector_proc.poll() is not None:
         cmd = [sys.executable, "-m", "scripts.collect_ticks"]
@@ -516,7 +547,9 @@ def api_collector_start():
 
 
 @app.post("/api/collector/stop")
-def api_collector_stop():
+def api_collector_stop(request: Request):
+    """Stop active background tick collection process."""
+    _verify_safe_origin(request)
     global _collector_proc
     if _collector_proc and _collector_proc.poll() is None:
         _collector_proc.terminate()
@@ -529,14 +562,24 @@ def api_collector_stop():
 
 
 @app.post("/api/collector/poll-once")
-def api_collector_poll_once():
+def api_collector_poll_once(request: Request):
+    """Perform a single immediate poll across all active series."""
+    _verify_safe_origin(request)
     cmd = [sys.executable, "-m", "scripts.collect_ticks", "--once"]
-    res = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+    try:
+        res = subprocess.run(
+            cmd, cwd=str(ROOT), capture_output=True, text=True,
+            timeout=60, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": "poll timed out after 60s"}
     return {"ok": res.returncode == 0, "output": res.stdout[:500]}
 
 
 @app.delete("/api/ticks/file")
-def api_delete_tick_file(filename: str):
+def api_delete_tick_file(request: Request, filename: str):
+    """Delete a tick file and its index sidecar from run/ticks/."""
+    _verify_safe_origin(request)
     if not filename or "/" in filename or "\\" in filename or ".." in filename:
         return JSONResponse(status_code=400, content={"error": "invalid filename"})
     target = TICKS_DIR / filename
@@ -550,6 +593,59 @@ def api_delete_tick_file(filename: str):
         return {"ok": True, "deleted": filename}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/ticks/upload-chunk")
+async def api_upload_chunk(
+    request: Request,
+    filename: str,
+    uploadId: str,
+    chunkIndex: int,
+    totalChunks: int,
+):
+    """Receive and assemble chunked tick data stream into run/ticks/ directory."""
+    _verify_safe_origin(request)
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return JSONResponse(status_code=400, content={"error": "invalid filename"})
+    if not (filename.endswith(".jsonl") or filename.endswith(".jsonl.gz") or filename.endswith(".gz")):
+        return JSONResponse(status_code=400, content={"error": "file must be .jsonl or .gz"})
+
+    upload_dir = RUN / "_uploads" / uploadId
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    chunk_path = upload_dir / f"chunk_{chunkIndex:06d}"
+    body = await request.body()
+    chunk_path.write_bytes(body)
+
+    if chunkIndex == totalChunks - 1:
+        target_file = TICKS_DIR / filename
+        with open(target_file, "wb") as out_f:
+            for i in range(totalChunks):
+                part = upload_dir / f"chunk_{i:06d}"
+                if not part.exists():
+                    return JSONResponse(status_code=400, content={"error": f"missing chunk {i}"})
+                out_f.write(part.read_bytes())
+
+        import shutil
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+        lines_count = _count_lines_fast(target_file)
+        windows_indexed = 0
+        try:
+            from backtest.index import build_index, load_index
+            idx_path = build_index(target_file)
+            windows_indexed = len(load_index(idx_path))
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "filename": filename,
+            "lines": lines_count,
+            "windows_indexed": windows_indexed,
+        }
+
+    return {"ok": True, "chunkIndex": chunkIndex}
 
 
 # --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
@@ -659,7 +755,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div class="form-grid" style="margin-top:12px">
         <div class="form-group">
           <label>קובץ דגימות לבדיקה (Tick File)</label>
-          <select id="btFileSelect" onchange="runBacktest()">
+          <select id="btFileSelect">
             <option value="">כל הקבצים / 2,820 חלונות (ברירת מחדל)</option>
           </select>
         </div>
@@ -833,7 +929,7 @@ function switchTab(name){
   const cont = $('tab-'+name);
   if(btn) btn.classList.add('active');
   if(cont) cont.classList.add('active');
-  if(name==='backtest' && !window.equityChartInstance) runBacktest();
+  if(name==='backtest' && !equityChartInstance) runBacktest();
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
 }
@@ -929,15 +1025,18 @@ async function tick(){
     const openUp = sm==null?'-':(sm*100).toFixed(1)+'¢';
     const openDown = sm==null?'-':((1-sm)*100).toFixed(1)+'¢';
     const upHigh = mx==null?'-':(mx*100).toFixed(1)+'¢';
-    const upExc = (w.max_up*100).toFixed(1);
+    const upExc = ((w.max_up||0)*100).toFixed(1);
     const downHigh = mn==null?'-':((1-mn)*100).toFixed(1)+'¢';
-    const downExc = (w.max_down*100).toFixed(1);
+    const downExc = ((w.max_down||0)*100).toFixed(1);
     const o = sm==null?50:sm*100, c = cm==null?o:cm*100, h = mx==null?o:mx*100, l = mn==null?o:mn*100;
     const bodyLeft = Math.min(o,c), bodyW = Math.abs(c-o);
     const wickLeft = l, wickW = h-l;
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
     const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div><div style="font-size:9px;color:var(--dim);margin-top:1px">טווח ${((h-l)).toFixed(1)}¢ · סגירה ${(c).toFixed(1)}¢</div></div>`;
-    tbl+=`<tr><td style="font-weight:700">${esc(w.label)}</td><td class="mono" style="font-size:12px">${esc(w.slug.slice(-14))}<div style="font-size:10px;color:var(--faint)">${new Date(w.start_ts*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc}¢)</td><td><span class="price-down">${downHigh}</span> (+${downExc}¢)</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${w.url}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">פתח ↗</a></td></tr>`;
+    const labelStr = esc(String(w.label||''));
+    const slugStr = esc(String(w.slug||'').slice(-14));
+    const startTs = w.start_ts ? new Date(w.start_ts*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'}) : '-';
+    tbl+=`<tr><td style="font-weight:700">${labelStr}</td><td class="mono" style="font-size:12px">${slugStr}<div style="font-size:10px;color:var(--faint)">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc}¢)</td><td><span class="price-down">${downHigh}</span> (+${downExc}¢)</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">פתח ↗</a></td></tr>`;
   }
   tbl+='</table></div>';
   $('windowsTableWrap').innerHTML=tbl;
@@ -1095,6 +1194,11 @@ function resetBtParams(){
 }
 
 // Statistical Summary Charts
+function destroyChartInstance(canvasId){
+  const existing = Chart.getChart(canvasId);
+  if(existing) existing.destroy();
+}
+
 async function renderSummaryCharts(){
   const d=await (await fetch('/api/oscillation',{cache:'no-store'})).json();
   const sum=d.summary.per_series||{};
@@ -1105,12 +1209,13 @@ async function renderSummaryCharts(){
     for(const k of Object.keys(sum)){
       if(sum[k].label === lbl){ found = sum[k]; break; }
     }
-    osc.push(found ? found.oscillating : 0);
-    mono.push(found ? found.monotonic : 0);
+    osc.push(found ? (found.oscillating||0) : 0);
+    mono.push(found ? (found.monotonic||0) : 0);
   }
 
   const canvasAsset = $('cPerAsset');
   if(canvasAsset){
+    destroyChartInstance('cPerAsset');
     new Chart(canvasAsset,{
       type:'bar',
       data:{
@@ -1132,17 +1237,27 @@ async function renderSummaryCharts(){
   }
 
   const a=await (await fetch('/api/analysis',{cache:'no-store'})).json();
-  const rows=a.rows||[];
-
+  const hm = a.hist_max || {};
   const bLabels=['0-10¢','10-20¢','20-30¢','30-40¢','40-50¢'];
-  const bCounts=[0,0,0,0,0];
-  rows.forEach(r=>{
-    const m=Math.max(r.max_up,r.max_down)*100;
-    if(m<10) bCounts[0]++; else if(m<20) bCounts[1]++; else if(m<30) bCounts[2]++; else if(m<40) bCounts[3]++; else bCounts[4]++;
-  });
+  let bCounts=[0,0,0,0,0];
+  if(Object.keys(hm).length > 0){
+    bCounts = [
+      (hm[0]||0) + (hm[5]||0),
+      (hm[10]||0) + (hm[15]||0),
+      (hm[20]||0) + (hm[25]||0),
+      (hm[30]||0) + (hm[35]||0),
+      (hm[40]||0) + (hm[45]||0) + (hm[50]||0)
+    ];
+  } else {
+    (a.rows||[]).forEach(r=>{
+      const m=Math.max(r.max_up||0,r.max_down||0)*100;
+      if(m<10) bCounts[0]++; else if(m<20) bCounts[1]++; else if(m<30) bCounts[2]++; else if(m<40) bCounts[3]++; else bCounts[4]++;
+    });
+  }
 
   const canvasHist = $('cHist');
   if(canvasHist){
+    destroyChartInstance('cHist');
     new Chart(canvasHist,{
       type:'bar',
       data:{labels:bLabels,datasets:[{label:'חלונות',data:bCounts,backgroundColor:'#e8b84b'}]},
@@ -1150,15 +1265,27 @@ async function renderSummaryCharts(){
     });
   }
 
+  const hs = a.hist_start || {};
   const sBuckets=['0-1¢','1-2¢','2-5¢','5-10¢','10¢+'];
-  const sCounts=[0,0,0,0,0];
-  rows.forEach(r=>{
-    const d=Math.abs((r.start_mid||0.5)-0.5)*100;
-    if(d<1) sCounts[0]++; else if(d<2) sCounts[1]++; else if(d<5) sCounts[2]++; else if(d<10) sCounts[3]++; else sCounts[4]++;
-  });
+  let sCounts=[0,0,0,0,0];
+  if(Object.keys(hs).length > 0){
+    sCounts = [
+      hs[0]||0,
+      hs[1]||0,
+      (hs[2]||0) + (hs[3]||0),
+      hs[5]||0,
+      hs[10]||0
+    ];
+  } else {
+    (a.rows||[]).forEach(r=>{
+      const d=Math.abs((r.start_mid||0.5)-0.5)*100;
+      if(d<1) sCounts[0]++; else if(d<2) sCounts[1]++; else if(d<5) sCounts[2]++; else if(d<10) sCounts[3]++; else sCounts[4]++;
+    });
+  }
 
   const canvasStart = $('cStart');
   if(canvasStart){
+    destroyChartInstance('cStart');
     new Chart(canvasStart,{
       type:'doughnut',
       data:{labels:sBuckets,datasets:[{data:sCounts,backgroundColor:['#33c9b5','#7b9bf7','#e8b84b','#f0684d','#535e70']}]},
@@ -1166,6 +1293,7 @@ async function renderSummaryCharts(){
     });
   }
 
+  const rows = a.rows || [];
   const pBuckets=['1.00-1.02','1.02-1.04','1.04-1.06','1.06+'];
   const pCounts=[0,0,0,0];
   rows.forEach(r=>{
@@ -1175,6 +1303,7 @@ async function renderSummaryCharts(){
 
   const canvasPair = $('cPair');
   if(canvasPair){
+    destroyChartInstance('cPair');
     new Chart(canvasPair,{
       type:'bar',
       data:{labels:pBuckets,datasets:[{data:pCounts,backgroundColor:'#7b9bf7'}]},
@@ -1207,7 +1336,9 @@ async function loadManifest(){
       const currentVal = sel.value || window.selectedBacktestFile;
       let opts = '<option value="">כל הקבצים / 2,820 חלונות (ברירת מחדל)</option>';
       for(const f of d.files){
-        opts += `<option value="${esc(f.name)}">${esc(f.name)} (${(f.lines||0).toLocaleString()} שורות)</option>`;
+        const linesFormatted = (f.lines||0).toLocaleString();
+        const estPrefix = f.lines_estimated ? '~' : '';
+        opts += `<option value="${esc(f.name)}">${esc(f.name)} (${estPrefix}${linesFormatted} שורות)</option>`;
       }
       sel.innerHTML = opts;
       if(currentVal && Array.from(sel.options).some(o => o.value === currentVal)){
@@ -1221,10 +1352,14 @@ async function loadManifest(){
     } else {
       for(const f of d.files){
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
+        const linesFormatted = (f.lines||0).toLocaleString();
+        const linesCell = f.lines_estimated
+          ? `~${linesFormatted} <span style="color:var(--dim);font-size:10px">(הערכה)</span>`
+          : linesFormatted;
         tbl+=`<tr>
           <td class="mono" style="font-weight:700">${esc(f.name)}</td>
           <td class="mono">${mb}</td>
-          <td class="mono">${(f.lines||0).toLocaleString()}</td>
+          <td class="mono">${linesCell}</td>
           <td class="mono">${new Date(f.mtime*1000).toLocaleString('he-IL')}</td>
           <td style="display:flex;gap:6px;align-items:center">
             <button class="btn" style="padding:4px 10px;font-size:11px" onclick="runBacktestOnFile('${esc(f.name)}')">הרץ בקטסט ⚡</button>
@@ -1441,7 +1576,6 @@ function setupBacktestInputListeners(){
   });
 }
 
-document.addEventListener('DOMContentLoaded', setupBacktestInputListeners);
 setupBacktestInputListeners();
 
 tick();
@@ -1455,4 +1589,6 @@ setInterval(tick, 3000);
 @app.get("/summary", response_class=HTMLResponse)
 @app.get("/analysis", response_class=HTMLResponse)
 def root_spa_page():
+    """Serve the complete unified 4-tab SPA interface."""
     return HTMLResponse(FULL_APP_HTML, headers={"Cache-Control": "no-cache"})
+
