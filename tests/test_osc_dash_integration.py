@@ -1,5 +1,6 @@
-"""Tests for the 4-tab SPA dashboard and API endpoints."""
+"""Integration tests for the 4-tab dashboard SPA and FastAPI API endpoints."""
 import json
+import subprocess
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
@@ -39,7 +40,7 @@ def _make_fake_tick(ts: float, cid: str, slug: str, series: str, mid: float, tap
 
 
 def test_root_returns_4tab_spa():
-    """Verify that root endpoint serves the full 4-tab SPA HTML."""
+    """Verify that root endpoint serves the full 4-tab SPA HTML with all containers."""
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
@@ -53,6 +54,8 @@ def test_root_returns_4tab_spa():
     assert "tab-summary" in html
     assert "tab-ticks" in html
     assert "switchTab" in html
+    assert "loadManifest" in html
+    assert "uploadFileStream" in html
 
 
 def test_api_oscillation():
@@ -82,20 +85,69 @@ def test_api_ticks_manifest(tmp_path, monkeypatch):
     assert data["files"][0]["lines_estimated"] is False
 
 
-def test_api_collector_status():
-    """Verify collector status endpoint returns running flag and collected tick count."""
-    response = client.get("/api/collector/status")
+def test_api_collector_lifecycle_and_status(monkeypatch):
+    """Verify collector start, status, and stop workflow with mocked process."""
+    class DummyProc:
+        def __init__(self):
+            self.pid = 99999
+            self._running = True
+
+        def poll(self):
+            return None if self._running else 0
+
+        def terminate(self):
+            self._running = False
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._running = False
+
+    monkeypatch.setattr(osc_dash.subprocess, "Popen", lambda *args, **kwargs: DummyProc())
+    try:
+        # Start collector
+        res_start = client.post("/api/collector/start")
+        assert res_start.status_code == 200
+        assert res_start.json().get("running") is True
+        assert res_start.json().get("pid") == 99999
+
+        # Check status
+        res_status = client.get("/api/collector/status")
+        assert res_status.status_code == 200
+        assert res_status.json().get("running") is True
+        assert res_status.json().get("pid") == 99999
+
+        # Stop collector
+        res_stop = client.post("/api/collector/stop")
+        assert res_stop.status_code == 200
+        assert res_stop.json().get("running") is False
+    finally:
+        osc_dash._collector_proc = None
+
+
+def test_api_collector_poll_once(monkeypatch):
+    """Verify single poll collector endpoint invokes single collection pass via subprocess."""
+    def _mock_run(*args, **kwargs):
+        class DummyResult:
+            returncode = 0
+            stdout = "Collected 10 series successfully"
+            stderr = ""
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+    response = client.post("/api/collector/poll-once")
     assert response.status_code == 200
     data = response.json()
-    assert "running" in data
+    assert data.get("ok") is True
+    assert "Collected 10 series" in data.get("output")
 
 
-def test_api_backtest_fake_file(tmp_path, monkeypatch):
+def test_api_backtest_simulation(tmp_path, monkeypatch):
     """Verify backtest simulation on an isolated deterministic 4-window fixture."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     fake_file = tmp_path / "fake_round.jsonl"
 
-    # Generate 4 distinct windows
     ticks = []
     for i in range(4):
         cid = f"0xCID_000{i}"
@@ -110,10 +162,19 @@ def test_api_backtest_fake_file(tmp_path, monkeypatch):
         for t in ticks:
             f.write(json.dumps(t) + "\n")
 
-    response = client.get("/api/backtest?file=fake_round.jsonl")
+    url = "/api/backtest?file=fake_round.jsonl&offset=0.03&queue=75&pair_cost=0.98&exit_default_5m=0.15&fill_model=book&size=150&gas=0.02"
+    response = client.get(url)
     assert response.status_code == 200
     data = response.json()
     assert "params_hash" in data
+    assert "params" in data
+    assert data["params"]["offset"] == 0.03
+    assert data["params"]["queue"] == 75.0
+    assert data["params"]["pair_cost"] == 0.98
+    assert data["params"]["exit_default_5m"] == 0.15
+    assert data["params"]["fill_model"] == "book"
+    assert data["params"]["size"] == 150
+    assert data["params"]["gas"] == 0.02
     assert "overall" in data
     assert "max_drawdown_cents" in data["overall"]
     assert "win_rate" in data["overall"]
@@ -124,6 +185,28 @@ def test_api_backtest_fake_file(tmp_path, monkeypatch):
     assert "trades_sample" in data
     assert len(data["trades_sample"]) == 4
     assert data["n_windows"] == 4
+
+
+def test_api_upload_stream_ingest(tmp_path, monkeypatch):
+    """Verify single direct stream upload of JSONL payload with index creation."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "RUN", tmp_path)
+
+    content = '{"ts": 100}\n{"ts": 200}\n{"ts": 300}\n'.encode("utf-8")
+    filename = "streamed_ticks.jsonl"
+
+    res = client.post(
+        f"/api/ticks/upload-stream?filename={filename}",
+        content=content,
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res.status_code == 200
+    d = res.json()
+    assert d.get("ok") is True
+    assert d.get("filename") == filename
+    assert d.get("lines") == 3
+    assert (tmp_path / filename).exists()
+    assert (tmp_path / f"{filename}.idx").exists()
 
 
 def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
@@ -172,6 +255,7 @@ def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
     assert d1.get("ok") is True
     assert d1.get("lines") == 2
     assert (tmp_path / filename).exists()
+    assert (tmp_path / f"{filename}.idx").exists()
 
     # Retry final chunk after upload_dir was removed
     res1_retry = client.post(
@@ -182,13 +266,14 @@ def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
     assert res1_retry.status_code == 200
     assert res1_retry.json().get("lines") == 2
 
-    # Delete uploaded file
+    # Delete uploaded file and verify index cleanup
     res_del = client.delete(f"/api/ticks/file?filename={filename}")
     assert res_del.status_code == 200
     assert not (tmp_path / filename).exists()
+    assert not (tmp_path / f"{filename}.idx").exists()
 
 
-def test_api_safe_origin_rejected():
+def test_api_security_origin_and_path_traversal():
     """Verify cross-origin, invalid port, and path traversal requests are rejected."""
     # Malicious external origin
     res = client.post(
@@ -212,32 +297,10 @@ def test_api_safe_origin_rejected():
     )
     assert res_traversal.status_code == 400
 
-
-def test_api_upload_stream(tmp_path, monkeypatch):
-    """Verify single direct stream upload of JSONL payload."""
-    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
-    monkeypatch.setattr(osc_dash, "RUN", tmp_path)
-
-    content = '{"ts": 100}\n{"ts": 200}\n{"ts": 300}\n'.encode("utf-8")
-    filename = "streamed_ticks.jsonl"
-
-    res_bad = client.post(
+    # Path traversal in stream upload
+    res_bad_stream = client.post(
         "/api/ticks/upload-stream?filename=../bad.jsonl",
-        content=content,
+        content=b'{"a":1}',
         headers={"Content-Type": "application/octet-stream"}
     )
-    assert res_bad.status_code == 400
-
-    res = client.post(
-        f"/api/ticks/upload-stream?filename={filename}",
-        content=content,
-        headers={"Content-Type": "application/octet-stream"}
-    )
-    assert res.status_code == 200
-    d = res.json()
-    assert d.get("ok") is True
-    assert d.get("filename") == filename
-    assert d.get("lines") == 3
-    assert (tmp_path / filename).exists()
-
-
+    assert res_bad_stream.status_code == 400
