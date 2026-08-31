@@ -395,8 +395,48 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "windows": 0, "pair": 0, "exit": 0, "filled_up_only": 0,
         "filled_down_only": 0, "oscillating": 0, "monotonic": 0, "flat": 0,
         "total_pnl_cents": 0.0, "total_fees_cents": 0.0,
+        "wins": 0, "peak_pnl": 0.0, "cum_pnl": 0.0, "max_dd": 0.0,
     })
-    for w in per_window:
+
+    cum_pnl = 0.0
+    peak_pnl = 0.0
+    max_dd = 0.0
+    equity_curve: list[dict] = []
+    trades_sample: list[dict] = []
+    wins_count = 0
+
+    for i, w in enumerate(per_window):
+        # Global equity curve and max drawdown
+        cum_pnl += w.pnl_cents
+        if cum_pnl > peak_pnl:
+            peak_pnl = cum_pnl
+        dd = peak_pnl - cum_pnl
+        if dd > max_dd:
+            max_dd = dd
+        if w.pnl_cents > 0:
+            wins_count += 1
+
+        equity_curve.append({
+            "window": i + 1,
+            "pnl": round(cum_pnl, 2),
+            "slug": w.slug,
+            "series": w.series,
+        })
+
+        if len(trades_sample) < 50:
+            exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
+            trades_sample.append({
+                "slug": w.slug,
+                "series": w.series,
+                "both_filled": w.pair_captured,
+                "exit_triggered": w.exit_taken,
+                "up_filled": w.filled_up,
+                "down_filled": w.filled_down,
+                "pnl_cents": round(w.pnl_cents, 2),
+                "exit_reason": exit_info,
+            })
+
+        # Per series tracking
         a = per_series[w.series]
         a["windows"] += 1
         if w.pair_captured:
@@ -416,6 +456,15 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         a["total_pnl_cents"] += w.pnl_cents
         a["total_fees_cents"] += w.fees_cents
 
+        if w.pnl_cents > 0:
+            a["wins"] += 1
+        a["cum_pnl"] += w.pnl_cents
+        if a["cum_pnl"] > a["peak_pnl"]:
+            a["peak_pnl"] = a["cum_pnl"]
+        s_dd = a["peak_pnl"] - a["cum_pnl"]
+        if s_dd > a["max_dd"]:
+            a["max_dd"] = s_dd
+
     def _finalize(d: dict) -> dict:
         n = d.get("windows", 0)
         return {
@@ -430,6 +479,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "total_pnl_cents": round(d.get("total_pnl_cents", 0.0), 4),
             "avg_pnl_cents": round(d.get("total_pnl_cents", 0.0) / n, 4) if n else 0.0,
             "total_fees_cents": round(d.get("total_fees_cents", 0.0), 4),
+            "max_drawdown_cents": round(d.get("max_dd", 0.0), 2),
+            "win_rate": round(d.get("wins", 0) / n, 4) if n else 0.0,
         }
 
     overall = {
@@ -438,12 +489,16 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "exit": sum(s["exit"] for s in per_series.values()),
         "total_pnl_cents": sum(s["total_pnl_cents"] for s in per_series.values()),
         "total_fees_cents": sum(s["total_fees_cents"] for s in per_series.values()),
+        "wins": wins_count,
+        "max_dd": max_dd,
     }
     return {
         "params_hash": params.params_hash(),
         "n_snaps": n_snaps,
         "n_windows": len(per_window),
         "per_window": [asdict(w) for w in per_window],
+        "equity_curve": equity_curve,
+        "trades_sample": trades_sample,
         "aggregate": {
             "per_series": {k: _finalize(v) for k, v in per_series.items()},
             "overall": _finalize(overall),

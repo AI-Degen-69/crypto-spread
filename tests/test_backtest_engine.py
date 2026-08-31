@@ -359,6 +359,13 @@ def test_replay_returns_aggregate_and_per_window():
     assert "overall" in out["aggregate"]
     assert "per_series" in out["aggregate"]
     assert out["params_hash"] == BacktestParams().params_hash()
+    assert "equity_curve" in out
+    assert len(out["equity_curve"]) == 2
+    assert "trades_sample" in out
+    assert len(out["trades_sample"]) == 2
+    assert "max_drawdown_cents" in out["aggregate"]["overall"]
+    assert "win_rate" in out["aggregate"]["overall"]
+
 
 def test_replay_is_deterministic():
     snaps = _two_window_dataset()
@@ -366,16 +373,36 @@ def test_replay_is_deterministic():
     b = replay(snaps, BacktestParams())
     assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
+
 def test_replay_different_params_different_hash():
     snaps = _two_window_dataset()
     a = replay(snaps, BacktestParams(offset=0.01))
     b = replay(snaps, BacktestParams(offset=0.03))
     assert a["params_hash"] != b["params_hash"]
 
+
 def test_replay_handles_empty_input():
     out = replay([], BacktestParams())
     assert out["n_windows"] == 0
     assert out["aggregate"]["overall"]["windows"] == 0
+    assert out["equity_curve"] == []
+    assert out["trades_sample"] == []
+    assert out["aggregate"]["overall"]["max_drawdown_cents"] == 0.0
+    assert out["aggregate"]["overall"]["win_rate"] == 0.0
+
+
+def test_replay_equity_curve_and_kpi_calculations():
+    snaps = _two_window_dataset()
+    out = replay(snaps, BacktestParams())
+    eq = out["equity_curve"]
+    assert len(eq) == 2
+    assert eq[0]["window"] == 1
+    assert eq[1]["window"] == 2
+    assert isinstance(eq[0]["pnl"], float)
+    ov = out["aggregate"]["overall"]
+    assert 0.0 <= ov["win_rate"] <= 1.0
+    assert ov["max_drawdown_cents"] >= 0.0
+
 
 def test_replay_skips_blanks_and_bad_lines(tmp_path: Path):
     f = tmp_path / "x.jsonl"

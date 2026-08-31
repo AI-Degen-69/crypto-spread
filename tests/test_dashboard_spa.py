@@ -115,9 +115,14 @@ def test_api_backtest_fake_file(tmp_path, monkeypatch):
     data = response.json()
     assert "params_hash" in data
     assert "overall" in data
+    assert "max_drawdown_cents" in data["overall"]
+    assert "win_rate" in data["overall"]
     assert "per_series" in data
+    assert len(data["per_series"]) == 10
     assert "equity_curve" in data
+    assert len(data["equity_curve"]) == 4
     assert "trades_sample" in data
+    assert len(data["trades_sample"]) == 4
     assert data["n_windows"] == 4
 
 
