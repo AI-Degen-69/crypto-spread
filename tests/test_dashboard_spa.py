@@ -122,7 +122,7 @@ def test_api_backtest_fake_file(tmp_path, monkeypatch):
 
 
 def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
-    """Verify chunked upload assembly and file deletion endpoints."""
+    """Verify chunked upload assembly, retries, bounds checking, and deletion."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     monkeypatch.setattr(osc_dash, "RUN", tmp_path)
 
@@ -131,6 +131,21 @@ def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
     part2 = content[8:]
     upload_id = "up_test_upload_123"
     filename = "uploaded_ticks.jsonl"
+
+    # Out of range bounds checks
+    res_bad_idx = client.post(
+        f"/api/ticks/upload-chunk?filename={filename}&uploadId={upload_id}&chunkIndex=5&totalChunks=2",
+        content=part1,
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res_bad_idx.status_code == 400
+
+    res_bad_total = client.post(
+        f"/api/ticks/upload-chunk?filename={filename}&uploadId={upload_id}&chunkIndex=0&totalChunks=20000",
+        content=part1,
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res_bad_total.status_code == 400
 
     # Send Chunk 0
     res0 = client.post(
@@ -152,6 +167,15 @@ def test_api_upload_chunk_and_delete(tmp_path, monkeypatch):
     assert d1.get("ok") is True
     assert d1.get("lines") == 2
     assert (tmp_path / filename).exists()
+
+    # Retry final chunk after upload_dir was removed
+    res1_retry = client.post(
+        f"/api/ticks/upload-chunk?filename={filename}&uploadId={upload_id}&chunkIndex=1&totalChunks=2",
+        content=part2,
+        headers={"Content-Type": "application/octet-stream"}
+    )
+    assert res1_retry.status_code == 200
+    assert res1_retry.json().get("lines") == 2
 
     # Delete uploaded file
     res_del = client.delete(f"/api/ticks/file?filename={filename}")

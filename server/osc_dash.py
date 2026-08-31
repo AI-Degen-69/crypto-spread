@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from collections import defaultdict
@@ -601,39 +602,71 @@ def api_delete_tick_file(request: Request, filename: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def _finalize_upload(upload_dir: Path, target_file: Path, total_chunks: int) -> tuple[int, int]:
-    """Atomically assemble chunks, count lines, and build index in worker thread."""
-    for i in range(total_chunks):
-        part = upload_dir / f"chunk_{i:06d}"
-        if not part.exists():
-            raise FileNotFoundError(f"missing chunk {i}")
+_upload_locks_mutex = threading.Lock()
+_upload_target_locks: dict[str, threading.Lock] = {}
 
-    tmp_target = target_file.with_suffix(target_file.suffix + f".tmp_{time.time_ns()}")
+
+def _get_target_lock(filename: str) -> threading.Lock:
+    """Get or create per-target synchronization lock."""
+    with _upload_locks_mutex:
+        if filename not in _upload_target_locks:
+            _upload_target_locks[filename] = threading.Lock()
+        return _upload_target_locks[filename]
+
+
+def _cleanup_abandoned_uploads(max_age_seconds: int = 3600) -> None:
+    """Remove upload staging directories older than max_age_seconds."""
+    uploads_root = RUN / "_uploads"
+    if not uploads_root.exists():
+        return
+    now = time.time()
     try:
-        with open(tmp_target, "wb") as out_f:
-            for i in range(total_chunks):
-                part = upload_dir / f"chunk_{i:06d}"
-                out_f.write(part.read_bytes())
-        os.replace(tmp_target, target_file)
-    finally:
-        if tmp_target.exists():
-            try:
-                tmp_target.unlink()
-            except Exception:
-                pass
-
-    shutil.rmtree(upload_dir, ignore_errors=True)
-
-    lines_count = _count_lines_fast(target_file)
-    windows_indexed = 0
-    try:
-        from backtest.index import build_index, load_index
-        idx_path, _ = build_index(target_file)
-        windows_indexed = len(load_index(idx_path))
+        for item in uploads_root.iterdir():
+            if item.is_dir():
+                try:
+                    if now - item.stat().st_mtime > max_age_seconds:
+                        shutil.rmtree(item, ignore_errors=True)
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    return lines_count, windows_indexed
+
+def _finalize_upload(upload_dir: Path, target_file: Path, total_chunks: int) -> tuple[int, int]:
+    """Atomically assemble chunks, count lines, and build index in worker thread."""
+    lock = _get_target_lock(target_file.name)
+    with lock:
+        for i in range(total_chunks):
+            part = upload_dir / f"chunk_{i:06d}"
+            if not part.exists():
+                raise FileNotFoundError(f"missing chunk {i}")
+
+        tmp_target = target_file.with_suffix(target_file.suffix + f".tmp_{time.time_ns()}")
+        try:
+            with open(tmp_target, "wb") as out_f:
+                for i in range(total_chunks):
+                    part = upload_dir / f"chunk_{i:06d}"
+                    out_f.write(part.read_bytes())
+            os.replace(tmp_target, target_file)
+        finally:
+            if tmp_target.exists():
+                try:
+                    tmp_target.unlink()
+                except Exception:
+                    pass
+
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+        lines_count = _count_lines_fast(target_file)
+        windows_indexed = 0
+        try:
+            from backtest.index import build_index
+            _, total_snaps = build_index(target_file)
+            windows_indexed = total_snaps
+        except Exception:
+            pass
+
+        return lines_count, windows_indexed
 
 
 @app.post("/api/ticks/upload-chunk")
@@ -651,6 +684,11 @@ async def api_upload_chunk(
     if not (filename.endswith(".jsonl") or filename.endswith(".jsonl.gz") or filename.endswith(".gz")):
         return JSONResponse(status_code=400, content={"error": "file must be .jsonl or .gz"})
 
+    if totalChunks < 1 or totalChunks > 10000:
+        return JSONResponse(status_code=400, content={"error": "totalChunks must be between 1 and 10000"})
+    if chunkIndex < 0 or chunkIndex >= totalChunks:
+        return JSONResponse(status_code=400, content={"error": "chunkIndex out of range"})
+
     if not re.match(r"^up_[A-Za-z0-9_-]+$", uploadId):
         return JSONResponse(status_code=400, content={"error": "invalid uploadId"})
 
@@ -663,17 +701,18 @@ async def api_upload_chunk(
     if not str(target_file).startswith(str(TICKS_DIR.resolve())):
         return JSONResponse(status_code=400, content={"error": "invalid target path"})
 
+    # Run background cleanup of stale staging directories
+    _cleanup_abandoned_uploads()
+
     # If retry arrives after assembly completed and upload_dir was removed
     if chunkIndex == totalChunks - 1 and not upload_dir.exists() and target_file.exists():
         lines_count = _count_lines_fast(target_file)
         windows_indexed = 0
-        idx_file = TICKS_DIR / f"{filename}.idx"
-        if idx_file.exists():
-            try:
-                from backtest.index import load_index
-                windows_indexed = len(load_index(idx_file))
-            except Exception:
-                pass
+        try:
+            from backtest.index import load_index
+            windows_indexed = len(load_index(target_file))
+        except Exception:
+            pass
         return {
             "ok": True,
             "filename": filename,
@@ -683,8 +722,26 @@ async def api_upload_chunk(
 
     upload_dir.mkdir(parents=True, exist_ok=True)
     chunk_path = upload_dir / f"chunk_{chunkIndex:06d}"
-    body = await request.body()
-    chunk_path.write_bytes(body)
+
+    MAX_CHUNK_BYTES = 5 * 1024 * 1024  # 5 MiB hard limit per chunk
+    total_bytes = 0
+    try:
+        with open(chunk_path, "wb") as f_chunk:
+            async for chunk in request.stream():
+                total_bytes += len(chunk)
+                if total_bytes > MAX_CHUNK_BYTES:
+                    f_chunk.close()
+                    if chunk_path.exists():
+                        chunk_path.unlink()
+                    return JSONResponse(status_code=413, content={"error": "chunk exceeds 5MB size limit"})
+                f_chunk.write(chunk)
+    except Exception as e:
+        if chunk_path.exists():
+            try:
+                chunk_path.unlink()
+            except Exception:
+                pass
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
     if chunkIndex == totalChunks - 1:
         try:
