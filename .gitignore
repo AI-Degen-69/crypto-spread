@@ -18,6 +18,7 @@ ten-bankrolls/*/shared_feed.jsonl
 Thumbs.db
 .gstack/
 .freebuff/
+.claude/
 bot/
 ten-bankrolls/
 # local scratch generator (not part of repo)
