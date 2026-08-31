@@ -10,7 +10,7 @@ Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP. Isolated fro
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 62 tests
+pip install pytest                          # dev: 63 tests
 python -m pytest -q                         # all tests
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test

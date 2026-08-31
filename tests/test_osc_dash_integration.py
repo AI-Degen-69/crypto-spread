@@ -85,22 +85,45 @@ def test_api_ticks_manifest(tmp_path, monkeypatch):
     assert data["files"][0]["lines_estimated"] is False
 
 
-def test_api_collector_lifecycle_and_status():
-    """Verify collector start, status, and stop workflow."""
-    # Start collector
-    res_start = client.post("/api/collector/start")
-    assert res_start.status_code == 200
-    assert res_start.json().get("running") is True
+def test_api_collector_lifecycle_and_status(monkeypatch):
+    """Verify collector start, status, and stop workflow with mocked process."""
+    class DummyProc:
+        def __init__(self):
+            self.pid = 99999
+            self._running = True
 
-    # Check status
-    res_status = client.get("/api/collector/status")
-    assert res_status.status_code == 200
-    assert res_status.json().get("running") is True
+        def poll(self):
+            return None if self._running else 0
 
-    # Stop collector
-    res_stop = client.post("/api/collector/stop")
-    assert res_stop.status_code == 200
-    assert res_stop.json().get("running") is False
+        def terminate(self):
+            self._running = False
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._running = False
+
+    monkeypatch.setattr(osc_dash.subprocess, "Popen", lambda *args, **kwargs: DummyProc())
+    try:
+        # Start collector
+        res_start = client.post("/api/collector/start")
+        assert res_start.status_code == 200
+        assert res_start.json().get("running") is True
+        assert res_start.json().get("pid") == 99999
+
+        # Check status
+        res_status = client.get("/api/collector/status")
+        assert res_status.status_code == 200
+        assert res_status.json().get("running") is True
+        assert res_status.json().get("pid") == 99999
+
+        # Stop collector
+        res_stop = client.post("/api/collector/stop")
+        assert res_stop.status_code == 200
+        assert res_stop.json().get("running") is False
+    finally:
+        osc_dash._collector_proc = None
 
 
 def test_api_collector_poll_once(monkeypatch):
@@ -139,10 +162,19 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
         for t in ticks:
             f.write(json.dumps(t) + "\n")
 
-    response = client.get("/api/backtest?file=fake_round.jsonl&offset=0.02&queue=50&fill_model=tape")
+    url = "/api/backtest?file=fake_round.jsonl&offset=0.03&queue=75&pair_cost=0.98&exit_default_5m=0.15&fill_model=book&size=150&gas=0.02"
+    response = client.get(url)
     assert response.status_code == 200
     data = response.json()
     assert "params_hash" in data
+    assert "params" in data
+    assert data["params"]["offset"] == 0.03
+    assert data["params"]["queue"] == 75.0
+    assert data["params"]["pair_cost"] == 0.98
+    assert data["params"]["exit_default_5m"] == 0.15
+    assert data["params"]["fill_model"] == "book"
+    assert data["params"]["size"] == 150
+    assert data["params"]["gas"] == 0.02
     assert "overall" in data
     assert "max_drawdown_cents" in data["overall"]
     assert "win_rate" in data["overall"]
