@@ -397,3 +397,35 @@ def test_api_backtest_with_max_start_delay_filter(tmp_path, monkeypatch):
     d_flag = res_flag.json()
     assert d_flag["n_windows"] == 1
 
+
+def test_api_ticks_verify_endpoint(tmp_path, monkeypatch):
+    """Verify /api/ticks/verify endpoint validates directories and individual files."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    clean_file = tmp_path / "ticks_2026-09-01.jsonl"
+    t = _make_fake_tick(1725000000.0, "0xCID", "btc-5m-1", "btc-up-or-down-5m", 0.50)
+    clean_file.write_text(json.dumps(t) + "\n", encoding="utf-8")
+
+    # Directory verification
+    res_dir = client.get("/api/ticks/verify")
+    assert res_dir.status_code == 200
+    d_dir = res_dir.json()
+    assert "status" in d_dir
+    assert d_dir["total_valid_ticks"] == 1
+    assert d_dir["total_corrupt_lines"] == 0
+
+    # Single file verification
+    res_file = client.get("/api/ticks/verify?file=ticks_2026-09-01.jsonl")
+    assert res_file.status_code == 200
+    d_file = res_file.json()
+    assert d_file["valid_ticks"] == 1
+    assert d_file["corrupt_lines"] == 0
+
+    # Invalid file path traversal
+    res_bad = client.get("/api/ticks/verify?file=../bad.jsonl")
+    assert res_bad.status_code == 400
+
+    # Missing file
+    res_missing = client.get("/api/ticks/verify?file=nonexistent.jsonl")
+    assert res_missing.status_code == 404
+
+

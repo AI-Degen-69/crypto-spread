@@ -173,9 +173,9 @@ def compute_mid(book: dict):
     if bb is not None and ba is not None:
         return (bb + ba) / 2.0
     if bb is not None:
-        return bb + 0.005
+        return min(1.0, bb + 0.005)
     if ba is not None:
-        return ba - 0.005
+        return max(0.0, ba - 0.005)
     return None
 
 
