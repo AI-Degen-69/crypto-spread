@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--size", type=int, default=120)
     ap.add_argument("--fill-model", choices=["tape", "book", "both"],
                     default="tape", help="tape=conservative, book=optimistic")
-    ap.add_argument("--gas", type=float, default=0.05)
+    ap.add_argument("--gas", type=float, default=0.0)
     ap.add_argument("--max-start-delay", type=float, default=0.0,
                     help="filter late-started windows where first tick > N seconds after window open (0 disables)")
     ap.add_argument("--filter-partial", action="store_true",

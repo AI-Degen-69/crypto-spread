@@ -244,16 +244,16 @@ def api_ticks_manifest():
 def api_backtest(
     file: str = "",
     offset: float = 0.02,
-    queue: float = 50.0,
+    queue: float = 0.0,
     pair_cost: float = 1.05,
     exit_default_5m: float = 0.12,
     exit_default_15m: float = 0.13,
     exit_btc_5m: float = 0.09,
     exit_sol_5m: float = 0.11,
     exit_reversal: float = 0.02,
-    size: int = 120,
+    size: int = 5,
     fill_model: str = "tape",
-    gas: float = 0.05,
+    gas: float = 0.0,
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
     limit_windows: int = 0,
@@ -270,7 +270,11 @@ def api_backtest(
         "default_15m": exit_default_15m,
         "btc-up-or-down-5m": exit_btc_5m,
         "sol-up-or-down-5m": exit_sol_5m,
+        "btc-up-or-down-15m": round(exit_btc_5m + 0.01, 2),
+        "sol-up-or-down-15m": round(exit_sol_5m + 0.01, 2),
     }
+
+    size = max(5, int(size))
 
     if filter_partial and max_start_delay <= 0:
         max_start_delay = 5.0
@@ -318,14 +322,28 @@ def api_backtest(
                 "error": f"file not found: {file}",
                 "params_hash": params.params_hash(),
             }
+        snaps = list(iter_ticks(source))
     else:
-        source = TICKS_DIR
+        snaps = list(iter_ticks(TICKS_DIR))
 
-    grouped = group_by_cid(iter_ticks(source))
+    grouped = group_by_cid(snaps)
     if not grouped:
         return {
-            "error": "no snaps",
             "params_hash": params.params_hash(),
+            "params": {
+                "offset": params.offset,
+                "queue": params.queue_gate,
+                "pair_cost": params.pair_cost_gate,
+                "exit_default_5m": exit_default_5m,
+                "exit_default_15m": exit_default_15m,
+                "exit_btc_5m": exit_btc_5m,
+                "exit_sol_5m": exit_sol_5m,
+                "exit_reversal": params.exit_reversal,
+                "size": size,
+                "fill_model": params.fill_model,
+                "gas": params.merge_gas_usd,
+                "max_start_delay": params.max_start_delay_sec,
+            },
             "overall": {
                 "windows": 0,
                 "pairs": 0,
@@ -362,7 +380,7 @@ def api_backtest(
     per_window = [_simulate_window(g, params) for _cid, g in grouped]
     n_snaps = sum(len(g) for _cid, g in grouped)
 
-    # Compute Equity Curve and Max Drawdown
+    # Compute Equity Curve and Max Drawdown scaled by size
     cum_pnl = 0.0
     peak_pnl = 0.0
     max_dd = 0.0
@@ -370,7 +388,8 @@ def api_backtest(
     winning_windows = 0
 
     for idx, w in enumerate(per_window):
-        cum_pnl += w.pnl_cents
+        win_pnl = w.pnl_cents * size
+        cum_pnl += win_pnl
         if cum_pnl > peak_pnl:
             peak_pnl = cum_pnl
         drawdown = peak_pnl - cum_pnl
@@ -382,7 +401,7 @@ def api_backtest(
         equity_curve.append({
             "window_idx": idx + 1,
             "cumulative_pnl_cents": round(cum_pnl, 2),
-            "pnl_cents": round(w.pnl_cents, 2),
+            "pnl_cents": round(win_pnl, 2),
         })
 
     # Per-series aggregation
@@ -400,6 +419,7 @@ def api_backtest(
 
     trades_sample = []
     for w in per_window:
+        win_pnl = w.pnl_cents * size
         a = per_series_raw[w.series]
         a["windows"] += 1
         if w.pair_captured:
@@ -412,7 +432,7 @@ def api_backtest(
             a["monotonic"] += 1
         elif w.class_label == "flat":
             a["flat"] += 1
-        a["total_pnl_cents"] += w.pnl_cents
+        a["total_pnl_cents"] += win_pnl
 
         if len(trades_sample) < 50:
             exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
@@ -424,7 +444,7 @@ def api_backtest(
                 "exit_triggered": w.exit_taken,
                 "up_filled": w.filled_up,
                 "down_filled": w.filled_down,
-                "pnl_cents": round(w.pnl_cents, 2),
+                "pnl_cents": round(win_pnl, 2),
                 "exit_reason": exit_info,
                 "start_delay_sec": w.start_delay_sec,
                 "is_partial": w.is_partial,
@@ -1022,8 +1042,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <input type="number" step="0.005" id="btOffset" value="0.02">
         </div>
         <div class="form-group">
-          <label>עומק תור (Queue ahead @ rest)</label>
-          <input type="number" step="10" id="btQueue" value="50">
+          <label>עומק תור (Queue ahead @ rest - 0 = ללא סינון)</label>
+          <input type="number" step="5" id="btQueue" value="0">
         </div>
         <div class="form-group">
           <label>עלות מקסימלית לזוג (Pair Cost Ceiling)</label>
@@ -1054,12 +1074,12 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           </select>
         </div>
         <div class="form-group">
-          <label>גודל פוזיציה למניות (Shares)</label>
-          <input type="number" step="10" id="btSize" value="120">
+          <label>גודל פוזיציה למניות (Shares - מינימום 5)</label>
+          <input type="number" min="5" step="1" id="btSize" value="5">
         </div>
         <div class="form-group">
           <label>עלות גז מרג' בסנטים (Gas Cents)</label>
-          <input type="number" step="0.01" id="btGas" value="0.05">
+          <input type="number" step="0.01" id="btGas" value="0.00">
         </div>
         <div class="form-group">
           <label>סינון חלונות חלקיים (Partial Windows)</label>
@@ -1399,8 +1419,9 @@ async function runBacktest(fileOverride){
     const exitBtc = getVal('btExitBtc', 0.09);
     const exitSol = getVal('btExitSol', 0.11);
     const fillModel = $('btFillModel') ? $('btFillModel').value : 'tape';
-    const size = Math.round(getVal('btSize', 120));
-    const gas = getVal('btGas', 0.05);
+    const size = Math.max(5, Math.round(getVal('btSize', 5)));
+    if ($('btSize')) $('btSize').value = size;
+    const gas = getVal('btGas', 0.0);
 
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
 
@@ -1437,7 +1458,7 @@ async function runBacktest(fileOverride){
       data: {
         labels: eq.map(e=>e.window_idx),
         datasets: [{
-          label: 'PnL מצטבר (סנטים)',
+          label: `PnL מצטבר (${size} מניות, סנטים)`,
           data: eq.map(e=>e.cumulative_pnl_cents),
           borderColor: '#33c9b5',
           backgroundColor: 'rgba(51,201,181,0.08)',
@@ -1467,7 +1488,7 @@ async function runBacktest(fileOverride){
     // Trades sample table
     let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון</th><th>Delay / חלקי</th><th>סיבת יציאה</th></tr>';
     for(const t of (data.trades_sample||[]).slice(0,30)){
-      const resPill = t.both_filled ? pill('pill-osc','PAIR CAPTURED +4¢') : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
+      const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED +${(4 * size).toFixed(0)}¢`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
       const delayTag = t.is_partial
         ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">חצי (${t.start_delay_sec}s)</span>`
         : `<span class="mono" style="font-size:11px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
@@ -1484,15 +1505,15 @@ async function runBacktest(fileOverride){
 
 function resetBtParams(){
   $('btOffset').value = "0.02";
-  $('btQueue').value = "50";
-  $('btPairCost').value = "0.995";
+  $('btQueue').value = "0";
+  $('btPairCost').value = "1.05";
   $('btExit5m').value = "0.12";
   $('btExit15m').value = "0.13";
   $('btExitBtc').value = "0.09";
   $('btExitSol').value = "0.11";
   $('btFillModel').value = "tape";
-  $('btSize').value = "120";
-  $('btGas').value = "0.05";
+  $('btSize').value = "5";
+  $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";

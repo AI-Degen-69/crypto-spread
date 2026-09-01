@@ -108,3 +108,11 @@ Based on analysis of the codebase, follow these practices:
 - Don't write vague commit messages
 - Don't skip tests for new features
 - Don't block the async event loop with heavy synchronous disk/index operations
+
+## Polymarket Protocol & Gas Rules
+
+- **Gasless Operations**: All core trading operations on Polymarket are gasless via the Relayer:
+  - Order creation and cancellation (CLOB EIP-712)
+  - Token and operator approvals (`setupTradingApprovals()`)
+  - Position merges (`mergePositions()` YES + NO `→` USDC)
+- **Backtest Gas Parameter**: Note that config `merge_gas_usd` (0.05) is an offline conservative backtest buffer and does not reflect an actual on-chain fee charged to the user.
