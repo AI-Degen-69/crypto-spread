@@ -1,0 +1,69 @@
+# Instincts generated from https://github.com/AI-Degen-69/crypto-spread
+# Version: 2.0
+
+---
+id: crypto-spread-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/AI-Degen-69/crypto-spread
+action: "Use conventional commit format with prefixes: feat, fix, chore, docs, test"
+evidence:
+  - "Detected conventional commit pattern"
+  - "Examples: feat: tick capture + backtest lab"
+
+---
+id: crypto-spread-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/AI-Degen-69/crypto-spread
+action: "Write concise commit messages (~65 characters)"
+evidence:
+  - "Average commit message length: 65 chars"
+
+---
+id: crypto-spread-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/AI-Degen-69/crypto-spread
+action: "Use snake_case naming convention for Python files"
+evidence:
+  - "Dominant repository pattern: snake_case"
+
+---
+id: crypto-spread-import-style
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/AI-Degen-69/crypto-spread
+action: "Use standard Python import conventions"
+evidence:
+  - "Imports use absolute and relative module paths"
+
+---
+id: crypto-spread-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/AI-Degen-69/crypto-spread
+action: "Place tests in tests/ directory"
+evidence:
+  - "Dedicated tests directory pattern"
+
+---
+id: crypto-spread-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/AI-Degen-69/crypto-spread
+action: "Name test files using the pattern: test_*.py"
+evidence:
+  - "File pattern: test_*.py for pytest discovery"
