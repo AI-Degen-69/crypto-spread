@@ -254,6 +254,8 @@ def api_backtest(
     size: int = 120,
     fill_model: str = "tape",
     gas: float = 0.05,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -270,6 +272,9 @@ def api_backtest(
         "sol-up-or-down-5m": exit_sol_5m,
     }
 
+    if filter_partial and max_start_delay <= 0:
+        max_start_delay = 5.0
+
     params = BacktestParams(
         offset=offset,
         queue_gate=queue,
@@ -279,6 +284,7 @@ def api_backtest(
         quote_shares=size,
         fill_model=fill_model,
         merge_gas_usd=gas,
+        max_start_delay_sec=max_start_delay,
     )
 
     if not TICKS_DIR.exists():
@@ -337,6 +343,18 @@ def api_backtest(
             "n_snaps": 0,
             "n_windows": 0,
         }
+
+    if params.max_start_delay_sec > 0:
+        filtered_grouped = []
+        for _cid, g in grouped:
+            if not g:
+                continue
+            first_ts = float(g[0].get("ts", 0.0) or 0.0)
+            start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
+            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+            if delay <= params.max_start_delay_sec:
+                filtered_grouped.append((_cid, g))
+        grouped = filtered_grouped
 
     if limit_windows and limit_windows > 0:
         grouped = grouped[:limit_windows]
@@ -408,6 +426,8 @@ def api_backtest(
                 "down_filled": w.filled_down,
                 "pnl_cents": round(w.pnl_cents, 2),
                 "exit_reason": exit_info,
+                "start_delay_sec": w.start_delay_sec,
+                "is_partial": w.is_partial,
             })
 
     total_windows = len(per_window)
@@ -476,6 +496,7 @@ def api_backtest(
             "fill_model": fill_model,
             "size": size,
             "gas": gas,
+            "max_start_delay_sec": max_start_delay,
         },
         "n_snaps": n_snaps,
         "n_windows": total_windows,
@@ -976,6 +997,14 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <label>עלות גז מרג' בסנטים (Gas Cents)</label>
           <input type="number" step="0.01" id="btGas" value="0.05">
         </div>
+        <div class="form-group">
+          <label>סינון חלונות חלקיים (Partial Windows)</label>
+          <select id="btMaxStartDelay">
+            <option value="0" selected>הכל (ללא סינון)</option>
+            <option value="5.0">חלונות מלאים בלבד (≤5s)</option>
+            <option value="2.0">הדוק במיוחד (≤2s)</option>
+          </select>
+        </div>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">הרץ סימולציה (Run Sweep)</span></button>
@@ -1275,12 +1304,14 @@ async function runBacktest(fileOverride){
     const size = Math.round(getVal('btSize', 120));
     const gas = getVal('btGas', 0.05);
 
+    const maxStartDelay = getVal('btMaxStartDelay', 0.0);
+
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -1336,10 +1367,13 @@ async function runBacktest(fileOverride){
     $('btSeriesTableWrap').innerHTML=stbl;
 
     // Trades sample table
-    let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון</th><th>סיבת יציאה</th></tr>';
+    let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון</th><th>Delay / חלקי</th><th>סיבת יציאה</th></tr>';
     for(const t of (data.trades_sample||[]).slice(0,30)){
       const resPill = t.both_filled ? pill('pill-osc','PAIR CAPTURED +4¢') : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
-      ttbl+=`<tr><td class="mono" style="font-size:11px">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:11px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${t.pnl_cents>=0?'+':''}${t.pnl_cents.toFixed(2)}¢</td><td style="font-size:11px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
+      const delayTag = t.is_partial
+        ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">חצי (${t.start_delay_sec}s)</span>`
+        : `<span class="mono" style="font-size:11px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
+      ttbl+=`<tr><td class="mono" style="font-size:11px">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:11px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${t.pnl_cents>=0?'+':''}${t.pnl_cents.toFixed(2)}¢</td><td>${delayTag}</td><td style="font-size:11px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
     }
     ttbl+='</table>';
     $('btTradesTableWrap').innerHTML=ttbl;
@@ -1361,6 +1395,7 @@ function resetBtParams(){
   $('btFillModel').value = "tape";
   $('btSize').value = "120";
   $('btGas').value = "0.05";
+  if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
   runBacktest();
@@ -1778,7 +1813,7 @@ function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol', 'btFillModel',
-    'btSize', 'btGas', 'btFileSelect'
+    'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay'
   ];
 
   inputIds.forEach(id => {
