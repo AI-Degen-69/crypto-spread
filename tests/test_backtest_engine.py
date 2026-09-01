@@ -412,3 +412,38 @@ def test_replay_skips_blanks_and_bad_lines(tmp_path: Path):
                  "not-json\n", encoding="utf-8")
     out = replay(list(iter_ticks(f)), BacktestParams())
     assert out["n_windows"] == 1
+
+
+def test_simulate_window_start_delay_and_partial_flag():
+    # Snap with 10s start delay (>5s -> partial)
+    snap_late = snap(110.0, 0.50)
+    snap_late["start_ts"] = 100.0
+    w_late = _simulate_window([snap_late], BacktestParams())
+    assert w_late.start_delay_sec == 10.0
+    assert w_late.is_partial is True
+
+    # Snap with 2s start delay (<=5s -> full window)
+    snap_early = snap(102.0, 0.50)
+    snap_early["start_ts"] = 100.0
+    w_early = _simulate_window([snap_early], BacktestParams())
+    assert w_early.start_delay_sec == 2.0
+    assert w_early.is_partial is False
+
+
+def test_replay_max_start_delay_filtering():
+    # Window 1: delay = 10s (late)
+    w1_snap = {**snap(110.0, 0.50), "cid": "0xW1", "start_ts": 100.0}
+    # Window 2: delay = 1s (early)
+    w2_snap = {**snap(201.0, 0.50), "cid": "0xW2", "start_ts": 200.0}
+    snaps = [w1_snap, w2_snap]
+
+    # No filter (default max_start_delay_sec = 0.0) -> both windows included
+    out_all = replay(snaps, BacktestParams())
+    assert out_all["n_windows"] == 2
+
+    # Filter max_start_delay_sec = 5.0 -> only w2 included
+    out_filtered = replay(snaps, BacktestParams(max_start_delay_sec=5.0))
+    assert out_filtered["n_windows"] == 1
+    assert out_filtered["trades_sample"][0]["slug"] == w2_snap["slug"]
+    assert out_filtered["trades_sample"][0]["is_partial"] is False
+

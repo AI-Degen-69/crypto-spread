@@ -45,6 +45,10 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--fill-model", choices=["tape", "book", "both"],
                     default="tape", help="tape=conservative, book=optimistic")
     ap.add_argument("--gas", type=float, default=0.05)
+    ap.add_argument("--max-start-delay", type=float, default=0.0,
+                    help="filter late-started windows where first tick > N seconds after window open (0 disables)")
+    ap.add_argument("--filter-partial", action="store_true",
+                    help="shorthand to filter late-started partial windows (>5s delay)")
     ap.add_argument("--start", type=str, default=None,
                     help="inclusive start ISO timestamp, e.g. 2026-08-29T00:00:00Z")
     ap.add_argument("--end", type=str, default=None,
@@ -59,15 +63,20 @@ def main(argv: list[str] | None = None):
     if "default_15m" not in exit_thresh:
         exit_thresh["default_15m"] = args.exit_default_15m
 
+    max_start_delay = args.max_start_delay
+    if args.filter_partial and max_start_delay <= 0:
+        max_start_delay = 5.0
+
     params = BacktestParams(
         offset=args.offset, queue_gate=args.queue,
         pair_cost_gate=args.pair_cost, exit_thresh_by_slug=exit_thresh,
         exit_reversal=args.exit_reversal, quote_shares=args.size,
         fill_model=args.fill_model, merge_gas_usd=args.gas,
+        max_start_delay_sec=max_start_delay,
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
           f"pair_cost={params.pair_cost_gate} fill={params.fill_model} "
-          f"params_hash={params.params_hash()}")
+          f"max_delay={params.max_start_delay_sec}s params_hash={params.params_hash()}")
 
     t0 = time.perf_counter()
     snaps = list(iter_ticks(args.source))

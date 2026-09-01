@@ -122,6 +122,7 @@ class BacktestParams:
     merge_gas_usd: float = 0.05
     taker_fee_rate: float = 0.07     # crypto fee coefficient
     min_quote_shares: int = 50
+    max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
 
     def exit_thresh(self, slug: str, duration: int) -> float:
         if slug in self.exit_thresh_by_slug:
@@ -154,6 +155,8 @@ class WindowResult:
     exit_side: str                   # "up" | "down" | ""
     pnl_cents: float                 # +4 per pair, -exit_cost per naked, -gas share
     fees_cents: float
+    start_delay_sec: float = 0.0
+    is_partial: bool = False
     err: str = ""
 
 
@@ -189,13 +192,19 @@ def _classify(mids: list[float]) -> str:
 def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> WindowResult:
     if not window_snaps:
         return WindowResult("", "", "", 0, 0, "no_data", 0.0, 0.0,
-                            False, False, False, False, "", 0.0, 0.0, "empty")
+                            False, False, False, False, "", 0.0, 0.0,
+                            0.0, False, "empty")
 
     first = window_snaps[0]
     cid = first.get("cid", "")
     series = first.get("series", "")
     slug = first.get("slug", "")
     duration = int(first.get("duration", 0))
+
+    first_ts = float(first.get("ts", 0.0) or 0.0)
+    start_ts = float(first.get("start_ts", 0.0) or 0.0)
+    start_delay_sec = round(max(0.0, first_ts - start_ts), 2) if (first_ts and start_ts) else 0.0
+    is_partial = bool(start_delay_sec > 5.0)
 
     filled_up = False
     filled_down = False
@@ -367,6 +376,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         pair_captured=pair_captured, exit_taken=exit_taken, exit_side=exit_side,
         pnl_cents=round(pnl_cents, 4),
         fees_cents=round(fees_cents, 4),
+        start_delay_sec=start_delay_sec,
+        is_partial=is_partial,
         err=err,
     )
 
@@ -389,6 +400,14 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
     n_snaps = len(snaps_list)
     per_window: list[WindowResult] = []
     for _cid, group in group_by_cid(snaps_list):
+        if not group:
+            continue
+        if params.max_start_delay_sec > 0:
+            first_ts = float(group[0].get("ts", 0.0) or 0.0)
+            start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
+            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+            if delay > params.max_start_delay_sec:
+                continue
         per_window.append(_simulate_window(group, params))
 
     per_series: dict[str, dict] = defaultdict(lambda: {
@@ -434,6 +453,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
                 "down_filled": w.filled_down,
                 "pnl_cents": round(w.pnl_cents, 2),
                 "exit_reason": exit_info,
+                "start_delay_sec": w.start_delay_sec,
+                "is_partial": w.is_partial,
             })
 
         # Per series tracking

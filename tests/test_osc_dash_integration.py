@@ -304,3 +304,46 @@ def test_api_security_origin_and_path_traversal():
         headers={"Content-Type": "application/octet-stream"}
     )
     assert res_bad_stream.status_code == 400
+
+
+def test_api_backtest_with_max_start_delay_filter(tmp_path, monkeypatch):
+    """Verify api_backtest filters late-started windows when max_start_delay or filter_partial is supplied."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_partial_test.jsonl"
+
+    # Window 1: delay = 10s (ts=1000, start_ts=990) -> partial
+    # Window 2: delay = 1s (ts=2000, start_ts=1999) -> full
+    ticks = []
+    # w1 (late start delay 10s)
+    t1 = _make_fake_tick(1000.0, "0xW1", "btc-updown-5m-1", "btc-up-or-down-5m", 0.50)
+    t1["start_ts"] = 990.0
+    ticks.append(t1)
+    # w2 (early start delay 1s)
+    t2 = _make_fake_tick(2000.0, "0xW2", "btc-updown-5m-2", "btc-up-or-down-5m", 0.50)
+    t2["start_ts"] = 1999.0
+    ticks.append(t2)
+
+    fake_file.write_text("\n".join(json.dumps(t) for t in ticks) + "\n", encoding="utf-8")
+
+    # Default (no filter) -> 2 windows
+    res_all = client.get("/api/backtest?file=fake_partial_test.jsonl")
+    assert res_all.status_code == 200
+    d_all = res_all.json()
+    assert d_all["n_windows"] == 2
+    assert d_all["trades_sample"][0]["is_partial"] is True
+    assert d_all["trades_sample"][0]["start_delay_sec"] == 10.0
+
+    # Filter with max_start_delay=5.0 -> 1 window
+    res_filtered = client.get("/api/backtest?file=fake_partial_test.jsonl&max_start_delay=5.0")
+    assert res_filtered.status_code == 200
+    d_filtered = res_filtered.json()
+    assert d_filtered["n_windows"] == 1
+    assert d_filtered["trades_sample"][0]["is_partial"] is False
+    assert d_filtered["trades_sample"][0]["start_delay_sec"] == 1.0
+
+    # Filter with filter_partial=true -> 1 window
+    res_flag = client.get("/api/backtest?file=fake_partial_test.jsonl&filter_partial=true")
+    assert res_flag.status_code == 200
+    d_flag = res_flag.json()
+    assert d_flag["n_windows"] == 1
+
