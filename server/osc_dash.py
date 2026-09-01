@@ -867,6 +867,44 @@ async def api_upload_stream(
     }
 
 
+@app.get("/api/ticks/verify")
+async def api_ticks_verify(
+    request: Request,
+    file: str | None = None,
+    max_gap: float = 6.0,
+    max_start_delay: float = 5.0,
+):
+    """Verify data integrity and quality of tick file(s) in run/ticks/."""
+    _verify_safe_origin(request)
+    from scripts.verify_tick_data import verify_tick_file, verify_ticks_dir
+
+    if file:
+        if "/" in file or "\\" in file or ".." in file:
+            return JSONResponse(status_code=400, content={"error": "invalid file param"})
+        target = (TICKS_DIR / file).resolve()
+        try:
+            target.relative_to(TICKS_DIR.resolve())
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "invalid file path"})
+        if not target.exists() or not target.is_file():
+            return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
+        rep = await asyncio.to_thread(
+            verify_tick_file,
+            target,
+            max_gap_sec=max_gap,
+            max_start_delay=max_start_delay,
+        )
+    else:
+        rep = await asyncio.to_thread(
+            verify_ticks_dir,
+            TICKS_DIR,
+            max_gap_sec=max_gap,
+            max_start_delay=max_start_delay,
+        )
+
+    return rep
+
+
 # --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
 
 FULL_APP_HTML = r"""<!doctype html><html lang="he" dir="rtl"><head>
@@ -1100,11 +1138,25 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     <div class="card" style="border-top:2px solid var(--proj)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <h3 style="margin:0">💾 קובצי Ticks בשרת (JSONL Repository)</h3>
-        <button class="btn" style="font-size:11px;padding:3px 8px" onclick="loadManifest()">🔄 רענן רשימה</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn" style="font-size:11px;padding:4px 10px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3)" onclick="verifyTickData()">🔍 בדיקת תקינות מלאה (Verify All)</button>
+          <button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadManifest()">🔄 רענן רשימה</button>
+        </div>
       </div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">הקולקטור כותב נתוני עומק וספר פקודות מלאים ל-<code>run/ticks/ticks_YYYY-MM-DD.jsonl</code>. ניתן להעלות קבצים נוספים לניתוח.</div>
       <div id="manifestNotice" style="display:none;padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:12px;font-weight:600"></div>
       <div id="manifestTableWrap">טוען קבצים...</div>
+    </div>
+
+    <!-- Integrity Verification Results Modal -->
+    <div id="verifyModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center">
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;max-width:680px;width:95%;max-height:85vh;overflow-y:auto;box-shadow:0 12px 36px rgba(0,0,0,0.7)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin:0;font-size:16px;display:flex;align-items:center;gap:8px"><span>🔍</span> דוח תקינות נתונים (Tick Integrity Report)</h3>
+          <button class="btn" style="padding:2px 8px;font-size:11px" onclick="closeVerifyModal()">✖ סגור</button>
+        </div>
+        <div id="verifyModalContent">טוען נתונים ומבצע בדיקה...</div>
+      </div>
     </div>
 
     <!-- Custom Delete Confirmation Modal -->
@@ -1662,6 +1714,12 @@ async function loadManifest(){
         tdActions.style.gap = '6px';
         tdActions.style.alignItems = 'center';
 
+        const btnVerify = document.createElement('button');
+        btnVerify.className = 'btn';
+        btnVerify.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3);cursor:pointer';
+        btnVerify.textContent = '🔍 בדוק';
+        btnVerify.addEventListener('click', () => verifyTickData(f.name));
+
         const btnRun = document.createElement('button');
         btnRun.className = 'btn';
         btnRun.style.cssText = 'padding:4px 10px;font-size:11px';
@@ -1674,6 +1732,7 @@ async function loadManifest(){
         btnDel.textContent = '🗑️ מחק';
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
 
+        tdActions.appendChild(btnVerify);
         tdActions.appendChild(btnRun);
         tdActions.appendChild(btnDel);
 
@@ -1689,6 +1748,91 @@ async function loadManifest(){
   }catch(err){
     $('manifestTableWrap').innerHTML = '<div style="color:var(--down);padding:12px">שגיאה בטעינת רשימת הקבצים</div>';
   }
+}
+
+async function verifyTickData(filename){
+  const modal = $('verifyModalOverlay');
+  const content = $('verifyModalContent');
+  if(!modal || !content) return;
+
+  modal.style.display = 'flex';
+  content.innerHTML = '<div style="text-align:center;padding:24px;color:var(--dim);font-size:14px">מבצע בדיקת תקינות מקיפה... <span class="spinner"></span></div>';
+
+  try{
+    let url = '/api/ticks/verify';
+    if(filename) url += '?file=' + encodeURIComponent(filename);
+    const res = await fetch(url);
+    const d = await res.json();
+
+    const st = d.status || 'UNKNOWN';
+    const statusColor = st === 'PASS' ? 'var(--up)' : st === 'WARN' ? 'var(--gold)' : 'var(--down)';
+    const statusLabel = st === 'PASS' ? '✅ תקין (PASS)' : st === 'WARN' ? '⚠️ אזהרות סבירות (WARN)' : '❌ כשל תקינות (FAIL)';
+
+    let html = `
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase">סטטוס תקינות כללי</div>
+          <div style="font-size:16px;font-weight:700;color:${statusColor};margin-top:2px">${statusLabel}</div>
+        </div>
+        <div class="mono" style="font-size:12px;color:var(--dim)">
+          ${filename ? 'קובץ: ' + esc(filename) : 'כלל הקבצים בתיקייה (' + (d.files_checked||0) + ')'}
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
+        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:var(--dim)">דגימות תקינות</div>
+          <div class="mono" style="font-size:15px;font-weight:700;color:var(--up);margin-top:2px">${(d.total_valid_ticks||d.valid_ticks||0).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:var(--dim)">שורות פגומות (Corrupt)</div>
+          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_corrupt_lines||d.corrupt_lines||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.total_corrupt_lines||d.corrupt_lines||0).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:var(--dim)">חלונות שזוהו</div>
+          <div class="mono" style="font-size:15px;font-weight:700;margin-top:2px">${(d.total_windows||d.windows_count||0).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:var(--dim)">Crossed Books</div>
+          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_crossed_books||d.crossed_books||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.total_crossed_books||d.crossed_books||0).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:var(--dim)">פערי דגימה (>6s)</div>
+          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_sampling_gaps||d.sampling_gaps_count||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.total_sampling_gaps||d.sampling_gaps_count||0).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:var(--dim)">שגיאות קולקטור (err)</div>
+          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_collector_errors||d.collector_errors||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.total_collector_errors||d.collector_errors||0).toLocaleString()}</div>
+        </div>
+      </div>
+    `;
+
+    if(d.files && d.files.length > 0){
+      html += '<h4 style="margin:12px 0 6px;font-size:12px">פירוט לפי קובץ:</h4><table class="tbl" style="margin-top:4px"><tr><th>קובץ</th><th>סטטוס</th><th>דגימות</th><th>פגומים</th><th>חלונות</th><th>פערים</th></tr>';
+      for(const fr of d.files){
+        const fCol = fr.status === 'PASS' ? 'var(--up)' : fr.status === 'WARN' ? 'var(--gold)' : 'var(--down)';
+        html += `<tr><td class="mono" style="font-weight:600">${esc(fr.file)}</td><td style="color:${fCol};font-weight:700">${esc(fr.status)}</td><td class="mono">${(fr.valid_ticks||0).toLocaleString()}</td><td class="mono" style="color:${fr.corrupt_lines>0?'var(--down)':'inherit'}">${fr.corrupt_lines||0}</td><td class="mono">${fr.windows_count||0}</td><td class="mono">${fr.sampling_gaps_count||0}</td></tr>`;
+      }
+      html += '</table>';
+    }
+
+    if(d.sample_issues && d.sample_issues.length > 0){
+      html += '<h4 style="margin:14px 0 6px;font-size:12px;color:var(--down)">דוגמאות לחריגות שנמצאו:</h4><div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-height:140px;overflow-y:auto;font-size:11px" class="mono">';
+      for(const is of d.sample_issues.slice(0, 10)){
+        html += `<div style="margin-bottom:4px;color:var(--dim)">• שורה ${is.line}: <span style="color:var(--tx)">${esc(is.detail)}</span></div>`;
+      }
+      html += '</div>';
+    }
+
+    content.innerHTML = html;
+  }catch(e){
+    content.innerHTML = `<div style="color:var(--down);padding:16px;text-align:center">שגיאה בביצוע בדיקת תקינות: ${esc(e.message)}</div>`;
+  }
+}
+
+function closeVerifyModal(){
+  const modal = $('verifyModalOverlay');
+  if(modal) modal.style.display = 'none';
 }
 
 function deleteTickFile(filename){
