@@ -203,8 +203,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     first_ts = float(first.get("ts", 0.0) or 0.0)
     start_ts = float(first.get("start_ts", 0.0) or 0.0)
-    start_delay_sec = round(max(0.0, first_ts - start_ts), 2) if (first_ts and start_ts) else 0.0
-    is_partial = bool(start_delay_sec > 5.0)
+    raw_start_delay_sec = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+    start_delay_sec = round(raw_start_delay_sec, 2)
+    is_partial = bool(raw_start_delay_sec > 5.0)
 
     filled_up = False
     filled_down = False

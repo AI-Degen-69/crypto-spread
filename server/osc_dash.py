@@ -1813,7 +1813,7 @@ function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol', 'btFillModel',
-    'btSize', 'btGas', 'btFileSelect'
+    'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay'
   ];
 
   inputIds.forEach(id => {
