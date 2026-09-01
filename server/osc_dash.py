@@ -1488,7 +1488,7 @@ async function runBacktest(fileOverride){
     // Trades sample table
     let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון</th><th>Delay / חלקי</th><th>סיבת יציאה</th></tr>';
     for(const t of (data.trades_sample||[]).slice(0,30)){
-      const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED +${(4 * size).toFixed(0)}¢`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
+      const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED +${t.pnl_cents.toFixed(1)}¢`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
       const delayTag = t.is_partial
         ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">חצי (${t.start_delay_sec}s)</span>`
         : `<span class="mono" style="font-size:11px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;

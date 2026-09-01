@@ -10,6 +10,7 @@ import argparse
 import itertools
 import json
 import math
+import random
 import statistics
 import sys
 import time
@@ -80,15 +81,15 @@ def compute_metrics(
 
     pairs = sum(1 for w in window_results if w.pair_captured)
     exits = sum(1 for w in window_results if w.exit_taken)
-    wins = sum(1 for w in window_results if w.pnl_cents > 0)
-    total_pnl = sum(w.pnl_cents for w in window_results) * size
+    pnls = [(w.pnl_cents - w.fees_cents) * size for w in window_results]
+    wins = sum(1 for p in pnls if p > 0)
+    total_pnl = sum(pnls)
     total_fees = sum(w.fees_cents for w in window_results) * size
 
     # Max Drawdown & PnL standard deviation scaled by size
     cum_pnl = 0.0
     peak_pnl = 0.0
     max_dd = 0.0
-    pnls = [w.pnl_cents * size for w in window_results]
 
     gross_gains = sum(p for p in pnls if p > 0)
     gross_losses = abs(sum(p for p in pnls if p < 0))
@@ -108,7 +109,8 @@ def compute_metrics(
 
     per_series_pnl: dict[str, float] = {}
     for w in window_results:
-        per_series_pnl[w.series] = round(per_series_pnl.get(w.series, 0.0) + w.pnl_cents * size, 2)
+        net_w = (w.pnl_cents - w.fees_cents) * size
+        per_series_pnl[w.series] = round(per_series_pnl.get(w.series, 0.0) + net_w, 2)
 
     return SweepRunResult(
         params=params,
@@ -273,6 +275,62 @@ def generate_joint_grid(
     return grid
 
 
+def generate_random_grid(
+    count: int = 50,
+    seed: int = 42,
+    fill_model: str = "tape",
+    max_start_delay: float = 0.0,
+    size: int = 5,
+) -> list[tuple[str, BacktestParams]]:
+    """Sample random parameter configurations from declared ranges with a deterministic seed."""
+    rng = random.Random(seed)
+    size = max(5, int(size))
+    offsets = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040]
+    queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
+    exit_5ms = [0.06, 0.08, 0.09, 0.10, 0.11, 0.12, 0.14, 0.16]
+    exit_reversals = [0.010, 0.015, 0.020, 0.030]
+    pair_costs = [1.01, 1.02, 1.03, 1.05, 1.10]
+
+    grid: list[tuple[str, BacktestParams]] = []
+    seen: set[tuple[float, float, float, float, float]] = set()
+    for _ in range(count * 5):
+        if len(grid) >= count:
+            break
+        off = rng.choice(offsets)
+        q = rng.choice(queues)
+        e5 = rng.choice(exit_5ms)
+        rev = rng.choice(exit_reversals)
+        pc = rng.choice(pair_costs)
+        key = (off, q, e5, rev, pc)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        ex_dict = {
+            "default_5m": e5,
+            "default_15m": round(e5 + 0.01, 2),
+            "btc-up-or-down-5m": max(0.05, round(e5 - 0.03, 2)),
+            "sol-up-or-down-5m": max(0.06, round(e5 - 0.01, 2)),
+            "btc-up-or-down-15m": round(e5 + 0.01, 2),
+            "sol-up-or-down-15m": round(e5 + 0.01, 2),
+        }
+        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}"
+        p = BacktestParams(
+            offset=off,
+            queue_gate=q,
+            pair_cost_gate=pc,
+            exit_thresh_by_slug=ex_dict,
+            exit_reversal=rev,
+            quote_shares=size,
+            fill_model=fill_model,
+            merge_gas_usd=0.0,
+            taker_fee_rate=0.07,
+            max_start_delay_sec=max_start_delay,
+        )
+        grid.append((label, p))
+    return grid
+
+
 def run_sweep(
     grouped_windows: list[tuple[str, list[dict]]],
     grid: list[tuple[str, BacktestParams]],
@@ -333,8 +391,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="SPREAD-2 Quant Parameter Sweep Runner")
     ap.add_argument("source", nargs="?", default=str(DEFAULT_TICKS),
                     help="ticks directory or .jsonl[.gz] file")
-    ap.add_argument("--preset", choices=["sensitivity", "grid", "assets"], default="sensitivity",
-                    help="Sweep preset: sensitivity (1D), grid (joint), assets (universe)")
+    ap.add_argument("--preset", choices=["sensitivity", "grid", "assets", "random"], default="sensitivity",
+                    help="Sweep preset: sensitivity (1D), grid (joint), assets (universe), random (stochastic)")
+    ap.add_argument("--count", type=int, default=50,
+                    help="Sample count for random sweep (default: 50)")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Deterministic seed for random sweep (default: 42)")
     ap.add_argument("--fill-model", choices=["tape", "book", "both"], default="tape",
                     help="Fill model: tape (conservative), book (optimistic)")
     ap.add_argument("--size", type=int, default=5,
@@ -376,6 +438,14 @@ def main(argv: list[str] | None = None) -> int:
         grid = generate_sensitivity_grid(base, size=size)
     elif args.preset == "grid":
         grid = generate_joint_grid(fill_model=args.fill_model, max_start_delay=max_delay, size=size)
+    elif args.preset == "random":
+        grid = generate_random_grid(
+            count=args.count,
+            seed=args.seed,
+            fill_model=args.fill_model,
+            max_start_delay=max_delay,
+            size=size,
+        )
     elif args.preset == "assets":
         # Asset whitelist sweep
         all_series = {
@@ -420,6 +490,8 @@ def main(argv: list[str] | None = None) -> int:
             "preset": args.preset,
             "fill_model": args.fill_model,
             "size": size,
+            "count": args.count if args.preset == "random" else None,
+            "seed": args.seed if args.preset == "random" else None,
             "n_runs": len(results),
             "runs": [r.to_dict() for r in sorted(results, key=lambda x: x.total_pnl_cents, reverse=True)],
         }

@@ -11,6 +11,7 @@ from scripts.sweep_backtest import (
     compute_metrics,
     format_markdown_table,
     generate_joint_grid,
+    generate_random_grid,
     generate_sensitivity_grid,
     main,
     run_sweep,
@@ -23,7 +24,7 @@ def _make_window_result(
     pnl_cents: float = 4.0,
     pair_captured: bool = True,
     exit_taken: bool = False,
-    fees_cents: float = 0.5,
+    fees_cents: float = 0.0,
 ) -> WindowResult:
     return WindowResult(
         cid=cid,
@@ -76,9 +77,9 @@ def test_generate_sensitivity_grid():
     assert len(grid) > 10
     labels = [label for label, _params in grid]
     assert "Baseline" in labels
-    assert any("offset=" in l for l in labels)
-    assert any("queue=" in l for l in labels)
-    assert any("exit_5m=" in l for l in labels)
+    assert any("offset=" in label for label in labels)
+    assert any("queue=" in label for label in labels)
+    assert any("exit_5m=" in label for label in labels)
 
 
 def test_generate_joint_grid():
@@ -116,7 +117,20 @@ def test_run_sweep_with_grouped_windows():
     assert results[0].n_windows == 1
 
 
+def test_generate_random_grid():
+    """Verify deterministic sampling of random parameter combinations."""
+    grid1 = generate_random_grid(count=10, seed=123)
+    grid2 = generate_random_grid(count=10, seed=123)
+    assert len(grid1) == 10
+    assert len(grid2) == 10
+    assert [label for label, _ in grid1] == [label for label, _ in grid2]
+    label, p = grid1[0]
+    assert isinstance(p, BacktestParams)
+    assert "rand_off=" in label
+
+
 def test_format_markdown_table():
+    """Verify markdown table formatting with proper headers and rank."""
     p = BacktestParams()
     w = _make_window_result(pnl_cents=5.0)
     r1 = compute_metrics([w], p, label="config_A", size=5)
@@ -127,6 +141,7 @@ def test_format_markdown_table():
 
 
 def test_cli_smoke(tmp_path: Path):
+    """Verify CLI entrypoint with sensitivity and random presets and JSON dumping."""
     out_json = tmp_path / "sweep_results.json"
     dummy_tick_file = tmp_path / "ticks_test.jsonl"
     snap = {
@@ -152,3 +167,19 @@ def test_cli_smoke(tmp_path: Path):
     data = json.loads(out_json.read_text(encoding="utf-8"))
     assert data["preset"] == "sensitivity"
     assert len(data["runs"]) > 0
+
+    # Test random preset
+    out_rand = tmp_path / "sweep_rand.json"
+    code_rand = main([
+        str(dummy_tick_file),
+        "--preset", "random",
+        "--count", "5",
+        "--seed", "99",
+        "--out", str(out_rand),
+    ])
+    assert code_rand == 0
+    data_rand = json.loads(out_rand.read_text(encoding="utf-8"))
+    assert data_rand["preset"] == "random"
+    assert data_rand["count"] == 5
+    assert data_rand["seed"] == 99
+    assert len(data_rand["runs"]) == 5

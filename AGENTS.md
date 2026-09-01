@@ -10,7 +10,7 @@ Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP. Isolated fro
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 94 tests
+pip install pytest                          # dev: 95 tests
 python -m pytest -q                         # all tests
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test
@@ -32,14 +32,14 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `docs/` — `operations.md` (runbook for capture + replay), `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report).
-- `tests/` — 94 tests: `test_backtest_engine.py` (41), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (8), `test_rebuild_windows.py` (4), `test_verify_tick_data.py` (14), `test_osc_dash_integration.py` (14), `test_sweep_backtest.py` (7), `test_docstrings.py` (1).
+- `tests/` — 95 tests: `test_backtest_engine.py` (41), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (8), `test_rebuild_windows.py` (4), `test_verify_tick_data.py` (14), `test_osc_dash_integration.py` (14), `test_sweep_backtest.py` (8), `test_docstrings.py` (1).
 
 ## Data Model / Classification
 - Window classification in `scripts/measure_5m_oscillation.py:125` (`classify_window`): vs base 0.50, `max_up=max(mids)-0.50`, `max_down=0.50-min(mids)`. `oscillating` = both ≥0.02, `monotonic` = one ≥0.02, `flat` = neither. Thresholds at `OSC_THRESH_CENTS=[2.0,3.0]`.
 - Dashboard finding (635 windows): median range 49.5¢, 73% oscillating on 5m, `touch_pair` median ~1.01. Exit thresholds in dashboard are derived stats (BTC 5m +9¢, SOL +11¢, others +12¢, 15m +13¢) — not enforced in collector code.
 
 ## Gotchas
-- **Polymarket Gasless Operations**: Trading (CLOB orders), CTF pair merges (`mergePositions`), and trading approvals (`setupTradingApprovals`, `approveErc20`, `approveErc1155ForAll`) are 100% gasless (sponsored by Polymarket Relayer per official docs). Only external chain bridging/funding incurs gas.
+- **Polymarket Gasless Operations**: Trading (CLOB orders), CTF pair merges (`mergePositions`), and trading approvals (`setupTradingApprovals`, `approveErc20`, `approveErc1155ForAll`) are sponsored (gasless) when routed via the Polymarket Relayer and smart wallet flow per official docs. Direct on-chain EOA transactions incur native gas. External bridging and wallet funding also incur gas.
 - `run/` is in `.gitignore`; missing `run/*.jsonl` means collector hasn't run — dashboard shows empty state, not an error.
 - Collector uses a pooled `requests.Session` with `(3.05, 5.0)` timeouts (connect, read) and `max_retries=0` — failed markets are skipped for that poll, not retried.
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
