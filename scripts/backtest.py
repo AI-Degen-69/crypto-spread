@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None):
                     help="ticks file, .jsonl.gz, or directory")
     ap.add_argument("--offset", type=float, default=0.020)
     ap.add_argument("--queue", type=float, default=50.0)
-    ap.add_argument("--pair-cost", type=float, default=0.995)
+    ap.add_argument("--pair-cost", type=float, default=1.05)
     ap.add_argument("--exit", action="append", default=[],
                     help="key=value, e.g. --exit btc-up-or-down-5m=0.09 (repeatable)")
     ap.add_argument("--exit-default-5m", type=float, default=0.12)
