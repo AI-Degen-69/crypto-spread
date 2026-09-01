@@ -239,6 +239,62 @@ def test_simulate_both_models_flag_both_fills():
     assert w.filled_up is True
     assert w.filled_down is True
 
+def test_simulate_cross_model_requires_strict_crossing():
+    # At offset=0.02 (resting at 0.48), a trade at 0.48 DOES NOT fill in cross model.
+    tape_48 = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
+    snaps_48 = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape_48)]
+    w_48 = _simulate_window(snaps_48, BacktestParams(offset=0.02, fill_model="cross"))
+    assert w_48.filled_up is False
+
+    # A trade that crosses through at 0.47 DOES fill in cross model.
+    tape_47 = [{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}]
+    snaps_47 = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape_47)]
+    w_47 = _simulate_window(snaps_47, BacktestParams(offset=0.02, fill_model="cross"))
+    assert w_47.filled_up is True
+
+    # Book ask at 0.48 DOES NOT fill in cross model (must be <= 0.47).
+    snaps_ask_48 = [snap(1.0, 0.50, up_ask=0.48, down_ask=0.51)]
+    w_ask_48 = _simulate_window(snaps_ask_48, BacktestParams(offset=0.02, fill_model="cross"))
+    assert w_ask_48.filled_up is False
+
+    # Book ask at 0.47 DOES fill in cross model.
+    snaps_ask_47 = [snap(1.0, 0.50, up_ask=0.47, down_ask=0.51)]
+    w_ask_47 = _simulate_window(snaps_ask_47, BacktestParams(offset=0.02, fill_model="cross"))
+    assert w_ask_47.filled_up is True
+
+def test_simulate_cross_model_pair_capture():
+    # Both legs cross through 0.48 to 0.47 -> Pair captured (+4c profit)
+    tape = [
+        {"asset": UP_TOKEN, "price": 0.47, "size": 5.0},
+        {"asset": DN_TOKEN, "price": 0.47, "size": 5.0},
+    ]
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, fill_model="cross"))
+    assert w.filled_up is True
+    assert w.filled_down is True
+    assert w.pair_captured is True
+    assert w.pnl_cents == 4.0
+
+def test_simulate_cross_model_exit_on_drift():
+    # UP leg crosses to 0.47 on tape and fills; DOWN ask stays at 0.49 (above 0.48 resting, no fill).
+    # Mid drifts to 0.60 (max_up = 0.10 >= 0.08 exit threshold) -> Safety exit triggered.
+    snap1 = snap(1.0, 0.50, up_ask=0.51, down_ask=0.51,
+                 tape=[{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}])
+    snap2 = snap(2.0, 0.60, up_ask=0.61, down_ask=0.49,
+                 down_bids={"0.39": 100.0})
+    w = _simulate_window([snap1, snap2], BacktestParams(
+        offset=0.02,
+        fill_model="cross",
+        exit_thresh_by_slug={"btc-up-or-down-5m": 0.08, "default_5m": 0.08},
+    ))
+    assert w.filled_up is True
+    assert w.filled_down is False
+    assert w.exit_taken is True
+    assert w.exit_side == "down"
+
+
+
+
 
 # --- simulation: gates ----------------------------------------------------
 
@@ -260,6 +316,13 @@ def test_simulate_pair_cost_gate_blocks_wide_touch():
     snaps = [snap(1.0, 0.50, up_ask=0.60, down_ask=0.60, tape=tape)]
     w = _simulate_window(snaps, BacktestParams(pair_cost_gate=0.99))
     assert w.filled_up is False
+
+def test_simulate_pair_cost_gate_zero_disables():
+    # With pair_cost_gate=0, gate is bypassed even if touch is very wide (1.20)
+    tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
+    snaps = [snap(1.0, 0.50, up_ask=0.60, down_ask=0.60, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(pair_cost_gate=0.0))
+    assert w.filled_up is True
 
 
 # --- simulation: exit -----------------------------------------------------

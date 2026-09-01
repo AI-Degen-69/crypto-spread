@@ -397,8 +397,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Sample count for random sweep (default: 50)")
     ap.add_argument("--seed", type=int, default=42,
                     help="Deterministic seed for random sweep (default: 42)")
-    ap.add_argument("--fill-model", choices=["tape", "book", "both"], default="tape",
-                    help="Fill model: tape (conservative), book (optimistic)")
+    ap.add_argument("--fill-model", choices=["tape", "book", "both", "cross"], default="tape",
+                    help="Fill model: tape (conservative), book (optimistic), cross (strict price-crossing)")
     ap.add_argument("--size", type=int, default=5,
                     help="Position size in shares (minimum 5, default: 5)")
     ap.add_argument("--top", type=int, default=15, help="Number of top configurations to show")

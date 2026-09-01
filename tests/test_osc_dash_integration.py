@@ -236,6 +236,13 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert len(data["trades_sample"]) == 4
     assert data["n_windows"] == 4
 
+    # Test with fill_model=cross
+    url_cross = "/api/backtest?file=fake_round.jsonl&offset=0.02&fill_model=cross"
+    res_cross = client.get(url_cross)
+    assert res_cross.status_code == 200
+    assert res_cross.json()["params"]["fill_model"] == "cross"
+
+
 
 def test_api_upload_stream_ingest(tmp_path, monkeypatch):
     """Verify single direct stream upload of JSONL payload with index creation."""
