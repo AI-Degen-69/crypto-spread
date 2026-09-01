@@ -46,12 +46,14 @@ SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
 
 def iso_to_unix(s: str) -> float:
+    """Convert ISO timestamp string to Unix epoch seconds."""
     from datetime import datetime
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     return datetime.fromisoformat(s).timestamp()
 
 def fetch_live_for_series(series_slug: str):
+    """Fetch active live market metadata for a series slug from Gamma API."""
     try:
         r = SESSION.get(f"{GAMMA_HOST}/events", params={"series_slug": series_slug, "closed": "false", "limit": 500}, timeout=(3.05,5))
         r.raise_for_status()
@@ -89,6 +91,7 @@ def fetch_live_for_series(series_slug: str):
     }, None
 
 def fetch_book(token_id: str):
+    """Fetch and parse top-of-book bids and asks for a token ID from CLOB."""
     try:
         r = SESSION.get(f"{CLOB_HOST}/book", params={"token_id": token_id}, timeout=(3.05,5))
         r.raise_for_status()
@@ -111,6 +114,13 @@ def fetch_book(token_id: str):
 windows = {}
 
 def classify_window(mids: list[float]):
+    """Classify window price excursion into 'no_data', 'flat', 'monotonic', or 'oscillating'.
+
+    - 'no_data': empty mids list.
+    - 'oscillating': both max_up and max_down >= 0.02 vs 0.50 base.
+    - 'monotonic': either max_up or max_down >= 0.02 (at least one side moves >= 0.02).
+    - 'flat': neither direction moves >= 0.02.
+    """
     if not mids:
         return "no_data"
     base = 0.50
@@ -129,6 +139,7 @@ def classify_window(mids: list[float]):
     return "flat"
 
 def update_summary():
+    """Aggregate window outcomes across series and write summary JSON."""
     # aggregate from WIN_FILE
     per_series = defaultdict(list)
     if WIN_FILE.exists():
@@ -167,6 +178,7 @@ def update_summary():
     return summary
 
 def poll_once():
+    """Sample live markets across 10 series and record top-of-book snapshots."""
     now = time.time()
     for series_slug, duration, label in SERIES:
         info, err = fetch_live_for_series(series_slug)
@@ -260,6 +272,7 @@ def poll_once():
             update_summary()
 
 def main():
+    """Legacy runner for 5m/15m top-of-book oscillation measurement."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="single poll then exit")
     ap.add_argument("--windows", type=int, default=0, help="run until N windows closed")

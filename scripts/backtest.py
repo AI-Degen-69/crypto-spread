@@ -17,6 +17,7 @@ DEFAULT_TICKS = Path(__file__).resolve().parent.parent / "run" / "ticks"
 
 
 def parse_exit_thresh(items: list[str]) -> dict:
+    """Parse list of 'slug=thresh' CLI arguments into a dict."""
     out: dict = {}
     for it in items:
         if "=" not in it:
@@ -30,6 +31,7 @@ def parse_exit_thresh(items: list[str]) -> dict:
 
 
 def main(argv: list[str] | None = None):
+    """Run SPREAD-2 backtest CLI replay on tick files and print performance summary."""
     ap = argparse.ArgumentParser(description="SPREAD-2 backtest replay")
     ap.add_argument("source", nargs="?", default=str(DEFAULT_TICKS),
                     help="ticks file, .jsonl.gz, or directory")
@@ -84,6 +86,7 @@ def main(argv: list[str] | None = None):
     if args.start or args.end:
         from datetime import datetime, timezone
         def _to_ts(s: str) -> float:
+            """Convert ISO string timestamp to Unix epoch seconds."""
             if s.endswith("Z"):
                 s = s[:-1] + "+00:00"
             return datetime.fromisoformat(s).timestamp()

@@ -284,6 +284,7 @@ def rebuild_windows(
 
 
 def main():
+    """Rebuild oscillation_windows.jsonl and oscillation_summary.json from tick files."""
     parser = argparse.ArgumentParser(
         description="Rebuild oscillation windows and summary from run/ticks data"
     )

@@ -32,6 +32,7 @@ from typing import Iterable, Iterator
 # --- loaders ----------------------------------------------------------------
 
 def _open_text(path: Path) -> Iterator[str]:
+    """Open a plain text or gzip file and yield lines."""
     if path.suffix == ".gz":
         with gzip.open(path, "rt", encoding="utf-8") as f:
             for line in f:
@@ -68,11 +69,13 @@ def load_ticks(source) -> Iterator[dict | None]:
 
 
 def _json_or_skip(line: str):
+    """Parse JSON line into dict, or return None if empty/malformed/non-dict."""
     line = line.strip()
     if not line:
         return None
     try:
-        return json.loads(line)
+        val = json.loads(line)
+        return val if isinstance(val, dict) else None
     except Exception:
         return None
 
@@ -125,6 +128,7 @@ class BacktestParams:
     max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
 
     def exit_thresh(self, slug: str, duration: int) -> float:
+        """Return the exit threshold for a given market slug and window duration."""
         if slug in self.exit_thresh_by_slug:
             return float(self.exit_thresh_by_slug[slug])
         key = f"default_{'5m' if duration == 300 else '15m'}"
@@ -140,6 +144,7 @@ class BacktestParams:
 
 @dataclass
 class WindowResult:
+    """Outcome and P&L metrics for a single simulated window."""
     cid: str
     series: str
     slug: str
@@ -161,6 +166,7 @@ class WindowResult:
 
 
 def _mid(book: dict):
+    """Compute midpoint price from orderbook best_bid / best_ask."""
     bb, ba = book.get("best_bid"), book.get("best_ask")
     if bb is not None and ba is not None:
         return (bb + ba) / 2.0
@@ -172,12 +178,20 @@ def _mid(book: dict):
 
 
 def _taker_fee(p: float, rate: float) -> float:
+    """Calculate Polymarket crypto taker fee for trade price p."""
     if p is None or p <= 0 or p >= 1:
         return 0.0
     return rate * p * (1.0 - p)
 
 
 def _classify(mids: list[float]) -> str:
+    """Classify window price path into one of: 'no_data', 'flat', 'monotonic', or 'oscillating'.
+
+    - 'no_data': empty mids list.
+    - 'oscillating': both max_up and max_down >= 0.02 vs 0.50 base.
+    - 'monotonic': either max_up or max_down >= 0.02 (at least one side moves >= 0.02).
+    - 'flat': neither direction moves >= 0.02.
+    """
     if not mids:
         return "no_data"
     max_up = max(mids) - 0.50
@@ -190,6 +204,7 @@ def _classify(mids: list[float]) -> str:
 
 
 def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> WindowResult:
+    """Replay one condition window of ticks under BacktestParams and return WindowResult."""
     if not window_snaps:
         return WindowResult("", "", "", 0, 0, "no_data", 0.0, 0.0,
                             False, False, False, False, "", 0.0, 0.0,
@@ -488,6 +503,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             a["max_dd"] = s_dd
 
     def _finalize(d: dict) -> dict:
+        """Compute aggregate summary ratios and rates from raw metric counts."""
         n = d.get("windows", 0)
         return {
             "windows": n,

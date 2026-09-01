@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class MakerConfig:
+    """Strategy configuration and hyperparameters for market-maker bot."""
     series_slug: str = "btc-up-or-down-5m"
 
     # --- virtual account --------------------------------------------------
@@ -744,15 +745,18 @@ class MakerConfig:
 
     @property
     def tau_cancel_sec(self) -> float:
+        """Total cancel latency in seconds (network leg + venue cancel ack)."""
         return (self.net_oneway_ms + self.cancel_venue_ack_ms) / 1000.0
 
     @property
     def tau_post_sec(self) -> float:
+        """Total post latency in seconds (network leg + venue post accept)."""
         return (self.net_oneway_ms + self.post_venue_accept_ms) / 1000.0
 
     sim_only: bool = True
 
     def db_path(self) -> Path:
+        """Resolve database path from environment variable or default hunter.db."""
         return Path(os.environ.get("SPREAD_HUNTER_DB") or os.environ.get("HUNTER_DB", str(ROOT / "hunter.db")))
 
 
