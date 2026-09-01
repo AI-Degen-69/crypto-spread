@@ -1038,7 +1038,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           </select>
         </div>
         <div class="form-group">
-          <label>Offset מ-Mid (ספרד 2¢ = 0.02)</label>
+          <label>Offset מ-Mid (ספרד $0.02 = 0.02)</label>
           <input type="number" step="0.005" id="btOffset" value="0.02">
         </div>
         <div class="form-group">
@@ -1078,7 +1078,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <input type="number" min="5" step="1" id="btSize" value="5">
         </div>
         <div class="form-group">
-          <label>עלות גז מרג' בסנטים (Gas Cents)</label>
+          <label>עלות גז מרג' בדולרים (Gas USD)</label>
           <input type="number" step="0.01" id="btGas" value="0.00">
         </div>
         <div class="form-group">
@@ -1099,10 +1099,10 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     <div class="card" id="btOverallCard">
       <h3>📈 תוצאות בקטסט כוללות (Overall Execution)</h3>
       <div class="kpi" id="btKpiRow">
-        <div class="box"><div class="lbl">רווח/הפסד כולל</div><div class="val" id="btTotalPnl" style="color:var(--up)">+0.00¢</div><div class="sub" id="btAvgPnl">0.00¢ לחלון</div></div>
+        <div class="box"><div class="lbl">רווח/הפסד כולל</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 לחלון</div></div>
         <div class="box"><div class="lbl">אחוז לכידת זוג (Pair Rate)</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 זוגות</div></div>
         <div class="box"><div class="lbl">אחוז הפעלת יציאה (Exit Rate)</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 יציאות</div></div>
-        <div class="box"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">0.00¢</div><div class="sub">ירידה מרבית</div></div>
+        <div class="box"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">ירידה מרבית</div></div>
         <div class="box"><div class="lbl">Win Rate</div><div class="val" id="btWinRate">0.0%</div><div class="sub">עסקאות ברווח</div></div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
@@ -1129,17 +1129,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <h3>מסקנת המחקר — SPREAD-2</h3>
         <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0">74% מהחלונות תנודתיים (Oscillating)</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
-          מתוך 2,820+ חלונות אמיתיים שנמדדו ב-5m ו-15m: ב-5m <b>73% oscillating</b> — שני הצדדים ב-0.96 נתפסים ומתמזגים ל-4¢ רווח. ב-15m <b>80% oscillating</b>.
+          מתוך 2,820+ חלונות אמיתיים שנמדדו ב-5m ו-15m: ב-5m <b>73% oscillating</b> — שני הצדדים ב-$0.48 ($0.96 לזוג) נתפסים ומתמזגים ל-$0.04 רווח למניה. ב-15m <b>80% oscillating</b>.
         </div>
       </div>
       <div class="card" style="border-top:2px solid var(--gold)">
         <h3>המלצות רף יציאה</h3>
         <div style="font-size:12px;color:var(--dim)">הדוק = יציאה מוקדמת. BTC הכי מונוטוני:</div>
         <div class="mono" style="font-size:12px;margin-top:8px;display:flex;flex-direction:column;gap:4px">
-          <div><b style="color:var(--down)">BTC 5m:</b> רף +9¢ (יציאה ב-59¢ UP)</div>
-          <div><b style="color:var(--gold)">SOL 5m:</b> רף +11¢ (יציאה ב-61¢)</div>
-          <div><b style="color:var(--up)">ETH/BNB/XRP 5m:</b> רף +12¢ (יציאה ב-62¢)</div>
-          <div><b>15m כללי:</b> רף +13¢</div>
+          <div><b style="color:var(--down)">BTC 5m:</b> רף +$0.09 (יציאה ב-$0.59 UP)</div>
+          <div><b style="color:var(--gold)">SOL 5m:</b> רף +$0.11 (יציאה ב-$0.61)</div>
+          <div><b style="color:var(--up)">ETH/BNB/XRP 5m:</b> רף +$0.12 (יציאה ב-$0.62)</div>
+          <div><b>15m כללי:</b> רף +$0.13</div>
         </div>
       </div>
     </div>
@@ -1219,6 +1219,16 @@ const $=s=>document.getElementById(s);
 const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
 const pct=(a,b)=> b?Math.round(a/b*100):0;
 const hms=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`;};
+const fmtUsd=(cents, showPlus=true)=>{
+  if(cents===null || cents===undefined || isNaN(Number(cents))) return '$0.00';
+  const val = Number(cents) / 100;
+  const sign = val >= 0 ? (showPlus ? '+' : '') : '-';
+  return `${sign}$${Math.abs(val).toFixed(2)}`;
+};
+const fmtPrice=(p)=>{
+  if(p===null || p===undefined || isNaN(Number(p))) return '-';
+  return `$${Number(p).toFixed(2)}`;
+};
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
 function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating תנודתי'):c==='monotonic'?pill('pill-mono','monotonic חד-כיווני'):c==='flat'?pill('pill-flat','flat שטוח'):pill('pill-flat',esc(c));}
 
@@ -1298,7 +1308,7 @@ async function tick(){
     };
     const g5=fmt(300), g15=fmt(900);
     const gt=g.total||{n:0,any_2c:0,monotonic:0,oscillating:0};
-    const bar=(x)=>`<div class="card" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">🎯 ${x.short} — ${x.label}</div><div class="mono" style="font-size:18px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:12px;color:var(--dim)">goal</span> / ${x.n} <span style="font-size:12px;color:var(--up)">passed</span> / ${x.any2} <span style="font-size:12px;color:var(--gold)">±2¢</span> / ${x.mono} <span style="font-size:12px;color:var(--down)">mono</span></div><div style="display:flex;gap:6px;align-items:center"><div class="bar" style="flex:1;height:8px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><span class="mono" style="font-size:11px;color:var(--dim)">${x.pctGoal}%</span></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">oscillating ${x.osc} · flat ${g[String(x.short==='5m'?300:900)]?.flat||0} · נותר ${x.remain} ליעד</div><div style="margin-top:6px;display:flex;gap:6px;align-items:center"><span class="mono" style="font-size:10px;color:var(--dim)">יעד:</span><input id="goalIn${x.short}" type="number" min="1" step="10" value="${x.goal}" style="width:90px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:500 12px var(--mono)"><button onclick="(function(){const v=parseInt(document.getElementById('goalIn${x.short}').value,10);if(v>0){localStorage.setItem('goal_${x.short==='5m'?300:900}',v);tick();}})()" style="background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 11px var(--disp);cursor:pointer">שמור</button></div></div>`;
+    const bar=(x)=>`<div class="card" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">🎯 ${x.short} — ${x.label}</div><div class="mono" style="font-size:18px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:12px;color:var(--dim)">goal</span> / ${x.n} <span style="font-size:12px;color:var(--up)">passed</span> / ${x.any2} <span style="font-size:12px;color:var(--gold)">±$0.02</span> / ${x.mono} <span style="font-size:12px;color:var(--down)">mono</span></div><div style="display:flex;gap:6px;align-items:center"><div class="bar" style="flex:1;height:8px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><span class="mono" style="font-size:11px;color:var(--dim)">${x.pctGoal}%</span></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">oscillating ${x.osc} · flat ${g[String(x.short==='5m'?300:900)]?.flat||0} · נותר ${x.remain} ליעד</div><div style="margin-top:6px;display:flex;gap:6px;align-items:center"><span class="mono" style="font-size:10px;color:var(--dim)">יעד:</span><input id="goalIn${x.short}" type="number" min="1" step="10" value="${x.goal}" style="width:90px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:500 12px var(--mono)"><button onclick="(function(){const v=parseInt(document.getElementById('goalIn${x.short}').value,10);if(v>0){localStorage.setItem('goal_${x.short==='5m'?300:900}',v);tick();}})()" style="background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 11px var(--disp);cursor:pointer">שמור</button></div></div>`;
     const tot=`<div class="card" style="flex:0 0 180px;min-width:160px;background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">סה״כ</div><div class="mono" style="font-size:16px;font-weight:700;margin-top:4px">${gt.n} חלונות</div><div class="mono" style="font-size:10px;color:var(--dim)">${gt.any_2c} touched · ${gt.monotonic} mono · ${gt.oscillating} osc</div></div>`;
     $('goalBar').innerHTML=`<h3>🎯 Goal Count — יעדים לספירת חלונות</h3><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>`;
   })();
@@ -1309,7 +1319,7 @@ async function tick(){
   for(const k of order){
     const s=live[k];
     if(!s){ liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div style="color:var(--dim);font-size:11px">טוען...</div></div>`; continue; }
-    const mid=s.mid==null?'-':(s.mid*100).toFixed(1)+'¢';
+    const mid=s.mid==null?'-':fmtPrice(s.mid);
     const tp=s.touch_pair==null?'-':s.touch_pair.toFixed(3);
     const rem=s.t_rem==null?'-':hms(s.t_rem);
     const q=s.queue_up==null?'-':Math.round(s.queue_up);
@@ -1328,8 +1338,8 @@ async function tick(){
     const p2=pct(any2,n), p3=pct(any3,n), po=pct(osc,n), pm=pct(mono,n);
     grid+=`<div class="card"><h3>${esc(s.label)} — ${s.duration===300?'5 דקות':'15 דקות'} <span style="font-weight:400;color:var(--dim);text-transform:none;letter-spacing:0">· ${n} חלונות</span></h3>
       <div class="kpi">
-        <div class="box"><div class="lbl">כל תנודה ≥2¢</div><div class="val">${any2}/${n}</div><div class="sub">${p2}% זזו 2¢</div><div class="bar"><div class="fill up" style="width:${p2}%"></div></div></div>
-        <div class="box"><div class="lbl">≥3¢</div><div class="val">${any3}/${n}</div><div class="sub">${p3}%</div><div class="bar"><div class="fill gold" style="width:${p3}%"></div></div></div>
+        <div class="box"><div class="lbl">כל תנודה ≥$0.02</div><div class="val">${any2}/${n}</div><div class="sub">${p2}% זזו $0.02</div><div class="bar"><div class="fill up" style="width:${p2}%"></div></div></div>
+        <div class="box"><div class="lbl">≥$0.03</div><div class="val">${any3}/${n}</div><div class="sub">${p3}%</div><div class="bar"><div class="fill gold" style="width:${p3}%"></div></div></div>
         <div class="box"><div class="lbl">oscillating</div><div class="val" style="color:var(--up)">${osc}/${n}</div><div class="sub">${po}%</div><div class="bar"><div class="fill up" style="width:${po}%"></div></div></div>
         <div class="box"><div class="lbl">monotonic</div><div class="val" style="color:var(--down)">${mono}/${n}</div><div class="sub">${pm}%</div><div class="bar"><div class="fill down" style="width:${pm}%"></div></div></div>
       </div>
@@ -1342,21 +1352,21 @@ async function tick(){
   let tbl='<div class="card"><h3 style="font-size:13px">חלונות אחרונים — פתיחה 50/50 (לחיץ ל-Polymarket)</h3><table class="tbl"><tr><th>סדרה</th><th>חלון</th><th>פתיחה UP / DOWN</th><th style="color:var(--up)">שיא UP</th><th style="color:var(--down)">שיא DOWN</th><th>נר יפני</th><th>סיווג</th><th>קישור</th></tr>';
   for(const w of wins.slice(0,60)){
     const sm = w.start_mid, cm=w.close_mid, mx=w.max_mid, mn=w.min_mid;
-    const openUp = sm==null?'-':(sm*100).toFixed(1)+'¢';
-    const openDown = sm==null?'-':((1-sm)*100).toFixed(1)+'¢';
-    const upHigh = mx==null?'-':(mx*100).toFixed(1)+'¢';
-    const upExc = ((w.max_up||0)*100).toFixed(1);
-    const downHigh = mn==null?'-':((1-mn)*100).toFixed(1)+'¢';
-    const downExc = ((w.max_down||0)*100).toFixed(1);
+    const openUp = sm==null?'-':fmtPrice(sm);
+    const openDown = sm==null?'-':fmtPrice(1-sm);
+    const upHigh = mx==null?'-':fmtPrice(mx);
+    const upExc = fmtPrice(w.max_up||0);
+    const downHigh = mn==null?'-':fmtPrice(1-mn);
+    const downExc = fmtPrice(w.max_down||0);
     const o = sm==null?50:sm*100, c = cm==null?o:cm*100, h = mx==null?o:mx*100, l = mn==null?o:mn*100;
     const bodyLeft = Math.min(o,c), bodyW = Math.abs(c-o);
     const wickLeft = l, wickW = h-l;
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
-    const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div><div style="font-size:9px;color:var(--dim);margin-top:1px">טווח ${((h-l)).toFixed(1)}¢ · סגירה ${(c).toFixed(1)}¢</div></div>`;
+    const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div><div style="font-size:9px;color:var(--dim);margin-top:1px">טווח ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · סגירה ${fmtPrice(cm)}</div></div>`;
     const labelStr = esc(String(w.label||''));
     const slugStr = esc(String(w.slug||'').slice(-14));
     const startTs = w.start_ts ? new Date(w.start_ts*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'}) : '-';
-    tbl+=`<tr><td style="font-weight:700">${labelStr}</td><td class="mono" style="font-size:12px">${slugStr}<div style="font-size:10px;color:var(--faint)">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc}¢)</td><td><span class="price-down">${downHigh}</span> (+${downExc}¢)</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">פתח ↗</a></td></tr>`;
+    tbl+=`<tr><td style="font-weight:700">${labelStr}</td><td class="mono" style="font-size:12px">${slugStr}<div style="font-size:10px;color:var(--faint)">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc})</td><td><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">פתח ↗</a></td></tr>`;
   }
   tbl+='</table></div>';
   $('windowsTableWrap').innerHTML=tbl;
@@ -1439,14 +1449,14 @@ async function runBacktest(fileOverride){
 
     $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} חלונות${fileVal ? ' · [' + fileVal + ']' : ''}`;
     const ov = data.overall || {};
-    $('btTotalPnl').textContent = ((ov.total_pnl_cents||0)>=0?'+':'') + (ov.total_pnl_cents||0).toFixed(2) + '¢';
+    $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);
     $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
-    $('btAvgPnl').textContent = ((ov.avg_pnl_cents||0)>=0?'+':'') + (ov.avg_pnl_cents||0).toFixed(2) + '¢ לחלון';
+    $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' לחלון';
     $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
     $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} זוגות`;
     $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
     $('btExitsCount').textContent = `${ov.exits||0} יציאות`;
-    $('btMaxDd').textContent = '-' + (ov.max_drawdown_cents||0).toFixed(2) + '¢';
+    $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
     $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
 
     // Chart
@@ -1458,8 +1468,8 @@ async function runBacktest(fileOverride){
       data: {
         labels: eq.map(e=>e.window_idx),
         datasets: [{
-          label: `PnL מצטבר (${size} מניות, סנטים)`,
-          data: eq.map(e=>e.cumulative_pnl_cents),
+          label: `PnL מצטבר (${size} מניות, $)`,
+          data: eq.map(e=>((e.cumulative_pnl_cents||0)/100).toFixed(2)),
           borderColor: '#33c9b5',
           backgroundColor: 'rgba(51,201,181,0.08)',
           fill: true,
@@ -1472,27 +1482,34 @@ async function runBacktest(fileOverride){
         plugins: { legend: { display: false } },
         scales: {
           x: { ticks: { color: '#8792a6' }, grid: { color: '#232a35' } },
-          y: { ticks: { color: '#8792a6' }, grid: { color: '#232a35' } }
+          y: {
+            ticks: {
+              color: '#8792a6',
+              callback: function(v){ return '$' + Number(v).toFixed(2); }
+            },
+            grid: { color: '#232a35' }
+          }
         }
       }
     });
 
     // Per series table
-    let stbl = '<table class="tbl"><tr><th>סדרה</th><th>חלונות</th><th>לכידת זוג (Pair)</th><th>יציאות (Exits)</th><th>PnL כולל</th><th>ממוצע לחלון</th><th>Oscillating</th><th>Monotonic</th></tr>';
+    let stbl = '<table class="tbl"><tr><th>סדרה</th><th>חלונות</th><th>לכידת זוג (Pair)</th><th>יציאות (Exits)</th><th>PnL כולל ($)</th><th>ממוצע לחלון ($)</th><th>Oscillating</th><th>Monotonic</th></tr>';
     for(const [k,v] of Object.entries(data.per_series||{})){
-      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td>${v.windows}</td><td style="color:var(--up);font-weight:700">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down)">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${v.total_pnl_cents>=0?'+':''}${v.total_pnl_cents.toFixed(2)}¢</td><td class="mono">${v.avg_pnl_cents>=0?'+':''}${v.avg_pnl_cents.toFixed(2)}¢</td><td>${v.oscillating}</td><td>${v.monotonic}</td></tr>`;
+      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td>${v.windows}</td><td style="color:var(--up);font-weight:700">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down)">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono">${fmtUsd(v.avg_pnl_cents,true)}</td><td>${v.oscillating}</td><td>${v.monotonic}</td></tr>`;
     }
     stbl+='</table>';
     $('btSeriesTableWrap').innerHTML=stbl;
 
     // Trades sample table
-    let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון</th><th>Delay / חלקי</th><th>סיבת יציאה</th></tr>';
+    let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון ($)</th><th>Delay / חלקי</th><th>סיבת יציאה</th></tr>';
     for(const t of (data.trades_sample||[]).slice(0,30)){
-      const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED +${t.pnl_cents.toFixed(1)}¢`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
+      const pnlUsd = fmtUsd(t.pnl_cents, true);
+      const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED ${pnlUsd}`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
       const delayTag = t.is_partial
         ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">חצי (${t.start_delay_sec}s)</span>`
         : `<span class="mono" style="font-size:11px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
-      ttbl+=`<tr><td class="mono" style="font-size:11px">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:11px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${t.pnl_cents>=0?'+':''}${t.pnl_cents.toFixed(2)}¢</td><td>${delayTag}</td><td style="font-size:11px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
+      ttbl+=`<tr><td class="mono" style="font-size:11px">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:11px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td><td>${delayTag}</td><td style="font-size:11px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
     }
     ttbl+='</table>';
     $('btTradesTableWrap').innerHTML=ttbl;
@@ -1565,7 +1582,7 @@ async function renderSummaryCharts(){
 
   const a=await (await fetch('/api/analysis',{cache:'no-store'})).json();
   const hm = a.hist_max || {};
-  const bLabels=['0-10¢','10-20¢','20-30¢','30-40¢','40-50¢'];
+  const bLabels=['$0.00-$0.10','$0.10-$0.20','$0.20-$0.30','$0.30-$0.40','$0.40-$0.50'];
   let bCounts=[0,0,0,0,0];
   if(Object.keys(hm).length > 0){
     bCounts = [
@@ -1593,7 +1610,7 @@ async function renderSummaryCharts(){
   }
 
   const hs = a.hist_start || {};
-  const sBuckets=['0-1¢','1-2¢','2-5¢','5-10¢','10¢+'];
+  const sBuckets=['$0.00-$0.01','$0.01-$0.02','$0.02-$0.05','$0.05-$0.10','>$0.10'];
   let sCounts=[0,0,0,0,0];
   if(Object.keys(hs).length > 0){
     sCounts = [
