@@ -60,12 +60,14 @@ SESSION.mount("http://", requests.adapters.HTTPAdapter(
 
 
 def iso_to_unix(s: str) -> float:
+    """Convert ISO timestamp string to Unix epoch seconds."""
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     return datetime.fromisoformat(s).timestamp()
 
 
 def fetch_live_for_series(series_slug: str):
+    """Fetch active live market metadata for a series slug from Gamma API."""
     try:
         r = SESSION.get(
             f"{GAMMA_HOST}/events",
@@ -166,6 +168,7 @@ def record_tape_sample(stats: dict, now: float, has_trades: bool, num_entries: i
 
 
 def compute_mid(book: dict):
+    """Compute midpoint price from best_bid and best_ask in book dict."""
     bb, ba = book.get("best_bid"), book.get("best_ask")
     if bb is not None and ba is not None:
         return (bb + ba) / 2.0
@@ -177,12 +180,14 @@ def compute_mid(book: dict):
 
 
 def queue_ahead(bids: dict, resting_price: float) -> float:
+    """Sum volume of bids with price >= resting_price (queue ahead of us)."""
     if not bids:
         return 0.0
     return sum(s for p, s in bids.items() if p >= resting_price)
 
 
 def now_day_key() -> str:
+    """Return current UTC date formatted as YYYY-MM-DD."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
@@ -290,6 +295,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
 
 
 def main():
+    """Run full-depth 1-second tick collection across 10 Polymarket series."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="single poll then exit")
     ap.add_argument("--days", type=int, default=0, help="run until N UTC day boundaries pass")

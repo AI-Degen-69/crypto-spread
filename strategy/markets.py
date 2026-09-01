@@ -32,6 +32,7 @@ for _scheme in ("https://", "http://"):
 
 @dataclass(frozen=True)
 class LiveMarket:
+    """Representation of an active binary market with tokens and validity window."""
     condition_id: str
     market_slug: str
     up_token: str
@@ -42,6 +43,7 @@ class LiveMarket:
     neg_risk: bool
 
     def t_remaining(self, now: Optional[float] = None) -> float:
+        """Seconds remaining until market end timestamp."""
         return self.end_ts - (now if now is not None else time.time())
 
 
@@ -53,10 +55,12 @@ _SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._~-]")
 
 
 def _sanitize_slug(slug: str) -> str:
+    """Sanitize market slug to allow only safe URL characters."""
     return _SAFE_SLUG_RE.sub("", slug or "")
 
 
 def _parse_market(market: dict) -> Optional[LiveMarket]:
+    """Parse raw market dictionary from Gamma API into a LiveMarket object."""
     token_ids_raw = market.get("clobTokenIds")
     if not token_ids_raw:
         return None
@@ -86,6 +90,7 @@ def _parse_market(market: dict) -> Optional[LiveMarket]:
 
 
 def _iso_to_unix(s: str) -> float:
+    """Convert ISO timestamp string to Unix epoch seconds."""
     # tolerate "Z" suffix
     from datetime import datetime
     if s.endswith("Z"):

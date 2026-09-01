@@ -25,6 +25,7 @@ def _index_path(source: Path) -> Path:
 
 @dataclass
 class IndexEntry:
+    """Byte-offset pointer for a single tick snapshot within a tick file."""
     cid: str
     ts: float
     series: str
@@ -132,6 +133,7 @@ def group_by_cid_indexed(source: Path) -> list[tuple[str, list[tuple[dict, int]]
     open_files: dict[str, object] = {}
 
     def _get_handle(src: Path):
+        """Retrieve or create an open file handle cached by path."""
         key = str(src)
         if key not in open_files:
             if src.suffix == ".gz":

@@ -19,6 +19,7 @@ UP_TOK = "0xUP_FAKE"
 DN_TOK = "0xDN_FAKE"
 
 def mk(ts, cid, slug, mid, tape=None, up_ask=None, down_ask=None, start_ts=None, end_ts=None):
+    """Construct a synthetic tick snapshot dictionary with specified mid and books."""
     bb_up = round(mid - 0.005, 4)
     ba_up = round(mid + 0.005, 4)
     # Keep touch ~0.99 so pair_cost 0.995 passes even at mid 0.50
