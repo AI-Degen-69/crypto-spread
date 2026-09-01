@@ -14,6 +14,10 @@
 | `scripts/backtest.py` | Thin CLI: `python -m scripts.backtest run/ticks/ --offset 0.02 --queue 50 --exit btc-up-or-down-5m=0.09` |
 | `server/osc_dash.py` | Adds `GET /api/backtest` and `GET /api/ticks/manifest` to the existing dashboard. No UI changes yet — sliders are the next iteration (T4 partial). |
 
+### Dashboard Runtime & Stack
+
+`server/osc_dash.py` (FastAPI on `:8802`) is the sole canonical dashboard for this repository. Any external TypeScript/Express prototype (e.g. `Downloads/crypto-spread/server.ts`) is an archived reference and not part of the active project.
+
 ## Run a day of capture
 
 ```powershell

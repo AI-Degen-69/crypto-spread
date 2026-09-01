@@ -24,3 +24,8 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # דשבור
 **תיקיות מופרדות:**
 - `C:\Users\Tiger\Agents\Projects\AI Trading\spread-hunter` — הבוט המקורי (rewards)
 - `C:\Users\Tiger\Agents\Projects\AI Trading\crypto-spread` — כאן (ספרד 5m)
+
+## Dashboard Architecture
+
+- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 8802) is the sole canonical dashboard.
+- **External TS Reference**: Any external TypeScript/Express prototype (e.g. `C:/Users/Tiger/Downloads/crypto-spread/server.ts`) is an archived AI-Studio reference. No `server.ts` or Node.js runtime is used or tracked in this repository.
