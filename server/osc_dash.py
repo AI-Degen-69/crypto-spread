@@ -544,7 +544,7 @@ def api_analysis():
 # Collector endpoints
 @app.get("/api/collector/status")
 def api_collector_status():
-    """Return status of the background tick collector and today's total ticks."""
+    """Return status of the background tick collector, today's ticks, and tape empty-rate health."""
     global _collector_proc
     running = _collector_proc is not None and _collector_proc.poll() is None
     # Count total tick lines collected today
@@ -554,10 +554,35 @@ def api_collector_status():
     )
     if today_file.exists():
         today_ticks = _count_lines_fast(today_file)
+
+    tape_empty_rate = None
+    tape_recent_empty_rate = None
+    tape_entries_total = 0
+    tape_alert = False
+    mf = TICKS_DIR / "manifest.json"
+    if mf.exists():
+        try:
+            mdata = json.loads(mf.read_text(encoding="utf-8"))
+            tape_empty_rate = mdata.get("tape_empty_rate")
+            tape_recent_empty_rate = mdata.get("tape_recent_empty_rate")
+            tape_entries_total = mdata.get("tape_entries_total", 0)
+            if "tape_alert" in mdata:
+                tape_alert = bool(mdata.get("tape_alert"))
+            elif tape_empty_rate is not None and tape_empty_rate > 0.99:
+                total_checks = mdata.get("tape_empty_count", 0) + mdata.get("tape_non_empty_count", 0)
+                if total_checks >= 300:
+                    tape_alert = True
+        except Exception:
+            pass
+
     return {
         "running": running,
         "pid": _collector_proc.pid if running else None,
         "total_ticks_collected": today_ticks,
+        "tape_empty_rate": tape_empty_rate,
+        "tape_recent_empty_rate": tape_recent_empty_rate,
+        "tape_entries_total": tape_entries_total,
+        "tape_alert": tape_alert,
     }
 
 
@@ -928,6 +953,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <span style="flex:1"></span>
   <div style="display:flex;align-items:center;gap:8px">
     <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">קולקטור: טוען...</span>
+    <span id="tapeBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Tape: טוען...</span>
     <button class="btn" id="btnToggleCollector" onclick="toggleCollector()">הפעל איסוף רציף (1s)</button>
     <button class="btn" onclick="pollOnce()">דגום עכשיו (Once)</button>
   </div>
@@ -1146,6 +1172,26 @@ async function refreshCollectorStatus(){
     $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
     $('btnToggleCollector').textContent = st.running ? 'עצור איסוף' : 'הפעל איסוף רציף (1s)';
     $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
+
+    const tb = $('tapeBadge');
+    if(tb){
+      if(st.tape_empty_rate !== null && st.tape_empty_rate !== undefined){
+        const pctStr = (st.tape_empty_rate * 100).toFixed(1) + '%';
+        if(st.tape_alert){
+          tb.textContent = `⚠️ Tape שקט (${pctStr} ריק)`;
+          tb.style.color = 'var(--down)';
+          tb.style.borderColor = 'rgba(240,104,77,0.5)';
+          tb.style.background = 'rgba(240,104,77,0.18)';
+        } else {
+          tb.textContent = `Tape ריק: ${pctStr} (${(st.tape_entries_total||0).toLocaleString()} עסקאות)`;
+          tb.style.color = 'var(--dim)';
+          tb.style.borderColor = 'var(--line)';
+          tb.style.background = 'var(--panel2)';
+        }
+      } else {
+        tb.textContent = 'Tape: -';
+      }
+    }
   }catch{}
 }
 
@@ -1564,6 +1610,16 @@ async function loadManifest(){
     const wrap = $('manifestTableWrap');
     if(!wrap) return;
     wrap.innerHTML = '';
+
+    if(d.manifest && d.manifest.tape_empty_rate !== undefined){
+      const m = d.manifest;
+      const ratePct = (m.tape_empty_rate * 100).toFixed(1) + '%';
+      const isCrit = m.tape_empty_rate > 0.99;
+      const noticeDiv = document.createElement('div');
+      noticeDiv.style.cssText = `padding:10px 14px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;background:${isCrit?'rgba(240,104,77,0.15)':'var(--panel2)'};border:1px solid ${isCrit?'rgba(240,104,77,0.4)':'var(--line)'}`;
+      noticeDiv.innerHTML = `<div style="font-size:12px;color:${isCrit?'var(--down)':'var(--tx)'};font-weight:600">${isCrit?'⚠️ התראה: שיעור עסקאות ריקות גבוה (>99%) — בדוק את תקינות ה-CLOB Trade Stream':'📊 סטטוס Tape (CLOB Trade Feed)'}</div><div class="mono" style="font-size:12px;color:${isCrit?'var(--down)':'var(--up)'}">ריק: ${ratePct} · עסקאות: ${(m.tape_entries_total||0).toLocaleString()} · יום: ${esc(m.day||'-')}</div>`;
+      wrap.appendChild(noticeDiv);
+    }
 
     const tbl = document.createElement('table');
     tbl.className = 'tbl';

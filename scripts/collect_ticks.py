@@ -121,10 +121,47 @@ def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
     return str(path)
 
 
+TAPE_ROLLING_WINDOW_SECS = 300.0  # 5-minute rolling window for tape silence alerting
+TAPE_ALERT_THRESHOLD = 0.99       # silence threshold (>99% empty trades)
+
+
 def update_manifest(out_dir: Path, stats: dict) -> None:
+    """Persist public collector stats to manifest.json (excluding internal keys)."""
+    data = {k: v for k, v in stats.items() if not k.startswith("_")}
+    data["ts"] = time.time()
     (out_dir / "manifest.json").write_text(
-        json.dumps({"ts": time.time(), **stats}, indent=2),
+        json.dumps(data, indent=2),
         encoding="utf-8",
+    )
+
+
+def record_tape_sample(stats: dict, now: float, has_trades: bool, num_entries: int) -> None:
+    """Record tape sample into stats, updating aggregate metrics and rolling 5m alert state."""
+    if has_trades:
+        stats["tape_non_empty_count"] = stats.get("tape_non_empty_count", 0) + 1
+        stats["tape_entries_total"] = stats.get("tape_entries_total", 0) + num_entries
+    else:
+        stats["tape_empty_count"] = stats.get("tape_empty_count", 0) + 1
+
+    total_tape_checks = stats.get("tape_empty_count", 0) + stats.get("tape_non_empty_count", 0)
+    if total_tape_checks > 0:
+        stats["tape_empty_rate"] = round(stats.get("tape_empty_count", 0) / total_tape_checks, 4)
+
+    # Rolling 5-minute window for alert
+    tape_window = stats.setdefault("_tape_window", [])
+    tape_window.append({"ts": now, "empty": not has_trades})
+    cutoff = now - TAPE_ROLLING_WINDOW_SECS
+    while tape_window and tape_window[0]["ts"] < cutoff:
+        tape_window.pop(0)
+
+    w_tot = len(tape_window)
+    w_empty = sum(1 for item in tape_window if item["empty"])
+    w_span = (tape_window[-1]["ts"] - tape_window[0]["ts"]) if w_tot >= 2 else 0.0
+    recent_rate = round(w_empty / w_tot, 4) if w_tot > 0 else 0.0
+    stats["tape_recent_empty_rate"] = recent_rate
+    # Alert requires rolling duration of at least 5m (with 10s tolerance for tick scheduling jitter)
+    stats["tape_alert"] = bool(
+        w_span >= (TAPE_ROLLING_WINDOW_SECS - 10.0) and recent_rate > TAPE_ALERT_THRESHOLD
     )
 
 
@@ -232,6 +269,9 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
         stats["lines"] = stats.get("lines", 0) + 1
         stats["series_seen"] = sorted(set(stats.get("series_seen", []) + [series_slug]))
         stats["day"] = day_key
+
+        record_tape_sample(stats, now, bool(tape_list), len(tape_list))
+
         try:
             write_snap(snap, out_dir, day_key, gzip)
         except Exception as e:
@@ -259,13 +299,25 @@ def main():
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
-    stats: dict = {"lines": 0, "series_seen": []}
+    stats: dict = {
+        "lines": 0,
+        "series_seen": [],
+        "tape_empty_count": 0,
+        "tape_non_empty_count": 0,
+        "tape_empty_rate": 0.0,
+        "tape_recent_empty_rate": 0.0,
+        "tape_alert": False,
+        "tape_entries_total": 0,
+    }
 
     print(f"collect_ticks: {len(SERIES)} series -> {out_dir}  gzip={args.gzip}")
     if args.once:
         closed, errs = poll_once(out_dir, args.gzip, stats)
         update_manifest(out_dir, stats)
-        print(f"once done · closed={len(closed)} errs={len(errs)}")
+        print(
+            f"once done · closed={len(closed)} errs={len(errs)} · "
+            f"tape_empty_rate={stats.get('tape_empty_rate', 0.0):.1%}"
+        )
         return
 
     day_boundaries = 0
@@ -283,6 +335,18 @@ def main():
                     break
             if closed:
                 print(f"closed {len(closed)} window(s)  errs={len(errs)}")
+
+            # Check for sustained tape silence alert (>99% empty over rolling 5m window)
+            if stats.get("tape_alert"):
+                now_ts = time.time()
+                last_alert = stats.get("_last_alert_log_ts", 0.0)
+                if now_ts - last_alert >= 60.0:
+                    stats["_last_alert_log_ts"] = now_ts
+                    print(
+                        f"⚠️ WARNING: Sustained 5m tape silence (recent_empty_rate = "
+                        f"{stats.get('tape_recent_empty_rate', 0.0):.1%}) — check CLOB trade stream"
+                    )
+
             if int(time.time()) % 10 == 0:
                 update_manifest(out_dir, stats)
             time.sleep(POLL_INTERVAL)
