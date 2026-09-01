@@ -40,3 +40,4 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
 - No `opencode.json` or `CLAUDE.md` exists — no hidden verification steps to run.
 - Sister repo at `C:\Users\Tiger\Agents\Projects\AI Trading\spread-hunter` is the original bot; keep the two isolated per `README.md:24`.
+- Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard. Any external TS export in Downloads is an unmaintained reference prototype.
