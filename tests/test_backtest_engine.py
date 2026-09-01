@@ -280,19 +280,17 @@ def test_simulate_exit_when_one_side_filled_and_drifts():
     assert w.pnl_cents < 0   # loss on naked DOWN
 
 def test_simulate_no_exit_when_reversal_seen():
-    # Sequence: oscillate first (down past exit_thr, then back within
-    # exit_reversal of 0.50), then drift up past threshold. The down
-    # round-trip is the "reversal" -- once it has happened, an up drift
-    # no longer triggers an exit (the market has shown it can move both
-    # directions within this window).
+    # Sequence: oscillate first (up excursion setting reversal_seen_down),
+    # then return to 0.50 where UP fills, then drift up past threshold.
+    # Because reversal was seen, it does not trigger an exit.
     snaps = [
-        snap(1.0, 0.50, up_ask=0.49, down_ask=0.49,
-             tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]),
-        snap(2.0, 0.40, up_ask=0.40, down_ask=0.60),    # -0.10 down excursion
-        snap(3.0, 0.50, up_ask=0.50, down_ask=0.50),    # back to 0.50
-        snap(4.0, 0.60, up_ask=0.60, down_ask=0.40),    # +0.10 up drift
+        snap(1.0, 0.50, up_ask=0.49, down_ask=0.49),
+        snap(2.0, 0.60, up_ask=0.60, down_ask=0.40),    # +0.10 up excursion -> sets reversal_seen_down
+        snap(3.0, 0.50, up_ask=0.49, down_ask=0.49,
+             tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]), # UP fills at 0.50
+        snap(4.0, 0.60, up_ask=0.60, down_ask=0.40),    # +0.10 up again past 0.09 threshold
     ]
-    w = _simulate_window(snaps, BacktestParams())
+    w = _simulate_window(snaps, BacktestParams(exit_thresh_by_slug={"btc-up-or-down-5m": 0.09}))
     assert w.exit_taken is False
 
 def test_simulate_exit_uses_btc_threshold_not_default():

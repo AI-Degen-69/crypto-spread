@@ -108,3 +108,12 @@ Based on analysis of the codebase, follow these practices:
 - Don't write vague commit messages
 - Don't skip tests for new features
 - Don't block the async event loop with heavy synchronous disk/index operations
+
+## Polymarket Protocol & Gas Rules
+
+- **Gasless Operations**: Core trading operations on Polymarket are sponsored (gasless) when routed through the Polymarket Relayer and smart wallet flow:
+  - Order creation and cancellation (CLOB EIP-712)
+  - Token and operator approvals (`setupTradingApprovals()`)
+  - Position merges (`mergePositions()` YES + NO `→` USDC)
+  - Note: Direct un-relayed EOA transactions incur native gas.
+- **Backtest Gas Parameter**: Default `merge_gas_usd` is 0.0 (reflecting sponsored relayer execution); non-zero values may be passed as an offline conservative buffer.

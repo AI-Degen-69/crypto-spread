@@ -111,7 +111,7 @@ def group_by_cid(snaps: Iterable[dict]) -> list[tuple[str, list[dict]]]:
 class BacktestParams:
     """All knobs the engine consumes. Frozen = deterministic replay."""
     offset: float = 0.020
-    queue_gate: float = 50.0          # 0 disables
+    queue_gate: float = 0.0           # 0 disables
     pair_cost_gate: float = 1.05
     exit_thresh_by_slug: dict = field(default_factory=lambda: {
         "btc-up-or-down-5m": 0.09, "sol-up-or-down-5m": 0.11,
@@ -119,18 +119,25 @@ class BacktestParams:
         "default_5m": 0.12, "default_15m": 0.13,
     })
     exit_reversal: float = 0.02
-    quote_shares: int = 120
+    quote_shares: int = 5
     fill_model: str = "tape"         # "tape" | "book" | "both"
     tick_size: float = 0.001
-    merge_gas_usd: float = 0.05
+    merge_gas_usd: float = 0.0
     taker_fee_rate: float = 0.07     # crypto fee coefficient
-    min_quote_shares: int = 50
+    min_quote_shares: int = 5
     max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
 
-    def exit_thresh(self, slug: str, duration: int) -> float:
-        """Return the exit threshold for a given market slug and window duration."""
+    def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
+        """Return the exit threshold for a given market slug, series, and window duration."""
+        if series and series in self.exit_thresh_by_slug:
+            return float(self.exit_thresh_by_slug[series])
         if slug in self.exit_thresh_by_slug:
             return float(self.exit_thresh_by_slug[slug])
+        for k, v in self.exit_thresh_by_slug.items():
+            if k.startswith("default_"):
+                continue
+            if (series and k in series) or (slug and k in slug):
+                return float(v)
         key = f"default_{'5m' if duration == 300 else '15m'}"
         return float(self.exit_thresh_by_slug.get(key, 0.12))
 
@@ -236,7 +243,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     fees_cents = 0.0
     err = ""
 
-    exit_thr = params.exit_thresh(slug, duration)
+    exit_thr = params.exit_thresh(slug, duration, series=series)
 
     # Base resting quotes for the window (0.50 - offset)
     resting_up = round(0.50 - params.offset, 3)

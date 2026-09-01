@@ -266,10 +266,8 @@ class MakerConfig:
     # verified. U6's verify_merge.py replaces it with the real figure from an
     # actual transaction, and U5 reads it to compute the minimum economic size.
     #
-    # Never set this to 0. Zero-cost gas makes every merge look profitable,
-    # including ones that lose money -- `strategy/merge.py` treats None as
-    # blocking for the same reason.
-    merge_gas_usd: float = 0.05
+    # Polymarket Relayer sponsors gasless mergePositions; default is 0.0.
+    merge_gas_usd: float = 0.0
 
     # OVER-PARITY MERGES (U5, KTD2b). 4.5% of measured pairs cost more than
     # 1.00, so merging them books an immediate loss. Holding is not obviously
