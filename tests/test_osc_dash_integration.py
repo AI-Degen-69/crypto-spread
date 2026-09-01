@@ -53,6 +53,8 @@ def test_root_returns_4tab_spa():
     assert "tab-backtest" in html
     assert "tab-summary" in html
     assert "tab-ticks" in html
+    assert "collectorBadge" in html
+    assert "tapeBadge" in html
     assert "switchTab" in html
     assert "loadManifest" in html
     assert "uploadFileStream" in html
@@ -141,6 +143,54 @@ def test_api_collector_poll_once(monkeypatch):
     data = response.json()
     assert data.get("ok") is True
     assert "Collected 10 series" in data.get("output")
+
+
+def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
+    """Verify collector status endpoint surfaces tape empty rate and alert flag."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    
+    # Without manifest
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    assert res.json()["tape_empty_rate"] is None
+    assert res.json()["tape_alert"] is False
+
+    # With normal tape empty rate (e.g. 98.8%)
+    mf = tmp_path / "manifest.json"
+    mf.write_text(
+        json.dumps({
+            "lines": 500,
+            "tape_empty_count": 494,
+            "tape_non_empty_count": 6,
+            "tape_empty_rate": 0.988,
+            "tape_entries_total": 12,
+        }),
+        encoding="utf-8",
+    )
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    d = res.json()
+    assert d["tape_empty_rate"] == 0.988
+    assert d["tape_entries_total"] == 12
+    assert d["tape_alert"] is False
+
+    # With high tape silence (>99%)
+    mf.write_text(
+        json.dumps({
+            "lines": 1000,
+            "tape_empty_count": 995,
+            "tape_non_empty_count": 5,
+            "tape_empty_rate": 0.995,
+            "tape_entries_total": 6,
+        }),
+        encoding="utf-8",
+    )
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    d = res.json()
+    assert d["tape_empty_rate"] == 0.995
+    assert d["tape_alert"] is True
+
 
 
 def test_api_backtest_simulation(tmp_path, monkeypatch):

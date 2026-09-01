@@ -28,7 +28,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `docs/` — `operations.md` (runbook for capture + replay), `research-spread-bot-conclusions.md` (findings).
-- `tests/` — 63 tests: `test_backtest_engine.py` (41), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (4), `test_rebuild_windows.py` (4), `test_osc_dash_integration.py` (9).
+- `tests/` — 68 tests: `test_backtest_engine.py` (41), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (5), `test_rebuild_windows.py` (4), `test_osc_dash_integration.py` (13).
 
 ## Data Model / Classification
 - Window classification in `scripts/measure_5m_oscillation.py:125` (`classify_window`): vs base 0.50, `max_up=max(mids)-0.50`, `max_down=0.50-min(mids)`. `oscillating` = both ≥0.02, `monotonic` = one ≥0.02, `flat` = neither. Thresholds at `OSC_THRESH_CENTS=[2.0,3.0]`.

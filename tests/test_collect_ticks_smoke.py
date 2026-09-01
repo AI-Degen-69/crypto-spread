@@ -69,3 +69,27 @@ def test_cli_help_runs():
     )
     assert r.returncode == 0
     assert "out" in r.stdout or "ticks" in r.stdout.lower()
+
+
+def test_manifest_tape_empty_rate_tracking(tmp_path: Path):
+    """Verify update_manifest writes tape stats including tape_empty_rate."""
+    import scripts.collect_ticks as ct
+
+    stats = {
+        "lines": 100,
+        "series_seen": ["btc-up-or-down-5m"],
+        "day": "2026-09-01",
+        "tape_empty_count": 98,
+        "tape_non_empty_count": 2,
+        "tape_empty_rate": 0.98,
+        "tape_entries_total": 5,
+    }
+    ct.update_manifest(tmp_path, stats)
+    mf = tmp_path / "manifest.json"
+    assert mf.exists()
+    data = json.loads(mf.read_text(encoding="utf-8"))
+    assert data["tape_empty_rate"] == 0.98
+    assert data["tape_empty_count"] == 98
+    assert data["tape_entries_total"] == 5
+    assert data["day"] == "2026-09-01"
+

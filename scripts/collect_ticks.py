@@ -232,6 +232,17 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
         stats["lines"] = stats.get("lines", 0) + 1
         stats["series_seen"] = sorted(set(stats.get("series_seen", []) + [series_slug]))
         stats["day"] = day_key
+
+        if tape_list:
+            stats["tape_non_empty_count"] = stats.get("tape_non_empty_count", 0) + 1
+            stats["tape_entries_total"] = stats.get("tape_entries_total", 0) + len(tape_list)
+        else:
+            stats["tape_empty_count"] = stats.get("tape_empty_count", 0) + 1
+
+        total_tape_checks = stats.get("tape_empty_count", 0) + stats.get("tape_non_empty_count", 0)
+        if total_tape_checks > 0:
+            stats["tape_empty_rate"] = round(stats.get("tape_empty_count", 0) / total_tape_checks, 4)
+
         try:
             write_snap(snap, out_dir, day_key, gzip)
         except Exception as e:
@@ -259,20 +270,32 @@ def main():
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
-    stats: dict = {"lines": 0, "series_seen": []}
+    stats: dict = {
+        "lines": 0,
+        "series_seen": [],
+        "tape_empty_count": 0,
+        "tape_non_empty_count": 0,
+        "tape_empty_rate": 0.0,
+        "tape_entries_total": 0,
+    }
 
     print(f"collect_ticks: {len(SERIES)} series -> {out_dir}  gzip={args.gzip}")
     if args.once:
         closed, errs = poll_once(out_dir, args.gzip, stats)
         update_manifest(out_dir, stats)
-        print(f"once done · closed={len(closed)} errs={len(errs)}")
+        print(
+            f"once done · closed={len(closed)} errs={len(errs)} · "
+            f"tape_empty_rate={stats.get('tape_empty_rate', 0.0):.1%}"
+        )
         return
 
     day_boundaries = 0
     current_day = now_day_key()
+    poll_count = 0
     try:
         while True:
             closed, errs = poll_once(out_dir, args.gzip, stats)
+            poll_count += 1
             new_day = now_day_key()
             if new_day != current_day:
                 day_boundaries += 1
@@ -283,6 +306,17 @@ def main():
                     break
             if closed:
                 print(f"closed {len(closed)} window(s)  errs={len(errs)}")
+
+            # Check for sustained tape silence (>99% empty after warmup)
+            if poll_count % 60 == 0:
+                empty_rate = stats.get("tape_empty_rate", 0.0)
+                tot = stats.get("tape_empty_count", 0) + stats.get("tape_non_empty_count", 0)
+                if empty_rate > 0.99 and tot >= 60:
+                    print(
+                        f"⚠️ WARNING: High tape_empty_rate = {empty_rate:.1%} "
+                        f"({stats.get('tape_empty_count')}/{tot} snaps empty) — check CLOB trade stream"
+                    )
+
             if int(time.time()) % 10 == 0:
                 update_manifest(out_dir, stats)
             time.sleep(POLL_INTERVAL)
