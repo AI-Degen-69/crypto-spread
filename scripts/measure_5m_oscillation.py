@@ -114,7 +114,13 @@ def fetch_book(token_id: str):
 windows = {}
 
 def classify_window(mids: list[float]):
-    """Classify window price excursion as oscillating, monotonic, or flat."""
+    """Classify window price excursion into 'no_data', 'flat', 'monotonic', or 'oscillating'.
+
+    - 'no_data': empty mids list.
+    - 'oscillating': both max_up and max_down >= 0.02 vs 0.50 base.
+    - 'monotonic': either max_up or max_down >= 0.02 (at least one side moves >= 0.02).
+    - 'flat': neither direction moves >= 0.02.
+    """
     if not mids:
         return "no_data"
     base = 0.50

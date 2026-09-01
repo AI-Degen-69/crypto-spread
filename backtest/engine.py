@@ -69,12 +69,13 @@ def load_ticks(source) -> Iterator[dict | None]:
 
 
 def _json_or_skip(line: str):
-    """Parse JSON line into dict, or return None if empty/malformed."""
+    """Parse JSON line into dict, or return None if empty/malformed/non-dict."""
     line = line.strip()
     if not line:
         return None
     try:
-        return json.loads(line)
+        val = json.loads(line)
+        return val if isinstance(val, dict) else None
     except Exception:
         return None
 
@@ -184,7 +185,13 @@ def _taker_fee(p: float, rate: float) -> float:
 
 
 def _classify(mids: list[float]) -> str:
-    """Classify window price path as oscillating, monotonic, or flat."""
+    """Classify window price path into one of: 'no_data', 'flat', 'monotonic', or 'oscillating'.
+
+    - 'no_data': empty mids list.
+    - 'oscillating': both max_up and max_down >= 0.02 vs 0.50 base.
+    - 'monotonic': either max_up or max_down >= 0.02 (at least one side moves >= 0.02).
+    - 'flat': neither direction moves >= 0.02.
+    """
     if not mids:
         return "no_data"
     max_up = max(mids) - 0.50

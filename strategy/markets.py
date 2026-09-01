@@ -60,7 +60,7 @@ def _sanitize_slug(slug: str) -> str:
 
 
 def _parse_market(market: dict) -> Optional[LiveMarket]:
-    """Parse raw market dictionary from Gamma API into a LiveMarket object."""
+    """Parse raw market dictionary from Gamma API into LiveMarket, or None if invalid."""
     token_ids_raw = market.get("clobTokenIds")
     if not token_ids_raw:
         return None
