@@ -245,7 +245,7 @@ def api_backtest(
     file: str = "",
     offset: float = 0.02,
     queue: float = 50.0,
-    pair_cost: float = 0.995,
+    pair_cost: float = 1.05,
     exit_default_5m: float = 0.12,
     exit_default_15m: float = 0.13,
     exit_btc_5m: float = 0.09,
@@ -942,7 +942,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label>עלות מקסימלית לזוג (Pair Cost Ceiling)</label>
-          <input type="number" step="0.005" id="btPairCost" value="0.995">
+          <input type="number" step="0.005" id="btPairCost" value="1.05">
         </div>
         <div class="form-group">
           <label>רף יציאה 5m כללי (Exit Default)</label>
@@ -1266,7 +1266,7 @@ async function runBacktest(fileOverride){
 
     const offset = getVal('btOffset', 0.02);
     const queue = getVal('btQueue', 50);
-    const pairCost = getVal('btPairCost', 0.995);
+    const pairCost = getVal('btPairCost', 1.05);
     const exit5m = getVal('btExit5m', 0.12);
     const exit15m = getVal('btExit15m', 0.13);
     const exitBtc = getVal('btExitBtc', 0.09);

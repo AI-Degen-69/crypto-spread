@@ -109,7 +109,7 @@ class BacktestParams:
     """All knobs the engine consumes. Frozen = deterministic replay."""
     offset: float = 0.020
     queue_gate: float = 50.0          # 0 disables
-    pair_cost_gate: float = 0.995
+    pair_cost_gate: float = 1.05
     exit_thresh_by_slug: dict = field(default_factory=lambda: {
         "btc-up-or-down-5m": 0.09, "sol-up-or-down-5m": 0.11,
         "btc-up-or-down-15m": 0.13, "sol-up-or-down-15m": 0.13,
@@ -213,6 +213,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     exit_thr = params.exit_thresh(slug, duration)
 
+    # Base resting quotes for the window (0.50 - offset)
+    resting_up = round(0.50 - params.offset, 3)
+    resting_down = round(0.50 - params.offset, 3)
+
     for s in window_snaps:
         ub = s.get("up_book") or {}
         db = s.get("down_book") or {}
@@ -234,9 +238,6 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             reversal_seen_up = True
         if max_up >= exit_thr and (mid - 0.50) < params.exit_reversal:
             reversal_seen_down = True
-
-        resting_up = round(mid - params.offset, 3)
-        resting_down = round((1.0 - mid) - params.offset, 3)
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
@@ -266,19 +267,19 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 exit_taken = True
                 exit_side = "down"
                 bb_dn = db.get("best_bid") or 0.0
-                pnl_cents -= (1.0 - bb_dn) * 100.0
+                pnl_cents += (bb_dn - resting_up) * 100.0
                 fees_cents += _taker_fee(1.0 - bb_dn, params.taker_fee_rate) * 100.0
             if (filled_down and not filled_up and max_down >= exit_thr
                     and not reversal_seen_up and not exit_taken):
                 exit_taken = True
                 exit_side = "up"
                 bb_up = ub.get("best_bid") or 0.0
-                pnl_cents -= bb_up * 100.0
-                fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+                pnl_cents += (bb_up - resting_down) * 100.0
+                fees_cents += _taker_fee(1.0 - bb_up, params.taker_fee_rate) * 100.0
             # Update reversal flags before skipping so mid drift isn't lost.
-            if max_up >= exit_thr:
-                reversal_seen_up = True
             if max_down >= exit_thr:
+                reversal_seen_up = True
+            if max_up >= exit_thr:
                 reversal_seen_down = True
             continue
 
@@ -314,15 +315,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             exit_taken = True
             exit_side = "down"
             bb_dn = db.get("best_bid") or 0.0
-            pnl_cents -= (1.0 - bb_dn) * 100.0
+            pnl_cents += (bb_dn - resting_up) * 100.0
             fees_cents += _taker_fee(1.0 - bb_dn, params.taker_fee_rate) * 100.0
         if (filled_down and not filled_up and max_down >= exit_thr
                 and not reversal_seen_up and not exit_taken):
             exit_taken = True
             exit_side = "up"
             bb_up = ub.get("best_bid") or 0.0
-            pnl_cents -= bb_up * 100.0
-            fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+            pnl_cents += (bb_up - resting_down) * 100.0
+            fees_cents += _taker_fee(1.0 - bb_up, params.taker_fee_rate) * 100.0
 
         # "reversal_seen_<side>" = the OTHER side has also hit >= exit_thr at some
         # point, so this drift isn't a one-sided surprise -- don't exit next tick.
@@ -334,7 +335,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # --- PAIR COMPLETION ---
         if filled_up and filled_down and not pair_captured:
             pair_captured = True
-            pnl_cents += 4.0
+            pnl_cents += (1.00 - (resting_up + resting_down)) * 100.0
             # merge_gas_usd is a per-transaction cost; amortize over the
             # actual shares in the pair so pnl_cents stays per-share.
             pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
@@ -351,11 +352,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             lb = (last.get("up_book") or {}).get("best_bid")
             db_bid = (last.get("down_book") or {}).get("best_bid")
             if filled_up and not filled_down and lb is not None:
-                pnl_cents -= lb * 100.0
+                pnl_cents += (lb - resting_up) * 100.0
                 fees_cents += _taker_fee(lb, params.taker_fee_rate) * 100.0
             elif filled_down and not filled_up and db_bid is not None:
-                # DOWN leg held: value is 1 - mid, approximated by down best_bid
-                pnl_cents -= db_bid * 100.0
+                pnl_cents += (db_bid - resting_down) * 100.0
                 fees_cents += _taker_fee(db_bid, params.taker_fee_rate) * 100.0
 
     return WindowResult(

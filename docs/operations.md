@@ -48,7 +48,7 @@ python -m scripts.backtest run/ticks/ticks_2026-08-29.jsonl --out run\backtest\b
 
 Dash:
 ```
-http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=0.995&fill_model=tape
+http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=1.05&fill_model=tape
 http://127.0.0.1:8802/api/ticks/manifest
 ```
 
