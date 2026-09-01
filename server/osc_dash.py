@@ -252,7 +252,7 @@ def api_backtest(
     exit_sol_5m: float = 0.11,
     exit_reversal: float = 0.02,
     size: int = 5,
-    fill_model: str = "tape",
+    fill_model: str = "cross",
     gas: float = 0.0,
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
@@ -998,6 +998,13 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono)}
 .tab-content{display:none}
 .tab-content.active{display:block}
+.toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.toggle-switch{position:relative;display:inline-block;width:34px;height:18px}
+.toggle-switch input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:var(--panel2);border:1px solid var(--line-hi);transition:.2s;border-radius:18px}
+.toggle-slider:before{position:absolute;content:"";height:12px;width:12px;left:2px;bottom:2px;background-color:var(--dim);transition:.2s;border-radius:50%}
+.toggle-switch input:checked + .toggle-slider{background-color:rgba(51,201,181,0.25);border-color:var(--up)}
+.toggle-switch input:checked + .toggle-slider:before{transform:translateX(16px);background-color:var(--up)}
 </style></head><body>
 <div class="hdr" id="app-hdr">
   <h1><span>◆</span> Crypto Spread <span>5m/15m Engine</span></h1>
@@ -1046,8 +1053,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <input type="number" step="5" id="btQueue" value="0">
         </div>
         <div class="form-group">
-          <label>עלות מקסימלית לזוג (Pair Cost Ceiling)</label>
-          <input type="number" step="0.005" id="btPairCost" value="1.05">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <label for="btPairCost">עלות מקסימלית לזוג (Pair Cost)</label>
+            <label class="toggle-wrap" title="הפעל או כבה סינון לפי עלות מקסימלית לזוג">
+              <span id="btPairCostToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--dim)">OFF</span>
+              <div class="toggle-switch">
+                <input type="checkbox" id="btPairCostEnabled" onchange="togglePairCostInput()">
+                <span class="toggle-slider"></span>
+              </div>
+            </label>
+          </div>
+          <input type="number" step="0.005" id="btPairCost" value="1.05" disabled style="opacity:0.45">
         </div>
         <div class="form-group">
           <label>רף יציאה 5m כללי (Exit Default)</label>
@@ -1068,7 +1084,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <div class="form-group">
           <label>מודל מילוי (Fill Model)</label>
           <select id="btFillModel">
-            <option value="tape" selected>Tape (שמרני - עסקאות בפועל)</option>
+            <option value="cross" selected>Cross (חצייה מלאה ≤47¢ — מובטח)</option>
+            <option value="tape">Tape (שמרני - עסקאות בפועל)</option>
             <option value="book">Book (אופטימי - חציית Ask)</option>
             <option value="both">Both</option>
           </select>
@@ -1411,6 +1428,20 @@ function runBacktestOnFile(filename){
   runBacktest(filename);
 }
 
+function togglePairCostInput(){
+  const enabled = $('btPairCostEnabled') ? $('btPairCostEnabled').checked : false;
+  const inp = $('btPairCost');
+  const lbl = $('btPairCostToggleLabel');
+  if(inp){
+    inp.disabled = !enabled;
+    inp.style.opacity = enabled ? '1' : '0.45';
+  }
+  if(lbl){
+    lbl.textContent = enabled ? 'ON' : 'OFF';
+    lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
+  }
+}
+
 async function runBacktest(fileOverride){
   setBacktestLoadingState(true);
   try {
@@ -1423,12 +1454,13 @@ async function runBacktest(fileOverride){
 
     const offset = getVal('btOffset', 0.02);
     const queue = getVal('btQueue', 50);
-    const pairCost = getVal('btPairCost', 1.05);
+    const pairCostEnabled = $('btPairCostEnabled') ? $('btPairCostEnabled').checked : false;
+    const pairCost = pairCostEnabled ? getVal('btPairCost', 1.05) : 0.0;
     const exit5m = getVal('btExit5m', 0.12);
     const exit15m = getVal('btExit15m', 0.13);
     const exitBtc = getVal('btExitBtc', 0.09);
     const exitSol = getVal('btExitSol', 0.11);
-    const fillModel = $('btFillModel') ? $('btFillModel').value : 'tape';
+    const fillModel = $('btFillModel') ? $('btFillModel').value : 'cross';
     const size = Math.max(5, Math.round(getVal('btSize', 5)));
     if ($('btSize')) $('btSize').value = size;
     const gas = getVal('btGas', 0.0);
@@ -1459,30 +1491,38 @@ async function runBacktest(fileOverride){
     $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
     $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
 
-    // Chart
-    const eq = data.equity_curve || [];
+    // Equity Curve Chart
+    const eqData = data.equity_curve || [];
+    const labels = eqData.map(e => e.window_idx);
+    const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
+
+    destroyChartInstance('chartEquity');
     const ctx = $('chartEquity').getContext('2d');
-    if(equityChartInstance) equityChartInstance.destroy();
     equityChartInstance = new Chart(ctx, {
       type: 'line',
       data: {
-        labels: eq.map(e=>e.window_idx),
+        labels: labels,
         datasets: [{
-          label: `PnL מצטבר (${size} מניות, $)`,
-          data: eq.map(e=>((e.cumulative_pnl_cents||0)/100).toFixed(2)),
-          borderColor: '#33c9b5',
-          backgroundColor: 'rgba(51,201,181,0.08)',
+          label: 'Cumulative PnL ($)',
+          data: pnlValues,
+          borderColor: (ov.total_pnl_cents||0)>=0 ? '#33c9b5' : '#f0684d',
+          backgroundColor: (ov.total_pnl_cents||0)>=0 ? 'rgba(51,201,181,0.1)' : 'rgba(240,104,77,0.1)',
           fill: true,
           tension: 0.1,
-          pointRadius: 0
+          pointRadius: labels.length > 100 ? 0 : 2,
         }]
       },
       options: {
         responsive: true,
         plugins: { legend: { display: false } },
         scales: {
-          x: { ticks: { color: '#8792a6' }, grid: { color: '#232a35' } },
+          x: {
+            title: { display: true, text: 'חלון', color: '#8792a6' },
+            ticks: { color: '#8792a6', maxTicksLimit: 12 },
+            grid: { color: '#232a35' }
+          },
           y: {
+            title: { display: true, text: 'רווח/הפסד מצטבר ($)', color: '#8792a6' },
             ticks: {
               color: '#8792a6',
               callback: function(v){ return '$' + Number(v).toFixed(2); }
@@ -1523,12 +1563,16 @@ async function runBacktest(fileOverride){
 function resetBtParams(){
   $('btOffset').value = "0.02";
   $('btQueue').value = "0";
+  if ($('btPairCostEnabled')) {
+    $('btPairCostEnabled').checked = false;
+    togglePairCostInput();
+  }
   $('btPairCost').value = "1.05";
   $('btExit5m').value = "0.12";
   $('btExit15m').value = "0.13";
   $('btExitBtc').value = "0.09";
   $('btExitSol').value = "0.11";
-  $('btFillModel').value = "tape";
+  $('btFillModel').value = "cross";
   $('btSize').value = "5";
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";

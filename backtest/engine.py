@@ -120,7 +120,7 @@ class BacktestParams:
     })
     exit_reversal: float = 0.02
     quote_shares: int = 5
-    fill_model: str = "tape"         # "tape" | "book" | "both"
+    fill_model: str = "tape"         # "tape" | "book" | "both" | "cross"
     tick_size: float = 0.001
     merge_gas_usd: float = 0.0
     taker_fee_rate: float = 0.07     # crypto fee coefficient
@@ -281,13 +281,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                        if float(p) >= resting_down)
             queue_ok = (q_up <= params.queue_gate) and (q_dn <= params.queue_gate)
 
-        # Touch pair gate
+        # Touch pair gate (0 or <= 0 disables per Maker strategy)
         up_ask = ub.get("best_ask")
         dn_ask = db.get("best_ask")
-        touch = None
-        if up_ask is not None and dn_ask is not None:
-            touch = up_ask + dn_ask
-        pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
+        if params.pair_cost_gate <= 0:
+            pair_cost_ok = True
+        else:
+            touch = None
+            if up_ask is not None and dn_ask is not None:
+                touch = up_ask + dn_ask
+            pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
 
         if not queue_ok or not pair_cost_ok:
             # An already-filled position must still be eligible to exit even
@@ -315,8 +318,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 reversal_seen_down = True
             continue
 
-        # --- FILL DETECTION (Plan fill_model: tape conservative default) ---
-        # Tape-confirmed: a real trade printed at our resting price.
+        # --- FILL DETECTION (Plan fill_model: tape conservative default, cross for strict through-price fills) ---
+        # Tape-confirmed: a real trade printed at our resting price (or strictly through for "cross").
         # Book-only: best_ask <= resting_price means book crossed us.
         # Hoist token lookups and guard empty identifiers (prevents "" == "" match).
         up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
@@ -326,16 +329,25 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             if not tasset:
                 continue
             tprice = float(trade.get("price", 0))
-            if up_token and tasset == up_token and abs(tprice - resting_up) <= params.tick_size:
-                if params.fill_model in ("tape", "both"):
+            if up_token and tasset == up_token:
+                if params.fill_model in ("tape", "both") and abs(tprice - resting_up) <= params.tick_size:
                     filled_up = True
-            if dn_token and tasset == dn_token and abs(tprice - resting_down) <= params.tick_size:
-                if params.fill_model in ("tape", "both"):
+                elif params.fill_model == "cross" and tprice <= (resting_up - params.tick_size + 1e-6):
+                    filled_up = True
+            if dn_token and tasset == dn_token:
+                if params.fill_model in ("tape", "both") and abs(tprice - resting_down) <= params.tick_size:
+                    filled_down = True
+                elif params.fill_model == "cross" and tprice <= (resting_down - params.tick_size + 1e-6):
                     filled_down = True
         if params.fill_model in ("book", "both"):
             if up_ask is not None and up_ask <= resting_up:
                 filled_up = True
             if dn_ask is not None and dn_ask <= resting_down:
+                filled_down = True
+        elif params.fill_model == "cross":
+            if up_ask is not None and up_ask <= (resting_up - params.tick_size + 1e-6):
+                filled_up = True
+            if dn_ask is not None and dn_ask <= (resting_down - params.tick_size + 1e-6):
                 filled_down = True
 
         # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
