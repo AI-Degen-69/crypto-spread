@@ -556,6 +556,7 @@ def api_collector_status():
         today_ticks = _count_lines_fast(today_file)
 
     tape_empty_rate = None
+    tape_recent_empty_rate = None
     tape_entries_total = 0
     tape_alert = False
     mf = TICKS_DIR / "manifest.json"
@@ -563,9 +564,14 @@ def api_collector_status():
         try:
             mdata = json.loads(mf.read_text(encoding="utf-8"))
             tape_empty_rate = mdata.get("tape_empty_rate")
+            tape_recent_empty_rate = mdata.get("tape_recent_empty_rate")
             tape_entries_total = mdata.get("tape_entries_total", 0)
-            if tape_empty_rate is not None and tape_empty_rate > 0.99:
-                tape_alert = True
+            if "tape_alert" in mdata:
+                tape_alert = bool(mdata.get("tape_alert"))
+            elif tape_empty_rate is not None and tape_empty_rate > 0.99:
+                total_checks = mdata.get("tape_empty_count", 0) + mdata.get("tape_non_empty_count", 0)
+                if total_checks >= 300:
+                    tape_alert = True
         except Exception:
             pass
 
@@ -574,6 +580,7 @@ def api_collector_status():
         "pid": _collector_proc.pid if running else None,
         "total_ticks_collected": today_ticks,
         "tape_empty_rate": tape_empty_rate,
+        "tape_recent_empty_rate": tape_recent_empty_rate,
         "tape_entries_total": tape_entries_total,
         "tape_alert": tape_alert,
     }

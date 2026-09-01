@@ -72,7 +72,7 @@ def test_cli_help_runs():
 
 
 def test_manifest_tape_empty_rate_tracking(tmp_path: Path):
-    """Verify update_manifest writes tape stats including tape_empty_rate."""
+    """Verify update_manifest writes public tape stats and strips internal keys."""
     import scripts.collect_ticks as ct
 
     stats = {
@@ -82,14 +82,77 @@ def test_manifest_tape_empty_rate_tracking(tmp_path: Path):
         "tape_empty_count": 98,
         "tape_non_empty_count": 2,
         "tape_empty_rate": 0.98,
+        "tape_recent_empty_rate": 0.98,
+        "tape_alert": False,
         "tape_entries_total": 5,
+        "_tape_window": [{"ts": 1000.0, "empty": True}],
     }
     ct.update_manifest(tmp_path, stats)
     mf = tmp_path / "manifest.json"
     assert mf.exists()
     data = json.loads(mf.read_text(encoding="utf-8"))
     assert data["tape_empty_rate"] == 0.98
+    assert data["tape_recent_empty_rate"] == 0.98
+    assert data["tape_alert"] is False
     assert data["tape_empty_count"] == 98
     assert data["tape_entries_total"] == 5
     assert data["day"] == "2026-09-01"
+    assert "_tape_window" not in data
+
+
+def test_record_tape_sample_startup_silence():
+    """Startup silence under 5 minutes must not trigger tape_alert."""
+    import scripts.collect_ticks as ct
+
+    stats = {}
+    base_ts = 1000.0
+    # 60 polls (1s apart) all empty
+    for i in range(60):
+        ct.record_tape_sample(stats, base_ts + i, has_trades=False, num_entries=0)
+
+    assert stats["tape_empty_count"] == 60
+    assert stats["tape_empty_rate"] == 1.0
+    assert stats["tape_recent_empty_rate"] == 1.0
+    # Alert must be False because duration is only 59s (< 290s)
+    assert stats["tape_alert"] is False
+
+
+def test_record_tape_sample_sustained_silence_alerts():
+    """Sustained silence >= 5 minutes must trigger tape_alert."""
+    import scripts.collect_ticks as ct
+
+    stats = {}
+    base_ts = 1000.0
+    # 300 polls (1s apart) all empty
+    for i in range(301):
+        ct.record_tape_sample(stats, base_ts + i, has_trades=False, num_entries=0)
+
+    assert stats["tape_empty_rate"] == 1.0
+    assert stats["tape_recent_empty_rate"] == 1.0
+    assert stats["tape_alert"] is True
+
+
+def test_record_tape_sample_healthy_then_silent_transition():
+    """A healthy collector with trades that later becomes silent triggers alert after 5m."""
+    import scripts.collect_ticks as ct
+
+    stats = {}
+    base_ts = 1000.0
+    # 300s of healthy activity (50% non-empty)
+    for i in range(300):
+        has_trades = (i % 2 == 0)
+        ct.record_tape_sample(stats, base_ts + i, has_trades=has_trades, num_entries=1 if has_trades else 0)
+
+    assert stats["tape_alert"] is False
+    assert stats["tape_empty_rate"] == 0.5
+
+    # Next 300s has 100% empty trades
+    for i in range(300, 601):
+        ct.record_tape_sample(stats, base_ts + i, has_trades=False, num_entries=0)
+
+    # Rolling window only sees the last 300s (all empty) -> alert triggers
+    assert stats["tape_recent_empty_rate"] == 1.0
+    assert stats["tape_alert"] is True
+    # Lifetime rate is still only ~75%, but time-bounded rolling detector caught the outage
+    assert stats["tape_empty_rate"] < 0.90
 
