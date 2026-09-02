@@ -500,6 +500,16 @@ def test_api_live_cockpit_endpoints(monkeypatch):
 
         # Stop before resetting
         client.post("/api/live/control", json={"action": "stop"})
+
+        # 6. POST control demo_data
+        res_demo = client.post("/api/live/control", json={"action": "demo_data"})
+        assert res_demo.status_code == 200
+        d_demo = res_demo.json()
+        assert d_demo["total_trades"] == 7
+        assert d_demo["pairs_merged"] == 6
+        assert len(d_demo["trades"]) == 7
+        assert len(d_demo["timeline"]) == 120
+
         res_reset = client.post("/api/live/control", json={"action": "reset_pnl"})
         assert res_reset.status_code == 200
         assert res_reset.json()["total_trades"] == 0
@@ -514,6 +524,98 @@ def test_api_live_cockpit_endpoints(monkeypatch):
             "starting_balance": 1000.0,
         })
         client.post("/api/live/control", json={"action": "reset_pnl"})
+
+
+def test_osc_dash_live_execution_endpoints(monkeypatch):
+    """Verify live order execution endpoints: /orders, /cancel_all, /cancel_order, /test_order."""
+    from unittest.mock import MagicMock
+    from strategy.live_trader import get_live_trader_engine
+
+    engine = get_live_trader_engine()
+    fake_client = MagicMock()
+    fake_client.create_and_post_order.return_value = {"orderID": "ord_mock_123", "status": "delayed"}
+    fake_client.cancel.return_value = {"success": True}
+    fake_client.cancel_all.return_value = {"success": True}
+    fake_client.get_orders.return_value = [
+        {"id": "ord_mock_123", "asset_id": "tok_test_up", "side": "BUY", "price": "0.05", "original_size": "1"}
+    ]
+    monkeypatch.setattr(engine, "_clob_client", fake_client)
+    saved_markets = {
+        slug: (
+            m.order_id_up,
+            m.order_id_down,
+            m.next_order_id_up,
+            m.next_order_id_down,
+            m.order_status_up,
+            m.order_status_down,
+            m.next_quoted,
+            m.status,
+            m.last_action,
+        )
+        for slug, m in engine.markets.items()
+    }
+    saved_halted = engine.quoting_halted
+
+    try:
+        # 1. GET /api/live/orders
+        res_orders = client.get("/api/live/orders")
+        assert res_orders.status_code == 200
+        orders_data = res_orders.json()
+        assert "orders" in orders_data
+        assert len(orders_data["orders"]) >= 1
+
+        # 2. POST /api/live/test_order
+        res_test_ord = client.post("/api/live/test_order", json={
+            "token_id": "tok_test_up",
+            "price": 0.05,
+            "size": 1.0,
+            "side": "BUY",
+        })
+        assert res_test_ord.status_code == 200
+        ord_data = res_test_ord.json()
+        assert ord_data["order_id"] == "ord_mock_123"
+
+        # 2b. POST /api/live/test_order rejects invalid payloads before touching the CLOB
+        fake_client.create_and_post_order.reset_mock()
+        for payload in (
+            {"token_id": "tok_test_up", "price": "invalid"},
+            {"token_id": "tok_test_up", "size": "invalid"},
+            {"token_id": "tok_test_up", "price": 0.0},
+            {"token_id": "tok_test_up", "price": 1.0},
+            {"token_id": "tok_test_up", "size": 11.0},
+            {"token_id": "tok_test_up", "side": "INVALID"},
+            {"token_id": "", "price": 0.05},
+        ):
+            res_reject = client.post("/api/live/test_order", json=payload)
+            assert res_reject.status_code == 400, payload
+        fake_client.create_and_post_order.assert_not_called()
+
+        # 3. POST /api/live/cancel_order
+        res_cancel_single = client.post("/api/live/cancel_order", json={"order_id": "ord_mock_123"})
+        assert res_cancel_single.status_code == 200
+        assert res_cancel_single.json()["ok"] is True
+
+        # 4. POST /api/live/cancel_all
+        res_cancel_all = client.post("/api/live/cancel_all")
+        assert res_cancel_all.status_code == 200
+        assert res_cancel_all.json()["ok"] is True
+    finally:
+        engine.quoting_halted = saved_halted
+        for slug, saved in saved_markets.items():
+            m = engine.markets.get(slug)
+            if m:
+                (
+                    m.order_id_up,
+                    m.order_id_down,
+                    m.next_order_id_up,
+                    m.next_order_id_down,
+                    m.order_status_up,
+                    m.order_status_down,
+                    m.next_quoted,
+                    m.status,
+                    m.last_action,
+                ) = saved
+
 
 
 

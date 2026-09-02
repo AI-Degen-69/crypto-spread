@@ -1,6 +1,6 @@
 # AGENTS.md — crypto-spread
 
-Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP. Isolated from `spread-hunter` (original rewards bot).
+Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP.
 
 ## Stack
 - Python, `fastapi` + `uvicorn` + `requests` only (`requirements.txt:3`)
@@ -10,7 +10,7 @@ Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP. Isolated fro
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 95 tests
+pip install pytest                          # dev: 116 tests
 python -m pytest -q                         # all tests
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test
@@ -28,11 +28,11 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `scripts/rebuild_windows.py` — reconstructs `run/oscillation_windows.jsonl` and `run/oscillation_summary.json` from `run/ticks/*.jsonl` full-depth data.
 - `scripts/measure_5m_oscillation.py` — legacy top-of-book collector (best_bid/ask/mid only). Kept for reference; `collect_ticks` is the source of truth for replay.
 - `backtest/` — offline replay engine. `engine.py:replay()` is pure (no venue calls), `index.py` builds per-file cid sidecars for slider-speed sweeps.
-- `server/osc_dash.py` — FastAPI dashboard on `:8802`. Routes: `/` + `/oscillation`, `/summary` + `/analysis`, `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/ticks/manifest`, `/api/ticks/verify`, `/api/backtest` (query: offset/queue/pair_cost/exit_* /fill_model).
-- `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
+- `server/osc_dash.py` — FastAPI dashboard on `:8802`. Routes: `/` + `/oscillation`, `/summary` + `/analysis`, `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/ticks/manifest`, `/api/ticks/verify`, `/api/backtest` (query: offset/queue/pair_cost/exit_* /fill_model), plus live execution & cockpit routes (`/api/live/account`, `/api/live/state`, `/api/live/control`, `/api/live/orders`, `/api/live/cancel_all`, `/api/live/cancel_order`, `/api/live/test_order`).
+- `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `live_trader.py` (order flow & execution engine), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `docs/` — `operations.md` (runbook for capture + replay), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report).
-- `tests/` — 95 tests: `test_backtest_engine.py` (41), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (8), `test_rebuild_windows.py` (4), `test_verify_tick_data.py` (14), `test_osc_dash_integration.py` (14), `test_sweep_backtest.py` (8), `test_docstrings.py` (1).
+- `tests/` — 116 tests: `test_backtest_engine.py` (48), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (8), `test_rebuild_windows.py` (4), `test_verify_tick_data.py` (14), `test_osc_dash_integration.py` (14), `test_sweep_backtest.py` (8), `test_docstrings.py` (1), `test_live_trader.py` (14).
 
 ## Data Model / Classification
 - Window classification in `scripts/measure_5m_oscillation.py:125` (`classify_window`): vs base 0.50, `max_up=max(mids)-0.50`, `max_down=0.50-min(mids)`. `oscillating` = both ≥0.02, `monotonic` = one ≥0.02, `flat` = neither. Thresholds at `OSC_THRESH_CENTS=[2.0,3.0]`.
@@ -45,5 +45,4 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - Collector uses a pooled `requests.Session` with `(3.05, 5.0)` timeouts (connect, read) and `max_retries=0` — failed markets are skipped for that poll, not retried.
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
 - No `opencode.json` or `CLAUDE.md` exists — no hidden verification steps to run.
-- Sister repo at `C:\Users\Tiger\Agents\Projects\AI Trading\spread-hunter` is the original bot; keep the two isolated per `README.md:24`.
-- Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard. Any external TS export in Downloads is an unmaintained reference prototype.
+- Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard.

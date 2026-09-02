@@ -44,6 +44,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
+MAX_TEST_ORDER_SHARES = 10.0
 
 
 def _verify_safe_origin(request: Request) -> None:
@@ -741,6 +742,68 @@ def api_live_account(address: Optional[str] = None):
     return fetch_polymarket_account_value(addr)
 
 
+@app.post("/api/live/cancel_all")
+def api_live_cancel_all(request: Request):
+    """Emergency panic button: cancel all active orders on CLOB and engine."""
+    _verify_safe_origin(request)
+    engine = get_live_trader_engine()
+    res = engine.cancel_all_orders()
+    return res
+
+
+@app.post("/api/live/cancel_order")
+async def api_live_cancel_order(request: Request):
+    """Cancel a single active order by order_id."""
+    _verify_safe_origin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    order_id = str(body.get("order_id") or "").strip()
+    if not order_id:
+        return JSONResponse(status_code=400, content={"error": "order_id required"})
+    engine = get_live_trader_engine()
+    ok = engine.cancel_live_order(order_id)
+    return {"ok": ok, "order_id": order_id}
+
+
+@app.get("/api/live/orders")
+def api_live_orders():
+    """List all open active orders from CLOB and engine tracking."""
+    engine = get_live_trader_engine()
+    return {"orders": engine.get_open_orders_list()}
+
+
+@app.post("/api/live/test_order")
+async def api_live_test_order(request: Request):
+    """Safe test endpoint to place 1 small resting order and return its Polymarket Order ID for live verification."""
+    _verify_safe_origin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    token_id = str(body.get("token_id") or "").strip()
+    try:
+        price = float(body.get("price", 0.05))
+        size = float(body.get("size", 1.0))
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "price and size must be numeric"})
+    side = str(body.get("side") or "BUY").upper()
+    if not token_id:
+        return JSONResponse(status_code=400, content={"error": "token_id required"})
+    if not (0.0 < price < 1.0):
+        return JSONResponse(status_code=400, content={"error": "price must be between 0 and 1"})
+    if not (0.0 < size <= MAX_TEST_ORDER_SHARES):
+        return JSONResponse(status_code=400, content={"error": "size out of allowed range"})
+    if side not in ("BUY", "SELL"):
+        return JSONResponse(status_code=400, content={"error": "side must be BUY or SELL"})
+    engine = get_live_trader_engine()
+    res = engine.place_live_quote(token_id=token_id, price=price, size=size, side=side)
+    if not res:
+        return JSONResponse(status_code=500, content={"error": "Failed placing test order on CLOB"})
+    return res
+
+
 _upload_locks_mutex = threading.Lock()
 _upload_target_locks: dict[str, threading.Lock] = {}
 
@@ -1321,6 +1384,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <button class="btn" style="font-size:13px;padding:7px 14px" onclick="restartCockpitBot()">🔄 RESTART</button>
           <button class="btn" style="font-size:13px;padding:7px 14px;background:rgba(243,186,47,0.15);border-color:var(--gold);color:var(--gold);font-weight:700" onclick="loadCockpitDemoData()">🎲 DEMO DATA</button>
           <button class="btn btn-danger" style="font-size:13px;padding:7px 14px" onclick="resetCockpitPnL()">🗑 RESET P&L</button>
+          <button id="btnPanicCancel" class="btn btn-danger" style="font-size:13px;padding:7px 14px;font-weight:700;background:rgba(240,104,77,0.3);border-color:var(--down)" onclick="panicCancelAllOrders()">🚨 PANIC CANCEL ALL</button>
         </div>
       </div>
 
@@ -1347,7 +1411,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
-          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" oninput="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
+          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" onchange="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
         </div>
         <div class="form-group">
           <label id="lblCockpitStartBal">Starting Portfolio Balance ($)</label>
@@ -1418,6 +1482,33 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(5, 1fr);gap:10px"></div>
     </div>
 
+    <!-- Live Open Orders & Advance Pre-Quotes Table -->
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <h3 style="margin:0">📌 Live Active Orders & Advance Pre-Quotes (<span id="cockpitOrdersCount">0</span> active)</h3>
+        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="fetchCockpitState()">🔄 Refresh Orders</button>
+      </div>
+      <div style="max-height:220px;overflow-y:auto">
+        <table class="tbl" id="cockpitOrdersTable">
+          <thead>
+            <tr>
+              <th>Order ID</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Shares</th>
+              <th>Status</th>
+              <th>Source</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="cockpitOrdersBody">
+            <tr><td colspan="8" style="text-align:center;color:var(--dim);padding:16px">No resting orders currently active.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Live Trade History Log -->
     <div class="card" style="margin-top:12px">
       <h3 style="margin:0 0 8px">📋 Live Execution Trade Log</h3>
@@ -1447,7 +1538,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 
 <script>
 const $=s=>document.getElementById(s);
-const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const pct=(a,b)=> b?Math.round(a/b*100):0;
 const hms=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`;};
 const fmtUsd=(cents, showPlus=true)=>{
@@ -2362,6 +2453,40 @@ async function restartCockpitBot() {
   }
 }
 
+async function panicCancelAllOrders() {
+  if (!confirm('Are you sure you want to CANCEL ALL ACTIVE ORDERS on Polymarket CLOB immediately?')) return;
+  try {
+    const res = await fetch('/api/live/cancel_all', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data && data.ok) {
+      alert('Panic Cancel completed. All active orders cleared.');
+    } else {
+      alert('Warning: Panic Cancel failed or was rejected. Orders may still be open!');
+    }
+    await fetchCockpitState();
+  } catch (e) {
+    alert('Error during panic cancel: ' + e);
+  }
+}
+
+async function cancelSingleOrder(orderId) {
+  if (!orderId) return;
+  try {
+    const res = await fetch('/api/live/cancel_order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data || !data.ok) {
+      alert('Warning: Order cancellation failed or was rejected. Order may still be open!');
+    }
+    await fetchCockpitState();
+  } catch (e) {
+    alert('Error cancelling order: ' + e);
+  }
+}
+
 async function resetCockpitPnL() {
   if (!confirm('Are you sure you want to reset session P&L and trade history?')) return;
   try {
@@ -2631,7 +2756,49 @@ function renderCockpitUI(st) {
     gridEl.innerHTML = gridHtml;
   }
 
-  // 4. Render Execution Trade Log Table
+  // 4. Render Live Open Orders & Pre-Quotes Table
+  const ordersBodyEl = $('cockpitOrdersBody');
+  const ordersCountEl = $('cockpitOrdersCount');
+  const openOrders = st.open_orders || [];
+  if (ordersCountEl) ordersCountEl.textContent = String(openOrders.length);
+  if (ordersBodyEl) {
+    if (openOrders.length === 0) {
+      ordersBodyEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:16px">No resting orders currently active.</td></tr>';
+    } else {
+      let ordHtml = '';
+      for (const o of openOrders) {
+        const oId = o.order_id || '-';
+        const mktLabel = o.market || o.token_id || '-';
+        const sideStr = o.side || 'BUY';
+        const priceStr = o.price != null ? `$${Number(o.price).toFixed(2)}` : '-';
+        const sizeStr = o.size != null ? String(o.size) : '-';
+        const statusStr = o.status || 'OPEN';
+        const sourceStr = o.source || 'CLOB';
+        const canCancel = oId && oId !== '-';
+
+        ordHtml += `
+          <tr>
+            <td class="mono" style="font-size:10.5px;color:var(--gold);max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${esc(oId)}">${esc(oId.length > 16 ? oId.slice(0, 16) + '...' : oId)}</td>
+            <td style="font-weight:700">${esc(mktLabel)}</td>
+            <td class="mono" style="color:${sideStr.includes('UP') || sideStr === 'BUY' ? 'var(--up)' : 'var(--down)'}">${esc(sideStr)}</td>
+            <td class="mono">${priceStr}</td>
+            <td class="mono">${sizeStr}</td>
+            <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
+            <td style="font-size:10.5px;color:var(--dim)">${esc(sourceStr)}</td>
+            <td>
+              ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
+            </td>
+          </tr>
+        `;
+      }
+      ordersBodyEl.innerHTML = ordHtml;
+      ordersBodyEl.querySelectorAll('.cancel-order-btn').forEach(btn => {
+        btn.addEventListener('click', () => cancelSingleOrder(btn.dataset.orderId));
+      });
+    }
+  }
+
+  // 5. Render Execution Trade Log Table
   const bodyEl = $('cockpitTradesBody');
   if (bodyEl && st.trades) {
     if (st.trades.length === 0) {
@@ -2674,7 +2841,7 @@ function renderCockpitUI(st) {
     }
   }
 
-  // 5. Render Chart
+  // 6. Render Chart
   renderCockpitChart(st.timeline, activeCockpitChartMode, st.starting_balance);
 }
 
@@ -2974,8 +3141,10 @@ function onCockpitChartMouseMove(evt) {
   if (!wrap || !tooltip) return;
 
   const rect = wrap.getBoundingClientRect();
-  const mouseX = evt.clientX - rect.left;
-  const mouseY = evt.clientY - rect.top;
+  const scaleX = rect.width ? ctx.w / rect.width : 1;
+  const clientX = evt.clientX - rect.left;
+  const clientY = evt.clientY - rect.top;
+  const mouseX = clientX * scaleX;
 
   // Clamp within plot bounds
   if (mouseX < ctx.padL - 10 || mouseX > ctx.w - ctx.padR + 10) {
@@ -3056,11 +3225,11 @@ function onCockpitChartMouseMove(evt) {
   tooltip.style.display = 'block';
 
   // Position tooltip relative to chart bounds
-  let tipX = mouseX + 15;
+  let tipX = clientX + 15;
   if (tipX + 190 > rect.width) {
-    tipX = mouseX - 200;
+    tipX = clientX - 200;
   }
-  let tipY = Math.max(8, mouseY - 40);
+  let tipY = Math.max(8, clientY - 40);
   if (tipY + 130 > rect.height) {
     tipY = rect.height - 135;
   }

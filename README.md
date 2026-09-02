@@ -2,7 +2,7 @@
 
 **מטרה:** לתפוס ספרדים ב-`BTC/ETH/BNB/SOL/XRP 5m+15m` עם `SPREAD 2 → resting_pair 0.96` (4¢ רווח לזוג + merge), לא פרסי venue.
 
-**מה הועבר מ-spread-hunter:**
+**רכיבי ליבה קיימים:**
 - `scripts/measure_5m_oscillation.py` — מודד כל שנייה 10 סדרות, כותב `run/oscillation_*.jsonl`
 - `server/osc_dash.py` — :8802 Live + /summary עם גרפים
 - `strategy/markets.py` — fetch live 5m/15m via `gamma-api /events?series_slug`
@@ -19,13 +19,8 @@ python -m scripts.measure_5m_oscillation   # אוסף
 python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # דשבורד
 ```
 
-**הבא:** לבנות בוט עצמאי — config חדש (SPREAD 2 כיעד), quotes `mid-2¢` בשני הצדדים, queue gate 50, pair_cost <0.995, ויציאה מונוטונית לפי הרף פר נכס. הפרויקט מופרד לחלוטין מ-spread-hunter.
-
-**תיקיות מופרדות:**
-- `C:\Users\Tiger\Agents\Projects\AI Trading\spread-hunter` — הבוט המקורי (rewards)
-- `C:\Users\Tiger\Agents\Projects\AI Trading\crypto-spread` — כאן (ספרד 5m)
+**הבא (היסטורי):** לבנות בוט עצמאי — config חדש (SPREAD 2 כיעד), quotes `mid-2¢` בשני הצדדים, queue gate 50, pair_cost <0.995, ויציאה מונוטונית לפי הרף פר נכס. (סטטוס נוכחי: מנוע מסחר חי/סימולציה פעיל ב-`strategy/live_trader.py` עם לוח בקרה חי ב-`server/osc_dash.py`).
 
 ## Dashboard Architecture
 
-- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 8802) is the sole canonical dashboard.
-- **External TS Reference**: Any external TypeScript/Express prototype (e.g. `C:/Users/Tiger/Downloads/crypto-spread/server.ts`) is an archived AI-Studio reference. No `server.ts` or Node.js runtime is used or tracked in this repository.
+- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 8802) is the sole canonical dashboard. No Node.js runtime is used or tracked in this repository.

@@ -1,8 +1,9 @@
-# Tick Capture + Backtest — Operations
+# Tick Capture + Backtest — Operations (Replay & Simulation)
 
 > Companion to `docs/research-spread-bot-conclusions.md` (data model, measured
 > findings). This file is the **operator runbook** for the replay-grade
-> capture + offline sweep system added on top of the original `osc_dash`.
+> capture + offline sweep system added on top of the original `osc_dash`. Live trading
+> execution is managed by `strategy/live_trader.py` and the canonical dashboard.
 
 ## What it is
 
@@ -12,11 +13,11 @@
 | `backtest/engine.py` | Pure function `replay(snaps, params) -> results`. Consumes tick jsonl, simulates SPREAD-2 (resting bid at `mid-offset`, queue gate, monotonic exit, pair capture). |
 | `backtest/index.py` | Per-file `<file>.jsonl.idx` sidecar (cid -> byte offset, ts). First backtest on a file scans once; subsequent calls jump to cid spans. |
 | `scripts/backtest.py` | Thin CLI: `python -m scripts.backtest run/ticks/ --offset 0.02 --queue 50 --exit btc-up-or-down-5m=0.09` |
-| `server/osc_dash.py` | Adds `GET /api/backtest` and `GET /api/ticks/manifest` to the existing dashboard. No UI changes yet — sliders are the next iteration (T4 partial). |
+| `server/osc_dash.py` | FastAPI dashboard (`:8802`) — sole canonical dashboard for backtest analytics, replay, and live trader cockpit. |
 
 ### Dashboard Runtime & Stack
 
-`server/osc_dash.py` (FastAPI on `:8802`) is the sole canonical dashboard for this repository. Any external TypeScript/Express prototype (e.g. `Downloads/crypto-spread/server.ts`) is an archived reference and not part of the active project.
+`server/osc_dash.py` (FastAPI on `:8802`) is the sole canonical dashboard for this repository.
 
 ## Run a day of capture
 
@@ -118,10 +119,11 @@ replay determinism (same input + params = identical pnl hash), gzip
 roundtrip, per-file cid sidecars (5 tests), CLI smoke (4 tests).
 Total: 44 (engine) + 5 (index) + 4 (smoke) = 49.
 
-## What this lab does not do
-
-- **No order execution.** Pure capture + simulation. The actual on-chain
-  spread capture bot is a separate project.
+## Scope of Replay & Backtesting Subsystem
+ 
+- **Backtesting is pure capture + simulation.** The replay engine performs
+  pure offline replay without live venue calls. Live order execution is handled
+  independently by `strategy/live_trader.py`.
 - **No live websocket.** 1s polling matches the documented `requote_interval`
   in `strategy/config.py:637`; the documented `post_venue_accept_ms=81`
   means tick-by-tick price moves on a 1s poll are within the resting-quote
