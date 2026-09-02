@@ -1,7 +1,8 @@
 """Live Trading Cockpit Engine for 5-minute Polymarket Crypto Binary Markets.
 
-Manages real-time quoting, paper/live execution, pair merges, stop-loss exits,
-live wallet balance tracking, and timeline charting across the 5m universe:
+Manages real-time quoting with advance pre-quoting on upcoming 5m windows,
+paper/live execution, pair merges, stop-loss exits, live wallet balance tracking,
+and timeline charting across the 5m universe:
 BTC 5m, ETH 5m, BNB 5m, SOL 5m, XRP 5m.
 """
 from __future__ import annotations
@@ -25,6 +26,7 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
 
 _local = threading.local()
+log = logging.getLogger("live_trader")
 
 
 def _load_env_file() -> None:
@@ -80,8 +82,12 @@ def fetch_polymarket_account_value(
     # 1. CLOB Collateral Cash Balance (via py_clob_client if credentials present)
     if funder and private_key and api_key and api_secret and api_pass:
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+            try:
+                from py_clob_client_v2.client import ClobClient
+                from py_clob_client_v2.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+            except ImportError:
+                from py_clob_client.client import ClobClient
+                from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
             client = ClobClient(
                 host=CLOB_HOST,
@@ -163,6 +169,12 @@ def _iso_to_unix(s: str) -> float:
 
 def fetch_live_series_market(series_slug: str, session: Optional[requests.Session] = None) -> Optional[Dict[str, Any]]:
     """Fetch active live market metadata for a series slug from Gamma API."""
+    res = fetch_live_and_upcoming_markets(series_slug, session=session)
+    return res.get("current")
+
+
+def fetch_live_and_upcoming_markets(series_slug: str, session: Optional[requests.Session] = None) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Fetch both current active market and next upcoming market for advance pre-quoting."""
     sess = session or _get_thread_session()
     try:
         r = sess.get(
@@ -174,10 +186,12 @@ def fetch_live_series_market(series_slug: str, session: Optional[requests.Sessio
         events = r.json()
     except Exception as e:
         log.debug("Gamma API error for %s: %s", series_slug, e)
-        return None
+        return {"current": None, "next": None}
 
     now = time.time()
-    candidates = []
+    active_candidates = []
+    upcoming_candidates = []
+
     for ev in events:
         for m in ev.get("markets") or []:
             try:
@@ -187,29 +201,41 @@ def fetch_live_series_market(series_slug: str, session: Optional[requests.Sessio
                     continue
                 st = _iso_to_unix(m.get("eventStartTime") or "")
                 et = _iso_to_unix(m.get("endDate") or m.get("endDateIso") or "")
+                
+                mdict = {
+                    "conditionId": m.get("conditionId") or "",
+                    "slug": m.get("slug") or "",
+                    "start_ts": st,
+                    "end_ts": et,
+                    "up_token": str(tids[0]),
+                    "down_token": str(tids[1]),
+                    "series": series_slug,
+                }
+                
                 if st <= now < et:
-                    candidates.append((st, et, m, tids))
+                    active_candidates.append((st, et, mdict))
+                elif st > now:
+                    upcoming_candidates.append((st, et, mdict))
             except Exception as e:
                 log.debug("Error parsing candidate market in %s: %s", series_slug, e)
                 continue
 
-    if not candidates:
-        return None
+    current_mkt = None
+    if active_candidates:
+        active_candidates.sort(key=lambda x: x[0], reverse=True)
+        current_mkt = active_candidates[0][2]
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    st, et, m, tids = candidates[0]
+    next_mkt = None
+    if upcoming_candidates:
+        # Sort upcoming by start_ts ascending (the very next one)
+        upcoming_candidates.sort(key=lambda x: x[0])
+        next_mkt = upcoming_candidates[0][2]
+
     return {
-        "conditionId": m.get("conditionId") or "",
-        "slug": m.get("slug") or "",
-        "start_ts": st,
-        "end_ts": et,
-        "up_token": str(tids[0]),
-        "down_token": str(tids[1]),
-        "series": series_slug,
+        "current": current_mkt,
+        "next": next_mkt,
     }
 
-
-log = logging.getLogger("live_trader")
 
 SERIES_5M = by_duration(300)
 
@@ -249,8 +275,25 @@ class MarketLiveState:
     resting_down: float = 0.48
     order_shares: int = 5
     
+    # Live Order Tracking (Current Window)
+    order_id_up: Optional[str] = None
+    order_id_down: Optional[str] = None
+    order_status_up: str = "NONE"  # NONE, RESTING, FILLED, CANCELLED
+    order_status_down: str = "NONE"
+
+    # Advance Pre-Quoting (Upcoming Window T+1)
+    next_condition_id: str = ""
+    next_market_slug: str = ""
+    next_up_token: str = ""
+    next_down_token: str = ""
+    next_start_ts: float = 0.0
+    next_end_ts: float = 0.0
+    next_order_id_up: Optional[str] = None
+    next_order_id_down: Optional[str] = None
+    next_quoted: bool = False
+    
     # Execution status
-    status: str = "IDLE"  # IDLE, QUOTING, FILLED_UP, FILLED_DOWN, PAIR_MERGED, STOP_EXIT, SETTLED
+    status: str = "IDLE"  # IDLE, QUOTING, PRE_QUOTING, FILLED_UP, FILLED_DOWN, PAIR_MERGED, STOP_EXIT, SETTLED
     filled_up: bool = False
     filled_down: bool = False
     fill_price_up: Optional[float] = None
@@ -337,6 +380,265 @@ class LiveTraderEngine:
         self._lock = asyncio.Lock()
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "Mozilla/5.0"})
+        self._clob_client: Optional[Any] = None
+
+    def get_clob_client(self) -> Optional[Any]:
+        """Get or lazily initialize authenticated ClobClient."""
+        if self._clob_client is not None:
+            return self._clob_client
+
+        _load_env_file()
+        funder = self.wallet_address or os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
+        private_key = os.getenv("POLY_PRIVATE_KEY", "")
+        api_key = os.getenv("POLY_API_KEY", "")
+        api_secret = os.getenv("POLY_API_SECRET", "")
+        api_pass = os.getenv("POLY_API_PASSPHRASE", "")
+        sig_type_str = os.getenv("POLY_SIG_TYPE", "3")
+        try:
+            sig_type = int(sig_type_str)
+        except Exception:
+            sig_type = 3
+
+        if not (funder and private_key and api_key and api_secret and api_pass):
+            return None
+
+        try:
+            try:
+                from py_clob_client_v2.client import ClobClient
+                from py_clob_client_v2.clob_types import ApiCreds
+            except ImportError:
+                from py_clob_client.client import ClobClient
+                from py_clob_client.clob_types import ApiCreds
+
+            client = ClobClient(
+                host=CLOB_HOST,
+                key=private_key,
+                chain_id=137,
+                signature_type=sig_type,
+                funder=funder,
+            )
+            client.set_api_creds(ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_pass))
+            self._clob_client = client
+            log.info("Initialized CLOB client for %s", funder)
+            return self._clob_client
+        except Exception as e:
+            log.error("Failed creating ClobClient: %s", e)
+            return None
+
+    def place_live_quote(self, token_id: str, price: float, size: float, side: str = "BUY") -> Optional[Dict[str, Any]]:
+        """Place live limit order on Polymarket CLOB."""
+        client = self.get_clob_client()
+        if not client:
+            log.warning("place_live_quote skipped: CLOB client not configured")
+            return None
+
+        try:
+            try:
+                from py_clob_client_v2.clob_types import OrderArgs
+            except ImportError:
+                from py_clob_client.clob_types import OrderArgs
+
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=round(float(price), 2),
+                size=float(size),
+                side=side.upper(),
+            )
+            res = client.create_and_post_order(order_args)
+            log.info("Live quote placed: %s side=%s price=%.2f size=%.1f -> %s", token_id, side, price, size, res)
+            
+            order_id = ""
+            status = "RESTING"
+            if isinstance(res, dict):
+                order_id = res.get("orderID") or res.get("id") or ""
+                st = (res.get("status") or "").lower()
+                if st in ("delayed", "unmatched"):
+                    status = "RESTING"
+                elif st in ("matched", "filled"):
+                    status = "FILLED"
+            elif isinstance(res, str):
+                order_id = res
+
+            return {
+                "order_id": order_id,
+                "status": status,
+                "token_id": token_id,
+                "price": price,
+                "size": size,
+                "side": side,
+                "raw": res,
+            }
+        except Exception as e:
+            log.error("Failed placing live quote for %s: %s", token_id, e)
+            return {"error": str(e), "order_id": None}
+
+    def cancel_live_order(self, order_id: str) -> bool:
+        """Cancel a single active order on Polymarket CLOB."""
+        if not order_id:
+            return False
+        client = self.get_clob_client()
+        if not client:
+            return False
+        try:
+            if hasattr(client, "cancel"):
+                try:
+                    res = client.cancel(order_id)
+                    log.info("Cancelled order %s -> %s", order_id, res)
+                    return True
+                except (AttributeError, TypeError):
+                    pass
+            if hasattr(client, "cancel_orders"):
+                res = client.cancel_orders([order_id])
+                log.info("Cancelled order %s -> %s", order_id, res)
+                return True
+            res = client.cancel_all()
+            return True
+        except Exception as e:
+            log.error("Failed cancelling order %s: %s", order_id, e)
+            return False
+
+    def cancel_all_orders(self) -> Dict[str, Any]:
+        """Emergency panic button: Cancel all open orders on CLOB and clear active handles."""
+        cancelled_remote = False
+        client = self.get_clob_client()
+        if client:
+            try:
+                client.cancel_all()
+                cancelled_remote = True
+                log.info("Emergency cancel_all invoked on Polymarket CLOB")
+            except Exception as e:
+                log.error("Error in remote cancel_all: %s", e)
+
+        # Clear local order handles across all markets
+        cleared_count = 0
+        for m in self.markets.values():
+            if m.order_id_up or m.order_id_down or m.next_order_id_up or m.next_order_id_down:
+                cleared_count += 1
+            m.order_id_up = None
+            m.order_id_down = None
+            m.order_status_up = "CANCELLED"
+            m.order_status_down = "CANCELLED"
+            m.next_order_id_up = None
+            m.next_order_id_down = None
+            m.next_quoted = False
+            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
+                m.status = "IDLE"
+            m.last_action = "All orders cancelled"
+
+        return {
+            "ok": True,
+            "remote_cancel_called": cancelled_remote,
+            "markets_cleared": cleared_count,
+            "timestamp": time.time(),
+        }
+
+    def get_open_orders_list(self) -> List[Dict[str, Any]]:
+        """List active open orders from CLOB and current engine state."""
+        orders: List[Dict[str, Any]] = []
+        client = self.get_clob_client()
+
+        if client:
+            try:
+                from py_clob_client.clob_types import OpenOrderParams
+                res = client.get_orders(OpenOrderParams())
+                if isinstance(res, list):
+                    for o in res:
+                        orders.append({
+                            "order_id": o.get("id") or o.get("order_id", ""),
+                            "token_id": o.get("asset_id", ""),
+                            "side": o.get("side", ""),
+                            "price": float(o.get("price", 0.0)),
+                            "size": float(o.get("original_size", 0.0)),
+                            "status": o.get("status", "OPEN"),
+                            "source": "CLOB_API",
+                        })
+            except Exception as e:
+                log.debug("CLOB get_orders error: %s", e)
+
+        # Merge in tracked market orders if not already listed
+        existing_ids = {o["order_id"] for o in orders if o.get("order_id")}
+        for m in self.markets.values():
+            if m.order_id_up and m.order_id_up not in existing_ids:
+                orders.append({
+                    "order_id": m.order_id_up,
+                    "market": m.label,
+                    "token_id": m.up_token,
+                    "side": "BUY (UP)",
+                    "price": m.resting_up,
+                    "size": m.order_shares,
+                    "status": m.order_status_up,
+                    "source": "ENGINE_ACTIVE",
+                })
+            if m.order_id_down and m.order_id_down not in existing_ids:
+                orders.append({
+                    "order_id": m.order_id_down,
+                    "market": m.label,
+                    "token_id": m.down_token,
+                    "side": "BUY (DOWN)",
+                    "price": m.resting_down,
+                    "size": m.order_shares,
+                    "status": m.order_status_down,
+                    "source": "ENGINE_ACTIVE",
+                })
+            if m.next_order_id_up and m.next_order_id_up not in existing_ids:
+                orders.append({
+                    "order_id": m.next_order_id_up,
+                    "market": f"{m.label} (Next Window)",
+                    "token_id": m.next_up_token,
+                    "side": "BUY (UP)",
+                    "price": m.resting_up,
+                    "size": m.order_shares,
+                    "status": "ADVANCE_PRE_QUOTE",
+                    "source": "ENGINE_ADVANCE",
+                })
+            if m.next_order_id_down and m.next_order_id_down not in existing_ids:
+                orders.append({
+                    "order_id": m.next_order_id_down,
+                    "market": f"{m.label} (Next Window)",
+                    "token_id": m.next_down_token,
+                    "side": "BUY (DOWN)",
+                    "price": m.resting_down,
+                    "size": m.order_shares,
+                    "status": "ADVANCE_PRE_QUOTE",
+                    "source": "ENGINE_ADVANCE",
+                })
+
+        return orders
+
+    def merge_positions(self, condition_id: str, amount: float = 0.0) -> Dict[str, Any]:
+        """Merge outcome tokens back to USDC gaslessly via Relayer / CTF."""
+        log.info("Executing live pair merge for condition %s", condition_id)
+        if self.mode == "live":
+            try:
+                from polymarket import SecureClient, RelayerApiKey
+                pkey = os.getenv("POLY_PRIVATE_KEY") or os.getenv("POLYMARKET_PRIVATE_KEY")
+                wallet = self.wallet_address or os.getenv("POLY_FUNDER")
+                r_key = os.getenv("RELAYER_API_KEY")
+                r_addr = os.getenv("RELAYER_API_KEY_ADDRESS")
+                if pkey and wallet and r_key and r_addr:
+                    relayer_creds = RelayerApiKey(key=r_key, address=r_addr)
+                    sec_client = SecureClient.create(private_key=pkey, wallet=wallet, api_key=relayer_creds)
+                    tx = sec_client.merge_positions(condition_id=condition_id, amount="max")
+                    outcome = tx.wait()
+                    tx_hash = getattr(outcome, "transaction_hash", "")
+                    log.info("Gasless merge successful! TxHash: %s", tx_hash)
+                    return {
+                        "ok": True,
+                        "condition_id": condition_id,
+                        "merged": True,
+                        "transaction_hash": tx_hash,
+                        "timestamp": time.time(),
+                    }
+            except Exception as e:
+                log.error("Live merge failed for %s: %s", condition_id, e)
+                return {"ok": False, "condition_id": condition_id, "error": str(e)}
+
+        return {
+            "ok": True,
+            "condition_id": condition_id,
+            "merged": True,
+            "timestamp": time.time(),
+        }
 
     def get_state(self) -> Dict[str, Any]:
         """Return snapshot of entire trading engine state for the UI."""
@@ -362,6 +664,9 @@ class LiveTraderEngine:
         # Recent trades
         recent_trades = [asdict(t) for t in reversed(self.trades[-50:])]
         
+        # Open orders
+        open_orders = self.get_open_orders_list()
+
         return {
             "is_running": self.is_running,
             "mode": self.mode,
@@ -391,6 +696,8 @@ class LiveTraderEngine:
             "markets": mkts_dict,
             "timeline": recent_timeline,
             "trades": recent_trades,
+            "open_orders": open_orders,
+            "open_orders_count": len(open_orders),
             "server_time": datetime.datetime.now().strftime("%H:%M:%S"),
         }
 
@@ -402,7 +709,6 @@ class LiveTraderEngine:
                       starting_balance: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters."""
         if offset is not None:
-            # Constrain offset to keep resting prices strictly positive (0.001 to 0.490)
             self.offset = max(0.001, min(0.490, float(offset)))
         if exit_thresh is not None and exit_thresh > 0:
             self.exit_thresh = float(exit_thresh)
@@ -412,10 +718,8 @@ class LiveTraderEngine:
             self.mode = mode
         if wallet_address is not None:
             self.wallet_address = wallet_address.strip()
+            self._clob_client = None  # Reset client if wallet changed
 
-        # Starting balance handling:
-        # In LIVE mode, starting balance is locked to real Polymarket net account value.
-        # In PAPER mode, starting balance can be manually adjusted.
         if self.mode == "live":
             addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
             val_info = fetch_polymarket_account_value(addr)
@@ -472,15 +776,16 @@ class LiveTraderEngine:
             if self._bg_task is None or self._bg_task.done():
                 self._bg_task = loop.create_task(self._run_loop())
         except RuntimeError:
-            # No running event loop in current thread (e.g. sync unit test)
             pass
         log.info("LiveTraderEngine started in %s mode", self.mode)
 
     def stop(self):
         """Stop trading engine and cancel active quoting."""
         self.is_running = False
+        if self.mode == "live":
+            self.cancel_all_orders()
         for m in self.markets.values():
-            if m.status in ("QUOTING", "LIVE_MONITOR"):
+            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
                 m.status = "IDLE"
                 m.last_action = "Stopped"
         log.info("LiveTraderEngine stopped")
@@ -515,7 +820,6 @@ class LiveTraderEngine:
             m.reversal_seen_down = False
             m.status = "QUOTING" if self.is_running else "IDLE"
             m.last_action = "PnL Reset"
-        # Seed initial timeline point
         self._record_timeline_point(time.time())
 
     def seed_demo_data(self):
@@ -733,7 +1037,6 @@ class LiveTraderEngine:
         now = time.time()
         loop = asyncio.get_running_loop()
 
-        # Run I/O fetching concurrently in threadpool
         tasks = [
             loop.run_in_executor(None, self._poll_single_market, slug)
             for slug in self.markets.keys()
@@ -748,23 +1051,26 @@ class LiveTraderEngine:
                 if res:
                     self._update_market_strategy(slug, res, now)
 
-            # Record timeline snapshot for charts
             self._record_timeline_point(now)
 
     def _poll_single_market(self, slug: str) -> Optional[Dict[str, Any]]:
-        """Fetch market definition and orderbooks synchronously."""
+        """Fetch current and next market definition and orderbooks synchronously."""
         try:
             from strategy.markets import full_book
             sess = _get_thread_session()
-            market_info = fetch_live_series_market(slug, session=sess)
-            if not market_info:
+            markets_pair = fetch_live_and_upcoming_markets(slug, session=sess)
+            market_info = markets_pair.get("current")
+            next_market = markets_pair.get("next")
+
+            if not market_info and not next_market:
                 return None
 
-            ubook = full_book(CLOB_HOST, market_info["up_token"])
-            dbook = full_book(CLOB_HOST, market_info["down_token"])
+            ubook = full_book(CLOB_HOST, market_info["up_token"]) if market_info else {}
+            dbook = full_book(CLOB_HOST, market_info["down_token"]) if market_info else {}
 
             return {
                 "market": market_info,
+                "next_market": next_market,
                 "up_book": ubook,
                 "down_book": dbook,
             }
@@ -773,11 +1079,45 @@ class LiveTraderEngine:
             return None
 
     def _update_market_strategy(self, slug: str, poll_data: Dict[str, Any], now: float):
-        """Update trading state machine, execute fills, stop-loss exits, and pair merges."""
+        """Update trading state machine, advance pre-quoting, fills, stop-loss exits, and pair merges."""
         mstate = self.markets[slug]
-        minfo = poll_data["market"]
-        ubook = poll_data["up_book"]
-        dbook = poll_data["down_book"]
+        minfo = poll_data.get("market")
+        next_minfo = poll_data.get("next_market")
+        ubook = poll_data.get("up_book") or {}
+        dbook = poll_data.get("down_book") or {}
+
+        # 1. Update upcoming market metadata for advance pre-quoting
+        if next_minfo:
+            next_cid = str(next_minfo.get("conditionId") or next_minfo.get("condition_id") or "")
+            if next_cid != mstate.next_condition_id:
+                mstate.next_condition_id = next_cid
+                mstate.next_market_slug = str(next_minfo.get("slug") or next_minfo.get("market_slug") or "")
+                mstate.next_up_token = str(next_minfo.get("up_token") or "")
+                mstate.next_down_token = str(next_minfo.get("down_token") or "")
+                mstate.next_start_ts = float(next_minfo.get("start_ts", 0.0))
+                mstate.next_end_ts = float(next_minfo.get("end_ts", 0.0))
+                mstate.next_order_id_up = None
+                mstate.next_order_id_down = None
+                mstate.next_quoted = False
+
+        # 2. Advance Pre-Quoting on Next Window (T+1) if live mode is active
+        if self.is_running and self.mode == "live" and mstate.next_condition_id and not mstate.next_quoted:
+            resting_up = round(0.50 - self.offset, 3)
+            resting_down = round(0.50 - self.offset, 3)
+            if mstate.next_up_token and not mstate.next_order_id_up:
+                res_up = self.place_live_quote(mstate.next_up_token, resting_up, self.shares, "BUY")
+                if res_up and res_up.get("order_id"):
+                    mstate.next_order_id_up = res_up["order_id"]
+            if mstate.next_down_token and not mstate.next_order_id_down:
+                res_dn = self.place_live_quote(mstate.next_down_token, resting_down, self.shares, "BUY")
+                if res_dn and res_dn.get("order_id"):
+                    mstate.next_order_id_down = res_dn["order_id"]
+            if mstate.next_order_id_up and mstate.next_order_id_down:
+                mstate.next_quoted = True
+                log.info("[%s] ADVANCE PRE-QUOTING active on %s (UP: %s, DN: %s)", slug, mstate.next_market_slug, mstate.next_order_id_up, mstate.next_order_id_down)
+
+        if not minfo:
+            return
 
         if isinstance(minfo, dict):
             cid = str(minfo.get("conditionId") or minfo.get("condition_id") or "")
@@ -831,7 +1171,7 @@ class LiveTraderEngine:
 
         # If not active or window is expired, stay idle
         if not self.is_running or mstate.time_remaining_sec <= 0:
-            if mstate.status in ("QUOTING", "LIVE_MONITOR"):
+            if mstate.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
                 mstate.status = "IDLE"
             return
 
@@ -842,14 +1182,8 @@ class LiveTraderEngine:
         mstate.resting_down = resting_down
         mstate.order_shares = self.shares
 
-        # In live mode without signed key execution, monitor live order book only
-        if self.mode == "live":
-            mstate.status = "LIVE_MONITOR"
-            mstate.last_action = "Live mode: monitoring live order book (signing unconfigured)"
-            return
-
         # --- DRIFT TRACKING (vs 0.50 base) ---
-        mid = mstate.mid
+        mid = mstate.mid or 0.50
         if mid > 0.50:
             mstate.max_up_drift = max(mstate.max_up_drift, mid - 0.50)
         elif mid < 0.50:
@@ -861,35 +1195,82 @@ class LiveTraderEngine:
         if mstate.max_up_drift >= self.exit_thresh and (mid - 0.50) < self.exit_reversal:
             mstate.reversal_seen_up = True
 
-        # --- FILL DETECTION (Paper Simulation) ---
-        if mstate.status == "IDLE":
+        # --- LIVE ORDER PLACEMENT (if in live mode and orders not placed yet) ---
+        if self.mode == "live" and not mstate.pair_captured and not mstate.exit_taken:
+            if not mstate.order_id_up and mstate.up_token:
+                res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
+                if res_up and res_up.get("order_id"):
+                    mstate.order_id_up = res_up["order_id"]
+                    mstate.order_status_up = "RESTING"
+            if not mstate.order_id_down and mstate.down_token:
+                res_dn = self.place_live_quote(mstate.down_token, resting_down, self.shares, "BUY")
+                if res_dn and res_dn.get("order_id"):
+                    mstate.order_id_down = res_dn["order_id"]
+                    mstate.order_status_down = "RESTING"
+
+        # --- FILL DETECTION ---
+        if mstate.status in ("IDLE", "PRE_QUOTING"):
             mstate.status = "QUOTING"
             mstate.last_action = f"Quoting bids @ {resting_up:.2f} / {resting_down:.2f}"
 
         if not mstate.pair_captured and not mstate.exit_taken:
-            # UP Leg Fill Check
-            if not mstate.filled_up:
-                if mstate.up_ask is not None and mstate.up_ask <= resting_up:
-                    mstate.filled_up = True
-                    mstate.fill_price_up = resting_up
-                    mstate.status = "FILLED_UP"
-                    mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
-                    log.info("[%s] Filled UP @ %.2f", slug, resting_up)
+            # In LIVE mode, verify true fill status directly from Polymarket CLOB
+            if self.mode == "live":
+                client = self.get_clob_client()
+                if client:
+                    if not mstate.filled_up and mstate.order_id_up:
+                        try:
+                            ord_up = client.get_order(mstate.order_id_up)
+                            st_up = (ord_up.get("status") or "").upper()
+                            sz_up = float(ord_up.get("size_matched", 0.0) or 0.0)
+                            if st_up in ("MATCHED", "FILLED") or sz_up >= mstate.order_shares:
+                                mstate.filled_up = True
+                                mstate.fill_price_up = resting_up
+                                mstate.order_status_up = "FILLED"
+                                mstate.status = "FILLED_UP"
+                                mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
+                                log.info("[%s] UP leg FILLED on CLOB (status=%s, matched=%.1f)", slug, st_up, sz_up)
+                        except Exception as e:
+                            log.debug("[%s] Error checking UP order: %s", slug, e)
 
-            # DOWN Leg Fill Check
-            if not mstate.filled_down:
-                if mstate.down_ask is not None and mstate.down_ask <= resting_down:
-                    mstate.filled_down = True
-                    mstate.fill_price_down = resting_down
-                    mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
-                    mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
-                    log.info("[%s] Filled DOWN @ %.2f", slug, resting_down)
+                    if not mstate.filled_down and mstate.order_id_down:
+                        try:
+                            ord_dn = client.get_order(mstate.order_id_down)
+                            st_dn = (ord_dn.get("status") or "").upper()
+                            sz_dn = float(ord_dn.get("size_matched", 0.0) or 0.0)
+                            if st_dn in ("MATCHED", "FILLED") or sz_dn >= mstate.order_shares:
+                                mstate.filled_down = True
+                                mstate.fill_price_down = resting_down
+                                mstate.order_status_down = "FILLED"
+                                mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
+                                mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
+                                log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f)", slug, st_dn, sz_dn)
+                        except Exception as e:
+                            log.debug("[%s] Error checking DOWN order: %s", slug, e)
+            else:
+                # Paper / Backtest simulation fallback using order book asks
+                if not mstate.filled_up:
+                    if mstate.up_ask is not None and mstate.up_ask <= resting_up:
+                        mstate.filled_up = True
+                        mstate.fill_price_up = resting_up
+                        mstate.order_status_up = "FILLED"
+                        mstate.status = "FILLED_UP"
+                        mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
+                        log.info("[%s] Filled UP @ %.2f", slug, resting_up)
+
+                if not mstate.filled_down:
+                    if mstate.down_ask is not None and mstate.down_ask <= resting_down:
+                        mstate.filled_down = True
+                        mstate.fill_price_down = resting_down
+                        mstate.order_status_down = "FILLED"
+                        mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
+                        mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
+                        log.info("[%s] Filled DOWN @ %.2f", slug, resting_down)
 
             # --- PAIR COMPLETION & MERGE ---
             if mstate.filled_up and mstate.filled_down:
                 mstate.pair_captured = True
                 mstate.status = "PAIR_MERGED"
-                # Both sides bought at 0.48, merged to 1.00 -> Profit = (1.00 - 0.96) * shares = $0.04 * shares
                 pair_profit_usd = (1.00 - (resting_up + resting_down)) * self.shares
                 mstate.realized_pnl_usd += pair_profit_usd
                 mstate.unrealized_pnl_usd = 0.0
@@ -899,8 +1280,10 @@ class LiveTraderEngine:
                 mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
                 log.info("[%s] PAIR MERGED! Profit: +$%.2f", slug, pair_profit_usd)
                 
+                if self.mode == "live":
+                    self.merge_positions(mstate.condition_id)
+
                 denom = max(0.01, 2 * resting_up * max(1, self.shares))
-                # Log trade event
                 self.trades.append(TradeEvent(
                     id=f"{slug}_{int(now)}",
                     timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
@@ -934,6 +1317,15 @@ class LiveTraderEngine:
                     mstate.trades_count += 1
                     mstate.last_action = f"Stop Loss UP @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
                     log.info("[%s] STOP LOSS EXIT (UP) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
+
+                    if self.mode == "live":
+                        # 1. Cancel the unhedged DOWN resting order immediately
+                        if mstate.order_id_down:
+                            self.cancel_live_order(mstate.order_id_down)
+                            mstate.order_status_down = "CANCELLED"
+                        # 2. Market sell the filled UP leg
+                        if mstate.up_token:
+                            self.place_live_quote(mstate.up_token, sell_bid, self.shares, "SELL")
 
                     denom = max(0.01, resting_up * max(1, self.shares))
                     self.trades.append(TradeEvent(
@@ -969,6 +1361,15 @@ class LiveTraderEngine:
                     mstate.last_action = f"Stop Loss DOWN @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
                     log.info("[%s] STOP LOSS EXIT (DOWN) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
 
+                    if self.mode == "live":
+                        # 1. Cancel the unhedged UP resting order immediately
+                        if mstate.order_id_up:
+                            self.cancel_live_order(mstate.order_id_up)
+                            mstate.order_status_up = "CANCELLED"
+                        # 2. Market sell the filled DOWN leg
+                        if mstate.down_token:
+                            self.place_live_quote(mstate.down_token, sell_bid, self.shares, "SELL")
+
                     denom = max(0.01, resting_down * max(1, self.shares))
                     self.trades.append(TradeEvent(
                         id=f"{slug}_{int(now)}",
@@ -1001,8 +1402,14 @@ class LiveTraderEngine:
 
     def _handle_window_rollover(self, mstate: MarketLiveState, now: float):
         """Cleanly settle unresolved positions when window expires and roll to next."""
+        # Cancel any unfilled orders from expiring window
+        if self.mode == "live":
+            if mstate.order_id_up and not mstate.filled_up:
+                self.cancel_live_order(mstate.order_id_up)
+            if mstate.order_id_down and not mstate.filled_down:
+                self.cancel_live_order(mstate.order_id_down)
+
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
-            # Settle unmerged leg at market bid
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down
             settle_pnl = 0.0
@@ -1033,6 +1440,22 @@ class LiveTraderEngine:
                 pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
                 notes="Window expired, position auto-settled",
             ))
+
+        # Promote advance pre-quoted orders from next window if available
+        if mstate.next_quoted and mstate.next_condition_id:
+            mstate.order_id_up = mstate.next_order_id_up
+            mstate.order_id_down = mstate.next_order_id_down
+            mstate.order_status_up = "RESTING"
+            mstate.order_status_down = "RESTING"
+            mstate.next_order_id_up = None
+            mstate.next_order_id_down = None
+            mstate.next_quoted = False
+            log.info("[%s] PROMOTED advance pre-quotes to active live window (UP: %s, DN: %s)", mstate.slug, mstate.order_id_up, mstate.order_id_down)
+        else:
+            mstate.order_id_up = None
+            mstate.order_id_down = None
+            mstate.order_status_up = "NONE"
+            mstate.order_status_down = "NONE"
 
         # Reset window execution state for the new 5m period
         mstate.filled_up = False
@@ -1072,7 +1495,6 @@ class LiveTraderEngine:
             "pnl_pct": pnl_by_mkt_pct,
         }
 
-        # Keep last 1,800 points (~30 mins of 1s ticks)
         self.timeline.append(point)
         if len(self.timeline) > 1800:
             self.timeline.pop(0)

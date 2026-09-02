@@ -16,7 +16,7 @@
 
 ### Dashboard Runtime & Stack
 
-`server/osc_dash.py` (FastAPI on `:8802`) is the sole canonical dashboard for this repository. Any external TypeScript/Express prototype (e.g. `Downloads/crypto-spread/server.ts`) is an archived reference and not part of the active project.
+`server/osc_dash.py` (FastAPI on `:8802`) is the sole canonical dashboard for this repository.
 
 ## Run a day of capture
 

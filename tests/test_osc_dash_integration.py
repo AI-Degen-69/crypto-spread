@@ -516,4 +516,49 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         client.post("/api/live/control", json={"action": "reset_pnl"})
 
 
+def test_osc_dash_live_execution_endpoints(monkeypatch):
+    """Verify live order execution endpoints: /orders, /cancel_all, /cancel_order, /test_order."""
+    from unittest.mock import MagicMock
+    from strategy.live_trader import get_live_trader_engine
+
+    engine = get_live_trader_engine()
+    fake_client = MagicMock()
+    fake_client.create_and_post_order.return_value = {"orderID": "ord_mock_123", "status": "delayed"}
+    fake_client.cancel.return_value = {"success": True}
+    fake_client.cancel_all.return_value = {"success": True}
+    fake_client.get_orders.return_value = [
+        {"id": "ord_mock_123", "asset_id": "tok_test_up", "side": "BUY", "price": "0.05", "original_size": "1"}
+    ]
+    engine._clob_client = fake_client
+
+    # 1. GET /api/live/orders
+    res_orders = client.get("/api/live/orders")
+    assert res_orders.status_code == 200
+    orders_data = res_orders.json()
+    assert "orders" in orders_data
+    assert len(orders_data["orders"]) >= 1
+
+    # 2. POST /api/live/test_order
+    res_test_ord = client.post("/api/live/test_order", json={
+        "token_id": "tok_test_up",
+        "price": 0.05,
+        "size": 1.0,
+        "side": "BUY",
+    })
+    assert res_test_ord.status_code == 200
+    ord_data = res_test_ord.json()
+    assert ord_data["order_id"] == "ord_mock_123"
+
+    # 3. POST /api/live/cancel_order
+    res_cancel_single = client.post("/api/live/cancel_order", json={"order_id": "ord_mock_123"})
+    assert res_cancel_single.status_code == 200
+    assert res_cancel_single.json()["ok"] is True
+
+    # 4. POST /api/live/cancel_all
+    res_cancel_all = client.post("/api/live/cancel_all")
+    assert res_cancel_all.status_code == 200
+    assert res_cancel_all.json()["ok"] is True
+
+
+
 
