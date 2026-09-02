@@ -85,7 +85,8 @@ def main():
     print("\n[OK] ORDERS PLACED.")
     print(f"\n[>>] CHECK YOUR POLYMARKET UI NOW (Open Orders tab)!")
     print(f"     URL: https://polymarket.com/event/{next_slug}")
-    print(f"     You should see BOTH BUY orders resting at ${args.price:.2f}.")
+    active_legs = [leg for leg, oid in (('UP', up_id), ('DOWN', dn_id)) if oid]
+    print(f"     Resting order(s) active on leg(s): {', '.join(active_legs)} @ ${args.price:.2f}.")
 
     print(f"\n[4/5] Waiting {args.auto_cancel_sec} seconds before cancelling both orders...")
     try:
