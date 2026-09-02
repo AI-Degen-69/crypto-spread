@@ -167,7 +167,7 @@ resp = client.create_and_post_order(OrderArgs(
 
 ### 1. RTDS Reference Price Streams
 - **Binance (`prices.crypto.binance`)**: `btcusdt`, `ethusdt`, `solusdt`, `xrpusdt` (1s live ticks for leading signals / rapid stop-loss; BNB not supported).
-- **Chainlink (`prices.crypto.chainlink`)**: `btc/usd`, `eth/usd`, `sol/usd`, `xrp/usd` (Oracle & TWAP references).
+- **Chainlink (`prices.crypto.chainlink`)**: `btc/usd`, `eth/usd`, `sol/usd`, `xrp/usd` (Oracle & TWAP references; BNB not supported on RTDS, use REST fallback).
 - **Pyth Equity (`prices.equity.pyth`)**: Stocks, ETFs, Forex, Commodities. Emits a 2-minute historical snapshot on subscription to seed state, then streams live updates up to 5x/sec.
 - **Comments (`comments`)**: Scoped to `parentEntityId` with `comment_created`, `comment_removed`, `reaction_created`, `reaction_removed`.
 - **Python Usage**:
@@ -189,28 +189,51 @@ resp = client.create_and_post_order(OrderArgs(
 
 ### 2. CLOB Market Streams (`MarketSpec`)
 - **Endpoint**: `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-- **Events**: `book` (full book), `price_change`, `last_trade_price`, `tick_size_change`.
+- **Events & State Model**:
+  - `book`: Full order book snapshot. Replaces local book state entirely (do not apply as delta).
+  - `price_change`: Level mutations. Updates individual price levels from `price_changes` delta list.
+  - `last_trade_price`: Tape trade execution updates.
+  - `tick_size_change`: Dynamic tick size adjustments.
 - **Custom Features (`custom_feature_enabled=True`)**: Emits `best_bid_ask`, `new_market`, and `market_resolved`.
 - **Aggregation**: Multi-token subscription on a single connection; send text `PING` every 10s.
 
 ### 3. User Order & Trade Lifecycle Stream (`UserSpec`)
-- **Python Usage**:
+- **Python Usage (Authenticated)**:
   ```python
+  import os
+  from polymarket import AsyncSecureClient
+  from polymarket.clob_types import ApiCreds
   from polymarket.streams import UserSpec
 
-  async with await client.subscribe(UserSpec()) as stream:
-      async for event in stream:
-          if event.type == "order":
-              # payload.order_event_type: PLACEMENT | UPDATE | CANCELLATION
-              # payload.status: LIVE | MATCHED | CANCELED
-              update_order_state(event.payload)
-          elif event.type == "trade":
-              # payload.status: MATCHED → CONFIRMED
-              update_trade_state(event.payload)
+  creds = ApiCreds(
+      api_key=os.environ["CLOB_API_KEY"],
+      api_secret=os.environ["CLOB_API_SECRET"],
+      api_passphrase=os.environ["CLOB_API_PASSPHRASE"],
+  )
+  async with AsyncSecureClient(
+      key=os.environ["POLYGON_PRIVATE_KEY"],
+      creds=creds,
+      chain_id=137,
+  ) as client:
+      async with await client.subscribe(UserSpec()) as stream:
+          async for event in stream:
+              if event.type == "order":
+                  # payload.order_event_type: PLACEMENT | UPDATE | CANCELLATION
+                  # payload.status: LIVE | MATCHED | CANCELED | DELAYED | UNMATCHED
+                  update_order_state(event.payload)
+              elif event.type == "trade":
+                  # payload.status: MATCHED → CONFIRMED
+                  update_trade_state(event.payload)
   ```
+- **Order Status Reducer Rules**:
+  - `LIVE`: Order active on book; render in open orders table.
+  - `DELAYED`: Order pending matching engine ingestion; mark as pending in UI.
+  - `UNMATCHED`: Order rejected or resting without fill; update status or remove.
+  - `MATCHED`: Fully filled; remove from open orders and transition to position state.
+  - `CANCELED`: Canceled; prune from open orders table.
 - **Sync & Reconnection Pattern**:
-  1. **Seed on load**: Always query REST open orders & positions on startup before processing events.
-  2. **Live ingest**: Key state by `payload.id`.
-  3. **Reconnect resync**: Re-query REST snapshot on socket reconnect since missed stream events are not replayed.
+  1. **Buffer before snapshot**: Subscribe to stream and start buffering events.
+  2. **Seed via REST**: Query REST open orders & positions; merge with buffered stream events.
+  3. **Reconnect resync**: On reconnect, re-buffer and re-fetch REST snapshot before applying new live updates.
 
 
