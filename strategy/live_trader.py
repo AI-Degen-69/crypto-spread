@@ -328,9 +328,11 @@ class MarketLiveState:
     order_id_exit_down: Optional[str] = None
     order_status_exit_up: str = "NONE"
     order_status_exit_down: str = "NONE"
+    exit_price_up: Optional[float] = None
+    exit_price_down: Optional[float] = None
     
     # Execution status
-    status: str = "IDLE"  # IDLE, QUOTING, PRE_QUOTING, FILLED_UP, FILLED_DOWN, PAIR_MERGED, STOP_EXIT, SETTLED
+    status: str = "IDLE"  # IDLE, QUOTING, PRE_QUOTING, LIVE_MONITOR, FILLED_UP, FILLED_DOWN, PAIR_MERGED, STOP_EXIT_PENDING, STOP_EXIT, SETTLED
     filled_up: bool = False
     filled_down: bool = False
     fill_price_up: Optional[float] = None
@@ -576,7 +578,7 @@ class LiveTraderEngine:
             m.next_order_id_up = None
             m.next_order_id_down = None
             m.next_quoted = False
-            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
+            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                 m.status = "IDLE"
             m.last_action = "All orders cancelled"
 
@@ -731,7 +733,7 @@ class LiveTraderEngine:
         recent_trades = [asdict(t) for t in reversed(self.trades[-50:])]
         
         # Open orders (cached with 5s TTL to avoid blocking requests)
-        if (now - self._orders_cache_ts > 5.0) or not self._orders_cache:
+        if now - self._orders_cache_ts > 5.0:
             self._orders_cache = self.get_open_orders_list()
             self._orders_cache_ts = now
         open_orders = self._orders_cache
@@ -855,7 +857,7 @@ class LiveTraderEngine:
         if self.mode == "live":
             self.cancel_all_orders()
         for m in self.markets.values():
-            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
+            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                 m.status = "IDLE"
                 m.last_action = "Stopped"
         log.info("LiveTraderEngine stopped")
@@ -1243,7 +1245,7 @@ class LiveTraderEngine:
 
         # If not active or window is expired, stay idle
         if not self.is_running or mstate.time_remaining_sec <= 0:
-            if mstate.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
+            if mstate.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                 mstate.status = "IDLE"
             return
 
@@ -1389,6 +1391,11 @@ class LiveTraderEngine:
                             if res_up and res_up.get("order_id"):
                                 mstate.order_id_exit_up = res_up["order_id"]
                                 mstate.order_status_exit_up = res_up.get("status") or "RESTING"
+                                mstate.exit_price_up = sell_bid
+
+                        # Account at the price actually submitted, not the current tick bid
+                        if mstate.exit_price_up is not None:
+                            sell_bid = mstate.exit_price_up
 
                         # Defer setting exit_taken and realized_pnl until filled
                         is_filled = (mstate.order_status_exit_up == "FILLED")
@@ -1455,6 +1462,11 @@ class LiveTraderEngine:
                             if res_dn and res_dn.get("order_id"):
                                 mstate.order_id_exit_down = res_dn["order_id"]
                                 mstate.order_status_exit_down = res_dn.get("status") or "RESTING"
+                                mstate.exit_price_down = sell_bid
+
+                        # Account at the price actually submitted, not the current tick bid
+                        if mstate.exit_price_down is not None:
+                            sell_bid = mstate.exit_price_down
 
                         # Defer setting exit_taken and realized_pnl until filled
                         is_filled = (mstate.order_status_exit_down == "FILLED")
@@ -1591,10 +1603,17 @@ class LiveTraderEngine:
         mstate.pair_captured = False
         mstate.exit_taken = False
         mstate.exit_side = None
+        if self.mode == "live":
+            if mstate.order_id_exit_up:
+                self.cancel_live_order(mstate.order_id_exit_up)
+            if mstate.order_id_exit_down:
+                self.cancel_live_order(mstate.order_id_exit_down)
         mstate.order_id_exit_up = None
         mstate.order_id_exit_down = None
         mstate.order_status_exit_up = "NONE"
         mstate.order_status_exit_down = "NONE"
+        mstate.exit_price_up = None
+        mstate.exit_price_down = None
         mstate.max_up_drift = 0.0
         mstate.max_down_drift = 0.0
         mstate.reversal_seen_up = False

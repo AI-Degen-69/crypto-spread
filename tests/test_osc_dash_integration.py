@@ -575,6 +575,21 @@ def test_osc_dash_live_execution_endpoints(monkeypatch):
         ord_data = res_test_ord.json()
         assert ord_data["order_id"] == "ord_mock_123"
 
+        # 2b. POST /api/live/test_order rejects invalid payloads before touching the CLOB
+        fake_client.create_and_post_order.reset_mock()
+        for payload in (
+            {"token_id": "tok_test_up", "price": "invalid"},
+            {"token_id": "tok_test_up", "size": "invalid"},
+            {"token_id": "tok_test_up", "price": 0.0},
+            {"token_id": "tok_test_up", "price": 1.0},
+            {"token_id": "tok_test_up", "size": 11.0},
+            {"token_id": "tok_test_up", "side": "INVALID"},
+            {"token_id": "", "price": 0.05},
+        ):
+            res_reject = client.post("/api/live/test_order", json=payload)
+            assert res_reject.status_code == 400, payload
+        fake_client.create_and_post_order.assert_not_called()
+
         # 3. POST /api/live/cancel_order
         res_cancel_single = client.post("/api/live/cancel_order", json={"order_id": "ord_mock_123"})
         assert res_cancel_single.status_code == 200

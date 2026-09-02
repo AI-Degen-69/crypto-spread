@@ -432,8 +432,8 @@ def test_live_trader_live_stop_loss_order_routing():
 def test_live_order_flow_smoke(monkeypatch):
     """Verify test_live_order_flow CLI runs successfully in dry-run mode."""
     from scripts.test_live_order_flow import main
-    monkeypatch.setattr("scripts.test_live_order_flow.fetch_polymarket_account_value", lambda wallet: {"success": True, "cash_balance": 100.0, "net_value": 100.0, "open_positions": 0})
-    monkeypatch.setattr("scripts.test_live_order_flow.fetch_live_series_market", lambda s: {"conditionId": "0x123", "up_token": "tok_up", "slug": "btc-up-5m", "end_ts": time.time() + 300})
+    monkeypatch.setattr("scripts.test_live_order_flow.fetch_polymarket_account_value", lambda *a, **kw: {"success": True, "cash_balance": 100.0, "net_value": 100.0, "open_positions": 0})
+    monkeypatch.setattr("scripts.test_live_order_flow.fetch_live_series_market", lambda *a, **kw: {"conditionId": "0x123", "up_token": "tok_up", "slug": "btc-up-5m", "end_ts": time.time() + 300})
     monkeypatch.setattr("sys.argv", ["test_live_order_flow.py", "--dry-run"])
     ret = main()
     assert ret == 0
