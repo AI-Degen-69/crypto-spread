@@ -436,8 +436,10 @@ def test_api_ticks_verify_endpoint(tmp_path, monkeypatch):
     assert res_missing.status_code == 404
 
 
-def test_api_live_cockpit_endpoints():
+def test_api_live_cockpit_endpoints(monkeypatch):
     """Verify live trading cockpit endpoints for state, control, and config."""
+    from strategy.live_trader import LiveTraderEngine
+    monkeypatch.setattr(LiveTraderEngine, "_poll_single_market", lambda self, slug: None)
     try:
         # 1. GET state
         res_state = client.get("/api/live/state")
