@@ -113,10 +113,10 @@ def test_params_hash_deterministic():
 
 def test_exit_thresh_per_slug():
     p = BacktestParams()
-    assert p.exit_thresh("btc-up-or-down-5m", 300) == 0.09
-    assert p.exit_thresh("sol-up-or-down-5m", 300) == 0.11
-    assert p.exit_thresh("eth-up-or-down-5m", 300) == 0.12   # default_5m
-    assert p.exit_thresh("xrp-up-or-down-15m", 900) == 0.13  # default_15m
+    assert p.exit_thresh("btc-up-or-down-5m", 300) == 0.05
+    assert p.exit_thresh("sol-up-or-down-5m", 300) == 0.05
+    assert p.exit_thresh("eth-up-or-down-5m", 300) == 0.05   # default_5m
+    assert p.exit_thresh("xrp-up-or-down-15m", 900) == 0.05  # default_15m
 
 def test_exit_thresh_override():
     p = BacktestParams(exit_thresh_by_slug={"default_5m": 0.15})
@@ -375,7 +375,7 @@ def test_simulate_exit_uses_btc_threshold_not_default():
     snaps = [
         snap(1.0, 0.50, up_ask=0.49, down_ask=0.51,
              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]),
-        snap(2.0, 0.42, up_ask=0.42, down_ask=0.58),   # 0.50 - 0.42 = +0.08 max_down, below BTC 0.09
+        snap(2.0, 0.46, up_ask=0.46, down_ask=0.54),   # 0.50 - 0.46 = +0.04 max_down, below 0.05
     ]
     w = _simulate_window(snaps, BacktestParams())
     assert w.exit_taken is False

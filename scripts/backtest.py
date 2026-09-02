@@ -40,8 +40,8 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--pair-cost", type=float, default=1.05)
     ap.add_argument("--exit", action="append", default=[],
                     help="key=value, e.g. --exit btc-up-or-down-5m=0.09 (repeatable)")
-    ap.add_argument("--exit-default-5m", type=float, default=0.12)
-    ap.add_argument("--exit-default-15m", type=float, default=0.13)
+    ap.add_argument("--exit-default-5m", type=float, default=0.05)
+    ap.add_argument("--exit-default-15m", type=float, default=0.05)
     ap.add_argument("--exit-reversal", type=float, default=0.02)
     ap.add_argument("--size", type=int, default=120)
     ap.add_argument("--fill-model", choices=["tape", "book", "both", "cross"],

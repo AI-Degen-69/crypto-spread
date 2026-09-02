@@ -250,10 +250,10 @@ def api_backtest(
     offset: float = 0.02,
     queue: float = 0.0,
     pair_cost: float = 1.05,
-    exit_default_5m: float = 0.12,
-    exit_default_15m: float = 0.13,
-    exit_btc_5m: float = 0.09,
-    exit_sol_5m: float = 0.11,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
     exit_reversal: float = 0.02,
     size: int = 5,
     fill_model: str = "cross",
@@ -274,8 +274,8 @@ def api_backtest(
         "default_15m": exit_default_15m,
         "btc-up-or-down-5m": exit_btc_5m,
         "sol-up-or-down-5m": exit_sol_5m,
-        "btc-up-or-down-15m": round(exit_btc_5m + 0.01, 2),
-        "sol-up-or-down-15m": round(exit_sol_5m + 0.01, 2),
+        "btc-up-or-down-15m": exit_btc_5m,
+        "sol-up-or-down-15m": exit_sol_5m,
     }
 
     size = max(5, int(size))
@@ -1762,10 +1762,10 @@ async function runBacktest(fileOverride){
     const queue = getVal('btQueue', 50);
     const pairCostEnabled = $('btPairCostEnabled') ? $('btPairCostEnabled').checked : false;
     const pairCost = pairCostEnabled ? getVal('btPairCost', 1.05) : 0.0;
-    const exit5m = getVal('btExit5m', 0.12);
-    const exit15m = getVal('btExit15m', 0.13);
-    const exitBtc = getVal('btExitBtc', 0.09);
-    const exitSol = getVal('btExitSol', 0.11);
+    const exit5m = getVal('btExit5m', 0.05);
+    const exit15m = getVal('btExit15m', 0.05);
+    const exitBtc = getVal('btExitBtc', 0.05);
+    const exitSol = getVal('btExitSol', 0.05);
     const fillModel = $('btFillModel') ? $('btFillModel').value : 'cross';
     const size = Math.max(5, Math.round(getVal('btSize', 5)));
     if ($('btSize')) $('btSize').value = size;

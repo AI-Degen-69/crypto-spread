@@ -36,7 +36,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 
 ## Data Model / Classification
 - Window classification in `scripts/measure_5m_oscillation.py:125` (`classify_window`): vs base 0.50, `max_up=max(mids)-0.50`, `max_down=0.50-min(mids)`. `oscillating` = both ≥0.02, `monotonic` = one ≥0.02, `flat` = neither. Thresholds at `OSC_THRESH_CENTS=[2.0,3.0]`.
-- Dashboard finding (635 windows): median range 49.5¢, 73% oscillating on 5m, `touch_pair` median ~1.01. Exit thresholds in dashboard are derived stats (BTC 5m +9¢, SOL +11¢, others +12¢, 15m +13¢) — not enforced in collector code.
+- Dashboard finding (635 windows): median range 49.5¢, 73% oscillating on 5m, `touch_pair` median ~1.01. Exit thresholds unified to 5¢ (0.05) across all series and window durations.
 
 ## Gotchas
 - **Polymarket Gasless Operations**: Trading (CLOB orders), CTF pair merges (`mergePositions`), and trading approvals (`setupTradingApprovals`, `approveErc20`, `approveErc1155ForAll`) are sponsored (gasless) when routed via the Polymarket Relayer and smart wallet flow per official docs. Direct on-chain EOA transactions incur native gas. External bridging and wallet funding also incur gas.
