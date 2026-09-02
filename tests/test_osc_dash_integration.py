@@ -436,3 +436,51 @@ def test_api_ticks_verify_endpoint(tmp_path, monkeypatch):
     assert res_missing.status_code == 404
 
 
+def test_api_live_cockpit_endpoints():
+    """Verify live trading cockpit endpoints for state, control, and config."""
+    # 1. GET state
+    res_state = client.get("/api/live/state")
+    assert res_state.status_code == 200
+    d_state = res_state.json()
+    assert "is_running" in d_state
+    assert "portfolio_value" in d_state
+    assert "markets" in d_state
+    assert len(d_state["markets"]) == 5
+    assert "timeline" in d_state
+
+    # 2. POST config
+    res_cfg = client.post("/api/live/config", json={
+        "offset": 0.025,
+        "exit_thresh": 0.06,
+        "shares": 8,
+        "mode": "paper",
+        "starting_balance": 1500.0,
+    })
+    assert res_cfg.status_code == 200
+    d_cfg = res_cfg.json()
+    assert d_cfg["params"]["offset"] == 0.025
+    assert d_cfg["params"]["exit_thresh"] == 0.06
+    assert d_cfg["params"]["shares"] == 8
+    assert d_cfg["starting_balance"] == 1500.0
+
+    # 3. POST control (start, stop, restart, reset_pnl)
+    res_start = client.post("/api/live/control", json={"action": "start"})
+    assert res_start.status_code == 200
+    assert res_start.json()["is_running"] is True
+
+    res_stop = client.post("/api/live/control", json={"action": "stop"})
+    assert res_stop.status_code == 200
+    assert res_stop.json()["is_running"] is False
+
+    res_restart = client.post("/api/live/control", json={"action": "restart"})
+    assert res_restart.status_code == 200
+    assert res_restart.json()["is_running"] is True
+
+    # Stop before resetting
+    client.post("/api/live/control", json={"action": "stop"})
+    res_reset = client.post("/api/live/control", json={"action": "reset_pnl"})
+    assert res_reset.status_code == 200
+    assert res_reset.json()["total_trades"] == 0
+
+
+

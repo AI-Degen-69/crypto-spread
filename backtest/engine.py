@@ -262,14 +262,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             max_down = 0.50 - mid
 
         # "reversal_seen_<side>" = mid has come back toward 0.50 after exceeding
-        # exit_thr on the opposite side -- the current drift is no longer
+        # exit_thr on the adverse side -- the current drift is no longer
         # monotonic, so don't exit. E.g. if max_down >= exit_thr and then mid
         # is now back within exit_reversal of 0.50, the down excursion was a
-        # round-trip and the up drift is unsurprising.
+        # round-trip and the adverse drift is no longer sustained.
         if max_down >= exit_thr and (0.50 - mid) < params.exit_reversal:
-            reversal_seen_up = True
-        if max_up >= exit_thr and (mid - 0.50) < params.exit_reversal:
             reversal_seen_down = True
+        if max_up >= exit_thr and (mid - 0.50) < params.exit_reversal:
+            reversal_seen_up = True
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
@@ -297,25 +297,27 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # if the live book no longer meets the entry gate. Check exit
             # BEFORE updating the reversal flag, otherwise the crossing tick
             # sets the flag and the exit is suppressed.
-            if (filled_up and not filled_down and max_up >= exit_thr
+            if (filled_up and not filled_down and max_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
-                exit_taken = True
-                exit_side = "down"
-                bb_dn = db.get("best_bid") or 0.0
-                pnl_cents += (bb_dn - resting_up) * 100.0
-                fees_cents += _taker_fee(1.0 - bb_dn, params.taker_fee_rate) * 100.0
-            if (filled_down and not filled_up and max_down >= exit_thr
-                    and not reversal_seen_up and not exit_taken):
                 exit_taken = True
                 exit_side = "up"
                 bb_up = ub.get("best_bid") or 0.0
-                pnl_cents += (bb_up - resting_down) * 100.0
-                fees_cents += _taker_fee(1.0 - bb_up, params.taker_fee_rate) * 100.0
+                pnl_cents += (bb_up - resting_up) * 100.0
+                fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+                break
+            if (filled_down and not filled_up and max_up >= exit_thr
+                    and not reversal_seen_up and not exit_taken):
+                exit_taken = True
+                exit_side = "down"
+                bb_dn = db.get("best_bid") or 0.0
+                pnl_cents += (bb_dn - resting_down) * 100.0
+                fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
+                break
             # Update reversal flags before skipping so mid drift isn't lost.
             if max_down >= exit_thr:
-                reversal_seen_up = True
-            if max_up >= exit_thr:
                 reversal_seen_down = True
+            if max_up >= exit_thr:
+                reversal_seen_up = True
             continue
 
         # --- FILL DETECTION (Plan fill_model: tape conservative default, cross for strict through-price fills) ---
@@ -350,39 +352,41 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             if dn_ask is not None and dn_ask <= (resting_down - params.tick_size + 1e-6):
                 filled_down = True
 
-        # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
-        # Check BEFORE we update the reversal flag this tick so the crossing
-        # tick is the exit tick (otherwise the flag toggles the same tick and
-        # the exit is suppressed).
-        if (filled_up and not filled_down and max_up >= exit_thr
-                and not reversal_seen_down and not exit_taken):
-            exit_taken = True
-            exit_side = "down"
-            bb_dn = db.get("best_bid") or 0.0
-            pnl_cents += (bb_dn - resting_up) * 100.0
-            fees_cents += _taker_fee(1.0 - bb_dn, params.taker_fee_rate) * 100.0
-        if (filled_down and not filled_up and max_down >= exit_thr
-                and not reversal_seen_up and not exit_taken):
-            exit_taken = True
-            exit_side = "up"
-            bb_up = ub.get("best_bid") or 0.0
-            pnl_cents += (bb_up - resting_down) * 100.0
-            fees_cents += _taker_fee(1.0 - bb_up, params.taker_fee_rate) * 100.0
-
-        # "reversal_seen_<side>" = the OTHER side has also hit >= exit_thr at some
-        # point, so this drift isn't a one-sided surprise -- don't exit next tick.
-        if max_down >= exit_thr:
-            reversal_seen_up = True
-        if max_up >= exit_thr:
-            reversal_seen_down = True
-
         # --- PAIR COMPLETION ---
-        if filled_up and filled_down and not pair_captured:
+        if filled_up and filled_down and not pair_captured and not exit_taken:
             pair_captured = True
             pnl_cents += (1.00 - (resting_up + resting_down)) * 100.0
             # merge_gas_usd is a per-transaction cost; amortize over the
             # actual shares in the pair so pnl_cents stays per-share.
             pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
+            break
+
+        # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
+        # Check BEFORE we update the reversal flag this tick so the crossing
+        # tick is the exit tick (otherwise the flag toggles the same tick and
+        # the exit is suppressed).
+        if (filled_up and not filled_down and max_down >= exit_thr
+                and not reversal_seen_down and not exit_taken):
+            exit_taken = True
+            exit_side = "up"
+            bb_up = ub.get("best_bid") or 0.0
+            pnl_cents += (bb_up - resting_up) * 100.0
+            fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+            break
+        if (filled_down and not filled_up and max_up >= exit_thr
+                and not reversal_seen_up and not exit_taken):
+            exit_taken = True
+            exit_side = "down"
+            bb_dn = db.get("best_bid") or 0.0
+            pnl_cents += (bb_dn - resting_down) * 100.0
+            fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
+            break
+
+        # "reversal_seen_<side>" = adverse drift has been recorded
+        if max_down >= exit_thr:
+            reversal_seen_down = True
+        if max_up >= exit_thr:
+            reversal_seen_up = True
 
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):
