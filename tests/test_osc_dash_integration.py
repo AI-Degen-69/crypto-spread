@@ -500,6 +500,16 @@ def test_api_live_cockpit_endpoints(monkeypatch):
 
         # Stop before resetting
         client.post("/api/live/control", json={"action": "stop"})
+
+        # 6. POST control demo_data
+        res_demo = client.post("/api/live/control", json={"action": "demo_data"})
+        assert res_demo.status_code == 200
+        d_demo = res_demo.json()
+        assert d_demo["total_trades"] == 7
+        assert d_demo["pairs_merged"] == 6
+        assert len(d_demo["trades"]) == 7
+        assert len(d_demo["timeline"]) == 120
+
         res_reset = client.post("/api/live/control", json={"action": "reset_pnl"})
         assert res_reset.status_code == 200
         assert res_reset.json()["total_trades"] == 0

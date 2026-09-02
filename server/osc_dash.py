@@ -1401,7 +1401,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
-          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" oninput="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
+          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" onchange="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
         </div>
         <div class="form-group">
           <label id="lblCockpitStartBal">Starting Portfolio Balance ($)</label>
@@ -3120,8 +3120,10 @@ function onCockpitChartMouseMove(evt) {
   if (!wrap || !tooltip) return;
 
   const rect = wrap.getBoundingClientRect();
-  const mouseX = evt.clientX - rect.left;
-  const mouseY = evt.clientY - rect.top;
+  const scaleX = rect.width ? ctx.w / rect.width : 1;
+  const clientX = evt.clientX - rect.left;
+  const clientY = evt.clientY - rect.top;
+  const mouseX = clientX * scaleX;
 
   // Clamp within plot bounds
   if (mouseX < ctx.padL - 10 || mouseX > ctx.w - ctx.padR + 10) {
@@ -3202,11 +3204,11 @@ function onCockpitChartMouseMove(evt) {
   tooltip.style.display = 'block';
 
   // Position tooltip relative to chart bounds
-  let tipX = mouseX + 15;
+  let tipX = clientX + 15;
   if (tipX + 190 > rect.width) {
-    tipX = mouseX - 200;
+    tipX = clientX - 200;
   }
-  let tipY = Math.max(8, mouseY - 40);
+  let tipY = Math.max(8, clientY - 40);
   if (tipY + 130 > rect.height) {
     tipY = rect.height - 135;
   }

@@ -14,6 +14,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -28,9 +29,16 @@ CLOB_HOST = "https://clob.polymarket.com"
 _local = threading.local()
 log = logging.getLogger("live_trader")
 
+_ENV_LOADED = False
+_EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
 
 def _load_env_file() -> None:
     """Load key-value pairs from .env if present into os.environ."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    _ENV_LOADED = True
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if not env_path.exists():
         return
@@ -62,8 +70,21 @@ def fetch_polymarket_account_value(
     """
     _load_env_file()
     sess = session or _get_thread_session()
+    errors: List[str] = []
 
-    funder = (wallet_address or "").strip() or os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
+    raw_funder = (wallet_address or "").strip() or os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
+    if raw_funder and not _EVM_ADDR_RE.match(raw_funder):
+        errors.append(f"Invalid EVM wallet address: {raw_funder}")
+        return {
+            "success": False,
+            "wallet_address": raw_funder,
+            "net_value": 0.0,
+            "cash_balance": 0.0,
+            "positions_value": 0.0,
+            "open_positions": 0,
+            "errors": errors,
+        }
+    funder = raw_funder.lower() if raw_funder else ""
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
     api_key = os.getenv("POLY_API_KEY", "")
     api_secret = os.getenv("POLY_API_SECRET", "")
@@ -77,7 +98,6 @@ def fetch_polymarket_account_value(
     cash_balance: Optional[float] = None
     positions_value: float = 0.0
     open_positions_count: int = 0
-    errors: List[str] = []
 
     # 1. CLOB Collateral Cash Balance (via py_clob_client if credentials present)
     if funder and private_key and api_key and api_secret and api_pass:
@@ -122,21 +142,32 @@ def fetch_polymarket_account_value(
             log.debug("Data API positions fetch failed: %s", e)
 
     # 3. Data API /value fallback if cash is still None
+    fallback_val: Optional[float] = None
     if cash_balance is None and funder and funder.startswith("0x"):
         try:
             r_val = sess.get(f"https://data-api.polymarket.com/value?user={funder}", timeout=(3.0, 5.0))
             if r_val.ok:
                 vdata = r_val.json()
                 if isinstance(vdata, list) and len(vdata) > 0 and isinstance(vdata[0], dict):
-                    cash_balance = float(vdata[0].get("value", 0.0) or 0.0)
+                    fallback_val = float(vdata[0].get("value", 0.0) or 0.0)
                 elif isinstance(vdata, dict):
-                    cash_balance = float(vdata.get("value", 0.0) or 0.0)
+                    fallback_val = float(vdata.get("value", 0.0) or 0.0)
         except Exception as e:
             errors.append(f"Data API value error: {e}")
             log.debug("Data API value fetch failed: %s", e)
 
-    net_value = (cash_balance or 0.0) + positions_value
-    success = bool(funder) and (cash_balance is not None or positions_value > 0)
+    has_balance = cash_balance is not None or fallback_val is not None
+    if cash_balance is not None:
+        net_value = cash_balance + positions_value
+    elif fallback_val is not None:
+        # /value from Data API is total portfolio value; cash is remainder
+        net_value = fallback_val
+        cash_balance = max(0.0, net_value - positions_value)
+    else:
+        net_value = positions_value
+        cash_balance = 0.0
+
+    success = bool(funder) and (has_balance or positions_value > 0)
 
     return {
         "success": success,
@@ -824,6 +855,8 @@ class LiveTraderEngine:
 
     def seed_demo_data(self):
         """Populate realistic demo simulation trades, timeline curve, and market states."""
+        if self.is_running:
+            self.stop()
         now = time.time()
         self.trades.clear()
         self.timeline.clear()

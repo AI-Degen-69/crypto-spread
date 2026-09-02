@@ -158,6 +158,81 @@ def test_fetch_polymarket_account_value_mocked(monkeypatch):
     assert res["open_positions"] == 2
 
 
+def test_fetch_polymarket_account_value_fallback_without_double_counting(monkeypatch):
+    from unittest.mock import MagicMock
+    from strategy.live_trader import fetch_polymarket_account_value
+
+    monkeypatch.delenv("POLY_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("POLY_API_KEY", raising=False)
+
+    fake_sess = MagicMock()
+    fake_pos_resp = MagicMock(ok=True)
+    fake_pos_resp.json.return_value = [
+        {"asset": "tok1", "currentValue": 20.00},
+    ]
+    fake_val_resp = MagicMock(ok=True)
+    fake_val_resp.json.return_value = [{"value": 100.00}]
+
+    def mock_get(url, *args, **kwargs):
+        if "positions" in url:
+            return fake_pos_resp
+        elif "value" in url:
+            return fake_val_resp
+        return MagicMock(ok=False)
+
+    fake_sess.get.side_effect = mock_get
+
+    res = fetch_polymarket_account_value(
+        wallet_address="0xee3b778a783510bc833384919f709e3d2fee1624",
+        session=fake_sess,
+    )
+    assert res["success"] is True
+    assert res["wallet_address"] == "0xee3b778a783510bc833384919f709e3d2fee1624"
+    assert res["positions_value"] == 20.00
+    assert res["net_value"] == 100.00
+    assert res["cash_balance"] == 80.00
+    # Confirm no double-counting of positions_value
+    assert res["net_value"] != 120.00
+
+
+def test_fetch_polymarket_account_value_invalid_and_checksum_address(monkeypatch):
+    from unittest.mock import MagicMock
+    from strategy.live_trader import fetch_polymarket_account_value
+
+    monkeypatch.delenv("POLY_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("POLY_API_KEY", raising=False)
+
+    # Invalid address formats
+    res_bad = fetch_polymarket_account_value(wallet_address="not-an-address")
+    assert res_bad["success"] is False
+    assert len(res_bad["errors"]) > 0
+    assert "Invalid EVM wallet address" in res_bad["errors"][0]
+
+    res_short = fetch_polymarket_account_value(wallet_address="0x12345")
+    assert res_short["success"] is False
+    assert "Invalid EVM wallet address" in res_short["errors"][0]
+
+    # Valid mixed-case checksum address should be accepted and lowercased
+    fake_sess = MagicMock()
+    fake_pos_resp = MagicMock(ok=True)
+    fake_pos_resp.json.return_value = []
+    fake_val_resp = MagicMock(ok=True)
+    fake_val_resp.json.return_value = [{"value": 50.0}]
+
+    def mock_get(url, *args, **kwargs):
+        if "positions" in url:
+            return fake_pos_resp
+        return fake_val_resp
+
+    fake_sess.get.side_effect = mock_get
+    res_check = fetch_polymarket_account_value(
+        wallet_address="0xEE3B778A783510BC833384919F709E3D2FEE1624",
+        session=fake_sess,
+    )
+    assert res_check["success"] is True
+    assert res_check["wallet_address"] == "0xee3b778a783510bc833384919f709e3d2fee1624"
+
+
 def test_live_mode_locks_starting_balance(monkeypatch):
     from unittest.mock import patch
     engine = LiveTraderEngine()
@@ -187,7 +262,9 @@ def test_live_mode_locks_starting_balance(monkeypatch):
 
 def test_seed_demo_data():
     engine = LiveTraderEngine()
+    engine.is_running = True  # Verify seed_demo_data stops running engine
     engine.seed_demo_data()
+    assert engine.is_running is False
     state = engine.get_state()
     assert len(state["trades"]) == 7
     assert len(state["timeline"]) == 120
