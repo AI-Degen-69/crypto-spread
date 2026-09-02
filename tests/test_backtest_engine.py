@@ -276,12 +276,12 @@ def test_simulate_cross_model_pair_capture():
     assert w.pnl_cents == 4.0
 
 def test_simulate_cross_model_exit_on_drift():
-    # UP leg crosses to 0.47 on tape and fills; DOWN ask stays at 0.49 (above 0.48 resting, no fill).
-    # Mid drifts to 0.60 (max_up = 0.10 >= 0.08 exit threshold) -> Safety exit triggered.
-    snap1 = snap(1.0, 0.50, up_ask=0.51, down_ask=0.51,
+    # UP leg crosses to 0.47 on tape and fills; DOWN ask stays at 0.53 (above 0.48 resting, no fill).
+    # Mid drifts to 0.40 (max_down = 0.10 >= 0.08 exit threshold) -> Safety exit triggered on UP.
+    snap1 = snap(1.0, 0.48, up_ask=0.49, down_ask=0.53,
                  tape=[{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}])
-    snap2 = snap(2.0, 0.60, up_ask=0.61, down_ask=0.49,
-                 down_bids={"0.39": 100.0})
+    snap2 = snap(2.0, 0.40, up_ask=0.41, down_ask=0.61,
+                 up_bids={"0.39": 100.0})
     w = _simulate_window([snap1, snap2], BacktestParams(
         offset=0.02,
         fill_model="cross",
@@ -290,7 +290,7 @@ def test_simulate_cross_model_exit_on_drift():
     assert w.filled_up is True
     assert w.filled_down is False
     assert w.exit_taken is True
-    assert w.exit_side == "down"
+    assert w.exit_side == "up"
 
 
 
@@ -328,39 +328,54 @@ def test_simulate_pair_cost_gate_zero_disables():
 # --- simulation: exit -----------------------------------------------------
 
 def test_simulate_exit_when_one_side_filled_and_drifts():
-    # mid starts at 0.50, UP fills at 0.48, then mid drifts to 0.62 (>0.09)
+    # mid starts at 0.50, UP fills at 0.48, then mid drifts down to 0.38 (max_down = 0.12 > 0.09)
     snaps = [
-        snap(1.0, 0.50, up_ask=0.49, down_ask=0.49,
+        snap(1.0, 0.50, up_ask=0.49, down_ask=0.51,
              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]),
+        snap(2.0, 0.45, up_ask=0.45, down_ask=0.55),
+        snap(3.0, 0.40, up_ask=0.40, down_ask=0.60),
+        snap(4.0, 0.38, up_ask=0.38, down_ask=0.62),
+    ]
+    w = _simulate_window(snaps, BacktestParams())
+    assert w.filled_up is True
+    assert w.exit_taken is True
+    assert w.exit_side == "up"
+    assert w.pnl_cents < 0   # loss on naked UP
+
+def test_simulate_exit_when_down_filled_and_up_drifts():
+    # DOWN fills at 0.48, mid drifts up to 0.62 (max_up = 0.12 > 0.09 threshold)
+    snaps = [
+        snap(1.0, 0.50, up_ask=0.51, down_ask=0.49,
+             tape=[{"asset": DN_TOKEN, "price": 0.48, "size": 5.0}]),
         snap(2.0, 0.55, up_ask=0.55, down_ask=0.45),
         snap(3.0, 0.60, up_ask=0.60, down_ask=0.40),
         snap(4.0, 0.62, up_ask=0.62, down_ask=0.38),
     ]
     w = _simulate_window(snaps, BacktestParams())
-    assert w.filled_up is True
+    assert w.filled_down is True
     assert w.exit_taken is True
     assert w.exit_side == "down"
     assert w.pnl_cents < 0   # loss on naked DOWN
 
 def test_simulate_no_exit_when_reversal_seen():
-    # Sequence: oscillate first (up excursion setting reversal_seen_down),
-    # then return to 0.50 where UP fills, then drift up past threshold.
+    # Sequence: downward excursion first (setting reversal_seen_down),
+    # then return to 0.50 where UP fills, then drift down past threshold.
     # Because reversal was seen, it does not trigger an exit.
     snaps = [
-        snap(1.0, 0.50, up_ask=0.49, down_ask=0.49),
-        snap(2.0, 0.60, up_ask=0.60, down_ask=0.40),    # +0.10 up excursion -> sets reversal_seen_down
-        snap(3.0, 0.50, up_ask=0.49, down_ask=0.49,
+        snap(1.0, 0.50, up_ask=0.49, down_ask=0.51),
+        snap(2.0, 0.40, up_ask=0.40, down_ask=0.60),    # +0.10 down excursion -> sets reversal_seen_down
+        snap(3.0, 0.50, up_ask=0.49, down_ask=0.51,
              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]), # UP fills at 0.50
-        snap(4.0, 0.60, up_ask=0.60, down_ask=0.40),    # +0.10 up again past 0.09 threshold
+        snap(4.0, 0.40, up_ask=0.40, down_ask=0.60),    # +0.10 down again past 0.09 threshold
     ]
     w = _simulate_window(snaps, BacktestParams(exit_thresh_by_slug={"btc-up-or-down-5m": 0.09}))
     assert w.exit_taken is False
 
 def test_simulate_exit_uses_btc_threshold_not_default():
     snaps = [
-        snap(1.0, 0.50, up_ask=0.49, down_ask=0.49,
+        snap(1.0, 0.50, up_ask=0.49, down_ask=0.51,
              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]),
-        snap(2.0, 0.58, up_ask=0.58, down_ask=0.42),   # +0.08, below BTC 0.09
+        snap(2.0, 0.42, up_ask=0.42, down_ask=0.58),   # 0.50 - 0.42 = +0.08 max_down, below BTC 0.09
     ]
     w = _simulate_window(snaps, BacktestParams())
     assert w.exit_taken is False

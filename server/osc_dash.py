@@ -24,11 +24,14 @@ import time
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
+
+from strategy.live_trader import get_live_trader_engine
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
@@ -668,6 +671,66 @@ def api_delete_tick_file(request: Request, filename: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# --- Live Trading Cockpit Endpoints ---
+
+
+@app.get("/api/live/state")
+def api_live_state():
+    """Return real-time state snapshot of the Live Trading Cockpit engine."""
+    engine = get_live_trader_engine()
+    return engine.get_state()
+
+
+@app.post("/api/live/control")
+async def api_live_control(request: Request):
+    """Control live bot execution (start, stop, restart, reset_pnl)."""
+    _verify_safe_origin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    action = body.get("action", "")
+    engine = get_live_trader_engine()
+    if action == "start":
+        engine.start()
+    elif action == "stop":
+        engine.stop()
+    elif action == "restart":
+        engine.restart()
+    elif action == "reset_pnl":
+        engine.reset_pnl()
+    else:
+        return JSONResponse(status_code=400, content={"error": f"Unknown action '{action}'"})
+    return engine.get_state()
+
+
+class LiveConfigPayload(BaseModel):
+    """Payload schema for live trading cockpit configuration updates."""
+
+    offset: Optional[float] = Field(default=None, ge=0.001, le=0.49)
+    exit_thresh: Optional[float] = Field(default=None, ge=0.001, le=0.50)
+    shares: Optional[int] = Field(default=None, ge=1, le=10000)
+    mode: Optional[str] = Field(default=None, pattern="^(paper|live)$")
+    wallet_address: Optional[str] = None
+    starting_balance: Optional[float] = Field(default=None, ge=0.0)
+
+
+@app.post("/api/live/config")
+def api_live_config(payload: LiveConfigPayload, request: Request):
+    """Update strategy parameters for the live bot."""
+    _verify_safe_origin(request)
+    engine = get_live_trader_engine()
+    state = engine.update_config(
+        offset=payload.offset,
+        exit_thresh=payload.exit_thresh,
+        shares=payload.shares,
+        mode=payload.mode,
+        wallet_address=payload.wallet_address,
+        starting_balance=payload.starting_balance,
+    )
+    return state
+
+
 _upload_locks_mutex = threading.Lock()
 _upload_target_locks: dict[str, threading.Lock] = {}
 
@@ -1010,10 +1073,11 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <h1><span>◆</span> Crypto Spread <span>5m/15m Engine</span></h1>
   <span class="tag">SPREAD-2 · POLYMARKET CLOB</span>
   <div class="nav-tabs" id="main-nav">
-    <button class="tab-btn active" onclick="switchTab('live')" id="tab-btn-live">📡 תצפיות ו-Live Books</button>
-    <button class="tab-btn" onclick="switchTab('backtest')" id="tab-btn-backtest">⚡ סימולטור בקטסט (Sweeper)</button>
-    <button class="tab-btn" onclick="switchTab('summary')" id="tab-btn-summary">📊 סיכום סטטיסטי</button>
-    <button class="tab-btn" onclick="switchTab('ticks')" id="tab-btn-ticks">💾 קובצי Ticks & Ingestion</button>
+    <button class="tab-btn active" onclick="switchTab('cockpit')" id="tab-btn-cockpit">⚡ Live Trading Cockpit</button>
+    <button class="tab-btn" onclick="switchTab('live')" id="tab-btn-live">📡 Live Books & Queue</button>
+    <button class="tab-btn" onclick="switchTab('backtest')" id="tab-btn-backtest">⚡ Backtest Sweeper</button>
+    <button class="tab-btn" onclick="switchTab('summary')" id="tab-btn-summary">📊 Stats Summary</button>
+    <button class="tab-btn" onclick="switchTab('ticks')" id="tab-btn-ticks">💾 Tick Files</button>
   </div>
   <span style="flex:1"></span>
   <div style="display:flex;align-items:center;gap:8px">
@@ -1026,7 +1090,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 
 <div class="wrap">
   <!-- TAB 1: LIVE & RECENT WINDOWS -->
-  <div id="tab-live" class="tab-content active">
+  <div id="tab-live" class="tab-content">
     <div id="goalBar" class="card" style="border-top:2px solid var(--gold)"></div>
     <div id="liveBar" class="card"></div>
     <div id="seriesGrid" class="grid"></div>
@@ -1229,6 +1293,144 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </div>
     </div>
   </div>
+
+  <!-- TAB 5: LIVE TRADING COCKPIT -->
+  <div id="tab-cockpit" class="tab-content active">
+    <!-- Top Control Bar -->
+    <div class="card" style="border-top:2px solid var(--up)">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <h3 style="margin:0;font-size:15px;display:flex;align-items:center;gap:8px">
+            <span>⚡</span> Live Trading Cockpit (5m Markets)
+          </h3>
+          <span id="cockpitStatusPill" class="pill pill-flat" style="font-size:11px;padding:3px 10px;font-weight:700">BOT: STOPPED</span>
+          <span id="cockpitModePill" class="pill" style="font-size:11px;padding:3px 10px;background:rgba(51,201,181,0.15);color:var(--up);border-color:rgba(51,201,181,0.3);font-weight:700">PAPER TRADING</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button id="btnCockpitToggle" class="btn btn-primary" style="font-size:13px;padding:7px 16px" onclick="toggleCockpitBot()">▶ START BOT</button>
+          <button class="btn" style="font-size:13px;padding:7px 14px" onclick="restartCockpitBot()">🔄 RESTART</button>
+          <button class="btn btn-danger" style="font-size:13px;padding:7px 14px" onclick="resetCockpitPnL()">🗑 RESET P&L</button>
+        </div>
+      </div>
+
+      <!-- Config Inputs -->
+      <div class="form-grid" style="margin-top:10px">
+        <div class="form-group">
+          <label>Spread Offset (Rest @ 0.50 - offset)</label>
+          <input type="number" step="0.005" id="cockpitOffset" value="0.02">
+        </div>
+        <div class="form-group">
+          <label>Exit Stop Loss Threshold ($)</label>
+          <input type="number" step="0.01" id="cockpitExit" value="0.05">
+        </div>
+        <div class="form-group">
+          <label>Share Size (per leg)</label>
+          <input type="number" min="1" step="1" id="cockpitShares" value="5">
+        </div>
+        <div class="form-group">
+          <label>Execution Mode</label>
+          <select id="cockpitMode">
+            <option value="paper" selected>Paper Simulation (Live Book)</option>
+            <option value="live">Live Polymarket Orders</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Polymarket Wallet Address (Optional)</label>
+          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)">
+        </div>
+        <div class="form-group">
+          <label>Starting Portfolio Balance ($)</label>
+          <input type="number" step="10" id="cockpitStartBal" value="1000.00">
+        </div>
+        <div class="form-group" style="justify-content:flex-end">
+          <button class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live KPI Summary -->
+    <div class="kpi" id="cockpitKpiBar">
+      <div class="box">
+        <div class="lbl">Total Realized P&L</div>
+        <div class="val" id="cockpitRealizedPnl" style="color:var(--tx)">$0.00</div>
+        <div class="sub" id="cockpitRealizedSub">+0.0%</div>
+      </div>
+      <div class="box">
+        <div class="lbl">Portfolio Net Value</div>
+        <div class="val" id="cockpitPortfolioVal" style="color:var(--gold)">$1,000.00</div>
+        <div class="sub">Live Account Equity</div>
+      </div>
+      <div class="box">
+        <div class="lbl">Win Rate (Pairs / Closed)</div>
+        <div class="val" id="cockpitWinRate" style="color:var(--up)">0.0%</div>
+        <div class="sub" id="cockpitTradesSummary">0 trades</div>
+      </div>
+      <div class="box">
+        <div class="lbl">Pairs Merged ($1.00)</div>
+        <div class="val" id="cockpitPairsCount" style="color:var(--up)">0</div>
+        <div class="sub">Completed pairs</div>
+      </div>
+      <div class="box">
+        <div class="lbl">Stops Triggered (0.05)</div>
+        <div class="val" id="cockpitStopsCount" style="color:var(--down)">0</div>
+        <div class="sub">Protected exits</div>
+      </div>
+      <div class="box">
+        <div class="lbl">Active Exposure</div>
+        <div class="val" id="cockpitExposure" style="color:var(--dim)">$0.00</div>
+        <div class="sub">Capital at risk</div>
+      </div>
+    </div>
+
+    <!-- Interactive Real-Time Equity Curve Card -->
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <h3 style="margin:0;display:flex;align-items:center;gap:8px">
+          <span>📈</span> Real-Time Equity & Performance Curve
+        </h3>
+        <div style="display:flex;align-items:center;gap:6px">
+          <button id="btnChartModeTotal" class="btn btn-primary" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('total')">Portfolio Total Net Value ($)</button>
+          <button id="btnChartModeUsd" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_usd')">5-Market P&L Breakdown ($)</button>
+          <button id="btnChartModePct" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_pct')">5-Market Return Breakdown (%)</button>
+        </div>
+      </div>
+      <div id="cockpitChartWrap" style="height:260px;width:100%;position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+        <div id="cockpitSvgWrap" style="width:100%;height:100%"></div>
+      </div>
+      <div id="cockpitChartLegend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;align-items:center" class="mono"></div>
+    </div>
+
+    <!-- 5-Market Live Matrix -->
+    <div class="card" style="margin-top:12px">
+      <h3 style="margin:0 0 10px">🎯 5-Minute Live Market Matrix (BTC, ETH, BNB, SOL, XRP)</h3>
+      <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(5, 1fr);gap:10px"></div>
+    </div>
+
+    <!-- Live Trade History Log -->
+    <div class="card" style="margin-top:12px">
+      <h3 style="margin:0 0 8px">📋 Live Execution Trade Log</h3>
+      <div style="max-height:300px;overflow-y:auto">
+        <table class="tbl" id="cockpitTradesTable">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Market</th>
+              <th>Action</th>
+              <th>Shares</th>
+              <th>Entry UP / DOWN</th>
+              <th>Exit / Merge</th>
+              <th>P&L ($)</th>
+              <th>Return (%)</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="cockpitTradesBody">
+            <tr><td colspan="9" style="text-align:center;color:var(--dim);padding:20px">No completed executions in this session yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1256,6 +1458,7 @@ function switchTab(name){
   const cont = $('tab-'+name);
   if(btn) btn.classList.add('active');
   if(cont) cont.classList.add('active');
+  if(name==='cockpit') fetchCockpitState();
   if(name==='backtest' && !equityChartInstance) runBacktest();
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
@@ -2091,6 +2294,463 @@ async function uploadFileStream(file){
   }
 }
 
+// --- LIVE TRADING COCKPIT LOGIC ---
+let activeCockpitChartMode = 'total';
+let cockpitState = null;
+const COCKPIT_SERIES = [
+  { slug: 'btc-up-or-down-5m', label: 'BTC 5m', color: '#f7931a' },
+  { slug: 'eth-up-or-down-5m', label: 'ETH 5m', color: '#627eea' },
+  { slug: 'bnb-up-or-down-5m', label: 'BNB 5m', color: '#f3ba2f' },
+  { slug: 'sol-up-or-down-5m', label: 'SOL 5m', color: '#14f195' },
+  { slug: 'xrp-up-or-down-5m', label: 'XRP 5m', color: '#00aae4' },
+];
+
+async function fetchCockpitState() {
+  try {
+    const res = await fetch('/api/live/state', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    cockpitState = data;
+    renderCockpitUI(data);
+  } catch (e) {
+    console.error('Failed fetching cockpit state', e);
+  }
+}
+
+async function toggleCockpitBot() {
+  if (!cockpitState) await fetchCockpitState();
+  const nextAction = cockpitState && cockpitState.is_running ? 'stop' : 'start';
+  $('btnCockpitToggle').textContent = 'Loading...';
+  try {
+    const res = await fetch('/api/live/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: nextAction }),
+    });
+    const st = await res.json();
+    cockpitState = st;
+    renderCockpitUI(st);
+  } catch (e) {
+    alert('Error toggling bot: ' + e);
+  }
+}
+
+async function restartCockpitBot() {
+  try {
+    const res = await fetch('/api/live/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'restart' }),
+    });
+    const st = await res.json();
+    cockpitState = st;
+    renderCockpitUI(st);
+  } catch (e) {
+    alert('Error restarting bot: ' + e);
+  }
+}
+
+async function resetCockpitPnL() {
+  if (!confirm('Are you sure you want to reset session P&L and trade history?')) return;
+  try {
+    const res = await fetch('/api/live/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'reset_pnl' }),
+    });
+    const st = await res.json();
+    cockpitState = st;
+    renderCockpitUI(st);
+  } catch (e) {
+    alert('Error resetting PnL: ' + e);
+  }
+}
+
+async function applyCockpitConfig() {
+  const offset = parseFloat($('cockpitOffset').value) || 0.02;
+  const exit_thresh = parseFloat($('cockpitExit').value) || 0.05;
+  const shares = parseInt($('cockpitShares').value, 10) || 5;
+  const mode = $('cockpitMode').value || 'paper';
+  const wallet = $('cockpitWallet').value.trim();
+  const startBal = parseFloat($('cockpitStartBal').value) || 1000.0;
+
+  try {
+    const res = await fetch('/api/live/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        offset,
+        exit_thresh,
+        shares,
+        mode,
+        wallet_address: wallet,
+        starting_balance: startBal,
+      }),
+    });
+    const st = await res.json();
+    cockpitState = st;
+    renderCockpitUI(st);
+  } catch (e) {
+    alert('Error applying config: ' + e);
+  }
+}
+
+function setCockpitChartMode(mode) {
+  activeCockpitChartMode = mode;
+  $('btnChartModeTotal').className = mode === 'total' ? 'btn btn-primary' : 'btn';
+  $('btnChartModeUsd').className = mode === 'breakdown_usd' ? 'btn btn-primary' : 'btn';
+  $('btnChartModePct').className = mode === 'breakdown_pct' ? 'btn btn-primary' : 'btn';
+  if (cockpitState) {
+    renderCockpitChart(cockpitState.timeline, mode, cockpitState.starting_balance);
+  }
+}
+
+function renderCockpitUI(st) {
+  if (!st) return;
+
+  // 1. Status Badges & Buttons
+  const isRun = !!st.is_running;
+  const statusPill = $('cockpitStatusPill');
+  if (statusPill) {
+    statusPill.textContent = isRun ? '🟢 BOT: RUNNING (1s)' : '⚪ BOT: STOPPED';
+    statusPill.className = isRun ? 'pill pill-osc' : 'pill pill-flat';
+    statusPill.style.color = isRun ? 'var(--up)' : 'var(--dim)';
+  }
+
+  const modePill = $('cockpitModePill');
+  if (modePill) {
+    modePill.textContent = (st.mode || 'paper').toUpperCase() + ' TRADING';
+    modePill.style.background = st.mode === 'live' ? 'rgba(240,104,77,0.15)' : 'rgba(51,201,181,0.15)';
+    modePill.style.color = st.mode === 'live' ? 'var(--down)' : 'var(--up)';
+    modePill.style.borderColor = st.mode === 'live' ? 'rgba(240,104,77,0.4)' : 'rgba(51,201,181,0.4)';
+  }
+
+  const toggleBtn = $('btnCockpitToggle');
+  if (toggleBtn) {
+    toggleBtn.textContent = isRun ? '⏹ STOP BOT' : '▶ START BOT';
+    toggleBtn.className = isRun ? 'btn btn-danger' : 'btn btn-primary';
+  }
+
+  // 2. KPI Boxes
+  const pnlUsd = st.total_pnl || 0.0;
+  const pnlPct = st.total_pnl_pct || 0.0;
+  const realPnlEl = $('cockpitRealizedPnl');
+  if (realPnlEl) {
+    realPnlEl.textContent = (pnlUsd >= 0 ? '+' : '') + '$' + pnlUsd.toFixed(2);
+    realPnlEl.style.color = pnlUsd > 0 ? 'var(--up)' : pnlUsd < 0 ? 'var(--down)' : 'var(--tx)';
+  }
+  const realSubEl = $('cockpitRealizedSub');
+  if (realSubEl) {
+    realSubEl.textContent = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '% return';
+    realSubEl.style.color = pnlPct > 0 ? 'var(--up)' : pnlPct < 0 ? 'var(--down)' : 'var(--dim)';
+  }
+
+  const portValEl = $('cockpitPortfolioVal');
+  if (portValEl) {
+    portValEl.textContent = '$' + (st.portfolio_value || 1000.0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  const winRateEl = $('cockpitWinRate');
+  if (winRateEl) {
+    winRateEl.textContent = (st.win_rate || 0.0).toFixed(1) + '%';
+  }
+  const tradesSumEl = $('cockpitTradesSummary');
+  if (tradesSumEl) {
+    tradesSumEl.textContent = `${st.total_trades || 0} trades`;
+  }
+
+  const pairsCountEl = $('cockpitPairsCount');
+  if (pairsCountEl) pairsCountEl.textContent = String(st.pairs_merged || 0);
+
+  const stopsCountEl = $('cockpitStopsCount');
+  if (stopsCountEl) stopsCountEl.textContent = String(st.stops_triggered || 0);
+
+  const expEl = $('cockpitExposure');
+  if (expEl) expEl.textContent = '$' + (st.active_exposure || 0.0).toFixed(2);
+
+  // 3. Render 5-Market Live Matrix Grid
+  const gridEl = $('cockpitMarketGrid');
+  if (gridEl && st.markets) {
+    let gridHtml = '';
+    for (const item of COCKPIT_SERIES) {
+      const m = st.markets[item.slug] || {};
+      const midStr = m.mid != null ? `$${m.mid.toFixed(3)}` : '-';
+      const spreadStr = m.spread != null ? `touch ${m.spread.toFixed(3)}` : 'touch -';
+      const remStr = m.time_remaining_sec != null ? hms(m.time_remaining_sec) : '-';
+      const mktPnl = m.total_pnl_usd || 0.0;
+      const pnlColor = mktPnl > 0 ? 'var(--up)' : mktPnl < 0 ? 'var(--down)' : 'var(--tx)';
+
+      let statusBadgeCls = 'pill-flat';
+      let statusText = m.status || 'IDLE';
+      if (m.status === 'QUOTING') { statusBadgeCls = 'pill-flat'; statusText = 'QUOTING BIDS'; }
+      else if (m.status === 'FILLED_UP') { statusBadgeCls = 'pill-mono'; statusText = 'FILLED UP'; }
+      else if (m.status === 'FILLED_DOWN') { statusBadgeCls = 'pill-mono'; statusText = 'FILLED DOWN'; }
+      else if (m.status === 'PAIR_MERGED') { statusBadgeCls = 'pill-osc'; statusText = 'PAIR MERGED'; }
+      else if (m.status === 'STOP_EXIT') { statusBadgeCls = 'pill-mono'; statusText = 'STOPPED OUT'; }
+
+      let posStr = 'FLAT';
+      if (m.filled_up && m.filled_down) { posStr = `MERGED PAIR (${m.order_shares || 5})`; }
+      else if (m.filled_up) { posStr = `LONG UP (${m.order_shares || 5}) @ $${(m.resting_up || 0.48).toFixed(2)}`; }
+      else if (m.filled_down) { posStr = `LONG DOWN (${m.order_shares || 5}) @ $${(m.resting_down || 0.48).toFixed(2)}`; }
+
+      gridHtml += `
+        <div class="card" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin:0;display:flex;flex-direction:column;justify-content:space-between">
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${item.color}"></span>
+                <span style="font:700 13px var(--disp);letter-spacing:0.04em">${item.label}</span>
+              </div>
+              <span class="mono" style="font-size:11px;color:var(--gold);font-weight:600">⏱ ${remStr}</span>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin:6px 0">
+              <span class="mono" style="font-size:17px;font-weight:700">${midStr}</span>
+              <span class="mono" style="font-size:10px;color:var(--dim)">${spreadStr}</span>
+            </div>
+
+            <div class="mono" style="font-size:10px;color:var(--dim);margin-bottom:8px;line-height:1.4">
+              UP: ${fmtPrice(m.up_bid)} / ${fmtPrice(m.up_ask)}<br>
+              DN: ${fmtPrice(m.down_bid)} / ${fmtPrice(m.down_ask)}
+            </div>
+
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
+              <div style="font-size:9px;color:var(--faint);font-weight:700;text-transform:uppercase;margin-bottom:2px">Orders & Position</div>
+              <div class="mono" style="font-size:11px;font-weight:600;color:var(--tx)">${posStr}</div>
+              <div class="mono" style="font-size:10px;color:var(--dim)">Bids: $${(m.resting_up || 0.48).toFixed(2)} / $${(m.resting_down || 0.48).toFixed(2)}</div>
+            </div>
+          </div>
+
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
+              <span class="pill ${statusBadgeCls}" style="font-size:9px;padding:2px 6px">${statusText}</span>
+              <span class="mono" style="font-size:12px;font-weight:700;color:${pnlColor}">
+                ${mktPnl >= 0 ? '+' : ''}$${mktPnl.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    gridEl.innerHTML = gridHtml;
+  }
+
+  // 4. Render Execution Trade Log Table
+  const bodyEl = $('cockpitTradesBody');
+  if (bodyEl && st.trades) {
+    if (st.trades.length === 0) {
+      bodyEl.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:20px">No completed executions in this session yet.</td></tr>';
+    } else {
+      let rowsHtml = '';
+      for (const t of st.trades) {
+        const pnlCol = t.pnl_usd >= 0 ? 'var(--up)' : 'var(--down)';
+        const actBadge = t.action === 'PAIR_MERGE'
+          ? '<span class="pill pill-osc">PAIR MERGE</span>'
+          : t.action.startsWith('STOP')
+          ? '<span class="pill pill-mono">STOP EXIT</span>'
+          : '<span class="pill pill-flat">SETTLE</span>';
+
+        const entryStr = t.entry_price_up && t.entry_price_down
+          ? `$${t.entry_price_up.toFixed(2)} + $${t.entry_price_down.toFixed(2)}`
+          : t.entry_price_up
+          ? `UP @ $${t.entry_price_up.toFixed(2)}`
+          : t.entry_price_down
+          ? `DN @ $${t.entry_price_down.toFixed(2)}`
+          : '-';
+
+        const exitStr = t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '-';
+
+        rowsHtml += `
+          <tr>
+            <td class="mono" style="font-size:11px;color:var(--faint)">${esc(t.timestamp)}</td>
+            <td style="font-weight:700">${esc(t.label)}</td>
+            <td>${actBadge}</td>
+            <td class="mono">${t.shares}</td>
+            <td class="mono">${entryStr}</td>
+            <td class="mono">${exitStr}</td>
+            <td class="mono" style="font-weight:700;color:${pnlCol}">${t.pnl_usd >= 0 ? '+' : ''}$${t.pnl_usd.toFixed(2)}</td>
+            <td class="mono" style="color:${pnlCol}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%</td>
+            <td style="font-size:11px;color:var(--dim)">${esc(t.notes || '')}</td>
+          </tr>
+        `;
+      }
+      bodyEl.innerHTML = rowsHtml;
+    }
+  }
+
+  // 5. Render Chart
+  renderCockpitChart(st.timeline, activeCockpitChartMode, st.starting_balance);
+}
+
+function renderCockpitChart(timeline, mode, startingBalance) {
+  const wrap = $('cockpitSvgWrap');
+  const legendEl = $('cockpitChartLegend');
+  if (!wrap) return;
+
+  if (!timeline || timeline.length === 0) {
+    wrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--dim);font-size:12px" class="mono">Engine starting... recording real-time equity timeline.</div>`;
+    if (legendEl) legendEl.innerHTML = '';
+    return;
+  }
+
+  const w = wrap.clientWidth || 800;
+  const h = 250;
+  const padL = 60, padR = 25, padT = 20, padB = 30;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  if (mode === 'total') {
+    const vals = timeline.map(pt => pt.portfolio_value != null ? pt.portfolio_value : startingBalance);
+    let minV = Math.min(...vals, startingBalance);
+    let maxV = Math.max(...vals, startingBalance);
+    if (minV === maxV) { minV -= 10; maxV += 10; }
+    const range = (maxV - minV) || 1;
+
+    const getX = i => padL + (i / Math.max(1, vals.length - 1)) * plotW;
+    const getY = v => padT + (1 - (v - minV) / range) * plotH;
+
+    let pathD = '';
+    let areaD = '';
+    vals.forEach((v, i) => {
+      const x = getX(i);
+      const y = getY(v);
+      if (i === 0) {
+        pathD += `M ${x.toFixed(1)} ${y.toFixed(1)}`;
+        areaD += `M ${x.toFixed(1)} ${y.toFixed(1)}`;
+      } else {
+        pathD += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+        areaD += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+      }
+    });
+
+    const lastX = getX(vals.length - 1);
+    const lastY = getY(vals[vals.length - 1]);
+    const zeroY = getY(startingBalance);
+    areaD += ` L ${lastX.toFixed(1)} ${padT + plotH} L ${padL} ${padT + plotH} Z`;
+
+    const lastVal = vals[vals.length - 1];
+    const diffVal = lastVal - startingBalance;
+    const diffPct = startingBalance > 0 ? (diffVal / startingBalance) * 100 : 0.0;
+    const lineColor = diffVal >= 0 ? '#33c9b5' : '#f0684d';
+
+    let svg = `
+      <svg width="100%" height="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <defs>
+          <linearGradient id="cockpitAreaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="${lineColor}" stop-opacity="0.25"/>
+            <stop offset="100%" stop-color="${lineColor}" stop-opacity="0.0"/>
+          </linearGradient>
+        </defs>
+
+        <!-- Horizontal Gridlines -->
+        <line x1="${padL}" y1="${getY(maxV)}" x2="${w - padR}" y2="${getY(maxV)}" stroke="var(--line)" stroke-dasharray="3,3"/>
+        <line x1="${padL}" y1="${zeroY}" x2="${w - padR}" y2="${zeroY}" stroke="var(--faint)" stroke-dasharray="2,2"/>
+        <line x1="${padL}" y1="${getY(minV)}" x2="${w - padR}" y2="${getY(minV)}" stroke="var(--line)" stroke-dasharray="3,3"/>
+
+        <!-- Y Axis Labels -->
+        <text x="${padL - 8}" y="${getY(maxV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">$${maxV.toFixed(2)}</text>
+        <text x="${padL - 8}" y="${zeroY + 4}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">$${startingBalance.toFixed(2)}</text>
+        <text x="${padL - 8}" y="${getY(minV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">$${minV.toFixed(2)}</text>
+
+        <!-- X Axis Labels (Time) -->
+        <text x="${padL}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)">${timeline[0]?.time_str || ''}</text>
+        <text x="${w - padR}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">${timeline[timeline.length - 1]?.time_str || ''}</text>
+
+        <!-- Shaded Area & Line -->
+        <path d="${areaD}" fill="url(#cockpitAreaGrad)"/>
+        <path d="${pathD}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round"/>
+
+        <!-- Latest Point Pulse -->
+        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4.5" fill="${lineColor}"/>
+        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="7.5" fill="none" stroke="${lineColor}" stroke-opacity="0.5"/>
+      </svg>
+    `;
+    wrap.innerHTML = svg;
+
+    if (legendEl) {
+      legendEl.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:10px;height:10px;background:${lineColor};border-radius:2px"></span>
+          <span>Account Net Value: <strong>$${lastVal.toFixed(2)}</strong> (${diffVal >= 0 ? '+' : ''}$${diffVal.toFixed(2)} / ${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}%)</span>
+        </div>
+      `;
+    }
+  } else {
+    const isDollar = mode === 'breakdown_usd';
+    const seriesKeys = COCKPIT_SERIES.map(s => s.slug);
+
+    let allVals = [];
+    timeline.forEach(pt => {
+      const src = isDollar ? (pt.pnl_usd || {}) : (pt.pnl_pct || {});
+      seriesKeys.forEach(k => {
+        allVals.push(src[k] != null ? src[k] : 0.0);
+      });
+    });
+
+    let minV = Math.min(...allVals, 0.0);
+    let maxV = Math.max(...allVals, 0.0);
+    if (minV === maxV) { minV -= 1.0; maxV += 1.0; }
+    const range = (maxV - minV) || 1;
+
+    const getX = i => padL + (i / Math.max(1, timeline.length - 1)) * plotW;
+    const getY = v => padT + (1 - (v - minV) / range) * plotH;
+    const zeroY = getY(0.0);
+
+    let linesSvg = '';
+    let legendHtml = '';
+
+    COCKPIT_SERIES.forEach(s => {
+      let pathD = '';
+      let lastVal = 0.0;
+      timeline.forEach((pt, i) => {
+        const src = isDollar ? (pt.pnl_usd || {}) : (pt.pnl_pct || {});
+        const v = src[s.slug] != null ? src[s.slug] : 0.0;
+        lastVal = v;
+        const x = getX(i);
+        const y = getY(v);
+        if (i === 0) pathD += `M ${x.toFixed(1)} ${y.toFixed(1)}`;
+        else pathD += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+      });
+
+      linesSvg += `<path d="${pathD}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round"/>`;
+
+      const valStr = isDollar
+        ? `${lastVal >= 0 ? '+' : ''}$${lastVal.toFixed(2)}`
+        : `${lastVal >= 0 ? '+' : ''}${lastVal.toFixed(1)}%`;
+
+      legendHtml += `
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:10px;height:10px;background:${s.color};border-radius:2px"></span>
+          <span>${s.label}: <strong>${valStr}</strong></span>
+        </div>
+      `;
+    });
+
+    let unit = isDollar ? '$' : '';
+    let suffix = isDollar ? '' : '%';
+
+    let svg = `
+      <svg width="100%" height="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
+        <!-- Zero Baseline -->
+        <line x1="${padL}" y1="${zeroY}" x2="${w - padR}" y2="${zeroY}" stroke="var(--faint)" stroke-dasharray="2,2"/>
+
+        <!-- Y Axis Labels -->
+        <text x="${padL - 8}" y="${getY(maxV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">${unit}${maxV.toFixed(2)}${suffix}</text>
+        <text x="${padL - 8}" y="${zeroY + 4}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">${unit}0.00${suffix}</text>
+        <text x="${padL - 8}" y="${getY(minV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">${unit}${minV.toFixed(2)}${suffix}</text>
+
+        <!-- X Axis Labels (Time) -->
+        <text x="${padL}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)">${timeline[0]?.time_str || ''}</text>
+        <text x="${w - padR}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">${timeline[timeline.length - 1]?.time_str || ''}</text>
+
+        ${linesSvg}
+      </svg>
+    `;
+    wrap.innerHTML = svg;
+    if (legendEl) legendEl.innerHTML = legendHtml;
+  }
+}
+
 function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
@@ -2120,6 +2780,9 @@ function setupBacktestInputListeners(){
 
 setupBacktestInputListeners();
 
+// Initialize polls
+fetchCockpitState();
+setInterval(fetchCockpitState, 1000);
 tick();
 setInterval(tick, 3000);
 </script></body></html>
