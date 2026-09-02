@@ -31,7 +31,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `server/osc_dash.py` — FastAPI dashboard on `:8802`. Routes: `/` + `/oscillation`, `/summary` + `/analysis`, `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/ticks/manifest`, `/api/ticks/verify`, `/api/backtest` (query: offset/queue/pair_cost/exit_* /fill_model).
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
-- `docs/` — `operations.md` (runbook for capture + replay), `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report).
+- `docs/` — `operations.md` (runbook for capture + replay), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report).
 - `tests/` — 95 tests: `test_backtest_engine.py` (41), `test_backtest_index.py` (5), `test_collect_ticks_smoke.py` (8), `test_rebuild_windows.py` (4), `test_verify_tick_data.py` (14), `test_osc_dash_integration.py` (14), `test_sweep_backtest.py` (8), `test_docstrings.py` (1).
 
 ## Data Model / Classification
@@ -40,6 +40,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 
 ## Gotchas
 - **Polymarket Gasless Operations**: Trading (CLOB orders), CTF pair merges (`mergePositions`), and trading approvals (`setupTradingApprovals`, `approveErc20`, `approveErc1155ForAll`) are sponsored (gasless) when routed via the Polymarket Relayer and smart wallet flow per official docs. Direct on-chain EOA transactions incur native gas. External bridging and wallet funding also incur gas.
+- **RTDS Crypto Feed & WebSockets**: `prices.crypto.binance` supports `btcusdt`, `ethusdt`, `solusdt`, `xrpusdt` only (no BNB on Binance or Chainlink RTDS feeds; BNB uses REST fallback). CLOB Market WebSocket (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) supports multi-token subscription on a single socket with 10s PING heartbeat and `custom_feature_enabled` for `best_bid_ask`. Use 1s RTDS ticks as leading price signals for faster stop-loss execution.
 - `run/` is in `.gitignore`; missing `run/*.jsonl` means collector hasn't run — dashboard shows empty state, not an error.
 - Collector uses a pooled `requests.Session` with `(3.05, 5.0)` timeouts (connect, read) and `max_retries=0` — failed markets are skipped for that poll, not retried.
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
