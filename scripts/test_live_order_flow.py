@@ -45,6 +45,15 @@ def main():
     wallet = engine.wallet_address or os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
     print(f"\n[1/5] Checking account credentials for wallet: {wallet or 'NOT CONFIGURED'}")
     
+    if args.dry_run:
+        print(f"      - Cash Collateral:  $0.00 (dry-run)")
+        print(f"      - Net Value:        $0.00 (dry-run)")
+        print(f"      - Open Positions:   0 (dry-run)")
+        print(f"\n[2/5] Fetching active 5m market for {args.series} (dry-run)...")
+        print("\n[DRY RUN] Would place BUY order on UP token @ $%.2f (Size: %s)" % (args.price, args.size))
+        print("[DRY RUN] Test completed successfully.")
+        return 0
+
     acc_info = fetch_polymarket_account_value(wallet)
     print(f"      - Cash Collateral:  ${acc_info.get('cash_balance', 0.0):.2f}")
     print(f"      - Net Value:        ${acc_info.get('net_value', 0.0):.2f}")
@@ -70,11 +79,6 @@ def main():
     print(f"      - UP Token ID:      {up_tok}")
     print(f"      - Time Remaining:   {int(rem)}s")
 
-    if args.dry_run:
-        print("\n[DRY RUN] Would place BUY order on UP token @ $%.2f (Size: %s)" % (args.price, args.size))
-        print("[DRY RUN] Test completed successfully.")
-        return 0
-
     print(f"\n[3/5] Placing REAL test limit BUY order on Polymarket CLOB:")
     print(f"      - Side:             BUY (UP)")
     print(f"      - Price:            ${args.price:.2f} (Resting limit order)")
@@ -95,9 +99,12 @@ def main():
     print(f"     You should see 1 open BUY order for {args.size} shares @ ${args.price:.2f}.")
 
     print(f"\n[4/5] Waiting {args.auto_cancel_sec} seconds before cancelling order...")
-    for remaining in range(args.auto_cancel_sec, 0, -1):
-        print(f"      Cancelling in {remaining}s... (Press Ctrl+C to cancel immediately)", end="\r")
-        time.sleep(1)
+    try:
+        for remaining in range(args.auto_cancel_sec, 0, -1):
+            print(f"      Cancelling in {remaining}s... (Press Ctrl+C to cancel immediately)", end="\r")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[!] Wait interrupted by operator (Ctrl+C). Proceeding to cancellation...")
     print("\n")
 
     print(f"[5/5] Cancelling order {order_id} on CLOB...")

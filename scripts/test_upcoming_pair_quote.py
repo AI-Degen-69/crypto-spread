@@ -77,17 +77,23 @@ def main():
     up_id = res_up.get("order_id") if res_up else None
     dn_id = res_dn.get("order_id") if res_dn else None
 
-    print(f"\n[OK] ORDERS PLACED SUCCESSFULLY!")
     print(f"     UP Order ID:   {up_id or 'FAILED'}")
     print(f"     DOWN Order ID: {dn_id or 'FAILED'}")
+    if not up_id and not dn_id:
+        print("\n[!] Both order placements failed; nothing to cancel.")
+        return 1
+    print("\n[OK] ORDERS PLACED.")
     print(f"\n[>>] CHECK YOUR POLYMARKET UI NOW (Open Orders tab)!")
     print(f"     URL: https://polymarket.com/event/{next_slug}")
     print(f"     You should see BOTH BUY orders resting at ${args.price:.2f}.")
 
     print(f"\n[4/5] Waiting {args.auto_cancel_sec} seconds before cancelling both orders...")
-    for rem in range(args.auto_cancel_sec, 0, -1):
-        print(f"      Cancelling in {rem}s... (Press Ctrl+C to cancel immediately)", end="\r", flush=True)
-        time.sleep(1)
+    try:
+        for rem in range(args.auto_cancel_sec, 0, -1):
+            print(f"      Cancelling in {rem}s... (Press Ctrl+C to cancel immediately)", end="\r", flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[!] Wait interrupted by operator (Ctrl+C). Proceeding to cancellation...")
     print("\n")
 
     print(f"[5/5] Cancelling orders on Polymarket CLOB...")

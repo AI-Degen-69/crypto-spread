@@ -323,6 +323,12 @@ class MarketLiveState:
     next_order_id_down: Optional[str] = None
     next_quoted: bool = False
     
+    # Live Exit Order Tracking
+    order_id_exit_up: Optional[str] = None
+    order_id_exit_down: Optional[str] = None
+    order_status_exit_up: str = "NONE"
+    order_status_exit_down: str = "NONE"
+    
     # Execution status
     status: str = "IDLE"  # IDLE, QUOTING, PRE_QUOTING, FILLED_UP, FILLED_DOWN, PAIR_MERGED, STOP_EXIT, SETTLED
     filled_up: bool = False
@@ -412,6 +418,9 @@ class LiveTraderEngine:
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "Mozilla/5.0"})
         self._clob_client: Optional[Any] = None
+        self._orders_cache: List[Dict[str, Any]] = []
+        self._orders_cache_ts: float = 0.0
+        self.quoting_halted: bool = False
 
     def get_clob_client(self) -> Optional[Any]:
         """Get or lazily initialize authenticated ClobClient."""
@@ -503,6 +512,20 @@ class LiveTraderEngine:
             log.error("Failed placing live quote for %s: %s", token_id, e)
             return {"error": str(e), "order_id": None}
 
+    @staticmethod
+    def _cancel_succeeded(res: Any) -> bool:
+        """Derive boolean result from venue cancellation response."""
+        if res is False:
+            return False
+        if isinstance(res, dict):
+            if res.get("success") is False:
+                return False
+            if res.get("not_canceled"):
+                return False
+            if res.get("error"):
+                return False
+        return True
+
     def cancel_live_order(self, order_id: str) -> bool:
         """Cancel a single active order on Polymarket CLOB."""
         if not order_id:
@@ -515,21 +538,22 @@ class LiveTraderEngine:
                 try:
                     res = client.cancel(order_id)
                     log.info("Cancelled order %s -> %s", order_id, res)
-                    return True
+                    return self._cancel_succeeded(res)
                 except (AttributeError, TypeError):
                     pass
             if hasattr(client, "cancel_orders"):
                 res = client.cancel_orders([order_id])
                 log.info("Cancelled order %s -> %s", order_id, res)
-                return True
-            res = client.cancel_all()
-            return True
+                return self._cancel_succeeded(res)
+            log.error("No single-order cancel API available; refusing cancel_all for %s", order_id)
+            return False
         except Exception as e:
             log.error("Failed cancelling order %s: %s", order_id, e)
             return False
 
     def cancel_all_orders(self) -> Dict[str, Any]:
         """Emergency panic button: Cancel all open orders on CLOB and clear active handles."""
+        self.quoting_halted = True
         cancelled_remote = False
         client = self.get_clob_client()
         if client:
@@ -570,7 +594,10 @@ class LiveTraderEngine:
 
         if client:
             try:
-                from py_clob_client.clob_types import OpenOrderParams
+                try:
+                    from py_clob_client_v2.clob_types import OpenOrderParams
+                except ImportError:
+                    from py_clob_client.clob_types import OpenOrderParams
                 res = client.get_orders(OpenOrderParams())
                 if isinstance(res, list):
                     for o in res:
@@ -664,6 +691,14 @@ class LiveTraderEngine:
                 log.error("Live merge failed for %s: %s", condition_id, e)
                 return {"ok": False, "condition_id": condition_id, "error": str(e)}
 
+            log.error("Live merge skipped for %s: relayer credentials incomplete", condition_id)
+            return {
+                "ok": False,
+                "condition_id": condition_id,
+                "merged": False,
+                "error": "relayer credentials incomplete",
+            }
+
         return {
             "ok": True,
             "condition_id": condition_id,
@@ -695,8 +730,11 @@ class LiveTraderEngine:
         # Recent trades
         recent_trades = [asdict(t) for t in reversed(self.trades[-50:])]
         
-        # Open orders
-        open_orders = self.get_open_orders_list()
+        # Open orders (cached with 5s TTL to avoid blocking requests)
+        if (now - self._orders_cache_ts > 5.0) or not self._orders_cache:
+            self._orders_cache = self.get_open_orders_list()
+            self._orders_cache_ts = now
+        open_orders = self._orders_cache
 
         return {
             "is_running": self.is_running,
@@ -798,6 +836,7 @@ class LiveTraderEngine:
 
     def start(self):
         """Start the background live trading ticker."""
+        self.quoting_halted = False
         if self.is_running:
             return
         self.is_running = True
@@ -1134,7 +1173,7 @@ class LiveTraderEngine:
                 mstate.next_quoted = False
 
         # 2. Advance Pre-Quoting on Next Window (T+1) if live mode is active
-        if self.is_running and self.mode == "live" and mstate.next_condition_id and not mstate.next_quoted:
+        if self.is_running and self.mode == "live" and not self.quoting_halted and mstate.next_condition_id and not mstate.next_quoted:
             resting_up = round(0.50 - self.offset, 3)
             resting_down = round(0.50 - self.offset, 3)
             if mstate.next_up_token and not mstate.next_order_id_up:
@@ -1169,7 +1208,7 @@ class LiveTraderEngine:
 
         # Check for window rollover (condition_id changed or market ended)
         if mstate.condition_id and mstate.condition_id != cid:
-            self._handle_window_rollover(mstate, now)
+            self._handle_window_rollover(mstate, now, cid)
 
         # Update market metadata
         mstate.condition_id = cid
@@ -1229,7 +1268,7 @@ class LiveTraderEngine:
             mstate.reversal_seen_up = True
 
         # --- LIVE ORDER PLACEMENT (if in live mode and orders not placed yet) ---
-        if self.mode == "live" and not mstate.pair_captured and not mstate.exit_taken:
+        if self.mode == "live" and not self.quoting_halted and not mstate.pair_captured and not mstate.exit_taken:
             if not mstate.order_id_up and mstate.up_token:
                 res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
                 if res_up and res_up.get("order_id"):
@@ -1339,6 +1378,38 @@ class LiveTraderEngine:
                     and not mstate.reversal_seen_down):
                 sell_bid = mstate.up_bid
                 if sell_bid is not None:
+                    if self.mode == "live":
+                        # 1. Cancel the unhedged DOWN resting order immediately
+                        if mstate.order_id_down:
+                            self.cancel_live_order(mstate.order_id_down)
+                            mstate.order_status_down = "CANCELLED"
+                        # 2. Market sell the filled UP leg if not yet submitted
+                        if not mstate.order_id_exit_up and mstate.up_token:
+                            res_up = self.place_live_quote(mstate.up_token, sell_bid, self.shares, "SELL")
+                            if res_up and res_up.get("order_id"):
+                                mstate.order_id_exit_up = res_up["order_id"]
+                                mstate.order_status_exit_up = res_up.get("status") or "RESTING"
+
+                        # Defer setting exit_taken and realized_pnl until filled
+                        is_filled = (mstate.order_status_exit_up == "FILLED")
+                        if not is_filled and mstate.order_id_exit_up:
+                            client = self.get_clob_client()
+                            if client:
+                                try:
+                                    ord_info = client.get_order(mstate.order_id_exit_up)
+                                    st = (ord_info.get("status") or "").upper()
+                                    sz = float(ord_info.get("size_matched", 0.0) or 0.0)
+                                    if st in ("MATCHED", "FILLED") or sz >= self.shares:
+                                        is_filled = True
+                                        mstate.order_status_exit_up = "FILLED"
+                                except Exception as e:
+                                    log.debug("[%s] Error checking UP exit order %s: %s", slug, mstate.order_id_exit_up, e)
+
+                        if not is_filled:
+                            mstate.status = "STOP_EXIT_PENDING"
+                            mstate.last_action = f"Stop Loss UP resting @ {sell_bid:.2f}"
+                            return
+
                     mstate.exit_taken = True
                     mstate.exit_side = "UP"
                     mstate.status = "STOP_EXIT"
@@ -1350,15 +1421,6 @@ class LiveTraderEngine:
                     mstate.trades_count += 1
                     mstate.last_action = f"Stop Loss UP @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
                     log.info("[%s] STOP LOSS EXIT (UP) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
-
-                    if self.mode == "live":
-                        # 1. Cancel the unhedged DOWN resting order immediately
-                        if mstate.order_id_down:
-                            self.cancel_live_order(mstate.order_id_down)
-                            mstate.order_status_down = "CANCELLED"
-                        # 2. Market sell the filled UP leg
-                        if mstate.up_token:
-                            self.place_live_quote(mstate.up_token, sell_bid, self.shares, "SELL")
 
                     denom = max(0.01, resting_up * max(1, self.shares))
                     self.trades.append(TradeEvent(
@@ -1382,6 +1444,38 @@ class LiveTraderEngine:
                     and not mstate.reversal_seen_up):
                 sell_bid = mstate.down_bid
                 if sell_bid is not None:
+                    if self.mode == "live":
+                        # 1. Cancel the unhedged UP resting order immediately
+                        if mstate.order_id_up:
+                            self.cancel_live_order(mstate.order_id_up)
+                            mstate.order_status_up = "CANCELLED"
+                        # 2. Market sell the filled DOWN leg if not yet submitted
+                        if not mstate.order_id_exit_down and mstate.down_token:
+                            res_dn = self.place_live_quote(mstate.down_token, sell_bid, self.shares, "SELL")
+                            if res_dn and res_dn.get("order_id"):
+                                mstate.order_id_exit_down = res_dn["order_id"]
+                                mstate.order_status_exit_down = res_dn.get("status") or "RESTING"
+
+                        # Defer setting exit_taken and realized_pnl until filled
+                        is_filled = (mstate.order_status_exit_down == "FILLED")
+                        if not is_filled and mstate.order_id_exit_down:
+                            client = self.get_clob_client()
+                            if client:
+                                try:
+                                    ord_info = client.get_order(mstate.order_id_exit_down)
+                                    st = (ord_info.get("status") or "").upper()
+                                    sz = float(ord_info.get("size_matched", 0.0) or 0.0)
+                                    if st in ("MATCHED", "FILLED") or sz >= self.shares:
+                                        is_filled = True
+                                        mstate.order_status_exit_down = "FILLED"
+                                except Exception as e:
+                                    log.debug("[%s] Error checking DOWN exit order %s: %s", slug, mstate.order_id_exit_down, e)
+
+                        if not is_filled:
+                            mstate.status = "STOP_EXIT_PENDING"
+                            mstate.last_action = f"Stop Loss DOWN resting @ {sell_bid:.2f}"
+                            return
+
                     mstate.exit_taken = True
                     mstate.exit_side = "DOWN"
                     mstate.status = "STOP_EXIT"
@@ -1393,15 +1487,6 @@ class LiveTraderEngine:
                     mstate.trades_count += 1
                     mstate.last_action = f"Stop Loss DOWN @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
                     log.info("[%s] STOP LOSS EXIT (DOWN) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
-
-                    if self.mode == "live":
-                        # 1. Cancel the unhedged UP resting order immediately
-                        if mstate.order_id_up:
-                            self.cancel_live_order(mstate.order_id_up)
-                            mstate.order_status_up = "CANCELLED"
-                        # 2. Market sell the filled DOWN leg
-                        if mstate.down_token:
-                            self.place_live_quote(mstate.down_token, sell_bid, self.shares, "SELL")
 
                     denom = max(0.01, resting_down * max(1, self.shares))
                     self.trades.append(TradeEvent(
@@ -1433,7 +1518,7 @@ class LiveTraderEngine:
 
         mstate.total_pnl_usd = round(mstate.realized_pnl_usd + mstate.unrealized_pnl_usd, 3)
 
-    def _handle_window_rollover(self, mstate: MarketLiveState, now: float):
+    def _handle_window_rollover(self, mstate: MarketLiveState, now: float, new_cid: str = ""):
         """Cleanly settle unresolved positions when window expires and roll to next."""
         # Cancel any unfilled orders from expiring window
         if self.mode == "live":
@@ -1474,8 +1559,8 @@ class LiveTraderEngine:
                 notes="Window expired, position auto-settled",
             ))
 
-        # Promote advance pre-quoted orders from next window if available
-        if mstate.next_quoted and mstate.next_condition_id:
+        # Promote advance pre-quoted orders from next window if available and matching new_cid
+        if mstate.next_quoted and mstate.next_condition_id and (not new_cid or mstate.next_condition_id == new_cid):
             mstate.order_id_up = mstate.next_order_id_up
             mstate.order_id_down = mstate.next_order_id_down
             mstate.order_status_up = "RESTING"
@@ -1485,6 +1570,14 @@ class LiveTraderEngine:
             mstate.next_quoted = False
             log.info("[%s] PROMOTED advance pre-quotes to active live window (UP: %s, DN: %s)", mstate.slug, mstate.order_id_up, mstate.order_id_down)
         else:
+            if self.mode == "live":
+                if mstate.next_order_id_up:
+                    self.cancel_live_order(mstate.next_order_id_up)
+                if mstate.next_order_id_down:
+                    self.cancel_live_order(mstate.next_order_id_down)
+            mstate.next_order_id_up = None
+            mstate.next_order_id_down = None
+            mstate.next_quoted = False
             mstate.order_id_up = None
             mstate.order_id_down = None
             mstate.order_status_up = "NONE"
@@ -1498,6 +1591,10 @@ class LiveTraderEngine:
         mstate.pair_captured = False
         mstate.exit_taken = False
         mstate.exit_side = None
+        mstate.order_id_exit_up = None
+        mstate.order_id_exit_down = None
+        mstate.order_status_exit_up = "NONE"
+        mstate.order_status_exit_down = "NONE"
         mstate.max_up_drift = 0.0
         mstate.max_down_drift = 0.0
         mstate.reversal_seen_up = False

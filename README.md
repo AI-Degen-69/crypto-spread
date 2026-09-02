@@ -19,7 +19,7 @@ python -m scripts.measure_5m_oscillation   # אוסף
 python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # דשבורד
 ```
 
-**הבא:** לבנות בוט עצמאי — config חדש (SPREAD 2 כיעד), quotes `mid-2¢` בשני הצדדים, queue gate 50, pair_cost <0.995, ויציאה מונוטונית לפי הרף פר נכס.
+**הבא (היסטורי):** לבנות בוט עצמאי — config חדש (SPREAD 2 כיעד), quotes `mid-2¢` בשני הצדדים, queue gate 50, pair_cost <0.995, ויציאה מונוטונית לפי הרף פר נכס. (סטטוס נוכחי: מנוע מסחר חי/סימולציה פעיל ב-`strategy/live_trader.py` עם לוח בקרה חי ב-`server/osc_dash.py`).
 
 ## Dashboard Architecture
 

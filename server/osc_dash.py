@@ -44,6 +44,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
+MAX_TEST_ORDER_SHARES = 10.0
 
 
 def _verify_safe_origin(request: Request) -> None:
@@ -758,7 +759,7 @@ async def api_live_cancel_order(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    order_id = (body.get("order_id") or "").strip()
+    order_id = str(body.get("order_id") or "").strip()
     if not order_id:
         return JSONResponse(status_code=400, content={"error": "order_id required"})
     engine = get_live_trader_engine()
@@ -781,12 +782,21 @@ async def api_live_test_order(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    token_id = (body.get("token_id") or "").strip()
-    price = float(body.get("price", 0.05))
-    size = float(body.get("size", 1.0))
-    side = (body.get("side") or "BUY").upper()
+    token_id = str(body.get("token_id") or "").strip()
+    try:
+        price = float(body.get("price", 0.05))
+        size = float(body.get("size", 1.0))
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "price and size must be numeric"})
+    side = str(body.get("side") or "BUY").upper()
     if not token_id:
         return JSONResponse(status_code=400, content={"error": "token_id required"})
+    if not (0.0 < price < 1.0):
+        return JSONResponse(status_code=400, content={"error": "price must be between 0 and 1"})
+    if not (0.0 < size <= MAX_TEST_ORDER_SHARES):
+        return JSONResponse(status_code=400, content={"error": "size out of allowed range"})
+    if side not in ("BUY", "SELL"):
+        return JSONResponse(status_code=400, content={"error": "side must be BUY or SELL"})
     engine = get_live_trader_engine()
     res = engine.place_live_quote(token_id=token_id, price=price, size=size, side=side)
     if not res:
@@ -1528,7 +1538,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 
 <script>
 const $=s=>document.getElementById(s);
-const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const pct=(a,b)=> b?Math.round(a/b*100):0;
 const hms=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`;};
 const fmtUsd=(cents, showPlus=true)=>{
@@ -2448,7 +2458,11 @@ async function panicCancelAllOrders() {
   try {
     const res = await fetch('/api/live/cancel_all', { method: 'POST' });
     const data = await res.json();
-    alert('Panic Cancel completed. All active orders cleared.');
+    if (res.ok && data && data.ok) {
+      alert('Panic Cancel completed. All active orders cleared.');
+    } else {
+      alert('Warning: Panic Cancel failed or was rejected. Orders may still be open!');
+    }
     await fetchCockpitState();
   } catch (e) {
     alert('Error during panic cancel: ' + e);
@@ -2463,6 +2477,10 @@ async function cancelSingleOrder(orderId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ order_id: orderId }),
     });
+    const data = await res.json();
+    if (!res.ok || !data || !data.ok) {
+      alert('Warning: Order cancellation failed or was rejected. Order may still be open!');
+    }
     await fetchCockpitState();
   } catch (e) {
     alert('Error cancelling order: ' + e);
@@ -2768,12 +2786,15 @@ function renderCockpitUI(st) {
             <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
             <td style="font-size:10.5px;color:var(--dim)">${esc(sourceStr)}</td>
             <td>
-              ${canCancel ? `<button class="btn btn-danger" style="font-size:10px;padding:2px 7px" onclick="cancelSingleOrder('${esc(oId)}')">✖ Cancel</button>` : '-'}
+              ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
             </td>
           </tr>
         `;
       }
       ordersBodyEl.innerHTML = ordHtml;
+      ordersBodyEl.querySelectorAll('.cancel-order-btn').forEach(btn => {
+        btn.addEventListener('click', () => cancelSingleOrder(btn.dataset.orderId));
+      });
     }
   }
 

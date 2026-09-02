@@ -539,35 +539,67 @@ def test_osc_dash_live_execution_endpoints(monkeypatch):
     fake_client.get_orders.return_value = [
         {"id": "ord_mock_123", "asset_id": "tok_test_up", "side": "BUY", "price": "0.05", "original_size": "1"}
     ]
-    engine._clob_client = fake_client
+    monkeypatch.setattr(engine, "_clob_client", fake_client)
+    saved_markets = {
+        slug: (
+            m.order_id_up,
+            m.order_id_down,
+            m.next_order_id_up,
+            m.next_order_id_down,
+            m.order_status_up,
+            m.order_status_down,
+            m.next_quoted,
+            m.status,
+            m.last_action,
+        )
+        for slug, m in engine.markets.items()
+    }
+    saved_halted = engine.quoting_halted
 
-    # 1. GET /api/live/orders
-    res_orders = client.get("/api/live/orders")
-    assert res_orders.status_code == 200
-    orders_data = res_orders.json()
-    assert "orders" in orders_data
-    assert len(orders_data["orders"]) >= 1
+    try:
+        # 1. GET /api/live/orders
+        res_orders = client.get("/api/live/orders")
+        assert res_orders.status_code == 200
+        orders_data = res_orders.json()
+        assert "orders" in orders_data
+        assert len(orders_data["orders"]) >= 1
 
-    # 2. POST /api/live/test_order
-    res_test_ord = client.post("/api/live/test_order", json={
-        "token_id": "tok_test_up",
-        "price": 0.05,
-        "size": 1.0,
-        "side": "BUY",
-    })
-    assert res_test_ord.status_code == 200
-    ord_data = res_test_ord.json()
-    assert ord_data["order_id"] == "ord_mock_123"
+        # 2. POST /api/live/test_order
+        res_test_ord = client.post("/api/live/test_order", json={
+            "token_id": "tok_test_up",
+            "price": 0.05,
+            "size": 1.0,
+            "side": "BUY",
+        })
+        assert res_test_ord.status_code == 200
+        ord_data = res_test_ord.json()
+        assert ord_data["order_id"] == "ord_mock_123"
 
-    # 3. POST /api/live/cancel_order
-    res_cancel_single = client.post("/api/live/cancel_order", json={"order_id": "ord_mock_123"})
-    assert res_cancel_single.status_code == 200
-    assert res_cancel_single.json()["ok"] is True
+        # 3. POST /api/live/cancel_order
+        res_cancel_single = client.post("/api/live/cancel_order", json={"order_id": "ord_mock_123"})
+        assert res_cancel_single.status_code == 200
+        assert res_cancel_single.json()["ok"] is True
 
-    # 4. POST /api/live/cancel_all
-    res_cancel_all = client.post("/api/live/cancel_all")
-    assert res_cancel_all.status_code == 200
-    assert res_cancel_all.json()["ok"] is True
+        # 4. POST /api/live/cancel_all
+        res_cancel_all = client.post("/api/live/cancel_all")
+        assert res_cancel_all.status_code == 200
+        assert res_cancel_all.json()["ok"] is True
+    finally:
+        engine.quoting_halted = saved_halted
+        for slug, saved in saved_markets.items():
+            m = engine.markets.get(slug)
+            if m:
+                (
+                    m.order_id_up,
+                    m.order_id_down,
+                    m.next_order_id_up,
+                    m.next_order_id_down,
+                    m.order_status_up,
+                    m.order_status_down,
+                    m.next_quoted,
+                    m.status,
+                    m.last_action,
+                ) = saved
 
 
 

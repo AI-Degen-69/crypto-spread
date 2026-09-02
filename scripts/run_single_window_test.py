@@ -72,6 +72,9 @@ def main():
 
     up_id = res_up.get("order_id") if res_up else None
     dn_id = res_dn.get("order_id") if res_dn else None
+    for leg, res in (("UP", res_up), ("DOWN", res_dn)):
+        if isinstance(res, dict) and res.get("error"):
+            print(f"      - {leg} placement error: {res['error']}")
 
     print(f"      - UP Order ID:   {up_id or 'FAILED'}")
     print(f"      - DOWN Order ID: {dn_id or 'FAILED'}")
@@ -92,6 +95,11 @@ def main():
     exit_taken = False
     max_up_drift = 0.0
     max_down_drift = 0.0
+
+    clob_client = engine.get_clob_client()
+    if not clob_client:
+        print("[!] Error: CLOB client not configured; cannot track fills.")
+        return 1
 
     try:
         while True:
@@ -136,7 +144,7 @@ def main():
                         filled_up = True
                         print(f"\n[!] [FILL CONFIRMED ON CLOB] UP leg FILLED @ ${quote_price:.2f} ({args.shares} shares, status={st_up})!")
                 except Exception as e:
-                    pass
+                    print(f"\n[!] UP order status poll failed: {e}")
 
             if not filled_down and dn_id:
                 try:
@@ -147,7 +155,7 @@ def main():
                         filled_down = True
                         print(f"\n[!] [FILL CONFIRMED ON CLOB] DOWN leg FILLED @ ${quote_price:.2f} ({args.shares} shares, status={st_dn})!")
                 except Exception as e:
-                    pass
+                    print(f"\n[!] DOWN order status poll failed: {e}")
 
             # 1. Both Filled -> Pair Capture & Merge!
             if filled_up and filled_down and not pair_captured:
@@ -161,9 +169,10 @@ def main():
                 break
 
             # 2. Stop Loss Exit Check (if only 1 leg filled and market drifted adversely)
-            if filled_up and not filled_down and max_down_drift >= args.exit_thresh and not exit_taken:
+            cur_down_drift = max(0.0, 0.50 - mid)
+            if filled_up and not filled_down and cur_down_drift >= args.exit_thresh and not exit_taken:
                 exit_taken = True
-                print(f"\n[!] [STOP LOSS] Market dropped adversely (drift: {max_down_drift:.3f} >= {args.exit_thresh:.2f})!")
+                print(f"\n[!] [STOP LOSS] Market dropped adversely (drift: {cur_down_drift:.3f} >= {args.exit_thresh:.2f}, max seen: {max_down_drift:.3f})!")
                 print(f"    Cancelling unhedged DOWN order...")
                 if dn_id:
                     engine.cancel_live_order(dn_id)
@@ -174,9 +183,10 @@ def main():
                     print(f"    [EXIT COMPLETE] Realized Loss: ${loss:.2f} (protected from 100% loss).")
                 break
 
-            if filled_down and not filled_up and max_up_drift >= args.exit_thresh and not exit_taken:
+            cur_up_drift = max(0.0, mid - 0.50)
+            if filled_down and not filled_up and cur_up_drift >= args.exit_thresh and not exit_taken:
                 exit_taken = True
-                print(f"\n[!] [STOP LOSS] Market rallied adversely (drift: {max_up_drift:.3f} >= {args.exit_thresh:.2f})!")
+                print(f"\n[!] [STOP LOSS] Market rallied adversely (drift: {cur_up_drift:.3f} >= {args.exit_thresh:.2f}, max seen: {max_up_drift:.3f})!")
                 print(f"    Cancelling unhedged UP order...")
                 if up_id:
                     engine.cancel_live_order(up_id)
