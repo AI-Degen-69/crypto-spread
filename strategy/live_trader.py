@@ -11,6 +11,8 @@ import datetime
 import json
 import logging
 import math
+import os
+from pathlib import Path
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -23,6 +25,122 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
 
 _local = threading.local()
+
+
+def _load_env_file() -> None:
+    """Load key-value pairs from .env if present into os.environ."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("\"'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception as e:
+        log.debug("Failed loading .env: %s", e)
+
+
+def fetch_polymarket_account_value(
+    wallet_address: Optional[str] = None,
+    session: Optional[requests.Session] = None,
+) -> Dict[str, Any]:
+    """Fetch real Polymarket net account value (USDC collateral cash + open positions).
+    
+    Priority:
+    1. CLOB balance-allowance API via py_clob_client using .env credentials.
+    2. Polymarket Data API positions market value.
+    3. Polymarket Data API portfolio value fallback.
+    """
+    _load_env_file()
+    sess = session or _get_thread_session()
+
+    funder = (wallet_address or "").strip() or os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
+    private_key = os.getenv("POLY_PRIVATE_KEY", "")
+    api_key = os.getenv("POLY_API_KEY", "")
+    api_secret = os.getenv("POLY_API_SECRET", "")
+    api_pass = os.getenv("POLY_API_PASSPHRASE", "")
+    sig_type_str = os.getenv("POLY_SIG_TYPE", "3")
+    try:
+        sig_type = int(sig_type_str)
+    except Exception:
+        sig_type = 3
+
+    cash_balance: Optional[float] = None
+    positions_value: float = 0.0
+    open_positions_count: int = 0
+    errors: List[str] = []
+
+    # 1. CLOB Collateral Cash Balance (via py_clob_client if credentials present)
+    if funder and private_key and api_key and api_secret and api_pass:
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+
+            client = ClobClient(
+                host=CLOB_HOST,
+                key=private_key,
+                chain_id=137,
+                signature_type=sig_type,
+                funder=funder,
+            )
+            client.set_api_creds(ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_pass))
+            bal_res = client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)
+            )
+            if isinstance(bal_res, dict) and "balance" in bal_res:
+                cash_balance = float(bal_res["balance"]) / 1e6
+                log.debug("CLOB collateral cash balance for %s: $%.2f", funder, cash_balance)
+        except Exception as e:
+            errors.append(f"CLOB cash error: {e}")
+            log.debug("CLOB balance fetch failed: %s", e)
+
+    # 2. Polymarket Data API Open Positions Market Value
+    if funder and funder.startswith("0x"):
+        try:
+            r = sess.get(f"https://data-api.polymarket.com/positions?user={funder}", timeout=(3.0, 5.0))
+            if r.ok:
+                data = r.json()
+                if isinstance(data, list):
+                    positions_value = sum(float(p.get("currentValue", 0.0) or 0.0) for p in data)
+                    open_positions_count = len(data)
+                    log.debug("Polymarket positions value for %s: $%.2f across %d positions", funder, positions_value, open_positions_count)
+        except Exception as e:
+            errors.append(f"Positions error: {e}")
+            log.debug("Data API positions fetch failed: %s", e)
+
+    # 3. Data API /value fallback if cash is still None
+    if cash_balance is None and funder and funder.startswith("0x"):
+        try:
+            r_val = sess.get(f"https://data-api.polymarket.com/value?user={funder}", timeout=(3.0, 5.0))
+            if r_val.ok:
+                vdata = r_val.json()
+                if isinstance(vdata, list) and len(vdata) > 0 and isinstance(vdata[0], dict):
+                    cash_balance = float(vdata[0].get("value", 0.0) or 0.0)
+                elif isinstance(vdata, dict):
+                    cash_balance = float(vdata.get("value", 0.0) or 0.0)
+        except Exception as e:
+            errors.append(f"Data API value error: {e}")
+            log.debug("Data API value fetch failed: %s", e)
+
+    net_value = (cash_balance or 0.0) + positions_value
+    success = bool(funder) and (cash_balance is not None or positions_value > 0)
+
+    return {
+        "success": success,
+        "wallet_address": funder,
+        "net_value": round(net_value, 2),
+        "cash_balance": round(cash_balance or 0.0, 2),
+        "positions_value": round(positions_value, 2),
+        "open_positions": open_positions_count,
+        "errors": errors,
+    }
 
 
 def _get_thread_session() -> requests.Session:
@@ -180,9 +298,10 @@ class LiveTraderEngine:
 
     def __init__(self):
         """Initialize the live trading engine with default 5m parameters and markets."""
+        _load_env_file()
         self.is_running: bool = False
         self.mode: str = "paper"  # "paper" or "live"
-        self.wallet_address: str = ""
+        self.wallet_address: str = os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
         self.starting_balance: float = 1000.0
         self.current_portfolio_value: float = 1000.0
         
@@ -222,6 +341,7 @@ class LiveTraderEngine:
     def get_state(self) -> Dict[str, Any]:
         """Return snapshot of entire trading engine state for the UI."""
         now = time.time()
+        env_funder = os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
         
         # Calculate totals
         realized = sum(m.realized_pnl_usd for m in self.markets.values())
@@ -245,7 +365,8 @@ class LiveTraderEngine:
         return {
             "is_running": self.is_running,
             "mode": self.mode,
-            "wallet_address": self.wallet_address,
+            "wallet_address": self.wallet_address or env_funder,
+            "env_wallet_address": env_funder,
             "starting_balance": round(self.starting_balance, 2),
             "portfolio_value": round(portfolio_val, 2),
             "total_pnl": round(total_pnl, 2),
@@ -289,11 +410,25 @@ class LiveTraderEngine:
             self.shares = int(shares)
         if mode in ("paper", "live"):
             self.mode = mode
-        if starting_balance is not None and starting_balance > 0:
-            self.starting_balance = float(starting_balance)
         if wallet_address is not None:
             self.wallet_address = wallet_address.strip()
-            self._schedule_wallet_balance_fetch()
+
+        # Starting balance handling:
+        # In LIVE mode, starting balance is locked to real Polymarket net account value.
+        # In PAPER mode, starting balance can be manually adjusted.
+        if self.mode == "live":
+            addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
+            val_info = fetch_polymarket_account_value(addr)
+            if val_info.get("success"):
+                self.starting_balance = float(val_info["net_value"])
+                if not self.wallet_address and val_info.get("wallet_address"):
+                    self.wallet_address = val_info["wallet_address"]
+                log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
+            else:
+                self._schedule_wallet_balance_fetch()
+        else:
+            if starting_balance is not None and starting_balance >= 0:
+                self.starting_balance = float(starting_balance)
 
         # Update per-market resting prices
         for m in self.markets.values():
@@ -312,19 +447,17 @@ class LiveTraderEngine:
             self._try_fetch_wallet_balance()
 
     def _try_fetch_wallet_balance(self):
-        """Fetch live portfolio balance from Polymarket if wallet address is supplied."""
-        if not self.wallet_address or not self.wallet_address.startswith("0x"):
-            return
+        """Fetch live portfolio balance from Polymarket and update starting_balance if in live mode."""
         try:
-            url = f"https://data-api.polymarket.com/value?user={self.wallet_address}"
-            sess = _get_thread_session()
-            res = sess.get(url, timeout=(3.0, 4.0))
-            if res.ok:
-                data = res.json()
-                val = float(data.get("value") or data.get("portfolioValue") or 0.0)
-                if val > 0:
-                    self.starting_balance = val
-                    log.info("Fetched live Polymarket portfolio balance: $%.2f", val)
+            addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
+            info = fetch_polymarket_account_value(addr)
+            if info.get("success"):
+                net_val = float(info.get("net_value", 0.0))
+                if self.mode == "live":
+                    self.starting_balance = net_val
+                    log.info("Live mode: fetched Polymarket portfolio balance: $%.2f", net_val)
+                if not self.wallet_address and info.get("wallet_address"):
+                    self.wallet_address = info["wallet_address"]
         except Exception as e:
             log.warning("Could not fetch wallet balance: %s", e)
 
@@ -384,6 +517,206 @@ class LiveTraderEngine:
             m.last_action = "PnL Reset"
         # Seed initial timeline point
         self._record_timeline_point(time.time())
+
+    def seed_demo_data(self):
+        """Populate realistic demo simulation trades, timeline curve, and market states."""
+        now = time.time()
+        self.trades.clear()
+        self.timeline.clear()
+        self.session_start_ts = now - 300.0
+
+        demo_trades = [
+            TradeEvent(
+                id=f"btc-up-or-down-5m_{int(now - 280)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 280).strftime("%H:%M:%S"),
+                slug="btc-up-or-down-5m",
+                label="BTC 5m",
+                action="PAIR_MERGE",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=0.48,
+                exit_price=1.00,
+                pnl_usd=0.20,
+                pnl_pct=4.2,
+                notes="Complete spread capture @ 0.48 + 0.48",
+            ),
+            TradeEvent(
+                id=f"eth-up-or-down-5m_{int(now - 240)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 240).strftime("%H:%M:%S"),
+                slug="eth-up-or-down-5m",
+                label="ETH 5m",
+                action="PAIR_MERGE",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=0.48,
+                exit_price=1.00,
+                pnl_usd=0.20,
+                pnl_pct=4.2,
+                notes="Complete spread capture @ 0.48 + 0.48",
+            ),
+            TradeEvent(
+                id=f"sol-up-or-down-5m_{int(now - 200)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 200).strftime("%H:%M:%S"),
+                slug="sol-up-or-down-5m",
+                label="SOL 5m",
+                action="STOP_EXIT_UP",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=None,
+                exit_price=0.43,
+                pnl_usd=-0.25,
+                pnl_pct=-10.4,
+                notes="Adverse drift 0.055 >= 0.05",
+            ),
+            TradeEvent(
+                id=f"bnb-up-or-down-5m_{int(now - 160)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 160).strftime("%H:%M:%S"),
+                slug="bnb-up-or-down-5m",
+                label="BNB 5m",
+                action="PAIR_MERGE",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=0.48,
+                exit_price=1.00,
+                pnl_usd=0.20,
+                pnl_pct=4.2,
+                notes="Complete spread capture @ 0.48 + 0.48",
+            ),
+            TradeEvent(
+                id=f"btc-up-or-down-5m_{int(now - 120)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 120).strftime("%H:%M:%S"),
+                slug="btc-up-or-down-5m",
+                label="BTC 5m",
+                action="PAIR_MERGE",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=0.48,
+                exit_price=1.00,
+                pnl_usd=0.20,
+                pnl_pct=4.2,
+                notes="Complete spread capture @ 0.48 + 0.48",
+            ),
+            TradeEvent(
+                id=f"xrp-up-or-down-5m_{int(now - 80)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 80).strftime("%H:%M:%S"),
+                slug="xrp-up-or-down-5m",
+                label="XRP 5m",
+                action="PAIR_MERGE",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=0.48,
+                exit_price=1.00,
+                pnl_usd=0.20,
+                pnl_pct=4.2,
+                notes="Complete spread capture @ 0.48 + 0.48",
+            ),
+            TradeEvent(
+                id=f"eth-up-or-down-5m_{int(now - 40)}",
+                timestamp=datetime.datetime.fromtimestamp(now - 40).strftime("%H:%M:%S"),
+                slug="eth-up-or-down-5m",
+                label="ETH 5m",
+                action="PAIR_MERGE",
+                shares=5,
+                entry_price_up=0.48,
+                entry_price_down=0.48,
+                exit_price=1.00,
+                pnl_usd=0.20,
+                pnl_pct=4.2,
+                notes="Complete spread capture @ 0.48 + 0.48",
+            ),
+        ]
+        self.trades = demo_trades
+
+        m_btc = self.markets.get("btc-up-or-down-5m")
+        if m_btc:
+            m_btc.realized_pnl_usd = 0.40
+            m_btc.total_pnl_usd = 0.40
+            m_btc.pairs_count = 2
+            m_btc.trades_count = 2
+            m_btc.status = "QUOTING"
+            m_btc.last_action = "Quoting bids @ 0.48 / 0.48"
+
+        m_eth = self.markets.get("eth-up-or-down-5m")
+        if m_eth:
+            m_eth.realized_pnl_usd = 0.40
+            m_eth.total_pnl_usd = 0.40
+            m_eth.pairs_count = 2
+            m_eth.trades_count = 2
+            m_eth.status = "FILLED_UP"
+            m_eth.filled_up = True
+            m_eth.resting_up = 0.48
+            m_eth.last_action = "Filled UP 5 shares @ 0.48"
+
+        m_sol = self.markets.get("sol-up-or-down-5m")
+        if m_sol:
+            m_sol.realized_pnl_usd = -0.25
+            m_sol.total_pnl_usd = -0.25
+            m_sol.stops_count = 1
+            m_sol.trades_count = 1
+            m_sol.status = "STOP_EXIT"
+            m_sol.exit_taken = True
+            m_sol.last_action = "Stop Loss UP @ 0.43 (-$0.25)"
+
+        m_bnb = self.markets.get("bnb-up-or-down-5m")
+        if m_bnb:
+            m_bnb.realized_pnl_usd = 0.20
+            m_bnb.total_pnl_usd = 0.20
+            m_bnb.pairs_count = 1
+            m_bnb.trades_count = 1
+            m_bnb.status = "PAIR_MERGED"
+            m_bnb.pair_captured = True
+            m_bnb.last_action = "Pair Merged! +$0.20"
+
+        m_xrp = self.markets.get("xrp-up-or-down-5m")
+        if m_xrp:
+            m_xrp.realized_pnl_usd = 0.20
+            m_xrp.total_pnl_usd = 0.20
+            m_xrp.pairs_count = 1
+            m_xrp.trades_count = 1
+            m_xrp.status = "QUOTING"
+            m_xrp.last_action = "Quoting bids @ 0.48 / 0.48"
+
+        t_start = int(now - 290)
+        pnl_btc, pnl_eth, pnl_sol, pnl_bnb, pnl_xrp = 0.0, 0.0, 0.0, 0.0, 0.0
+        for step in range(120):
+            t_cur = t_start + (step * 2.5)
+            if step >= 10:
+                pnl_btc = 0.20
+            if step >= 25:
+                pnl_eth = 0.20
+            if step >= 45:
+                pnl_sol = -0.25
+            if step >= 60:
+                pnl_bnb = 0.20
+            if step >= 75:
+                pnl_btc = 0.40
+            if step >= 90:
+                pnl_xrp = 0.20
+            if step >= 105:
+                pnl_eth = 0.40
+
+            tot = pnl_btc + pnl_eth + pnl_sol + pnl_bnb + pnl_xrp
+            p_val = self.starting_balance + tot
+
+            mkt_usd = {
+                "btc-up-or-down-5m": round(pnl_btc, 2),
+                "eth-up-or-down-5m": round(pnl_eth, 2),
+                "bnb-up-or-down-5m": round(pnl_bnb, 2),
+                "sol-up-or-down-5m": round(pnl_sol, 2),
+                "xrp-up-or-down-5m": round(pnl_xrp, 2),
+            }
+            denom = max(0.01, self.shares * 0.48 * 2)
+            mkt_pct = {k: round((v / denom) * 100.0, 1) for k, v in mkt_usd.items()}
+
+            self.timeline.append({
+                "timestamp": int(t_cur),
+                "time_str": datetime.datetime.fromtimestamp(t_cur).strftime("%H:%M:%S"),
+                "portfolio_value": round(p_val, 2),
+                "total_pnl": round(tot, 2),
+                "total_pnl_pct": round((tot / max(1.0, self.starting_balance)) * 100.0, 2),
+                "pnl_usd": mkt_usd,
+                "pnl_pct": mkt_pct,
+            })
 
     async def _run_loop(self):
         """Main async ticker loop (1s resolution)."""

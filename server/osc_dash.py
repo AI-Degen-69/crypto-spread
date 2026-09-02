@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
 
-from strategy.live_trader import get_live_trader_engine
+from strategy.live_trader import get_live_trader_engine, fetch_polymarket_account_value
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
@@ -699,6 +699,8 @@ async def api_live_control(request: Request):
         engine.restart()
     elif action == "reset_pnl":
         engine.reset_pnl()
+    elif action == "demo_data":
+        engine.seed_demo_data()
     else:
         return JSONResponse(status_code=400, content={"error": f"Unknown action '{action}'"})
     return engine.get_state()
@@ -729,6 +731,14 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
         starting_balance=payload.starting_balance,
     )
     return state
+
+
+@app.get("/api/live/account")
+def api_live_account(address: Optional[str] = None):
+    """Fetch live Polymarket net account value, collateral cash, and positions."""
+    engine = get_live_trader_engine()
+    addr = (address or "").strip() or engine.wallet_address or os.getenv("POLY_FUNDER") or ""
+    return fetch_polymarket_account_value(addr)
 
 
 _upload_locks_mutex = threading.Lock()
@@ -1309,6 +1319,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <div style="display:flex;align-items:center;gap:8px">
           <button id="btnCockpitToggle" class="btn btn-primary" style="font-size:13px;padding:7px 16px" onclick="toggleCockpitBot()">▶ START BOT</button>
           <button class="btn" style="font-size:13px;padding:7px 14px" onclick="restartCockpitBot()">🔄 RESTART</button>
+          <button class="btn" style="font-size:13px;padding:7px 14px;background:rgba(243,186,47,0.15);border-color:var(--gold);color:var(--gold);font-weight:700" onclick="loadCockpitDemoData()">🎲 DEMO DATA</button>
           <button class="btn btn-danger" style="font-size:13px;padding:7px 14px" onclick="resetCockpitPnL()">🗑 RESET P&L</button>
         </div>
       </div>
@@ -1329,17 +1340,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label>Execution Mode</label>
-          <select id="cockpitMode">
+          <select id="cockpitMode" onchange="onCockpitModeChange()">
             <option value="paper" selected>Paper Simulation (Live Book)</option>
             <option value="live">Live Polymarket Orders</option>
           </select>
         </div>
         <div class="form-group">
-          <label>Polymarket Wallet Address (Optional)</label>
-          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)">
+          <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
+          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" oninput="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
         </div>
         <div class="form-group">
-          <label>Starting Portfolio Balance ($)</label>
+          <label id="lblCockpitStartBal">Starting Portfolio Balance ($)</label>
           <input type="number" step="10" id="cockpitStartBal" value="1000.00">
         </div>
         <div class="form-group" style="justify-content:flex-end">
@@ -1394,8 +1405,9 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <button id="btnChartModePct" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_pct')">5-Market Return Breakdown (%)</button>
         </div>
       </div>
-      <div id="cockpitChartWrap" style="height:260px;width:100%;position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      <div id="cockpitChartWrap" style="height:270px;width:100%;position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden;user-select:none">
         <div id="cockpitSvgWrap" style="width:100%;height:100%"></div>
+        <div id="cockpitChartTooltip" style="position:absolute;display:none;pointer-events:none;background:rgba(18,22,31,0.96);border:1px solid rgba(255,255,255,0.18);backdrop-filter:blur(8px);border-radius:6px;padding:8px 12px;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-size:11px;z-index:20;color:var(--tx);min-width:180px"></div>
       </div>
       <div id="cockpitChartLegend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;align-items:center" class="mono"></div>
     </div>
@@ -2366,7 +2378,73 @@ async function resetCockpitPnL() {
   }
 }
 
+async function loadCockpitDemoData() {
+  try {
+    const res = await fetch('/api/live/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'demo_data' }),
+    });
+    const st = await res.json();
+    cockpitState = st;
+    renderCockpitUI(st);
+  } catch (e) {
+    alert('Error loading demo data: ' + e);
+  }
+}
+
+let isApplyingCockpitConfig = false;
+
+async function onCockpitModeChange(autoApply = true) {
+  const mode = $('cockpitMode') ? $('cockpitMode').value : 'paper';
+  const startBalInput = $('cockpitStartBal');
+  const walletInput = $('cockpitWallet');
+  const lblStartBal = $('lblCockpitStartBal');
+  const lblWallet = $('lblCockpitWallet');
+
+  if (mode === 'live') {
+    if (startBalInput) {
+      startBalInput.readOnly = true;
+      startBalInput.style.background = 'rgba(240,104,77,0.08)';
+      startBalInput.style.borderColor = 'rgba(240,104,77,0.4)';
+      startBalInput.style.color = 'var(--tx)';
+      startBalInput.style.cursor = 'not-allowed';
+      startBalInput.title = 'Starting balance is locked to real Polymarket net account value in LIVE mode.';
+    }
+    if (lblStartBal) {
+      lblStartBal.innerHTML = 'Starting Balance <span class="pill pill-mono" style="font-size:9px;padding:1px 5px;color:var(--gold);border-color:rgba(243,186,47,0.4)">🔒 LIVE NET VALUE</span>';
+    }
+    if (walletInput && cockpitState && cockpitState.env_wallet_address && !walletInput.value) {
+      walletInput.value = cockpitState.env_wallet_address;
+    }
+    if (lblWallet) {
+      lblWallet.innerHTML = 'Polymarket Wallet Address <span class="pill pill-flat" style="font-size:9px;padding:1px 5px;color:var(--up)">.ENV ACTIVE</span>';
+    }
+  } else {
+    if (startBalInput) {
+      startBalInput.readOnly = false;
+      startBalInput.style.background = '';
+      startBalInput.style.borderColor = '';
+      startBalInput.style.color = '';
+      startBalInput.style.cursor = 'auto';
+      startBalInput.title = '';
+    }
+    if (lblStartBal) {
+      lblStartBal.textContent = 'Starting Portfolio Balance ($)';
+    }
+    if (lblWallet) {
+      lblWallet.textContent = 'Polymarket Wallet Address (Optional)';
+    }
+  }
+
+  if (autoApply && !isApplyingCockpitConfig) {
+    await applyCockpitConfig();
+  }
+}
+
 async function applyCockpitConfig() {
+  if (isApplyingCockpitConfig) return;
+  isApplyingCockpitConfig = true;
   const offset = parseFloat($('cockpitOffset').value) || 0.02;
   const exit_thresh = parseFloat($('cockpitExit').value) || 0.05;
   const shares = parseInt($('cockpitShares').value, 10) || 5;
@@ -2392,6 +2470,8 @@ async function applyCockpitConfig() {
     renderCockpitUI(st);
   } catch (e) {
     alert('Error applying config: ' + e);
+  } finally {
+    isApplyingCockpitConfig = false;
   }
 }
 
@@ -2407,6 +2487,22 @@ function setCockpitChartMode(mode) {
 
 function renderCockpitUI(st) {
   if (!st) return;
+
+  // Sync mode dropdown & lock state only when not actively focused
+  if (st.mode && $('cockpitMode') && document.activeElement !== $('cockpitMode')) {
+    if ($('cockpitMode').value !== st.mode) {
+      $('cockpitMode').value = st.mode;
+    }
+    onCockpitModeChange(false);
+  }
+  if (st.starting_balance != null && $('cockpitStartBal')) {
+    if ($('cockpitStartBal').readOnly || document.activeElement !== $('cockpitStartBal')) {
+      $('cockpitStartBal').value = st.starting_balance.toFixed(2);
+    }
+  }
+  if (st.wallet_address && $('cockpitWallet') && document.activeElement !== $('cockpitWallet')) {
+    $('cockpitWallet').value = st.wallet_address;
+  }
 
   // 1. Status Badges & Buttons
   const isRun = !!st.is_running;
@@ -2582,6 +2678,8 @@ function renderCockpitUI(st) {
   renderCockpitChart(st.timeline, activeCockpitChartMode, st.starting_balance);
 }
 
+let activeCockpitChartContext = null;
+
 function renderCockpitChart(timeline, mode, startingBalance) {
   const wrap = $('cockpitSvgWrap');
   const legendEl = $('cockpitChartLegend');
@@ -2590,20 +2688,40 @@ function renderCockpitChart(timeline, mode, startingBalance) {
   if (!timeline || timeline.length === 0) {
     wrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--dim);font-size:12px" class="mono">Engine starting... recording real-time equity timeline.</div>`;
     if (legendEl) legendEl.innerHTML = '';
+    activeCockpitChartContext = null;
     return;
   }
 
   const w = wrap.clientWidth || 800;
-  const h = 250;
-  const padL = 60, padR = 25, padT = 20, padB = 30;
-  const plotW = w - padL - padR;
-  const plotH = h - padT - padB;
+  const h = 270;
+  const padL = 75, padR = 30, padT = 25, padB = 35;
+  const plotW = Math.max(10, w - padL - padR);
+  const plotH = Math.max(10, h - padT - padB);
+
+  // Time ticks calculation (5 nicely spaced ticks)
+  const timeTicks = [];
+  const nTicks = Math.min(5, timeline.length);
+  for (let k = 0; k < nTicks; k++) {
+    const idx = Math.min(timeline.length - 1, Math.round(k * (timeline.length - 1) / (nTicks - 1 || 1)));
+    timeTicks.push({
+      idx,
+      x: padL + (idx / Math.max(1, timeline.length - 1)) * plotW,
+      timeStr: timeline[idx]?.time_str || '',
+      anchor: k === 0 ? 'start' : k === nTicks - 1 ? 'end' : 'middle',
+    });
+  }
+
+  let svgContent = '';
 
   if (mode === 'total') {
     const vals = timeline.map(pt => pt.portfolio_value != null ? pt.portfolio_value : startingBalance);
     let minV = Math.min(...vals, startingBalance);
     let maxV = Math.max(...vals, startingBalance);
-    if (minV === maxV) { minV -= 10; maxV += 10; }
+    if (minV === maxV) { minV -= 5; maxV += 5; }
+    // Add 8% vertical padding
+    const vPad = (maxV - minV) * 0.08 || 1;
+    minV -= vPad;
+    maxV += vPad;
     const range = (maxV - minV) || 1;
 
     const getX = i => padL + (i / Math.max(1, vals.length - 1)) * plotW;
@@ -2633,7 +2751,38 @@ function renderCockpitChart(timeline, mode, startingBalance) {
     const diffPct = startingBalance > 0 ? (diffVal / startingBalance) * 100 : 0.0;
     const lineColor = diffVal >= 0 ? '#33c9b5' : '#f0684d';
 
-    let svg = `
+    // Y Axis 5 Levels
+    const yLevels = [minV, minV + range * 0.25, minV + range * 0.5, minV + range * 0.75, maxV];
+    let yGridSvg = '';
+    yLevels.forEach(lv => {
+      const yPos = getY(lv);
+      yGridSvg += `
+        <line x1="${padL}" y1="${yPos.toFixed(1)}" x2="${w - padR}" y2="${yPos.toFixed(1)}" stroke="rgba(255,255,255,0.06)" stroke-dasharray="3,3"/>
+        <line x1="${padL - 4}" y1="${yPos.toFixed(1)}" x2="${padL}" y2="${yPos.toFixed(1)}" stroke="rgba(255,255,255,0.2)"/>
+        <text x="${padL - 8}" y="${(yPos + 3.5).toFixed(1)}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">$${lv.toFixed(2)}</text>
+      `;
+    });
+
+    // Baseline Line for Starting Balance
+    let baseLineSvg = '';
+    if (zeroY >= padT && zeroY <= padT + plotH) {
+      baseLineSvg = `
+        <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${w - padR}" y2="${zeroY.toFixed(1)}" stroke="rgba(243,186,47,0.4)" stroke-width="1.2" stroke-dasharray="3,2"/>
+        <text x="${w - padR + 5}" y="${(zeroY + 3.5).toFixed(1)}" fill="var(--gold)" font-size="9" font-family="var(--mono)">Base $${startingBalance.toFixed(2)}</text>
+      `;
+    }
+
+    // X Gridlines & Labels
+    let xGridSvg = '';
+    timeTicks.forEach(tt => {
+      xGridSvg += `
+        <line x1="${tt.x.toFixed(1)}" y1="${padT}" x2="${tt.x.toFixed(1)}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.04)" stroke-dasharray="2,2"/>
+        <line x1="${tt.x.toFixed(1)}" y1="${padT + plotH}" x2="${tt.x.toFixed(1)}" y2="${padT + plotH + 4}" stroke="rgba(255,255,255,0.2)"/>
+        <text x="${tt.x.toFixed(1)}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="${tt.anchor}">${tt.timeStr}</text>
+      `;
+    });
+
+    svgContent = `
       <svg width="100%" height="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
         <defs>
           <linearGradient id="cockpitAreaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -2642,39 +2791,52 @@ function renderCockpitChart(timeline, mode, startingBalance) {
           </linearGradient>
         </defs>
 
-        <!-- Horizontal Gridlines -->
-        <line x1="${padL}" y1="${getY(maxV)}" x2="${w - padR}" y2="${getY(maxV)}" stroke="var(--line)" stroke-dasharray="3,3"/>
-        <line x1="${padL}" y1="${zeroY}" x2="${w - padR}" y2="${zeroY}" stroke="var(--faint)" stroke-dasharray="2,2"/>
-        <line x1="${padL}" y1="${getY(minV)}" x2="${w - padR}" y2="${getY(minV)}" stroke="var(--line)" stroke-dasharray="3,3"/>
+        <!-- Gridlines -->
+        ${yGridSvg}
+        ${xGridSvg}
+        ${baseLineSvg}
 
-        <!-- Y Axis Labels -->
-        <text x="${padL - 8}" y="${getY(maxV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">$${maxV.toFixed(2)}</text>
-        <text x="${padL - 8}" y="${zeroY + 4}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">$${startingBalance.toFixed(2)}</text>
-        <text x="${padL - 8}" y="${getY(minV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">$${minV.toFixed(2)}</text>
-
-        <!-- X Axis Labels (Time) -->
-        <text x="${padL}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)">${timeline[0]?.time_str || ''}</text>
-        <text x="${w - padR}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">${timeline[timeline.length - 1]?.time_str || ''}</text>
+        <!-- Axes Spines -->
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1"/>
+        <line x1="${padL}" y1="${padT + plotH}" x2="${w - padR}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1"/>
 
         <!-- Shaded Area & Line -->
         <path d="${areaD}" fill="url(#cockpitAreaGrad)"/>
         <path d="${pathD}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round"/>
 
         <!-- Latest Point Pulse -->
-        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4.5" fill="${lineColor}"/>
+        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="${lineColor}"/>
         <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="7.5" fill="none" stroke="${lineColor}" stroke-opacity="0.5"/>
+
+        <!-- Interactive Crosshair Layer -->
+        <g id="cockpitCrosshairG" style="display:none;pointer-events:none">
+          <line id="cockpitCrossLine" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(255,255,255,0.4)" stroke-width="1.2" stroke-dasharray="3,3"/>
+          <circle id="cockpitCrossDot" cx="0" cy="0" r="5" fill="#fff" stroke="${lineColor}" stroke-width="2.5"/>
+        </g>
+
+        <!-- Transparent Event Capture Rect -->
+        <rect x="0" y="0" width="${w}" height="${h}" fill="transparent" style="cursor:crosshair" onmousemove="onCockpitChartMouseMove(event)" onmouseleave="onCockpitChartMouseLeave()"/>
       </svg>
     `;
-    wrap.innerHTML = svg;
 
     if (legendEl) {
       legendEl.innerHTML = `
         <div style="display:flex;align-items:center;gap:6px">
           <span style="width:10px;height:10px;background:${lineColor};border-radius:2px"></span>
-          <span>Account Net Value: <strong>$${lastVal.toFixed(2)}</strong> (${diffVal >= 0 ? '+' : ''}$${diffVal.toFixed(2)} / ${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}%)</span>
+          <span>Account Net Value: <strong style="color:var(--tx)">$${lastVal.toFixed(2)}</strong> (<span style="color:${diffVal >= 0 ? 'var(--up)' : 'var(--down)'}">${diffVal >= 0 ? '+' : ''}$${diffVal.toFixed(2)} / ${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}%</span>)</span>
         </div>
       `;
     }
+
+    activeCockpitChartContext = {
+      mode: 'total',
+      timeline,
+      startingBalance,
+      minV, maxV, range,
+      padL, padR, padT, padB, plotW, plotH, w, h,
+      getX, getY,
+      lineColor,
+    };
   } else {
     const isDollar = mode === 'breakdown_usd';
     const seriesKeys = COCKPIT_SERIES.map(s => s.slug);
@@ -2689,12 +2851,48 @@ function renderCockpitChart(timeline, mode, startingBalance) {
 
     let minV = Math.min(...allVals, 0.0);
     let maxV = Math.max(...allVals, 0.0);
-    if (minV === maxV) { minV -= 1.0; maxV += 1.0; }
+    if (minV === maxV) { minV -= 0.5; maxV += 0.5; }
+    const vPad = (maxV - minV) * 0.08 || 0.2;
+    minV -= vPad;
+    maxV += vPad;
     const range = (maxV - minV) || 1;
 
     const getX = i => padL + (i / Math.max(1, timeline.length - 1)) * plotW;
     const getY = v => padT + (1 - (v - minV) / range) * plotH;
     const zeroY = getY(0.0);
+
+    // Y Axis 5 Levels
+    const yLevels = [minV, minV + range * 0.25, minV + range * 0.5, minV + range * 0.75, maxV];
+    let yGridSvg = '';
+    yLevels.forEach(lv => {
+      const yPos = getY(lv);
+      const signStr = lv > 0 ? '+' : '';
+      const lvFmt = isDollar ? `${signStr}$${lv.toFixed(2)}` : `${signStr}${lv.toFixed(1)}%`;
+      yGridSvg += `
+        <line x1="${padL}" y1="${yPos.toFixed(1)}" x2="${w - padR}" y2="${yPos.toFixed(1)}" stroke="rgba(255,255,255,0.06)" stroke-dasharray="3,3"/>
+        <line x1="${padL - 4}" y1="${yPos.toFixed(1)}" x2="${padL}" y2="${yPos.toFixed(1)}" stroke="rgba(255,255,255,0.2)"/>
+        <text x="${padL - 8}" y="${(yPos + 3.5).toFixed(1)}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">${lvFmt}</text>
+      `;
+    });
+
+    // Zero baseline
+    let baseLineSvg = '';
+    if (zeroY >= padT && zeroY <= padT + plotH) {
+      baseLineSvg = `
+        <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${w - padR}" y2="${zeroY.toFixed(1)}" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" stroke-dasharray="2,2"/>
+        <text x="${w - padR + 5}" y="${(zeroY + 3.5).toFixed(1)}" fill="var(--faint)" font-size="9" font-family="var(--mono)">0.00</text>
+      `;
+    }
+
+    // X Gridlines & Labels
+    let xGridSvg = '';
+    timeTicks.forEach(tt => {
+      xGridSvg += `
+        <line x1="${tt.x.toFixed(1)}" y1="${padT}" x2="${tt.x.toFixed(1)}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.04)" stroke-dasharray="2,2"/>
+        <line x1="${tt.x.toFixed(1)}" y1="${padT + plotH}" x2="${tt.x.toFixed(1)}" y2="${padT + plotH + 4}" stroke="rgba(255,255,255,0.2)"/>
+        <text x="${tt.x.toFixed(1)}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="${tt.anchor}">${tt.timeStr}</text>
+      `;
+    });
 
     let linesSvg = '';
     let legendHtml = '';
@@ -2712,7 +2910,7 @@ function renderCockpitChart(timeline, mode, startingBalance) {
         else pathD += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
       });
 
-      linesSvg += `<path d="${pathD}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round"/>`;
+      linesSvg += `<path d="${pathD}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linecap="round"/>`;
 
       const valStr = isDollar
         ? `${lastVal >= 0 ? '+' : ''}$${lastVal.toFixed(2)}`
@@ -2720,35 +2918,162 @@ function renderCockpitChart(timeline, mode, startingBalance) {
 
       legendHtml += `
         <div style="display:flex;align-items:center;gap:6px">
-          <span style="width:10px;height:10px;background:${s.color};border-radius:2px"></span>
-          <span>${s.label}: <strong>${valStr}</strong></span>
+          <span style="width:9px;height:9px;background:${s.color};border-radius:50%"></span>
+          <span>${s.label}: <strong style="color:var(--tx)">${valStr}</strong></span>
         </div>
       `;
     });
 
-    let unit = isDollar ? '$' : '';
-    let suffix = isDollar ? '' : '%';
-
-    let svg = `
+    svgContent = `
       <svg width="100%" height="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">
-        <!-- Zero Baseline -->
-        <line x1="${padL}" y1="${zeroY}" x2="${w - padR}" y2="${zeroY}" stroke="var(--faint)" stroke-dasharray="2,2"/>
+        <!-- Gridlines -->
+        ${yGridSvg}
+        ${xGridSvg}
+        ${baseLineSvg}
 
-        <!-- Y Axis Labels -->
-        <text x="${padL - 8}" y="${getY(maxV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">${unit}${maxV.toFixed(2)}${suffix}</text>
-        <text x="${padL - 8}" y="${zeroY + 4}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">${unit}0.00${suffix}</text>
-        <text x="${padL - 8}" y="${getY(minV) + 4}" fill="var(--dim)" font-size="10" font-family="var(--mono)" text-anchor="end">${unit}${minV.toFixed(2)}${suffix}</text>
+        <!-- Axes Spines -->
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1"/>
+        <line x1="${padL}" y1="${padT + plotH}" x2="${w - padR}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1"/>
 
-        <!-- X Axis Labels (Time) -->
-        <text x="${padL}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)">${timeline[0]?.time_str || ''}</text>
-        <text x="${w - padR}" y="${h - 8}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="end">${timeline[timeline.length - 1]?.time_str || ''}</text>
-
+        <!-- Multi-series Lines -->
         ${linesSvg}
+
+        <!-- Interactive Crosshair Layer -->
+        <g id="cockpitCrosshairG" style="display:none;pointer-events:none">
+          <line id="cockpitCrossLine" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(255,255,255,0.4)" stroke-width="1.2" stroke-dasharray="3,3"/>
+          <g id="cockpitCrossMultiDots"></g>
+        </g>
+
+        <!-- Transparent Event Capture Rect -->
+        <rect x="0" y="0" width="${w}" height="${h}" fill="transparent" style="cursor:crosshair" onmousemove="onCockpitChartMouseMove(event)" onmouseleave="onCockpitChartMouseLeave()"/>
       </svg>
     `;
-    wrap.innerHTML = svg;
+
     if (legendEl) legendEl.innerHTML = legendHtml;
+
+    activeCockpitChartContext = {
+      mode,
+      timeline,
+      isDollar,
+      startingBalance,
+      minV, maxV, range,
+      padL, padR, padT, padB, plotW, plotH, w, h,
+      getX, getY,
+    };
   }
+
+  wrap.innerHTML = svgContent;
+}
+
+function onCockpitChartMouseMove(evt) {
+  const ctx = activeCockpitChartContext;
+  if (!ctx || !ctx.timeline || ctx.timeline.length === 0) return;
+
+  const wrap = $('cockpitChartWrap');
+  const tooltip = $('cockpitChartTooltip');
+  if (!wrap || !tooltip) return;
+
+  const rect = wrap.getBoundingClientRect();
+  const mouseX = evt.clientX - rect.left;
+  const mouseY = evt.clientY - rect.top;
+
+  // Clamp within plot bounds
+  if (mouseX < ctx.padL - 10 || mouseX > ctx.w - ctx.padR + 10) {
+    onCockpitChartMouseLeave();
+    return;
+  }
+
+  const ratio = Math.max(0, Math.min(1, (mouseX - ctx.padL) / ctx.plotW));
+  const idx = Math.round(ratio * (ctx.timeline.length - 1));
+  const pt = ctx.timeline[idx];
+  if (!pt) return;
+
+  const xPos = ctx.getX(idx);
+
+  // Update SVG Crosshair elements
+  const crossG = $('cockpitCrosshairG');
+  const crossLine = $('cockpitCrossLine');
+  if (crossG && crossLine) {
+    crossG.style.display = 'block';
+    crossLine.setAttribute('x1', xPos.toFixed(1));
+    crossLine.setAttribute('x2', xPos.toFixed(1));
+
+    if (ctx.mode === 'total') {
+      const dot = $('cockpitCrossDot');
+      if (dot) {
+        const val = pt.portfolio_value != null ? pt.portfolio_value : ctx.startingBalance;
+        const yPos = ctx.getY(val);
+        dot.setAttribute('cx', xPos.toFixed(1));
+        dot.setAttribute('cy', yPos.toFixed(1));
+      }
+    } else {
+      const multiDotsG = $('cockpitCrossMultiDots');
+      if (multiDotsG) {
+        let dotsSvg = '';
+        const src = ctx.isDollar ? (pt.pnl_usd || {}) : (pt.pnl_pct || {});
+        COCKPIT_SERIES.forEach(s => {
+          const v = src[s.slug] != null ? src[s.slug] : 0.0;
+          const yPos = ctx.getY(v);
+          dotsSvg += `<circle cx="${xPos.toFixed(1)}" cy="${yPos.toFixed(1)}" r="4.5" fill="${s.color}" stroke="#fff" stroke-width="1.5"/>`;
+        });
+        multiDotsG.innerHTML = dotsSvg;
+      }
+    }
+  }
+
+  // Build Tooltip HTML
+  let tooltipHtml = `<div style="font-size:10px;color:var(--gold);font-weight:700;margin-bottom:4px;font-family:var(--mono)">⏱ ${pt.time_str || ''}</div>`;
+
+  if (ctx.mode === 'total') {
+    const val = pt.portfolio_value != null ? pt.portfolio_value : ctx.startingBalance;
+    const diffVal = val - ctx.startingBalance;
+    const diffPct = ctx.startingBalance > 0 ? (diffVal / ctx.startingBalance) * 100 : 0.0;
+    const col = diffVal >= 0 ? 'var(--up)' : 'var(--down)';
+
+    tooltipHtml += `
+      <div style="font-size:13px;font-weight:700;font-family:var(--mono);color:var(--tx);margin-bottom:2px">$${val.toFixed(2)}</div>
+      <div style="font-size:11px;font-family:var(--mono);color:${col}">${diffVal >= 0 ? '+' : ''}$${diffVal.toFixed(2)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}%)</div>
+    `;
+  } else {
+    const src = ctx.isDollar ? (pt.pnl_usd || {}) : (pt.pnl_pct || {});
+    tooltipHtml += `<div style="display:grid;grid-template-columns:auto auto;gap:3px 12px;margin-top:4px;font-family:var(--mono);font-size:10.5px">`;
+    COCKPIT_SERIES.forEach(s => {
+      const v = src[s.slug] != null ? src[s.slug] : 0.0;
+      const vStr = ctx.isDollar ? `${v >= 0 ? '+' : ''}$${v.toFixed(2)}` : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+      const col = v >= 0 ? 'var(--up)' : 'var(--down)';
+      tooltipHtml += `
+        <div style="display:flex;align-items:center;gap:4px">
+          <span style="width:6px;height:6px;background:${s.color};border-radius:50%"></span>
+          <span>${s.label}</span>
+        </div>
+        <div style="text-align:right;font-weight:700;color:${col}">${vStr}</div>
+      `;
+    });
+    tooltipHtml += `</div>`;
+  }
+
+  tooltip.innerHTML = tooltipHtml;
+  tooltip.style.display = 'block';
+
+  // Position tooltip relative to chart bounds
+  let tipX = mouseX + 15;
+  if (tipX + 190 > rect.width) {
+    tipX = mouseX - 200;
+  }
+  let tipY = Math.max(8, mouseY - 40);
+  if (tipY + 130 > rect.height) {
+    tipY = rect.height - 135;
+  }
+
+  tooltip.style.left = `${tipX}px`;
+  tooltip.style.top = `${tipY}px`;
+}
+
+function onCockpitChartMouseLeave() {
+  const crossG = $('cockpitCrosshairG');
+  if (crossG) crossG.style.display = 'none';
+  const tooltip = $('cockpitChartTooltip');
+  if (tooltip) tooltip.style.display = 'none';
 }
 
 function setupBacktestInputListeners(){

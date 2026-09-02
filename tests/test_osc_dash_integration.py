@@ -466,7 +466,26 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert d_cfg["params"]["shares"] == 8
         assert d_cfg["starting_balance"] == 1500.0
 
-        # 3. POST control (start, stop, restart, reset_pnl)
+        # 3. GET /api/live/account
+        res_acc = client.get("/api/live/account")
+        assert res_acc.status_code == 200
+        d_acc = res_acc.json()
+        assert "net_value" in d_acc
+        assert "cash_balance" in d_acc
+        assert "positions_value" in d_acc
+
+        # 4. POST config in LIVE mode (locks starting balance)
+        res_live_cfg = client.post("/api/live/config", json={
+            "mode": "live",
+            "starting_balance": 9999.0,
+        })
+        assert res_live_cfg.status_code == 200
+        d_live = res_live_cfg.json()
+        assert d_live["mode"] == "live"
+        # 9999.0 should not override the real live balance
+        assert d_live["starting_balance"] != 9999.0
+
+        # 5. POST control (start, stop, restart, reset_pnl)
         res_start = client.post("/api/live/control", json={"action": "start"})
         assert res_start.status_code == 200
         assert res_start.json()["is_running"] is True
