@@ -46,6 +46,7 @@ def test_is_fresh_after_rebuild(tmp_path: Path):
     time.sleep(1.05)
     _write_ticks(src, 3)
     assert not is_fresh(src, idx)
+    time.sleep(1.05)
     build_index(src)
     assert is_fresh(src, idx)
 
