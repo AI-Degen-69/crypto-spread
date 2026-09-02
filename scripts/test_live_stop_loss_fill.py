@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import datetime
+import math
 import os
 import sys
 import time
@@ -16,6 +17,90 @@ from strategy.live_trader import (
 from strategy.markets import full_book
 
 
+def _fetch_book_bounded(token_id: str, attempts: int = 3) -> dict | None:
+    """Fetch an order book with bounded retries for malformed structures."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return full_book(CLOB_HOST, token_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            print(f"[!] Invalid order-book response ({attempt}/{attempts}): {exc}")
+            if attempt < attempts:
+                time.sleep(0.25)
+    return None
+
+
+def _confirmed_matched_size(order_info: dict, requested_size: float) -> float:
+    """Return a finite, non-negative matched size capped at the order size."""
+    matched_size = float(order_info.get("size_matched", 0.0) or 0.0)
+    if not math.isfinite(matched_size) or matched_size < 0:
+        raise ValueError(f"invalid matched size: {matched_size}")
+    return min(requested_size, matched_size)
+
+
+def _liquidate_position(engine, clob_client, token_id: str, size: float, buy_price: float) -> int:
+    """Submit an exit and report only the quantity confirmed as matched."""
+    cur_book = _fetch_book_bounded(token_id)
+    if cur_book is None:
+        print("[!] Order book remained invalid; using a conservative fallback exit price.")
+        raw_bid = buy_price - 0.05
+    else:
+        raw_bid = cur_book.get("best_bid") or (buy_price - 0.05)
+    sell_price = round(max(0.01, min(0.99, float(raw_bid))), 2)
+
+    print(f"      Sending immediate SELL order: {size} shares @ ${sell_price:.2f}...")
+    sell_res = engine.place_live_quote(token_id=token_id, price=sell_price, size=size, side="SELL")
+    sell_id = sell_res.get("order_id")
+    if not sell_id:
+        print(f"[!] EXIT PLACEMENT FAILED: {sell_res}")
+        print(f"[!] REMAINING EXPOSURE: {size} shares require manual liquidation.")
+        return 1
+    print(f"      Sell Order ID: {sell_id} (status: {sell_res.get('status')})")
+
+    matched_size = 0.0
+    cancel_confirmed = True
+    for _ in range(8):
+        time.sleep(1)
+        try:
+            sell_info = clob_client.get_order(sell_id)
+            matched_size = max(matched_size, _confirmed_matched_size(sell_info, size))
+        except Exception as exc:
+            print(f"[!] Could not read sell fill status: {exc}")
+            continue
+        if matched_size >= size:
+            break
+
+    if matched_size < size:
+        cancel_confirmed = engine.cancel_live_order(sell_id)
+        if not cancel_confirmed:
+            print(f"[!] Could not confirm cancellation of unfilled sell order {sell_id}.")
+        try:
+            final_info = clob_client.get_order(sell_id)
+            matched_size = max(matched_size, _confirmed_matched_size(final_info, size))
+        except Exception as exc:
+            print(f"[!] Could not verify final sell fill after cancellation: {exc}")
+
+    matched_size = min(size, matched_size)
+    remaining_size = max(0.0, size - matched_size)
+    pnl = (sell_price - buy_price) * matched_size
+    if remaining_size == 0:
+        print(f"[OK] SELL FILL CONFIRMED: Sold {matched_size} shares @ ${sell_price:.2f}!")
+
+    print("\n" + "=" * 80)
+    print(" [*] STOP-LOSS EXPERIMENT SUMMARY")
+    print("=" * 80)
+    print(f" - Bought:        {size} shares @ ${buy_price:.2f} (${buy_price * size:.2f})")
+    print(f" - Sold:          {matched_size} shares @ ${sell_price:.2f} (${sell_price * matched_size:.2f})")
+    print(f" - Realized PnL:  {pnl:+.2f}$ (confirmed filled quantity only)")
+    if remaining_size > 0:
+        print(f" - REMAINING EXPOSURE: {remaining_size} shares not confirmed sold")
+        if cancel_confirmed:
+            print("   Manual liquidation is required.")
+        else:
+            print("   Sell cancellation is unconfirmed; inspect the order before taking manual action.")
+    print("=" * 80)
+    return 1 if remaining_size > 0 else 0
+
+
 def main():
     """Execute live buy fill and stop-loss exit demonstration."""
     parser = argparse.ArgumentParser(description="Live Buy Fill and Stop-Loss Exit Demonstration")
@@ -23,17 +108,14 @@ def main():
     parser.add_argument("--side", choices=["UP", "DOWN"], default="UP", help="Which outcome token to buy (UP or DOWN)")
     parser.add_argument("--size", type=float, default=5.0, help="Number of shares (default: 5 - Polymarket minimum)")
     parser.add_argument("--exit-thresh", type=float, default=0.02, help="Stop loss drift threshold in cents (default: $0.02)")
+    parser.add_argument("--max-wait-sec", type=int, default=30, help="Max seconds to wait before safety exit (default: 30s)")
     args = parser.parse_args()
-
-    if args.size <= 0:
-        print("[!] Error: --size must be positive.")
-        return 1
-    if args.exit_thresh < 0:
-        print("[!] Error: --exit-thresh must be non-negative.")
-        return 1
+    if not math.isfinite(args.size) or args.size <= 0:
+        parser.error("--size must be positive")
+    if not math.isfinite(args.exit_thresh) or args.exit_thresh < 0:
+        parser.error("--exit-thresh must be non-negative")
     if args.max_wait_sec <= 0:
-        print("[!] Error: --max-wait-sec must be positive.")
-        return 1
+        parser.error("--max-wait-sec must be positive")
 
     _load_env_file()
     print("=" * 80)
@@ -117,18 +199,22 @@ def main():
 
     if not filled:
         print(f"[!] Order not filled immediately (status={status}). Cancelling for safety...")
-        engine.cancel_live_order(order_id)
-        time.sleep(1)
-        canceled_info = clob_client.get_order(order_id)
-        matched_qty = float(canceled_info.get("size_matched", 0.0) or 0.0)
-        if matched_qty > 0.0:
-            print(f"[!] Partial fill detected ({matched_qty} shares). Liquidating residual position...")
-            try:
-                res_book = full_book(CLOB_HOST, token_id)
-                res_bid = round(max(0.01, min(0.99, float(res_book.get("best_bid") or (buy_price - 0.05)))), 2)
-            except Exception:
-                res_bid = round(max(0.01, buy_price - 0.05), 2)
-            engine.place_live_quote(token_id=token_id, price=res_bid, size=matched_qty, side="SELL")
+        cancel_ok = engine.cancel_live_order(order_id)
+        if not cancel_ok:
+            print(f"[!] Could not confirm cancellation of buy order {order_id}.")
+        try:
+            final_info = clob_client.get_order(order_id)
+            final_matched = _confirmed_matched_size(final_info, args.size)
+        except Exception as exc:
+            print(f"[!] Could not determine final matched buy size after cancellation: {exc}")
+            print("[!] Exposure is unknown; inspect the order manually before continuing.")
+            return 1
+        if final_matched > 0:
+            print(f"[!] Partial buy fill confirmed: {final_matched} shares. Liquidating now...")
+            liquidation_result = _liquidate_position(
+                engine, clob_client, token_id, final_matched, buy_price
+            )
+            return 1 if not cancel_ok else liquidation_result
         return 1
 
     # Monitor for stop loss
@@ -140,11 +226,11 @@ def main():
 
     while time.time() - start_time < args.max_wait_sec:
         time.sleep(1.0)
-        try:
-            cur_book = full_book(CLOB_HOST, token_id)
-        except Exception as e:
-            print(f"      [!] Order book fetch warning: {e}", flush=True)
-            continue
+        cur_book = _fetch_book_bounded(token_id)
+        if cur_book is None:
+            exit_triggered = True
+            exit_reason = "Order book remained structurally invalid — controlled safety exit"
+            break
         cur_bid = cur_book.get("best_bid")
         cur_ask = cur_book.get("best_ask")
         if cur_bid is None or cur_ask is None:
@@ -164,47 +250,7 @@ def main():
         exit_reason = f"Safety timeout ({args.max_wait_sec}s elapsed) — demonstration exit"
 
     print(f"\n[5/5] STOP-LOSS TRIGGERED: {exit_reason}!")
-    # Get freshest bid
-    try:
-        cur_book = full_book(CLOB_HOST, token_id)
-        raw_bid = cur_book.get("best_bid") or (buy_price - 0.05)
-    except Exception as e:
-        print(f"      [!] Order book fetch error before sell: {e}. Falling back to conservative price.")
-        raw_bid = buy_price - 0.05
-    sell_price = round(max(0.01, min(0.99, float(raw_bid))), 2)
-
-    print(f"      Sending immediate SELL order: {args.size} shares @ ${sell_price:.2f}...")
-    sell_res = engine.place_live_quote(token_id=token_id, price=sell_price, size=args.size, side="SELL")
-    sell_id = sell_res.get("order_id")
-    print(f"      Sell Order ID: {sell_id} (status: {sell_res.get('status')})")
-
-    # Verify sell fill
-    sell_matched = 0.0
-    for _ in range(8):
-        time.sleep(1)
-        sell_info = clob_client.get_order(sell_id)
-        st = (sell_info.get("status") or "").upper()
-        sell_matched = float(sell_info.get("size_matched", 0.0) or 0.0)
-        if st in ("MATCHED", "FILLED") or sell_matched >= args.size:
-            sell_matched = args.size
-            print(f"[OK] SELL FILL CONFIRMED: Sold {args.size} shares @ ${sell_price:.2f}!")
-            break
-
-    if sell_matched < args.size:
-        print(f"[!] Sell order not fully filled ({sell_matched}/{args.size} shares). Cancelling remainder for safety...")
-        engine.cancel_live_order(sell_id)
-
-    pnl = (sell_price - buy_price) * sell_matched
-    print("\n" + "=" * 80)
-    print(" [*] STOP-LOSS EXPERIMENT SUMMARY")
-    print("=" * 80)
-    print(f" - Bought:         {args.size} shares @ ${buy_price:.2f} (${buy_price * args.size:.2f})")
-    print(f" - Confirmed Sold: {sell_matched} shares @ ${sell_price:.2f} (${sell_price * sell_matched:.2f})")
-    if sell_matched < args.size:
-        print(f" - Unfilled Size:  {args.size - sell_matched} shares (alert: residual exposure)")
-    print(f" - Realized PnL:   {pnl:+.2f}$ (exit protected capital)")
-    print("=" * 80)
-    return 0
+    return _liquidate_position(engine, clob_client, token_id, args.size, buy_price)
 
 
 if __name__ == "__main__":
