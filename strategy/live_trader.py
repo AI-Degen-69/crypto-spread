@@ -480,14 +480,15 @@ class LiveTraderEngine:
             except ImportError:
                 from py_clob_client.clob_types import OrderArgs
 
+            norm_price = round(float(price), 2)
             order_args = OrderArgs(
                 token_id=token_id,
-                price=round(float(price), 2),
+                price=norm_price,
                 size=float(size),
                 side=side.upper(),
             )
             res = client.create_and_post_order(order_args)
-            log.info("Live quote placed: %s side=%s price=%.2f size=%.1f -> %s", token_id, side, price, size, res)
+            log.info("Live quote placed: %s side=%s price=%.2f size=%.1f -> %s", token_id, side, norm_price, size, res)
             
             order_id = ""
             status = "RESTING"
@@ -505,7 +506,7 @@ class LiveTraderEngine:
                 "order_id": order_id,
                 "status": status,
                 "token_id": token_id,
-                "price": price,
+                "price": norm_price,
                 "size": size,
                 "side": side,
                 "raw": res,
@@ -569,12 +570,16 @@ class LiveTraderEngine:
         # Clear local order handles across all markets
         cleared_count = 0
         for m in self.markets.values():
-            if m.order_id_up or m.order_id_down or m.next_order_id_up or m.next_order_id_down:
+            if m.order_id_up or m.order_id_down or m.next_order_id_up or m.next_order_id_down or m.order_id_exit_up or m.order_id_exit_down:
                 cleared_count += 1
             m.order_id_up = None
             m.order_id_down = None
             m.order_status_up = "CANCELLED"
             m.order_status_down = "CANCELLED"
+            m.order_id_exit_up = None
+            m.order_id_exit_down = None
+            m.order_status_exit_up = "CANCELLED"
+            m.order_status_exit_down = "CANCELLED"
             m.next_order_id_up = None
             m.next_order_id_down = None
             m.next_quoted = False
@@ -1605,13 +1610,25 @@ class LiveTraderEngine:
         mstate.exit_side = None
         if self.mode == "live":
             if mstate.order_id_exit_up:
-                self.cancel_live_order(mstate.order_id_exit_up)
+                if self.cancel_live_order(mstate.order_id_exit_up):
+                    mstate.order_id_exit_up = None
+                    mstate.order_status_exit_up = "NONE"
+            else:
+                mstate.order_id_exit_up = None
+                mstate.order_status_exit_up = "NONE"
+
             if mstate.order_id_exit_down:
-                self.cancel_live_order(mstate.order_id_exit_down)
-        mstate.order_id_exit_up = None
-        mstate.order_id_exit_down = None
-        mstate.order_status_exit_up = "NONE"
-        mstate.order_status_exit_down = "NONE"
+                if self.cancel_live_order(mstate.order_id_exit_down):
+                    mstate.order_id_exit_down = None
+                    mstate.order_status_exit_down = "NONE"
+            else:
+                mstate.order_id_exit_down = None
+                mstate.order_status_exit_down = "NONE"
+        else:
+            mstate.order_id_exit_up = None
+            mstate.order_id_exit_down = None
+            mstate.order_status_exit_up = "NONE"
+            mstate.order_status_exit_down = "NONE"
         mstate.exit_price_up = None
         mstate.exit_price_down = None
         mstate.max_up_drift = 0.0
