@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Any
@@ -19,6 +21,17 @@ from strategy.series import by_duration
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
+
+_local = threading.local()
+
+
+def _get_thread_session() -> requests.Session:
+    """Get or initialize thread-local requests.Session with proper headers."""
+    if not hasattr(_local, "session"):
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0"})
+        _local.session = s
+    return _local.session
 
 
 def _iso_to_unix(s: str) -> float:
@@ -30,10 +43,11 @@ def _iso_to_unix(s: str) -> float:
     return datetime.datetime.fromisoformat(s).timestamp()
 
 
-def fetch_live_series_market(series_slug: str, session: requests.Session) -> Optional[Dict[str, Any]]:
+def fetch_live_series_market(series_slug: str, session: Optional[requests.Session] = None) -> Optional[Dict[str, Any]]:
     """Fetch active live market metadata for a series slug from Gamma API."""
+    sess = session or _get_thread_session()
     try:
-        r = session.get(
+        r = sess.get(
             f"{GAMMA_HOST}/events",
             params={"series_slug": series_slug, "closed": "false", "limit": 500},
             timeout=(3.05, 5.0),
@@ -50,7 +64,6 @@ def fetch_live_series_market(series_slug: str, session: requests.Session) -> Opt
         for m in ev.get("markets") or []:
             try:
                 raw = m.get("clobTokenIds")
-                import json
                 tids = json.loads(raw) if isinstance(raw, str) else raw
                 if not tids or len(tids) != 2:
                     continue
@@ -58,7 +71,8 @@ def fetch_live_series_market(series_slug: str, session: requests.Session) -> Opt
                 et = _iso_to_unix(m.get("endDate") or m.get("endDateIso") or "")
                 if st <= now < et:
                     candidates.append((st, et, m, tids))
-            except Exception:
+            except Exception as e:
+                log.debug("Error parsing candidate market in %s: %s", series_slug, e)
                 continue
 
     if not candidates:
@@ -266,19 +280,20 @@ class LiveTraderEngine:
                       wallet_address: Optional[str] = None,
                       starting_balance: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters."""
-        if offset is not None and offset > 0:
-            self.offset = float(offset)
+        if offset is not None:
+            # Constrain offset to keep resting prices strictly positive (0.001 to 0.490)
+            self.offset = max(0.001, min(0.490, float(offset)))
         if exit_thresh is not None and exit_thresh > 0:
             self.exit_thresh = float(exit_thresh)
         if shares is not None and shares > 0:
             self.shares = int(shares)
         if mode in ("paper", "live"):
             self.mode = mode
-        if wallet_address is not None:
-            self.wallet_address = wallet_address.strip()
-            self._try_fetch_wallet_balance()
         if starting_balance is not None and starting_balance > 0:
             self.starting_balance = float(starting_balance)
+        if wallet_address is not None:
+            self.wallet_address = wallet_address.strip()
+            self._schedule_wallet_balance_fetch()
 
         # Update per-market resting prices
         for m in self.markets.values():
@@ -288,13 +303,22 @@ class LiveTraderEngine:
 
         return self.get_state()
 
+    def _schedule_wallet_balance_fetch(self):
+        """Schedule non-blocking wallet balance fetch in executor if loop is running."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, self._try_fetch_wallet_balance)
+        except RuntimeError:
+            self._try_fetch_wallet_balance()
+
     def _try_fetch_wallet_balance(self):
         """Fetch live portfolio balance from Polymarket if wallet address is supplied."""
         if not self.wallet_address or not self.wallet_address.startswith("0x"):
             return
         try:
             url = f"https://data-api.polymarket.com/value?user={self.wallet_address}"
-            res = self._session.get(url, timeout=(3.0, 4.0))
+            sess = _get_thread_session()
+            res = sess.get(url, timeout=(3.0, 4.0))
             if res.ok:
                 data = res.json()
                 val = float(data.get("value") or data.get("portfolioValue") or 0.0)
@@ -309,7 +333,7 @@ class LiveTraderEngine:
         if self.is_running:
             return
         self.is_running = True
-        self._try_fetch_wallet_balance()
+        self._schedule_wallet_balance_fetch()
         try:
             loop = asyncio.get_running_loop()
             if self._bg_task is None or self._bg_task.done():
@@ -323,7 +347,7 @@ class LiveTraderEngine:
         """Stop trading engine and cancel active quoting."""
         self.is_running = False
         for m in self.markets.values():
-            if m.status == "QUOTING":
+            if m.status in ("QUOTING", "LIVE_MONITOR"):
                 m.status = "IDLE"
                 m.last_action = "Stopped"
         log.info("LiveTraderEngine stopped")
@@ -347,8 +371,15 @@ class LiveTraderEngine:
             m.stops_count = 0
             m.filled_up = False
             m.filled_down = False
+            m.fill_price_up = None
+            m.fill_price_down = None
             m.pair_captured = False
             m.exit_taken = False
+            m.exit_side = ""
+            m.max_up_drift = 0.0
+            m.max_down_drift = 0.0
+            m.reversal_seen_up = False
+            m.reversal_seen_down = False
             m.status = "QUOTING" if self.is_running else "IDLE"
             m.last_action = "PnL Reset"
         # Seed initial timeline point
@@ -391,7 +422,8 @@ class LiveTraderEngine:
         """Fetch market definition and orderbooks synchronously."""
         try:
             from strategy.markets import full_book
-            market_info = fetch_live_series_market(slug, session=self._session)
+            sess = _get_thread_session()
+            market_info = fetch_live_series_market(slug, session=sess)
             if not market_info:
                 return None
 
@@ -466,7 +498,7 @@ class LiveTraderEngine:
 
         # If not active or window is expired, stay idle
         if not self.is_running or mstate.time_remaining_sec <= 0:
-            if mstate.status == "QUOTING":
+            if mstate.status in ("QUOTING", "LIVE_MONITOR"):
                 mstate.status = "IDLE"
             return
 
@@ -476,6 +508,12 @@ class LiveTraderEngine:
         mstate.resting_up = resting_up
         mstate.resting_down = resting_down
         mstate.order_shares = self.shares
+
+        # In live mode without signed key execution, monitor live order book only
+        if self.mode == "live":
+            mstate.status = "LIVE_MONITOR"
+            mstate.last_action = "Live mode: monitoring live order book (signing unconfigured)"
+            return
 
         # --- DRIFT TRACKING (vs 0.50 base) ---
         mid = mstate.mid
@@ -490,7 +528,7 @@ class LiveTraderEngine:
         if mstate.max_up_drift >= self.exit_thresh and (mid - 0.50) < self.exit_reversal:
             mstate.reversal_seen_up = True
 
-        # --- FILL DETECTION (Paper / Live) ---
+        # --- FILL DETECTION (Paper Simulation) ---
         if mstate.status == "IDLE":
             mstate.status = "QUOTING"
             mstate.last_action = f"Quoting bids @ {resting_up:.2f} / {resting_down:.2f}"
@@ -528,6 +566,7 @@ class LiveTraderEngine:
                 mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
                 log.info("[%s] PAIR MERGED! Profit: +$%.2f", slug, pair_profit_usd)
                 
+                denom = max(0.01, 2 * resting_up * max(1, self.shares))
                 # Log trade event
                 self.trades.append(TradeEvent(
                     id=f"{slug}_{int(now)}",
@@ -540,7 +579,7 @@ class LiveTraderEngine:
                     entry_price_down=resting_down,
                     exit_price=1.00,
                     pnl_usd=round(pair_profit_usd, 3),
-                    pnl_pct=round(((pair_profit_usd) / (2 * resting_up * self.shares)) * 100.0, 1),
+                    pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
                     notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
                 ))
                 return
@@ -549,66 +588,70 @@ class LiveTraderEngine:
             # Holding UP alone and mid dropped adversely (max_down >= exit_thresh)
             if (mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
                     and not mstate.reversal_seen_down):
-                mstate.exit_taken = True
-                mstate.exit_side = "UP"
-                mstate.status = "STOP_EXIT"
-                sell_bid = mstate.up_bid or 0.0
-                exit_pnl_usd = (sell_bid - resting_up) * self.shares
-                mstate.realized_pnl_usd += exit_pnl_usd
-                mstate.unrealized_pnl_usd = 0.0
-                mstate.total_pnl_usd = mstate.realized_pnl_usd
-                mstate.stops_count += 1
-                mstate.trades_count += 1
-                mstate.last_action = f"Stop Loss UP @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
-                log.info("[%s] STOP LOSS EXIT (UP) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
+                sell_bid = mstate.up_bid
+                if sell_bid is not None:
+                    mstate.exit_taken = True
+                    mstate.exit_side = "UP"
+                    mstate.status = "STOP_EXIT"
+                    exit_pnl_usd = (sell_bid - resting_up) * self.shares
+                    mstate.realized_pnl_usd += exit_pnl_usd
+                    mstate.unrealized_pnl_usd = 0.0
+                    mstate.total_pnl_usd = mstate.realized_pnl_usd
+                    mstate.stops_count += 1
+                    mstate.trades_count += 1
+                    mstate.last_action = f"Stop Loss UP @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
+                    log.info("[%s] STOP LOSS EXIT (UP) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
 
-                self.trades.append(TradeEvent(
-                    id=f"{slug}_{int(now)}",
-                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                    slug=slug,
-                    label=mstate.label,
-                    action="STOP_EXIT_UP",
-                    shares=self.shares,
-                    entry_price_up=resting_up,
-                    entry_price_down=None,
-                    exit_price=sell_bid,
-                    pnl_usd=round(exit_pnl_usd, 3),
-                    pnl_pct=round(((exit_pnl_usd) / (resting_up * self.shares)) * 100.0, 1),
-                    notes=f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}",
-                ))
-                return
+                    denom = max(0.01, resting_up * max(1, self.shares))
+                    self.trades.append(TradeEvent(
+                        id=f"{slug}_{int(now)}",
+                        timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                        slug=slug,
+                        label=mstate.label,
+                        action="STOP_EXIT_UP",
+                        shares=self.shares,
+                        entry_price_up=resting_up,
+                        entry_price_down=None,
+                        exit_price=sell_bid,
+                        pnl_usd=round(exit_pnl_usd, 3),
+                        pnl_pct=round(((exit_pnl_usd) / denom) * 100.0, 1),
+                        notes=f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}",
+                    ))
+                    return
 
             # Holding DOWN alone and mid rallied adversely (max_up >= exit_thresh)
             if (mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
                     and not mstate.reversal_seen_up):
-                mstate.exit_taken = True
-                mstate.exit_side = "DOWN"
-                mstate.status = "STOP_EXIT"
-                sell_bid = mstate.down_bid or 0.0
-                exit_pnl_usd = (sell_bid - resting_down) * self.shares
-                mstate.realized_pnl_usd += exit_pnl_usd
-                mstate.unrealized_pnl_usd = 0.0
-                mstate.total_pnl_usd = mstate.realized_pnl_usd
-                mstate.stops_count += 1
-                mstate.trades_count += 1
-                mstate.last_action = f"Stop Loss DOWN @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
-                log.info("[%s] STOP LOSS EXIT (DOWN) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
+                sell_bid = mstate.down_bid
+                if sell_bid is not None:
+                    mstate.exit_taken = True
+                    mstate.exit_side = "DOWN"
+                    mstate.status = "STOP_EXIT"
+                    exit_pnl_usd = (sell_bid - resting_down) * self.shares
+                    mstate.realized_pnl_usd += exit_pnl_usd
+                    mstate.unrealized_pnl_usd = 0.0
+                    mstate.total_pnl_usd = mstate.realized_pnl_usd
+                    mstate.stops_count += 1
+                    mstate.trades_count += 1
+                    mstate.last_action = f"Stop Loss DOWN @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
+                    log.info("[%s] STOP LOSS EXIT (DOWN) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
 
-                self.trades.append(TradeEvent(
-                    id=f"{slug}_{int(now)}",
-                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                    slug=slug,
-                    label=mstate.label,
-                    action="STOP_EXIT_DOWN",
-                    shares=self.shares,
-                    entry_price_up=None,
-                    entry_price_down=resting_down,
-                    exit_price=sell_bid,
-                    pnl_usd=round(exit_pnl_usd, 3),
-                    pnl_pct=round(((exit_pnl_usd) / (resting_down * self.shares)) * 100.0, 1),
-                    notes=f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}",
-                ))
-                return
+                    denom = max(0.01, resting_down * max(1, self.shares))
+                    self.trades.append(TradeEvent(
+                        id=f"{slug}_{int(now)}",
+                        timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                        slug=slug,
+                        label=mstate.label,
+                        action="STOP_EXIT_DOWN",
+                        shares=self.shares,
+                        entry_price_up=None,
+                        entry_price_down=resting_down,
+                        exit_price=sell_bid,
+                        pnl_usd=round(exit_pnl_usd, 3),
+                        pnl_pct=round(((exit_pnl_usd) / denom) * 100.0, 1),
+                        notes=f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}",
+                    ))
+                    return
 
         # --- UNREALIZED PnL CALCULATION ---
         if mstate.pair_captured or mstate.exit_taken:

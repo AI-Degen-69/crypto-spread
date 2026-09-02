@@ -24,10 +24,11 @@ import time
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
 
 from strategy.live_trader import get_live_trader_engine
@@ -703,22 +704,29 @@ async def api_live_control(request: Request):
     return engine.get_state()
 
 
+class LiveConfigPayload(BaseModel):
+    """Payload schema for live trading cockpit configuration updates."""
+
+    offset: Optional[float] = Field(default=None, ge=0.001, le=0.49)
+    exit_thresh: Optional[float] = Field(default=None, ge=0.001, le=0.50)
+    shares: Optional[int] = Field(default=None, ge=1, le=10000)
+    mode: Optional[str] = Field(default=None, pattern="^(paper|live)$")
+    wallet_address: Optional[str] = None
+    starting_balance: Optional[float] = Field(default=None, ge=0.0)
+
+
 @app.post("/api/live/config")
-async def api_live_config(request: Request):
+def api_live_config(payload: LiveConfigPayload, request: Request):
     """Update strategy parameters for the live bot."""
     _verify_safe_origin(request)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
     engine = get_live_trader_engine()
     state = engine.update_config(
-        offset=body.get("offset"),
-        exit_thresh=body.get("exit_thresh"),
-        shares=body.get("shares"),
-        mode=body.get("mode"),
-        wallet_address=body.get("wallet_address"),
-        starting_balance=body.get("starting_balance"),
+        offset=payload.offset,
+        exit_thresh=payload.exit_thresh,
+        shares=payload.shares,
+        mode=payload.mode,
+        wallet_address=payload.wallet_address,
+        starting_balance=payload.starting_balance,
     )
     return state
 
@@ -1082,7 +1090,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 
 <div class="wrap">
   <!-- TAB 1: LIVE & RECENT WINDOWS -->
-  <div id="tab-live" class="tab-content active">
+  <div id="tab-live" class="tab-content">
     <div id="goalBar" class="card" style="border-top:2px solid var(--gold)"></div>
     <div id="liveBar" class="card"></div>
     <div id="seriesGrid" class="grid"></div>
@@ -2622,7 +2630,7 @@ function renderCockpitChart(timeline, mode, startingBalance) {
 
     const lastVal = vals[vals.length - 1];
     const diffVal = lastVal - startingBalance;
-    const diffPct = (diffVal / maxV) * 100;
+    const diffPct = startingBalance > 0 ? (diffVal / startingBalance) * 100 : 0.0;
     const lineColor = diffVal >= 0 ? '#33c9b5' : '#f0684d';
 
     let svg = `

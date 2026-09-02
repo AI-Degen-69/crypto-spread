@@ -299,25 +299,22 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # sets the flag and the exit is suppressed.
             if (filled_up and not filled_down and max_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
-                exit_taken = True
-                exit_side = "up"
-                bb_up = ub.get("best_bid") or 0.0
-                pnl_cents += (bb_up - resting_up) * 100.0
-                fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
-                break
+                bb_up = ub.get("best_bid")
+                if bb_up is not None:
+                    exit_taken = True
+                    exit_side = "up"
+                    pnl_cents += (bb_up - resting_up) * 100.0
+                    fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+                    break
             if (filled_down and not filled_up and max_up >= exit_thr
                     and not reversal_seen_up and not exit_taken):
-                exit_taken = True
-                exit_side = "down"
-                bb_dn = db.get("best_bid") or 0.0
-                pnl_cents += (bb_dn - resting_down) * 100.0
-                fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
-                break
-            # Update reversal flags before skipping so mid drift isn't lost.
-            if max_down >= exit_thr:
-                reversal_seen_down = True
-            if max_up >= exit_thr:
-                reversal_seen_up = True
+                bb_dn = db.get("best_bid")
+                if bb_dn is not None:
+                    exit_taken = True
+                    exit_side = "down"
+                    pnl_cents += (bb_dn - resting_down) * 100.0
+                    fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
+                    break
             continue
 
         # --- FILL DETECTION (Plan fill_model: tape conservative default, cross for strict through-price fills) ---
@@ -367,26 +364,22 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # the exit is suppressed).
         if (filled_up and not filled_down and max_down >= exit_thr
                 and not reversal_seen_down and not exit_taken):
-            exit_taken = True
-            exit_side = "up"
-            bb_up = ub.get("best_bid") or 0.0
-            pnl_cents += (bb_up - resting_up) * 100.0
-            fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
-            break
+            bb_up = ub.get("best_bid")
+            if bb_up is not None:
+                exit_taken = True
+                exit_side = "up"
+                pnl_cents += (bb_up - resting_up) * 100.0
+                fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+                break
         if (filled_down and not filled_up and max_up >= exit_thr
                 and not reversal_seen_up and not exit_taken):
-            exit_taken = True
-            exit_side = "down"
-            bb_dn = db.get("best_bid") or 0.0
-            pnl_cents += (bb_dn - resting_down) * 100.0
-            fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
-            break
-
-        # "reversal_seen_<side>" = adverse drift has been recorded
-        if max_down >= exit_thr:
-            reversal_seen_down = True
-        if max_up >= exit_thr:
-            reversal_seen_up = True
+            bb_dn = db.get("best_bid")
+            if bb_dn is not None:
+                exit_taken = True
+                exit_side = "down"
+                pnl_cents += (bb_dn - resting_down) * 100.0
+                fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
+                break
 
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):
