@@ -1204,19 +1204,19 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label>רף יציאה 5m כללי (Exit Default)</label>
-          <input type="number" step="0.01" id="btExit5m" value="0.12">
+          <input type="number" step="0.01" id="btExit5m" value="0.05">
         </div>
         <div class="form-group">
           <label>רף יציאה 15m כללי (Exit Default)</label>
-          <input type="number" step="0.01" id="btExit15m" value="0.13">
+          <input type="number" step="0.01" id="btExit15m" value="0.05">
         </div>
         <div class="form-group">
           <label>רף יציאה ייעודי BTC 5m</label>
-          <input type="number" step="0.01" id="btExitBtc" value="0.09">
+          <input type="number" step="0.01" id="btExitBtc" value="0.05">
         </div>
         <div class="form-group">
           <label>רף יציאה ייעודי SOL 5m</label>
-          <input type="number" step="0.01" id="btExitSol" value="0.11">
+          <input type="number" step="0.01" id="btExitSol" value="0.05">
         </div>
         <div class="form-group">
           <label>מודל מילוי (Fill Model)</label>
@@ -1874,10 +1874,10 @@ function resetBtParams(){
     togglePairCostInput();
   }
   $('btPairCost').value = "1.05";
-  $('btExit5m').value = "0.12";
-  $('btExit15m').value = "0.13";
-  $('btExitBtc').value = "0.09";
-  $('btExitSol').value = "0.11";
+  $('btExit5m').value = "0.05";
+  $('btExit15m').value = "0.05";
+  $('btExitBtc').value = "0.05";
+  $('btExitSol').value = "0.05";
   $('btFillModel').value = "cross";
   $('btSize').value = "5";
   $('btGas').value = "0.00";

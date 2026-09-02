@@ -371,7 +371,8 @@ def test_simulate_no_exit_when_reversal_seen():
     w = _simulate_window(snaps, BacktestParams(exit_thresh_by_slug={"btc-up-or-down-5m": 0.09}))
     assert w.exit_taken is False
 
-def test_simulate_exit_uses_btc_threshold_not_default():
+def test_simulate_exit_below_unified_threshold():
+    """Verify exit is not taken when drift is below the unified 0.05 threshold."""
     snaps = [
         snap(1.0, 0.50, up_ask=0.49, down_ask=0.51,
              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]),

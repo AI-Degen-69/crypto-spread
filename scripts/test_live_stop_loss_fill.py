@@ -23,8 +23,17 @@ def main():
     parser.add_argument("--side", choices=["UP", "DOWN"], default="UP", help="Which outcome token to buy (UP or DOWN)")
     parser.add_argument("--size", type=float, default=5.0, help="Number of shares (default: 5 - Polymarket minimum)")
     parser.add_argument("--exit-thresh", type=float, default=0.02, help="Stop loss drift threshold in cents (default: $0.02)")
-    parser.add_argument("--max-wait-sec", type=int, default=30, help="Max seconds to wait before safety exit (default: 30s)")
     args = parser.parse_args()
+
+    if args.size <= 0:
+        print("[!] Error: --size must be positive.")
+        return 1
+    if args.exit_thresh < 0:
+        print("[!] Error: --exit-thresh must be non-negative.")
+        return 1
+    if args.max_wait_sec <= 0:
+        print("[!] Error: --max-wait-sec must be positive.")
+        return 1
 
     _load_env_file()
     print("=" * 80)
@@ -109,6 +118,17 @@ def main():
     if not filled:
         print(f"[!] Order not filled immediately (status={status}). Cancelling for safety...")
         engine.cancel_live_order(order_id)
+        time.sleep(1)
+        canceled_info = clob_client.get_order(order_id)
+        matched_qty = float(canceled_info.get("size_matched", 0.0) or 0.0)
+        if matched_qty > 0.0:
+            print(f"[!] Partial fill detected ({matched_qty} shares). Liquidating residual position...")
+            try:
+                res_book = full_book(CLOB_HOST, token_id)
+                res_bid = round(max(0.01, min(0.99, float(res_book.get("best_bid") or (buy_price - 0.05)))), 2)
+            except Exception:
+                res_bid = round(max(0.01, buy_price - 0.05), 2)
+            engine.place_live_quote(token_id=token_id, price=res_bid, size=matched_qty, side="SELL")
         return 1
 
     # Monitor for stop loss
@@ -120,7 +140,11 @@ def main():
 
     while time.time() - start_time < args.max_wait_sec:
         time.sleep(1.0)
-        cur_book = full_book(CLOB_HOST, token_id)
+        try:
+            cur_book = full_book(CLOB_HOST, token_id)
+        except Exception as e:
+            print(f"      [!] Order book fetch warning: {e}", flush=True)
+            continue
         cur_bid = cur_book.get("best_bid")
         cur_ask = cur_book.get("best_ask")
         if cur_bid is None or cur_ask is None:
@@ -129,7 +153,7 @@ def main():
         drift = entry_mid - cur_mid  # Positive drift means price dropped against us
         elapsed = int(time.time() - start_time)
 
-        print(f"      [{elapsed:2d}s] Mid: ${cur_mid:.3f} | Best Bid: ${cur_bid:.2f} | Drift vs 0.50: {drift:+.3f} (stop threshold: ${args.exit_thresh:.2f})", flush=True)
+        print(f"      [{elapsed:2d}s] Mid: ${cur_mid:.3f} | Best Bid: ${cur_bid:.2f} | Drift vs entry midpoint: {drift:+.3f} (stop threshold: ${args.exit_thresh:.2f})", flush=True)
 
         if drift >= args.exit_thresh:
             exit_triggered = True
@@ -141,8 +165,12 @@ def main():
 
     print(f"\n[5/5] STOP-LOSS TRIGGERED: {exit_reason}!")
     # Get freshest bid
-    cur_book = full_book(CLOB_HOST, token_id)
-    raw_bid = cur_book.get("best_bid") or (buy_price - 0.05)
+    try:
+        cur_book = full_book(CLOB_HOST, token_id)
+        raw_bid = cur_book.get("best_bid") or (buy_price - 0.05)
+    except Exception as e:
+        print(f"      [!] Order book fetch error before sell: {e}. Falling back to conservative price.")
+        raw_bid = buy_price - 0.05
     sell_price = round(max(0.01, min(0.99, float(raw_bid))), 2)
 
     print(f"      Sending immediate SELL order: {args.size} shares @ ${sell_price:.2f}...")
@@ -151,21 +179,30 @@ def main():
     print(f"      Sell Order ID: {sell_id} (status: {sell_res.get('status')})")
 
     # Verify sell fill
+    sell_matched = 0.0
     for _ in range(8):
         time.sleep(1)
         sell_info = clob_client.get_order(sell_id)
         st = (sell_info.get("status") or "").upper()
-        if st in ("MATCHED", "FILLED") or float(sell_info.get("size_matched", 0.0) or 0.0) >= args.size:
+        sell_matched = float(sell_info.get("size_matched", 0.0) or 0.0)
+        if st in ("MATCHED", "FILLED") or sell_matched >= args.size:
+            sell_matched = args.size
             print(f"[OK] SELL FILL CONFIRMED: Sold {args.size} shares @ ${sell_price:.2f}!")
             break
 
-    pnl = (sell_price - buy_price) * args.size
+    if sell_matched < args.size:
+        print(f"[!] Sell order not fully filled ({sell_matched}/{args.size} shares). Cancelling remainder for safety...")
+        engine.cancel_live_order(sell_id)
+
+    pnl = (sell_price - buy_price) * sell_matched
     print("\n" + "=" * 80)
     print(" [*] STOP-LOSS EXPERIMENT SUMMARY")
     print("=" * 80)
-    print(f" - Bought:        {args.size} shares @ ${buy_price:.2f} (${buy_price * args.size:.2f})")
-    print(f" - Sold:          {args.size} shares @ ${sell_price:.2f} (${sell_price * args.size:.2f})")
-    print(f" - Realized PnL:  {pnl:+.2f}$ (exit protected capital)")
+    print(f" - Bought:         {args.size} shares @ ${buy_price:.2f} (${buy_price * args.size:.2f})")
+    print(f" - Confirmed Sold: {sell_matched} shares @ ${sell_price:.2f} (${sell_price * sell_matched:.2f})")
+    if sell_matched < args.size:
+        print(f" - Unfilled Size:  {args.size - sell_matched} shares (alert: residual exposure)")
+    print(f" - Realized PnL:   {pnl:+.2f}$ (exit protected capital)")
     print("=" * 80)
     return 0
 
