@@ -58,6 +58,12 @@ def test_root_returns_4tab_spa():
     assert "switchTab" in html
     assert "loadManifest" in html
     assert "uploadFileStream" in html
+    assert "chip-token-BTC" in html
+    assert "chip-token-ETH" in html
+    assert "btnDur5m" in html
+    assert "btnDur15m" in html
+    assert "cockpitActiveMarketsBadge" in html
+    assert "toggleCockpitToken" in html
 
 
 def test_api_oscillation():
