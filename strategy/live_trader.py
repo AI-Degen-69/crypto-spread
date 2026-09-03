@@ -652,7 +652,11 @@ class LiveTraderEngine:
                      slug, trigger_side, price, m.spot_drift)
             note = f"RTDS Fast stop: drift {m.spot_drift:.3f} {'<=' if trigger_side == 'UP' else '>='} {'-' if trigger_side == 'UP' else ''}{self.spot_exit_drift:.3f}"
             if self.mode == "live":
-                self._executor.submit(self._execute_stop_exit, slug, m, trigger_side, None, note, now)
+                fut = self._executor.submit(self._execute_stop_exit, slug, m, trigger_side, None, note, now)
+                fut.add_done_callback(
+                    lambda f: log.error("[%s] Fast stop execution failed: %s", slug, f.exception())
+                    if f.exception() else None
+                )
             else:
                 self._execute_stop_exit(slug, m, trigger_side, None, note, now)
 
@@ -1608,6 +1612,21 @@ class LiveTraderEngine:
                 ))
                 return
 
+            # --- RECONCILE PENDING STOP EXIT ---
+            if mstate.status == "STOP_EXIT_PENDING" and not mstate.exit_taken:
+                pending_side = "UP" if (mstate.order_id_exit_up or mstate.filled_up) else "DOWN"
+                exit_px = mstate.exit_price_up if pending_side == "UP" else mstate.exit_price_down
+                self._execute_stop_exit(
+                    slug,
+                    mstate,
+                    pending_side,
+                    exit_px,
+                    f"Reconciled pending stop exit ({pending_side})",
+                    now,
+                )
+                if mstate.exit_taken:
+                    return
+
             # --- STOP LOSS EXIT TRIGGER ---
             # Holding UP alone and mid dropped adversely (max_down >= exit_thresh)
             if (mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
@@ -1646,6 +1665,19 @@ class LiveTraderEngine:
 
     def _handle_window_rollover(self, mstate: MarketLiveState, now: float, new_cid: str = ""):
         """Cleanly settle unresolved positions when window expires and roll to next."""
+        # Reconcile any pending stop-exit order before rollover
+        if mstate.status == "STOP_EXIT_PENDING" and not mstate.exit_taken:
+            pending_side = "UP" if (mstate.order_id_exit_up or mstate.filled_up) else "DOWN"
+            exit_px = mstate.exit_price_up if pending_side == "UP" else mstate.exit_price_down
+            self._execute_stop_exit(
+                mstate.slug,
+                mstate,
+                pending_side,
+                exit_px,
+                f"Window rollover reconciled pending stop exit ({pending_side})",
+                now,
+            )
+
         # Cancel any unfilled orders from expiring window
         if self.mode == "live":
             if mstate.order_id_up and not mstate.filled_up:
