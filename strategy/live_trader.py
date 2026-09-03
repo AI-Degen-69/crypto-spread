@@ -1121,14 +1121,26 @@ class LiveTraderEngine:
                             f"Wait for window settlement or stop exit before deselecting."
                         )
 
+                removed_slugs = set()
+                order_attr_names = (
+                    "order_id_up",
+                    "order_id_down",
+                    "next_order_id_up",
+                    "next_order_id_down",
+                    "order_id_exit_up",
+                    "order_id_exit_down",
+                )
                 for s in to_remove:
                     m = self.markets[s]
                     cancel_failed = False
-                    for oid in (m.order_id_up, m.order_id_down, m.next_order_id_up, m.next_order_id_down, m.order_id_exit_up, m.order_id_exit_down):
+                    for attr in order_attr_names:
+                        oid = getattr(m, attr, None)
                         if oid:
                             try:
                                 success = self.cancel_live_order(oid)
-                                if not success:
+                                if success:
+                                    setattr(m, attr, None)
+                                else:
                                     log.warning("[%s] Failed to cancel order %s on removal", s, oid)
                                     cancel_failed = True
                                     break
@@ -1143,6 +1155,7 @@ class LiveTraderEngine:
 
                     self.historical_realized_pnl += m.realized_pnl_usd
                     del self.markets[s]
+                    removed_slugs.add(s)
 
                 for slug, _dur, label in new_series:
                     if slug not in self.markets:
@@ -1154,7 +1167,10 @@ class LiveTraderEngine:
                             resting_up=round(0.50 - self.offset, 3),
                             resting_down=round(0.50 - self.offset, 3),
                         )
-                self.selected_series = new_series
+
+                # Keep any retained markets that failed cancellation in selected_series
+                retained_series = [s for s in self.selected_series if s[0] in self.markets and s[0] not in {x[0] for x in new_series}]
+                self.selected_series = list(new_series) + retained_series
 
         # Update per-market resting prices
         for m in self.markets.values():
