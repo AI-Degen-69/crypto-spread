@@ -1,6 +1,6 @@
 # Todo List: Issue #50 Market Selection Engine and CLI Filtering
 
-- [ ] Task 1: Implement `filter_series()` and helpers in `strategy/series.py`
+- [x] Task 1: Implement `filter_series()` and helpers in `strategy/series.py`
   - Acceptance: Pure function returning matching subset of `SERIES`; validates tokens and durations; raises `ValueError` on invalid values; 100% docstrings.
   - Verify: Unit tests in `tests/test_series.py` and `python -m pytest tests/test_docstrings.py`.
   - Files: `strategy/series.py`, `tests/test_series.py`
