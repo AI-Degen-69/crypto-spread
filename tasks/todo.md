@@ -15,12 +15,12 @@
   - Verify: `tests/test_live_trader.py`.
   - Files: `strategy/live_trader.py`, `tests/test_live_trader.py`
 
-- [ ] Task 4: CLI flags in `scripts/run_single_window_test.py`
+- [x] Task 4: CLI flags in `scripts/run_single_window_test.py`
   - Acceptance: Accepts `--tokens` (comma-separated) and `--duration` (`5m`, `15m`, `both`); resolves via `filter_series()`; maintains backward compatibility.
   - Verify: Smoke test via `--help` and CLI test.
   - Files: `scripts/run_single_window_test.py`
 
-- [ ] Task 5: End-to-end verification and docstring audit
+- [x] Task 5: End-to-end verification and docstring audit
   - Acceptance: All test suites green: `python -m pytest -q`.
   - Verify: `python -m pytest -q`.
   - Files: Whole repository.

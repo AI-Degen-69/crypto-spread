@@ -16,21 +16,46 @@ from strategy.live_trader import (
     _load_env_file,
     CLOB_HOST,
 )
+from strategy.series import filter_series
 from strategy.markets import full_book
 
 
 def main():
-    """Execute live 5-minute single window experiment with advance pre-quoting."""
-    parser = argparse.ArgumentParser(description="Live 5m Window Advance Pre-Quoting Session")
-    parser.add_argument("--series", default="btc-up-or-down-5m", help="Series slug")
+    """Execute live single window experiment with advance pre-quoting."""
+    parser = argparse.ArgumentParser(description="Live Window Advance Pre-Quoting Session")
+    parser.add_argument("--series", default=None, help="Direct series slug (e.g. btc-up-or-down-5m)")
+    parser.add_argument("--tokens", default=None, help="Comma-separated tokens (e.g. BTC, ETH)")
+    parser.add_argument("--duration", choices=["5m", "15m", "both"], default=None, help="Window duration (5m, 15m, both)")
     parser.add_argument("--price-offset", type=float, default=0.02, help="Offset from 0.50 (default: 0.02 -> 0.48/0.48)")
     parser.add_argument("--shares", type=float, default=5.0, help="Order shares (default: 5.0)")
     parser.add_argument("--exit-thresh", type=float, default=0.05, help="Stop loss drift threshold (default: 0.05)")
     args = parser.parse_args()
 
+    # Resolve target single series from arguments
+    target_series = "btc-up-or-down-5m"
+    if args.series:
+        target_series = args.series
+    elif args.tokens or args.duration:
+        toks = [t.strip() for t in args.tokens.split(",") if t.strip()] if args.tokens else None
+        durs = None
+        if args.duration == "5m":
+            durs = [300]
+        elif args.duration == "15m":
+            durs = [900]
+        elif args.duration == "both":
+            durs = [300, 900]
+        resolved = filter_series(tokens=toks, durations=durs)
+        if not resolved:
+            print("[!] Error: No series matched tokens/duration selection.")
+            return 1
+        if len(resolved) > 1:
+            print(f"[!] Error: Single window test requires a single market; selection resolved to {len(resolved)}: {[s[0] for s in resolved]}. Please narrow to one token and duration (e.g. --tokens BTC --duration 15m).")
+            return 1
+        target_series = resolved[0][0]
+
     _load_env_file()
     print("=" * 80)
-    print(" [*] LIVE 5-MINUTE SPREAD-2 WINDOW EXPERIMENT (PRE-QUOTE + FILL TRACKING + EXIT)")
+    print(f" [*] LIVE SPREAD-2 WINDOW EXPERIMENT ({target_series})")
     print("=" * 80)
 
     engine = get_live_trader_engine()
@@ -42,8 +67,8 @@ def main():
     print(f"      - Cash Collateral:  ${acc.get('cash_balance', 0.0):.2f}")
     print(f"      - Net Value:        ${acc.get('net_value', 0.0):.2f}")
 
-    print(f"\n[2/5] Discovering upcoming window (T+1) for {args.series}...")
-    pair = fetch_live_and_upcoming_markets(args.series)
+    print(f"\n[2/5] Discovering upcoming window (T+1) for {target_series}...")
+    pair = fetch_live_and_upcoming_markets(target_series)
     nxt = pair.get("next")
     if not nxt:
         print("[!] Error: Upcoming market not available yet.")
