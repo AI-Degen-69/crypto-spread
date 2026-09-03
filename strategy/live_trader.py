@@ -1118,6 +1118,9 @@ class LiveTraderEngine:
         if selected_markets is not None or tokens is not None or durations is not None:
             new_series = _resolve_series_selection(selected_markets, tokens, durations)
             new_slugs = {s[0] for s in new_series}
+            current_slugs = {s[0] for s in self.selected_series}
+            if new_slugs != current_slugs and self.is_running:
+                raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
             with self._engine_lock:
                 to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
                 # Guard against deselecting markets with open positions or active pending exits
