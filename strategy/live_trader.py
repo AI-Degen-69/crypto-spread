@@ -1064,6 +1064,16 @@ class LiveTraderEngine:
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
             "selected_series": [s[0] for s in self.selected_series],
+            "available_series": [
+                {
+                    "slug": s[0],
+                    "duration": s[1],
+                    "label": s[2],
+                    "token": token_for_slug(s[0]),
+                    "color": SERIES_COLORS.get(s[0], "#33c9b5"),
+                }
+                for s in SERIES
+            ],
             "stream_bridge": self.stream_bridge.get_status(),
             "server_time": datetime.datetime.now().strftime("%H:%M:%S"),
         }

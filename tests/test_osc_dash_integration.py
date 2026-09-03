@@ -617,5 +617,72 @@ def test_osc_dash_live_execution_endpoints(monkeypatch):
                 ) = saved
 
 
+def test_api_live_config_market_selection():
+    engine = osc_dash.get_live_trader_engine()
+    # Reset engine to default 5m markets
+    engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
+
+    # 1. Update selection via tokens and durations
+    res = client.post("/api/live/config", json={"tokens": ["SOL"], "durations": [900]})
+    assert res.status_code == 200
+    data = res.json()
+    assert set(data["markets"].keys()) == {"sol-up-or-down-15m"}
+
+    # 2. Update selection via selected_markets directly
+    res2 = client.post("/api/live/config", json={"selected_markets": ["btc-up-or-down-5m", "eth-up-or-down-15m"]})
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert set(data2["markets"].keys()) == {"btc-up-or-down-5m", "eth-up-or-down-15m"}
+
+    # Reset
+    engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
+
+
+def test_api_live_config_invalid_selection_returns_400():
+    # Invalid token
+    res = client.post("/api/live/config", json={"tokens": ["DOGE"]})
+    assert res.status_code == 400
+    assert "error" in res.json()
+
+    # Invalid duration
+    res2 = client.post("/api/live/config", json={"durations": [12345]})
+    assert res2.status_code == 400
+    assert "error" in res2.json()
+
+
+def test_api_live_config_open_position_deselection_rejection():
+    engine = osc_dash.get_live_trader_engine()
+    engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    m_btc = engine.markets["btc-up-or-down-5m"]
+    m_btc.filled_up = True
+    m_btc.exit_taken = False
+
+    try:
+        # Deselecting btc while filled leg is unhedged and open must return 400
+        res = client.post("/api/live/config", json={"selected_markets": ["eth-up-or-down-5m"]})
+        assert res.status_code == 400
+        assert "Cannot deselect active market" in res.json().get("error", "")
+    finally:
+        m_btc.filled_up = False
+        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
+
+
+def test_api_live_state_includes_series_metadata():
+    res = client.get("/api/live/state")
+    assert res.status_code == 200
+    data = res.json()
+    assert "available_series" in data
+    assert len(data["available_series"]) == 10
+    # Check shape of available_series entries
+    first = data["available_series"][0]
+    assert "slug" in first
+    assert "token" in first
+    assert "duration" in first
+    assert "label" in first
+    assert "color" in first
+    assert "selected_series" in data
+
+
+
 
 

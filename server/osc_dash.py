@@ -770,6 +770,9 @@ class LiveConfigPayload(BaseModel):
     mode: Optional[str] = Field(default=None, pattern="^(paper|live)$")
     wallet_address: Optional[str] = None
     starting_balance: Optional[float] = Field(default=None, ge=0.0)
+    selected_markets: Optional[list[str]] = None
+    tokens: Optional[list[str]] = None
+    durations: Optional[list[int]] = None
 
 
 @app.post("/api/live/config")
@@ -777,15 +780,21 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
     """Update strategy parameters for the live bot."""
     _verify_safe_origin(request)
     engine = get_live_trader_engine()
-    state = engine.update_config(
-        offset=payload.offset,
-        exit_thresh=payload.exit_thresh,
-        shares=payload.shares,
-        mode=payload.mode,
-        wallet_address=payload.wallet_address,
-        starting_balance=payload.starting_balance,
-    )
-    return state
+    try:
+        state = engine.update_config(
+            offset=payload.offset,
+            exit_thresh=payload.exit_thresh,
+            shares=payload.shares,
+            mode=payload.mode,
+            wallet_address=payload.wallet_address,
+            starting_balance=payload.starting_balance,
+            selected_markets=payload.selected_markets,
+            tokens=payload.tokens,
+            durations=payload.durations,
+        )
+        return state
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @app.get("/api/live/account")
