@@ -45,6 +45,11 @@ SYMBOL_TO_SERIES = {
     "sol-5m": "sol-up-or-down-5m",
     "xrp-5m": "xrp-up-or-down-5m",
     "bnb-5m": "bnb-up-or-down-5m",
+    "btc-15m": "btc-up-or-down-15m",
+    "eth-15m": "eth-up-or-down-15m",
+    "sol-15m": "sol-up-or-down-15m",
+    "xrp-15m": "xrp-up-or-down-15m",
+    "bnb-15m": "bnb-up-or-down-15m",
 }
 
 SERIES_TO_SYMBOL = {
@@ -58,9 +63,43 @@ SERIES_TO_SYMBOL = {
     "sol-5m": "solusdt",
     "xrp-5m": "xrpusdt",
     "bnb-5m": "bnbusdt",
+    "btc-up-or-down-15m": "btcusdt",
+    "eth-up-or-down-15m": "ethusdt",
+    "sol-up-or-down-15m": "solusdt",
+    "xrp-up-or-down-15m": "xrpusdt",
+    "bnb-up-or-down-15m": "bnbusdt",
+    "btc-15m": "btcusdt",
+    "eth-15m": "ethusdt",
+    "sol-15m": "solusdt",
+    "xrp-15m": "xrpusdt",
+    "bnb-15m": "bnbusdt",
 }
 
 RTDS_SYMBOLS = ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
+
+
+def series_for_symbol(symbol: str) -> list[str]:
+    """Resolve an exchange symbol or alias to all matching canonical series slugs.
+
+    For base exchange symbols (e.g. 'btcusdt'), returns both 5m and 15m canonical slugs.
+    For specific duration aliases (e.g. 'btc-15m' or 'btc-up-or-down-15m'), returns
+    the single corresponding canonical slug. Returns an empty list if unknown.
+    """
+    sym = symbol.lower().strip()
+    if not sym:
+        return []
+
+    from strategy.series import SERIES, token_for_slug
+    canonical_slugs = {s[0] for s in SERIES}
+    if sym in canonical_slugs:
+        return [sym]
+
+    if sym in SYMBOL_TO_SERIES and ("-5m" in sym or "-15m" in sym):
+        return [SYMBOL_TO_SERIES[sym]]
+
+    token = sym.replace("usdt", "")
+    return [s[0] for s in SERIES if token_for_slug(s[0]).lower() == token]
+
 
 
 @dataclass
@@ -448,7 +487,8 @@ class UnifiedStreamBridge:
         if self.on_spot_tick_ext:
             self.on_spot_tick_ext(symbol, ts, price)
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
-        self._broadcast(stream_id="spot", data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug})
+        slugs = series_for_symbol(symbol)
+        self._broadcast(stream_id="spot", data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug, "slugs": slugs})
 
     def _handle_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
         """Handle incoming book snapshot/delta and broadcast envelope."""

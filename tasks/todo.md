@@ -5,7 +5,7 @@
   - Verify: Unit tests in `tests/test_series.py` and `python -m pytest tests/test_docstrings.py`.
   - Files: `strategy/series.py`, `tests/test_series.py`
 
-- [ ] Task 2: Spot tick fan-out and 15m aliases in `strategy/streaming.py`
+- [x] Task 2: Spot tick fan-out and 15m aliases in `strategy/streaming.py`
   - Acceptance: `series_for_symbol(symbol)` returns all active matching slugs (5m & 15m); 15m aliases added to `SYMBOL_TO_SERIES` & `SERIES_TO_SYMBOL`; `UnifiedStreamBridge._handle_spot_tick` broadcasts with fan-out.
   - Verify: Unit tests in `tests/test_streaming.py`.
   - Files: `strategy/streaming.py`, `tests/test_streaming.py`
