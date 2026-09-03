@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import requests
 
 from strategy.series import by_duration
@@ -1162,6 +1162,7 @@ class LiveTraderEngine:
             elif "STOP" in t.action:
                 mkt_stops[t.slug] += 1
 
+            notional_per_market = max(0.01, self.shares * 0.48 * 2.0)
             self.timeline.append({
                 "timestamp": int(time.time()),
                 "time_str": t.timestamp,
@@ -1169,7 +1170,7 @@ class LiveTraderEngine:
                 "total_pnl": round(cum_pnl, 2),
                 "total_pnl_pct": round((cum_pnl / max(1.0, self.starting_balance)) * 100.0, 2),
                 "pnl_usd": {k: round(v, 2) for k, v in mkt_pnl.items()},
-                "pnl_pct": {k: round(v, 1) for k, v in mkt_pnl.items()},
+                "pnl_pct": {k: round((v / notional_per_market) * 100.0, 2) for k, v in mkt_pnl.items()},
             })
 
         for slug, m in self.markets.items():
@@ -1187,11 +1188,16 @@ class LiveTraderEngine:
         self.total_stops_triggered = sum(mkt_stops.values())
         self.current_portfolio_value = round(self.starting_balance + cum_pnl, 2)
 
-    def sync_wallet_trades(self, wallet_address: Optional[str] = None) -> Dict[str, Any]:
+    def sync_wallet_trades(
+        self,
+        wallet_address: Optional[str] = None,
+        start_marker: Optional[str] = None,
+        fallback_cash: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Fetch historical activities and trades from Polymarket Data API starting from the requested run."""
-        addr = (wallet_address or "").strip() or self.wallet_address or os.getenv("POLY_FUNDER") or "0xee3b778a783510bc833384919f709e3d2fee1624"
-        if not addr:
-            return {"success": False, "error": "No wallet address provided"}
+        addr = (wallet_address or "").strip() or (self.wallet_address or "").strip() or (os.getenv("POLY_FUNDER") or "").strip()
+        if not addr or not addr.startswith("0x") or len(addr) < 10:
+            return {"success": False, "error": "No valid wallet address provided"}
 
         sess = _get_thread_session()
         activities = []
@@ -1206,7 +1212,16 @@ class LiveTraderEngine:
             try:
                 r = sess.get(f"https://data-api.polymarket.com/trades?user={addr}&limit=200", timeout=(4.0, 10.0))
                 if r.ok:
-                    activities = r.json()
+                    raw_trades = r.json()
+                    if isinstance(raw_trades, list):
+                        activities = []
+                        for t in raw_trades:
+                            norm = dict(t)
+                            norm.setdefault("type", "TRADE")
+                            sz = float(t.get("size", 0.0))
+                            px = float(t.get("price", 0.0))
+                            norm.setdefault("usdcSize", round(sz * px, 4))
+                            activities.append(norm)
             except Exception as e:
                 log.error("Failed fetching trades fallback: %s", e)
                 return {"success": False, "error": str(e)}
@@ -1216,13 +1231,15 @@ class LiveTraderEngine:
 
         activities.sort(key=lambda x: x.get("timestamp", 0))
 
-        # Look for the user's specific starting trade: btc-updown-5m-1788380100 (4:15PM-4:20PM ET, Down)
+        # Look for the user's specific starting trade if marker provided (default "1788380100" if present)
+        marker = start_marker if start_marker is not None else "1788380100"
         start_idx = 0
-        for i, a in enumerate(activities):
-            slug_cand = str(a.get("slug", ""))
-            if "1788380100" in slug_cand and a.get("outcome") == "Down" and a.get("side") == "BUY":
-                start_idx = i
-                break
+        if marker:
+            for i, a in enumerate(activities):
+                slug_cand = str(a.get("slug", ""))
+                if marker in slug_cand and a.get("outcome") == "Down" and a.get("side") == "BUY":
+                    start_idx = i
+                    break
 
         session_acts = activities[start_idx:]
 
@@ -1242,7 +1259,17 @@ class LiveTraderEngine:
 
         # Fetch current balance
         acct_val = fetch_polymarket_account_value(addr)
-        current_cash = float(acct_val.get("cash_balance", 78.46)) if acct_val.get("success") else 78.46
+        if not acct_val.get("success"):
+            if fallback_cash is not None:
+                current_cash = fallback_cash
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed fetching account balance for {addr}: {acct_val.get('error', 'unknown error')}",
+                }
+        else:
+            current_cash = float(acct_val.get("cash_balance", 0.0))
+
         inferred_start = round(current_cash - net_cash_flow, 2)
         self.starting_balance = inferred_start
 
@@ -1266,7 +1293,7 @@ class LiveTraderEngine:
             wid = a.get("conditionId") or a.get("slug")
             by_window[wid].append(a)
 
-        new_events: List[TradeEvent] = []
+        new_events: List[Tuple[int, TradeEvent]] = []
         for wid, acts in by_window.items():
             acts.sort(key=lambda x: x.get("timestamp", 0))
             first = acts[0]
@@ -1354,15 +1381,10 @@ class LiveTraderEngine:
                 pnl_pct=round((window_pnl / max(0.01, buys_cost)) * 100.0, 1),
                 notes=notes,
             )
-            ev._sort_ts = last_ts
-            new_events.append(ev)
+            new_events.append((last_ts, ev))
 
-        new_events.sort(key=lambda x: getattr(x, "_sort_ts", 0))
-        for ev in new_events:
-            if hasattr(ev, "_sort_ts"):
-                delattr(ev, "_sort_ts")
-
-        self.trades = new_events
+        new_events.sort(key=lambda x: x[0])
+        self.trades = [ev for _, ev in new_events]
         self._recalculate_from_trades()
         self._save_persisted_trades()
 

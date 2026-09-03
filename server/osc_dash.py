@@ -747,7 +747,13 @@ async def api_live_control(request: Request):
         engine.seed_demo_data()
     elif action == "sync_wallet_trades":
         addr = body.get("wallet_address") or engine.wallet_address
-        engine.sync_wallet_trades(addr)
+        start_marker = body.get("start_marker")
+        res = await asyncio.to_thread(engine.sync_wallet_trades, addr, start_marker)
+        if not res.get("success"):
+            return JSONResponse(status_code=400, content=res)
+        state = engine.get_state()
+        state["sync_result"] = res
+        return state
     else:
         return JSONResponse(status_code=400, content={"error": f"Unknown action '{action}'"})
     return engine.get_state()
@@ -2576,6 +2582,9 @@ async function syncRealRunTrades() {
       body: JSON.stringify({ action: 'sync_wallet_trades' }),
     });
     const st = await res.json();
+    if (!res.ok) {
+      throw new Error(st.error || 'Failed syncing trades');
+    }
     cockpitState = st;
     renderCockpitUI(st);
     if (btn) { btn.disabled = false; btn.textContent = '📥 סנכרן ריצה אמיתית (Polymarket)'; }

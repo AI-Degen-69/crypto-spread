@@ -20,6 +20,9 @@ def main() -> None:
     parser.add_argument("--seconds", type=int, default=0, help="Run for N seconds then exit (0 = run forever)")
     args = parser.parse_args()
 
+    if args.seconds < 0:
+        parser.error("--seconds must be non-negative (0 = run forever)")
+
     symbols = [s.lower() for s in args.symbols]
     print(f"Connecting to live RTDS stream for: {', '.join(symbols)}...", flush=True)
     print("Press Ctrl+C to stop.\n", flush=True)
@@ -36,6 +39,9 @@ def main() -> None:
     try:
         while True:
             time.sleep(0.5)
+            if not bridge.is_running:
+                print("\nStream worker ended unexpectedly.", flush=True)
+                break
             if args.seconds > 0 and (time.time() - start_time) >= args.seconds:
                 break
     except KeyboardInterrupt:

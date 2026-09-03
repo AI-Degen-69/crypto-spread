@@ -8,7 +8,7 @@ Practical guide for using the 25 production-grade agent skills (`addyosmani/agen
 
 When you invoke `/work-issue`, the agent runs a 6-step lifecycle that automatically invokes the right skills at each stage:
 
-```
+```text
 DISCOVER       DEFINE & PLAN             BUILD & VERIFY              REVIEW          SHIP & MERGE
 ┌────────┐    ┌────────────────────┐    ┌──────────────────────┐    ┌──────────┐    ┌────────────┐
 │ Step 1 │───▶│ Step 2             │───▶│ Step 3               │───▶│ Step 4   │───▶│ Step 5 & 6 │
