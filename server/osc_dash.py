@@ -696,12 +696,13 @@ async def api_live_stream(request: Request):
         """Yield SSE events including initial snapshot and real-time delta envelopes."""
         try:
             # First send full state snapshot envelope
+            state_data = await asyncio.get_running_loop().run_in_executor(None, engine.get_state)
             snap = DashboardEnvelope(
                 type="snapshot",
                 stream_id="state",
                 seq=0,
                 server_time=int(time.time() * 1000),
-                data=engine.get_state(),
+                data=state_data,
             )
             yield {"event": "message", "data": snap.to_json()}
 
@@ -2793,8 +2794,8 @@ function renderCockpitUI(st) {
             </div>
 
             <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;margin-bottom:8px;background:rgba(255,255,255,0.03);padding:3px 6px;border-radius:4px">
-              <span class="mono" style="color:var(--dim)">Spot 1s: <b style="color:var(--tx)">${m.spot_price != null ? '$' + m.spot_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-'}</b></span>
-              <span class="mono" style="font-weight:600;color:${(m.spot_drift || 0) > 0 ? 'var(--up)' : (m.spot_drift || 0) < 0 ? 'var(--down)' : 'var(--dim)'}">${(m.spot_drift || 0) >= 0 ? '+' : ''}${((m.spot_drift || 0) * 100).toFixed(2)}%</span>
+              <span class="mono" style="color:var(--dim)">Spot 1s: <b id="cockpit-spot-price-${item.slug}" style="color:var(--tx)">${m.spot_price != null ? '$' + m.spot_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-'}</b></span>
+              <span id="cockpit-spot-drift-${item.slug}" class="mono" style="font-weight:600;color:${(m.spot_drift || 0) > 0 ? 'var(--up)' : (m.spot_drift || 0) < 0 ? 'var(--down)' : 'var(--dim)'}">${(m.spot_drift || 0) >= 0 ? '+' : ''}${((m.spot_drift || 0) * 100).toFixed(2)}%</span>
             </div>
 
             <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
@@ -3336,11 +3337,18 @@ function setupBacktestInputListeners(){
 
 let liveEventSource = null;
 let liveStreamConnected = false;
+let cockpitPollTimer = null;
+
+function ensureCockpitPolling() {
+  if (!cockpitPollTimer) {
+    cockpitPollTimer = setInterval(fetchCockpitState, 5000);
+  }
+}
 
 function initLiveCockpitStream() {
   if (typeof EventSource === 'undefined') {
     fetchCockpitState();
-    setInterval(fetchCockpitState, 1000);
+    ensureCockpitPolling();
     return;
   }
   try {
@@ -3365,13 +3373,33 @@ function initLiveCockpitStream() {
           renderCockpitUI(env.data);
         } else if (env.stream_id === 'spot' && env.data) {
           if (cockpitState && cockpitState.markets) {
-            const sym = (env.data.symbol || '').toLowerCase();
-            for (const k in cockpitState.markets) {
+            const slug = env.data.slug || (function() {
+              const sym = (env.data.symbol || '').toLowerCase();
               const prefix = sym.replace('usdt', '');
-              if (k.startsWith(prefix)) {
-                cockpitState.markets[k].spot_price = env.data.price;
-                renderCockpitUI(cockpitState);
-                break;
+              for (const k in cockpitState.markets) {
+                if (k.startsWith(prefix)) return k;
+              }
+              return null;
+            })();
+            if (slug && cockpitState.markets[slug]) {
+              const m = cockpitState.markets[slug];
+              const price = env.data.price;
+              m.spot_price = price;
+              if (m.spot_open_price == null && price) {
+                m.spot_open_price = price;
+              }
+              if (m.spot_open_price && price) {
+                m.spot_drift = (price - m.spot_open_price) / m.spot_open_price;
+              }
+              const pEl = $(`cockpit-spot-price-${slug}`);
+              if (pEl && price != null) {
+                pEl.textContent = '$' + price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+              }
+              const dEl = $(`cockpit-spot-drift-${slug}`);
+              if (dEl) {
+                const drift = m.spot_drift || 0;
+                dEl.textContent = (drift >= 0 ? '+' : '') + (drift * 100).toFixed(2) + '%';
+                dEl.style.color = drift > 0 ? 'var(--up)' : drift < 0 ? 'var(--down)' : 'var(--dim)';
               }
             }
           }
@@ -3389,10 +3417,11 @@ function initLiveCockpitStream() {
         sp.style.color = 'var(--gold)';
       }
       fetchCockpitState();
+      ensureCockpitPolling();
     };
   } catch (e) {
     liveStreamConnected = false;
-    setInterval(fetchCockpitState, 1000);
+    ensureCockpitPolling();
   }
 }
 
@@ -3401,7 +3430,7 @@ setupBacktestInputListeners();
 // Initialize real-time streams and polls
 fetchCockpitState();
 initLiveCockpitStream();
-setInterval(fetchCockpitState, 5000);
+ensureCockpitPolling();
 tick();
 setInterval(tick, 3000);
 </script></body></html>

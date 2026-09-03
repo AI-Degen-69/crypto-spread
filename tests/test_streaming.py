@@ -167,13 +167,18 @@ def test_user_spec_buffer_first_reconciliation():
 
 def test_unified_stream_bridge_lifecycle():
     """Verify start and stop lifecycle of UnifiedStreamBridge."""
-    bridge = UnifiedStreamBridge(symbols=["btcusdt", "ethusdt"])
-    assert not bridge.is_running
-    bridge.start()
-    assert bridge.is_running
-    time.sleep(0.1)
-    status = bridge.get_status()
-    assert "rtds_connected" in status
-    assert "symbols" in status
-    bridge.stop()
-    assert not bridge.is_running
+    async def _mock_bnb(self):
+        while not self._stop_event.is_set():
+            await asyncio.sleep(0.05)
+
+    with patch.object(RTDSStreamClient, "_poll_bnb_fallback", _mock_bnb):
+        bridge = UnifiedStreamBridge(symbols=["btcusdt", "ethusdt"])
+        assert not bridge.is_running
+        bridge.start()
+        assert bridge.is_running
+        time.sleep(0.1)
+        status = bridge.get_status()
+        assert "rtds_connected" in status
+        assert "symbols" in status
+        bridge.stop()
+        assert not bridge.is_running

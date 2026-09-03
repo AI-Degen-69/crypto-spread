@@ -191,6 +191,7 @@ class CLOBMarketWSClient:
     ):
         """Initialize CLOB Market WebSocket client."""
         self.token_ids: List[str] = token_ids or []
+        self._tokens_version: int = 0
         self.on_book_update = on_book_update
         self.books: Dict[str, Dict[str, Any]] = {}
         self.is_connected: bool = False
@@ -261,7 +262,9 @@ class CLOBMarketWSClient:
 
     def update_tokens(self, new_tokens: List[str]) -> None:
         """Update subscribed token IDs."""
-        self.token_ids = list(set(new_tokens))
+        if set(new_tokens) != set(self.token_ids):
+            self.token_ids = sorted(list(set(new_tokens)))
+            self._tokens_version += 1
 
     async def run(self) -> None:
         """Connect to CLOB Market WebSocket and process messages."""
@@ -273,6 +276,7 @@ class CLOBMarketWSClient:
             if not self.token_ids:
                 await asyncio.sleep(1.0)
                 continue
+            subscribed_version = self._tokens_version
             try:
                 async with AsyncPublicClient() as client:
                     async with await client.subscribe(
@@ -284,7 +288,7 @@ class CLOBMarketWSClient:
                         self.is_connected = True
                         log.info("Connected to CLOB Market WS with %d tokens", len(self.token_ids))
                         async for event in stream:
-                            if self._stop_event.is_set():
+                            if self._stop_event.is_set() or self._tokens_version != subscribed_version:
                                 break
                             ev_type = getattr(event, "type", "")
                             payload = getattr(event, "payload", None)
@@ -433,6 +437,7 @@ class UnifiedStreamBridge:
         self.is_running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_ready = threading.Event()
         self._seq: int = 0
         self._lock = threading.Lock()
         self._subscribers: List[asyncio.Queue] = []
@@ -441,7 +446,8 @@ class UnifiedStreamBridge:
         """Handle incoming spot tick and broadcast envelope."""
         if self.on_spot_tick_ext:
             self.on_spot_tick_ext(symbol, ts, price)
-        self._broadcast(stream_id="spot", data={"symbol": symbol, "timestamp": ts, "price": price})
+        slug = SYMBOL_TO_SERIES.get(symbol.lower())
+        self._broadcast(stream_id="spot", data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug})
 
     def _handle_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
         """Handle incoming book snapshot/delta and broadcast envelope."""
@@ -471,9 +477,17 @@ class UnifiedStreamBridge:
         # Notify any registered async queues
         if self._loop and self._loop.is_running():
             msg = envelope.to_json()
+
+            def _offer(queue: asyncio.Queue, payload: str) -> None:
+                """Safely put payload into queue, dropping if full."""
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    log.debug("Subscriber queue full; dropping envelope")
+
             for q in list(self._subscribers):
                 try:
-                    self._loop.call_soon_threadsafe(q.put_nowait, msg)
+                    self._loop.call_soon_threadsafe(_offer, q, msg)
                 except Exception:
                     pass
 
@@ -494,13 +508,16 @@ class UnifiedStreamBridge:
         if self.is_running:
             return
         self.is_running = True
+        self._loop_ready.clear()
         self._thread = threading.Thread(target=self._worker_main, daemon=True, name="UnifiedStreamBridge")
         self._thread.start()
+        self._loop_ready.wait(timeout=5.0)
 
     def _worker_main(self) -> None:
         """Worker thread entry point."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
         try:
             self._tasks = [
                 self._loop.create_task(self.rtds.run()),

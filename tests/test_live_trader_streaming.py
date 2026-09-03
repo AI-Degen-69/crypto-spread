@@ -59,10 +59,14 @@ def test_on_spot_tick_fast_stop_loss_trigger():
     engine.on_spot_tick("btcusdt", now_ms, 80000.0)
     assert not btc.exit_taken
 
-    # Spot price drops adversely by 6% (threshold is 5% / 0.05)
-    engine.on_spot_tick("btcusdt", now_ms + 1000, 75000.0)
+    # Small drift (-0.125%) does not trigger fast stop (spot_exit_drift is 0.3% / 0.003)
+    engine.on_spot_tick("btcusdt", now_ms + 500, 79900.0)
+    assert not btc.exit_taken
 
-    # Spot drift is (75000 - 80000) / 80000 = -0.0625 <= -0.05
+    # Spot price drops adversely by 0.375% (<= -0.003)
+    engine.on_spot_tick("btcusdt", now_ms + 1000, 79700.0)
+
+    # Spot drift is (79700 - 80000) / 80000 = -0.00375 <= -0.003
     assert btc.exit_taken
     assert btc.exit_side == "UP"
     assert btc.status == "STOP_EXIT"
@@ -89,10 +93,14 @@ def test_on_spot_tick_fast_stop_loss_trigger_down():
     engine.on_spot_tick("ethusdt", now_ms, 3000.0)
     assert not eth.exit_taken
 
-    # Spot price rallies adversely by 6% (adverse for DOWN position)
-    engine.on_spot_tick("ethusdt", now_ms + 1000, 3180.0)
+    # Small drift (+0.167%) does not trigger fast stop (spot_exit_drift is 0.3% / 0.003)
+    engine.on_spot_tick("ethusdt", now_ms + 500, 3005.0)
+    assert not eth.exit_taken
 
-    # Spot drift is (3180 - 3000) / 3000 = +0.06 >= 0.05
+    # Spot price rallies adversely by 0.5% (>= +0.003)
+    engine.on_spot_tick("ethusdt", now_ms + 1000, 3015.0)
+
+    # Spot drift is (3015 - 3000) / 3000 = +0.005 >= 0.003
     assert eth.exit_taken
     assert eth.exit_side == "DOWN"
     assert eth.status == "STOP_EXIT"
@@ -127,12 +135,15 @@ async def test_api_live_stream_sse_endpoint():
 
     resp = await api_live_stream(req)
     gen = resp.body_iterator
-    first_item = await anext(gen)
-    raw = first_item["data"]
-    payload = json.loads(raw)
-    assert payload["type"] == "snapshot"
-    assert payload["stream_id"] == "state"
-    assert "markets" in payload["data"]
+    try:
+        first_item = await anext(gen)
+        raw = first_item["data"]
+        payload = json.loads(raw)
+        assert payload["type"] == "snapshot"
+        assert payload["stream_id"] == "state"
+        assert "markets" in payload["data"]
+    finally:
+        await gen.aclose()
 
 
 def test_cockpit_html_contains_streaming_ui():
