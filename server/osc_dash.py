@@ -32,6 +32,8 @@ from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
 
 from strategy.live_trader import get_live_trader_engine, fetch_polymarket_account_value
+from strategy.streaming import DashboardEnvelope
+from sse_starlette.sse import EventSourceResponse
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
@@ -680,6 +682,47 @@ def api_live_state():
     """Return real-time state snapshot of the Live Trading Cockpit engine."""
     engine = get_live_trader_engine()
     return engine.get_state()
+
+
+@app.get("/api/live/stream")
+async def api_live_stream(request: Request):
+    """Real-time SSE stream broadcasting versioned DashboardEnvelope events."""
+    _verify_safe_origin(request)
+    engine = get_live_trader_engine()
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    engine.stream_bridge.register_queue(q)
+
+    async def event_generator():
+        """Yield SSE events including initial snapshot and real-time delta envelopes."""
+        try:
+            # First send full state snapshot envelope
+            state_data = await asyncio.get_running_loop().run_in_executor(None, engine.get_state)
+            snap = DashboardEnvelope(
+                type="snapshot",
+                stream_id="state",
+                seq=0,
+                server_time=int(time.time() * 1000),
+                data=state_data,
+            )
+            yield {"event": "message", "data": snap.to_json()}
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield {"event": "message", "data": msg}
+                except asyncio.TimeoutError:
+                    ping_env = DashboardEnvelope(
+                        type="delta",
+                        stream_id="ping",
+                        data={"status": "keepalive"},
+                    )
+                    yield {"event": "ping", "data": ping_env.to_json()}
+        finally:
+            engine.stream_bridge.unregister_queue(q)
+
+    return EventSourceResponse(event_generator())
 
 
 @app.post("/api/live/control")
@@ -1378,6 +1421,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           </h3>
           <span id="cockpitStatusPill" class="pill pill-flat" style="font-size:11px;padding:3px 10px;font-weight:700">BOT: STOPPED</span>
           <span id="cockpitModePill" class="pill" style="font-size:11px;padding:3px 10px;background:rgba(51,201,181,0.15);color:var(--up);border-color:rgba(51,201,181,0.3);font-weight:700">PAPER TRADING</span>
+          <span id="cockpitStreamPill" class="pill pill-flat" style="font-size:11px;padding:3px 10px;font-weight:700">📡 STREAM: CONNECTING...</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <button id="btnCockpitToggle" class="btn btn-primary" style="font-size:13px;padding:7px 16px" onclick="toggleCockpitBot()">▶ START BOT</button>
@@ -2646,6 +2690,20 @@ function renderCockpitUI(st) {
     modePill.style.borderColor = st.mode === 'live' ? 'rgba(240,104,77,0.4)' : 'rgba(51,201,181,0.4)';
   }
 
+  const streamPill = $('cockpitStreamPill');
+  if (streamPill) {
+    const sb = st.stream_bridge || {};
+    if (sb.rtds_connected || liveStreamConnected) {
+      streamPill.textContent = '🟢 RTDS STREAM: 1s';
+      streamPill.className = 'pill pill-osc';
+      streamPill.style.color = 'var(--up)';
+    } else {
+      streamPill.textContent = '🟡 REST POLLING';
+      streamPill.className = 'pill pill-flat';
+      streamPill.style.color = 'var(--gold)';
+    }
+  }
+
   const toggleBtn = $('btnCockpitToggle');
   if (toggleBtn) {
     toggleBtn.textContent = isRun ? '⏹ STOP BOT' : '▶ START BOT';
@@ -2730,9 +2788,14 @@ function renderCockpitUI(st) {
               <span class="mono" style="font-size:10px;color:var(--dim)">${spreadStr}</span>
             </div>
 
-            <div class="mono" style="font-size:10px;color:var(--dim);margin-bottom:8px;line-height:1.4">
+            <div class="mono" style="font-size:10px;color:var(--dim);margin-bottom:6px;line-height:1.4">
               UP: ${fmtPrice(m.up_bid)} / ${fmtPrice(m.up_ask)}<br>
               DN: ${fmtPrice(m.down_bid)} / ${fmtPrice(m.down_ask)}
+            </div>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;margin-bottom:8px;background:rgba(255,255,255,0.03);padding:3px 6px;border-radius:4px">
+              <span class="mono" style="color:var(--dim)">Spot 1s: <b id="cockpit-spot-price-${item.slug}" style="color:var(--tx)">${m.spot_price != null ? '$' + m.spot_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-'}</b></span>
+              <span id="cockpit-spot-drift-${item.slug}" class="mono" style="font-weight:600;color:${(m.spot_drift || 0) > 0 ? 'var(--up)' : (m.spot_drift || 0) < 0 ? 'var(--down)' : 'var(--dim)'}">${(m.spot_drift || 0) >= 0 ? '+' : ''}${((m.spot_drift || 0) * 100).toFixed(2)}%</span>
             </div>
 
             <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
@@ -3272,11 +3335,102 @@ function setupBacktestInputListeners(){
   });
 }
 
+let liveEventSource = null;
+let liveStreamConnected = false;
+let cockpitPollTimer = null;
+
+function ensureCockpitPolling() {
+  if (!cockpitPollTimer) {
+    cockpitPollTimer = setInterval(fetchCockpitState, 5000);
+  }
+}
+
+function initLiveCockpitStream() {
+  if (typeof EventSource === 'undefined') {
+    fetchCockpitState();
+    ensureCockpitPolling();
+    return;
+  }
+  try {
+    if (liveEventSource) {
+      liveEventSource.close();
+    }
+    liveEventSource = new EventSource('/api/live/stream');
+    liveEventSource.onopen = () => {
+      liveStreamConnected = true;
+      const sp = $('cockpitStreamPill');
+      if (sp) {
+        sp.textContent = '🟢 RTDS STREAM: 1s';
+        sp.className = 'pill pill-osc';
+        sp.style.color = 'var(--up)';
+      }
+    };
+    liveEventSource.onmessage = (e) => {
+      try {
+        const env = JSON.parse(e.data);
+        if (env.type === 'snapshot' || env.stream_id === 'state') {
+          cockpitState = env.data;
+          renderCockpitUI(env.data);
+        } else if (env.stream_id === 'spot' && env.data) {
+          if (cockpitState && cockpitState.markets) {
+            const slug = env.data.slug || (function() {
+              const sym = (env.data.symbol || '').toLowerCase();
+              const prefix = sym.replace('usdt', '');
+              for (const k in cockpitState.markets) {
+                if (k.startsWith(prefix)) return k;
+              }
+              return null;
+            })();
+            if (slug && cockpitState.markets[slug]) {
+              const m = cockpitState.markets[slug];
+              const price = env.data.price;
+              m.spot_price = price;
+              if (m.spot_open_price == null && price) {
+                m.spot_open_price = price;
+              }
+              if (m.spot_open_price && price) {
+                m.spot_drift = (price - m.spot_open_price) / m.spot_open_price;
+              }
+              const pEl = $(`cockpit-spot-price-${slug}`);
+              if (pEl && price != null) {
+                pEl.textContent = '$' + price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+              }
+              const dEl = $(`cockpit-spot-drift-${slug}`);
+              if (dEl) {
+                const drift = m.spot_drift || 0;
+                dEl.textContent = (drift >= 0 ? '+' : '') + (drift * 100).toFixed(2) + '%';
+                dEl.style.color = drift > 0 ? 'var(--up)' : drift < 0 ? 'var(--down)' : 'var(--dim)';
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.debug('SSE parse error', err);
+      }
+    };
+    liveEventSource.onerror = () => {
+      liveStreamConnected = false;
+      const sp = $('cockpitStreamPill');
+      if (sp) {
+        sp.textContent = '🟡 REST POLLING';
+        sp.className = 'pill pill-flat';
+        sp.style.color = 'var(--gold)';
+      }
+      fetchCockpitState();
+      ensureCockpitPolling();
+    };
+  } catch (e) {
+    liveStreamConnected = false;
+    ensureCockpitPolling();
+  }
+}
+
 setupBacktestInputListeners();
 
-// Initialize polls
+// Initialize real-time streams and polls
 fetchCockpitState();
-setInterval(fetchCockpitState, 1000);
+initLiveCockpitStream();
+ensureCockpitPolling();
 tick();
 setInterval(tick, 3000);
 </script></body></html>
