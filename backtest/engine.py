@@ -114,9 +114,9 @@ class BacktestParams:
     queue_gate: float = 0.0           # 0 disables
     pair_cost_gate: float = 1.05
     exit_thresh_by_slug: dict = field(default_factory=lambda: {
-        "btc-up-or-down-5m": 0.09, "sol-up-or-down-5m": 0.11,
-        "btc-up-or-down-15m": 0.13, "sol-up-or-down-15m": 0.13,
-        "default_5m": 0.12, "default_15m": 0.13,
+        "btc-up-or-down-5m": 0.05, "sol-up-or-down-5m": 0.05,
+        "btc-up-or-down-15m": 0.05, "sol-up-or-down-15m": 0.05,
+        "default_5m": 0.05, "default_15m": 0.05,
     })
     exit_reversal: float = 0.02
     quote_shares: int = 5
@@ -139,7 +139,7 @@ class BacktestParams:
             if (series and k in series) or (slug and k in slug):
                 return float(v)
         key = f"default_{'5m' if duration == 300 else '15m'}"
-        return float(self.exit_thresh_by_slug.get(key, 0.12))
+        return float(self.exit_thresh_by_slug.get(key, 0.05))
 
     def params_hash(self) -> str:
         """Stable hash for cache keying slider sweeps (Plan D8)."""
