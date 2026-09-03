@@ -689,6 +689,64 @@ def test_api_live_state_includes_series_metadata():
     assert "selected_series" in data
 
 
+def test_api_live_config_rejects_market_change_while_running():
+    """Verify /api/live/config returns HTTP 400 if user tries to change markets while bot is running."""
+    engine = osc_dash.get_live_trader_engine()
+    engine.is_running = True
+    try:
+        res = client.post("/api/live/config", json={"tokens": ["SOL"]})
+        assert res.status_code == 400
+        assert "Cannot change market selection while the trading bot is running" in res.json().get("error", "")
+
+        # But updating other parameters (offset, shares) while running is accepted
+        res2 = client.post("/api/live/config", json={"offset": 0.025, "shares": 6})
+        assert res2.status_code == 200
+        assert engine.offset == 0.025
+        assert engine.shares == 6
+    finally:
+        engine.is_running = False
+        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
 
 
+def test_cockpit_ui_locks_market_filters_while_running():
+    """Verify the cockpit page ships the client-side lock for market filters during a run."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+
+    # Lock helpers and the guard used by every filter handler
+    assert "function areCockpitFiltersLocked()" in html
+    assert "function applyCockpitFilterLock(el, locked)" in html
+    assert "function syncCockpitFiltersFromState(st)" in html
+    assert html.count("Cannot change market selection while the trading bot is running") >= 3
+
+    # Lock hint element and ids for the All/Clear buttons the lock disables
+    assert 'id="cockpitFilterLockHint"' in html
+    assert 'id="btnTokensAll"' in html
+    assert 'id="btnTokensClear"' in html
+
+    # Filter fields are omitted from the config payload while the bot runs
+    assert "if (!areCockpitFiltersLocked()) {" in html
+    assert "body.tokens = Array.from(selectedCockpitTokens);" in html
+    assert "body.durations = getSelectedCockpitDurations();" in html
+
+
+def test_api_live_config_selection_roundtrip_while_stopped():
+    """Verify filters chosen in the UI while stopped drive the engine's active market set."""
+    engine = osc_dash.get_live_trader_engine()
+    assert not engine.is_running
+    try:
+        res = client.post("/api/live/config", json={"tokens": ["BTC", "ETH"], "durations": [900]})
+        assert res.status_code == 200
+        state = res.json()
+        assert sorted(state["selected_series"]) == ["btc-up-or-down-15m", "eth-up-or-down-15m"]
+        assert sorted(state["markets"].keys()) == ["btc-up-or-down-15m", "eth-up-or-down-15m"]
+        assert sorted(engine.markets.keys()) == ["btc-up-or-down-15m", "eth-up-or-down-15m"]
+
+        # Both durations for a single token
+        res2 = client.post("/api/live/config", json={"tokens": ["SOL"], "durations": [300, 900]})
+        assert res2.status_code == 200
+        assert sorted(res2.json()["selected_series"]) == ["sol-up-or-down-15m", "sol-up-or-down-5m"]
+    finally:
+        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
 

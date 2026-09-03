@@ -1501,8 +1501,9 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
             <button type="button" class="filter-chip active" id="chip-token-SOL" onclick="toggleCockpitToken('SOL')">SOL</button>
             <button type="button" class="filter-chip active" id="chip-token-XRP" onclick="toggleCockpitToken('XRP')">XRP</button>
           </div>
-          <button type="button" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(true)">All</button>
-          <button type="button" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(false)">Clear</button>
+          <button type="button" id="btnTokensAll" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(true)">All</button>
+          <button type="button" id="btnTokensClear" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(false)">Clear</button>
+          <span id="cockpitFilterLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn,#f0b90b);letter-spacing:0.04em">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE MARKETS</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <span style="font:700 11px var(--disp);color:var(--faint);text-transform:uppercase;letter-spacing:0.06em">Duration:</span>
@@ -2530,12 +2531,26 @@ function getSelectedCockpitDurations() {
   return [300, 900];
 }
 
+function areCockpitFiltersLocked() {
+  return !!(cockpitState && cockpitState.is_running);
+}
+
+function applyCockpitFilterLock(el, locked) {
+  if (!el) return;
+  el.disabled = locked;
+  el.style.opacity = locked ? '0.4' : '';
+  el.style.cursor = locked ? 'not-allowed' : '';
+  el.title = locked ? 'Stop the bot to change market selection' : '';
+}
+
 function updateCockpitFilterUI() {
+  const locked = areCockpitFiltersLocked();
   ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'].forEach(tok => {
     const chip = $(`chip-token-${tok}`);
     if (chip) {
       if (selectedCockpitTokens.has(tok)) chip.classList.add('active');
       else chip.classList.remove('active');
+      applyCockpitFilterLock(chip, locked);
     }
   });
   const btn5 = $('btnDur5m');
@@ -2544,9 +2559,37 @@ function updateCockpitFilterUI() {
   if (btn5) btn5.className = selectedCockpitDuration === '5m' ? 'tab-btn active' : 'tab-btn';
   if (btn15) btn15.className = selectedCockpitDuration === '15m' ? 'tab-btn active' : 'tab-btn';
   if (btnBoth) btnBoth.className = selectedCockpitDuration === 'both' ? 'tab-btn active' : 'tab-btn';
+  [btn5, btn15, btnBoth, $('btnTokensAll'), $('btnTokensClear')].forEach(b => applyCockpitFilterLock(b, locked));
+  const hint = $('cockpitFilterLockHint');
+  if (hint) hint.style.display = locked ? 'inline' : 'none';
+}
+
+function syncCockpitFiltersFromState(st) {
+  if (!st || !st.selected_series) return;
+  const activeSlugs = new Set(st.selected_series);
+  const tokens = new Set();
+  let has5m = false;
+  let has15m = false;
+  const seriesList = st.available_series || ALL_COCKPIT_SERIES;
+  seriesList.forEach(s => {
+    if (activeSlugs.has(s.slug)) {
+      tokens.add(s.token);
+      if (s.duration === 300) has5m = true;
+      if (s.duration === 900) has15m = true;
+    }
+  });
+  if (tokens.size > 0) selectedCockpitTokens = tokens;
+  if (has5m && has15m) selectedCockpitDuration = 'both';
+  else if (has15m) selectedCockpitDuration = '15m';
+  else selectedCockpitDuration = '5m';
+  updateCockpitFilterUI();
 }
 
 async function toggleCockpitToken(tok) {
+  if (areCockpitFiltersLocked()) {
+    alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
+    return;
+  }
   if (selectedCockpitTokens.has(tok)) {
     if (selectedCockpitTokens.size <= 1) {
       alert('At least one cryptocurrency token must remain selected.');
@@ -2561,6 +2604,10 @@ async function toggleCockpitToken(tok) {
 }
 
 async function setCockpitTokensAll(selectAll) {
+  if (areCockpitFiltersLocked()) {
+    alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
+    return;
+  }
   if (selectAll) {
     selectedCockpitTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
   } else {
@@ -2571,6 +2618,10 @@ async function setCockpitTokensAll(selectAll) {
 }
 
 async function setCockpitDuration(dur) {
+  if (areCockpitFiltersLocked()) {
+    alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
+    return;
+  }
   if (selectedCockpitDuration === dur) return;
   selectedCockpitDuration = dur;
   updateCockpitFilterUI();
@@ -2767,28 +2818,31 @@ async function applyCockpitConfig() {
   const mode = $('cockpitMode').value || 'paper';
   const wallet = $('cockpitWallet').value.trim();
   const startBal = parseFloat($('cockpitStartBal').value) || 1000.0;
-  const tokens = Array.from(selectedCockpitTokens);
-  const durations = getSelectedCockpitDurations();
+  const body = {
+    offset,
+    exit_thresh,
+    shares,
+    mode,
+    wallet_address: wallet,
+    starting_balance: startBal,
+  };
+  // Market selection is immutable while the bot runs; only send filters when stopped
+  if (!areCockpitFiltersLocked()) {
+    body.tokens = Array.from(selectedCockpitTokens);
+    body.durations = getSelectedCockpitDurations();
+  }
 
   try {
     const res = await fetch('/api/live/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        offset,
-        exit_thresh,
-        shares,
-        mode,
-        wallet_address: wallet,
-        starting_balance: startBal,
-        tokens,
-        durations,
-      }),
+      body: JSON.stringify(body),
     });
     const st = await res.json();
     if (!res.ok) {
       alert('Configuration rejected: ' + (st.error || res.statusText));
       await fetchCockpitState();
+      syncCockpitFiltersFromState(cockpitState);
       return;
     }
     cockpitState = st;
@@ -2829,25 +2883,14 @@ function renderCockpitUI(st) {
     $('cockpitWallet').value = st.wallet_address;
   }
 
-  // Sync asset tokens and duration selection from engine state on first receipt
+  // Sync asset/duration filters from engine state on first receipt, and whenever
+  // the bot is running (selection is engine-owned and immutable mid-run).
   if (!hasInitializedCockpitFilters && st.selected_series) {
-    const activeSlugs = new Set(st.selected_series);
-    const tokens = new Set();
-    let has5m = false;
-    let has15m = false;
-    const seriesList = st.available_series || ALL_COCKPIT_SERIES;
-    seriesList.forEach(s => {
-      if (activeSlugs.has(s.slug)) {
-        tokens.add(s.token);
-        if (s.duration === 300) has5m = true;
-        if (s.duration === 900) has15m = true;
-      }
-    });
-    if (tokens.size > 0) selectedCockpitTokens = tokens;
-    if (has5m && has15m) selectedCockpitDuration = 'both';
-    else if (has15m) selectedCockpitDuration = '15m';
-    else selectedCockpitDuration = '5m';
     hasInitializedCockpitFilters = true;
+    syncCockpitFiltersFromState(st);
+  } else if (st.is_running && st.selected_series) {
+    syncCockpitFiltersFromState(st);
+  } else {
     updateCockpitFilterUI();
   }
 
