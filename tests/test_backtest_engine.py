@@ -52,7 +52,7 @@ def snap(ts: float, mid_up: float, down_ask: float = 0.49, up_ask: float = 0.49,
     return {
         "ts": ts, "iso": iso, "series": SERIES, "duration": DUR,
         "label": "BTC 5m", "cid": CID, "slug": SLUG,
-        "start_ts": ts - 60.0, "end_ts": ts + 240.0, "t_rem": 240.0,
+        "start_ts": ts - 2.0, "end_ts": ts + 298.0, "t_rem": 298.0,
         "up_token": UP_TOKEN, "down_token": DN_TOKEN,
         "up_book": {
             "token_id": UP_TOKEN, "bids": up_bids or {}, "asks": {},

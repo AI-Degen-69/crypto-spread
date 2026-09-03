@@ -299,8 +299,8 @@ def test_live_trader_advance_pre_quoting():
         "slug": "btc-up-down-0900",
         "up_token": "tok_cur_up",
         "down_token": "tok_cur_dn",
-        "start_ts": now - 60,
-        "end_ts": now + 240,
+        "start_ts": now - 5,
+        "end_ts": now + 295,
     }
     next_mkt = {
         "conditionId": "0xnext456",

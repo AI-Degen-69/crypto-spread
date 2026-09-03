@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None):
                     help="filter late-started windows where first tick > N seconds after window open (0 disables)")
     ap.add_argument("--filter-partial", action="store_true",
                     help="shorthand to filter late-started partial windows (>5s delay)")
+    ap.add_argument("--entry-timeout", type=float, default=0.10,
+                    help="cancel unfilled entry quotes once N fraction of window elapsed, e.g. 0.10 for 10% (0 disables)")
     ap.add_argument("--start", type=str, default=None,
                     help="inclusive start ISO timestamp, e.g. 2026-08-29T00:00:00Z")
     ap.add_argument("--end", type=str, default=None,
@@ -75,10 +77,12 @@ def main(argv: list[str] | None = None):
         exit_reversal=args.exit_reversal, quote_shares=args.size,
         fill_model=args.fill_model, merge_gas_usd=args.gas,
         max_start_delay_sec=max_start_delay,
+        entry_timeout_pct=args.entry_timeout,
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
           f"pair_cost={params.pair_cost_gate} fill={params.fill_model} "
-          f"max_delay={params.max_start_delay_sec}s params_hash={params.params_hash()}")
+          f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct * 100:.0f}% "
+          f"params_hash={params.params_hash()}")
 
     t0 = time.perf_counter()
     snaps = list(iter_ticks(args.source))
