@@ -126,6 +126,13 @@ class BacktestParams:
     taker_fee_rate: float = 0.07     # crypto fee coefficient
     min_quote_shares: int = 5
     max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
+    entry_timeout_pct: float = 0.10   # 0 disables; e.g. 0.10 cancels unfilled entry quotes once 10% elapsed
+
+    def __post_init__(self):
+        """Validate parameter ranges and finite boundaries."""
+        if self.entry_timeout_pct is not None:
+            if math.isnan(self.entry_timeout_pct) or not (0.0 <= self.entry_timeout_pct <= 1.0):
+                raise ValueError(f"entry_timeout_pct must be between 0.0 and 1.0, got {self.entry_timeout_pct}")
 
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
         """Return the exit threshold for a given market slug, series, and window duration."""
@@ -249,7 +256,25 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     resting_up = round(0.50 - params.offset, 3)
     resting_down = round(0.50 - params.offset, 3)
 
-    for s in window_snaps:
+    entry_cancelled = False
+    if params.entry_timeout_pct > 0 and duration > 0:
+        cutoff_sec = params.entry_timeout_pct * duration
+        if raw_start_delay_sec >= cutoff_sec:
+            entry_cancelled = True
+
+    for s_idx, s in enumerate(window_snaps):
+        cur_ts = float(s.get("ts", 0.0) or 0.0)
+        if cur_ts > 0.0 and start_ts > 0.0:
+            elapsed = max(0.0, cur_ts - start_ts)
+        else:
+            elapsed = float(s_idx)
+
+        # Check entry timeout (Issue #48): if elapsed strictly exceeds cutoff, timeout already passed
+        if params.entry_timeout_pct > 0 and duration > 0 and not entry_cancelled:
+            if elapsed > (params.entry_timeout_pct * duration):
+                if not filled_up and not filled_down:
+                    entry_cancelled = True
+
         ub = s.get("up_book") or {}
         db = s.get("down_book") or {}
         mid = _mid(ub)
@@ -315,7 +340,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     pnl_cents += (bb_dn - resting_down) * 100.0
                     fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                     break
-            continue
+            if not filled_up and not filled_down:
+                continue
 
         # --- FILL DETECTION (Plan fill_model: tape conservative default, cross for strict through-price fills) ---
         # Tape-confirmed: a real trade printed at our resting price (or strictly through for "cross").
@@ -323,31 +349,41 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Hoist token lookups and guard empty identifiers (prevents "" == "" match).
         up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
+        can_fill_up = (not filled_up) and (not entry_cancelled or filled_down)
+        can_fill_down = (not filled_down) and (not entry_cancelled or filled_up)
         for trade in s.get("tape_delta") or []:
             tasset = str(trade.get("asset", "")).strip()
             if not tasset:
                 continue
             tprice = float(trade.get("price", 0))
-            if up_token and tasset == up_token:
+            if up_token and tasset == up_token and can_fill_up:
                 if params.fill_model in ("tape", "both") and abs(tprice - resting_up) <= params.tick_size:
                     filled_up = True
+                    can_fill_up = False
                 elif params.fill_model == "cross" and tprice <= (resting_up - params.tick_size + 1e-6):
                     filled_up = True
-            if dn_token and tasset == dn_token:
+                    can_fill_up = False
+            if dn_token and tasset == dn_token and can_fill_down:
                 if params.fill_model in ("tape", "both") and abs(tprice - resting_down) <= params.tick_size:
                     filled_down = True
+                    can_fill_down = False
                 elif params.fill_model == "cross" and tprice <= (resting_down - params.tick_size + 1e-6):
                     filled_down = True
+                    can_fill_down = False
         if params.fill_model in ("book", "both"):
-            if up_ask is not None and up_ask <= resting_up:
+            if can_fill_up and up_ask is not None and up_ask <= resting_up:
                 filled_up = True
-            if dn_ask is not None and dn_ask <= resting_down:
+                can_fill_up = False
+            if can_fill_down and dn_ask is not None and dn_ask <= resting_down:
                 filled_down = True
+                can_fill_down = False
         elif params.fill_model == "cross":
-            if up_ask is not None and up_ask <= (resting_up - params.tick_size + 1e-6):
+            if can_fill_up and up_ask is not None and up_ask <= (resting_up - params.tick_size + 1e-6):
                 filled_up = True
-            if dn_ask is not None and dn_ask <= (resting_down - params.tick_size + 1e-6):
+                can_fill_up = False
+            if can_fill_down and dn_ask is not None and dn_ask <= (resting_down - params.tick_size + 1e-6):
                 filled_down = True
+                can_fill_down = False
 
         # --- PAIR COMPLETION ---
         if filled_up and filled_down and not pair_captured and not exit_taken:
@@ -380,6 +416,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_dn - resting_down) * 100.0
                 fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                 break
+
+        # Check entry timeout (Issue #48): cancel unfilled entry quotes if 0 legs filled
+        # Evaluated after snapshot fills so trades in the cutoff snapshot are not dropped
+        if params.entry_timeout_pct > 0 and duration > 0 and not entry_cancelled:
+            if elapsed >= (params.entry_timeout_pct * duration):
+                if not filled_up and not filled_down:
+                    entry_cancelled = True
 
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):

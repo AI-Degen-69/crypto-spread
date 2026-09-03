@@ -317,6 +317,7 @@ class MarketLiveState:
     order_id_down: Optional[str] = None
     order_status_up: str = "NONE"  # NONE, RESTING, FILLED, CANCELLED
     order_status_down: str = "NONE"
+    entry_cancelled_timeout: bool = False
 
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
@@ -1828,8 +1829,47 @@ class LiveTraderEngine:
         if mstate.max_up_drift >= self.exit_thresh and (mid - 0.50) < self.exit_reversal:
             mstate.reversal_seen_up = True
 
+        # Determine window duration & elapsed time (Issue #48)
+        win_duration = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else (900.0 if "15m" in slug else 300.0)
+        elapsed_sec = max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else (win_duration - mstate.time_remaining_sec)
+        entry_timeout_sec = 0.10 * win_duration
+        is_late_start = (elapsed_sec >= entry_timeout_sec)
+
+        # --- 10% WINDOW TIMEOUT ENTRY CANCELLATION (Issue #48) ---
+        if is_late_start and not mstate.entry_cancelled_timeout:
+            if not mstate.filled_up and not mstate.filled_down:
+                if self.mode == "live":
+                    cancel_ok_up = True
+                    cancel_ok_down = True
+                    if mstate.order_id_up and mstate.order_status_up == "RESTING":
+                        if self.cancel_live_order(mstate.order_id_up):
+                            mstate.order_status_up = "CANCELLED"
+                        else:
+                            cancel_ok_up = False
+                    if mstate.order_id_down and mstate.order_status_down == "RESTING":
+                        if self.cancel_live_order(mstate.order_id_down):
+                            mstate.order_status_down = "CANCELLED"
+                        else:
+                            cancel_ok_down = False
+
+                    if cancel_ok_up and cancel_ok_down:
+                        mstate.entry_cancelled_timeout = True
+                else:
+                    if mstate.order_status_up == "RESTING":
+                        mstate.order_status_up = "CANCELLED"
+                    if mstate.order_status_down == "RESTING":
+                        mstate.order_status_down = "CANCELLED"
+                    mstate.entry_cancelled_timeout = True
+
+                if mstate.entry_cancelled_timeout:
+                    if mstate.status in ("IDLE", "QUOTING", "PRE_QUOTING"):
+                        mstate.status = "TIMEOUT_NO_FILL"
+                        mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
+                        log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
+
         # --- LIVE ORDER PLACEMENT (if in live mode and orders not placed yet) ---
-        if self.mode == "live" and not self.quoting_halted and not mstate.pair_captured and not mstate.exit_taken:
+        if (self.mode == "live" and not self.quoting_halted and not mstate.pair_captured 
+            and not mstate.exit_taken and not mstate.entry_cancelled_timeout and not is_late_start):
             if not mstate.order_id_up and mstate.up_token:
                 res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
                 if res_up and res_up.get("order_id"):
@@ -1842,7 +1882,7 @@ class LiveTraderEngine:
                     mstate.order_status_down = "RESTING"
 
         # --- FILL DETECTION ---
-        if mstate.status in ("IDLE", "PRE_QUOTING"):
+        if mstate.status in ("IDLE", "PRE_QUOTING") and not mstate.entry_cancelled_timeout:
             mstate.status = "QUOTING"
             mstate.last_action = f"Quoting bids @ {resting_up:.2f} / {resting_down:.2f}"
 
@@ -1882,7 +1922,10 @@ class LiveTraderEngine:
                             log.debug("[%s] Error checking DOWN order: %s", slug, e)
             else:
                 # Paper / Backtest simulation fallback using order book asks
-                if not mstate.filled_up:
+                can_sim_up = (not mstate.filled_up) and (not mstate.entry_cancelled_timeout or mstate.filled_down)
+                can_sim_dn = (not mstate.filled_down) and (not mstate.entry_cancelled_timeout or mstate.filled_up)
+
+                if can_sim_up:
                     if mstate.up_ask is not None and mstate.up_ask <= resting_up:
                         mstate.filled_up = True
                         mstate.fill_price_up = resting_up
@@ -1891,7 +1934,7 @@ class LiveTraderEngine:
                         mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
                         log.info("[%s] Filled UP @ %.2f", slug, resting_up)
 
-                if not mstate.filled_down:
+                if can_sim_dn:
                     if mstate.down_ask is not None and mstate.down_ask <= resting_down:
                         mstate.filled_down = True
                         mstate.fill_price_down = resting_down
@@ -2073,6 +2116,7 @@ class LiveTraderEngine:
         mstate.fill_price_down = None
         mstate.pair_captured = False
         mstate.exit_taken = False
+        mstate.entry_cancelled_timeout = False
         mstate.exit_side = None
         mstate.spot_open_price = None
         mstate.spot_drift = 0.0

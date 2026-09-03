@@ -262,6 +262,7 @@ def api_backtest(
     gas: float = 0.0,
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
+    entry_timeout_pct: float = 0.10,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -295,6 +296,7 @@ def api_backtest(
         fill_model=fill_model,
         merge_gas_usd=gas,
         max_start_delay_sec=max_start_delay,
+        entry_timeout_pct=entry_timeout_pct,
     )
 
     if not TICKS_DIR.exists():
