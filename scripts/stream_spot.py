@@ -39,7 +39,7 @@ def main() -> None:
     try:
         while True:
             time.sleep(0.5)
-            if not bridge.is_running:
+            if not bridge.is_running or not bridge.is_rtds_running:
                 print("\nStream worker ended unexpectedly.", flush=True)
                 break
             if args.seconds > 0 and (time.time() - start_time) >= args.seconds:

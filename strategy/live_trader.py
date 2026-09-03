@@ -772,6 +772,7 @@ class LiveTraderEngine:
                 pnl_pct=round(((exit_pnl_usd) / denom) * 100.0, 1),
                 notes=trigger_note,
             ))
+            self._save_persisted_trades()
 
     def _trigger_fast_stop_exit(self, slug: str, mstate: MarketLiveState, side: str, now: float) -> None:
         """Trigger fast stop-loss exit market order and cancel unhedged side."""
@@ -1110,6 +1111,10 @@ class LiveTraderEngine:
                 meta = json.loads(META_FILE.read_text(encoding="utf-8"))
                 if "starting_balance" in meta:
                     self.starting_balance = float(meta["starting_balance"])
+                if "wallet_address" in meta and meta["wallet_address"]:
+                    w = str(meta["wallet_address"]).strip()
+                    if w.startswith("0x") and len(w) >= 10:
+                        self.wallet_address = w
             except Exception as e:
                 log.warning("Failed loading trade metadata: %s", e)
         if not TRADES_FILE.exists():
@@ -1235,11 +1240,15 @@ class LiveTraderEngine:
         marker = start_marker if start_marker is not None else "1788380100"
         start_idx = 0
         if marker:
+            found = False
             for i, a in enumerate(activities):
                 slug_cand = str(a.get("slug", ""))
                 if marker in slug_cand and a.get("outcome") == "Down" and a.get("side") == "BUY":
                     start_idx = i
+                    found = True
                     break
+            if not found:
+                return {"success": False, "error": f"Start marker '{marker}' not found in wallet activities"}
 
         session_acts = activities[start_idx:]
 
@@ -1384,9 +1393,10 @@ class LiveTraderEngine:
             new_events.append((last_ts, ev))
 
         new_events.sort(key=lambda x: x[0])
-        self.trades = [ev for _, ev in new_events]
-        self._recalculate_from_trades()
-        self._save_persisted_trades()
+        with self._engine_lock:
+            self.trades = [ev for _, ev in new_events]
+            self._recalculate_from_trades()
+            self._save_persisted_trades()
 
         return {
             "success": True,
@@ -1907,20 +1917,22 @@ class LiveTraderEngine:
                     self.merge_positions(mstate.condition_id)
 
                 denom = max(0.01, 2 * resting_up * max(1, self.shares))
-                self.trades.append(TradeEvent(
-                    id=f"{slug}_{int(now)}",
-                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                    slug=slug,
-                    label=mstate.label,
-                    action="PAIR_MERGE",
-                    shares=self.shares,
-                    entry_price_up=resting_up,
-                    entry_price_down=resting_down,
-                    exit_price=1.00,
-                    pnl_usd=round(pair_profit_usd, 3),
-                    pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
-                    notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
-                ))
+                with self._engine_lock:
+                    self.trades.append(TradeEvent(
+                        id=f"{slug}_{int(now)}",
+                        timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                        slug=slug,
+                        label=mstate.label,
+                        action="PAIR_MERGE",
+                        shares=self.shares,
+                        entry_price_up=resting_up,
+                        entry_price_down=resting_down,
+                        exit_price=1.00,
+                        pnl_usd=round(pair_profit_usd, 3),
+                        pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
+                        notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
+                    ))
+                    self._save_persisted_trades()
                 return
 
             # --- RECONCILE PENDING STOP EXIT ---
@@ -2013,20 +2025,22 @@ class LiveTraderEngine:
             mstate.trades_count += 1
             log.info("[%s] Window Rollover Settled PnL: $%.2f", mstate.slug, settle_pnl)
 
-            self.trades.append(TradeEvent(
-                id=f"{mstate.slug}_{int(now)}",
-                timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                slug=mstate.slug,
-                label=mstate.label,
-                action="WINDOW_SETTLE",
-                shares=self.shares,
-                entry_price_up=resting_up if mstate.filled_up else None,
-                entry_price_down=resting_down if mstate.filled_down else None,
-                exit_price=mstate.mid,
-                pnl_usd=round(settle_pnl, 3),
-                pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
-                notes="Window expired, position auto-settled",
-            ))
+            with self._engine_lock:
+                self.trades.append(TradeEvent(
+                    id=f"{mstate.slug}_{int(now)}",
+                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                    slug=mstate.slug,
+                    label=mstate.label,
+                    action="WINDOW_SETTLE",
+                    shares=self.shares,
+                    entry_price_up=resting_up if mstate.filled_up else None,
+                    entry_price_down=resting_down if mstate.filled_down else None,
+                    exit_price=mstate.mid,
+                    pnl_usd=round(settle_pnl, 3),
+                    pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
+                    notes="Window expired, position auto-settled",
+                ))
+                self._save_persisted_trades()
 
         # Promote advance pre-quoted orders from next window if available and matching new_cid
         if mstate.next_quoted and mstate.next_condition_id and (not new_cid or mstate.next_condition_id == new_cid):

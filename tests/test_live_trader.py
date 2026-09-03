@@ -439,5 +439,47 @@ def test_live_order_flow_smoke(monkeypatch):
     assert ret == 0
 
 
+def test_load_persisted_trades_restores_wallet_address(tmp_path, monkeypatch):
+    meta_file = tmp_path / "live_trade_meta.json"
+    trades_file = tmp_path / "live_trades.jsonl"
+    meta_file.write_text('{"starting_balance": 1500.0, "wallet_address": "0x1234567890abcdef1234567890abcdef12345678"}')
+    trades_file.write_text("")
+    monkeypatch.setattr("strategy.live_trader.META_FILE", meta_file)
+    monkeypatch.setattr("strategy.live_trader.TRADES_FILE", trades_file)
+
+    engine = LiveTraderEngine()
+    engine._load_persisted_trades()
+    assert engine.starting_balance == 1500.0
+    assert engine.wallet_address == "0x1234567890abcdef1234567890abcdef12345678"
+
+
+def test_sync_wallet_trades_unmatched_start_marker(monkeypatch):
+    engine = LiveTraderEngine()
+    fake_activities = [
+        {"slug": "btc-up-or-down-5m-1788380000", "outcome": "Down", "side": "BUY", "timestamp": 100, "usdcSize": 2.4, "type": "TRADE"}
+    ]
+    class FakeResponse:
+        ok = True
+        def json(self):
+            return fake_activities
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("strategy.live_trader._get_thread_session", lambda: FakeSession())
+    res = engine.sync_wallet_trades(wallet_address="0x1234567890abcdef1234", start_marker="non_existent_marker")
+    assert res["success"] is False
+    assert "not found in wallet activities" in res["error"]
+
+
+def test_unified_stream_bridge_is_rtds_running():
+    from strategy.streaming import UnifiedStreamBridge
+    bridge = UnifiedStreamBridge()
+    assert bridge.is_rtds_running is False
+    bridge.is_running = True
+    assert bridge.is_rtds_running is True
+
+
 
 
