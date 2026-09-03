@@ -2512,6 +2512,10 @@ const ALL_COCKPIT_SERIES = [
 let selectedCockpitTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
 let selectedCockpitDuration = '5m';
 let hasInitializedCockpitFilters = false;
+// Holds the engine's exact slug set when it is not expressible as a
+// token x duration product (e.g. a CLI selection of BTC 5m + ETH 15m).
+// Sent verbatim so a parameter apply cannot silently widen the selection.
+let cockpitExactSelection = null;
 
 function getActiveCockpitSeries() {
   if (cockpitState && cockpitState.available_series && cockpitState.selected_series) {
@@ -2564,6 +2568,12 @@ function updateCockpitFilterUI() {
   if (hint) hint.style.display = locked ? 'inline' : 'none';
 }
 
+function cockpitFilterProductSlugs(tokens, durations) {
+  const durSet = new Set(durations);
+  const seriesList = (cockpitState && cockpitState.available_series) || ALL_COCKPIT_SERIES;
+  return seriesList.filter(s => tokens.has(s.token) && durSet.has(s.duration)).map(s => s.slug);
+}
+
 function syncCockpitFiltersFromState(st) {
   if (!st || !st.selected_series) return;
   const activeSlugs = new Set(st.selected_series);
@@ -2582,6 +2592,13 @@ function syncCockpitFiltersFromState(st) {
   if (has5m && has15m) selectedCockpitDuration = 'both';
   else if (has15m) selectedCockpitDuration = '15m';
   else selectedCockpitDuration = '5m';
+
+  // If the chips cannot reproduce the engine's exact set, keep the exact set so a
+  // later parameter apply resubmits it instead of the wider cross-product.
+  const product = cockpitFilterProductSlugs(selectedCockpitTokens, getSelectedCockpitDurations());
+  const matchesProduct = product.length === activeSlugs.size && product.every(slug => activeSlugs.has(slug));
+  cockpitExactSelection = matchesProduct ? null : [...activeSlugs];
+
   updateCockpitFilterUI();
 }
 
@@ -2590,6 +2607,7 @@ async function toggleCockpitToken(tok) {
     alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
     return;
   }
+  cockpitExactSelection = null;
   if (selectedCockpitTokens.has(tok)) {
     if (selectedCockpitTokens.size <= 1) {
       alert('At least one cryptocurrency token must remain selected.');
@@ -2608,6 +2626,7 @@ async function setCockpitTokensAll(selectAll) {
     alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
     return;
   }
+  cockpitExactSelection = null;
   if (selectAll) {
     selectedCockpitTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
   } else {
@@ -2622,6 +2641,7 @@ async function setCockpitDuration(dur) {
     alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
     return;
   }
+  cockpitExactSelection = null;
   if (selectedCockpitDuration === dur) return;
   selectedCockpitDuration = dur;
   updateCockpitFilterUI();
@@ -2828,8 +2848,12 @@ async function applyCockpitConfig() {
   };
   // Market selection is immutable while the bot runs; only send filters when stopped
   if (!areCockpitFiltersLocked()) {
-    body.tokens = Array.from(selectedCockpitTokens);
-    body.durations = getSelectedCockpitDurations();
+    if (cockpitExactSelection) {
+      body.selected_markets = cockpitExactSelection;
+    } else {
+      body.tokens = Array.from(selectedCockpitTokens);
+      body.durations = getSelectedCockpitDurations();
+    }
   }
 
   try {

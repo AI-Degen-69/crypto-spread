@@ -653,7 +653,7 @@ def test_live_trader_state_reports_selection_for_ui():
     assert durations["eth-up-or-down-15m"] == 900
 
 
-def test_live_trader_running_flag_is_guarded_by_engine_lock():
+def test_live_trader_running_flag_is_guarded_by_engine_lock(monkeypatch):
     """Verify start/stop flip is_running under the lock update_config checks it with.
 
     Without shared locking, a concurrent start() could land between
@@ -663,6 +663,11 @@ def test_live_trader_running_flag_is_guarded_by_engine_lock():
     import threading
 
     engine = LiveTraderEngine()
+    # Keep the test hermetic: start()/stop() must not open the stream bridge or
+    # schedule wallet-balance network work.
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine.stream_bridge, "stop", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
     engine._engine_lock.acquire()
     try:
         t = threading.Thread(target=engine.start, daemon=True)
@@ -692,4 +697,48 @@ def test_live_trader_running_guard_tracks_traded_markets():
     with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
         engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
     assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+
+def test_live_trader_rejected_config_leaves_parameters_unchanged():
+    """Verify a rejected selection does not partially apply the rest of the payload."""
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+
+    # Rejected because the bot is running: offset/shares must not be applied
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(offset=0.04, shares=99, tokens=["ETH"], durations=[300])
+    assert engine.offset == 0.02
+    assert engine.shares == 5
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+    # Rejected because the slug is unknown: same guarantee while stopped
+    engine.is_running = False
+    with pytest.raises(ValueError, match="Unknown series slug"):
+        engine.update_config(offset=0.04, shares=99, selected_markets=["not-a-market"])
+    assert engine.offset == 0.02
+    assert engine.shares == 5
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+
+def test_live_trader_start_sets_quoting_halted_under_lock(monkeypatch):
+    """Verify start() clears quoting_halted inside the lifecycle lock, not before it."""
+    import threading
+
+    engine = LiveTraderEngine()
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine.quoting_halted = True
+
+    engine._engine_lock.acquire()
+    try:
+        t = threading.Thread(target=engine.start, daemon=True)
+        t.start()
+        t.join(timeout=0.3)
+        assert t.is_alive()
+        assert engine.quoting_halted, "quoting_halted was cleared outside _engine_lock"
+    finally:
+        engine._engine_lock.release()
+    t.join(timeout=2.0)
+    assert engine.is_running
+    assert not engine.quoting_halted
 

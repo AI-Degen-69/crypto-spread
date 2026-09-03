@@ -1087,34 +1087,16 @@ class LiveTraderEngine:
                       selected_markets: Optional[Iterable[str]] = None,
                       tokens: Optional[Iterable[str]] = None,
                       durations: Optional[Iterable[int]] = None) -> Dict[str, Any]:
-        """Update strategy configuration parameters and market selection."""
-        if offset is not None:
-            self.offset = max(0.001, min(0.490, float(offset)))
-        if exit_thresh is not None and exit_thresh > 0:
-            self.exit_thresh = float(exit_thresh)
-        if shares is not None and shares > 0:
-            self.shares = int(shares)
-        if mode in ("paper", "live"):
-            self.mode = mode
-        if wallet_address is not None:
-            self.wallet_address = wallet_address.strip()
-            self._clob_client = None  # Reset client if wallet changed
+        """Update strategy configuration parameters and market selection.
 
-        if self.mode == "live":
-            addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
-            val_info = fetch_polymarket_account_value(addr)
-            if val_info.get("success"):
-                self.starting_balance = float(val_info["net_value"])
-                if not self.wallet_address and val_info.get("wallet_address"):
-                    self.wallet_address = val_info["wallet_address"]
-                log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
-            else:
-                self._schedule_wallet_balance_fetch()
-        else:
-            if starting_balance is not None and starting_balance >= 0:
-                self.starting_balance = float(starting_balance)
-
-        # Handle market selection reconfiguration if any selection param is provided
+        Raises:
+            ValueError: If the selection is invalid, would deselect a market with an
+                open position, or would change the traded market set while running.
+                No configuration field is modified when this is raised.
+        """
+        # Market selection is resolved and applied before any scalar field is
+        # assigned, so a rejected selection (invalid slug, or a change while the
+        # bot runs) leaves the whole configuration untouched rather than half-applied.
         if selected_markets is not None or tokens is not None or durations is not None:
             new_series = _resolve_series_selection(selected_markets, tokens, durations)
             new_slugs = {s[0] for s in new_series}
@@ -1186,6 +1168,33 @@ class LiveTraderEngine:
                 retained_series = [s for s in self.selected_series if s[0] in self.markets and s[0] not in {x[0] for x in new_series}]
                 self.selected_series = list(new_series) + retained_series
 
+        if offset is not None:
+            self.offset = max(0.001, min(0.490, float(offset)))
+        if exit_thresh is not None and exit_thresh > 0:
+            self.exit_thresh = float(exit_thresh)
+        if shares is not None and shares > 0:
+            self.shares = int(shares)
+        if mode in ("paper", "live"):
+            self.mode = mode
+        if wallet_address is not None:
+            self.wallet_address = wallet_address.strip()
+            self._clob_client = None  # Reset client if wallet changed
+
+        if self.mode == "live":
+            addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
+            val_info = fetch_polymarket_account_value(addr)
+            if val_info.get("success"):
+                self.starting_balance = float(val_info["net_value"])
+                if not self.wallet_address and val_info.get("wallet_address"):
+                    self.wallet_address = val_info["wallet_address"]
+                log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
+            else:
+                self._schedule_wallet_balance_fetch()
+        else:
+            if starting_balance is not None and starting_balance >= 0:
+                self.starting_balance = float(starting_balance)
+
+
         # Update per-market resting prices
         for m in self.markets.values():
             m.resting_up = round(0.50 - self.offset, 3)
@@ -1219,10 +1228,10 @@ class LiveTraderEngine:
 
     def start(self):
         """Start the background live trading ticker."""
-        self.quoting_halted = False
         with self._engine_lock:
             if self.is_running:
                 return
+            self.quoting_halted = False
             self.is_running = True
         self.stream_bridge.start()
         self._schedule_wallet_balance_fetch()

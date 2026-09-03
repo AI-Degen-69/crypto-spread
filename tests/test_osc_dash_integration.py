@@ -747,3 +747,37 @@ def test_api_live_config_selection_roundtrip_while_stopped():
     finally:
         engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
 
+
+def test_cockpit_ui_preserves_non_rectangular_selection():
+    """Verify the cockpit resubmits an exact slug set it cannot express as token x duration."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+
+    assert "let cockpitExactSelection = null;" in html
+    assert "function cockpitFilterProductSlugs(" in html
+    assert "body.selected_markets = cockpitExactSelection;" in html
+
+    # Every explicit filter click drops back to the product representation
+    for handler in ("toggleCockpitToken", "setCockpitTokensAll", "setCockpitDuration"):
+        body_start = html.index(f"function {handler}(")
+        assert "cockpitExactSelection = null;" in html[body_start:body_start + 400], handler
+
+
+def test_api_live_config_accepts_non_rectangular_selection():
+    """Verify a mixed-duration selection survives a parameter-only reapply."""
+    engine = osc_dash.get_live_trader_engine()
+    try:
+        mixed = ["btc-up-or-down-5m", "eth-up-or-down-15m"]
+        res = client.post("/api/live/config", json={"selected_markets": mixed})
+        assert res.status_code == 200
+        assert sorted(res.json()["selected_series"]) == sorted(mixed)
+
+        # Resubmitting the exact set alongside parameters must not widen it
+        res2 = client.post("/api/live/config", json={"offset": 0.03, "selected_markets": mixed})
+        assert res2.status_code == 200
+        assert sorted(res2.json()["selected_series"]) == sorted(mixed)
+        assert sorted(engine.markets.keys()) == sorted(mixed)
+    finally:
+        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
+
