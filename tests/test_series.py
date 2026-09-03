@@ -67,3 +67,10 @@ def test_filter_series_invalid_token():
 def test_filter_series_invalid_duration():
     with pytest.raises(ValueError, match="Unsupported duration"):
         filter_series(durations=[60])
+
+
+def test_filter_series_empty_token():
+    with pytest.raises(ValueError, match="Invalid empty token"):
+        filter_series(tokens=[""])
+    with pytest.raises(ValueError, match="Invalid empty token"):
+        filter_series(tokens=["   "])

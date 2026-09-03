@@ -540,6 +540,35 @@ def test_live_trader_spot_fanout_to_multiple_series():
     assert engine.markets["btc-up-or-down-15m"].spot_price == 68500.0
 
 
+def test_live_trader_deselection_with_open_position_fails():
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    engine.markets["btc-up-or-down-5m"].filled_up = True
+
+    with pytest.raises(ValueError, match="Cannot deselect active market"):
+        engine.update_config(selected_markets=["eth-up-or-down-5m"])
+
+
+def test_live_trader_realized_pnl_retained_on_deselection():
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    engine.markets["btc-up-or-down-5m"].realized_pnl_usd = 25.50
+
+    state_before = engine.get_state()
+    assert state_before["realized_pnl"] == 25.50
+
+    # Deselect btc-up-or-down-5m (safe because no position is open)
+    engine.update_config(selected_markets=["eth-up-or-down-5m"])
+    state_after = engine.get_state()
+    assert "btc-up-or-down-5m" not in engine.markets
+    assert state_after["realized_pnl"] == 25.50
+
+
+def test_live_trader_invalid_selected_market_slug_fails():
+    with pytest.raises(ValueError, match="Unknown series slug"):
+        LiveTraderEngine(selected_markets=["invalid-slug"])
+    with pytest.raises(ValueError, match="selected_markets cannot be empty"):
+        LiveTraderEngine(selected_markets=[])
+
+
 
 
 

@@ -80,18 +80,24 @@ def filter_series(
     valid_tokens = supported_tokens()
     valid_durations = supported_durations()
 
-    tokens_list = [t.strip().upper() for t in tokens if t and t.strip()] if tokens is not None else []
-    durations_list = list(durations) if durations is not None else []
-
-    if tokens_list:
-        for t in tokens_list:
-            if t not in valid_tokens:
-                raise ValueError(f"Unsupported token '{t}'. Must be one of {valid_tokens}")
-        tok_set = set(tokens_list)
-        filtered = [s for s in SERIES if token_for_slug(s[0]) in tok_set]
+    if tokens is not None:
+        tokens_list = []
+        for t in tokens:
+            if not isinstance(t, str) or not t.strip():
+                raise ValueError(f"Invalid empty token: '{t}'")
+            tok = t.strip().upper()
+            if tok not in valid_tokens:
+                raise ValueError(f"Unsupported token '{tok}'. Must be one of {valid_tokens}")
+            tokens_list.append(tok)
+        if tokens_list:
+            tok_set = set(tokens_list)
+            filtered = [s for s in SERIES if token_for_slug(s[0]) in tok_set]
+        else:
+            filtered = list(SERIES)
     else:
         filtered = list(SERIES)
 
+    durations_list = list(durations) if durations is not None else []
     if durations_list:
         for d in durations_list:
             if d not in valid_durations:

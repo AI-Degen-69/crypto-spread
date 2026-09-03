@@ -97,7 +97,7 @@ def series_for_symbol(symbol: str) -> list[str]:
     if sym in SYMBOL_TO_SERIES and ("-5m" in sym or "-15m" in sym):
         return [SYMBOL_TO_SERIES[sym]]
 
-    token = sym.replace("usdt", "")
+    token = sym.removesuffix("usdt")
     return [s[0] for s in SERIES if token_for_slug(s[0]).lower() == token]
 
 

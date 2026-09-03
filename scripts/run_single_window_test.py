@@ -32,6 +32,10 @@ def main():
     args = parser.parse_args()
 
     # Resolve target single series from arguments
+    if args.series and (args.tokens or args.duration):
+        print("[!] Error: Specify either --series OR --tokens/--duration, not both.")
+        return 1
+
     target_series = "btc-up-or-down-5m"
     if args.series:
         target_series = args.series

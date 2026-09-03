@@ -298,14 +298,28 @@ def _resolve_series_selection(
     """Resolve market selection into canonical SERIES subset.
 
     If selected_markets is provided, returns series matching those slugs.
+    Validates that every requested slug exists in SERIES.
     If tokens or durations are provided, delegates to filter_series().
     Otherwise, defaults to all 5m series.
     """
     if selected_markets is not None:
-        sel_set = set(selected_markets)
-        return tuple(s for s in SERIES if s[0] in sel_set)
+        sel_list = list(selected_markets)
+        if not sel_list:
+            raise ValueError("selected_markets cannot be empty")
+        valid_slugs = {s[0] for s in SERIES}
+        for slug in sel_list:
+            if slug not in valid_slugs:
+                raise ValueError(f"Unknown series slug '{slug}'. Must be one of {sorted(valid_slugs)}")
+        sel_set = set(sel_list)
+        resolved = tuple(s for s in SERIES if s[0] in sel_set)
+        if not resolved:
+            raise ValueError("No valid series matched selected_markets")
+        return resolved
     if tokens is not None or durations is not None:
-        return filter_series(tokens=tokens, durations=durations)
+        resolved = filter_series(tokens=tokens, durations=durations)
+        if not resolved:
+            raise ValueError("No valid series matched tokens and duration filter")
+        return resolved
     return by_duration(300)
 
 
@@ -460,6 +474,7 @@ class LiveTraderEngine:
         self.trades: List[TradeEvent] = []
         self.timeline: List[Dict[str, Any]] = []
         self.total_realized_pnl: float = 0.0
+        self.historical_realized_pnl: float = 0.0
         self.total_unrealized_pnl: float = 0.0
         self.total_pnl: float = 0.0
         self.total_pairs_merged: int = 0
@@ -990,7 +1005,7 @@ class LiveTraderEngine:
         env_funder = os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
         
         # Calculate totals
-        realized = sum(m.realized_pnl_usd for m in self.markets.values())
+        realized = self.historical_realized_pnl + sum(m.realized_pnl_usd for m in self.markets.values())
         unrealized = sum(m.unrealized_pnl_usd for m in self.markets.values())
         total_pnl = realized + unrealized
         portfolio_val = self.starting_balance + total_pnl
@@ -1092,8 +1107,19 @@ class LiveTraderEngine:
             new_slugs = {s[0] for s in new_series}
             with self._engine_lock:
                 to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
+                # Guard against deselecting markets with open positions or active pending exits
                 for s in to_remove:
                     m = self.markets[s]
+                    if m.filled_up or m.filled_down or m.status in ("FILLED_UP", "FILLED_DOWN", "STOP_EXIT_PENDING"):
+                        raise ValueError(
+                            f"Cannot deselect active market '{s}' with open positions or in-flight exits "
+                            f"(status={m.status}, filled_up={m.filled_up}, filled_down={m.filled_down}). "
+                            f"Wait for window settlement or stop exit before deselecting."
+                        )
+
+                for s in to_remove:
+                    m = self.markets[s]
+                    self.historical_realized_pnl += m.realized_pnl_usd
                     for oid in (m.order_id_up, m.order_id_down, m.next_order_id_up, m.next_order_id_down, m.order_id_exit_up, m.order_id_exit_down):
                         if oid:
                             try:
@@ -2230,7 +2256,7 @@ class LiveTraderEngine:
 
     def _record_timeline_point(self, now: float):
         """Append real-time equity & per-market PnL data point for chart logging."""
-        realized = sum(m.realized_pnl_usd for m in self.markets.values())
+        realized = self.historical_realized_pnl + sum(m.realized_pnl_usd for m in self.markets.values())
         unrealized = sum(m.unrealized_pnl_usd for m in self.markets.values())
         tot_pnl = realized + unrealized
         portfolio_val = self.starting_balance + tot_pnl
