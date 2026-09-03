@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Any
 import requests
 
 from strategy.series import by_duration
+from strategy.streaming import UnifiedStreamBridge, SYMBOL_TO_SERIES, SERIES_TO_SYMBOL
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
@@ -347,6 +348,13 @@ class MarketLiveState:
     reversal_seen_up: bool = False
     reversal_seen_down: bool = False
     
+    # Real-time RTDS spot price & streaming telemetry
+    spot_price: Optional[float] = None
+    spot_open_price: Optional[float] = None
+    spot_updated_ts: Optional[float] = None
+    spot_drift: float = 0.0
+    streaming_active: bool = False
+
     # Performance metrics
     realized_pnl_usd: float = 0.0
     unrealized_pnl_usd: float = 0.0
@@ -423,6 +431,13 @@ class LiveTraderEngine:
         self._orders_cache: List[Dict[str, Any]] = []
         self._orders_cache_ts: float = 0.0
         self.quoting_halted: bool = False
+        
+        # Real-time WebSocket streaming bridge
+        self.stream_bridge = UnifiedStreamBridge(
+            on_spot_tick=self.on_spot_tick,
+            on_book_update=self.on_book_update,
+            on_order_event=self.on_user_order_event,
+        )
 
     def get_clob_client(self) -> Optional[Any]:
         """Get or lazily initialize authenticated ClobClient."""
@@ -593,6 +608,201 @@ class LiveTraderEngine:
             "markets_cleared": cleared_count,
             "timestamp": time.time(),
         }
+
+    def on_spot_tick(self, symbol: str, ts_ms: int, price: float) -> None:
+        """Handle real-time spot tick from RTDS or fallback."""
+        slug = SYMBOL_TO_SERIES.get(symbol.lower())
+        if not slug or slug not in self.markets:
+            return
+        m = self.markets[slug]
+        m.spot_price = price
+        m.spot_updated_ts = ts_ms / 1000.0
+        m.streaming_active = True
+
+        if m.spot_open_price is None or m.spot_open_price <= 0:
+            m.spot_open_price = price
+
+        if m.spot_open_price and m.spot_open_price > 0:
+            m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
+
+        if not self.is_running or self.quoting_halted:
+            return
+
+        now = time.time()
+        # Fast stop loss execution on adverse leading spot drift
+        if m.filled_up and not m.filled_down and not m.exit_taken:
+            if m.spot_drift <= -self.exit_thresh:
+                m.max_down_drift = max(m.max_down_drift, abs(m.spot_drift))
+                log.info("[%s] RTDS leading tick triggered fast stop exit for UP leg: spot=%.2f drift=%.3f",
+                         slug, price, m.spot_drift)
+                self._trigger_fast_stop_exit(slug, m, "UP", now)
+        elif m.filled_down and not m.filled_up and not m.exit_taken:
+            if m.spot_drift >= self.exit_thresh:
+                m.max_up_drift = max(m.max_up_drift, m.spot_drift)
+                log.info("[%s] RTDS leading tick triggered fast stop exit for DOWN leg: spot=%.2f drift=%.3f",
+                         slug, price, m.spot_drift)
+                self._trigger_fast_stop_exit(slug, m, "DOWN", now)
+
+    def _trigger_fast_stop_exit(self, slug: str, mstate: MarketLiveState, side: str, now: float) -> None:
+        """Trigger fast stop-loss exit market order and cancel unhedged side."""
+        if side == "UP":
+            sell_bid = mstate.up_bid if mstate.up_bid is not None else 0.40
+            if self.mode == "live":
+                if mstate.order_id_down:
+                    self.cancel_live_order(mstate.order_id_down)
+                    mstate.order_status_down = "CANCELLED"
+                if not mstate.order_id_exit_up and mstate.up_token:
+                    res = self.place_live_quote(mstate.up_token, sell_bid, self.shares, "SELL")
+                    if res and res.get("order_id"):
+                        mstate.order_id_exit_up = res["order_id"]
+                        mstate.order_status_exit_up = res.get("status") or "RESTING"
+                        mstate.exit_price_up = sell_bid
+
+                is_filled = (mstate.order_status_exit_up == "FILLED")
+                if not is_filled and mstate.order_id_exit_up:
+                    client = self.get_clob_client()
+                    if client:
+                        try:
+                            ord_info = client.get_order(mstate.order_id_exit_up)
+                            st = (ord_info.get("status") or "").upper()
+                            sz = float(ord_info.get("size_matched", 0.0) or 0.0)
+                            if st in ("MATCHED", "FILLED") or sz >= self.shares:
+                                is_filled = True
+                                mstate.order_status_exit_up = "FILLED"
+                        except Exception as e:
+                            log.debug("[%s] Error checking UP exit order %s: %s", slug, mstate.order_id_exit_up, e)
+
+                if not is_filled:
+                    mstate.status = "STOP_EXIT_PENDING"
+                    mstate.last_action = f"Stop Loss UP resting @ {sell_bid:.2f}"
+                    return
+
+            mstate.exit_taken = True
+            mstate.exit_side = "UP"
+            mstate.status = "STOP_EXIT"
+            exit_pnl_usd = (sell_bid - (mstate.fill_price_up or mstate.resting_up)) * self.shares
+            mstate.realized_pnl_usd += exit_pnl_usd
+            mstate.unrealized_pnl_usd = 0.0
+            mstate.total_pnl_usd = mstate.realized_pnl_usd
+            mstate.stops_count += 1
+            mstate.trades_count += 1
+            mstate.last_action = f"Fast Stop UP @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
+            log.info("[%s] FAST STOP LOSS EXIT (UP) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
+            self.trades.append(TradeEvent(
+                id=f"{slug}_{int(now)}",
+                timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                slug=slug,
+                label=mstate.label,
+                action="STOP_EXIT_UP",
+                shares=self.shares,
+                entry_price_up=mstate.fill_price_up or mstate.resting_up,
+                entry_price_down=None,
+                exit_price=sell_bid,
+                pnl_usd=round(exit_pnl_usd, 3),
+                pnl_pct=round((exit_pnl_usd / max(0.01, mstate.resting_up * self.shares)) * 100.0, 1),
+                notes=f"RTDS Fast stop: drift {mstate.spot_drift:.3f} <= -{self.exit_thresh:.2f}",
+            ))
+        else:
+            sell_bid = mstate.down_bid if mstate.down_bid is not None else 0.40
+            if self.mode == "live":
+                if mstate.order_id_up:
+                    self.cancel_live_order(mstate.order_id_up)
+                    mstate.order_status_up = "CANCELLED"
+                if not mstate.order_id_exit_down and mstate.down_token:
+                    res = self.place_live_quote(mstate.down_token, sell_bid, self.shares, "SELL")
+                    if res and res.get("order_id"):
+                        mstate.order_id_exit_down = res["order_id"]
+                        mstate.order_status_exit_down = res.get("status") or "RESTING"
+                        mstate.exit_price_down = sell_bid
+
+                is_filled = (mstate.order_status_exit_down == "FILLED")
+                if not is_filled and mstate.order_id_exit_down:
+                    client = self.get_clob_client()
+                    if client:
+                        try:
+                            ord_info = client.get_order(mstate.order_id_exit_down)
+                            st = (ord_info.get("status") or "").upper()
+                            sz = float(ord_info.get("size_matched", 0.0) or 0.0)
+                            if st in ("MATCHED", "FILLED") or sz >= self.shares:
+                                is_filled = True
+                                mstate.order_status_exit_down = "FILLED"
+                        except Exception as e:
+                            log.debug("[%s] Error checking DOWN exit order %s: %s", slug, mstate.order_id_exit_down, e)
+
+                if not is_filled:
+                    mstate.status = "STOP_EXIT_PENDING"
+                    mstate.last_action = f"Stop Loss DOWN resting @ {sell_bid:.2f}"
+                    return
+
+            mstate.exit_taken = True
+            mstate.exit_side = "DOWN"
+            mstate.status = "STOP_EXIT"
+            exit_pnl_usd = (sell_bid - (mstate.fill_price_down or mstate.resting_down)) * self.shares
+            mstate.realized_pnl_usd += exit_pnl_usd
+            mstate.unrealized_pnl_usd = 0.0
+            mstate.total_pnl_usd = mstate.realized_pnl_usd
+            mstate.stops_count += 1
+            mstate.trades_count += 1
+            mstate.last_action = f"Fast Stop DOWN @ {sell_bid:.2f} ({exit_pnl_usd:+.2f}$)"
+            log.info("[%s] FAST STOP LOSS EXIT (DOWN) @ %.2f, PnL: $%.2f", slug, sell_bid, exit_pnl_usd)
+            self.trades.append(TradeEvent(
+                id=f"{slug}_{int(now)}",
+                timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                slug=slug,
+                label=mstate.label,
+                action="STOP_EXIT_DOWN",
+                shares=self.shares,
+                entry_price_up=None,
+                entry_price_down=mstate.fill_price_down or mstate.resting_down,
+                exit_price=sell_bid,
+                pnl_usd=round(exit_pnl_usd, 3),
+                pnl_pct=round((exit_pnl_usd / max(0.01, mstate.resting_down * self.shares)) * 100.0, 1),
+                notes=f"RTDS Fast stop: drift {mstate.spot_drift:.3f} >= {self.exit_thresh:.2f}",
+            ))
+
+    def on_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
+        """Handle real-time book updates from CLOB Market WebSocket."""
+        best_b = max(bids.keys()) if bids else None
+        best_a = min(asks.keys()) if asks else None
+
+        for m in self.markets.values():
+            if m.up_token == token_id:
+                m.up_bid = best_b
+                m.up_ask = best_a
+            elif m.down_token == token_id:
+                m.down_bid = best_b
+                m.down_ask = best_a
+            else:
+                continue
+
+            # Recalculate mid and spread
+            up_mid = (m.up_bid + m.up_ask) / 2.0 if (m.up_bid and m.up_ask) else (m.up_bid or m.up_ask or 0.50)
+            down_mid = (m.down_bid + m.down_ask) / 2.0 if (m.down_bid and m.down_ask) else (m.down_bid or m.down_ask or 0.50)
+            m.mid = round((up_mid + (1.0 - down_mid)) / 2.0, 4)
+            if m.up_ask is not None and m.down_ask is not None:
+                m.spread = round(m.up_ask + m.down_ask, 4)
+
+    def on_user_order_event(self, payload: Dict[str, Any]) -> None:
+        """Handle real-time authenticated order events from UserSpec stream."""
+        order_id = str(payload.get("id") or payload.get("order_id") or "")
+        status = str(payload.get("status") or "").upper()
+        for m in self.markets.values():
+            if m.order_id_up == order_id:
+                m.order_status_up = status
+                if status in ("MATCHED", "FILLED"):
+                    m.filled_up = True
+                    m.fill_price_up = float(payload.get("price") or m.resting_up)
+                    m.status = "FILLED_UP" if not m.filled_down else "PAIR_MERGED"
+            elif m.order_id_down == order_id:
+                m.order_status_down = status
+                if status in ("MATCHED", "FILLED"):
+                    m.filled_down = True
+                    m.fill_price_down = float(payload.get("price") or m.resting_down)
+                    m.status = "FILLED_DOWN" if not m.filled_up else "PAIR_MERGED"
+            elif m.order_id_exit_up == order_id:
+                m.order_status_exit_up = status
+            elif m.order_id_exit_down == order_id:
+                m.order_status_exit_down = status
 
     def get_open_orders_list(self) -> List[Dict[str, Any]]:
         """List active open orders from CLOB and current engine state."""
@@ -774,6 +984,7 @@ class LiveTraderEngine:
             "trades": recent_trades,
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
+            "stream_bridge": self.stream_bridge.get_status(),
             "server_time": datetime.datetime.now().strftime("%H:%M:%S"),
         }
 
@@ -847,6 +1058,7 @@ class LiveTraderEngine:
         if self.is_running:
             return
         self.is_running = True
+        self.stream_bridge.start()
         self._schedule_wallet_balance_fetch()
         try:
             loop = asyncio.get_running_loop()
@@ -859,6 +1071,7 @@ class LiveTraderEngine:
     def stop(self):
         """Stop trading engine and cancel active quoting."""
         self.is_running = False
+        self.stream_bridge.stop()
         if self.mode == "live":
             self.cancel_all_orders()
         for m in self.markets.values():
@@ -1129,6 +1342,14 @@ class LiveTraderEngine:
                     continue
                 if res:
                     self._update_market_strategy(slug, res, now)
+
+            active_tokens = []
+            for m in self.markets.values():
+                for t in (m.up_token, m.down_token, m.next_up_token, m.next_down_token):
+                    if t:
+                        active_tokens.append(t)
+            if active_tokens:
+                self.stream_bridge.update_market_tokens(active_tokens)
 
             self._record_timeline_point(now)
 
@@ -1608,6 +1829,8 @@ class LiveTraderEngine:
         mstate.pair_captured = False
         mstate.exit_taken = False
         mstate.exit_side = None
+        mstate.spot_open_price = None
+        mstate.spot_drift = 0.0
         if self.mode == "live":
             if mstate.order_id_exit_up:
                 if self.cancel_live_order(mstate.order_id_exit_up):
