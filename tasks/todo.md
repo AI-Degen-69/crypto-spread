@@ -10,7 +10,7 @@
   - Verify: Unit tests in `tests/test_streaming.py`.
   - Files: `strategy/streaming.py`, `tests/test_streaming.py`
 
-- [ ] Task 3: Multi-market selection and dynamic configuration in `LiveTraderEngine`
+- [x] Task 3: Multi-market selection and dynamic configuration in `LiveTraderEngine`
   - Acceptance: Engine accepts market selection during `__init__` and `update_config()`; `SERIES_COLORS` includes 15m; deselected markets have resting orders cancelled; single snapshot in `_tick_all_markets`; `on_spot_tick` fans out to all active markets sharing the token.
   - Verify: `tests/test_live_trader.py`.
   - Files: `strategy/live_trader.py`, `tests/test_live_trader.py`

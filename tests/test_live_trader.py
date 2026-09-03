@@ -481,5 +481,65 @@ def test_unified_stream_bridge_is_rtds_running():
     assert bridge.is_rtds_running is True
 
 
+def test_live_trader_engine_market_selection():
+    # By tokens and durations
+    engine = LiveTraderEngine(tokens=["SOL"], durations=[900])
+    assert len(engine.markets) == 1
+    assert "sol-up-or-down-15m" in engine.markets
+    assert engine.markets["sol-up-or-down-15m"].label == "SOL 15m"
+
+    # By explicit selected_markets slugs
+    engine2 = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "btc-up-or-down-15m"])
+    assert len(engine2.markets) == 2
+    assert "btc-up-or-down-5m" in engine2.markets
+    assert "btc-up-or-down-15m" in engine2.markets
+
+
+def test_live_trader_dynamic_reconfiguration():
+    engine = LiveTraderEngine()
+    assert len(engine.markets) == 5
+
+    # Reconfigure to only two 15m markets
+    state = engine.update_config(selected_markets=["eth-up-or-down-15m", "sol-up-or-down-15m"])
+    assert set(engine.markets.keys()) == {"eth-up-or-down-15m", "sol-up-or-down-15m"}
+    assert "eth-up-or-down-15m" in state["markets"]
+    assert "sol-up-or-down-15m" in state["markets"]
+    assert len(state["markets"]) == 2
+
+    # Reconfigure using tokens and durations
+    engine.update_config(tokens=["BTC", "BNB"], durations=[300])
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m", "bnb-up-or-down-5m"}
+
+
+def test_live_trader_deselected_market_order_cancellation(monkeypatch):
+    engine = LiveTraderEngine()
+    cancelled_orders = []
+    monkeypatch.setattr(engine, "cancel_live_order", lambda oid: cancelled_orders.append(oid) or True)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "ord_up_btc"
+    m.order_id_down = "ord_dn_btc"
+    m.next_order_id_up = "ord_next_up"
+    m.next_order_id_down = "ord_next_dn"
+
+    # Reconfigure without btc-up-or-down-5m
+    engine.update_config(selected_markets=["eth-up-or-down-5m"])
+    assert "btc-up-or-down-5m" not in engine.markets
+    assert "ord_up_btc" in cancelled_orders
+    assert "ord_dn_btc" in cancelled_orders
+    assert "ord_next_up" in cancelled_orders
+    assert "ord_next_dn" in cancelled_orders
+
+
+def test_live_trader_spot_fanout_to_multiple_series():
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "btc-up-or-down-15m"])
+    engine.start()
+    engine.on_spot_tick("btcusdt", 1700000000000, 68500.0)
+
+    assert engine.markets["btc-up-or-down-5m"].spot_price == 68500.0
+    assert engine.markets["btc-up-or-down-15m"].spot_price == 68500.0
+
+
+
 
 
