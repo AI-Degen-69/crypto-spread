@@ -20,11 +20,11 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Iterable, Sequence
 import requests
 
-from strategy.series import by_duration
-from strategy.streaming import UnifiedStreamBridge, SYMBOL_TO_SERIES, SERIES_TO_SYMBOL
+from strategy.series import by_duration, SERIES, filter_series, token_for_slug
+from strategy.streaming import UnifiedStreamBridge, SYMBOL_TO_SERIES, SERIES_TO_SYMBOL, series_for_symbol
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
@@ -282,7 +282,46 @@ SERIES_COLORS = {
     "bnb-up-or-down-5m": "#f3ba2f",  # BNB Gold
     "sol-up-or-down-5m": "#14f195",  # Solana Green/Teal
     "xrp-up-or-down-5m": "#00aae4",  # XRP Sky Blue
+    "btc-up-or-down-15m": "#f7931a",
+    "eth-up-or-down-15m": "#627eea",
+    "bnb-up-or-down-15m": "#f3ba2f",
+    "sol-up-or-down-15m": "#14f195",
+    "xrp-up-or-down-15m": "#00aae4",
 }
+
+
+def _resolve_series_selection(
+    selected_markets: Optional[Iterable[str]] = None,
+    tokens: Optional[Iterable[str]] = None,
+    durations: Optional[Iterable[int]] = None,
+) -> tuple[tuple[str, int, str], ...]:
+    """Resolve market selection into canonical SERIES subset.
+
+    If selected_markets is provided, returns series matching those slugs.
+    Validates that every requested slug exists in SERIES.
+    If tokens or durations are provided, delegates to filter_series().
+    Otherwise, defaults to all 5m series.
+    """
+    if selected_markets is not None:
+        sel_list = list(selected_markets)
+        if not sel_list:
+            raise ValueError("selected_markets cannot be empty")
+        valid_slugs = {s[0] for s in SERIES}
+        for slug in sel_list:
+            if slug not in valid_slugs:
+                raise ValueError(f"Unknown series slug '{slug}'. Must be one of {sorted(valid_slugs)}")
+        sel_set = set(sel_list)
+        resolved = tuple(s for s in SERIES if s[0] in sel_set)
+        if not resolved:
+            raise ValueError("No valid series matched selected_markets")
+        return resolved
+    if tokens is not None or durations is not None:
+        resolved = filter_series(tokens=tokens, durations=durations)
+        if not resolved:
+            raise ValueError("No valid series matched tokens and duration filter")
+        return resolved
+    return by_duration(300)
+
 
 
 @dataclass
@@ -392,8 +431,14 @@ class TradeEvent:
 class LiveTraderEngine:
     """Singleton background engine for live quoting and paper/live trading."""
 
-    def __init__(self, load_persisted: bool = True):
-        """Initialize the live trading engine with default 5m parameters and markets."""
+    def __init__(
+        self,
+        load_persisted: bool = True,
+        selected_markets: Optional[Sequence[str]] = None,
+        tokens: Optional[Sequence[str]] = None,
+        durations: Optional[Sequence[int]] = None,
+    ):
+        """Initialize the live trading engine with default parameters and selected markets."""
         _load_env_file()
         self.is_running: bool = False
         self.mode: str = "paper"  # "paper" or "live"
@@ -410,8 +455,13 @@ class LiveTraderEngine:
         self.taker_fee_rate: float = 0.0
         
         # State tracking
+        self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
+            selected_markets=selected_markets,
+            tokens=tokens,
+            durations=durations,
+        )
         self.markets: Dict[str, MarketLiveState] = {}
-        for slug, _dur, label in SERIES_5M:
+        for slug, _dur, label in self.selected_series:
             self.markets[slug] = MarketLiveState(
                 slug=slug,
                 label=label,
@@ -424,6 +474,7 @@ class LiveTraderEngine:
         self.trades: List[TradeEvent] = []
         self.timeline: List[Dict[str, Any]] = []
         self.total_realized_pnl: float = 0.0
+        self.historical_realized_pnl: float = 0.0
         self.total_unrealized_pnl: float = 0.0
         self.total_pnl: float = 0.0
         self.total_pairs_merged: int = 0
@@ -621,51 +672,59 @@ class LiveTraderEngine:
         }
 
     def on_spot_tick(self, symbol: str, ts_ms: int, price: float) -> None:
-        """Handle real-time spot tick from RTDS or fallback."""
-        slug = SYMBOL_TO_SERIES.get(symbol.lower())
-        if not slug or slug not in self.markets:
-            return
-        m = self.markets[slug]
-        m.spot_price = price
-        m.spot_updated_ts = ts_ms / 1000.0
-        m.streaming_active = True
+        """Handle real-time spot tick from RTDS or fallback across all matching active series."""
+        slugs = series_for_symbol(symbol)
+        if not slugs:
+            single = SYMBOL_TO_SERIES.get(symbol.lower())
+            slugs = [single] if single else []
 
-        if m.spot_open_price is None or m.spot_open_price <= 0:
-            m.spot_open_price = price
+        for slug in slugs:
+            if not slug:
+                continue
 
-        if m.spot_open_price and m.spot_open_price > 0:
-            m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
+            trigger_side: Optional[str] = None
+            note: str = ""
+            now = time.time()
 
-        if not self.is_running or self.quoting_halted:
-            return
+            with self._engine_lock:
+                if slug not in self.markets:
+                    continue
+                m = self.markets[slug]
+                m.spot_price = price
+                m.spot_updated_ts = ts_ms / 1000.0
+                m.streaming_active = True
 
-        now = time.time()
-        # Fast stop loss execution on adverse leading spot drift
-        trigger_side: Optional[str] = None
-        with self._engine_lock:
-            if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
-                if m.spot_drift <= -self.spot_exit_drift:
-                    m.max_down_drift = max(m.max_down_drift, abs(m.spot_drift))
-                    m.status = "STOP_EXIT_PENDING"
-                    trigger_side = "UP"
-            elif m.filled_down and not m.filled_up and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
-                if m.spot_drift >= self.spot_exit_drift:
-                    m.max_up_drift = max(m.max_up_drift, m.spot_drift)
-                    m.status = "STOP_EXIT_PENDING"
-                    trigger_side = "DOWN"
+                if m.spot_open_price is None or m.spot_open_price <= 0:
+                    m.spot_open_price = price
 
-        if trigger_side:
-            log.info("[%s] RTDS leading tick triggered fast stop exit for %s leg: spot=%.2f drift=%.3f",
-                     slug, trigger_side, price, m.spot_drift)
-            note = f"RTDS Fast stop: drift {m.spot_drift:.3f} {'<=' if trigger_side == 'UP' else '>='} {'-' if trigger_side == 'UP' else ''}{self.spot_exit_drift:.3f}"
-            if self.mode == "live":
-                fut = self._executor.submit(self._execute_stop_exit, slug, m, trigger_side, None, note, now)
-                fut.add_done_callback(
-                    lambda f: log.error("[%s] Fast stop execution failed: %s", slug, f.exception())
-                    if f.exception() else None
-                )
-            else:
-                self._execute_stop_exit(slug, m, trigger_side, None, note, now)
+                if m.spot_open_price and m.spot_open_price > 0:
+                    m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
+
+                if self.is_running and not self.quoting_halted:
+                    # Fast stop loss execution on adverse leading spot drift
+                    if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
+                        if m.spot_drift <= -self.spot_exit_drift:
+                            m.max_down_drift = max(m.max_down_drift, abs(m.spot_drift))
+                            m.status = "STOP_EXIT_PENDING"
+                            trigger_side = "UP"
+                    elif m.filled_down and not m.filled_up and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
+                        if m.spot_drift >= self.spot_exit_drift:
+                            m.max_up_drift = max(m.max_up_drift, m.spot_drift)
+                            m.status = "STOP_EXIT_PENDING"
+                            trigger_side = "DOWN"
+
+            if trigger_side:
+                log.info("[%s] RTDS leading tick triggered fast stop exit for %s leg: spot=%.2f drift=%.3f",
+                         slug, trigger_side, price, m.spot_drift)
+                note = f"RTDS Fast stop: drift {m.spot_drift:.3f} {'<=' if trigger_side == 'UP' else '>='} {'-' if trigger_side == 'UP' else ''}{self.spot_exit_drift:.3f}"
+                if self.mode == "live":
+                    fut = self._executor.submit(self._execute_stop_exit, slug, m, trigger_side, None, note, now)
+                    fut.add_done_callback(
+                        lambda f, s=slug: log.error("[%s] Fast stop execution failed: %s", s, f.exception())
+                        if f.exception() else None
+                    )
+                else:
+                    self._execute_stop_exit(slug, m, trigger_side, None, note, now)
 
     def _execute_stop_exit(
         self,
@@ -949,7 +1008,7 @@ class LiveTraderEngine:
         env_funder = os.getenv("POLY_FUNDER") or os.getenv("RELAYER_API_KEY_ADDRESS") or ""
         
         # Calculate totals
-        realized = sum(m.realized_pnl_usd for m in self.markets.values())
+        realized = self.historical_realized_pnl + sum(m.realized_pnl_usd for m in self.markets.values())
         unrealized = sum(m.unrealized_pnl_usd for m in self.markets.values())
         total_pnl = realized + unrealized
         portfolio_val = self.starting_balance + total_pnl
@@ -1004,6 +1063,7 @@ class LiveTraderEngine:
             "trades": recent_trades,
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
+            "selected_series": [s[0] for s in self.selected_series],
             "stream_bridge": self.stream_bridge.get_status(),
             "server_time": datetime.datetime.now().strftime("%H:%M:%S"),
         }
@@ -1013,8 +1073,11 @@ class LiveTraderEngine:
                       shares: Optional[int] = None,
                       mode: Optional[str] = None,
                       wallet_address: Optional[str] = None,
-                      starting_balance: Optional[float] = None) -> Dict[str, Any]:
-        """Update strategy configuration parameters."""
+                      starting_balance: Optional[float] = None,
+                      selected_markets: Optional[Iterable[str]] = None,
+                      tokens: Optional[Iterable[str]] = None,
+                      durations: Optional[Iterable[int]] = None) -> Dict[str, Any]:
+        """Update strategy configuration parameters and market selection."""
         if offset is not None:
             self.offset = max(0.001, min(0.490, float(offset)))
         if exit_thresh is not None and exit_thresh > 0:
@@ -1040,6 +1103,74 @@ class LiveTraderEngine:
         else:
             if starting_balance is not None and starting_balance >= 0:
                 self.starting_balance = float(starting_balance)
+
+        # Handle market selection reconfiguration if any selection param is provided
+        if selected_markets is not None or tokens is not None or durations is not None:
+            new_series = _resolve_series_selection(selected_markets, tokens, durations)
+            new_slugs = {s[0] for s in new_series}
+            with self._engine_lock:
+                to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
+                # Guard against deselecting markets with open positions or active pending exits
+                for s in to_remove:
+                    m = self.markets[s]
+                    has_unhedged_position = (m.filled_up != m.filled_down) and not m.exit_taken
+                    if m.status == "STOP_EXIT_PENDING" or has_unhedged_position:
+                        raise ValueError(
+                            f"Cannot deselect active market '{s}' with open positions or in-flight exits "
+                            f"(status={m.status}, filled_up={m.filled_up}, filled_down={m.filled_down}, exit_taken={m.exit_taken}). "
+                            f"Wait for window settlement or stop exit before deselecting."
+                        )
+
+                removed_slugs = set()
+                order_attr_names = (
+                    "order_id_up",
+                    "order_id_down",
+                    "next_order_id_up",
+                    "next_order_id_down",
+                    "order_id_exit_up",
+                    "order_id_exit_down",
+                )
+                for s in to_remove:
+                    m = self.markets[s]
+                    cancel_failed = False
+                    for attr in order_attr_names:
+                        oid = getattr(m, attr, None)
+                        if oid:
+                            try:
+                                success = self.cancel_live_order(oid)
+                                if success:
+                                    setattr(m, attr, None)
+                                else:
+                                    log.warning("[%s] Failed to cancel order %s on removal", s, oid)
+                                    cancel_failed = True
+                                    break
+                            except Exception as e:
+                                log.warning("[%s] Error cancelling order %s on removal: %s", s, oid, e)
+                                cancel_failed = True
+                                break
+
+                    if cancel_failed:
+                        log.error("[%s] Aborting removal of market: order cancellation failed or raised. Retaining market.", s)
+                        continue
+
+                    self.historical_realized_pnl += m.realized_pnl_usd
+                    del self.markets[s]
+                    removed_slugs.add(s)
+
+                for slug, _dur, label in new_series:
+                    if slug not in self.markets:
+                        self.markets[slug] = MarketLiveState(
+                            slug=slug,
+                            label=label,
+                            color=SERIES_COLORS.get(slug, "#33c9b5"),
+                            order_shares=self.shares,
+                            resting_up=round(0.50 - self.offset, 3),
+                            resting_down=round(0.50 - self.offset, 3),
+                        )
+
+                # Keep any retained markets that failed cancellation in selected_series
+                retained_series = [s for s in self.selected_series if s[0] in self.markets and s[0] not in {x[0] for x in new_series}]
+                self.selected_series = list(new_series) + retained_series
 
         # Update per-market resting prices
         for m in self.markets.values():
@@ -1188,6 +1319,8 @@ class LiveTraderEngine:
             if m.trades_count > 0:
                 m.last_action = f"PnL: ${m.total_pnl_usd:+.2f} ({m.trades_count} fills)"
 
+        unselected_pnl = sum(v for k, v in mkt_pnl.items() if k not in self.markets)
+        self.historical_realized_pnl = round(unselected_pnl, 2)
         self.total_realized_pnl = round(cum_pnl, 2)
         self.total_pnl = round(cum_pnl, 2)
         self.total_pairs_merged = sum(mkt_pairs.values())
@@ -1424,6 +1557,7 @@ class LiveTraderEngine:
                 META_FILE.unlink()
             except Exception as e:
                 log.warning("Could not delete %s: %s", META_FILE, e)
+        self.historical_realized_pnl = 0.0
         for m in self.markets.values():
             m.realized_pnl_usd = 0.0
             m.unrealized_pnl_usd = 0.0
@@ -1659,18 +1793,23 @@ class LiveTraderEngine:
             await asyncio.sleep(1.0)
 
     async def _tick_all_markets(self):
-        """Process one tick cycle across the 5 markets."""
+        """Process one tick cycle across the configured active markets."""
         now = time.time()
         loop = asyncio.get_running_loop()
 
+        # Single snapshot taken at top of tick for dispatch and results
+        markets_snapshot = list(self.markets.items())
+
         tasks = [
             loop.run_in_executor(None, self._poll_single_market, slug)
-            for slug in self.markets.keys()
+            for slug, _ in markets_snapshot
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         async with self._lock:
-            for slug, res in zip(self.markets.keys(), results):
+            for (slug, _), res in zip(markets_snapshot, results):
+                if slug not in self.markets:
+                    continue
                 if isinstance(res, Exception):
                     log.warning("Poll exception for %s: %s", slug, res)
                     continue
@@ -2152,7 +2291,7 @@ class LiveTraderEngine:
 
     def _record_timeline_point(self, now: float):
         """Append real-time equity & per-market PnL data point for chart logging."""
-        realized = sum(m.realized_pnl_usd for m in self.markets.values())
+        realized = self.historical_realized_pnl + sum(m.realized_pnl_usd for m in self.markets.values())
         unrealized = sum(m.unrealized_pnl_usd for m in self.markets.values())
         tot_pnl = realized + unrealized
         portfolio_val = self.starting_balance + tot_pnl

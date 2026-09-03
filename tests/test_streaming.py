@@ -14,6 +14,7 @@ from strategy.streaming import (
     DashboardEnvelope,
     SYMBOL_TO_SERIES,
     SERIES_TO_SYMBOL,
+    series_for_symbol,
 )
 
 
@@ -23,8 +24,23 @@ def test_symbol_to_series_mapping():
     assert SYMBOL_TO_SERIES["ethusdt"] == "eth-up-or-down-5m"
     assert SYMBOL_TO_SERIES["solusdt"] == "sol-up-or-down-5m"
     assert SYMBOL_TO_SERIES["xrpusdt"] == "xrp-up-or-down-5m"
+    assert SYMBOL_TO_SERIES["btc-15m"] == "btc-up-or-down-15m"
+    assert SYMBOL_TO_SERIES["eth-15m"] == "eth-up-or-down-15m"
     assert SERIES_TO_SYMBOL["btc-up-or-down-5m"] == "btcusdt"
     assert SERIES_TO_SYMBOL["bnb-up-or-down-5m"] == "bnbusdt"
+    assert SERIES_TO_SYMBOL["btc-up-or-down-15m"] == "btcusdt"
+    assert SERIES_TO_SYMBOL["sol-up-or-down-15m"] == "solusdt"
+
+
+def test_series_for_symbol():
+    """Verify series_for_symbol returns all active series for an exchange or short symbol."""
+    assert series_for_symbol("btcusdt") == ["btc-up-or-down-5m", "btc-up-or-down-15m"]
+    assert series_for_symbol("ethusdt") == ["eth-up-or-down-5m", "eth-up-or-down-15m"]
+    assert series_for_symbol("solusdt") == ["sol-up-or-down-5m", "sol-up-or-down-15m"]
+    assert series_for_symbol("xrpusdt") == ["xrp-up-or-down-5m", "xrp-up-or-down-15m"]
+    assert series_for_symbol("bnbusdt") == ["bnb-up-or-down-5m", "bnb-up-or-down-15m"]
+    assert series_for_symbol("btc-15m") == ["btc-up-or-down-15m"]
+    assert series_for_symbol("unknown") == []
 
 
 def test_dashboard_envelope_serialization():
