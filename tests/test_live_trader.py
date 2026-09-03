@@ -533,7 +533,6 @@ def test_live_trader_deselected_market_order_cancellation(monkeypatch):
 
 def test_live_trader_spot_fanout_to_multiple_series():
     engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "btc-up-or-down-15m"])
-    engine.start()
     engine.on_spot_tick("btcusdt", 1700000000000, 68500.0)
 
     assert engine.markets["btc-up-or-down-5m"].spot_price == 68500.0
@@ -546,6 +545,24 @@ def test_live_trader_deselection_with_open_position_fails():
 
     with pytest.raises(ValueError, match="Cannot deselect active market"):
         engine.update_config(selected_markets=["eth-up-or-down-5m"])
+
+    # If stop exit has completed (exit_taken=True), deselection should succeed
+    engine.markets["btc-up-or-down-5m"].exit_taken = True
+    engine.update_config(selected_markets=["eth-up-or-down-5m"])
+    assert "btc-up-or-down-5m" not in engine.markets
+
+
+def test_live_trader_deselection_aborts_on_failed_cancellation(monkeypatch):
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "ord_fail_cancel"
+
+    # Simulate venue cancellation failure
+    monkeypatch.setattr(engine, "cancel_live_order", lambda _oid: False)
+
+    engine.update_config(selected_markets=["eth-up-or-down-5m"])
+    # btc-up-or-down-5m must be retained to prevent unmanaged resting order
+    assert "btc-up-or-down-5m" in engine.markets
 
 
 def test_live_trader_realized_pnl_retained_on_deselection():

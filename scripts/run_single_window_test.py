@@ -48,7 +48,11 @@ def main():
             durs = [900]
         elif args.duration == "both":
             durs = [300, 900]
-        resolved = filter_series(tokens=toks, durations=durs)
+        try:
+            resolved = filter_series(tokens=toks, durations=durs)
+        except ValueError as e:
+            print(f"[!] Error: {e}")
+            return 1
         if not resolved:
             print("[!] Error: No series matched tokens/duration selection.")
             return 1

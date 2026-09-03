@@ -679,36 +679,39 @@ class LiveTraderEngine:
             slugs = [single] if single else []
 
         for slug in slugs:
-            if not slug or slug not in self.markets:
-                continue
-            m = self.markets[slug]
-            m.spot_price = price
-            m.spot_updated_ts = ts_ms / 1000.0
-            m.streaming_active = True
-
-            if m.spot_open_price is None or m.spot_open_price <= 0:
-                m.spot_open_price = price
-
-            if m.spot_open_price and m.spot_open_price > 0:
-                m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
-
-            if not self.is_running or self.quoting_halted:
+            if not slug:
                 continue
 
-            now = time.time()
-            # Fast stop loss execution on adverse leading spot drift
             trigger_side: Optional[str] = None
+            note: str = ""
+            now = time.time()
+
             with self._engine_lock:
-                if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
-                    if m.spot_drift <= -self.spot_exit_drift:
-                        m.max_down_drift = max(m.max_down_drift, abs(m.spot_drift))
-                        m.status = "STOP_EXIT_PENDING"
-                        trigger_side = "UP"
-                elif m.filled_down and not m.filled_up and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
-                    if m.spot_drift >= self.spot_exit_drift:
-                        m.max_up_drift = max(m.max_up_drift, m.spot_drift)
-                        m.status = "STOP_EXIT_PENDING"
-                        trigger_side = "DOWN"
+                if slug not in self.markets:
+                    continue
+                m = self.markets[slug]
+                m.spot_price = price
+                m.spot_updated_ts = ts_ms / 1000.0
+                m.streaming_active = True
+
+                if m.spot_open_price is None or m.spot_open_price <= 0:
+                    m.spot_open_price = price
+
+                if m.spot_open_price and m.spot_open_price > 0:
+                    m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
+
+                if self.is_running and not self.quoting_halted:
+                    # Fast stop loss execution on adverse leading spot drift
+                    if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
+                        if m.spot_drift <= -self.spot_exit_drift:
+                            m.max_down_drift = max(m.max_down_drift, abs(m.spot_drift))
+                            m.status = "STOP_EXIT_PENDING"
+                            trigger_side = "UP"
+                    elif m.filled_down and not m.filled_up and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
+                        if m.spot_drift >= self.spot_exit_drift:
+                            m.max_up_drift = max(m.max_up_drift, m.spot_drift)
+                            m.status = "STOP_EXIT_PENDING"
+                            trigger_side = "DOWN"
 
             if trigger_side:
                 log.info("[%s] RTDS leading tick triggered fast stop exit for %s leg: spot=%.2f drift=%.3f",
@@ -1110,22 +1113,35 @@ class LiveTraderEngine:
                 # Guard against deselecting markets with open positions or active pending exits
                 for s in to_remove:
                     m = self.markets[s]
-                    if m.filled_up or m.filled_down or m.status in ("FILLED_UP", "FILLED_DOWN", "STOP_EXIT_PENDING"):
+                    has_unhedged_position = (m.filled_up != m.filled_down) and not m.exit_taken
+                    if m.status == "STOP_EXIT_PENDING" or has_unhedged_position:
                         raise ValueError(
                             f"Cannot deselect active market '{s}' with open positions or in-flight exits "
-                            f"(status={m.status}, filled_up={m.filled_up}, filled_down={m.filled_down}). "
+                            f"(status={m.status}, filled_up={m.filled_up}, filled_down={m.filled_down}, exit_taken={m.exit_taken}). "
                             f"Wait for window settlement or stop exit before deselecting."
                         )
 
                 for s in to_remove:
                     m = self.markets[s]
-                    self.historical_realized_pnl += m.realized_pnl_usd
+                    cancel_failed = False
                     for oid in (m.order_id_up, m.order_id_down, m.next_order_id_up, m.next_order_id_down, m.order_id_exit_up, m.order_id_exit_down):
                         if oid:
                             try:
-                                self.cancel_live_order(oid)
+                                success = self.cancel_live_order(oid)
+                                if not success:
+                                    log.warning("[%s] Failed to cancel order %s on removal", s, oid)
+                                    cancel_failed = True
+                                    break
                             except Exception as e:
                                 log.warning("[%s] Error cancelling order %s on removal: %s", s, oid, e)
+                                cancel_failed = True
+                                break
+
+                    if cancel_failed:
+                        log.error("[%s] Aborting removal of market: order cancellation failed or raised. Retaining market.", s)
+                        continue
+
+                    self.historical_realized_pnl += m.realized_pnl_usd
                     del self.markets[s]
 
                 for slug, _dur, label in new_series:
@@ -1287,6 +1303,8 @@ class LiveTraderEngine:
             if m.trades_count > 0:
                 m.last_action = f"PnL: ${m.total_pnl_usd:+.2f} ({m.trades_count} fills)"
 
+        unselected_pnl = sum(v for k, v in mkt_pnl.items() if k not in self.markets)
+        self.historical_realized_pnl = round(unselected_pnl, 2)
         self.total_realized_pnl = round(cum_pnl, 2)
         self.total_pnl = round(cum_pnl, 2)
         self.total_pairs_merged = sum(mkt_pairs.values())
@@ -1523,6 +1541,7 @@ class LiveTraderEngine:
                 META_FILE.unlink()
             except Exception as e:
                 log.warning("Could not delete %s: %s", META_FILE, e)
+        self.historical_realized_pnl = 0.0
         for m in self.markets.values():
             m.realized_pnl_usd = 0.0
             m.unrealized_pnl_usd = 0.0
