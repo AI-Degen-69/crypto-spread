@@ -770,6 +770,9 @@ class LiveConfigPayload(BaseModel):
     mode: Optional[str] = Field(default=None, pattern="^(paper|live)$")
     wallet_address: Optional[str] = None
     starting_balance: Optional[float] = Field(default=None, ge=0.0)
+    selected_markets: Optional[list[str]] = None
+    tokens: Optional[list[str]] = None
+    durations: Optional[list[int]] = None
 
 
 @app.post("/api/live/config")
@@ -777,15 +780,21 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
     """Update strategy parameters for the live bot."""
     _verify_safe_origin(request)
     engine = get_live_trader_engine()
-    state = engine.update_config(
-        offset=payload.offset,
-        exit_thresh=payload.exit_thresh,
-        shares=payload.shares,
-        mode=payload.mode,
-        wallet_address=payload.wallet_address,
-        starting_balance=payload.starting_balance,
-    )
-    return state
+    try:
+        state = engine.update_config(
+            offset=payload.offset,
+            exit_thresh=payload.exit_thresh,
+            shares=payload.shares,
+            mode=payload.mode,
+            wallet_address=payload.wallet_address,
+            starting_balance=payload.starting_balance,
+            selected_markets=payload.selected_markets,
+            tokens=payload.tokens,
+            durations=payload.durations,
+        )
+        return state
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 @app.get("/api/live/account")
@@ -1135,6 +1144,9 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .tab-btn{background:transparent;border:none;color:var(--dim);padding:6px 14px;border-radius:7px;font:600 12px var(--disp);cursor:pointer;transition:all .15s}
 .tab-btn.active{background:var(--panel);color:var(--tx);box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .tab-btn:hover:not(.active){color:var(--tx)}
+.filter-chip{background:var(--panel2);border:1px solid var(--line);color:var(--dim);border-radius:20px;padding:3px 10px;font:600 11px var(--disp);cursor:pointer;transition:all .15s;user-select:none;display:inline-flex;align-items:center;gap:5px}
+.filter-chip.active{background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up)}
+.filter-chip:hover:not(.active){color:var(--tx);border-color:var(--line-hi)}
 .wrap{max-width:1440px;margin:0 auto;padding:16px 20px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:1000px){.grid{grid-template-columns:1fr}}
@@ -1477,6 +1489,31 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <button class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
         </div>
       </div>
+
+      <!-- Market Selection: Tokens & Duration -->
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font:700 11px var(--disp);color:var(--faint);text-transform:uppercase;letter-spacing:0.06em">Assets:</span>
+          <div id="cockpitTokenChips" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <button type="button" class="filter-chip active" id="chip-token-BTC" onclick="toggleCockpitToken('BTC')">BTC</button>
+            <button type="button" class="filter-chip active" id="chip-token-ETH" onclick="toggleCockpitToken('ETH')">ETH</button>
+            <button type="button" class="filter-chip active" id="chip-token-BNB" onclick="toggleCockpitToken('BNB')">BNB</button>
+            <button type="button" class="filter-chip active" id="chip-token-SOL" onclick="toggleCockpitToken('SOL')">SOL</button>
+            <button type="button" class="filter-chip active" id="chip-token-XRP" onclick="toggleCockpitToken('XRP')">XRP</button>
+          </div>
+          <button type="button" id="btnTokensAll" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(true)">All</button>
+          <button type="button" id="btnTokensClear" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(false)">Clear</button>
+          <span id="cockpitFilterLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn,#f0b90b);letter-spacing:0.04em">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE MARKETS</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font:700 11px var(--disp);color:var(--faint);text-transform:uppercase;letter-spacing:0.06em">Duration:</span>
+          <div style="display:flex;gap:4px;background:var(--panel2);padding:2px;border-radius:8px;border:1px solid var(--line)">
+            <button type="button" id="btnDur5m" class="tab-btn active" style="font-size:11px;padding:4px 10px" onclick="setCockpitDuration('5m')">5m</button>
+            <button type="button" id="btnDur15m" class="tab-btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitDuration('15m')">15m</button>
+            <button type="button" id="btnDurBoth" class="tab-btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitDuration('both')">Both</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Live KPI Summary -->
@@ -1521,8 +1558,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </h3>
         <div style="display:flex;align-items:center;gap:6px">
           <button id="btnChartModeTotal" class="btn btn-primary" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('total')">Portfolio Total Net Value ($)</button>
-          <button id="btnChartModeUsd" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_usd')">5-Market P&L Breakdown ($)</button>
-          <button id="btnChartModePct" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_pct')">5-Market Return Breakdown (%)</button>
+          <button id="btnChartModeUsd" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_usd')">Market P&L Breakdown ($)</button>
+          <button id="btnChartModePct" class="btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitChartMode('breakdown_pct')">Market Return Breakdown (%)</button>
         </div>
       </div>
       <div id="cockpitChartWrap" style="height:270px;width:100%;position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden;user-select:none">
@@ -1532,10 +1569,13 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div id="cockpitChartLegend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;align-items:center" class="mono"></div>
     </div>
 
-    <!-- 5-Market Live Matrix -->
+    <!-- Live Market Matrix -->
     <div class="card" style="margin-top:12px">
-      <h3 style="margin:0 0 10px">🎯 5-Minute Live Market Matrix (BTC, ETH, BNB, SOL, XRP)</h3>
-      <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(5, 1fr);gap:10px"></div>
+      <h3 style="margin:0 0 10px">
+        <span>🎯 Live Market Matrix</span>
+        <span id="cockpitActiveMarketsBadge" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">5 ACTIVE MARKETS</span>
+      </h3>
+      <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));gap:10px"></div>
     </div>
 
     <!-- Live Open Orders & Advance Pre-Quotes Table -->
@@ -2456,13 +2496,157 @@ async function uploadFileStream(file){
 // --- LIVE TRADING COCKPIT LOGIC ---
 let activeCockpitChartMode = 'total';
 let cockpitState = null;
-const COCKPIT_SERIES = [
-  { slug: 'btc-up-or-down-5m', label: 'BTC 5m', color: '#f7931a' },
-  { slug: 'eth-up-or-down-5m', label: 'ETH 5m', color: '#627eea' },
-  { slug: 'bnb-up-or-down-5m', label: 'BNB 5m', color: '#f3ba2f' },
-  { slug: 'sol-up-or-down-5m', label: 'SOL 5m', color: '#14f195' },
-  { slug: 'xrp-up-or-down-5m', label: 'XRP 5m', color: '#00aae4' },
+const ALL_COCKPIT_SERIES = [
+  { slug: 'btc-up-or-down-5m', token: 'BTC', duration: 300, label: 'BTC 5m', color: '#f7931a' },
+  { slug: 'eth-up-or-down-5m', token: 'ETH', duration: 300, label: 'ETH 5m', color: '#627eea' },
+  { slug: 'bnb-up-or-down-5m', token: 'BNB', duration: 300, label: 'BNB 5m', color: '#f3ba2f' },
+  { slug: 'sol-up-or-down-5m', token: 'SOL', duration: 300, label: 'SOL 5m', color: '#14f195' },
+  { slug: 'xrp-up-or-down-5m', token: 'XRP', duration: 300, label: 'XRP 5m', color: '#00aae4' },
+  { slug: 'btc-up-or-down-15m', token: 'BTC', duration: 900, label: 'BTC 15m', color: '#f7931a' },
+  { slug: 'eth-up-or-down-15m', token: 'ETH', duration: 900, label: 'ETH 15m', color: '#627eea' },
+  { slug: 'bnb-up-or-down-15m', token: 'BNB', duration: 900, label: 'BNB 15m', color: '#f3ba2f' },
+  { slug: 'sol-up-or-down-15m', token: 'SOL', duration: 900, label: 'SOL 15m', color: '#14f195' },
+  { slug: 'xrp-up-or-down-15m', token: 'XRP', duration: 900, label: 'XRP 15m', color: '#00aae4' },
 ];
+
+let selectedCockpitTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+let selectedCockpitDuration = '5m';
+let hasInitializedCockpitFilters = false;
+// Holds the engine's exact slug set when it is not expressible as a
+// token x duration product (e.g. a CLI selection of BTC 5m + ETH 15m).
+// Sent verbatim so a parameter apply cannot silently widen the selection.
+let cockpitExactSelection = null;
+
+function getActiveCockpitSeries() {
+  if (cockpitState && cockpitState.available_series && cockpitState.selected_series) {
+    const selSet = new Set(cockpitState.selected_series);
+    return cockpitState.available_series.filter(s => selSet.has(s.slug));
+  }
+  if (cockpitState && cockpitState.selected_series) {
+    const selSet = new Set(cockpitState.selected_series);
+    return ALL_COCKPIT_SERIES.filter(s => selSet.has(s.slug));
+  }
+  return ALL_COCKPIT_SERIES.slice(0, 5);
+}
+
+function getSelectedCockpitDurations() {
+  if (selectedCockpitDuration === '5m') return [300];
+  if (selectedCockpitDuration === '15m') return [900];
+  return [300, 900];
+}
+
+function areCockpitFiltersLocked() {
+  return !!(cockpitState && cockpitState.is_running);
+}
+
+function applyCockpitFilterLock(el, locked) {
+  if (!el) return;
+  el.disabled = locked;
+  el.style.opacity = locked ? '0.4' : '';
+  el.style.cursor = locked ? 'not-allowed' : '';
+  el.title = locked ? 'Stop the bot to change market selection' : '';
+}
+
+function updateCockpitFilterUI() {
+  const locked = areCockpitFiltersLocked();
+  ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'].forEach(tok => {
+    const chip = $(`chip-token-${tok}`);
+    if (chip) {
+      if (selectedCockpitTokens.has(tok)) chip.classList.add('active');
+      else chip.classList.remove('active');
+      applyCockpitFilterLock(chip, locked);
+    }
+  });
+  const btn5 = $('btnDur5m');
+  const btn15 = $('btnDur15m');
+  const btnBoth = $('btnDurBoth');
+  if (btn5) btn5.className = selectedCockpitDuration === '5m' ? 'tab-btn active' : 'tab-btn';
+  if (btn15) btn15.className = selectedCockpitDuration === '15m' ? 'tab-btn active' : 'tab-btn';
+  if (btnBoth) btnBoth.className = selectedCockpitDuration === 'both' ? 'tab-btn active' : 'tab-btn';
+  [btn5, btn15, btnBoth, $('btnTokensAll'), $('btnTokensClear')].forEach(b => applyCockpitFilterLock(b, locked));
+  const hint = $('cockpitFilterLockHint');
+  if (hint) hint.style.display = locked ? 'inline' : 'none';
+}
+
+function cockpitFilterProductSlugs(tokens, durations) {
+  const durSet = new Set(durations);
+  const seriesList = (cockpitState && cockpitState.available_series) || ALL_COCKPIT_SERIES;
+  return seriesList.filter(s => tokens.has(s.token) && durSet.has(s.duration)).map(s => s.slug);
+}
+
+function syncCockpitFiltersFromState(st) {
+  if (!st || !st.selected_series) return;
+  const activeSlugs = new Set(st.selected_series);
+  const tokens = new Set();
+  let has5m = false;
+  let has15m = false;
+  const seriesList = st.available_series || ALL_COCKPIT_SERIES;
+  seriesList.forEach(s => {
+    if (activeSlugs.has(s.slug)) {
+      tokens.add(s.token);
+      if (s.duration === 300) has5m = true;
+      if (s.duration === 900) has15m = true;
+    }
+  });
+  if (tokens.size > 0) selectedCockpitTokens = tokens;
+  if (has5m && has15m) selectedCockpitDuration = 'both';
+  else if (has15m) selectedCockpitDuration = '15m';
+  else selectedCockpitDuration = '5m';
+
+  // If the chips cannot reproduce the engine's exact set, keep the exact set so a
+  // later parameter apply resubmits it instead of the wider cross-product.
+  const product = cockpitFilterProductSlugs(selectedCockpitTokens, getSelectedCockpitDurations());
+  const matchesProduct = product.length === activeSlugs.size && product.every(slug => activeSlugs.has(slug));
+  cockpitExactSelection = matchesProduct ? null : [...activeSlugs];
+
+  updateCockpitFilterUI();
+}
+
+async function toggleCockpitToken(tok) {
+  if (areCockpitFiltersLocked()) {
+    alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
+    return;
+  }
+  cockpitExactSelection = null;
+  if (selectedCockpitTokens.has(tok)) {
+    if (selectedCockpitTokens.size <= 1) {
+      alert('At least one cryptocurrency token must remain selected.');
+      return;
+    }
+    selectedCockpitTokens.delete(tok);
+  } else {
+    selectedCockpitTokens.add(tok);
+  }
+  updateCockpitFilterUI();
+  await applyCockpitConfig();
+}
+
+async function setCockpitTokensAll(selectAll) {
+  if (areCockpitFiltersLocked()) {
+    alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
+    return;
+  }
+  cockpitExactSelection = null;
+  if (selectAll) {
+    selectedCockpitTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+  } else {
+    selectedCockpitTokens = new Set(['BTC']);
+  }
+  updateCockpitFilterUI();
+  await applyCockpitConfig();
+}
+
+async function setCockpitDuration(dur) {
+  if (areCockpitFiltersLocked()) {
+    alert('Cannot change market selection while the trading bot is running. Stop the bot first.');
+    return;
+  }
+  cockpitExactSelection = null;
+  if (selectedCockpitDuration === dur) return;
+  selectedCockpitDuration = dur;
+  updateCockpitFilterUI();
+  await applyCockpitConfig();
+}
 
 async function fetchCockpitState() {
   try {
@@ -2654,21 +2838,37 @@ async function applyCockpitConfig() {
   const mode = $('cockpitMode').value || 'paper';
   const wallet = $('cockpitWallet').value.trim();
   const startBal = parseFloat($('cockpitStartBal').value) || 1000.0;
+  const body = {
+    offset,
+    exit_thresh,
+    shares,
+    mode,
+    wallet_address: wallet,
+    starting_balance: startBal,
+  };
+  // Market selection is immutable while the bot runs; only send filters when stopped
+  if (!areCockpitFiltersLocked()) {
+    if (cockpitExactSelection) {
+      body.selected_markets = cockpitExactSelection;
+    } else {
+      body.tokens = Array.from(selectedCockpitTokens);
+      body.durations = getSelectedCockpitDurations();
+    }
+  }
 
   try {
     const res = await fetch('/api/live/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        offset,
-        exit_thresh,
-        shares,
-        mode,
-        wallet_address: wallet,
-        starting_balance: startBal,
-      }),
+      body: JSON.stringify(body),
     });
     const st = await res.json();
+    if (!res.ok) {
+      alert('Configuration rejected: ' + (st.error || res.statusText));
+      await fetchCockpitState();
+      syncCockpitFiltersFromState(cockpitState);
+      return;
+    }
     cockpitState = st;
     renderCockpitUI(st);
   } catch (e) {
@@ -2705,6 +2905,17 @@ function renderCockpitUI(st) {
   }
   if (st.wallet_address && $('cockpitWallet') && document.activeElement !== $('cockpitWallet')) {
     $('cockpitWallet').value = st.wallet_address;
+  }
+
+  // Sync asset/duration filters from engine state on first receipt, and whenever
+  // the bot is running (selection is engine-owned and immutable mid-run).
+  if (!hasInitializedCockpitFilters && st.selected_series) {
+    hasInitializedCockpitFilters = true;
+    syncCockpitFiltersFromState(st);
+  } else if (st.is_running && st.selected_series) {
+    syncCockpitFiltersFromState(st);
+  } else {
+    updateCockpitFilterUI();
   }
 
   // 1. Status Badges & Buttons
@@ -2781,11 +2992,16 @@ function renderCockpitUI(st) {
   const expEl = $('cockpitExposure');
   if (expEl) expEl.textContent = '$' + (st.active_exposure || 0.0).toFixed(2);
 
-  // 3. Render 5-Market Live Matrix Grid
+  // 3. Render Live Matrix Grid
   const gridEl = $('cockpitMarketGrid');
+  const activeSeries = getActiveCockpitSeries();
+  const activeBadge = $('cockpitActiveMarketsBadge');
+  if (activeBadge) {
+    activeBadge.textContent = `${activeSeries.length} ACTIVE MARKET${activeSeries.length === 1 ? '' : 'S'}`;
+  }
   if (gridEl && st.markets) {
     let gridHtml = '';
-    for (const item of COCKPIT_SERIES) {
+    for (const item of activeSeries) {
       const m = st.markets[item.slug] || {};
       const midStr = m.mid != null ? `$${m.mid.toFixed(3)}` : '-';
       const spreadStr = m.spread != null ? `touch ${m.spread.toFixed(3)}` : 'touch -';
@@ -3096,6 +3312,7 @@ function renderCockpitChart(timeline, mode, startingBalance) {
       mode: 'total',
       timeline,
       startingBalance,
+      series: getActiveCockpitSeries(),
       minV, maxV, range,
       padL, padR, padT, padB, plotW, plotH, w, h,
       getX, getY,
@@ -3103,7 +3320,8 @@ function renderCockpitChart(timeline, mode, startingBalance) {
     };
   } else {
     const isDollar = mode === 'breakdown_usd';
-    const seriesKeys = COCKPIT_SERIES.map(s => s.slug);
+    const activeSeries = getActiveCockpitSeries();
+    const seriesKeys = activeSeries.map(s => s.slug);
 
     let allVals = [];
     timeline.forEach(pt => {
@@ -3149,7 +3367,6 @@ function renderCockpitChart(timeline, mode, startingBalance) {
     }
 
     // X Gridlines & Labels
-    let xGridSvg = '';
     timeTicks.forEach(tt => {
       xGridSvg += `
         <line x1="${tt.x.toFixed(1)}" y1="${padT}" x2="${tt.x.toFixed(1)}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.04)" stroke-dasharray="2,2"/>
@@ -3161,7 +3378,7 @@ function renderCockpitChart(timeline, mode, startingBalance) {
     let linesSvg = '';
     let legendHtml = '';
 
-    COCKPIT_SERIES.forEach(s => {
+    activeSeries.forEach(s => {
       let pathD = '';
       let lastVal = 0.0;
       timeline.forEach((pt, i) => {
@@ -3220,6 +3437,7 @@ function renderCockpitChart(timeline, mode, startingBalance) {
       timeline,
       isDollar,
       startingBalance,
+      series: activeSeries,
       minV, maxV, range,
       padL, padR, padT, padB, plotW, plotH, w, h,
       getX, getY,
@@ -3277,7 +3495,8 @@ function onCockpitChartMouseMove(evt) {
       if (multiDotsG) {
         let dotsSvg = '';
         const src = ctx.isDollar ? (pt.pnl_usd || {}) : (pt.pnl_pct || {});
-        COCKPIT_SERIES.forEach(s => {
+        const activeSeries = ctx.series || getActiveCockpitSeries();
+        activeSeries.forEach(s => {
           const v = src[s.slug] != null ? src[s.slug] : 0.0;
           const yPos = ctx.getY(v);
           dotsSvg += `<circle cx="${xPos.toFixed(1)}" cy="${yPos.toFixed(1)}" r="4.5" fill="${s.color}" stroke="#fff" stroke-width="1.5"/>`;
@@ -3303,7 +3522,8 @@ function onCockpitChartMouseMove(evt) {
   } else {
     const src = ctx.isDollar ? (pt.pnl_usd || {}) : (pt.pnl_pct || {});
     tooltipHtml += `<div style="display:grid;grid-template-columns:auto auto;gap:3px 12px;margin-top:4px;font-family:var(--mono);font-size:10.5px">`;
-    COCKPIT_SERIES.forEach(s => {
+    const activeSeries = ctx.series || getActiveCockpitSeries();
+    activeSeries.forEach(s => {
       const v = src[s.slug] != null ? src[s.slug] : 0.0;
       const vStr = ctx.isDollar ? `${v >= 0 ? '+' : ''}$${v.toFixed(2)}` : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
       const col = v >= 0 ? 'var(--up)' : 'var(--down)';

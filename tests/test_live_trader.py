@@ -586,6 +586,159 @@ def test_live_trader_invalid_selected_market_slug_fails():
         LiveTraderEngine(selected_markets=[])
 
 
+def test_live_trader_cannot_change_market_selection_while_running():
+    """Verify market selection cannot be changed mid-run while is_running is True."""
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    engine.is_running = True
+
+    # Attempting to change market selection while running must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(selected_markets=["btc-up-or-down-5m"])
+
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(tokens=["SOL"])
+
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(durations=[900])
+
+    # Updating other parameters like offset or shares while running is allowed
+    engine.update_config(offset=0.03, shares=10)
+    assert engine.offset == 0.03
+    assert engine.shares == 10
+
+    # Once stopped, changing market selection is allowed
+    engine.is_running = False
+    engine.update_config(tokens=["SOL"], durations=[300])
+    assert set(engine.markets.keys()) == {"sol-up-or-down-5m"}
 
 
+def test_live_trader_ticks_only_selected_markets():
+    """Verify the trading loop polls and quotes only the user-selected markets and durations."""
+    import asyncio
+
+    engine = LiveTraderEngine(tokens=["BTC", "XRP"], durations=[900])
+    assert set(engine.markets.keys()) == {"btc-up-or-down-15m", "xrp-up-or-down-15m"}
+
+    polled = []
+    engine._poll_single_market = lambda slug: polled.append(slug) or None
+
+    asyncio.run(engine._tick_all_markets())
+
+    assert sorted(polled) == ["btc-up-or-down-15m", "xrp-up-or-down-15m"]
+
+    # Narrow the selection while stopped, then confirm the loop follows it
+    polled.clear()
+    engine.update_config(tokens=["XRP"], durations=[900])
+    asyncio.run(engine._tick_all_markets())
+    assert polled == ["xrp-up-or-down-15m"]
+
+    # Widen to both durations for BTC and confirm both windows are traded
+    polled.clear()
+    engine.update_config(tokens=["BTC"], durations=[300, 900])
+    asyncio.run(engine._tick_all_markets())
+    assert sorted(polled) == ["btc-up-or-down-15m", "btc-up-or-down-5m"]
+
+
+def test_live_trader_state_reports_selection_for_ui():
+    """Verify get_state exposes the exact active selection the dashboard renders."""
+    engine = LiveTraderEngine(tokens=["ETH", "SOL"], durations=[300])
+    state = engine.get_state()
+
+    assert sorted(state["selected_series"]) == ["eth-up-or-down-5m", "sol-up-or-down-5m"]
+    assert sorted(state["markets"].keys()) == ["eth-up-or-down-5m", "sol-up-or-down-5m"]
+    assert len(state["available_series"]) == 10
+
+    durations = {s["slug"]: s["duration"] for s in state["available_series"]}
+    assert durations["eth-up-or-down-5m"] == 300
+    assert durations["eth-up-or-down-15m"] == 900
+
+
+def test_live_trader_running_flag_is_guarded_by_engine_lock(monkeypatch):
+    """Verify start/stop flip is_running under the lock update_config checks it with.
+
+    Without shared locking, a concurrent start() could land between
+    update_config()'s is_running check and its mutation of the market set,
+    letting the traded markets change mid-run.
+    """
+    import threading
+
+    engine = LiveTraderEngine()
+    # Keep the test hermetic: start()/stop() must not open the stream bridge or
+    # schedule wallet-balance network work.
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine.stream_bridge, "stop", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine._engine_lock.acquire()
+    try:
+        t = threading.Thread(target=engine.start, daemon=True)
+        t.start()
+        t.join(timeout=0.3)
+        assert t.is_alive(), "start() flipped is_running without holding _engine_lock"
+        assert not engine.is_running
+    finally:
+        engine._engine_lock.release()
+    t.join(timeout=2.0)
+    assert engine.is_running
+
+    engine.stop()
+    assert not engine.is_running
+
+
+def test_live_trader_running_guard_tracks_traded_markets():
+    """Verify the mid-run guard compares against the markets actually traded."""
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+
+    # Same set as engine.markets -> allowed (no-op reselection of the running set)
+    engine.update_config(selected_markets=["btc-up-or-down-5m"])
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+    # Different set -> rejected while running
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+
+def test_live_trader_rejected_config_leaves_parameters_unchanged():
+    """Verify a rejected selection does not partially apply the rest of the payload."""
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+
+    # Rejected because the bot is running: offset/shares must not be applied
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(offset=0.04, shares=99, tokens=["ETH"], durations=[300])
+    assert engine.offset == 0.02
+    assert engine.shares == 5
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+    # Rejected because the slug is unknown: same guarantee while stopped
+    engine.is_running = False
+    with pytest.raises(ValueError, match="Unknown series slug"):
+        engine.update_config(offset=0.04, shares=99, selected_markets=["not-a-market"])
+    assert engine.offset == 0.02
+    assert engine.shares == 5
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+
+def test_live_trader_start_sets_quoting_halted_under_lock(monkeypatch):
+    """Verify start() clears quoting_halted inside the lifecycle lock, not before it."""
+    import threading
+
+    engine = LiveTraderEngine()
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine.quoting_halted = True
+
+    engine._engine_lock.acquire()
+    try:
+        t = threading.Thread(target=engine.start, daemon=True)
+        t.start()
+        t.join(timeout=0.3)
+        assert t.is_alive()
+        assert engine.quoting_halted, "quoting_halted was cleared outside _engine_lock"
+    finally:
+        engine._engine_lock.release()
+    t.join(timeout=2.0)
+    assert engine.is_running
+    assert not engine.quoting_halted
 
