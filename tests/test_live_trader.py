@@ -652,3 +652,44 @@ def test_live_trader_state_reports_selection_for_ui():
     assert durations["eth-up-or-down-5m"] == 300
     assert durations["eth-up-or-down-15m"] == 900
 
+
+def test_live_trader_running_flag_is_guarded_by_engine_lock():
+    """Verify start/stop flip is_running under the lock update_config checks it with.
+
+    Without shared locking, a concurrent start() could land between
+    update_config()'s is_running check and its mutation of the market set,
+    letting the traded markets change mid-run.
+    """
+    import threading
+
+    engine = LiveTraderEngine()
+    engine._engine_lock.acquire()
+    try:
+        t = threading.Thread(target=engine.start, daemon=True)
+        t.start()
+        t.join(timeout=0.3)
+        assert t.is_alive(), "start() flipped is_running without holding _engine_lock"
+        assert not engine.is_running
+    finally:
+        engine._engine_lock.release()
+    t.join(timeout=2.0)
+    assert engine.is_running
+
+    engine.stop()
+    assert not engine.is_running
+
+
+def test_live_trader_running_guard_tracks_traded_markets():
+    """Verify the mid-run guard compares against the markets actually traded."""
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+
+    # Same set as engine.markets -> allowed (no-op reselection of the running set)
+    engine.update_config(selected_markets=["btc-up-or-down-5m"])
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+
+    # Different set -> rejected while running
+    with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
+        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    assert set(engine.markets.keys()) == {"btc-up-or-down-5m"}
+

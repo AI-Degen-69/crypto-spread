@@ -1118,10 +1118,11 @@ class LiveTraderEngine:
         if selected_markets is not None or tokens is not None or durations is not None:
             new_series = _resolve_series_selection(selected_markets, tokens, durations)
             new_slugs = {s[0] for s in new_series}
-            current_slugs = {s[0] for s in self.selected_series}
-            if new_slugs != current_slugs and self.is_running:
-                raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
             with self._engine_lock:
+                # Read is_running under the lock that start()/stop() also take, so a
+                # concurrent start cannot slip in between the check and the mutation.
+                if self.is_running and new_slugs != set(self.markets.keys()):
+                    raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
                 to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
                 # Guard against deselecting markets with open positions or active pending exits
                 for s in to_remove:
@@ -1219,9 +1220,10 @@ class LiveTraderEngine:
     def start(self):
         """Start the background live trading ticker."""
         self.quoting_halted = False
-        if self.is_running:
-            return
-        self.is_running = True
+        with self._engine_lock:
+            if self.is_running:
+                return
+            self.is_running = True
         self.stream_bridge.start()
         self._schedule_wallet_balance_fetch()
         try:
@@ -1234,7 +1236,8 @@ class LiveTraderEngine:
 
     def stop(self):
         """Stop trading engine and cancel active quoting."""
-        self.is_running = False
+        with self._engine_lock:
+            self.is_running = False
         self.stream_bridge.stop()
         if self.mode == "live":
             self.cancel_all_orders()

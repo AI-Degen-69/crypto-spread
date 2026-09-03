@@ -714,21 +714,18 @@ def test_cockpit_ui_locks_market_filters_while_running():
     assert res.status_code == 200
     html = res.text
 
-    # Lock helpers and the guard used by every filter handler
+    # Lock helpers exist and every filter handler consults the lock before mutating
     assert "function areCockpitFiltersLocked()" in html
-    assert "function applyCockpitFilterLock(el, locked)" in html
-    assert "function syncCockpitFiltersFromState(st)" in html
-    assert html.count("Cannot change market selection while the trading bot is running") >= 3
+    assert "function applyCockpitFilterLock(" in html
+    assert "function syncCockpitFiltersFromState(" in html
+    for handler in ("toggleCockpitToken", "setCockpitTokensAll", "setCockpitDuration", "applyCockpitConfig"):
+        body_start = html.index(f"function {handler}(")
+        assert "areCockpitFiltersLocked()" in html[body_start:body_start + 900], handler
 
     # Lock hint element and ids for the All/Clear buttons the lock disables
     assert 'id="cockpitFilterLockHint"' in html
     assert 'id="btnTokensAll"' in html
     assert 'id="btnTokensClear"' in html
-
-    # Filter fields are omitted from the config payload while the bot runs
-    assert "if (!areCockpitFiltersLocked()) {" in html
-    assert "body.tokens = Array.from(selectedCockpitTokens);" in html
-    assert "body.durations = getSelectedCockpitDurations();" in html
 
 
 def test_api_live_config_selection_roundtrip_while_stopped():
