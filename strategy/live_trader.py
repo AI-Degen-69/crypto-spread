@@ -1838,24 +1838,34 @@ class LiveTraderEngine:
         # --- 10% WINDOW TIMEOUT ENTRY CANCELLATION (Issue #48) ---
         if is_late_start and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
-                mstate.entry_cancelled_timeout = True
                 if self.mode == "live":
+                    cancel_ok_up = True
+                    cancel_ok_down = True
                     if mstate.order_id_up and mstate.order_status_up == "RESTING":
-                        self.cancel_live_order(mstate.order_id_up)
-                        mstate.order_status_up = "CANCELLED"
+                        if self.cancel_live_order(mstate.order_id_up):
+                            mstate.order_status_up = "CANCELLED"
+                        else:
+                            cancel_ok_up = False
                     if mstate.order_id_down and mstate.order_status_down == "RESTING":
-                        self.cancel_live_order(mstate.order_id_down)
-                        mstate.order_status_down = "CANCELLED"
+                        if self.cancel_live_order(mstate.order_id_down):
+                            mstate.order_status_down = "CANCELLED"
+                        else:
+                            cancel_ok_down = False
+
+                    if cancel_ok_up and cancel_ok_down:
+                        mstate.entry_cancelled_timeout = True
                 else:
                     if mstate.order_status_up == "RESTING":
                         mstate.order_status_up = "CANCELLED"
                     if mstate.order_status_down == "RESTING":
                         mstate.order_status_down = "CANCELLED"
+                    mstate.entry_cancelled_timeout = True
 
-                if mstate.status in ("IDLE", "QUOTING", "PRE_QUOTING"):
-                    mstate.status = "TIMEOUT_NO_FILL"
-                    mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
-                    log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
+                if mstate.entry_cancelled_timeout:
+                    if mstate.status in ("IDLE", "QUOTING", "PRE_QUOTING"):
+                        mstate.status = "TIMEOUT_NO_FILL"
+                        mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
+                        log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
 
         # --- LIVE ORDER PLACEMENT (if in live mode and orders not placed yet) ---
         if (self.mode == "live" and not self.quoting_halted and not mstate.pair_captured 

@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None):
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
           f"pair_cost={params.pair_cost_gate} fill={params.fill_model} "
-          f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct * 100:.0f}% "
+          f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct:.2%} "
           f"params_hash={params.params_hash()}")
 
     t0 = time.perf_counter()

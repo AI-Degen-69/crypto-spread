@@ -96,6 +96,7 @@ def test_live_trader_cancels_unfilled_entry_at_10_percent_elapsed():
         cancelled_orders.append(order_id)
         return True
 
+    engine.get_clob_client = MagicMock(return_value=None)
     engine.place_live_quote = MagicMock(side_effect=mock_place)
     engine.cancel_live_order = MagicMock(side_effect=mock_cancel)
 
@@ -130,6 +131,57 @@ def test_live_trader_cancels_unfilled_entry_at_10_percent_elapsed():
     assert mstate.status == "TIMEOUT_NO_FILL"
     assert "10% window timeout" in mstate.last_action
     assert len(cancelled_orders) == 2
+
+
+def test_live_trader_failed_cancel_retains_resting_and_retries():
+    """If cancel_live_order fails, order stays RESTING and retries on next tick."""
+    engine = LiveTraderEngine()
+    engine.mode = "live"
+    engine.is_running = True
+    slug = "btc-up-or-down-5m"
+    start_time = 1000.0
+
+    engine.get_clob_client = MagicMock(return_value=None)
+    engine.place_live_quote = MagicMock(return_value={"order_id": "ord_1", "status": "RESTING"})
+    cancel_attempts = []
+    def failing_cancel(oid):
+        cancel_attempts.append(oid)
+        return False  # Remote cancel failed
+
+    engine.cancel_live_order = MagicMock(side_effect=failing_cancel)
+
+    mkt = {
+        "conditionId": "0xwin_retry",
+        "slug": "btc-up-down-retry",
+        "up_token": "tok_up",
+        "down_token": "tok_dn",
+        "start_ts": start_time,
+        "end_ts": start_time + 300.0,
+    }
+    poll_data = {
+        "market": mkt,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }
+
+    # Tick 1: at t=1005s -> orders placed
+    engine._update_market_strategy(slug, poll_data, now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_status_up == "RESTING"
+
+    # Tick 2: at t=1031s -> cancel fails
+    engine._update_market_strategy(slug, poll_data, now=1031.0)
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.order_status_up == "RESTING"
+    assert len(cancel_attempts) == 2
+
+    # Now make cancel succeed
+    engine.cancel_live_order = MagicMock(return_value=True)
+    # Tick 3: at t=1032s -> cancel retries and succeeds
+    engine._update_market_strategy(slug, poll_data, now=1032.0)
+    assert mstate.entry_cancelled_timeout is True
+    assert mstate.order_status_up == "CANCELLED"
+    assert mstate.status == "TIMEOUT_NO_FILL"
 
 
 def test_live_trader_skips_orders_on_late_start_window():

@@ -128,6 +128,12 @@ class BacktestParams:
     max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
     entry_timeout_pct: float = 0.10   # 0 disables; e.g. 0.10 cancels unfilled entry quotes once 10% elapsed
 
+    def __post_init__(self):
+        """Validate parameter ranges and finite boundaries."""
+        if self.entry_timeout_pct is not None:
+            if math.isnan(self.entry_timeout_pct) or not (0.0 <= self.entry_timeout_pct <= 1.0):
+                raise ValueError(f"entry_timeout_pct must be between 0.0 and 1.0, got {self.entry_timeout_pct}")
+
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
         """Return the exit threshold for a given market slug, series, and window duration."""
         if series and series in self.exit_thresh_by_slug:
@@ -263,9 +269,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         else:
             elapsed = float(s_idx)
 
-        # Check entry timeout (Issue #48): cancel unfilled entry quotes if 0 legs filled
+        # Check entry timeout (Issue #48): if elapsed strictly exceeds cutoff, timeout already passed
         if params.entry_timeout_pct > 0 and duration > 0 and not entry_cancelled:
-            if elapsed >= (params.entry_timeout_pct * duration):
+            if elapsed > (params.entry_timeout_pct * duration):
                 if not filled_up and not filled_down:
                     entry_cancelled = True
 
@@ -334,7 +340,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     pnl_cents += (bb_dn - resting_down) * 100.0
                     fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                     break
-            continue
+            if not filled_up and not filled_down:
+                continue
 
         # --- FILL DETECTION (Plan fill_model: tape conservative default, cross for strict through-price fills) ---
         # Tape-confirmed: a real trade printed at our resting price (or strictly through for "cross").
@@ -409,6 +416,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_dn - resting_down) * 100.0
                 fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                 break
+
+        # Check entry timeout (Issue #48): cancel unfilled entry quotes if 0 legs filled
+        # Evaluated after snapshot fills so trades in the cutoff snapshot are not dropped
+        if params.entry_timeout_pct > 0 and duration > 0 and not entry_cancelled:
+            if elapsed >= (params.entry_timeout_pct * duration):
+                if not filled_up and not filled_down:
+                    entry_cancelled = True
 
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):
