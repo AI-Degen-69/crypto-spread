@@ -745,6 +745,9 @@ async def api_live_control(request: Request):
         engine.reset_pnl()
     elif action == "demo_data":
         engine.seed_demo_data()
+    elif action == "sync_wallet_trades":
+        addr = body.get("wallet_address") or engine.wallet_address
+        engine.sync_wallet_trades(addr)
     else:
         return JSONResponse(status_code=400, content={"error": f"Unknown action '{action}'"})
     return engine.get_state()
@@ -1427,6 +1430,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <button id="btnCockpitToggle" class="btn btn-primary" style="font-size:13px;padding:7px 16px" onclick="toggleCockpitBot()">▶ START BOT</button>
           <button class="btn" style="font-size:13px;padding:7px 14px" onclick="restartCockpitBot()">🔄 RESTART</button>
           <button class="btn" style="font-size:13px;padding:7px 14px;background:rgba(243,186,47,0.15);border-color:var(--gold);color:var(--gold);font-weight:700" onclick="loadCockpitDemoData()">🎲 DEMO DATA</button>
+          <button id="btnSyncRealRun" class="btn" style="font-size:13px;padding:7px 14px;background:rgba(51,201,181,0.2);border-color:var(--up);color:var(--up);font-weight:700" onclick="syncRealRunTrades()">📥 סנכרן ריצה אמיתית (Polymarket)</button>
           <button class="btn btn-danger" style="font-size:13px;padding:7px 14px" onclick="resetCockpitPnL()">🗑 RESET P&L</button>
           <button id="btnPanicCancel" class="btn btn-danger" style="font-size:13px;padding:7px 14px;font-weight:700;background:rgba(240,104,77,0.3);border-color:var(--down)" onclick="panicCancelAllOrders()">🚨 PANIC CANCEL ALL</button>
         </div>
@@ -2559,6 +2563,25 @@ async function loadCockpitDemoData() {
     renderCockpitUI(st);
   } catch (e) {
     alert('Error loading demo data: ' + e);
+  }
+}
+
+async function syncRealRunTrades() {
+  const btn = $('btnSyncRealRun');
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ מסנכרן מפולימרקט...'; }
+    const res = await fetch('/api/live/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'sync_wallet_trades' }),
+    });
+    const st = await res.json();
+    cockpitState = st;
+    renderCockpitUI(st);
+    if (btn) { btn.disabled = false; btn.textContent = '📥 סנכרן ריצה אמיתית (Polymarket)'; }
+  } catch (e) {
+    alert('Error syncing real run: ' + e);
+    if (btn) { btn.disabled = false; btn.textContent = '📥 סנכרן ריצה אמיתית (Polymarket)'; }
   }
 }
 
