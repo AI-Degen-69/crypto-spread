@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    - "!run/**"
+    - "!**/*.jsonl"
+    - "!**/*.csv"
+    - "!**/*.log"
+    - "!**/.pytest_cache/**"
+
+  path_instructions:
+    - path: "strategy/**/*.py"
+      instructions: |
+        Trading engine rules:
+        - NEVER suggest changing tick sizes, price rounding, lot sizes, or exchange constants.
+        - NEVER suggest adding new external dependencies to requirements.txt.
+        - Ensure all network calls and parsing have strict error handling (no bare except).
+    - path: "scripts/**/*.py"
+      instructions: |
+        - Replay & tick collectors: respect network timeouts and avoid unbounded retry loops.
+        - Do not change output formats or tick schema without explicit instructions.
+    - path: "tests/**/*.py"
+      instructions: |
+        - Ensure all unit tests are hermetic and mock external network calls.
+        - Use pytest conventions.
+
+  pre_merge_checks:
+    custom_checks:
+      - name: "No Hardcoded Secrets"
+        mode: "error"
+        instructions: "Fail if any private keys, Polymarket API keys, or wallet seed phrases appear in the diff."
+
+  finishing_touches:
+    custom:
+      - name: "Risk Score"
+        instructions: "Rate risk 1-5 (1=safe/cosmetic, 5=high risk trading logic) with one sentence rationale."

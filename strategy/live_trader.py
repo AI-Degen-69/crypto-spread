@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from collections import defaultdict
 import datetime
 import json
 import logging
@@ -19,7 +20,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import requests
 
 from strategy.series import by_duration
@@ -33,6 +34,9 @@ log = logging.getLogger("live_trader")
 
 _ENV_LOADED = False
 _EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+RUN_DIR = Path(__file__).resolve().parent.parent / "run"
+TRADES_FILE = RUN_DIR / "live_trades.jsonl"
+META_FILE = RUN_DIR / "live_trades_meta.json"
 
 
 def _load_env_file() -> None:
@@ -387,7 +391,7 @@ class TradeEvent:
 class LiveTraderEngine:
     """Singleton background engine for live quoting and paper/live trading."""
 
-    def __init__(self):
+    def __init__(self, load_persisted: bool = True):
         """Initialize the live trading engine with default 5m parameters and markets."""
         _load_env_file()
         self.is_running: bool = False
@@ -442,6 +446,8 @@ class LiveTraderEngine:
             on_book_update=self.on_book_update,
             on_order_event=self.on_user_order_event,
         )
+        if load_persisted and not os.getenv("PYTEST_CURRENT_TEST"):
+            self._load_persisted_trades()
 
     def get_clob_client(self) -> Optional[Any]:
         """Get or lazily initialize authenticated ClobClient."""
@@ -766,6 +772,7 @@ class LiveTraderEngine:
                 pnl_pct=round(((exit_pnl_usd) / denom) * 100.0, 1),
                 notes=trigger_note,
             ))
+            self._save_persisted_trades()
 
     def _trigger_fast_stop_exit(self, slug: str, mstate: MarketLiveState, side: str, now: float) -> None:
         """Trigger fast stop-loss exit market order and cancel unhedged side."""
@@ -1097,11 +1104,325 @@ class LiveTraderEngine:
         self.stop()
         self.start()
 
+    def _load_persisted_trades(self):
+        """Load trades and metadata from disk if available and restore state."""
+        if META_FILE.exists():
+            try:
+                meta = json.loads(META_FILE.read_text(encoding="utf-8"))
+                if "starting_balance" in meta:
+                    self.starting_balance = float(meta["starting_balance"])
+                if "wallet_address" in meta and meta["wallet_address"]:
+                    w = str(meta["wallet_address"]).strip()
+                    if w.startswith("0x") and len(w) >= 10:
+                        self.wallet_address = w
+            except Exception as e:
+                log.warning("Failed loading trade metadata: %s", e)
+        if not TRADES_FILE.exists():
+            return
+        try:
+            loaded: List[TradeEvent] = []
+            for line in TRADES_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                d = json.loads(line)
+                loaded.append(TradeEvent(**d))
+            if loaded:
+                self.trades = loaded
+                self._recalculate_from_trades()
+                log.info("Loaded %d persisted trades from %s", len(self.trades), TRADES_FILE)
+        except Exception as e:
+            log.warning("Failed loading persisted trades: %s", e)
+
+    def _save_persisted_trades(self):
+        """Write all current trades and metadata to disk for persistence."""
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            with open(TRADES_FILE, "w", encoding="utf-8") as f:
+                for t in self.trades:
+                    f.write(json.dumps(asdict(t)) + "\n")
+            META_FILE.write_text(json.dumps({
+                "starting_balance": round(self.starting_balance, 2),
+                "wallet_address": self.wallet_address,
+                "saved_at": time.time(),
+            }, indent=2), encoding="utf-8")
+        except Exception as e:
+            log.warning("Failed saving persisted trades: %s", e)
+
+    def _recalculate_from_trades(self):
+        """Recalculate market stats, totals, and timeline curve from self.trades."""
+        cum_pnl = 0.0
+        mkt_pnl: Dict[str, float] = defaultdict(float)
+        mkt_trades: Dict[str, int] = defaultdict(int)
+        mkt_pairs: Dict[str, int] = defaultdict(int)
+        mkt_stops: Dict[str, int] = defaultdict(int)
+        self.timeline.clear()
+
+        for t in self.trades:
+            cum_pnl += t.pnl_usd
+            mkt_pnl[t.slug] += t.pnl_usd
+            mkt_trades[t.slug] += 1
+            if t.action == "PAIR_MERGE":
+                mkt_pairs[t.slug] += 1
+            elif "STOP" in t.action:
+                mkt_stops[t.slug] += 1
+
+            notional_per_market = max(0.01, self.shares * 0.48 * 2.0)
+            self.timeline.append({
+                "timestamp": int(time.time()),
+                "time_str": t.timestamp,
+                "portfolio_value": round(self.starting_balance + cum_pnl, 2),
+                "total_pnl": round(cum_pnl, 2),
+                "total_pnl_pct": round((cum_pnl / max(1.0, self.starting_balance)) * 100.0, 2),
+                "pnl_usd": {k: round(v, 2) for k, v in mkt_pnl.items()},
+                "pnl_pct": {k: round((v / notional_per_market) * 100.0, 2) for k, v in mkt_pnl.items()},
+            })
+
+        for slug, m in self.markets.items():
+            m.realized_pnl_usd = round(mkt_pnl[slug], 2)
+            m.total_pnl_usd = round(mkt_pnl[slug], 2)
+            m.trades_count = mkt_trades[slug]
+            m.pairs_count = mkt_pairs[slug]
+            m.stops_count = mkt_stops[slug]
+            if m.trades_count > 0:
+                m.last_action = f"PnL: ${m.total_pnl_usd:+.2f} ({m.trades_count} fills)"
+
+        self.total_realized_pnl = round(cum_pnl, 2)
+        self.total_pnl = round(cum_pnl, 2)
+        self.total_pairs_merged = sum(mkt_pairs.values())
+        self.total_stops_triggered = sum(mkt_stops.values())
+        self.current_portfolio_value = round(self.starting_balance + cum_pnl, 2)
+
+    def sync_wallet_trades(
+        self,
+        wallet_address: Optional[str] = None,
+        start_marker: Optional[str] = None,
+        fallback_cash: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Fetch historical activities and trades from Polymarket Data API starting from the requested run."""
+        addr = (wallet_address or "").strip() or (self.wallet_address or "").strip() or (os.getenv("POLY_FUNDER") or "").strip()
+        if not addr or not addr.startswith("0x") or len(addr) < 10:
+            return {"success": False, "error": "No valid wallet address provided"}
+
+        sess = _get_thread_session()
+        activities = []
+        try:
+            r = sess.get(f"https://data-api.polymarket.com/activity?user={addr}&limit=500", timeout=(4.0, 10.0))
+            if r.ok:
+                activities = r.json()
+        except Exception as e:
+            log.warning("Could not fetch activity endpoint: %s", e)
+
+        if not isinstance(activities, list) or not activities:
+            try:
+                r = sess.get(f"https://data-api.polymarket.com/trades?user={addr}&limit=200", timeout=(4.0, 10.0))
+                if r.ok:
+                    raw_trades = r.json()
+                    if isinstance(raw_trades, list):
+                        activities = []
+                        for t in raw_trades:
+                            norm = dict(t)
+                            norm.setdefault("type", "TRADE")
+                            sz = float(t.get("size", 0.0))
+                            px = float(t.get("price", 0.0))
+                            norm.setdefault("usdcSize", round(sz * px, 4))
+                            activities.append(norm)
+            except Exception as e:
+                log.error("Failed fetching trades fallback: %s", e)
+                return {"success": False, "error": str(e)}
+
+        if not isinstance(activities, list) or not activities:
+            return {"success": True, "trades_count": 0, "total_pnl": self.total_pnl, "message": "No trades found"}
+
+        activities.sort(key=lambda x: x.get("timestamp", 0))
+
+        # Look for the user's specific starting trade if marker provided (default "1788380100" if present)
+        marker = start_marker if start_marker is not None else "1788380100"
+        start_idx = 0
+        if marker:
+            found = False
+            for i, a in enumerate(activities):
+                slug_cand = str(a.get("slug", ""))
+                if marker in slug_cand and a.get("outcome") == "Down" and a.get("side") == "BUY":
+                    start_idx = i
+                    found = True
+                    break
+            if not found:
+                return {"success": False, "error": f"Start marker '{marker}' not found in wallet activities"}
+
+        session_acts = activities[start_idx:]
+
+        # Calculate exact cash flow to infer starting balance before this trade
+        net_cash_flow = 0.0
+        for a in session_acts:
+            atype = a.get("type")
+            side = a.get("side", "")
+            usdc = float(a.get("usdcSize", 0.0))
+            if atype == "TRADE":
+                if side == "BUY":
+                    net_cash_flow -= usdc
+                elif side == "SELL":
+                    net_cash_flow += usdc
+            elif atype in ("MERGE", "REDEEM"):
+                net_cash_flow += usdc
+
+        # Fetch current balance
+        acct_val = fetch_polymarket_account_value(addr)
+        if not acct_val.get("success"):
+            if fallback_cash is not None:
+                current_cash = fallback_cash
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed fetching account balance for {addr}: {acct_val.get('error', 'unknown error')}",
+                }
+        else:
+            current_cash = float(acct_val.get("cash_balance", 0.0))
+
+        inferred_start = round(current_cash - net_cash_flow, 2)
+        self.starting_balance = inferred_start
+
+        def _to_series_slug(title: str, slug: str):
+            """Map title and slug strings to canonical 5m series slug and display label."""
+            t = (title + " " + slug).lower()
+            if "bitcoin" in t or "btc" in t:
+                return "btc-up-or-down-5m", "BTC 5m"
+            if "ethereum" in t or "eth" in t:
+                return "eth-up-or-down-5m", "ETH 5m"
+            if "solana" in t or "sol" in t:
+                return "sol-up-or-down-5m", "SOL 5m"
+            if "bnb" in t:
+                return "bnb-up-or-down-5m", "BNB 5m"
+            if "xrp" in t:
+                return "xrp-up-or-down-5m", "XRP 5m"
+            return None, None
+
+        by_window = defaultdict(list)
+        for a in session_acts:
+            wid = a.get("conditionId") or a.get("slug")
+            by_window[wid].append(a)
+
+        new_events: List[Tuple[int, TradeEvent]] = []
+        for wid, acts in by_window.items():
+            acts.sort(key=lambda x: x.get("timestamp", 0))
+            first = acts[0]
+            title = first.get("title", "")
+            slug_name = first.get("slug", "")
+            series_slug, label = _to_series_slug(title, slug_name)
+            if not series_slug:
+                continue
+
+            buys_cost = 0.0
+            buys_shares = 0.0
+            sells_proceeds = 0.0
+            sells_shares = 0.0
+            merges_proceeds = 0.0
+            redeems_proceeds = 0.0
+
+            up_bought = 0.0
+            down_bought = 0.0
+            up_cost = 0.0
+            down_cost = 0.0
+
+            last_ts = first.get("timestamp", 0)
+
+            for a in acts:
+                atype = a.get("type")
+                side = a.get("side", "")
+                outcome = a.get("outcome", "")
+                sz = float(a.get("size", 0.0))
+                usdc = float(a.get("usdcSize", 0.0))
+                last_ts = max(last_ts, a.get("timestamp", 0))
+
+                if atype == "TRADE":
+                    if side == "BUY":
+                        buys_cost += usdc
+                        buys_shares += sz
+                        if outcome == "Up":
+                            up_bought += sz
+                            up_cost += usdc
+                        elif outcome == "Down":
+                            down_bought += sz
+                            down_cost += usdc
+                    elif side == "SELL":
+                        sells_proceeds += usdc
+                        sells_shares += sz
+                elif atype == "MERGE":
+                    merges_proceeds += usdc
+                elif atype == "REDEEM":
+                    redeems_proceeds += usdc
+
+            total_proceeds = sells_proceeds + merges_proceeds + redeems_proceeds
+            window_pnl = total_proceeds - buys_cost
+
+            if merges_proceeds > 0:
+                action = "PAIR_MERGE"
+                notes = f"Merged pair for ${merges_proceeds:.2f}"
+            elif sells_proceeds > 0 and redeems_proceeds == 0:
+                if window_pnl >= 0:
+                    action = "TAKE_PROFIT"
+                    notes = f"Sold early +${window_pnl:.2f}"
+                else:
+                    action = "STOP_EXIT"
+                    notes = f"Stop Loss exit -${abs(window_pnl):.2f}"
+            elif redeems_proceeds > 0:
+                action = "WINDOW_SETTLE"
+                notes = f"Won & redeemed ${redeems_proceeds:.2f}"
+            else:
+                action = "EXPIRED"
+                notes = f"Expired out of money (-${buys_cost:.2f})"
+
+            entry_up = round(up_cost / up_bought, 3) if up_bought > 0 else None
+            entry_down = round(down_cost / down_bought, 3) if down_bought > 0 else None
+            time_str = datetime.datetime.fromtimestamp(last_ts).strftime("%H:%M:%S")
+
+            ev = TradeEvent(
+                id=f"{series_slug}_{last_ts}",
+                timestamp=time_str,
+                slug=series_slug,
+                label=label,
+                action=action,
+                shares=int(round(buys_shares or 5)),
+                entry_price_up=entry_up,
+                entry_price_down=entry_down,
+                exit_price=round(total_proceeds / max(0.1, buys_shares), 3) if buys_shares > 0 else None,
+                pnl_usd=round(window_pnl, 2),
+                pnl_pct=round((window_pnl / max(0.01, buys_cost)) * 100.0, 1),
+                notes=notes,
+            )
+            new_events.append((last_ts, ev))
+
+        new_events.sort(key=lambda x: x[0])
+        with self._engine_lock:
+            self.trades = [ev for _, ev in new_events]
+            self._recalculate_from_trades()
+            self._save_persisted_trades()
+
+        return {
+            "success": True,
+            "trades_count": len(self.trades),
+            "starting_balance": self.starting_balance,
+            "current_portfolio_value": self.current_portfolio_value,
+            "total_pnl": self.total_pnl,
+            "pairs_merged": self.total_pairs_merged,
+            "stops_triggered": self.total_stops_triggered,
+        }
+
     def reset_pnl(self):
         """Reset session PnL and trade history."""
         self.trades.clear()
         self.timeline.clear()
         self.session_start_ts = time.time()
+        if TRADES_FILE.exists() and not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                TRADES_FILE.unlink()
+            except Exception as e:
+                log.warning("Could not delete %s: %s", TRADES_FILE, e)
+        if META_FILE.exists() and not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                META_FILE.unlink()
+            except Exception as e:
+                log.warning("Could not delete %s: %s", META_FILE, e)
         for m in self.markets.values():
             m.realized_pnl_usd = 0.0
             m.unrealized_pnl_usd = 0.0
@@ -1596,20 +1917,22 @@ class LiveTraderEngine:
                     self.merge_positions(mstate.condition_id)
 
                 denom = max(0.01, 2 * resting_up * max(1, self.shares))
-                self.trades.append(TradeEvent(
-                    id=f"{slug}_{int(now)}",
-                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                    slug=slug,
-                    label=mstate.label,
-                    action="PAIR_MERGE",
-                    shares=self.shares,
-                    entry_price_up=resting_up,
-                    entry_price_down=resting_down,
-                    exit_price=1.00,
-                    pnl_usd=round(pair_profit_usd, 3),
-                    pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
-                    notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
-                ))
+                with self._engine_lock:
+                    self.trades.append(TradeEvent(
+                        id=f"{slug}_{int(now)}",
+                        timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                        slug=slug,
+                        label=mstate.label,
+                        action="PAIR_MERGE",
+                        shares=self.shares,
+                        entry_price_up=resting_up,
+                        entry_price_down=resting_down,
+                        exit_price=1.00,
+                        pnl_usd=round(pair_profit_usd, 3),
+                        pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
+                        notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
+                    ))
+                    self._save_persisted_trades()
                 return
 
             # --- RECONCILE PENDING STOP EXIT ---
@@ -1702,20 +2025,22 @@ class LiveTraderEngine:
             mstate.trades_count += 1
             log.info("[%s] Window Rollover Settled PnL: $%.2f", mstate.slug, settle_pnl)
 
-            self.trades.append(TradeEvent(
-                id=f"{mstate.slug}_{int(now)}",
-                timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                slug=mstate.slug,
-                label=mstate.label,
-                action="WINDOW_SETTLE",
-                shares=self.shares,
-                entry_price_up=resting_up if mstate.filled_up else None,
-                entry_price_down=resting_down if mstate.filled_down else None,
-                exit_price=mstate.mid,
-                pnl_usd=round(settle_pnl, 3),
-                pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
-                notes="Window expired, position auto-settled",
-            ))
+            with self._engine_lock:
+                self.trades.append(TradeEvent(
+                    id=f"{mstate.slug}_{int(now)}",
+                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                    slug=mstate.slug,
+                    label=mstate.label,
+                    action="WINDOW_SETTLE",
+                    shares=self.shares,
+                    entry_price_up=resting_up if mstate.filled_up else None,
+                    entry_price_down=resting_down if mstate.filled_down else None,
+                    exit_price=mstate.mid,
+                    pnl_usd=round(settle_pnl, 3),
+                    pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
+                    notes="Window expired, position auto-settled",
+                ))
+                self._save_persisted_trades()
 
         # Promote advance pre-quoted orders from next window if available and matching new_cid
         if mstate.next_quoted and mstate.next_condition_id and (not new_cid or mstate.next_condition_id == new_cid):

@@ -435,6 +435,7 @@ class UnifiedStreamBridge:
         self.user = UserSpecStreamClient(on_order_event=self._handle_order_event)
 
         self.is_running: bool = False
+        self._rtds_task: Optional[asyncio.Task] = None
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_ready = threading.Event()
@@ -519,11 +520,10 @@ class UnifiedStreamBridge:
         asyncio.set_event_loop(self._loop)
         self._loop_ready.set()
         try:
-            self._tasks = [
-                self._loop.create_task(self.rtds.run()),
-                self._loop.create_task(self.clob.run()),
-                self._loop.create_task(self.user.run()),
-            ]
+            self._rtds_task = self._loop.create_task(self.rtds.run())
+            clob_task = self._loop.create_task(self.clob.run())
+            user_task = self._loop.create_task(self.user.run())
+            self._tasks = [self._rtds_task, clob_task, user_task]
             self._loop.run_until_complete(asyncio.gather(*self._tasks, return_exceptions=True))
         except Exception as e:
             log.debug("Stream worker loop ended: %s", e)
@@ -538,6 +538,15 @@ class UnifiedStreamBridge:
                 pass
             self._loop.close()
             self.is_running = False
+
+    @property
+    def is_rtds_running(self) -> bool:
+        """Check whether the RTDS stream task is currently running."""
+        if not self.is_running:
+            return False
+        if self._rtds_task is not None:
+            return not self._rtds_task.done()
+        return True
 
     def update_market_tokens(self, tokens: List[str]) -> None:
         """Update active CLOB market tokens."""
