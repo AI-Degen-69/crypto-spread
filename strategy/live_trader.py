@@ -1066,8 +1066,8 @@ class LiveTraderEngine:
             "pairs_merged": sum(m.pairs_count for m in self.markets.values()),
             "stops_triggered": sum(m.stops_count for m in self.markets.values()),
             "active_exposure": round(sum(
-                (m.order_shares * (m.resting_up if m.filled_up else 0) +
-                 m.order_shares * (m.resting_down if m.filled_down else 0))
+                (m.order_shares * ((m.fill_price_up if m.fill_price_up is not None else m.resting_up) if m.filled_up else 0) +
+                 m.order_shares * ((m.fill_price_down if m.fill_price_down is not None else m.resting_down) if m.filled_down else 0))
                 for m in self.markets.values() if not m.pair_captured
             ), 2),
             "params": {
@@ -1082,6 +1082,7 @@ class LiveTraderEngine:
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
             "positions": self.open_positions,
+            "open_positions": self.open_positions,
             "positions_count": len(self.open_positions),
             "selected_series": [s[0] for s in self.selected_series],
             "available_series": [
@@ -1737,6 +1738,18 @@ class LiveTraderEngine:
             ),
         ]
         self.trades = demo_trades
+        self.open_positions = [
+            {
+                "asset": "0x1234567890abcdef1",
+                "conditionId": "0xabcdef1234567890",
+                "size": 5.0,
+                "avgPrice": 0.485,
+                "curPrice": 0.510,
+                "cashPnl": 0.125,
+                "title": "ETH Up or Down 5m",
+                "outcome": "Up",
+            },
+        ]
 
         m_btc = self.markets.get("btc-up-or-down-5m")
         if m_btc:
@@ -1756,7 +1769,8 @@ class LiveTraderEngine:
             m_eth.status = "FILLED_UP"
             m_eth.filled_up = True
             m_eth.resting_up = 0.48
-            m_eth.last_action = "Filled UP 5 shares @ 0.48"
+            m_eth.fill_price_up = 0.485
+            m_eth.last_action = "Filled UP 5 shares @ 0.485"
 
         m_sol = self.markets.get("sol-up-or-down-5m")
         if m_sol:
@@ -1766,6 +1780,7 @@ class LiveTraderEngine:
             m_sol.trades_count = 1
             m_sol.status = "STOP_EXIT"
             m_sol.exit_taken = True
+            m_sol.fill_price_up = 0.48
             m_sol.last_action = "Stop Loss UP @ 0.43 (-$0.25)"
 
         m_bnb = self.markets.get("bnb-up-or-down-5m")
@@ -1776,6 +1791,10 @@ class LiveTraderEngine:
             m_bnb.trades_count = 1
             m_bnb.status = "PAIR_MERGED"
             m_bnb.pair_captured = True
+            m_bnb.filled_up = True
+            m_bnb.filled_down = True
+            m_bnb.fill_price_up = 0.48
+            m_bnb.fill_price_down = 0.48
             m_bnb.last_action = "Pair Merged! +$0.20"
 
         m_xrp = self.markets.get("xrp-up-or-down-5m")

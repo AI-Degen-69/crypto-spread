@@ -10,7 +10,7 @@
   - Verify: `python -m pytest tests/test_live_trader.py -k test_fill_price -q`
   - Files: `strategy/live_trader.py`, `tests/test_live_trader.py`
 
-- [ ] Task 3: `cockpit-ui-reflection` — Render true fill prices and open positions on dashboard
+- [x] Task 3: `cockpit-ui-reflection` — Render true fill prices and open positions on dashboard
   - Acceptance: Cockpit UI cards display actual fill prices (`m.fill_price_up || m.resting_up || 0.48`), and live open positions are exposed.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`

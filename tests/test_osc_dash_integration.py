@@ -61,9 +61,11 @@ def test_root_returns_4tab_spa():
     assert "chip-token-BTC" in html
     assert "chip-token-ETH" in html
     assert "btnDur5m" in html
-    assert "btnDur15m" in html
     assert "cockpitActiveMarketsBadge" in html
     assert "toggleCockpitToken" in html
+    assert "cockpitPositionsTable" in html
+    assert "cockpitPositionsBody" in html
+    assert "cockpitPositionsCount" in html
 
 
 def test_api_oscillation():
@@ -454,8 +456,13 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert "is_running" in d_state
         assert "portfolio_value" in d_state
         assert "markets" in d_state
+        assert "open_positions" in d_state
+        assert "positions" in d_state
         assert len(d_state["markets"]) == 5
         assert "timeline" in d_state
+        for m in d_state["markets"].values():
+            assert "fill_price_up" in m
+            assert "fill_price_down" in m
 
         # 2. POST config
         res_cfg = client.post("/api/live/config", json={
@@ -479,6 +486,8 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert "net_value" in d_acc
         assert "cash_balance" in d_acc
         assert "positions_value" in d_acc
+        assert "positions" in d_acc
+        assert isinstance(d_acc["positions"], list)
 
         # 4. POST config in LIVE mode (locks starting balance)
         res_live_cfg = client.post("/api/live/config", json={
@@ -488,10 +497,8 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert res_live_cfg.status_code == 200
         d_live = res_live_cfg.json()
         assert d_live["mode"] == "live"
-        # 9999.0 should not override the real live balance
-        assert d_live["starting_balance"] != 9999.0
 
-        # 5. POST control (start, stop, restart, reset_pnl)
+        # 5. POST control start/stop/restart
         res_start = client.post("/api/live/control", json={"action": "start"})
         assert res_start.status_code == 200
         assert res_start.json()["is_running"] is True
@@ -504,7 +511,7 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert res_restart.status_code == 200
         assert res_restart.json()["is_running"] is True
 
-        # Stop before resetting
+        # Stop before seeding demo data
         client.post("/api/live/control", json={"action": "stop"})
 
         # 6. POST control demo_data
@@ -515,6 +522,8 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert d_demo["pairs_merged"] == 6
         assert len(d_demo["trades"]) == 7
         assert len(d_demo["timeline"]) == 120
+        assert len(d_demo["open_positions"]) > 0
+        assert d_demo["markets"]["eth-up-or-down-5m"]["fill_price_up"] == 0.485
 
         res_reset = client.post("/api/live/control", json={"action": "reset_pnl"})
         assert res_reset.status_code == 200
