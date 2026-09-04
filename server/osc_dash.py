@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -1129,6 +1129,8 @@ async def api_ticks_verify(
 FULL_APP_HTML = r"""<!doctype html><html lang="he" dir="rtl"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Crypto Spread — 5m/15m SPREAD-2 Engine & Lab</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230a0d12' stroke='%23232a35' stroke-width='1.5'/><path d='M10 6v20' stroke='%2333c9b5' stroke-width='2' stroke-linecap='round'/><rect x='7' y='10' width='6' height='11' rx='2' fill='%2333c9b5'/><path d='M22 6v20' stroke='%23f0684d' stroke-width='2' stroke-linecap='round'/><rect x='19' y='11' width='6' height='11' rx='2' fill='%23f0684d'/></svg>">
+<link rel="alternate icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -4014,6 +4016,27 @@ setInterval(tick, 3000);
 """
 
 
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#0a0d12" stroke="#232a35" stroke-width="1.5"/>'
+    '<path d="M10 6v20" stroke="#33c9b5" stroke-width="2" stroke-linecap="round"/>'
+    '<rect x="7" y="10" width="6" height="11" rx="2" fill="#33c9b5"/>'
+    '<path d="M22 6v20" stroke="#f0684d" stroke-width="2" stroke-linecap="round"/>'
+    '<rect x="19" y="11" width="6" height="11" rx="2" fill="#f0684d"/>'
+    '</svg>'
+)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Serve SVG favicon for browser tab requests to avoid 404 logs."""
+    return Response(
+        content=FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/oscillation", response_class=HTMLResponse)
 @app.get("/summary", response_class=HTMLResponse)
@@ -4021,4 +4044,5 @@ setInterval(tick, 3000);
 def root_spa_page():
     """Serve the complete unified 4-tab SPA interface."""
     return HTMLResponse(FULL_APP_HTML, headers={"Cache-Control": "no-cache"})
+
 

@@ -66,6 +66,18 @@ def test_root_returns_4tab_spa():
     assert "cockpitPositionsTable" in html
     assert "cockpitPositionsBody" in html
     assert "cockpitPositionsCount" in html
+    assert 'rel="icon"' in html
+    assert 'rel="alternate icon"' in html
+
+
+def test_favicon_served():
+    """Verify that /favicon.ico returns 200 OK with SVG content and correct media type."""
+    response = client.get("/favicon.ico")
+    assert response.status_code == 200
+    assert "image/svg+xml" in response.headers["content-type"]
+    assert "<svg" in response.text
+    assert "#33c9b5" in response.text
+    assert "#f0684d" in response.text
 
 
 def test_api_oscillation():
