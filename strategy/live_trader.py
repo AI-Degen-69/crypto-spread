@@ -506,7 +506,7 @@ class LiveTraderEngine:
         
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
-        self._engine_lock = threading.Lock()
+        self._engine_lock = threading.RLock()
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="LiveTraderExec")
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -658,26 +658,34 @@ class LiveTraderEngine:
 
         if success:
             with self._engine_lock:
-                for m in self.markets.values():
-                    if m.order_id_up == order_id:
-                        m.order_id_up = None
-                        m.order_status_up = "CANCELLED"
-                        m.order_time_up = "-"
-                    if m.order_id_down == order_id:
-                        m.order_id_down = None
-                        m.order_status_down = "CANCELLED"
-                        m.order_time_down = "-"
-                    if m.next_order_id_up == order_id:
-                        m.next_order_id_up = None
-                        m.next_order_time_up = "-"
-                    if m.next_order_id_down == order_id:
-                        m.next_order_id_down = None
-                        m.next_order_time_down = "-"
-                    if m.order_id_exit_up == order_id:
-                        m.order_id_exit_up = None
-                    if m.order_id_exit_down == order_id:
-                        m.order_id_exit_down = None
+                self._clear_order_handles(order_id)
         return success
+
+    def _clear_order_handles(self, order_id: str) -> None:
+        """Clear cached order handles and status markers for a cancelled order ID.
+
+        Caller must hold _engine_lock.
+        """
+        for m in self.markets.values():
+            if m.order_id_up == order_id:
+                m.order_id_up = None
+                m.order_status_up = "CANCELLED"
+                m.order_time_up = "-"
+            if m.order_id_down == order_id:
+                m.order_id_down = None
+                m.order_status_down = "CANCELLED"
+                m.order_time_down = "-"
+            if m.next_order_id_up == order_id:
+                m.next_order_id_up = None
+                m.next_order_time_up = "-"
+            if m.next_order_id_down == order_id:
+                m.next_order_id_down = None
+                m.next_order_time_down = "-"
+            if m.order_id_exit_up == order_id:
+                m.order_id_exit_up = None
+            if m.order_id_exit_down == order_id:
+                m.order_id_exit_down = None
+
 
     def cancel_all_orders(self) -> Dict[str, Any]:
         """Emergency panic button: Cancel all open orders on CLOB and clear active handles."""
@@ -957,9 +965,17 @@ class LiveTraderEngine:
                             try:
                                 if isinstance(created_raw, (int, float)):
                                     ts_val = created_raw / 1000.0 if created_raw > 1e11 else float(created_raw)
-                                    time_str = time.strftime("%H:%M:%S", time.gmtime(ts_val))
+                                    time_str = time.strftime("%H:%M:%S", time.localtime(ts_val))
                                 elif isinstance(created_raw, str):
-                                    time_str = created_raw[11:19] if "T" in created_raw else created_raw
+                                    try:
+                                        from datetime import datetime
+                                        iso_str = created_raw.replace("Z", "+00:00")
+                                        dt = datetime.fromisoformat(iso_str)
+                                        if dt.tzinfo is not None:
+                                            dt = dt.astimezone()
+                                        time_str = dt.strftime("%H:%M:%S")
+                                    except Exception:
+                                        time_str = created_raw[11:19] if "T" in created_raw else created_raw
                             except Exception:
                                 time_str = "-"
 
