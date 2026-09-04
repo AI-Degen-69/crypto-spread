@@ -1,107 +1,129 @@
-# Spec: Display Actual Polymarket Position Values and Fill History (Issue #49)
+# Spec: Unified Orders & Trades Table (Issue #59)
 
 ## 1. Objective
-Enable accurate live execution reporting and slippage-aware PnL accounting across the engine and dashboard.
-Today, `LiveTraderEngine` and the Live Cockpit dashboard assume fixed 0.48 entry quotes for position values and pair merge profits. When live orders fill with slippage or adverse fills, the dashboard shows theoretical 0.48 prices, and pair merge profit is computed as `(1.00 - (0.48 + 0.48)) * shares = $0.20`, ignoring real execution prices.
+Replace the 3 fragmented Cockpit tables in `server/osc_dash.py` (Active Orders, Polymarket Positions, Trade Log) with a single, unified "Orders & Trades" component (`#orders-trades-card`) containing 3 tabs:
+1. **Open Orders**: Resting CLOB limit orders, grouped by pair (Up above Down), 9 columns (`Time` first, `Remaining`/`Queue Ahead`/`Age` removed).
+2. **Positions**: Held shares, grouped by pair with shared pair-level cells (`Market`, `Market Value`, `Unrealized $ (%)`, `Realized $ (%)`), 8 columns (`Time` first, `Cost` removed, `Base Cost` for share basis).
+3. **Closed Trades**: Execution history log, 8 columns (`Time` first, `Cause` [Merged/Stop-Loss/Settled], `Base Cost`, `Exit Price`, and combined `Gain / Loss $ (%)`).
 
-This change:
-1. Ingests and preserves full position details (`avgPrice`, `curPrice`, `size`, `initialValue`, `currentValue`, `cashPnl`) from Polymarket Data API (`https://data-api.polymarket.com/positions?user={wallet}`).
-2. Records true executed match prices into `MarketLiveState.fill_price_up` and `MarketLiveState.fill_price_down` when orders match on CLOB or via positions reconciliation.
-3. Computes realized pair merge PnL using actual fill prices: `(1.00 - (fill_price_up + fill_price_down)) * shares`.
-4. Updates the Live Cockpit dashboard UI to display actual average fill prices (`m.fill_price_up || m.resting_up`) and exposes open positions in `/api/live/state` and `/api/live/account`.
+Consistent layout across tabs: Column 1 is always `Time` (action creation/execution timestamp), Column 2 is always `Market`.
 
----
-
-## 2. Capability Map (Phase 0)
-
-| Module ID | Responsibility | Depends on |
-|---|---|---|
-| `positions-api` | Fetch, parse, and expose full open positions array from Polymarket Data API `/positions` | — |
-| `execution-fill-tracking` | Ingest real match prices on fill from CLOB/positions; compute slippage-aware realized & unrealized PnL | `positions-api` |
-| `cockpit-ui-reflection` | Update dashboard position cards & trades table to display true fill prices and live positions | `execution-fill-tracking`, `positions-api` |
-
-Build order: `positions-api` `→` `execution-fill-tracking` `→` `cockpit-ui-reflection`
+Add tab badges with live counts, tab persistence to `localStorage` (`crypto-spread-ot-view`), sentence-case empty states, and strict signed money formatting (`-$0.25 (-25.0%)`, `--` for missing marks).
 
 ---
 
-## 3. Tech Stack
-- Python 3.11+
-- FastAPI, Uvicorn, Requests
-- Vanilla JavaScript & HTML/CSS (in `server/osc_dash.py`)
-- Pytest for automated unit and integration tests
+## 2. Tech Stack
+- Python 3.11+ (FastAPI, Uvicorn, Requests)
+- Vanilla JavaScript & Modern CSS (in `server/osc_dash.py`)
+- Node.js (v24+) & Pytest for test runner execution
 
 ---
 
-## 4. Commands
-- Run test suite: `python -m pytest -q`
-- Run live trader tests: `python -m pytest tests/test_live_trader.py -q`
-- Run dashboard tests: `python -m pytest tests/test_osc_dash_integration.py -q`
-- Start dashboard server: `python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802`
+## 3. Commands
+- Run all tests: `python -m pytest -q`
+- Run table tests: `python -m pytest tests/test_orders_trades_table.py -q`
+- Run integration tests: `python -m pytest tests/test_osc_dash_integration.py -q`
+- Start dashboard: `python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802`
 
 ---
 
-## 5. Project Structure
+## 4. Project Structure
 ```
-strategy/
-  live_trader.py       -> fetch_polymarket_account_value, fill price tracking, pair merge PnL, get_state()
 server/
-  osc_dash.py          -> /api/live/account, /api/live/state, Cockpit UI cards & tables
+  osc_dash.py                  -> Unified #orders-trades-card HTML, CSS, and JS renderers
+strategy/
+  live_trader.py               -> Timestamp inclusion on order/position dicts
 tests/
-  test_live_trader.py  -> Unit tests for position parsing, fill price recording, and slippage PnL
-SPEC.md                -> This specification
+  test_orders_trades_table.py  -> Unit tests for pair grouping, column headers, mark value, and tab state
+  test_osc_dash_integration.py -> Verification of served HTML elements and API endpoints
+SPEC.md                        -> This specification
 ```
 
 ---
 
-## 6. Code Style
-Use dataclasses, explicit typing, and thread safety with `_engine_lock`. Keep functions pure where possible.
+## 5. Column Specifications & UI Contracts
 
-```python
-# Example: Slippage-aware pair merge profit calculation
-fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else mstate.resting_up
-fill_down = mstate.fill_price_down if mstate.fill_price_down is not None else mstate.resting_down
-pair_profit_usd = (1.00 - (fill_up + fill_down)) * self.shares
-```
+### Tab 1: Open Orders (9 Columns)
+- `Time`: Creation timestamp (e.g. `14:02:11`).
+- `Market`: Rowspan per pair, title, pair status pill (`Paired` / `Partial` / `Unpaired`), pair cost (`$X.XX` or `--`).
+- `Side`: `Up` or `Down` badge.
+- `Price`: Bid limit price (`$0.48`).
+- `Size`: Order shares (`5`).
+- `Filled`: Matched shares (`0`).
+- `Total Cost`: `Price * Size` (`$2.40`).
+- `Status`: `OPEN`, `PARTIAL`, `PENDING`.
+- `Action`: `✖ Cancel` button (cancels resting limit order on Polymarket CLOB).
+- Deliberately excluded: `Remaining`, `Queue Ahead`, `Age`.
+
+### Tab 2: Positions (8 Columns)
+- `Time`: Position entry/creation timestamp.
+- `Market`: Rowspan per pair, title, pair status pill, pair cost.
+- `Side`: `Up` or `Down` badge.
+- `Size`: Held shares.
+- `Base Cost`: Cost basis per share (`$0.480`).
+- `Market Value`: Rowspan per pair. `$1.00 * min(size_up, size_down) + remainder * mid`. If mid unavailable, `--`.
+- `Unrealized $ (%)`: Rowspan per pair. Combined signed dollar and percent: `+$0.15 (+15.6%)` or `-$0.10 (-10.4%)`.
+- `Realized $ (%)`: Rowspan per pair. Combined signed realized dollar and percent.
+
+### Tab 3: Closed Trades (8 Columns)
+- `Time`: Execution timestamp.
+- `Market`: Asset & timeframe label.
+- `Cause`: Pill badge (`Merged`, `Stop-Loss`, `Settled`).
+- `Shares`: Share count.
+- `Base Cost`: `UP + DOWN` or single-leg fill (`$0.48 + $0.48`).
+- `Exit Price`: Merge `$1.00` or stop exit price.
+- `Gain / Loss $ (%)`: Combined cash P&L and return: `+$0.20 (+4.2%)` / `-$0.25 (-25.0%)`.
+- `Details`: Execution notes and stop triggers.
+
+---
+
+## 6. Code Style & Honesty Rules
+- Signed money formatting: always `-$0.25 (-25.0%)` or `+$0.25 (+4.2%)`, never `$-0.25`.
+- Missing marks or prices: `--`, never `$0.00`.
+- Empty states in sentence case:
+  - Orders: `No orders are resting on the book.`
+  - Positions: `No open positions held in account.`
+  - Trades: `No closed trades recorded in this session.`
+- Pure JavaScript helper functions: `groupOrdersByPair`, `groupPositionsByPair`, `formatSignedMoneyPct`, `calculatePairMarkValue`.
 
 ---
 
 ## 7. Testing Strategy
-- Unit tests in `tests/test_live_trader.py`:
-  1. Test `fetch_polymarket_account_value` preserves structured positions list (`size`, `avgPrice`, `curPrice`, `cashPnl`, `asset`, `title`).
-  2. Test CLOB order fill detection records actual match price (`price` / `associate_trades`) instead of default `resting_up`.
-  3. Test pair merge realized PnL correctly computes `(1.00 - (fill_up + fill_down)) * shares` when fills experience slippage (e.g., 0.49 + 0.485 `→` 0.025/share).
-  4. Test unrealized PnL reflects actual entry fill price rather than initial resting price.
-- Integration tests in `tests/test_osc_dash_integration.py`:
-  1. Test `/api/live/account` and `/api/live/state` include `positions` payload.
-  2. Ensure full suite passes (`176+ passed`).
+- Create `tests/test_orders_trades_table.py`:
+  1. Test HTML contains `#orders-trades-card`, `.ot-tabs`, 3 tab buttons, and target tables.
+  2. Test Open Orders table headers match exactly the 9 specified columns (`Time`, `Market`, `Side`, `Price`, `Size`, `Filled`, `Total Cost`, `Status`, `Action`), and verify `Remaining`, `Queue Ahead`, `Age`, and `Leg` are not present.
+  3. Test Positions table headers match exactly the 8 specified columns (`Time`, `Market`, `Side`, `Size`, `Base Cost`, `Market Value`, `Unrealized $ (%)`, `Realized $ (%)`), and verify `Cost`, `Avg Price`, and `Leg` are not present.
+  4. Test Closed Trades table headers match exactly the 8 specified columns (`Time`, `Market`, `Cause`, `Shares`, `Base Cost`, `Exit Price`, `Gain / Loss $ (%)`, `Details`), and verify `Action`, `Entry Price`, and `P&L ($)` are replaced.
+  5. Test pure JS helper logic (pair grouping, rowspan calculation, mark value, signed formatting) using a Node runner script in test assertions.
+- Run `tests/test_osc_dash_integration.py` to ensure existing assertions remain green.
 
 ---
 
 ## 8. Boundaries
 - **Always do:**
-  - Fall back gracefully to `resting_up` / `resting_down` if fill price or position lookup is unavailable.
-  - Maintain thread safety with `with self._engine_lock:`.
-  - Preserve backward compatibility for paper mode and demo mode.
-  - Run `python -m pytest -q` before committing.
+  - Preserve backward-compatible element IDs where integration tests expect them (`cockpitPositionsTable`, `cockpitPositionsBody`, `cockpitPositionsCount`, `cockpitOrdersCount`, etc.).
+  - Ensure all 178 baseline pytest tests pass.
+  - Keep CSS scoped with `.ot-` prefix to avoid style collisions.
 - **Ask first:**
-  - Modifying backtest engine logic (`backtest/engine.py`).
-  - Adding external dependencies to `requirements.txt`.
+  - Changing API response structures on `/api/live/state`.
 - **Never do:**
-  - Commit private keys or secrets.
-  - Hardcode 0.48 in live accounting formulas.
-  - Break existing `/api/live/*` contract for UI consumers.
+  - Reinstate excluded columns (`Remaining`, `Queue Ahead`, `Age`, `Cost`).
+  - Render `$-0.25` or `$0.00` for missing mark values.
 
 ---
 
 ## 9. Success Criteria
-- [ ] `fetch_polymarket_account_value` returns `positions` list containing structured objects (`asset`, `conditionId`, `size`, `avgPrice`, `curPrice`, `cashPnl`, `title`, `outcome`).
-- [ ] In `LiveTraderEngine._on_tick`, when a live order fills on CLOB, `MarketLiveState.fill_price_up` and `MarketLiveState.fill_price_down` record the actual match price from the order/trade.
-- [ ] Pair merge realized PnL formula is `(1.00 - (fill_price_up + fill_price_down)) * shares`.
-- [ ] `/api/live/state` returns open positions list and actual fill prices.
-- [ ] Cockpit UI cards in `server/osc_dash.py` render actual average fill price instead of fixed `$0.48`.
-- [ ] All unit and integration tests pass (`python -m pytest -q`).
+- [ ] Unified card `#orders-trades-card` with 3 tabs replaces the 3 separate cards in Cockpit view.
+- [ ] Active tab button shows live count pill and switches views with zero reload.
+- [ ] Selected tab persists in `localStorage.getItem('crypto-spread-ot-view')`.
+- [ ] Column 1 is consistently `Time` and Column 2 is `Market` across all 3 tabs.
+- [ ] Open Orders uses `Side` (`Up` / `Down`), includes `Action` (`✖ Cancel`), and excludes `Remaining`, `Queue Ahead`, `Age`.
+- [ ] Positions uses `Side`, `Base Cost`, `Market Value`, `Unrealized $ (%)`, `Realized $ (%)`, and excludes separate `Cost`.
+- [ ] Closed Trades uses `Cause` (`Merged`, `Stop-Loss`, `Settled`), `Base Cost`, `Exit Price`, and `Gain / Loss $ (%)`.
+- [ ] `tests/test_orders_trades_table.py` passes all tests.
+- [ ] All 178+ pytest tests pass with zero regressions.
 
 ---
 
 ## 10. Open Questions
-- None identified. Requirements and contracts are fully specified in Issue #49 and aligned with Polymarket Data API.
+- None.
