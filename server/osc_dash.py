@@ -1699,6 +1699,170 @@ const fmtPrice=(p)=>{
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
 function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating תנודתי'):c==='monotonic'?pill('pill-mono','monotonic חד-כיווני'):c==='flat'?pill('pill-flat','flat שטוח'):pill('pill-flat',esc(c));}
 
+// Orders & Trades Tab State & Switching (Issue #59)
+let activeOtTab = (typeof localStorage !== 'undefined' && localStorage.getItem('crypto-spread-ot-view')) || 'orders';
+
+function switchOtTab(tabName) {
+  activeOtTab = tabName;
+  try { if (typeof localStorage !== 'undefined') localStorage.setItem('crypto-spread-ot-view', tabName); } catch (e) {}
+  
+  const tabs = ['orders', 'positions', 'trades'];
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+  tabs.forEach(t => {
+    const btn = $('otTabBtn' + cap(t));
+    const pane = $('otPane' + cap(t));
+    if (btn) btn.classList.toggle('active', t === tabName);
+    if (pane) pane.classList.toggle('active', t === tabName);
+  });
+}
+
+function formatSignedMoneyPct(dollarVal, pctVal) {
+  if (dollarVal == null || isNaN(Number(dollarVal))) return '--';
+  const d = Number(dollarVal);
+  const p = pctVal != null && !isNaN(Number(pctVal)) ? Number(pctVal) : null;
+
+  let dStr = '';
+  if (d > 0.00001) dStr = `+$${d.toFixed(2)}`;
+  else if (d < -0.00001) dStr = `-$${Math.abs(d).toFixed(2)}`;
+  else dStr = '$0.00';
+
+  if (p == null) return dStr;
+  let pStr = '';
+  if (p > 0.00001) pStr = `(+${p.toFixed(1)}%)`;
+  else if (p < -0.00001) pStr = `(-${Math.abs(p).toFixed(1)}%)`;
+  else pStr = '(0.0%)';
+
+  return `${dStr} ${pStr}`;
+}
+
+function groupOrdersByPair(orders) {
+  const groups = {};
+  for (const o of (orders || [])) {
+    const rawMkt = o.market || o.label || o.token_id || 'Unknown';
+    if (!groups[rawMkt]) {
+      groups[rawMkt] = {
+        market: rawMkt,
+        legs: [],
+        pair_cost: '--',
+        status: 'Unpaired',
+        rowspan: 0
+      };
+    }
+    const sideRaw = String(o.side || 'BUY').toUpperCase();
+    const isUp = sideRaw.includes('UP');
+    const sideClean = isUp ? 'Up' : (sideRaw.includes('DOWN') ? 'Down' : (sideRaw.charAt(0) + sideRaw.slice(1).toLowerCase()));
+    
+    groups[rawMkt].legs.push({
+      ...o,
+      isUp,
+      side: sideClean,
+      priceNum: o.price != null ? Number(o.price) : null,
+      sizeNum: o.size != null ? Number(o.size) : 0,
+      filledNum: o.filled != null ? Number(o.filled) : 0,
+      time: o.time || o.created_at || o.timestamp || '-'
+    });
+  }
+
+  for (const k of Object.keys(groups)) {
+    const g = groups[k];
+    g.legs.sort((a, b) => (a.isUp === b.isUp ? 0 : a.isUp ? -1 : 1));
+    g.rowspan = g.legs.length;
+    
+    const hasUp = g.legs.some(l => l.isUp);
+    const hasDown = g.legs.some(l => !l.isUp);
+    if (hasUp && hasDown) {
+      g.status = 'Paired';
+      const upLeg = g.legs.find(l => l.isUp);
+      const downLeg = g.legs.find(l => !l.isUp);
+      if (upLeg?.priceNum != null && downLeg?.priceNum != null) {
+        g.pair_cost = `$${(upLeg.priceNum + downLeg.priceNum).toFixed(2)}`;
+      }
+    } else {
+      g.status = 'Unpaired';
+      g.pair_cost = '--';
+    }
+  }
+  return groups;
+}
+
+function groupPositionsByPair(positions, markets) {
+  const groups = {};
+  for (const p of (positions || [])) {
+    const rawMkt = p.title || p.market || p.asset || 'Unknown';
+    if (!groups[rawMkt]) {
+      groups[rawMkt] = {
+        market: rawMkt,
+        legs: [],
+        status: 'Unpaired',
+        market_val: null,
+        unrealized_usd: null,
+        unrealized_pct: null,
+        realized_usd: null,
+        realized_pct: null,
+        rowspan: 0
+      };
+    }
+    const outRaw = String(p.outcome || p.side || '').toUpperCase();
+    const isUp = outRaw.includes('UP');
+    const sideClean = isUp ? 'Up' : (outRaw.includes('DOWN') ? 'Down' : (outRaw.charAt(0) + outRaw.slice(1).toLowerCase()));
+    
+    groups[rawMkt].legs.push({
+      ...p,
+      isUp,
+      side: sideClean,
+      sizeNum: p.size != null ? Number(p.size) : 0,
+      baseCost: p.avgPrice != null ? Number(p.avgPrice) : (p.price != null ? Number(p.price) : null),
+      curPrice: p.curPrice != null ? Number(p.curPrice) : null,
+      time: p.time || p.created_at || p.timestamp || '-'
+    });
+  }
+
+  for (const k of Object.keys(groups)) {
+    const g = groups[k];
+    g.legs.sort((a, b) => (a.isUp === b.isUp ? 0 : a.isUp ? -1 : 1));
+    g.rowspan = g.legs.length;
+    
+    const upLeg = g.legs.find(l => l.isUp);
+    const downLeg = g.legs.find(l => !l.isUp);
+    const upSize = upLeg ? upLeg.sizeNum : 0;
+    const downSize = downLeg ? downLeg.sizeNum : 0;
+    
+    let totalCost = 0;
+    for (const leg of g.legs) {
+      if (leg.baseCost != null) totalCost += leg.sizeNum * leg.baseCost;
+    }
+
+    if (upLeg && downLeg) {
+      const pairedShares = Math.min(upSize, downSize);
+      const remainderShares = Math.abs(upSize - downSize);
+      g.status = (upSize === downSize) ? 'Paired' : 'Partial';
+
+      let mktVal = pairedShares * 1.00;
+      if (remainderShares > 0) {
+        const remLeg = upSize > downSize ? upLeg : downLeg;
+        if (remLeg.curPrice != null) {
+          mktVal += remainderShares * remLeg.curPrice;
+        }
+      }
+      g.market_val = mktVal;
+    } else {
+      g.status = 'Unpaired';
+      const singleLeg = upLeg || downLeg;
+      if (singleLeg && singleLeg.curPrice != null) {
+        g.market_val = singleLeg.sizeNum * singleLeg.curPrice;
+      } else {
+        g.market_val = null;
+      }
+    }
+
+    if (g.market_val != null && totalCost > 0) {
+      g.unrealized_usd = g.market_val - totalCost;
+      g.unrealized_pct = (g.unrealized_usd / totalCost) * 100;
+    }
+  }
+  return groups;
+}
+
 function switchTab(name){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
@@ -3124,40 +3288,61 @@ function renderCockpitUI(st) {
     gridEl.innerHTML = gridHtml;
   }
 
-  // 4. Render Live Open Orders & Pre-Quotes Table
+  // 4. Tab 1: Render Live Open Orders & Pre-Quotes Table (9 columns, grouped by pair)
   const ordersBodyEl = $('cockpitOrdersBody');
-  const ordersCountEl = $('cockpitOrdersCount');
+  const ordersCountEl = $('otOrdersCount');
+  const legacyOrdersCountEl = $('cockpitOrdersCount');
   const openOrders = st.open_orders || [];
   if (ordersCountEl) ordersCountEl.textContent = String(openOrders.length);
+  if (legacyOrdersCountEl) legacyOrdersCountEl.textContent = String(openOrders.length);
+
   if (ordersBodyEl) {
     if (openOrders.length === 0) {
-      ordersBodyEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:16px">No resting orders currently active.</td></tr>';
+      ordersBodyEl.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:18px">No orders are resting on the book.</td></tr>';
     } else {
+      const groupedOrders = groupOrdersByPair(openOrders);
       let ordHtml = '';
-      for (const o of openOrders) {
-        const oId = o.order_id || '-';
-        const mktLabel = o.market || o.token_id || '-';
-        const sideStr = o.side || 'BUY';
-        const priceStr = o.price != null ? `$${Number(o.price).toFixed(2)}` : '-';
-        const sizeStr = o.size != null ? String(o.size) : '-';
-        const statusStr = o.status || 'OPEN';
-        const sourceStr = o.source || 'CLOB';
-        const canCancel = oId && oId !== '-';
-
-        ordHtml += `
-          <tr>
-            <td class="mono" style="font-size:10.5px;color:var(--gold);max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${esc(oId)}">${esc(oId.length > 16 ? oId.slice(0, 16) + '...' : oId)}</td>
-            <td style="font-weight:700">${esc(mktLabel)}</td>
-            <td class="mono" style="color:${sideStr.includes('UP') || sideStr === 'BUY' ? 'var(--up)' : 'var(--down)'}">${esc(sideStr)}</td>
-            <td class="mono">${priceStr}</td>
-            <td class="mono">${sizeStr}</td>
-            <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
-            <td style="font-size:10.5px;color:var(--dim)">${esc(sourceStr)}</td>
-            <td>
-              ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
-            </td>
-          </tr>
+      for (const mktKey of Object.keys(groupedOrders)) {
+        const grp = groupedOrders[mktKey];
+        const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
+        const mktCell = `
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : 'var(--line)'};padding-left:10px">
+            <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${esc(grp.market)}</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+              <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
+              <span class="mono" style="font-size:10px;color:var(--dim)">Pair: <b style="color:${grp.pair_cost !== '--' ? 'var(--gold)' : 'var(--dim)'}">${esc(grp.pair_cost)}</b></span>
+            </div>
+          </td>
         `;
+
+        grp.legs.forEach((leg, idx) => {
+          const oId = leg.order_id || '-';
+          const canCancel = oId && oId !== '-';
+          const isUp = leg.isUp;
+          const sideBadgeCls = isUp ? 'ot-tag-up' : 'ot-tag-down';
+          const priceStr = leg.priceNum != null ? `$${leg.priceNum.toFixed(2)}` : '-';
+          const sizeStr = leg.sizeNum ? String(leg.sizeNum) : '-';
+          const filledStr = leg.filledNum != null ? String(leg.filledNum) : '0';
+          const totalCostStr = (leg.priceNum != null && leg.sizeNum) ? `$${(leg.priceNum * leg.sizeNum).toFixed(2)}` : '-';
+          const statusStr = leg.status || 'OPEN';
+          const timeStr = leg.time && leg.time !== '-' ? leg.time : '-';
+
+          ordHtml += `
+            <tr class="${idx === 0 ? 'ot-pair-lead' : ''}">
+              <td class="mono" style="font-size:11px;color:var(--faint)">${esc(timeStr)}</td>
+              ${idx === 0 ? mktCell : ''}
+              <td><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
+              <td class="mono" style="font-weight:600">${priceStr}</td>
+              <td class="mono">${sizeStr}</td>
+              <td class="mono" style="color:var(--dim)">${filledStr}</td>
+              <td class="mono" style="color:var(--tx)">${totalCostStr}</td>
+              <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
+              <td>
+                ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
+              </td>
+            </tr>
+          `;
+        });
       }
       ordersBodyEl.innerHTML = ordHtml;
       ordersBodyEl.querySelectorAll('.cancel-order-btn').forEach(btn => {
@@ -3166,57 +3351,88 @@ function renderCockpitUI(st) {
     }
   }
 
-  // 4b. Render Live Polymarket Open Positions Table
+  // 4b. Tab 2: Render Live Polymarket Open Positions Table (8 columns, grouped by pair)
   const posBodyEl = $('cockpitPositionsBody');
-  const posCountEl = $('cockpitPositionsCount');
+  const posCountEl = $('otPositionsCount');
+  const legacyPosCountEl = $('cockpitPositionsCount');
   const openPos = st.open_positions || st.positions || [];
   if (posCountEl) posCountEl.textContent = String(openPos.length);
+  if (legacyPosCountEl) legacyPosCountEl.textContent = String(openPos.length);
+
   if (posBodyEl) {
     if (openPos.length === 0) {
-      posBodyEl.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:16px">No open positions on Polymarket account.</td></tr>';
+      posBodyEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:18px">No open positions held in account.</td></tr>';
     } else {
+      const groupedPos = groupPositionsByPair(openPos, st.markets);
       let posHtml = '';
-      for (const p of openPos) {
-        const titleStr = p.title || p.asset || '-';
-        const outcomeStr = p.outcome || '-';
-        const sizeStr = p.size != null ? Number(p.size).toFixed(2) : '-';
-        const avgPriceStr = p.avgPrice != null ? `$${Number(p.avgPrice).toFixed(3)}` : '-';
-        const curPriceStr = p.curPrice != null ? `$${Number(p.curPrice).toFixed(3)}` : '-';
-        const cashPnl = p.cashPnl != null ? Number(p.cashPnl) : null;
-        const pnlCol = cashPnl != null ? (cashPnl >= 0 ? 'var(--up)' : 'var(--down)') : 'var(--tx)';
-        const pnlStr = cashPnl != null ? `${cashPnl >= 0 ? '+' : ''}$${cashPnl.toFixed(2)}` : '-';
-
-        posHtml += `
-          <tr>
-            <td style="font-weight:600;max-width:240px;overflow:hidden;text-overflow:ellipsis" title="${esc(titleStr)}">${esc(titleStr)}</td>
-            <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(outcomeStr)}</span></td>
-            <td class="mono">${sizeStr}</td>
-            <td class="mono">${avgPriceStr}</td>
-            <td class="mono">${curPriceStr}</td>
-            <td class="mono" style="font-weight:700;color:${pnlCol}">${pnlStr}</td>
-          </tr>
+      for (const mktKey of Object.keys(groupedPos)) {
+        const grp = groupedPos[mktKey];
+        const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
+        
+        const mktCell = `
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : 'var(--line)'};padding-left:10px">
+            <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${esc(grp.market)}</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+              <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
+            </div>
+          </td>
         `;
+
+        const mktValStr = grp.market_val != null ? `$${grp.market_val.toFixed(2)}` : '--';
+        const unrelFmt = formatSignedMoneyPct(grp.unrealized_usd, grp.unrealized_pct);
+        const unrelCol = grp.unrealized_usd != null ? (grp.unrealized_usd >= 0 ? 'var(--up)' : 'var(--down)') : 'var(--tx)';
+        const relFmt = formatSignedMoneyPct(grp.realized_usd, grp.realized_pct);
+        const relCol = grp.realized_usd != null ? (grp.realized_usd >= 0 ? 'var(--up)' : 'var(--down)') : 'var(--tx)';
+
+        const pairSharedCells = `
+          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="vertical-align:middle;font-weight:600">${mktValStr}</td>
+          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="vertical-align:middle;font-weight:700;color:${unrelCol}">${unrelFmt}</td>
+          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="vertical-align:middle;font-weight:700;color:${relCol}">${relFmt}</td>
+        `;
+
+        grp.legs.forEach((leg, idx) => {
+          const isUp = leg.isUp;
+          const sideBadgeCls = isUp ? 'ot-tag-up' : 'ot-tag-down';
+          const sizeStr = leg.sizeNum ? leg.sizeNum.toFixed(2) : '-';
+          const baseCostStr = leg.baseCost != null ? `$${leg.baseCost.toFixed(3)}` : '-';
+          const timeStr = leg.time && leg.time !== '-' ? leg.time : '-';
+
+          posHtml += `
+            <tr class="${idx === 0 ? 'ot-pair-lead' : ''}">
+              <td class="mono" style="font-size:11px;color:var(--faint)">${esc(timeStr)}</td>
+              ${idx === 0 ? mktCell : ''}
+              <td><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
+              <td class="mono">${sizeStr}</td>
+              <td class="mono">${baseCostStr}</td>
+              ${idx === 0 ? pairSharedCells : ''}
+            </tr>
+          `;
+        });
       }
       posBodyEl.innerHTML = posHtml;
     }
   }
 
-  // 5. Render Execution Trade Log Table
+  // 5. Tab 3: Render Closed Trades Execution Log (8 columns)
   const bodyEl = $('cockpitTradesBody');
+  const tradesCountEl = $('otTradesCount');
+  const trades = st.trades || [];
+  if (tradesCountEl) tradesCountEl.textContent = String(trades.length);
+
   if (bodyEl && st.trades) {
     if (st.trades.length === 0) {
-      bodyEl.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:20px">No completed executions in this session yet.</td></tr>';
+      bodyEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:20px">No closed trades recorded in this session.</td></tr>';
     } else {
       let rowsHtml = '';
       for (const t of st.trades) {
         const pnlCol = t.pnl_usd >= 0 ? 'var(--up)' : 'var(--down)';
-        const actBadge = t.action === 'PAIR_MERGE'
-          ? '<span class="pill pill-osc">PAIR MERGE</span>'
-          : t.action.startsWith('STOP')
-          ? '<span class="pill pill-mono">STOP EXIT</span>'
-          : '<span class="pill pill-flat">SETTLE</span>';
+        const causeBadge = t.action === 'PAIR_MERGE'
+          ? '<span class="pill pill-osc">Merged</span>'
+          : (t.action && t.action.startsWith('STOP'))
+          ? '<span class="pill pill-mono">Stop-Loss</span>'
+          : '<span class="pill pill-flat">Settled</span>';
 
-        const entryStr = t.entry_price_up && t.entry_price_down
+        const baseCostStr = t.entry_price_up && t.entry_price_down
           ? `$${t.entry_price_up.toFixed(2)} + $${t.entry_price_down.toFixed(2)}`
           : t.entry_price_up
           ? `UP @ $${t.entry_price_up.toFixed(2)}`
@@ -3225,17 +3441,17 @@ function renderCockpitUI(st) {
           : '-';
 
         const exitStr = t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '-';
+        const gainLossFmt = formatSignedMoneyPct(t.pnl_usd, t.pnl_pct);
 
         rowsHtml += `
           <tr>
-            <td class="mono" style="font-size:11px;color:var(--faint)">${esc(t.timestamp)}</td>
-            <td style="font-weight:700">${esc(t.label)}</td>
-            <td>${actBadge}</td>
-            <td class="mono">${t.shares}</td>
-            <td class="mono">${entryStr}</td>
+            <td class="mono" style="font-size:11px;color:var(--faint)">${esc(t.timestamp || '-')}</td>
+            <td style="font-weight:700">${esc(t.label || t.market || '-')}</td>
+            <td>${causeBadge}</td>
+            <td class="mono">${t.shares || 0}</td>
+            <td class="mono">${baseCostStr}</td>
             <td class="mono">${exitStr}</td>
-            <td class="mono" style="font-weight:700;color:${pnlCol}">${t.pnl_usd >= 0 ? '+' : ''}$${t.pnl_usd.toFixed(2)}</td>
-            <td class="mono" style="color:${pnlCol}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%</td>
+            <td class="mono" style="font-weight:700;color:${pnlCol}">${gainLossFmt}</td>
             <td style="font-size:11px;color:var(--dim)">${esc(t.notes || '')}</td>
           </tr>
         `;
@@ -3770,6 +3986,7 @@ function initLiveCockpitStream() {
 }
 
 setupBacktestInputListeners();
+switchOtTab(activeOtTab);
 
 // Initialize real-time streams and polls
 fetchCockpitState();

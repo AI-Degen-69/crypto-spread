@@ -157,6 +157,7 @@ def fetch_polymarket_account_value(
                                 "cashPnl": float(p.get("cashPnl", 0.0) or 0.0),
                                 "title": str(p.get("title") or ""),
                                 "outcome": str(p.get("outcome") or ""),
+                                "time": str(p.get("time") or p.get("createdAt") or p.get("timestamp") or "")[:19].replace("T", " "),
                             })
                     log.debug("Polymarket positions value for %s: $%.2f across %d positions", funder, positions_value, open_positions_count)
         except Exception as e:
@@ -915,6 +916,17 @@ class LiveTraderEngine:
                 res = client.get_orders(OpenOrderParams())
                 if isinstance(res, list):
                     for o in res:
+                        created_raw = o.get("created_at") or o.get("timestamp") or o.get("createdAt")
+                        time_str = "-"
+                        if created_raw:
+                            try:
+                                if isinstance(created_raw, (int, float)):
+                                    ts_val = created_raw / 1000.0 if created_raw > 1e11 else float(created_raw)
+                                    time_str = time.strftime("%H:%M:%S", time.gmtime(ts_val))
+                                elif isinstance(created_raw, str):
+                                    time_str = created_raw[11:19] if "T" in created_raw else created_raw
+                            except Exception:
+                                time_str = "-"
                         orders.append({
                             "order_id": o.get("id") or o.get("order_id", ""),
                             "token_id": o.get("asset_id", ""),
@@ -923,12 +935,14 @@ class LiveTraderEngine:
                             "size": float(o.get("original_size", 0.0)),
                             "status": o.get("status", "OPEN"),
                             "source": "CLOB_API",
+                            "time": time_str,
                         })
             except Exception as e:
                 log.debug("CLOB get_orders error: %s", e)
 
         # Merge in tracked market orders if not already listed
         existing_ids = {o["order_id"] for o in orders if o.get("order_id")}
+        now_time_str = time.strftime("%H:%M:%S")
         for m in self.markets.values():
             if m.order_id_up and m.order_id_up not in existing_ids:
                 orders.append({
@@ -940,6 +954,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": m.order_status_up,
                     "source": "ENGINE_ACTIVE",
+                    "time": now_time_str,
                 })
             if m.order_id_down and m.order_id_down not in existing_ids:
                 orders.append({
@@ -951,6 +966,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": m.order_status_down,
                     "source": "ENGINE_ACTIVE",
+                    "time": now_time_str,
                 })
             if m.next_order_id_up and m.next_order_id_up not in existing_ids:
                 orders.append({
@@ -962,6 +978,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": "ADVANCE_PRE_QUOTE",
                     "source": "ENGINE_ADVANCE",
+                    "time": now_time_str,
                 })
             if m.next_order_id_down and m.next_order_id_down not in existing_ids:
                 orders.append({
@@ -973,6 +990,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": "ADVANCE_PRE_QUOTE",
                     "source": "ENGINE_ADVANCE",
+                    "time": now_time_str,
                 })
 
         return orders
