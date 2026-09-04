@@ -942,7 +942,12 @@ class LiveTraderEngine:
                 try:
                     from py_clob_client_v2.clob_types import OpenOrderParams
                 except ImportError:
-                    from py_clob_client.clob_types import OpenOrderParams
+                    try:
+                        from py_clob_client.clob_types import OpenOrderParams
+                    except ImportError:
+                        class OpenOrderParams:  # type: ignore[no-redef]
+                            """Stub for CLOB OpenOrderParams when py_clob_client is not installed."""
+                            pass
                 res = client.get_orders(OpenOrderParams())
                 if isinstance(res, list):
                     for o in res:

@@ -347,7 +347,8 @@ def test_cockpit_dom_rendering_with_state():
 
 def test_engine_order_resolution_and_cleanup():
     """Verify get_open_orders_list resolves CLOB token IDs to markets and sides, and cancel_live_order clears state."""
-    from unittest.mock import MagicMock
+    import sys
+    from unittest.mock import MagicMock, patch
     from strategy.live_trader import LiveTraderEngine, MarketLiveState
 
     engine = LiveTraderEngine()
@@ -377,7 +378,9 @@ def test_engine_order_resolution_and_cleanup():
     ]
     engine.get_clob_client = MagicMock(return_value=mock_client)
 
-    orders = engine.get_open_orders_list()
+    dummy_clob_types = MagicMock()
+    with patch.dict(sys.modules, {"py_clob_client_v2.clob_types": dummy_clob_types, "py_clob_client.clob_types": dummy_clob_types}):
+        orders = engine.get_open_orders_list()
     assert len(orders) == 2  # clob_1 and ord_up_999
     clob_order = next(o for o in orders if o["order_id"] == "clob_1")
     assert clob_order["market"] == "BTC 5m"
