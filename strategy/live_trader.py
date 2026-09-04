@@ -157,6 +157,7 @@ def fetch_polymarket_account_value(
                                 "cashPnl": float(p.get("cashPnl", 0.0) or 0.0),
                                 "title": str(p.get("title") or ""),
                                 "outcome": str(p.get("outcome") or ""),
+                                "time": str(p.get("time") or p.get("createdAt") or p.get("timestamp") or "")[:19].replace("T", " "),
                             })
                     log.debug("Polymarket positions value for %s: $%.2f across %d positions", funder, positions_value, open_positions_count)
         except Exception as e:
@@ -371,6 +372,8 @@ class MarketLiveState:
     # Live Order Tracking (Current Window)
     order_id_up: Optional[str] = None
     order_id_down: Optional[str] = None
+    order_time_up: str = "-"
+    order_time_down: str = "-"
     order_status_up: str = "NONE"  # NONE, RESTING, FILLED, CANCELLED
     order_status_down: str = "NONE"
     entry_cancelled_timeout: bool = False
@@ -384,6 +387,8 @@ class MarketLiveState:
     next_end_ts: float = 0.0
     next_order_id_up: Optional[str] = None
     next_order_id_down: Optional[str] = None
+    next_order_time_up: str = "-"
+    next_order_time_down: str = "-"
     next_quoted: bool = False
     
     # Live Exit Order Tracking
@@ -501,7 +506,7 @@ class LiveTraderEngine:
         
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
-        self._engine_lock = threading.Lock()
+        self._engine_lock = threading.RLock()
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="LiveTraderExec")
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -631,27 +636,61 @@ class LiveTraderEngine:
         client = self.get_clob_client()
         if not client:
             return False
+        success = False
         try:
             if hasattr(client, "cancel"):
                 try:
                     res = client.cancel(order_id)
                     log.info("Cancelled order %s -> %s", order_id, res)
-                    return self._cancel_succeeded(res)
+                    success = self._cancel_succeeded(res)
                 except (AttributeError, TypeError):
                     pass
-            if hasattr(client, "cancel_orders"):
+            if not success and hasattr(client, "cancel_orders"):
                 res = client.cancel_orders([order_id])
                 log.info("Cancelled order %s -> %s", order_id, res)
-                return self._cancel_succeeded(res)
-            log.error("No single-order cancel API available; refusing cancel_all for %s", order_id)
-            return False
+                success = self._cancel_succeeded(res)
+            if not success and not hasattr(client, "cancel") and not hasattr(client, "cancel_orders"):
+                log.error("No single-order cancel API available; refusing cancel_all for %s", order_id)
+                return False
         except Exception as e:
             log.error("Failed cancelling order %s: %s", order_id, e)
             return False
 
+        if success:
+            with self._engine_lock:
+                self._clear_order_handles(order_id)
+        return success
+
+    def _clear_order_handles(self, order_id: str) -> None:
+        """Clear cached order handles and status markers for a cancelled order ID.
+
+        Caller must hold _engine_lock.
+        """
+        for m in self.markets.values():
+            if m.order_id_up == order_id:
+                m.order_id_up = None
+                m.order_status_up = "CANCELLED"
+                m.order_time_up = "-"
+            if m.order_id_down == order_id:
+                m.order_id_down = None
+                m.order_status_down = "CANCELLED"
+                m.order_time_down = "-"
+            if m.next_order_id_up == order_id:
+                m.next_order_id_up = None
+                m.next_order_time_up = "-"
+            if m.next_order_id_down == order_id:
+                m.next_order_id_down = None
+                m.next_order_time_down = "-"
+            if m.order_id_exit_up == order_id:
+                m.order_id_exit_up = None
+            if m.order_id_exit_down == order_id:
+                m.order_id_exit_down = None
+
+
     def cancel_all_orders(self) -> Dict[str, Any]:
         """Emergency panic button: Cancel all open orders on CLOB and clear active handles."""
         self.quoting_halted = True
+        self.is_running = False
         cancelled_remote = False
         client = self.get_clob_client()
         if client:
@@ -911,24 +950,81 @@ class LiveTraderEngine:
                 try:
                     from py_clob_client_v2.clob_types import OpenOrderParams
                 except ImportError:
-                    from py_clob_client.clob_types import OpenOrderParams
+                    try:
+                        from py_clob_client.clob_types import OpenOrderParams
+                    except ImportError:
+                        class OpenOrderParams:  # type: ignore[no-redef]
+                            """Stub for CLOB OpenOrderParams when py_clob_client is not installed."""
+                            pass
                 res = client.get_orders(OpenOrderParams())
                 if isinstance(res, list):
                     for o in res:
+                        created_raw = o.get("created_at") or o.get("timestamp") or o.get("createdAt")
+                        time_str = "-"
+                        if created_raw:
+                            try:
+                                if isinstance(created_raw, (int, float)):
+                                    ts_val = created_raw / 1000.0 if created_raw > 1e11 else float(created_raw)
+                                    time_str = time.strftime("%H:%M:%S", time.localtime(ts_val))
+                                elif isinstance(created_raw, str):
+                                    try:
+                                        from datetime import datetime
+                                        iso_str = created_raw.replace("Z", "+00:00")
+                                        dt = datetime.fromisoformat(iso_str)
+                                        if dt.tzinfo is not None:
+                                            dt = dt.astimezone()
+                                        time_str = dt.strftime("%H:%M:%S")
+                                    except (ValueError, OverflowError, OSError):
+                                        time_str = created_raw[11:19] if "T" in created_raw else created_raw
+                            except (ValueError, OverflowError, OSError):
+                                time_str = "-"
+
+                        # Resolve market label and side UP/DOWN by token_id
+                        raw_asset = str(o.get("asset_id") or o.get("token_id") or "")
+                        market_label = str(o.get("market") or "")
+                        side_val = str(o.get("side") or "BUY").upper()
+                        for m in self.markets.values():
+                            if raw_asset:
+                                if raw_asset == m.up_token:
+                                    market_label = m.label
+                                    if "UP" not in side_val:
+                                        side_val = f"{side_val} (UP)"
+                                    break
+                                elif raw_asset == m.down_token:
+                                    market_label = m.label
+                                    if "DOWN" not in side_val:
+                                        side_val = f"{side_val} (DOWN)"
+                                    break
+                                elif raw_asset == m.next_up_token:
+                                    market_label = f"{m.label} (Next Window)"
+                                    if "UP" not in side_val:
+                                        side_val = f"{side_val} (UP)"
+                                    break
+                                elif raw_asset == m.next_down_token:
+                                    market_label = f"{m.label} (Next Window)"
+                                    if "DOWN" not in side_val:
+                                        side_val = f"{side_val} (DOWN)"
+                                    break
+                        if not market_label:
+                            market_label = raw_asset[:10] + "..." if len(raw_asset) > 14 else (raw_asset or "Unknown")
+
                         orders.append({
                             "order_id": o.get("id") or o.get("order_id", ""),
-                            "token_id": o.get("asset_id", ""),
-                            "side": o.get("side", ""),
+                            "market": market_label,
+                            "token_id": raw_asset,
+                            "side": side_val,
                             "price": float(o.get("price", 0.0)),
                             "size": float(o.get("original_size", 0.0)),
                             "status": o.get("status", "OPEN"),
                             "source": "CLOB_API",
+                            "time": time_str,
                         })
             except Exception as e:
                 log.debug("CLOB get_orders error: %s", e)
 
         # Merge in tracked market orders if not already listed
         existing_ids = {o["order_id"] for o in orders if o.get("order_id")}
+        now_time_str = time.strftime("%H:%M:%S")
         for m in self.markets.values():
             if m.order_id_up and m.order_id_up not in existing_ids:
                 orders.append({
@@ -940,6 +1036,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": m.order_status_up,
                     "source": "ENGINE_ACTIVE",
+                    "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
                 })
             if m.order_id_down and m.order_id_down not in existing_ids:
                 orders.append({
@@ -951,6 +1048,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": m.order_status_down,
                     "source": "ENGINE_ACTIVE",
+                    "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
                 })
             if m.next_order_id_up and m.next_order_id_up not in existing_ids:
                 orders.append({
@@ -962,6 +1060,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": "ADVANCE_PRE_QUOTE",
                     "source": "ENGINE_ADVANCE",
+                    "time": m.next_order_time_up if m.next_order_time_up != "-" else now_time_str,
                 })
             if m.next_order_id_down and m.next_order_id_down not in existing_ids:
                 orders.append({
@@ -973,6 +1072,7 @@ class LiveTraderEngine:
                     "size": m.order_shares,
                     "status": "ADVANCE_PRE_QUOTE",
                     "source": "ENGINE_ADVANCE",
+                    "time": m.next_order_time_down if m.next_order_time_down != "-" else now_time_str,
                 })
 
         return orders
@@ -1947,10 +2047,12 @@ class LiveTraderEngine:
                 res_up = self.place_live_quote(mstate.next_up_token, resting_up, self.shares, "BUY")
                 if res_up and res_up.get("order_id"):
                     mstate.next_order_id_up = res_up["order_id"]
+                    mstate.next_order_time_up = time.strftime("%H:%M:%S")
             if mstate.next_down_token and not mstate.next_order_id_down:
                 res_dn = self.place_live_quote(mstate.next_down_token, resting_down, self.shares, "BUY")
                 if res_dn and res_dn.get("order_id"):
                     mstate.next_order_id_down = res_dn["order_id"]
+                    mstate.next_order_time_down = time.strftime("%H:%M:%S")
             if mstate.next_order_id_up and mstate.next_order_id_down:
                 mstate.next_quoted = True
                 log.info("[%s] ADVANCE PRE-QUOTING active on %s (UP: %s, DN: %s)", slug, mstate.next_market_slug, mstate.next_order_id_up, mstate.next_order_id_down)
@@ -2079,11 +2181,13 @@ class LiveTraderEngine:
                 res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
                 if res_up and res_up.get("order_id"):
                     mstate.order_id_up = res_up["order_id"]
+                    mstate.order_time_up = time.strftime("%H:%M:%S")
                     mstate.order_status_up = "RESTING"
             if not mstate.order_id_down and mstate.down_token:
                 res_dn = self.place_live_quote(mstate.down_token, resting_down, self.shares, "BUY")
                 if res_dn and res_dn.get("order_id"):
                     mstate.order_id_down = res_dn["order_id"]
+                    mstate.order_time_down = time.strftime("%H:%M:%S")
                     mstate.order_status_down = "RESTING"
 
         # --- FILL DETECTION ---
@@ -2323,10 +2427,14 @@ class LiveTraderEngine:
         if mstate.next_quoted and mstate.next_condition_id and (not new_cid or mstate.next_condition_id == new_cid):
             mstate.order_id_up = mstate.next_order_id_up
             mstate.order_id_down = mstate.next_order_id_down
+            mstate.order_time_up = mstate.next_order_time_up if mstate.next_order_time_up != "-" else time.strftime("%H:%M:%S")
+            mstate.order_time_down = mstate.next_order_time_down if mstate.next_order_time_down != "-" else time.strftime("%H:%M:%S")
             mstate.order_status_up = "RESTING"
             mstate.order_status_down = "RESTING"
             mstate.next_order_id_up = None
             mstate.next_order_id_down = None
+            mstate.next_order_time_up = "-"
+            mstate.next_order_time_down = "-"
             mstate.next_quoted = False
             log.info("[%s] PROMOTED advance pre-quotes to active live window (UP: %s, DN: %s)", mstate.slug, mstate.order_id_up, mstate.order_id_down)
         else:
