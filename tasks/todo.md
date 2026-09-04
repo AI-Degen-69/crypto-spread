@@ -1,6 +1,6 @@
 # Tasks: Issue #59 Unified Orders & Trades Table
 
-- [ ] Task 1: CSS styling & unified HTML shell in `server/osc_dash.py`
+- [x] Task 1: CSS styling & unified HTML shell in `server/osc_dash.py`
   - Acceptance: `#orders-trades-card` replaces 3 cards, renders `.ot-tabs` with active count pills and 3 table panes. Existing table IDs preserved.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`

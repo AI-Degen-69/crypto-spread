@@ -1207,6 +1207,21 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .toggle-slider:before{position:absolute;content:"";height:12px;width:12px;left:2px;bottom:2px;background-color:var(--dim);transition:.2s;border-radius:50%}
 .toggle-switch input:checked + .toggle-slider{background-color:rgba(51,201,181,0.25);border-color:var(--up)}
 .toggle-switch input:checked + .toggle-slider:before{transform:translateX(16px);background-color:var(--up)}
+.ot-tabs{display:inline-flex;gap:4px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)}
+.ot-tab-btn{background:transparent;border:none;color:var(--dim);font:700 11px var(--disp);letter-spacing:.05em;padding:5px 12px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease}
+.ot-tab-btn:hover{color:var(--tx);background:rgba(255,255,255,0.04)}
+.ot-tab-btn.active{background:var(--panel);color:var(--tx);box-shadow:0 1px 3px rgba(0,0,0,0.3);border:1px solid var(--line-hi)}
+.ot-count{font:700 10px var(--mono);background:var(--line);color:var(--tx);padding:1px 6px;border-radius:99px}
+.ot-tab-btn.active .ot-count{background:rgba(51,201,181,0.2);color:var(--up)}
+.ot-pane{display:none}
+.ot-pane.active{display:block}
+.ot-pair-lead{border-top:1px solid var(--line-hi)}
+.ot-tag{font:700 9px var(--disp);letter-spacing:.04em;padding:2px 6px;border-radius:4px;white-space:nowrap;display:inline-block}
+.ot-tag-up{background:rgba(51,201,181,0.15);color:var(--up);border:1px solid rgba(51,201,181,0.3)}
+.ot-tag-down{background:rgba(240,104,77,0.15);color:var(--down);border:1px solid rgba(240,104,77,0.3)}
+.ot-tag-paired{background:rgba(51,201,181,0.12);color:var(--up);border:1px solid rgba(51,201,181,0.25)}
+.ot-tag-partial{background:rgba(235,178,74,0.12);color:var(--gold);border:1px solid rgba(235,178,74,0.25)}
+.ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 </style></head><body>
 <div class="hdr" id="app-hdr">
   <h1><span>◆</span> Crypto Spread <span>5m/15m Engine</span></h1>
@@ -1578,78 +1593,87 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));gap:10px"></div>
     </div>
 
-    <!-- Live Open Orders & Advance Pre-Quotes Table -->
-    <div class="card" style="margin-top:12px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <h3 style="margin:0">📌 Live Active Orders & Advance Pre-Quotes (<span id="cockpitOrdersCount">0</span> active)</h3>
-        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="fetchCockpitState()">🔄 Refresh Orders</button>
+    <!-- Unified Orders & Trades Component -->
+    <div class="card" id="orders-trades-card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <div class="ot-tabs" id="otTabs">
+          <button class="ot-tab-btn active" id="otTabBtnOrders" onclick="switchOtTab('orders')">
+            OPEN ORDERS <span class="ot-count" id="otOrdersCount">0</span>
+          </button>
+          <button class="ot-tab-btn" id="otTabBtnPositions" onclick="switchOtTab('positions')">
+            POSITIONS <span class="ot-count" id="otPositionsCount">0</span>
+          </button>
+          <button class="ot-tab-btn" id="otTabBtnTrades" onclick="switchOtTab('trades')">
+            CLOSED TRADES <span class="ot-count" id="otTradesCount">0</span>
+          </button>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span id="cockpitOrdersCount" style="display:none">0</span>
+          <span id="cockpitPositionsCount" style="display:none">0</span>
+          <button class="btn" style="font-size:11px;padding:4px 10px" onclick="fetchCockpitState()">🔄 Refresh</button>
+        </div>
       </div>
-      <div style="max-height:220px;overflow-y:auto">
+
+      <!-- Tab 1: Open Orders -->
+      <div id="otPaneOrders" class="ot-pane active" style="max-height:280px;overflow-y:auto">
         <table class="tbl" id="cockpitOrdersTable">
           <thead>
             <tr>
-              <th>Order ID</th>
+              <th>Time</th>
               <th>Market</th>
               <th>Side</th>
               <th>Price</th>
-              <th>Shares</th>
+              <th>Size</th>
+              <th>Filled</th>
+              <th>Total Cost</th>
               <th>Status</th>
-              <th>Source</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody id="cockpitOrdersBody">
-            <tr><td colspan="8" style="text-align:center;color:var(--dim);padding:16px">No resting orders currently active.</td></tr>
+            <tr><td colspan="9" style="text-align:center;color:var(--dim);padding:18px">No orders are resting on the book.</td></tr>
           </tbody>
         </table>
       </div>
-    </div>
 
-    <!-- Live Polymarket Open Positions Table -->
-    <div class="card" style="margin-top:12px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <h3 style="margin:0">💼 Polymarket Open Positions (<span id="cockpitPositionsCount">0</span> open)</h3>
-        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="fetchCockpitState()">🔄 Refresh Positions</button>
-      </div>
-      <div style="max-height:220px;overflow-y:auto">
+      <!-- Tab 2: Positions -->
+      <div id="otPanePositions" class="ot-pane" style="max-height:280px;overflow-y:auto">
         <table class="tbl" id="cockpitPositionsTable">
           <thead>
             <tr>
-              <th>Market / Asset</th>
-              <th>Outcome</th>
-              <th>Shares</th>
-              <th>Avg Buy Price</th>
-              <th>Cur Price</th>
-              <th>Cash P&L</th>
+              <th>Time</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Size</th>
+              <th>Base Cost</th>
+              <th>Market Value</th>
+              <th>Unrealized $ (%)</th>
+              <th>Realized $ (%)</th>
             </tr>
           </thead>
           <tbody id="cockpitPositionsBody">
-            <tr><td colspan="6" style="text-align:center;color:var(--dim);padding:16px">No open positions on Polymarket account.</td></tr>
+            <tr><td colspan="8" style="text-align:center;color:var(--dim);padding:18px">No open positions held in account.</td></tr>
           </tbody>
         </table>
       </div>
-    </div>
 
-    <!-- Live Trade History Log -->
-    <div class="card" style="margin-top:12px">
-      <h3 style="margin:0 0 8px">📋 Live Execution Trade Log</h3>
-      <div style="max-height:300px;overflow-y:auto">
+      <!-- Tab 3: Closed Trades -->
+      <div id="otPaneTrades" class="ot-pane" style="max-height:300px;overflow-y:auto">
         <table class="tbl" id="cockpitTradesTable">
           <thead>
             <tr>
               <th>Time</th>
               <th>Market</th>
-              <th>Action</th>
+              <th>Cause</th>
               <th>Shares</th>
-              <th>Entry UP / DOWN</th>
-              <th>Exit / Merge</th>
-              <th>P&L ($)</th>
-              <th>Return (%)</th>
+              <th>Base Cost</th>
+              <th>Exit Price</th>
+              <th>Gain / Loss $ (%)</th>
               <th>Details</th>
             </tr>
           </thead>
           <tbody id="cockpitTradesBody">
-            <tr><td colspan="9" style="text-align:center;color:var(--dim);padding:20px">No completed executions in this session yet.</td></tr>
+            <tr><td colspan="8" style="text-align:center;color:var(--dim);padding:20px">No closed trades recorded in this session.</td></tr>
           </tbody>
         </table>
       </div>
