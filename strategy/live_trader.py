@@ -2084,11 +2084,27 @@ class LiveTraderEngine:
                             sz_up = float(ord_up.get("size_matched", 0.0) or 0.0)
                             if st_up in ("MATCHED", "FILLED") or sz_up >= mstate.order_shares:
                                 mstate.filled_up = True
-                                mstate.fill_price_up = resting_up
+                                actual_px_up = None
+                                trades_up = ord_up.get("associate_trades") or ord_up.get("trades")
+                                if isinstance(trades_up, list) and trades_up:
+                                    tot_vol = sum(float(t.get("size", 0.0) or 0.0) for t in trades_up)
+                                    if tot_vol > 0:
+                                        actual_px_up = sum(float(t.get("price", 0.0) or 0.0) * float(t.get("size", 0.0) or 0.0) for t in trades_up) / tot_vol
+                                if actual_px_up is None and ord_up.get("price") is not None:
+                                    try:
+                                        actual_px_up = float(ord_up["price"])
+                                    except (ValueError, TypeError):
+                                        pass
+                                if actual_px_up is None and hasattr(self, "open_positions") and self.open_positions:
+                                    for p in self.open_positions:
+                                        if p.get("asset") == mstate.up_token and p.get("avgPrice"):
+                                            actual_px_up = float(p["avgPrice"])
+                                            break
+                                mstate.fill_price_up = round(actual_px_up if actual_px_up is not None else resting_up, 4)
                                 mstate.order_status_up = "FILLED"
                                 mstate.status = "FILLED_UP"
-                                mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
-                                log.info("[%s] UP leg FILLED on CLOB (status=%s, matched=%.1f)", slug, st_up, sz_up)
+                                mstate.last_action = f"Filled UP {self.shares} shares @ {mstate.fill_price_up:.2f}"
+                                log.info("[%s] UP leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_up, sz_up, mstate.fill_price_up)
                         except Exception as e:
                             log.debug("[%s] Error checking UP order: %s", slug, e)
 
@@ -2099,11 +2115,27 @@ class LiveTraderEngine:
                             sz_dn = float(ord_dn.get("size_matched", 0.0) or 0.0)
                             if st_dn in ("MATCHED", "FILLED") or sz_dn >= mstate.order_shares:
                                 mstate.filled_down = True
-                                mstate.fill_price_down = resting_down
+                                actual_px_dn = None
+                                trades_dn = ord_dn.get("associate_trades") or ord_dn.get("trades")
+                                if isinstance(trades_dn, list) and trades_dn:
+                                    tot_vol = sum(float(t.get("size", 0.0) or 0.0) for t in trades_dn)
+                                    if tot_vol > 0:
+                                        actual_px_dn = sum(float(t.get("price", 0.0) or 0.0) * float(t.get("size", 0.0) or 0.0) for t in trades_dn) / tot_vol
+                                if actual_px_dn is None and ord_dn.get("price") is not None:
+                                    try:
+                                        actual_px_dn = float(ord_dn["price"])
+                                    except (ValueError, TypeError):
+                                        pass
+                                if actual_px_dn is None and hasattr(self, "open_positions") and self.open_positions:
+                                    for p in self.open_positions:
+                                        if p.get("asset") == mstate.down_token and p.get("avgPrice"):
+                                            actual_px_dn = float(p["avgPrice"])
+                                            break
+                                mstate.fill_price_down = round(actual_px_dn if actual_px_dn is not None else resting_down, 4)
                                 mstate.order_status_down = "FILLED"
                                 mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
-                                mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
-                                log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f)", slug, st_dn, sz_dn)
+                                mstate.last_action = f"Filled DOWN {self.shares} shares @ {mstate.fill_price_down:.2f}"
+                                log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_dn, sz_dn, mstate.fill_price_down)
                         except Exception as e:
                             log.debug("[%s] Error checking DOWN order: %s", slug, e)
             else:
@@ -2133,19 +2165,21 @@ class LiveTraderEngine:
             if mstate.filled_up and mstate.filled_down:
                 mstate.pair_captured = True
                 mstate.status = "PAIR_MERGED"
-                pair_profit_usd = (1.00 - (resting_up + resting_down)) * self.shares
+                fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                pair_profit_usd = (1.00 - (fill_up + fill_dn)) * self.shares
                 mstate.realized_pnl_usd += pair_profit_usd
                 mstate.unrealized_pnl_usd = 0.0
                 mstate.total_pnl_usd = mstate.realized_pnl_usd
                 mstate.pairs_count += 1
                 mstate.trades_count += 1
                 mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
-                log.info("[%s] PAIR MERGED! Profit: +$%.2f", slug, pair_profit_usd)
+                log.info("[%s] PAIR MERGED! Profit: +$%.2f (entry=%.3f+%.3f)", slug, pair_profit_usd, fill_up, fill_dn)
                 
                 if self.mode == "live":
                     self.merge_positions(mstate.condition_id)
 
-                denom = max(0.01, 2 * resting_up * max(1, self.shares))
+                denom = max(0.01, (fill_up + fill_dn) * max(1, self.shares))
                 with self._engine_lock:
                     self.trades.append(TradeEvent(
                         id=f"{slug}_{int(now)}",
@@ -2154,12 +2188,12 @@ class LiveTraderEngine:
                         label=mstate.label,
                         action="PAIR_MERGE",
                         shares=self.shares,
-                        entry_price_up=resting_up,
-                        entry_price_down=resting_down,
+                        entry_price_up=fill_up,
+                        entry_price_down=fill_dn,
                         exit_price=1.00,
                         pnl_usd=round(pair_profit_usd, 3),
                         pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
-                        notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
+                        notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
                     ))
                     self._save_persisted_trades()
                 return
@@ -2207,10 +2241,12 @@ class LiveTraderEngine:
             mstate.unrealized_pnl_usd = 0.0
         else:
             unrealized = 0.0
+            fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+            fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
             if mstate.filled_up and mstate.up_bid is not None:
-                unrealized += (mstate.up_bid - resting_up) * self.shares
+                unrealized += (mstate.up_bid - fill_up) * self.shares
             if mstate.filled_down and mstate.down_bid is not None:
-                unrealized += (mstate.down_bid - resting_down) * self.shares
+                unrealized += (mstate.down_bid - fill_dn) * self.shares
             mstate.unrealized_pnl_usd = round(unrealized, 3)
 
         mstate.total_pnl_usd = round(mstate.realized_pnl_usd + mstate.unrealized_pnl_usd, 3)
@@ -2240,13 +2276,15 @@ class LiveTraderEngine:
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down
+            fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+            fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
             settle_pnl = 0.0
             if mstate.filled_up:
                 bid = mstate.up_bid or 0.50
-                settle_pnl += (bid - resting_up) * self.shares
+                settle_pnl += (bid - fill_up) * self.shares
             if mstate.filled_down:
                 bid = mstate.down_bid or 0.50
-                settle_pnl += (bid - resting_down) * self.shares
+                settle_pnl += (bid - fill_dn) * self.shares
 
             mstate.realized_pnl_usd += settle_pnl
             mstate.unrealized_pnl_usd = 0.0
@@ -2254,6 +2292,7 @@ class LiveTraderEngine:
             mstate.trades_count += 1
             log.info("[%s] Window Rollover Settled PnL: $%.2f", mstate.slug, settle_pnl)
 
+            cost_basis = max(0.01, (fill_up if mstate.filled_up else fill_dn) * self.shares)
             with self._engine_lock:
                 self.trades.append(TradeEvent(
                     id=f"{mstate.slug}_{int(now)}",
@@ -2262,11 +2301,11 @@ class LiveTraderEngine:
                     label=mstate.label,
                     action="WINDOW_SETTLE",
                     shares=self.shares,
-                    entry_price_up=resting_up if mstate.filled_up else None,
-                    entry_price_down=resting_down if mstate.filled_down else None,
+                    entry_price_up=fill_up if mstate.filled_up else None,
+                    entry_price_down=fill_dn if mstate.filled_down else None,
                     exit_price=mstate.mid,
                     pnl_usd=round(settle_pnl, 3),
-                    pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
+                    pnl_pct=round((settle_pnl / cost_basis) * 100.0, 1),
                     notes="Window expired, position auto-settled",
                 ))
                 self._save_persisted_trades()
