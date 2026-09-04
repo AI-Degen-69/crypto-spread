@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -1126,9 +1126,11 @@ async def api_ticks_verify(
 
 # --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
 
-FULL_APP_HTML = r"""<!doctype html><html lang="he" dir="rtl"><head>
+FULL_APP_HTML = r"""<!doctype html><html lang="en" dir="ltr"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Crypto Spread — 5m/15m SPREAD-2 Engine & Lab</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230a0d12' stroke='%23232a35' stroke-width='1.5'/><path d='M10 6v20' stroke='%2333c9b5' stroke-width='2' stroke-linecap='round'/><rect x='7' y='10' width='6' height='11' rx='2' fill='%2333c9b5'/><path d='M22 6v20' stroke='%23f0684d' stroke-width='2' stroke-linecap='round'/><rect x='19' y='11' width='6' height='11' rx='2' fill='%23f0684d'/></svg>">
+<link rel="alternate icon" href="/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1136,7 +1138,7 @@ FULL_APP_HTML = r"""<!doctype html><html lang="he" dir="rtl"><head>
 :root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased}
 a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
-.mono{font-family:var(--mono);direction:ltr;unicode-bidi:isolate}
+.mono{font-family:var(--mono)}
 .hdr{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hdr h1{margin:0;font:700 16px var(--disp);display:flex;align-items:center;gap:8px}
 .tag{border:1px solid var(--up);color:var(--up);border-radius:99px;padding:2px 8px;font-size:10px;font-weight:700}
@@ -1161,7 +1163,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .fill{height:100%;border-radius:99px}
 .fill.up{background:var(--up)} .fill.warn{background:var(--proj)} .fill.gold{background:var(--gold)} .fill.down{background:var(--down)}
 .tbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
-.tbl th{font:700 11px var(--disp);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:right;padding:8px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl th{font:700 11px var(--disp);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:10px 8px;border-bottom:1px solid #1a2029;font-size:13px;vertical-align:middle}
 .price-up{color:var(--up);font-weight:700;font-family:var(--mono)}
 .price-down{color:var(--down);font-weight:700;font-family:var(--mono)}
@@ -1196,7 +1198,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
 .form-group{display:flex;flex-direction:column;gap:4px}
-.form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em}
+.form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
 .form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono)}
 .tab-content{display:none}
 .tab-content.active{display:block}
@@ -1235,10 +1237,10 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   </div>
   <span style="flex:1"></span>
   <div style="display:flex;align-items:center;gap:8px">
-    <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">קולקטור: טוען...</span>
-    <span id="tapeBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Tape: טוען...</span>
-    <button class="btn" id="btnToggleCollector" onclick="toggleCollector()">הפעל איסוף רציף (1s)</button>
-    <button class="btn" onclick="pollOnce()">דגום עכשיו (Once)</button>
+    <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Collector: Loading...</span>
+    <span id="tapeBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Tape: Loading...</span>
+    <button class="btn" id="btnToggleCollector" onclick="toggleCollector()">Start Polling (1s)</button>
+    <button class="btn" onclick="pollOnce()">Poll Now (Once)</button>
   </div>
 </div>
 
@@ -1254,26 +1256,26 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <!-- TAB 2: BACKTEST ENGINE & SWEEPER -->
   <div id="tab-backtest" class="tab-content">
     <div class="card" style="border-top:2px solid var(--up)">
-      <h3>⚡ הגדרות פרמטרים לבקטסט (Backtest Parameters) <span class="mono" id="btHash" style="font-size:11px;color:var(--dim)"></span></h3>
+      <h3>⚡ Backtest Parameters <span class="mono" id="btHash" style="font-size:11px;color:var(--dim)"></span></h3>
       <div class="form-grid" style="margin-top:12px">
         <div class="form-group">
-          <label>קובץ דגימות לבדיקה (Tick File)</label>
+          <label>Tick File Dataset</label>
           <select id="btFileSelect">
-            <option value="">כל הקבצים / 2,820 חלונות (ברירת מחדל)</option>
+            <option value="">All Files / 2,820 Windows (Default)</option>
           </select>
         </div>
         <div class="form-group">
-          <label>Offset מ-Mid (ספרד $0.02 = 0.02)</label>
+          <label>Offset from Mid ($0.02 = 0.02 spread)</label>
           <input type="number" step="0.005" id="btOffset" value="0.02">
         </div>
         <div class="form-group">
-          <label>עומק תור (Queue ahead @ rest - 0 = ללא סינון)</label>
+          <label>Queue Depth Ahead (0 = no filter)</label>
           <input type="number" step="5" id="btQueue" value="0">
         </div>
         <div class="form-group">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <label for="btPairCost">עלות מקסימלית לזוג (Pair Cost)</label>
-            <label class="toggle-wrap" title="הפעל או כבה סינון לפי עלות מקסימלית לזוג">
+            <label for="btPairCost">Max Pair Cost ($)</label>
+            <label class="toggle-wrap" title="Enable or disable max pair cost filter">
               <span id="btPairCostToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--dim)">OFF</span>
               <div class="toggle-switch">
                 <input type="checkbox" id="btPairCostEnabled" onchange="togglePairCostInput()">
@@ -1284,75 +1286,75 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <input type="number" step="0.005" id="btPairCost" value="1.05" disabled style="opacity:0.45">
         </div>
         <div class="form-group">
-          <label>רף יציאה 5m כללי (Exit Default)</label>
+          <label>Exit Stop Loss 5m ($)</label>
           <input type="number" step="0.01" id="btExit5m" value="0.05">
         </div>
         <div class="form-group">
-          <label>רף יציאה 15m כללי (Exit Default)</label>
+          <label>Exit Stop Loss 15m ($)</label>
           <input type="number" step="0.01" id="btExit15m" value="0.05">
         </div>
         <div class="form-group">
-          <label>רף יציאה ייעודי BTC 5m</label>
+          <label>BTC 5m Stop Loss ($)</label>
           <input type="number" step="0.01" id="btExitBtc" value="0.05">
         </div>
         <div class="form-group">
-          <label>רף יציאה ייעודי SOL 5m</label>
+          <label>SOL 5m Stop Loss ($)</label>
           <input type="number" step="0.01" id="btExitSol" value="0.05">
         </div>
         <div class="form-group">
-          <label>מודל מילוי (Fill Model)</label>
+          <label>Fill Model</label>
           <select id="btFillModel">
-            <option value="cross" selected>Cross (חצייה מלאה ≤47¢ — מובטח)</option>
-            <option value="tape">Tape (שמרני - עסקאות בפועל)</option>
-            <option value="book">Book (אופטימי - חציית Ask)</option>
+            <option value="cross" selected>Cross (Guaranteed if crossing ≤47¢)</option>
+            <option value="tape">Tape (Conservative - executed trades)</option>
+            <option value="book">Book (Optimistic - Ask crossing)</option>
             <option value="both">Both</option>
           </select>
         </div>
         <div class="form-group">
-          <label>גודל פוזיציה למניות (Shares - מינימום 5)</label>
+          <label>Order Shares per Leg (Min 5)</label>
           <input type="number" min="5" step="1" id="btSize" value="5">
         </div>
         <div class="form-group">
-          <label>עלות גז מרג' בדולרים (Gas USD)</label>
+          <label>Gas Merge Cost (USD)</label>
           <input type="number" step="0.01" id="btGas" value="0.00">
         </div>
         <div class="form-group">
-          <label>סינון חלונות חלקיים (Partial Windows)</label>
+          <label>Partial Windows Filter</label>
           <select id="btMaxStartDelay">
-            <option value="0" selected>הכל (ללא סינון)</option>
-            <option value="5.0">חלונות מלאים בלבד (≤5s)</option>
-            <option value="2.0">הדוק במיוחד (≤2s)</option>
+            <option value="0" selected>All (No filter)</option>
+            <option value="5.0">Full Windows Only (≤5s delay)</option>
+            <option value="2.0">Strict Full Windows (≤2s delay)</option>
           </select>
         </div>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px">
-        <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">הרץ סימולציה (Run Sweep)</span></button>
-        <button class="btn" id="btnResetParams" onclick="resetBtParams()">איפוס לברירת מחדל</button>
+        <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
+        <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
       </div>
     </div>
 
     <div class="card" id="btOverallCard">
-      <h3>📈 תוצאות בקטסט כוללות (Overall Execution)</h3>
+      <h3>📈 Overall Execution Results</h3>
       <div class="kpi" id="btKpiRow">
-        <div class="box"><div class="lbl">רווח/הפסד כולל</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 לחלון</div></div>
-        <div class="box"><div class="lbl">אחוז לכידת זוג (Pair Rate)</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 זוגות</div></div>
-        <div class="box"><div class="lbl">אחוז הפעלת יציאה (Exit Rate)</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 יציאות</div></div>
-        <div class="box"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">ירידה מרבית</div></div>
-        <div class="box"><div class="lbl">Win Rate</div><div class="val" id="btWinRate">0.0%</div><div class="sub">עסקאות ברווח</div></div>
+        <div class="box"><div class="lbl">Total P&L</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 / window</div></div>
+        <div class="box"><div class="lbl">Pair Capture Rate</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 pairs</div></div>
+        <div class="box"><div class="lbl">Exit Stop Rate</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
+        <div class="box"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
+        <div class="box"><div class="lbl">Win Rate</div><div class="val" id="btWinRate">0.0%</div><div class="sub">Profitable windows</div></div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
-        <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">עקומת PnL מצטברת (Cumulative Equity Curve)</h4>
+        <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
         <canvas id="chartEquity" height="140"></canvas>
       </div>
     </div>
 
     <div class="card">
-      <h3>📊 ביצועים לפי סדרה (Per-Series Performance)</h3>
+      <h3>📊 Per-Series Performance</h3>
       <div id="btSeriesTableWrap"></div>
     </div>
 
     <div class="card">
-      <h3>📝 יומן עסקאות חלונות (Sample Executed Windows)</h3>
+      <h3>📝 Executed Windows Log</h3>
       <div id="btTradesTableWrap"></div>
     </div>
   </div>
@@ -1361,30 +1363,30 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <div id="tab-summary" class="tab-content">
     <div class="hero" style="display:grid;grid-template-columns:1.2fr .8fr;gap:12px;margin-bottom:12px">
       <div class="card" style="border-top:2px solid var(--up)">
-        <h3>מסקנת המחקר — SPREAD-2</h3>
-        <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0">74% מהחלונות תנודתיים (Oscillating)</div>
+        <h3>Research Conclusion — SPREAD-2</h3>
+        <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0">74% of Windows Are Oscillating</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
-          מתוך 2,820+ חלונות אמיתיים שנמדדו ב-5m ו-15m: ב-5m <b>73% oscillating</b> — שני הצדדים ב-$0.48 ($0.96 לזוג) נתפסים ומתמזגים ל-$0.04 רווח למניה. ב-15m <b>80% oscillating</b>.
+          Across 2,820+ empirical windows measured in 5m and 15m: on 5m <b>73% oscillating</b> — both sides quoted at $0.48 ($0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b>80% oscillating</b>.
         </div>
       </div>
       <div class="card" style="border-top:2px solid var(--gold)">
-        <h3>המלצות רף יציאה</h3>
-        <div style="font-size:12px;color:var(--dim)">הדוק = יציאה מוקדמת. BTC הכי מונוטוני:</div>
+        <h3>Recommended Stop-Loss Thresholds</h3>
+        <div style="font-size:12px;color:var(--dim)">Tighter = earlier exit. BTC shows highest monotonicity:</div>
         <div class="mono" style="font-size:12px;margin-top:8px;display:flex;flex-direction:column;gap:4px">
-          <div><b style="color:var(--down)">BTC 5m:</b> רף +$0.09 (יציאה ב-$0.59 UP)</div>
-          <div><b style="color:var(--gold)">SOL 5m:</b> רף +$0.11 (יציאה ב-$0.61)</div>
-          <div><b style="color:var(--up)">ETH/BNB/XRP 5m:</b> רף +$0.12 (יציאה ב-$0.62)</div>
-          <div><b>15m כללי:</b> רף +$0.13</div>
+          <div><b style="color:var(--down)">BTC 5m:</b> Stop +$0.09 (Exit @ $0.59 UP)</div>
+          <div><b style="color:var(--gold)">SOL 5m:</b> Stop +$0.11 (Exit @ $0.61)</div>
+          <div><b style="color:var(--up)">ETH/BNB/XRP 5m:</b> Stop +$0.12 (Exit @ $0.62)</div>
+          <div><b>15m General:</b> Stop +$0.13</div>
         </div>
       </div>
     </div>
     <div class="grid">
-      <div class="card"><h3>1. אחוז תנודתיות לפי נכס</h3><canvas id="cPerAsset" height="220"></canvas></div>
-      <div class="card"><h3>2. התפלגות טווח תנועה (Max Excursion)</h3><canvas id="cHist" height="220"></canvas></div>
+      <div class="card"><h3>1. Oscillation Rate by Asset</h3><canvas id="cPerAsset" height="220"></canvas></div>
+      <div class="card"><h3>2. Max Excursion Distribution</h3><canvas id="cHist" height="220"></canvas></div>
     </div>
     <div class="grid" style="margin-top:12px">
-      <div class="card"><h3>3. סטיית פתיחה מ-50¢</h3><canvas id="cStart" height="200"></canvas></div>
-      <div class="card"><h3>4. התפלגות Touch Pair</h3><canvas id="cPair" height="200"></canvas></div>
+      <div class="card"><h3>3. Open Deviation from 50¢</h3><canvas id="cStart" height="200"></canvas></div>
+      <div class="card"><h3>4. Touch Pair Distribution</h3><canvas id="cPair" height="200"></canvas></div>
     </div>
   </div>
 
@@ -1392,25 +1394,25 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <div id="tab-ticks" class="tab-content">
     <div class="card" style="border-top:2px solid var(--proj)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <h3 style="margin:0">💾 קובצי Ticks בשרת (JSONL Repository)</h3>
+        <h3 style="margin:0">💾 Tick Data Files (JSONL Repository)</h3>
         <div style="display:flex;gap:8px">
-          <button class="btn" style="font-size:11px;padding:4px 10px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3)" onclick="verifyTickData()">🔍 בדיקת תקינות מלאה (Verify All)</button>
-          <button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadManifest()">🔄 רענן רשימה</button>
+          <button class="btn" style="font-size:11px;padding:4px 10px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3)" onclick="verifyTickData()">🔍 Verify All Files</button>
+          <button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadManifest()">🔄 Refresh List</button>
         </div>
       </div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">הקולקטור כותב נתוני עומק וספר פקודות מלאים ל-<code>run/ticks/ticks_YYYY-MM-DD.jsonl</code>. ניתן להעלות קבצים נוספים לניתוח.</div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">The collector writes full book depth and tape data to <code>run/ticks/ticks_YYYY-MM-DD.jsonl</code>. Additional tick files can be uploaded for analysis.</div>
       <div id="manifestNotice" style="display:none;padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:12px;font-weight:600"></div>
-      <div id="manifestTableWrap">טוען קבצים...</div>
+      <div id="manifestTableWrap">Loading files...</div>
     </div>
 
     <!-- Integrity Verification Results Modal -->
     <div id="verifyModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center">
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;max-width:680px;width:95%;max-height:85vh;overflow-y:auto;box-shadow:0 12px 36px rgba(0,0,0,0.7)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h3 style="margin:0;font-size:16px;display:flex;align-items:center;gap:8px"><span>🔍</span> דוח תקינות נתונים (Tick Integrity Report)</h3>
-          <button class="btn" style="padding:2px 8px;font-size:11px" onclick="closeVerifyModal()">✖ סגור</button>
+          <h3 style="margin:0;font-size:16px;display:flex;align-items:center;gap:8px"><span>🔍</span> Tick Data Integrity Report</h3>
+          <button class="btn" style="padding:2px 8px;font-size:11px" onclick="closeVerifyModal()">✖ Close</button>
         </div>
-        <div id="verifyModalContent">טוען נתונים ומבצע בדיקה...</div>
+        <div id="verifyModalContent">Loading data and verifying integrity...</div>
       </div>
     </div>
 
@@ -1418,25 +1420,25 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     <div id="deleteModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center">
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;max-width:420px;width:90%;box-shadow:0 12px 36px rgba(0,0,0,0.6);text-align:center">
         <div style="font-size:32px;margin-bottom:8px">🗑️</div>
-        <h3 style="margin:0 0 8px;font-size:16px;color:var(--tx)">אישור מחיקת קובץ</h3>
-        <p style="margin:0 0 16px;font-size:13px;color:var(--dim);line-height:1.5">האם אתה בטוח שברצונך למחוק לצמיתות את הקובץ:<br><span id="deleteFileNameTarget" class="mono" style="color:var(--down);font-weight:700;word-break:break-all"></span>?</p>
+        <h3 style="margin:0 0 8px;font-size:16px;color:var(--tx)">Confirm File Deletion</h3>
+        <p style="margin:0 0 16px;font-size:13px;color:var(--dim);line-height:1.5">Are you sure you want to permanently delete the file:<br><span id="deleteFileNameTarget" class="mono" style="color:var(--down);font-weight:700;word-break:break-all"></span>?</p>
         <div style="display:flex;gap:10px;justify-content:center">
-          <button class="btn" style="padding:6px 16px" onclick="closeDeleteModal()">ביטול</button>
-          <button id="confirmDeleteBtn" class="btn btn-danger" style="padding:6px 16px;font-weight:700" onclick="executeDeleteFile()">כן, מחק קובץ</button>
+          <button class="btn" style="padding:6px 16px" onclick="closeDeleteModal()">Cancel</button>
+          <button id="confirmDeleteBtn" class="btn btn-danger" style="padding:6px 16px;font-weight:700" onclick="executeDeleteFile()">Yes, Delete File</button>
         </div>
       </div>
     </div>
 
     <div class="card">
-      <h3>📤 העלאת קובץ JSONL (Streaming Ingestion)</h3>
+      <h3>📤 Upload JSONL File (Streaming Ingestion)</h3>
       <div id="dropZone" style="border:2px dashed var(--line);border-radius:10px;padding:28px 20px;text-align:center;background:var(--panel2);transition:all 0.2s"
            ondragover="event.preventDefault();this.style.borderColor='var(--up)';this.style.background='rgba(51,201,181,0.06)'"
            ondragleave="this.style.borderColor='var(--line)';this.style.background='var(--panel2)'"
            ondrop="handleFileDrop(event)">
-        <p style="margin:0 0 6px;font-size:14px;font-weight:600">גרור לכאן קובץ <code>.jsonl</code> או לחץ לבחירה</p>
-        <p style="margin:0 0 14px;font-size:12px;color:var(--dim)">תומך בהעלאת קבצי ענק (10MB–1GB+) בהזרמה ישירה ללא עומס על הזיכרון</p>
+        <p style="margin:0 0 6px;font-size:14px;font-weight:600">Drag & drop a <code>.jsonl</code> file here or click to browse</p>
+        <p style="margin:0 0 14px;font-size:12px;color:var(--dim)">Supports streaming upload of large files (10MB–1GB+) with zero memory buffering</p>
         <input type="file" id="fileInput" accept=".jsonl,.txt" style="display:none" onchange="handleFileSelect(event)">
-        <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">📁 בחר קובץ מהמחשב</button>
+        <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">📁 Select File from Computer</button>
         <div id="uploadProgressWrap" style="display:none;margin-top:16px;max-width:400px;margin-left:auto;margin-right:auto">
           <div style="background:var(--line);height:8px;border-radius:4px;overflow:hidden">
             <div id="uploadProgressBar" style="width:0%;height:100%;background:var(--up);transition:width 0.15s ease"></div>
@@ -1465,7 +1467,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <button id="btnCockpitToggle" class="btn btn-primary" style="font-size:13px;padding:7px 16px" onclick="toggleCockpitBot()">▶ START BOT</button>
           <button class="btn" style="font-size:13px;padding:7px 14px" onclick="restartCockpitBot()">🔄 RESTART</button>
           <button class="btn" style="font-size:13px;padding:7px 14px;background:rgba(243,186,47,0.15);border-color:var(--gold);color:var(--gold);font-weight:700" onclick="loadCockpitDemoData()">🎲 DEMO DATA</button>
-          <button id="btnSyncRealRun" class="btn" style="font-size:13px;padding:7px 14px;background:rgba(51,201,181,0.2);border-color:var(--up);color:var(--up);font-weight:700" onclick="syncRealRunTrades()">📥 סנכרן ריצה אמיתית (Polymarket)</button>
+          <button id="btnSyncRealRun" class="btn" style="font-size:13px;padding:7px 14px;background:rgba(51,201,181,0.2);border-color:var(--up);color:var(--up);font-weight:700" onclick="syncRealRunTrades()">📥 Sync Real Run (Polymarket)</button>
           <button class="btn btn-danger" style="font-size:13px;padding:7px 14px" onclick="resetCockpitPnL()">🗑 RESET P&L</button>
           <button id="btnPanicCancel" class="btn btn-danger" style="font-size:13px;padding:7px 14px;font-weight:700;background:rgba(240,104,77,0.3);border-color:var(--down)" onclick="panicCancelAllOrders()">🚨 PANIC CANCEL ALL</button>
         </div>
@@ -1492,7 +1494,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
             <option value="live">Live Polymarket Orders</option>
           </select>
         </div>
-        <div class="form-group">
+        <div class="form-group" style="grid-column:span 2">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
           <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" onchange="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
         </div>
@@ -1501,7 +1503,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <input type="number" step="10" id="cockpitStartBal" value="1000.00">
         </div>
         <div class="form-group" style="justify-content:flex-end">
-          <button class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
+          <button id="btnApplyParams" class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
         </div>
       </div>
 
@@ -1697,7 +1699,7 @@ const fmtPrice=(p)=>{
   return `$${Number(p).toFixed(2)}`;
 };
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
-function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating תנודתי'):c==='monotonic'?pill('pill-mono','monotonic חד-כיווני'):c==='flat'?pill('pill-flat','flat שטוח'):pill('pill-flat',esc(c));}
+function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating'):c==='monotonic'?pill('pill-mono','monotonic'):c==='flat'?pill('pill-flat','flat'):pill('pill-flat',esc(c));}
 
 // Orders & Trades Tab State & Switching (Issue #59)
 let activeOtTab = (typeof localStorage !== 'undefined' && localStorage.getItem('crypto-spread-ot-view')) || 'orders';
@@ -1898,9 +1900,9 @@ async function refreshCollectorStatus(){
     const res = await fetch('/api/collector/status');
     const st = await res.json();
     isCollectorActive = st.running;
-    $('collectorBadge').textContent = `קולקטור: ${st.running ? '🟢 פועל (1s)' : '⚪ מושהה'} · ${(st.total_ticks_collected||0).toLocaleString()} דגימות היום`;
+    $('collectorBadge').textContent = `Collector: ${st.running ? '🟢 Running (1s)' : '⚪ Paused'} · ${(st.total_ticks_collected||0).toLocaleString()} ticks today`;
     $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
-    $('btnToggleCollector').textContent = st.running ? 'עצור איסוף' : 'הפעל איסוף רציף (1s)';
+    $('btnToggleCollector').textContent = st.running ? 'Stop Polling' : 'Start Polling (1s)';
     $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
 
     const tb = $('tapeBadge');
@@ -1908,12 +1910,12 @@ async function refreshCollectorStatus(){
       if(st.tape_empty_rate !== null && st.tape_empty_rate !== undefined){
         const pctStr = (st.tape_empty_rate * 100).toFixed(1) + '%';
         if(st.tape_alert){
-          tb.textContent = `⚠️ Tape שקט (${pctStr} ריק)`;
+          tb.textContent = `⚠️ Tape quiet (${pctStr} empty)`;
           tb.style.color = 'var(--down)';
           tb.style.borderColor = 'rgba(240,104,77,0.5)';
           tb.style.background = 'rgba(240,104,77,0.18)';
         } else {
-          tb.textContent = `Tape ריק: ${pctStr} (${(st.tape_entries_total||0).toLocaleString()} עסקאות)`;
+          tb.textContent = `Tape empty: ${pctStr} (${(st.tape_entries_total||0).toLocaleString()} trades)`;
           tb.style.color = 'var(--dim)';
           tb.style.borderColor = 'var(--line)';
           tb.style.background = 'var(--panel2)';
@@ -1932,7 +1934,7 @@ async function toggleCollector(){
 }
 
 async function pollOnce(){
-  $('collectorBadge').textContent = 'דוגם נתונים כעת...';
+  $('collectorBadge').textContent = 'Sampling data now...';
   await fetch('/api/collector/poll-once', {method:'POST'});
   tick();
   refreshCollectorStatus();
@@ -1952,26 +1954,26 @@ async function tick(){
       const n=cur.n, any2=cur.any_2c, mono=cur.monotonic, osc=cur.oscillating;
       const pctGoal=Math.min(100,Math.round(n/goal*100));
       const remain=Math.max(0,goal-n);
-      return {goal,n,any2,mono,osc,pctGoal,remain,label:dur===300?'5 דקות (300s)':'15 דקות (900s)', short:dur===300?'5m':'15m'};
+      return {goal,n,any2,mono,osc,pctGoal,remain,label:dur===300?'5m (300s)':'15m (900s)', short:dur===300?'5m':'15m'};
     };
     const g5=fmt(300), g15=fmt(900);
     const gt=g.total||{n:0,any_2c:0,monotonic:0,oscillating:0};
-    const bar=(x)=>`<div class="card" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">🎯 ${x.short} — ${x.label}</div><div class="mono" style="font-size:18px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:12px;color:var(--dim)">goal</span> / ${x.n} <span style="font-size:12px;color:var(--up)">passed</span> / ${x.any2} <span style="font-size:12px;color:var(--gold)">±$0.02</span> / ${x.mono} <span style="font-size:12px;color:var(--down)">mono</span></div><div style="display:flex;gap:6px;align-items:center"><div class="bar" style="flex:1;height:8px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><span class="mono" style="font-size:11px;color:var(--dim)">${x.pctGoal}%</span></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">oscillating ${x.osc} · flat ${g[String(x.short==='5m'?300:900)]?.flat||0} · נותר ${x.remain} ליעד</div><div style="margin-top:6px;display:flex;gap:6px;align-items:center"><span class="mono" style="font-size:10px;color:var(--dim)">יעד:</span><input id="goalIn${x.short}" type="number" min="1" step="10" value="${x.goal}" style="width:90px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:500 12px var(--mono)"><button onclick="(function(){const v=parseInt(document.getElementById('goalIn${x.short}').value,10);if(v>0){localStorage.setItem('goal_${x.short==='5m'?300:900}',v);tick();}})()" style="background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 11px var(--disp);cursor:pointer">שמור</button></div></div>`;
-    const tot=`<div class="card" style="flex:0 0 180px;min-width:160px;background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">סה״כ</div><div class="mono" style="font-size:16px;font-weight:700;margin-top:4px">${gt.n} חלונות</div><div class="mono" style="font-size:10px;color:var(--dim)">${gt.any_2c} touched · ${gt.monotonic} mono · ${gt.oscillating} osc</div></div>`;
-    $('goalBar').innerHTML=`<h3>🎯 Goal Count — יעדים לספירת חלונות</h3><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>`;
+    const bar=(x)=>`<div class="card" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">🎯 ${x.short} — ${x.label}</div><div class="mono" style="font-size:18px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:12px;color:var(--dim)">goal</span> / ${x.n} <span style="font-size:12px;color:var(--up)">passed</span> / ${x.any2} <span style="font-size:12px;color:var(--gold)">±$0.02</span> / ${x.mono} <span style="font-size:12px;color:var(--down)">mono</span></div><div style="display:flex;gap:6px;align-items:center"><div class="bar" style="flex:1;height:8px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><span class="mono" style="font-size:11px;color:var(--dim)">${x.pctGoal}%</span></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">oscillating ${x.osc} · flat ${g[String(x.short==='5m'?300:900)]?.flat||0} · remaining ${x.remain}</div><div style="margin-top:6px;display:flex;gap:6px;align-items:center"><span class="mono" style="font-size:10px;color:var(--dim)">Target:</span><input id="goalIn${x.short}" type="number" min="1" step="10" value="${x.goal}" style="width:90px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:500 12px var(--mono)"><button onclick="(function(){const v=parseInt(document.getElementById('goalIn${x.short}').value,10);if(v>0){localStorage.setItem('goal_${x.short==='5m'?300:900}',v);tick();}})()" style="background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 11px var(--disp);cursor:pointer">Save</button></div></div>`;
+    const tot=`<div class="card" style="flex:0 0 180px;min-width:160px;background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">Total</div><div class="mono" style="font-size:16px;font-weight:700;margin-top:4px">${gt.n} windows</div><div class="mono" style="font-size:10px;color:var(--dim)">${gt.any_2c} touched · ${gt.monotonic} mono · ${gt.oscillating} osc</div></div>`;
+    $('goalBar').innerHTML=`<h3>🎯 Window Capture Targets</h3><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>`;
   })();
 
   // Live bar
-  let liveHtml = '<h3>חלונות חיים עכשיו — Live Books & Queue</h3><div class="live-grid">';
+  let liveHtml = '<h3>Live Windows — Books & Queue</h3><div class="live-grid">';
   const order=['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'];
   for(const k of order){
     const s=live[k];
-    if(!s){ liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div style="color:var(--dim);font-size:11px">טוען...</div></div>`; continue; }
+    if(!s){ liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div style="color:var(--dim);font-size:11px">Loading...</div></div>`; continue; }
     const mid=s.mid==null?'-':fmtPrice(s.mid);
     const tp=s.touch_pair==null?'-':s.touch_pair.toFixed(3);
     const rem=s.t_rem==null?'-':hms(s.t_rem);
     const q=s.queue_up==null?'-':Math.round(s.queue_up);
-    liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div class="mono" style="font-size:12px">mid ${mid} · touch ${tp}</div><div class="mono" style="font-size:10px;color:var(--dim)">queue @rest ${q} · נותר ${rem}</div><div style="font-size:10px"><a href="https://polymarket.com/market/${s.slug}" target="_blank" rel="noopener">${esc(s.slug.slice(0,28))} ↗</a></div></div>`;
+    liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div class="mono" style="font-size:12px">mid ${mid} · touch ${tp}</div><div class="mono" style="font-size:10px;color:var(--dim)">queue @rest ${q} · rem ${rem}</div><div style="font-size:10px"><a href="https://polymarket.com/market/${s.slug}" target="_blank" rel="noopener">${esc(s.slug.slice(0,28))} ↗</a></div></div>`;
   }
   liveHtml+='</div>';
   $('liveBar').innerHTML=liveHtml;
@@ -1984,20 +1986,20 @@ async function tick(){
     const n=s.windows||0;
     const any2=s.any_2c||0, any3=s.any_3c||0, osc=s.oscillating||0, mono=s.monotonic||0, flat=s.flat||0;
     const p2=pct(any2,n), p3=pct(any3,n), po=pct(osc,n), pm=pct(mono,n);
-    grid+=`<div class="card"><h3>${esc(s.label)} — ${s.duration===300?'5 דקות':'15 דקות'} <span style="font-weight:400;color:var(--dim);text-transform:none;letter-spacing:0">· ${n} חלונות</span></h3>
+    grid+=`<div class="card"><h3>${esc(s.label)} — ${s.duration===300?'5m':'15m'} <span style="font-weight:400;color:var(--dim);text-transform:none;letter-spacing:0">· ${n} windows</span></h3>
       <div class="kpi">
-        <div class="box"><div class="lbl">כל תנודה ≥$0.02</div><div class="val">${any2}/${n}</div><div class="sub">${p2}% זזו $0.02</div><div class="bar"><div class="fill up" style="width:${p2}%"></div></div></div>
+        <div class="box"><div class="lbl">Any move ≥$0.02</div><div class="val">${any2}/${n}</div><div class="sub">${p2}% moved $0.02</div><div class="bar"><div class="fill up" style="width:${p2}%"></div></div></div>
         <div class="box"><div class="lbl">≥$0.03</div><div class="val">${any3}/${n}</div><div class="sub">${p3}%</div><div class="bar"><div class="fill gold" style="width:${p3}%"></div></div></div>
         <div class="box"><div class="lbl">oscillating</div><div class="val" style="color:var(--up)">${osc}/${n}</div><div class="sub">${po}%</div><div class="bar"><div class="fill up" style="width:${po}%"></div></div></div>
         <div class="box"><div class="lbl">monotonic</div><div class="val" style="color:var(--down)">${mono}/${n}</div><div class="sub">${pm}%</div><div class="bar"><div class="fill down" style="width:${pm}%"></div></div></div>
       </div>
-      <div class="mono" style="font-size:10px;color:var(--dim)">מדד touch pair חציוני: ${s.pair_cost_median==null?'-':s.pair_cost_median.toFixed(3)} · flat ${flat}/${n}</div>
+      <div class="mono" style="font-size:10px;color:var(--dim)">Median touch pair: ${s.pair_cost_median==null?'-':s.pair_cost_median.toFixed(3)} · flat ${flat}/${n}</div>
     </div>`;
   }
   $('seriesGrid').innerHTML=grid;
 
   // Recent windows table
-  let tbl='<div class="card"><h3 style="font-size:13px">חלונות אחרונים — פתיחה 50/50 (לחיץ ל-Polymarket)</h3><table class="tbl"><tr><th>סדרה</th><th>חלון</th><th>פתיחה UP / DOWN</th><th style="color:var(--up)">שיא UP</th><th style="color:var(--down)">שיא DOWN</th><th>נר יפני</th><th>סיווג</th><th>קישור</th></tr>';
+  let tbl='<div class="card"><h3 style="font-size:13px">Recent Windows — 50/50 Open (Click for Polymarket)</h3><table class="tbl"><tr><th>Series</th><th>Window</th><th>Open UP / DOWN</th><th style="color:var(--up)">Max UP</th><th style="color:var(--down)">Max DOWN</th><th>Candle</th><th>Class</th><th>Link</th></tr>';
   for(const w of wins.slice(0,60)){
     const sm = w.start_mid, cm=w.close_mid, mx=w.max_mid, mn=w.min_mid;
     const openUp = sm==null?'-':fmtPrice(sm);
@@ -2010,11 +2012,11 @@ async function tick(){
     const bodyLeft = Math.min(o,c), bodyW = Math.abs(c-o);
     const wickLeft = l, wickW = h-l;
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
-    const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div><div style="font-size:9px;color:var(--dim);margin-top:1px">טווח ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · סגירה ${fmtPrice(cm)}</div></div>`;
+    const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div><div style="font-size:9px;color:var(--dim);margin-top:1px">Range ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · Close ${fmtPrice(cm)}</div></div>`;
     const labelStr = esc(String(w.label||''));
     const slugStr = esc(String(w.slug||'').slice(-14));
-    const startTs = w.start_ts ? new Date(w.start_ts*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'}) : '-';
-    tbl+=`<tr><td style="font-weight:700">${labelStr}</td><td class="mono" style="font-size:12px">${slugStr}<div style="font-size:10px;color:var(--faint)">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc})</td><td><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">פתח ↗</a></td></tr>`;
+    const startTs = w.start_ts ? new Date(w.start_ts*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '-';
+    tbl+=`<tr><td style="font-weight:700">${labelStr}</td><td class="mono" style="font-size:12px">${slugStr}<div style="font-size:10px;color:var(--faint)">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc})</td><td><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">Open ↗</a></td></tr>`;
   }
   tbl+='</table></div>';
   $('windowsTableWrap').innerHTML=tbl;
@@ -2033,12 +2035,12 @@ function setBacktestLoadingState(isLoading){
     btn.disabled = true;
     btn.classList.add('thinking');
     if(icon) icon.innerHTML = '<span class="spinner"></span>';
-    if(text) text.innerHTML = 'מחשב סימולציה <span class="thinking-dots"><span></span><span></span><span></span></span>';
+    if(text) text.innerHTML = 'Simulating <span class="thinking-dots"><span></span><span></span><span></span></span>';
   } else {
     btn.disabled = false;
     btn.classList.remove('thinking');
     if(icon) icon.textContent = '▶';
-    if(text) text.textContent = 'הרץ סימולציה (Run Sweep)';
+    if(text) text.textContent = 'Run Sweep';
   }
 }
 
@@ -2110,15 +2112,15 @@ async function runBacktest(fileOverride){
     const res = await fetch(url);
     const data = await res.json();
 
-    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} חלונות${fileVal ? ' · [' + fileVal + ']' : ''}`;
+    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${fileVal ? ' · [' + fileVal + ']' : ''}`;
     const ov = data.overall || {};
     $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);
     $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
-    $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' לחלון';
+    $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
     $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
-    $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} זוגות`;
+    $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs`;
     $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
-    $('btExitsCount').textContent = `${ov.exits||0} יציאות`;
+    $('btExitsCount').textContent = `${ov.exits||0} exits`;
     $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
     $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
 
@@ -2148,12 +2150,12 @@ async function runBacktest(fileOverride){
         plugins: { legend: { display: false } },
         scales: {
           x: {
-            title: { display: true, text: 'חלון', color: '#8792a6' },
+            title: { display: true, text: 'Window', color: '#8792a6' },
             ticks: { color: '#8792a6', maxTicksLimit: 12 },
             grid: { color: '#232a35' }
           },
           y: {
-            title: { display: true, text: 'רווח/הפסד מצטבר ($)', color: '#8792a6' },
+            title: { display: true, text: 'Cumulative P&L ($)', color: '#8792a6' },
             ticks: {
               color: '#8792a6',
               callback: function(v){ return '$' + Number(v).toFixed(2); }
@@ -2165,7 +2167,7 @@ async function runBacktest(fileOverride){
     });
 
     // Per series table
-    let stbl = '<table class="tbl"><tr><th>סדרה</th><th>חלונות</th><th>לכידת זוג (Pair)</th><th>יציאות (Exits)</th><th>PnL כולל ($)</th><th>ממוצע לחלון ($)</th><th>Oscillating</th><th>Monotonic</th></tr>';
+    let stbl = '<table class="tbl"><tr><th>Series</th><th>Windows</th><th>Pair Captured</th><th>Exits</th><th>Total P&L ($)</th><th>Avg / Window ($)</th><th>Oscillating</th><th>Monotonic</th></tr>';
     for(const [k,v] of Object.entries(data.per_series||{})){
       stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td>${v.windows}</td><td style="color:var(--up);font-weight:700">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down)">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono">${fmtUsd(v.avg_pnl_cents,true)}</td><td>${v.oscillating}</td><td>${v.monotonic}</td></tr>`;
     }
@@ -2173,12 +2175,12 @@ async function runBacktest(fileOverride){
     $('btSeriesTableWrap').innerHTML=stbl;
 
     // Trades sample table
-    let ttbl = '<table class="tbl"><tr><th>חלון</th><th>סדרה</th><th>תוצאה</th><th>סטטוס מילוי</th><th>PnL לחלון ($)</th><th>Delay / חלקי</th><th>סיבת יציאה</th></tr>';
+    let ttbl = '<table class="tbl"><tr><th>Window</th><th>Series</th><th>Result</th><th>Fill Status</th><th>PnL / Window ($)</th><th>Delay / Partial</th><th>Exit Reason</th></tr>';
     for(const t of (data.trades_sample||[]).slice(0,30)){
       const pnlUsd = fmtUsd(t.pnl_cents, true);
       const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED ${pnlUsd}`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
       const delayTag = t.is_partial
-        ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">חצי (${t.start_delay_sec}s)</span>`
+        ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">Half (${t.start_delay_sec}s)</span>`
         : `<span class="mono" style="font-size:11px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
       ttbl+=`<tr><td class="mono" style="font-size:11px">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:11px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td><td>${delayTag}</td><td style="font-size:11px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
     }
@@ -2279,7 +2281,7 @@ async function renderSummaryCharts(){
     destroyChartInstance('cHist');
     new Chart(canvasHist,{
       type:'bar',
-      data:{labels:bLabels,datasets:[{label:'חלונות',data:bCounts,backgroundColor:'#e8b84b'}]},
+      data:{labels:bLabels,datasets:[{label:'Windows',data:bCounts,backgroundColor:'#e8b84b'}]},
       options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8792a6'}},y:{ticks:{color:'#8792a6'},grid:{color:'#232a35'}}}}
     });
   }
@@ -2356,7 +2358,7 @@ async function loadManifest(){
       sel.innerHTML = '';
       const defOpt = document.createElement('option');
       defOpt.value = '';
-      defOpt.textContent = 'כל הקבצים / 2,820 חלונות (ברירת מחדל)';
+      defOpt.textContent = 'All Files / 2,820 Windows (Default)';
       sel.appendChild(defOpt);
 
       for(const f of d.files){
@@ -2364,7 +2366,7 @@ async function loadManifest(){
         opt.value = f.name;
         const linesFormatted = (f.lines||0).toLocaleString();
         const estPrefix = f.lines_estimated ? '~' : '';
-        opt.textContent = `${f.name} (${estPrefix}${linesFormatted} שורות)`;
+        opt.textContent = `${f.name} (${estPrefix}${linesFormatted} lines)`;
         sel.appendChild(opt);
       }
       if(currentVal && Array.from(sel.options).some(o => o.value === currentVal)){
@@ -2382,19 +2384,19 @@ async function loadManifest(){
       const isCrit = m.tape_empty_rate > 0.99;
       const noticeDiv = document.createElement('div');
       noticeDiv.style.cssText = `padding:10px 14px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;background:${isCrit?'rgba(240,104,77,0.15)':'var(--panel2)'};border:1px solid ${isCrit?'rgba(240,104,77,0.4)':'var(--line)'}`;
-      noticeDiv.innerHTML = `<div style="font-size:12px;color:${isCrit?'var(--down)':'var(--tx)'};font-weight:600">${isCrit?'⚠️ התראה: שיעור עסקאות ריקות גבוה (>99%) — בדוק את תקינות ה-CLOB Trade Stream':'📊 סטטוס Tape (CLOB Trade Feed)'}</div><div class="mono" style="font-size:12px;color:${isCrit?'var(--down)':'var(--up)'}">ריק: ${ratePct} · עסקאות: ${(m.tape_entries_total||0).toLocaleString()} · יום: ${esc(m.day||'-')}</div>`;
+      noticeDiv.innerHTML = `<div style="font-size:12px;color:${isCrit?'var(--down)':'var(--tx)'};font-weight:600">${isCrit?'⚠️ Alert: Empty trade rate high (>99%) — check CLOB trade stream health':'📊 Tape Status (CLOB Trade Feed)'}</div><div class="mono" style="font-size:12px;color:${isCrit?'var(--down)':'var(--up)'}">Empty: ${ratePct} · Trades: ${(m.tape_entries_total||0).toLocaleString()} · Day: ${esc(m.day||'-')}</div>`;
       wrap.appendChild(noticeDiv);
     }
 
     const tbl = document.createElement('table');
     tbl.className = 'tbl';
     const thead = document.createElement('tr');
-    thead.innerHTML = '<th>שם קובץ</th><th>גודל</th><th>שורות / דגימות</th><th>עדכון אחרון</th><th>פעולות</th>';
+    thead.innerHTML = '<th>File Name</th><th>Size</th><th>Lines / Samples</th><th>Last Modified</th><th>Actions</th>';
     tbl.appendChild(thead);
 
     if(!d.files || d.files.length === 0){
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="5" style="text-align:center;color:var(--faint);padding:18px">אין קבצים בתיקיית ticks/</td>';
+      tr.innerHTML = '<td colspan="5" style="text-align:center;color:var(--faint);padding:18px">No files found in run/ticks/</td>';
       tbl.appendChild(tr);
     } else {
       for(const f of d.files){
@@ -2402,7 +2404,7 @@ async function loadManifest(){
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
         const linesFormatted = (f.lines||0).toLocaleString();
         const linesHtml = f.lines_estimated
-          ? `~${linesFormatted} <span style="color:var(--dim);font-size:10px">(הערכה)</span>`
+          ? `~${linesFormatted} <span style="color:var(--dim);font-size:10px">(est.)</span>`
           : linesFormatted;
 
         const tdName = document.createElement('td');
@@ -2420,7 +2422,7 @@ async function loadManifest(){
 
         const tdMtime = document.createElement('td');
         tdMtime.className = 'mono';
-        tdMtime.textContent = new Date(f.mtime*1000).toLocaleString('he-IL');
+        tdMtime.textContent = new Date(f.mtime*1000).toLocaleString('en-US');
 
         const tdActions = document.createElement('td');
         tdActions.style.display = 'flex';
@@ -2430,19 +2432,19 @@ async function loadManifest(){
         const btnVerify = document.createElement('button');
         btnVerify.className = 'btn';
         btnVerify.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3);cursor:pointer';
-        btnVerify.textContent = '🔍 בדוק';
+        btnVerify.textContent = '🔍 Verify';
         btnVerify.addEventListener('click', () => verifyTickData(f.name));
 
         const btnRun = document.createElement('button');
         btnRun.className = 'btn';
         btnRun.style.cssText = 'padding:4px 10px;font-size:11px';
-        btnRun.textContent = 'הרץ בקטסט ⚡';
+        btnRun.textContent = '⚡ Run Backtest';
         btnRun.addEventListener('click', () => runBacktestOnFile(f.name));
 
         const btnDel = document.createElement('button');
         btnDel.className = 'btn';
         btnDel.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(255,87,87,0.12);color:var(--down);border-color:rgba(255,87,87,0.3);cursor:pointer';
-        btnDel.textContent = '🗑️ מחק';
+        btnDel.textContent = '🗑️ Delete';
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
 
         tdActions.appendChild(btnVerify);
@@ -2459,7 +2461,7 @@ async function loadManifest(){
     }
     wrap.appendChild(tbl);
   }catch(err){
-    $('manifestTableWrap').innerHTML = '<div style="color:var(--down);padding:12px">שגיאה בטעינת רשימת הקבצים</div>';
+    $('manifestTableWrap').innerHTML = '<div style="color:var(--down);padding:12px">Error loading files list</div>';
   }
 }
 
@@ -2469,7 +2471,7 @@ async function verifyTickData(filename){
   if(!modal || !content) return;
 
   modal.style.display = 'flex';
-  content.innerHTML = '<div style="text-align:center;padding:24px;color:var(--dim);font-size:14px">מבצע בדיקת תקינות מקיפה... <span class="spinner"></span></div>';
+  content.innerHTML = '<div style="text-align:center;padding:24px;color:var(--dim);font-size:14px">Running comprehensive integrity check... <span class="spinner"></span></div>';
 
   try{
     let url = '/api/ticks/verify';
@@ -2479,30 +2481,30 @@ async function verifyTickData(filename){
 
     const st = d.status || 'UNKNOWN';
     const statusColor = st === 'PASS' ? 'var(--up)' : st === 'WARN' ? 'var(--gold)' : 'var(--down)';
-    const statusLabel = st === 'PASS' ? '✅ תקין (PASS)' : st === 'WARN' ? '⚠️ אזהרות סבירות (WARN)' : '❌ כשל תקינות (FAIL)';
+    const statusLabel = st === 'PASS' ? '✅ PASS' : st === 'WARN' ? '⚠️ WARN' : '❌ FAIL';
 
     let html = `
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between">
         <div>
-          <div style="font-size:11px;color:var(--dim);text-transform:uppercase">סטטוס תקינות כללי</div>
+          <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Overall Integrity Status</div>
           <div style="font-size:16px;font-weight:700;color:${statusColor};margin-top:2px">${statusLabel}</div>
         </div>
         <div class="mono" style="font-size:12px;color:var(--dim)">
-          ${filename ? 'קובץ: ' + esc(filename) : 'כלל הקבצים בתיקייה (' + (d.files_checked||0) + ')'}
+          ${filename ? 'File: ' + esc(filename) : 'All directory files (' + (d.files_checked||0) + ')'}
         </div>
       </div>
 
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
         <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">דגימות תקינות</div>
+          <div style="font-size:10px;color:var(--dim)">Valid Samples</div>
           <div class="mono" style="font-size:15px;font-weight:700;color:var(--up);margin-top:2px">${(d.total_valid_ticks||d.valid_ticks||0).toLocaleString()}</div>
         </div>
         <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">שורות פגומות (Corrupt)</div>
+          <div style="font-size:10px;color:var(--dim)">Corrupt Rows</div>
           <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_corrupt_lines||d.corrupt_lines||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.total_corrupt_lines||d.corrupt_lines||0).toLocaleString()}</div>
         </div>
         <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">חלונות שזוהו</div>
+          <div style="font-size:10px;color:var(--dim)">Identified Windows</div>
           <div class="mono" style="font-size:15px;font-weight:700;margin-top:2px">${(d.total_windows||d.windows_count||0).toLocaleString()}</div>
         </div>
         <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
@@ -2510,18 +2512,18 @@ async function verifyTickData(filename){
           <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_crossed_books||d.crossed_books||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.total_crossed_books||d.crossed_books||0).toLocaleString()}</div>
         </div>
         <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">פערי דגימה (>6s)</div>
+          <div style="font-size:10px;color:var(--dim)">Timestamp Gaps (>6s)</div>
           <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_sampling_gaps||d.sampling_gaps_count||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.total_sampling_gaps||d.sampling_gaps_count||0).toLocaleString()}</div>
         </div>
         <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">שגיאות קולקטור (err)</div>
+          <div style="font-size:10px;color:var(--dim)">Collector Errors (err)</div>
           <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_collector_errors||d.collector_errors||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.total_collector_errors||d.collector_errors||0).toLocaleString()}</div>
         </div>
       </div>
     `;
 
     if(d.files && d.files.length > 0){
-      html += '<h4 style="margin:12px 0 6px;font-size:12px">פירוט לפי קובץ:</h4><table class="tbl" style="margin-top:4px"><tr><th>קובץ</th><th>סטטוס</th><th>דגימות</th><th>פגומים</th><th>חלונות</th><th>פערים</th></tr>';
+      html += '<h4 style="margin:12px 0 6px;font-size:12px">Per-File Breakdown:</h4><table class="tbl" style="margin-top:4px"><tr><th>File</th><th>Status</th><th>Samples</th><th>Corrupt</th><th>Windows</th><th>Gaps</th></tr>';
       for(const fr of d.files){
         const fCol = fr.status === 'PASS' ? 'var(--up)' : fr.status === 'WARN' ? 'var(--gold)' : 'var(--down)';
         html += `<tr><td class="mono" style="font-weight:600">${esc(fr.file)}</td><td style="color:${fCol};font-weight:700">${esc(fr.status)}</td><td class="mono">${(fr.valid_ticks||0).toLocaleString()}</td><td class="mono" style="color:${fr.corrupt_lines>0?'var(--down)':'inherit'}">${fr.corrupt_lines||0}</td><td class="mono">${fr.windows_count||0}</td><td class="mono">${fr.sampling_gaps_count||0}</td></tr>`;
@@ -2530,16 +2532,16 @@ async function verifyTickData(filename){
     }
 
     if(d.sample_issues && d.sample_issues.length > 0){
-      html += '<h4 style="margin:14px 0 6px;font-size:12px;color:var(--down)">דוגמאות לחריגות שנמצאו:</h4><div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-height:140px;overflow-y:auto;font-size:11px" class="mono">';
+      html += '<h4 style="margin:14px 0 6px;font-size:12px;color:var(--down)">Sample Discrepancies Found:</h4><div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-height:140px;overflow-y:auto;font-size:11px" class="mono">';
       for(const is of d.sample_issues.slice(0, 10)){
-        html += `<div style="margin-bottom:4px;color:var(--dim)">• שורה ${is.line}: <span style="color:var(--tx)">${esc(is.detail)}</span></div>`;
+        html += `<div style="margin-bottom:4px;color:var(--dim)">• Row ${is.line}: <span style="color:var(--tx)">${esc(is.detail)}</span></div>`;
       }
       html += '</div>';
     }
 
     content.innerHTML = html;
   }catch(e){
-    content.innerHTML = `<div style="color:var(--down);padding:16px;text-align:center">שגיאה בביצוע בדיקת תקינות: ${esc(e.message)}</div>`;
+    content.innerHTML = `<div style="color:var(--down);padding:16px;text-align:center">Error running integrity verification: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2572,13 +2574,13 @@ async function executeDeleteFile(){
   const confirmBtn = $('confirmDeleteBtn');
   if(confirmBtn){
     confirmBtn.disabled = true;
-    confirmBtn.textContent = 'מוחק...';
+    confirmBtn.textContent = 'Deleting...';
   }
   await executeDeleteFileDirect(filename);
   closeDeleteModal();
   if(confirmBtn){
     confirmBtn.disabled = false;
-    confirmBtn.textContent = 'כן, מחק קובץ';
+    confirmBtn.textContent = 'Yes, Delete File';
   }
 }
 
@@ -2587,13 +2589,13 @@ async function executeDeleteFileDirect(filename){
     const res = await fetch('/api/ticks/file?filename=' + encodeURIComponent(filename), { method:'DELETE' });
     const data = await res.json();
     if(data.ok){
-      showNotice('✅ הקובץ ' + filename + ' נמחק בהצלחה', false);
+      showNotice('✅ File ' + filename + ' deleted successfully', false);
       loadManifest();
     } else {
-      showNotice('❌ שגיאה במחיקת הקובץ: ' + (data.error || 'שגיאה לא ידועה'), true);
+      showNotice('❌ Error deleting file: ' + (data.error || 'Unknown error'), true);
     }
   }catch(e){
-    showNotice('❌ שגיאת תקשורת במחיקת הקובץ', true);
+    showNotice('❌ Network error while deleting file', true);
   }
 }
 
@@ -2631,8 +2633,8 @@ async function uploadFileStream(file){
   const uploadId = 'up_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
 
   const totalMb = (totalSize / (1024 * 1024)).toFixed(1);
-  progText.textContent = `מתחיל העלאה במקטעים: ${file.name} (${totalMb} MB, ${totalChunks} מקטעים)...`;
-  statusEl.textContent = `מעלה מקטע 1 מתוך ${totalChunks}...`;
+  progText.textContent = `Starting chunked upload: ${file.name} (${totalMb} MB, ${totalChunks} chunks)...`;
+  statusEl.textContent = `Uploading chunk 1 of ${totalChunks}...`;
 
   let uploadedBytes = 0;
 
@@ -2661,7 +2663,7 @@ async function uploadFileStream(file){
               const percent = Math.min(99, Math.round((currentTotalUploaded / totalSize) * 100));
               progBar.style.width = percent + '%';
               const loadedMb = (currentTotalUploaded / (1024 * 1024)).toFixed(1);
-              progText.textContent = `מעלה: ${loadedMb} MB / ${totalMb} MB (${percent}%) | מקטע ${chunkIndex + 1}/${totalChunks}`;
+              progText.textContent = `Uploading: ${loadedMb} MB / ${totalMb} MB (${percent}%) | Chunk ${chunkIndex + 1}/${totalChunks}`;
             }
           };
 
@@ -2674,17 +2676,17 @@ async function uploadFileStream(file){
                 resolve({ ok: true, data: {} });
               }
             } else {
-              let errMsg = xhr.statusText || 'שגיאת שרת';
+              let errMsg = xhr.statusText || 'Server error';
               try {
                 const errObj = JSON.parse(xhr.responseText);
                 if (errObj.error) errMsg = errObj.error;
               } catch (_) {}
-              reject(new Error(`קוד ${xhr.status}: ${errMsg}`));
+              reject(new Error(`Code ${xhr.status}: ${errMsg}`));
             }
           };
 
           xhr.onerror = function() {
-            reject(new Error('שגיאת תקשורת ברשת'));
+            reject(new Error('Network communication error'));
           };
 
           xhr.send(chunkBlob);
@@ -2697,7 +2699,7 @@ async function uploadFileStream(file){
       } catch (err) {
         lastError = err.message || String(err);
         if (attempt < 3) {
-          statusEl.textContent = `ניסיון ${attempt} נכשל במקטע ${chunkIndex + 1}, מנסה שוב בעוד שניה...`;
+          statusEl.textContent = `Attempt ${attempt} failed on chunk ${chunkIndex + 1}, retrying in 1s...`;
           await new Promise(r => setTimeout(r, 1000));
         }
       }
@@ -2705,16 +2707,16 @@ async function uploadFileStream(file){
 
     if (!success) {
       progBar.style.background = 'var(--down)';
-      statusEl.innerHTML = `<span style="color:var(--down);font-weight:700">❌ שגיאה בהעלאת מקטע ${chunkIndex + 1}/${totalChunks}: ${esc(lastError)}</span>`;
+      statusEl.innerHTML = `<span style="color:var(--down);font-weight:700">❌ Error uploading chunk ${chunkIndex + 1}/${totalChunks}: ${esc(lastError)}</span>`;
       return;
     }
 
     if (chunkIndex === totalChunks - 1 && responseData) {
       progBar.style.width = '100%';
-      progText.textContent = '100% - הושלם בהצלחה!';
+      progText.textContent = '100% — Upload Complete!';
       const linesStr = (responseData.lines || 0).toLocaleString();
       const winStr = (responseData.windows_indexed || 0).toLocaleString();
-      statusEl.innerHTML = `<span style="color:var(--up);font-weight:700">✅ הועלה בהצלחה: ${esc(responseData.filename || file.name)} (${linesStr} שורות, ${winStr} חלונות אונדקסו)</span>`;
+      statusEl.innerHTML = `<span style="color:var(--up);font-weight:700">✅ Uploaded successfully: ${esc(responseData.filename || file.name)} (${linesStr} lines, ${winStr} windows indexed)</span>`;
       loadManifest();
       tick();
       return;
@@ -2990,7 +2992,7 @@ async function loadCockpitDemoData() {
 async function syncRealRunTrades() {
   const btn = $('btnSyncRealRun');
   try {
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ מסנכרן מפולימרקט...'; }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing from Polymarket...'; }
     const res = await fetch('/api/live/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3002,10 +3004,10 @@ async function syncRealRunTrades() {
     }
     cockpitState = st;
     renderCockpitUI(st);
-    if (btn) { btn.disabled = false; btn.textContent = '📥 סנכרן ריצה אמיתית (Polymarket)'; }
+    if (btn) { btn.disabled = false; btn.textContent = '📥 Sync Real Run (Polymarket)'; }
   } catch (e) {
     alert('Error syncing real run: ' + e);
-    if (btn) { btn.disabled = false; btn.textContent = '📥 סנכרן ריצה אמיתית (Polymarket)'; }
+    if (btn) { btn.disabled = false; btn.textContent = '📥 Sync Real Run (Polymarket)'; }
   }
 }
 
@@ -4014,6 +4016,27 @@ setInterval(tick, 3000);
 """
 
 
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#0a0d12" stroke="#232a35" stroke-width="1.5"/>'
+    '<path d="M10 6v20" stroke="#33c9b5" stroke-width="2" stroke-linecap="round"/>'
+    '<rect x="7" y="10" width="6" height="11" rx="2" fill="#33c9b5"/>'
+    '<path d="M22 6v20" stroke="#f0684d" stroke-width="2" stroke-linecap="round"/>'
+    '<rect x="19" y="11" width="6" height="11" rx="2" fill="#f0684d"/>'
+    '</svg>'
+)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Serve SVG favicon for browser tab requests to avoid 404 logs."""
+    return Response(
+        content=FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/oscillation", response_class=HTMLResponse)
 @app.get("/summary", response_class=HTMLResponse)
@@ -4021,4 +4044,5 @@ setInterval(tick, 3000);
 def root_spa_page():
     """Serve the complete unified 4-tab SPA interface."""
     return HTMLResponse(FULL_APP_HTML, headers={"Cache-Control": "no-cache"})
+
 

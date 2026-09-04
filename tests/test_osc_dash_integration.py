@@ -66,6 +66,54 @@ def test_root_returns_4tab_spa():
     assert "cockpitPositionsTable" in html
     assert "cockpitPositionsBody" in html
     assert "cockpitPositionsCount" in html
+    assert 'rel="icon"' in html
+    assert 'rel="alternate icon"' in html
+
+
+def test_favicon_served():
+    """Verify that /favicon.ico returns 200 OK with SVG content and correct media type."""
+    response = client.get("/favicon.ico")
+    assert response.status_code == 200
+    assert "image/svg+xml" in response.headers["content-type"]
+    assert "<svg" in response.text
+    assert "#33c9b5" in response.text
+    assert "#f0684d" in response.text
+
+
+def test_root_ltr_layout_and_attributes():
+    """Verify that the dashboard root HTML uses LTR direction and English language with left-aligned headers."""
+    import re
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Parse and directly verify root html element attributes
+    html_tag_match = re.search(r"<html\s+([^>]+)>", html)
+    assert html_tag_match is not None, "<html> root tag not found in dashboard"
+    attrs = html_tag_match.group(1)
+    assert 'lang="en"' in attrs
+    assert 'dir="ltr"' in attrs
+    assert 'dir="rtl"' not in attrs
+    assert 'lang="he"' not in attrs
+
+    # Verify that required selectors explicitly set left text alignment
+    assert re.search(r"\.tbl\s+th\s*\{[^}]*text-align:\s*left", html) is not None
+    assert re.search(r"\.form-group\s+label\s*\{[^}]*text-align:\s*left", html) is not None
+
+
+def test_no_hebrew_characters_in_dashboard():
+    """Verify that all legacy Hebrew strings in server/osc_dash.py have been standardized to English."""
+    import re
+    from pathlib import Path
+    server_file = Path(__file__).resolve().parent.parent / "server" / "osc_dash.py"
+    with open(server_file, "r", encoding="utf-8") as f:
+        hebrew_lines = [
+            (idx, line.strip())
+            for idx, line in enumerate(f, 1)
+            if re.search(r"[\u0590-\u05ff]", line)
+        ]
+    assert len(hebrew_lines) == 0, f"Found {len(hebrew_lines)} lines with Hebrew in osc_dash.py: {hebrew_lines[:5]}"
+
 
 
 def test_api_oscillation():

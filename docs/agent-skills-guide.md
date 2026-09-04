@@ -22,8 +22,8 @@ DISCOVER       DEFINE & PLAN             BUILD & VERIFY              REVIEW     
 | **Step 2** | **Planning** | `interview-me`, `spec-driven-development`, `constraint-driven-development`, `api-and-interface-design`, `planning-and-task-breakdown` | Dissects requirements, locks quality contracts in `CONSTRAINTS.md`, designs APIs, and breaks work into bite-sized tasks. |
 | **Step 3** | **Orchestration** | `test-driven-development`, `incremental-implementation`, `source-driven-development`, `debugging-and-error-recovery`, `code-simplification` | Writes failing tests first, implements code incrementally against official docs, diagnoses test failures, and simplifies complexity. |
 | **Step 4** | **Self-Audit** | `code-review-and-quality`, `security-and-hardening`, `performance-optimization` | Audits the diff across correctness, secrets/inputs, and computational bottlenecks before committing. |
-| **Step 5** | **Shipping** | `git-workflow-and-versioning`, `shipping-and-launch`, `documentation-and-adrs` | Creates conventional commits, updates docs/ADRs, and prepares PR. |
-| **Step 6** | **Babysitting** | `pr-babysitter` | Resolves automated CodeRabbit review comments until green. |
+| **Step 5** | **Shipping** | `ship`, `git-workflow-and-versioning`, `shipping-and-launch`, `documentation-and-adrs` | Merges base (`master`), runs full tests & coverage audit, updates version/changelog, commits, pushes, and creates PR. |
+| **Step 6** | **Babysitting** | `pr-babysitter` | Autonomous single-round CodeRabbit review babysitter (5-4-3-2-1m polling countdown, auto-trigger `@coderabbitai review`, auto-triage, inline API reply/resolve, test verify, and squash merge). |
 
 ---
 
@@ -65,14 +65,27 @@ DISCOVER       DEFINE & PLAN             BUILD & VERIFY              REVIEW     
 * **`code-simplification`**: Eliminates unnecessary code while preserving behavior.
   * *Example prompt:* `"Use code-simplification on strategy/config.py to clean up legacy parameters."`
 
-### Phase 5: Review & Ship (Quality Gates)
+### Phase 5: Review & Ship (Quality Gates & PR Creation)
 
 * **`code-review-and-quality`**: 5-axis review before commit (correctness, safety, types, readability, tests).
   * *Example prompt:* `"Use code-review-and-quality to audit git diff before committing live trader fixes."`
+* **`ship`**: Automated ship workflow that merges base (`master`), executes tests, runs coverage audits, bumps version/changelog, commits, pushes, and opens the PR.
+  * *Example prompt:* `"Run ship"` or `"/ship"`
 * **`security-and-hardening`**: Verifies input sanitization and secret handling.
   * *Example prompt:* `"Use security-and-hardening to inspect how API keys and slug regexes are handled in strategy/markets.py."`
 * **`git-workflow-and-versioning`**: Enforces conventional commits and release tags.
   * *Example prompt:* `"Use git-workflow-and-versioning to format our commit for the backtest engine fix."`
+
+### Phase 6: Babysitting & Autonomous Merge
+
+* **`pr-babysitter`**: Sits on the newly opened PR through a single focused CodeRabbit review round until merged.
+  * **Ship Handshake**: Invoked directly after `/ship` on the opened PR.
+  * **Auto-Trigger & Bounded Timeout**: If CodeRabbit auto-review is silent or disabled, posts `@coderabbitai review` comment; if unavailable after the countdown timeout, enters a bounded failure state and falls back to `code-reviewer` rather than blindly merging.
+  * **Countdown Polling**: Polls review status at 5m → 4m → 3m → 2m → 1m intervals using non-blocking timers.
+  * **Single Round Cap**: Runs exactly 1 review round to eliminate review churn and conserve CodeRabbit quota.
+  * **Quota Limit Fallback**: If CodeRabbit hits limit, immediately invokes the local `code-reviewer` subagent.
+  * **Hard Merge Gate**: Resolves threads with explicit technical rationale, applies fixes locally, verifies 100% test pass (`pytest`), requires clean CI/status checks before merge, and escalates to operator if blocking issues remain.
+  * *Example prompt:* `"Run pr-babysitter"` or `"/pr-babysitter"`
 
 ---
 
@@ -85,3 +98,5 @@ DISCOVER       DEFINE & PLAN             BUILD & VERIFY              REVIEW     
 | Writing quant logic or math formulas | `test-driven-development` | `"use test-driven-development"` |
 | Diagnosing a bug or broken test | `debugging-and-error-recovery` | `"use debugging-and-error-recovery"` |
 | Code review before PR | `code-review-and-quality` | `"use code-review-and-quality"` |
+| Ship branch and open PR | `ship` | `"ship"` or `"/ship"` |
+| Babysit CodeRabbit and merge PR | `pr-babysitter` | `"pr-babysitter"` or `"/pr-babysitter"` |
