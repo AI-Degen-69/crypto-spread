@@ -963,9 +963,10 @@ def test_cannot_switch_live_to_paper_with_open_exposure():
         engine.update_config(mode="paper")
 
 
-def test_get_open_orders_list_excludes_idle_and_tokenless_markets():
+def test_get_open_orders_list_excludes_idle_and_tokenless_markets(monkeypatch):
     """Verify get_open_orders_list does not emit fabricated orders for IDLE or tokenless markets."""
     engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine, "get_clob_client", lambda: None)
     engine.mode = "paper"
     engine.is_running = True
     # All markets start in IDLE with empty tokens
