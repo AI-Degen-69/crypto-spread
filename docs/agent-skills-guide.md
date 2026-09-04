@@ -80,11 +80,11 @@ DISCOVER       DEFINE & PLAN             BUILD & VERIFY              REVIEW     
 
 * **`pr-babysitter`**: Sits on the newly opened PR through a single focused CodeRabbit review round until merged.
   * **Ship Handshake**: Invoked directly after `/ship` on the opened PR.
-  * **Auto-Trigger**: If CodeRabbit auto-review is silent or disabled, posts `@coderabbitai review` comment.
+  * **Auto-Trigger & Bounded Timeout**: If CodeRabbit auto-review is silent or disabled, posts `@coderabbitai review` comment; if unavailable after the countdown timeout, enters a bounded failure state and falls back to `code-reviewer` rather than blindly merging.
   * **Countdown Polling**: Polls review status at 5m → 4m → 3m → 2m → 1m intervals using non-blocking timers.
   * **Single Round Cap**: Runs exactly 1 review round to eliminate review churn and conserve CodeRabbit quota.
   * **Quota Limit Fallback**: If CodeRabbit hits limit, immediately invokes the local `code-reviewer` subagent.
-  * **Zero Human in the Loop**: Triages comments, replies with reasons via GitHub API, resolves threads via GraphQL, applies code fixes, tests with `pytest`, self-heals, and performs squash merge.
+  * **Hard Merge Gate**: Resolves threads with explicit technical rationale, applies fixes locally, verifies 100% test pass (`pytest`), requires clean CI/status checks before merge, and escalates to operator if blocking issues remain.
   * *Example prompt:* `"Run pr-babysitter"` or `"/pr-babysitter"`
 
 ---

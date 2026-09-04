@@ -82,14 +82,23 @@ def test_favicon_served():
 
 def test_root_ltr_layout_and_attributes():
     """Verify that the dashboard root HTML uses LTR direction and English language with left-aligned headers."""
+    import re
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert 'lang="en"' in html
-    assert 'dir="ltr"' in html
-    assert 'dir="rtl"' not in html
-    assert 'lang="he"' not in html
-    assert "text-align:left" in html
+
+    # Parse and directly verify root html element attributes
+    html_tag_match = re.search(r"<html\s+([^>]+)>", html)
+    assert html_tag_match is not None, "<html> root tag not found in dashboard"
+    attrs = html_tag_match.group(1)
+    assert 'lang="en"' in attrs
+    assert 'dir="ltr"' in attrs
+    assert 'dir="rtl"' not in attrs
+    assert 'lang="he"' not in attrs
+
+    # Verify that required selectors explicitly set left text alignment
+    assert re.search(r"\.tbl\s+th\s*\{[^}]*text-align:\s*left", html) is not None
+    assert re.search(r"\.form-group\s+label\s*\{[^}]*text-align:\s*left", html) is not None
 
 
 def test_no_hebrew_characters_in_dashboard():
