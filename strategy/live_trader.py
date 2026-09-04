@@ -974,9 +974,9 @@ class LiveTraderEngine:
                                         if dt.tzinfo is not None:
                                             dt = dt.astimezone()
                                         time_str = dt.strftime("%H:%M:%S")
-                                    except Exception:
+                                    except (ValueError, OverflowError, OSError):
                                         time_str = created_raw[11:19] if "T" in created_raw else created_raw
-                            except Exception:
+                            except (ValueError, OverflowError, OSError):
                                 time_str = "-"
 
                         # Resolve market label and side UP/DOWN by token_id
