@@ -133,6 +133,8 @@ def fetch_polymarket_account_value(
             errors.append(f"CLOB cash error: {e}")
             log.debug("CLOB balance fetch failed: %s", e)
 
+    positions_list: List[Dict[str, Any]] = []
+
     # 2. Polymarket Data API Open Positions Market Value
     if funder and funder.startswith("0x"):
         try:
@@ -142,6 +144,20 @@ def fetch_polymarket_account_value(
                 if isinstance(data, list):
                     positions_value = sum(float(p.get("currentValue", 0.0) or 0.0) for p in data)
                     open_positions_count = len(data)
+                    for p in data:
+                        if isinstance(p, dict):
+                            positions_list.append({
+                                "asset": str(p.get("asset") or ""),
+                                "conditionId": str(p.get("conditionId") or ""),
+                                "size": float(p.get("size", 0.0) or 0.0),
+                                "avgPrice": float(p.get("avgPrice", 0.0) or 0.0),
+                                "curPrice": float(p.get("curPrice", 0.0) or 0.0),
+                                "initialValue": float(p.get("initialValue", 0.0) or 0.0),
+                                "currentValue": float(p.get("currentValue", 0.0) or 0.0),
+                                "cashPnl": float(p.get("cashPnl", 0.0) or 0.0),
+                                "title": str(p.get("title") or ""),
+                                "outcome": str(p.get("outcome") or ""),
+                            })
                     log.debug("Polymarket positions value for %s: $%.2f across %d positions", funder, positions_value, open_positions_count)
         except Exception as e:
             errors.append(f"Positions error: {e}")
@@ -182,6 +198,7 @@ def fetch_polymarket_account_value(
         "cash_balance": round(cash_balance or 0.0, 2),
         "positions_value": round(positions_value, 2),
         "open_positions": open_positions_count,
+        "positions": positions_list,
         "errors": errors,
     }
 
@@ -480,6 +497,7 @@ class LiveTraderEngine:
         self.total_pairs_merged: int = 0
         self.total_stops_triggered: int = 0
         self.session_start_ts: float = time.time()
+        self.open_positions: List[Dict[str, Any]] = []
         
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
@@ -1063,6 +1081,8 @@ class LiveTraderEngine:
             "trades": recent_trades,
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
+            "positions": self.open_positions,
+            "positions_count": len(self.open_positions),
             "selected_series": [s[0] for s in self.selected_series],
             "available_series": [
                 {
@@ -1185,6 +1205,7 @@ class LiveTraderEngine:
             val_info = fetch_polymarket_account_value(addr)
             if val_info.get("success"):
                 self.starting_balance = float(val_info["net_value"])
+                self.open_positions = val_info.get("positions", [])
                 if not self.wallet_address and val_info.get("wallet_address"):
                     self.wallet_address = val_info["wallet_address"]
                 log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
@@ -1218,6 +1239,7 @@ class LiveTraderEngine:
             info = fetch_polymarket_account_value(addr)
             if info.get("success"):
                 net_val = float(info.get("net_value", 0.0))
+                self.open_positions = info.get("positions", [])
                 if self.mode == "live":
                     self.starting_balance = net_val
                     log.info("Live mode: fetched Polymarket portfolio balance: $%.2f", net_val)

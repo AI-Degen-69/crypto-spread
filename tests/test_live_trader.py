@@ -742,3 +742,43 @@ def test_live_trader_start_sets_quoting_halted_under_lock(monkeypatch):
     assert engine.is_running
     assert not engine.quoting_halted
 
+
+def test_fetch_polymarket_account_value_positions():
+    """Verify fetch_polymarket_account_value returns parsed positions array with full attributes."""
+    from unittest.mock import MagicMock
+    from strategy.live_trader import fetch_polymarket_account_value
+
+    fake_sess = MagicMock()
+    fake_pos_resp = MagicMock()
+    fake_pos_resp.ok = True
+    fake_pos_resp.json.return_value = [
+        {
+            "asset": "0xtoken123",
+            "conditionId": "0xcond123",
+            "size": "10.0",
+            "avgPrice": "0.485",
+            "curPrice": "0.52",
+            "initialValue": "4.85",
+            "currentValue": "5.20",
+            "cashPnl": "0.35",
+            "title": "Bitcoin Up or Down 5m",
+            "outcome": "Up",
+        }
+    ]
+    fake_sess.get.return_value = fake_pos_resp
+
+    res = fetch_polymarket_account_value(wallet_address="0xee3b778a783510bc833384919f709e3d2fee1624", session=fake_sess)
+    assert res["success"] is True
+    assert "positions" in res
+    assert len(res["positions"]) == 1
+    p = res["positions"][0]
+    assert p["asset"] == "0xtoken123"
+    assert p["conditionId"] == "0xcond123"
+    assert p["size"] == 10.0
+    assert p["avgPrice"] == 0.485
+    assert p["curPrice"] == 0.52
+    assert p["cashPnl"] == 0.35
+    assert p["title"] == "Bitcoin Up or Down 5m"
+    assert p["outcome"] == "Up"
+
+
