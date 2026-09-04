@@ -1075,7 +1075,39 @@ class LiveTraderEngine:
                     "time": m.next_order_time_down if m.next_order_time_down != "-" else now_time_str,
                 })
 
+        # In paper mode, expose resting simulation orders for active quoting markets
+        if self.mode == "paper" and self.is_running:
+            for m in self.markets.values():
+                if m.pair_captured or m.exit_taken or m.entry_cancelled_timeout:
+                    continue
+                if m.status in ("QUOTING", "PRE_QUOTING", "IDLE"):
+                    if not m.filled_up:
+                        orders.append({
+                            "order_id": f"paper_up_{m.slug}",
+                            "market": m.label,
+                            "token_id": m.up_token or f"tok_up_{m.slug}",
+                            "side": "BUY (UP)",
+                            "price": m.resting_up,
+                            "size": m.order_shares,
+                            "status": "RESTING",
+                            "source": "PAPER_SIMULATION",
+                            "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
+                        })
+                    if not m.filled_down:
+                        orders.append({
+                            "order_id": f"paper_dn_{m.slug}",
+                            "market": m.label,
+                            "token_id": m.down_token or f"tok_dn_{m.slug}",
+                            "side": "BUY (DOWN)",
+                            "price": m.resting_down,
+                            "size": m.order_shares,
+                            "status": "RESTING",
+                            "source": "PAPER_SIMULATION",
+                            "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
+                        })
+
         return orders
+
 
     def merge_positions(self, condition_id: str, amount: float = 0.0) -> Dict[str, Any]:
         """Merge outcome tokens back to USDC gaslessly via Relayer / CTF."""
@@ -1120,6 +1152,61 @@ class LiveTraderEngine:
             "timestamp": time.time(),
         }
 
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Return currently open positions (dynamic for paper, wallet/clob for live, static for demo)."""
+        if self.mode == "live":
+            return self.open_positions
+
+        # Paper mode: dynamically synthesize open positions from active markets
+        positions: List[Dict[str, Any]] = []
+        now_str = time.strftime("%H:%M:%S")
+        for m in self.markets.values():
+            if m.pair_captured or m.exit_taken:
+                continue
+            if m.filled_up:
+                entry_px = m.fill_price_up if m.fill_price_up is not None else m.resting_up
+                cur_px = m.up_bid if m.up_bid is not None else (m.mid or 0.50)
+                init_val = round(float(m.order_shares) * entry_px, 4)
+                cur_val = round(float(m.order_shares) * cur_px, 4)
+                positions.append({
+                    "asset": m.up_token or f"paper_up_{m.slug}",
+                    "conditionId": m.condition_id,
+                    "title": f"{m.label} - {m.market_slug}" if m.market_slug else m.label,
+                    "outcome": "Up",
+                    "side": "Up",
+                    "size": float(m.order_shares),
+                    "avgPrice": round(entry_px, 4),
+                    "price": round(entry_px, 4),
+                    "curPrice": round(cur_px, 4),
+                    "initialValue": init_val,
+                    "currentValue": cur_val,
+                    "cashPnl": round(cur_val - init_val, 4),
+                    "time": m.order_time_up if m.order_time_up != "-" else now_str,
+                })
+            if m.filled_down:
+                entry_px = m.fill_price_down if m.fill_price_down is not None else m.resting_down
+                down_cur = m.down_bid if m.down_bid is not None else (round(1.0 - (m.mid or 0.50), 4))
+                init_val = round(float(m.order_shares) * entry_px, 4)
+                cur_val = round(float(m.order_shares) * down_cur, 4)
+                positions.append({
+                    "asset": m.down_token or f"paper_dn_{m.slug}",
+                    "conditionId": m.condition_id,
+                    "title": f"{m.label} - {m.market_slug}" if m.market_slug else m.label,
+                    "outcome": "Down",
+                    "side": "Down",
+                    "size": float(m.order_shares),
+                    "avgPrice": round(entry_px, 4),
+                    "price": round(entry_px, 4),
+                    "curPrice": round(down_cur, 4),
+                    "initialValue": init_val,
+                    "currentValue": cur_val,
+                    "cashPnl": round(cur_val - init_val, 4),
+                    "time": m.order_time_down if m.order_time_down != "-" else now_str,
+                })
+        if not positions and self.open_positions and not self.is_running:
+            return self.open_positions
+        return positions
+
     def get_state(self) -> Dict[str, Any]:
         """Return snapshot of entire trading engine state for the UI."""
         now = time.time()
@@ -1149,6 +1236,8 @@ class LiveTraderEngine:
             self._orders_cache = self.get_open_orders_list()
             self._orders_cache_ts = now
         open_orders = self._orders_cache
+
+        open_pos = self.get_open_positions()
 
         return {
             "is_running": self.is_running,
@@ -1181,9 +1270,10 @@ class LiveTraderEngine:
             "trades": recent_trades,
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
-            "positions": self.open_positions,
-            "open_positions": self.open_positions,
-            "positions_count": len(self.open_positions),
+            "positions": open_pos,
+            "open_positions": open_pos,
+            "positions_count": len(open_pos),
+
             "selected_series": [s[0] for s in self.selected_series],
             "available_series": [
                 {
@@ -1297,6 +1387,8 @@ class LiveTraderEngine:
             self.shares = int(shares)
         if mode in ("paper", "live"):
             self.mode = mode
+            if self.mode == "paper":
+                self.open_positions = []
         if wallet_address is not None:
             self.wallet_address = wallet_address.strip()
             self._clob_client = None  # Reset client if wallet changed
@@ -1340,14 +1432,15 @@ class LiveTraderEngine:
             info = fetch_polymarket_account_value(addr)
             if info.get("success"):
                 net_val = float(info.get("net_value", 0.0))
-                self.open_positions = info.get("positions", [])
                 if self.mode == "live":
+                    self.open_positions = info.get("positions", [])
                     self.starting_balance = net_val
                     log.info("Live mode: fetched Polymarket portfolio balance: $%.2f", net_val)
                 if not self.wallet_address and info.get("wallet_address"):
                     self.wallet_address = info["wallet_address"]
         except Exception as e:
             log.warning("Could not fetch wallet balance: %s", e)
+
 
     def start(self):
         """Start the background live trading ticker."""
@@ -1694,6 +1787,7 @@ class LiveTraderEngine:
         """Reset session PnL and trade history."""
         self.trades.clear()
         self.timeline.clear()
+        self.open_positions.clear()
         self.session_start_ts = time.time()
         if TRADES_FILE.exists() and not os.getenv("PYTEST_CURRENT_TEST"):
             try:
@@ -1735,6 +1829,7 @@ class LiveTraderEngine:
         now = time.time()
         self.trades.clear()
         self.timeline.clear()
+        self._orders_cache_ts = 0.0
         self.session_start_ts = now - 300.0
 
         demo_trades = [
@@ -1859,6 +1954,12 @@ class LiveTraderEngine:
             m_btc.trades_count = 2
             m_btc.status = "QUOTING"
             m_btc.last_action = "Quoting bids @ 0.48 / 0.48"
+            m_btc.order_id_up = f"demo_ord_btc_up_{int(now)}"
+            m_btc.order_status_up = "LIVE"
+            m_btc.order_time_up = datetime.datetime.fromtimestamp(now - 15).strftime("%H:%M:%S")
+            m_btc.order_id_down = f"demo_ord_btc_dn_{int(now)}"
+            m_btc.order_status_down = "LIVE"
+            m_btc.order_time_down = datetime.datetime.fromtimestamp(now - 15).strftime("%H:%M:%S")
 
         m_eth = self.markets.get("eth-up-or-down-5m")
         if m_eth:
@@ -2142,8 +2243,15 @@ class LiveTraderEngine:
         entry_timeout_sec = 0.10 * win_duration
         is_late_start = (elapsed_sec >= entry_timeout_sec)
 
-        # --- 10% WINDOW TIMEOUT ENTRY CANCELLATION (Issue #48) ---
-        if is_late_start and not mstate.entry_cancelled_timeout:
+        # Pre-entry drift check: if mid has already drifted >= exit_thresh vs 0.50 before any fills,
+        # the market is already strongly monotonic / skewed. Never enter or quote into an immediate stop.
+        initial_drift = abs(mid - 0.50)
+        is_adverse_open = (initial_drift >= self.exit_thresh)
+        touch_pair = (mstate.up_ask + mstate.down_ask) if (mstate.up_ask is not None and mstate.down_ask is not None) else None
+        is_touch_pair_invalid = (touch_pair is not None and touch_pair > 1.03)
+
+        # --- PRE-ENTRY DRIFT & 10% WINDOW TIMEOUT ENTRY CANCELLATION ---
+        if (is_late_start or is_adverse_open or is_touch_pair_invalid) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 if self.mode == "live":
                     cancel_ok_up = True
@@ -2169,7 +2277,15 @@ class LiveTraderEngine:
                     mstate.entry_cancelled_timeout = True
 
                 if mstate.entry_cancelled_timeout:
-                    if mstate.status in ("IDLE", "QUOTING", "PRE_QUOTING"):
+                    if is_adverse_open:
+                        mstate.status = "DRIFT_SKIPPED"
+                        mstate.last_action = f"Adverse drift ({initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
+                        log.info("[%s] Entry skipped due to adverse open drift (drift=%.3f >= %.2f)", slug, initial_drift, self.exit_thresh)
+                    elif is_touch_pair_invalid:
+                        mstate.status = "DRIFT_SKIPPED"
+                        mstate.last_action = f"Touch pair wide ({touch_pair:.2f} > 1.03) — entry skipped"
+                        log.info("[%s] Entry skipped due to wide touch pair (touch=%.3f > 1.03)", slug, touch_pair)
+                    else:
                         mstate.status = "TIMEOUT_NO_FILL"
                         mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
                         log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
@@ -2261,6 +2377,7 @@ class LiveTraderEngine:
                         mstate.filled_up = True
                         mstate.fill_price_up = resting_up
                         mstate.order_status_up = "FILLED"
+                        mstate.order_time_up = time.strftime("%H:%M:%S")
                         mstate.status = "FILLED_UP"
                         mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
                         log.info("[%s] Filled UP @ %.2f", slug, resting_up)
@@ -2270,9 +2387,11 @@ class LiveTraderEngine:
                         mstate.filled_down = True
                         mstate.fill_price_down = resting_down
                         mstate.order_status_down = "FILLED"
+                        mstate.order_time_down = time.strftime("%H:%M:%S")
                         mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
                         mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
                         log.info("[%s] Filled DOWN @ %.2f", slug, resting_down)
+
 
             # --- PAIR COMPLETION & MERGE ---
             if mstate.filled_up and mstate.filled_down:

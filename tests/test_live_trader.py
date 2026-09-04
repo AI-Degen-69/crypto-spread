@@ -862,4 +862,87 @@ def test_fill_price_and_slippage_pair_merge_pnl(monkeypatch):
     assert abs(tr.pnl_usd - 0.125) < 1e-4
 
 
+def test_paper_mode_ignores_wallet_positions(monkeypatch):
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.wallet_address = "0x111122223333444455556666"
+    fake_val = {
+        "success": True,
+        "wallet_address": "0x111122223333444455556666",
+        "net_value": 500.0,
+        "positions": [{"title": "Old Wallet Bet", "size": 10.0, "outcome": "Up"}],
+    }
+    monkeypatch.setattr("strategy.live_trader.fetch_polymarket_account_value", lambda addr: fake_val)
+    engine._try_fetch_wallet_balance()
+    assert engine.open_positions == []
+    assert engine.get_open_positions() == []
+
+
+def test_paper_mode_dynamic_open_positions():
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.shares = 5
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    m.order_shares = 5
+    m.order_time_up = "12:00:00"
+    m.mid = 0.50
+    m.up_bid = 0.47
+    
+    open_pos = engine.get_open_positions()
+    assert len(open_pos) == 1
+    assert open_pos[0]["outcome"] == "Up"
+    assert open_pos[0]["size"] == 5.0
+    assert open_pos[0]["avgPrice"] == 0.48
+    
+    st = engine.get_state()
+    assert len(st["positions"]) == 1
+    assert st["positions"][0]["size"] == 5.0
+
+    m.pair_captured = True
+    assert engine.get_open_positions() == []
+
+
+def test_adverse_open_drift_gate():
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.is_running = True
+    engine.mode = "paper"
+    engine.offset = 0.02
+    engine.exit_thresh = 0.05
+    engine.shares = 5
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    poll_data = {
+        "market": {
+            "conditionId": "cid_drifted",
+            "slug": "btc-updown-5m-drifted",
+            "up_token": "tok_up",
+            "down_token": "tok_dn",
+            "start_ts": now - 5.0,  # 5s elapsed < 30s cutoff
+            "end_ts": now + 295.0,
+        },
+        "up_book": {"best_bid": 0.34, "best_ask": 0.36},
+        "down_book": {"best_bid": 0.64, "best_ask": 0.66},
+    }
+    engine._update_market_strategy(slug, poll_data, now)
+    m = engine.markets[slug]
+    assert m.filled_up is False
+    assert m.filled_down is False
+    assert m.entry_cancelled_timeout is True
+    assert m.status in ("DRIFT_SKIPPED", "TIMEOUT_NO_FILL")
+
+
+def test_reset_pnl_clears_open_positions():
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.open_positions = [{"title": "Stale", "size": 10.0}]
+    m = engine.markets["btc-up-or-down-5m"]
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    engine.reset_pnl()
+    assert engine.open_positions == []
+    assert engine.get_open_positions() == []
+    assert m.filled_up is False
 
