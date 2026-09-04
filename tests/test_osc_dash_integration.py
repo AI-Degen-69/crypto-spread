@@ -448,6 +448,16 @@ def test_api_live_cockpit_endpoints(monkeypatch):
     """Verify live trading cockpit endpoints for state, control, and config."""
     from strategy.live_trader import LiveTraderEngine
     monkeypatch.setattr(LiveTraderEngine, "_poll_single_market", lambda self, slug: None)
+    mock_acct = {
+        "success": True,
+        "net_value": 1234.56,
+        "cash_balance": 1000.0,
+        "positions_value": 234.56,
+        "positions": [],
+        "wallet_address": "0x1234567890abcdef1234567890abcdef12345678",
+    }
+    monkeypatch.setattr("server.osc_dash.fetch_polymarket_account_value", lambda *a, **kw: mock_acct)
+    monkeypatch.setattr("strategy.live_trader.fetch_polymarket_account_value", lambda *a, **kw: mock_acct)
     try:
         # 1. GET state
         res_state = client.get("/api/live/state")

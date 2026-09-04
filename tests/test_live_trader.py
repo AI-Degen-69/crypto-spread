@@ -743,8 +743,11 @@ def test_live_trader_start_sets_quoting_halted_under_lock(monkeypatch):
     assert not engine.quoting_halted
 
 
-def test_fetch_polymarket_account_value_positions():
+def test_fetch_polymarket_account_value_positions(monkeypatch):
     """Verify fetch_polymarket_account_value returns parsed positions array with full attributes."""
+    monkeypatch.setattr("strategy.live_trader._load_env_file", lambda: None)
+    for name in ("POLY_PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY", "POLY_API_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE"):
+        monkeypatch.delenv(name, raising=False)
     from unittest.mock import MagicMock
     from strategy.live_trader import fetch_polymarket_account_value
 

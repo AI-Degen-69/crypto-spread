@@ -2114,11 +2114,6 @@ class LiveTraderEngine:
                                         actual_px_up = float(ord_up["price"])
                                     except (ValueError, TypeError):
                                         pass
-                                if actual_px_up is None and hasattr(self, "open_positions") and self.open_positions:
-                                    for p in self.open_positions:
-                                        if p.get("asset") == mstate.up_token and p.get("avgPrice"):
-                                            actual_px_up = float(p["avgPrice"])
-                                            break
                                 mstate.fill_price_up = round(actual_px_up if actual_px_up is not None else resting_up, 4)
                                 mstate.order_status_up = "FILLED"
                                 mstate.status = "FILLED_UP"
@@ -2145,11 +2140,6 @@ class LiveTraderEngine:
                                         actual_px_dn = float(ord_dn["price"])
                                     except (ValueError, TypeError):
                                         pass
-                                if actual_px_dn is None and hasattr(self, "open_positions") and self.open_positions:
-                                    for p in self.open_positions:
-                                        if p.get("asset") == mstate.down_token and p.get("avgPrice"):
-                                            actual_px_dn = float(p["avgPrice"])
-                                            break
                                 mstate.fill_price_down = round(actual_px_dn if actual_px_dn is not None else resting_down, 4)
                                 mstate.order_status_down = "FILLED"
                                 mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
