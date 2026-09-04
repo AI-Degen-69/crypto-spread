@@ -1306,17 +1306,38 @@ class LiveTraderEngine:
                 open position, or would change the traded market set while running.
                 No configuration field is modified when this is raised.
         """
-        # Market selection is resolved and applied before any scalar field is
-        # assigned, so a rejected selection (invalid slug, or a change while the
-        # bot runs) leaves the whole configuration untouched rather than half-applied.
-        if selected_markets is not None or tokens is not None or durations is not None:
-            new_series = _resolve_series_selection(selected_markets, tokens, durations)
-            new_slugs = {s[0] for s in new_series}
-            with self._engine_lock:
+        with self._engine_lock:
+            # Market selection is resolved and checked before any scalar field is
+            # assigned, so a rejected selection leaves the whole configuration untouched.
+            new_series = None
+            if selected_markets is not None or tokens is not None or durations is not None:
+                new_series = _resolve_series_selection(selected_markets, tokens, durations)
+                new_slugs = {s[0] for s in new_series}
                 # Read is_running under the lock that start()/stop() also take, so a
                 # concurrent start cannot slip in between the check and the mutation.
                 if self.is_running and new_slugs != set(self.markets.keys()):
                     raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
+
+            # Guard against modifying scalar strategy parameters while the trading bot is running
+            if self.is_running:
+                param_changed = False
+                if offset is not None and abs(float(offset) - self.offset) > 1e-6:
+                    param_changed = True
+                elif exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
+                    param_changed = True
+                elif shares is not None and int(shares) != self.shares:
+                    param_changed = True
+                elif mode is not None and mode != self.mode:
+                    param_changed = True
+                elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
+                    param_changed = True
+                elif starting_balance is not None and self.mode != "live" and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+                    param_changed = True
+
+                if param_changed:
+                    raise ValueError("Cannot change strategy parameters while the trading bot is running. Stop the bot first.")
+
+            if new_series is not None:
                 to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
                 # Guard against deselecting markets with open positions or active pending exits
                 for s in to_remove:
@@ -1380,50 +1401,49 @@ class LiveTraderEngine:
                 retained_series = [s for s in self.selected_series if s[0] in self.markets and s[0] not in {x[0] for x in new_series}]
                 self.selected_series = list(new_series) + retained_series
 
-        if offset is not None:
-            self.offset = max(0.001, min(0.490, float(offset)))
-        if exit_thresh is not None and exit_thresh > 0:
-            self.exit_thresh = float(exit_thresh)
-        if shares is not None and shares > 0:
-            self.shares = int(shares)
-        if mode in ("paper", "live"):
-            if self.mode == "live" and mode == "paper":
-                has_active_live_exposure = any(
-                    (m.filled_up or m.filled_down) and not m.pair_captured and not m.exit_taken
-                    for m in self.markets.values()
-                ) or bool(self.open_positions)
-                if has_active_live_exposure:
-                    raise ValueError("Cannot switch from live to paper mode while unresolved live positions or fills remain")
-            self.mode = mode
-            if self.mode == "paper":
-                self.open_positions = []
-        if wallet_address is not None:
-            self.wallet_address = wallet_address.strip()
-            self._clob_client = None  # Reset client if wallet changed
+            if offset is not None:
+                self.offset = max(0.001, min(0.490, float(offset)))
+            if exit_thresh is not None and exit_thresh > 0:
+                self.exit_thresh = float(exit_thresh)
+            if shares is not None and shares > 0:
+                self.shares = int(shares)
+            if mode in ("paper", "live"):
+                if self.mode == "live" and mode == "paper":
+                    has_active_live_exposure = any(
+                        (m.filled_up or m.filled_down) and not m.pair_captured and not m.exit_taken
+                        for m in self.markets.values()
+                    ) or bool(self.open_positions)
+                    if has_active_live_exposure:
+                        raise ValueError("Cannot switch from live to paper mode while unresolved live positions or fills remain")
+                self.mode = mode
+                if self.mode == "paper":
+                    self.open_positions = []
+            if wallet_address is not None:
+                self.wallet_address = wallet_address.strip()
+                self._clob_client = None  # Reset client if wallet changed
 
-        if self.mode == "live":
-            addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
-            val_info = fetch_polymarket_account_value(addr)
-            if val_info.get("success"):
-                self.starting_balance = float(val_info["net_value"])
-                self.open_positions = val_info.get("positions", [])
-                if not self.wallet_address and val_info.get("wallet_address"):
-                    self.wallet_address = val_info["wallet_address"]
-                log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
+            if self.mode == "live":
+                addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
+                val_info = fetch_polymarket_account_value(addr)
+                if val_info.get("success"):
+                    self.starting_balance = float(val_info["net_value"])
+                    self.open_positions = val_info.get("positions", [])
+                    if not self.wallet_address and val_info.get("wallet_address"):
+                        self.wallet_address = val_info["wallet_address"]
+                    log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
+                else:
+                    self._schedule_wallet_balance_fetch()
             else:
-                self._schedule_wallet_balance_fetch()
-        else:
-            if starting_balance is not None and starting_balance >= 0:
-                self.starting_balance = float(starting_balance)
+                if starting_balance is not None and starting_balance >= 0:
+                    self.starting_balance = float(starting_balance)
 
+            # Update per-market resting prices
+            for m in self.markets.values():
+                m.resting_up = round(0.50 - self.offset, 3)
+                m.resting_down = round(0.50 - self.offset, 3)
+                m.order_shares = self.shares
 
-        # Update per-market resting prices
-        for m in self.markets.values():
-            m.resting_up = round(0.50 - self.offset, 3)
-            m.resting_down = round(0.50 - self.offset, 3)
-            m.order_shares = self.shares
-
-        return self.get_state()
+            return self.get_state()
 
     def _schedule_wallet_balance_fetch(self):
         """Schedule non-blocking wallet balance fetch in executor if loop is running."""

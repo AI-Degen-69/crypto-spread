@@ -601,15 +601,83 @@ def test_live_trader_cannot_change_market_selection_while_running():
     with pytest.raises(ValueError, match="Cannot change market selection while the trading bot is running"):
         engine.update_config(durations=[900])
 
-    # Updating other parameters like offset or shares while running is allowed
-    engine.update_config(offset=0.03, shares=10)
-    assert engine.offset == 0.03
-    assert engine.shares == 10
+    # Idempotent market selection call while running is allowed
+    engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m"])
 
     # Once stopped, changing market selection is allowed
     engine.is_running = False
     engine.update_config(tokens=["SOL"], durations=[300])
     assert set(engine.markets.keys()) == {"sol-up-or-down-5m"}
+
+
+def test_live_trader_cannot_change_parameters_while_running():
+    """Verify strategy parameters cannot be modified mid-run while is_running is True."""
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m"])
+    engine.wallet_address = "0x1111111111111111111111111111111111111111"
+    engine.offset = 0.02
+    engine.exit_thresh = 0.05
+    engine.shares = 5
+    engine.mode = "paper"
+    engine.starting_balance = 1000.0
+    engine.is_running = True
+
+    # 1. offset change must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(offset=0.03)
+
+    # 2. exit_thresh change must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(exit_thresh=0.08)
+
+    # 3. shares change must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(shares=10)
+
+    # 4. mode change must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(mode="live")
+
+    # 5. wallet_address change must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(wallet_address="0x2222222222222222222222222222222222222222")
+
+    # 6. starting_balance change must raise ValueError
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(starting_balance=2500.0)
+
+    # Verify no state was corrupted
+    assert engine.offset == 0.02
+    assert engine.exit_thresh == 0.05
+    assert engine.shares == 5
+    assert engine.mode == "paper"
+    assert engine.wallet_address == "0x1111111111111111111111111111111111111111"
+    assert engine.starting_balance == 1000.0
+
+    # 7. Idempotent calls with identical values must succeed
+    engine.update_config(
+        offset=0.02,
+        exit_thresh=0.05,
+        shares=5,
+        mode="paper",
+        wallet_address="0x1111111111111111111111111111111111111111",
+        starting_balance=1000.0,
+    )
+    assert engine.offset == 0.02
+
+    # 8. Once stopped, changing all parameters succeeds
+    engine.is_running = False
+    engine.update_config(
+        offset=0.03,
+        exit_thresh=0.07,
+        shares=12,
+        starting_balance=2000.0,
+        wallet_address="0x3333333333333333333333333333333333333333",
+    )
+    assert engine.offset == 0.03
+    assert engine.exit_thresh == 0.07
+    assert engine.shares == 12
+    assert engine.starting_balance == 2000.0
+    assert engine.wallet_address == "0x3333333333333333333333333333333333333333"
 
 
 def test_live_trader_ticks_only_selected_markets():

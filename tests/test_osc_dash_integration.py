@@ -756,23 +756,38 @@ def test_api_live_state_includes_series_metadata():
     assert "selected_series" in data
 
 
-def test_api_live_config_rejects_market_change_while_running():
-    """Verify /api/live/config returns HTTP 400 if user tries to change markets while bot is running."""
+def test_api_live_config_rejects_changes_while_running():
+    """Verify /api/live/config returns HTTP 400 if user tries to change markets or parameters while bot is running."""
     engine = osc_dash.get_live_trader_engine()
     engine.is_running = True
     try:
+        # Market change while running rejected
         res = client.post("/api/live/config", json={"tokens": ["SOL"]})
         assert res.status_code == 400
         assert "Cannot change market selection while the trading bot is running" in res.json().get("error", "")
 
-        # But updating other parameters (offset, shares) while running is accepted
-        res2 = client.post("/api/live/config", json={"offset": 0.025, "shares": 6})
-        assert res2.status_code == 200
+        # Parameter changes (offset, shares) while running are also rejected
+        res2 = client.post("/api/live/config", json={"offset": 0.04})
+        assert res2.status_code == 400
+        assert "Cannot change strategy parameters while the trading bot is running" in res2.json().get("error", "")
+
+        # Idempotent call with matching active parameters is accepted
+        res_idempotent = client.post("/api/live/config", json={"offset": engine.offset, "shares": engine.shares})
+        assert res_idempotent.status_code == 200
+
+        # Once stopped, updating parameters is accepted
+        engine.is_running = False
+        res3 = client.post("/api/live/config", json={"offset": 0.025, "shares": 6})
+        assert res3.status_code == 200
         assert engine.offset == 0.025
         assert engine.shares == 6
     finally:
         engine.is_running = False
-        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
+        engine.update_config(
+            offset=0.02,
+            shares=5,
+            selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"],
+        )
 
 
 def test_cockpit_ui_locks_market_filters_while_running():
