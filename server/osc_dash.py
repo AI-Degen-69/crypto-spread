@@ -826,7 +826,7 @@ async def api_live_cancel_order(request: Request):
     if not order_id:
         return JSONResponse(status_code=400, content={"error": "order_id required"})
     engine = get_live_trader_engine()
-    ok = engine.cancel_live_order(order_id)
+    ok = await asyncio.to_thread(engine.cancel_live_order, order_id)
     return {"ok": ok, "order_id": order_id}
 
 
@@ -1136,7 +1136,7 @@ FULL_APP_HTML = r"""<!doctype html><html lang="he" dir="rtl"><head>
 :root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased}
 a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
-.mono{font-family:var(--mono)}
+.mono{font-family:var(--mono);direction:ltr;unicode-bidi:isolate}
 .hdr{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hdr h1{margin:0;font:700 16px var(--disp);display:flex;align-items:center;gap:8px}
 .tag{border:1px solid var(--up);color:var(--up);border-radius:99px;padding:2px 8px;font-size:10px;font-weight:700}
@@ -1722,14 +1722,14 @@ function formatSignedMoneyPct(dollarVal, pctVal) {
   const p = pctVal != null && !isNaN(Number(pctVal)) ? Number(pctVal) : null;
 
   let dStr = '';
-  if (d > 0.00001) dStr = `+$${d.toFixed(2)}`;
-  else if (d < -0.00001) dStr = `-$${Math.abs(d).toFixed(2)}`;
+  if (d >= 0.005) dStr = `+$${d.toFixed(2)}`;
+  else if (d <= -0.005) dStr = `-$${Math.abs(d).toFixed(2)}`;
   else dStr = '$0.00';
 
   if (p == null) return dStr;
   let pStr = '';
-  if (p > 0.00001) pStr = `(+${p.toFixed(1)}%)`;
-  else if (p < -0.00001) pStr = `(-${Math.abs(p).toFixed(1)}%)`;
+  if (p >= 0.05) pStr = `(+${p.toFixed(1)}%)`;
+  else if (p <= -0.05) pStr = `(-${Math.abs(p).toFixed(1)}%)`;
   else pStr = '(0.0%)';
 
   return `${dStr} ${pStr}`;
@@ -1822,14 +1822,21 @@ function groupPositionsByPair(positions, markets) {
     g.legs.sort((a, b) => (a.isUp === b.isUp ? 0 : a.isUp ? -1 : 1));
     g.rowspan = g.legs.length;
     
+    const upSize = g.legs.filter(l => l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
+    const downSize = g.legs.filter(l => !l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
     const upLeg = g.legs.find(l => l.isUp);
     const downLeg = g.legs.find(l => !l.isUp);
-    const upSize = upLeg ? upLeg.sizeNum : 0;
-    const downSize = downLeg ? downLeg.sizeNum : 0;
     
     let totalCost = 0;
+    let totalRealized = 0;
+    let hasRealized = false;
     for (const leg of g.legs) {
       if (leg.baseCost != null) totalCost += leg.sizeNum * leg.baseCost;
+      const cp = leg.cashPnl != null ? Number(leg.cashPnl) : null;
+      if (cp != null && !isNaN(cp)) {
+        totalRealized += cp;
+        hasRealized = true;
+      }
     }
 
     if (upLeg && downLeg) {
@@ -1842,6 +1849,8 @@ function groupPositionsByPair(positions, markets) {
         const remLeg = upSize > downSize ? upLeg : downLeg;
         if (remLeg.curPrice != null) {
           mktVal += remainderShares * remLeg.curPrice;
+        } else if (remLeg.baseCost != null) {
+          mktVal += remainderShares * remLeg.baseCost;
         }
       }
       g.market_val = mktVal;
@@ -1850,6 +1859,8 @@ function groupPositionsByPair(positions, markets) {
       const singleLeg = upLeg || downLeg;
       if (singleLeg && singleLeg.curPrice != null) {
         g.market_val = singleLeg.sizeNum * singleLeg.curPrice;
+      } else if (singleLeg && singleLeg.baseCost != null) {
+        g.market_val = singleLeg.sizeNum * singleLeg.baseCost;
       } else {
         g.market_val = null;
       }
@@ -1858,6 +1869,11 @@ function groupPositionsByPair(positions, markets) {
     if (g.market_val != null && totalCost > 0) {
       g.unrealized_usd = g.market_val - totalCost;
       g.unrealized_pct = (g.unrealized_usd / totalCost) * 100;
+    }
+
+    if (hasRealized) {
+      g.realized_usd = Math.round(totalRealized * 100) / 100;
+      g.realized_pct = totalCost > 0 ? (totalRealized / totalCost) * 100 : 0.0;
     }
   }
   return groups;

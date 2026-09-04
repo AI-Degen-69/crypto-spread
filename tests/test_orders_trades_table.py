@@ -176,6 +176,10 @@ def test_js_helpers_presence_and_execution():
     const nullFmt = formatSignedMoneyPct(null, null);
     if (nullFmt !== '--') throw new Error('Null fmt mismatch: ' + nullFmt);
 
+    // Sub-cent formatting: -0.002 and 0.002 should not format as -$0.00 or +$0.00
+    const tinyNeg = formatSignedMoneyPct(-0.002, 0);
+    if (tinyNeg !== '$0.00 (0.0%)') throw new Error('Sub-cent negative mismatch: ' + tinyNeg);
+
     // 2. Test groupOrdersByPair
     if (typeof groupOrdersByPair !== 'function') throw new Error('groupOrdersByPair missing');
     const sampleOrders = [
@@ -193,12 +197,25 @@ def test_js_helpers_presence_and_execution():
     // 3. Test groupPositionsByPair
     if (typeof groupPositionsByPair !== 'function') throw new Error('groupPositionsByPair missing');
     const samplePos = [
-      {{ asset: 'BTC 5m', title: 'BTC 5m', outcome: 'UP', size: 5, avgPrice: 0.48, time: '14:00:00' }},
-      {{ asset: 'BTC 5m', title: 'BTC 5m', outcome: 'DOWN', size: 5, avgPrice: 0.48, time: '14:00:05' }}
+      {{ asset: 'BTC 5m', title: 'BTC 5m', outcome: 'UP', size: 5, avgPrice: 0.48, cashPnl: 0.20, time: '14:00:00' }},
+      {{ asset: 'BTC 5m', title: 'BTC 5m', outcome: 'DOWN', size: 5, avgPrice: 0.48, cashPnl: 0.10, time: '14:00:05' }}
     ];
     const groupedPos = groupPositionsByPair(samplePos, {{}});
     if (!groupedPos['BTC 5m']) throw new Error('BTC 5m position group missing');
     if (groupedPos['BTC 5m'].status !== 'Paired') throw new Error('Position pair should be Paired');
+    if (Math.abs(groupedPos['BTC 5m'].realized_usd - 0.30) > 0.001) throw new Error('Realized USD should be 0.30, got: ' + groupedPos['BTC 5m'].realized_usd);
+
+    // Test partial position without curPrice falling back to baseCost instead of false loss
+    const partialPos = [
+      {{ asset: 'ETH 5m', title: 'ETH 5m', outcome: 'UP', size: 5, avgPrice: 0.48, curPrice: null }},
+      {{ asset: 'ETH 5m', title: 'ETH 5m', outcome: 'DOWN', size: 2, avgPrice: 0.48, curPrice: null }}
+    ];
+    const groupedPartial = groupPositionsByPair(partialPos, {{}});
+    if (groupedPartial['ETH 5m'].status !== 'Partial') throw new Error('Should be Partial');
+    if (groupedPartial['ETH 5m'].market_val == null || groupedPartial['ETH 5m'].market_val <= 2.00) {{
+      throw new Error('Partial market_val should fall back to baseCost, got: ' + groupedPartial['ETH 5m'].market_val);
+    }}
+
     // 4. Test tab switching and localStorage persistence
     switchOtTab('positions');
     if (localStorage.getItem('crypto-spread-ot-view') !== 'positions') throw new Error('localStorage failed to save positions');
@@ -326,4 +343,56 @@ def test_cockpit_dom_rendering_with_state():
     res = subprocess.run(["node"], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
     assert res.returncode == 0, f"Node DOM render test failed: {res.stderr}\n{res.stdout}"
     assert "ALL_DOM_RENDER_TESTS_PASSED" in res.stdout
+
+
+def test_engine_order_resolution_and_cleanup():
+    """Verify get_open_orders_list resolves CLOB token IDs to markets and sides, and cancel_live_order clears state."""
+    from unittest.mock import MagicMock
+    from strategy.live_trader import LiveTraderEngine, MarketLiveState
+
+    engine = LiveTraderEngine()
+    m = MarketLiveState(
+        slug="btc-5m",
+        label="BTC 5m",
+        color="#f7931a",
+        up_token="token_up_123",
+        down_token="token_down_456",
+        order_id_up="ord_up_999",
+        order_status_up="RESTING",
+        order_time_up="14:10:00",
+    )
+    engine.markets["btc-5m"] = m
+
+    mock_client = MagicMock()
+    mock_client.get_orders.return_value = [
+        {
+            "id": "clob_1",
+            "asset_id": "token_up_123",
+            "side": "BUY",
+            "price": 0.48,
+            "original_size": 5.0,
+            "status": "OPEN",
+            "created_at": "2026-09-04T14:15:30Z",
+        }
+    ]
+    engine.get_clob_client = MagicMock(return_value=mock_client)
+
+    orders = engine.get_open_orders_list()
+    assert len(orders) == 2  # clob_1 and ord_up_999
+    clob_order = next(o for o in orders if o["order_id"] == "clob_1")
+    assert clob_order["market"] == "BTC 5m"
+    assert "UP" in clob_order["side"]
+    assert clob_order["time"] == "14:15:30"
+
+    engine_order = next(o for o in orders if o["order_id"] == "ord_up_999")
+    assert engine_order["time"] == "14:10:00"
+
+    # Test single-order cancellation cleans up state in self.markets
+    mock_client.cancel.return_value = True
+    ok = engine.cancel_live_order("ord_up_999")
+    assert ok is True
+    assert m.order_id_up is None
+    assert m.order_status_up == "CANCELLED"
+    assert m.order_time_up == "-"
+
 
