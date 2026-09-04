@@ -1,22 +1,11 @@
-# Technical Implementation Plan: Dashboard UI Controls for Market Selection (Issue #51)
+# Implementation Plan: Display Actual Polymarket Position Values and Fill History (Issue #49)
 
-## Overview
-Expose market selection by token (`BTC`, `ETH`, `BNB`, `SOL`, `XRP`) and duration (`5m`, `15m`, or `both`) on the FastAPI dashboard API (`server/osc_dash.py`) and Live Cockpit web UI, allowing operators to interactively configure active trading markets and view dynamically rendered status cards and prices.
+## Capability Map & Dependencies
+- `positions-api` (Module 1): Fetch and parse structured open positions list from Polymarket Data API.
+- `execution-fill-tracking` (Module 2, depends on Module 1): Update fill detection in `LiveTraderEngine._on_tick` and pair merge / stop loss PnL math.
+- `cockpit-ui-reflection` (Module 3, depends on Modules 1 & 2): Update Cockpit cards and trades table in `server/osc_dash.py`.
 
-## Dependency Graph
-1. **API Endpoints & Schemas (`server/osc_dash.py`)**:
-   - Extend `LiveConfigPayload` with `selected_markets`, `tokens`, and `durations`.
-   - Update `api_live_config()` to pass selection to `LiveTraderEngine.update_config()` with `try/except ValueError` returning HTTP 400.
-   - Update `api_live_state()` to expose all 10 series in `available_series` and active selections in `selected_series`.
-2. **Dashboard UI Components & Logic (`server/osc_dash.py`)**:
-   - Add Token filter chips (`BTC`, `ETH`, `BNB`, `SOL`, `XRP`, All, Clear) to Cockpit header/controls.
-   - Add Duration filter toggle buttons (`5m`, `15m`, `Both`).
-   - Refactor `renderCockpitUI` and `COCKPIT_SERIES` to dynamically render market cards based on `selected_series` / `available_series`.
-   - Wire interactive click handlers to call `/api/live/config` and update UI state.
-3. **Automated Integration Tests (`tests/test_osc_dash_integration.py`)**:
-   - Test `/api/live/config` with token and duration payloads.
-   - Test `/api/live/config` rejection with HTTP 400 on invalid tokens or open position deselection.
-   - Test `/api/live/state` includes complete `available_series` and active `selected_series`.
-4. **Verification & Regression**:
-   - Run `python -m pytest -q` across all 160+ tests.
-   - Verify 100% docstring coverage.
+## Tasks
+1. **Task 1 (`positions-api`)**: Update `fetch_polymarket_account_value` in `strategy/live_trader.py` to parse and return structured open `positions` list; expose in `/api/live/account` and `get_state()`.
+2. **Task 2 (`execution-fill-tracking`)**: Update CLOB fill detection in `LiveTraderEngine._on_tick` to record true execution price in `fill_price_up` and `fill_price_down`, and update pair merge realized PnL to `(1.00 - (fill_price_up + fill_price_down)) * shares`.
+3. **Task 3 (`cockpit-ui-reflection`)**: Update `server/osc_dash.py` Cockpit cards to display actual fill prices (`m.fill_price_* || m.resting_*`) and show open positions list.

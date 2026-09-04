@@ -1605,6 +1605,31 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </div>
     </div>
 
+    <!-- Live Polymarket Open Positions Table -->
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <h3 style="margin:0">💼 Polymarket Open Positions (<span id="cockpitPositionsCount">0</span> open)</h3>
+        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="fetchCockpitState()">🔄 Refresh Positions</button>
+      </div>
+      <div style="max-height:220px;overflow-y:auto">
+        <table class="tbl" id="cockpitPositionsTable">
+          <thead>
+            <tr>
+              <th>Market / Asset</th>
+              <th>Outcome</th>
+              <th>Shares</th>
+              <th>Avg Buy Price</th>
+              <th>Cur Price</th>
+              <th>Cash P&L</th>
+            </tr>
+          </thead>
+          <tbody id="cockpitPositionsBody">
+            <tr><td colspan="6" style="text-align:center;color:var(--dim);padding:16px">No open positions on Polymarket account.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Live Trade History Log -->
     <div class="card" style="margin-top:12px">
       <h3 style="margin:0 0 8px">📋 Live Execution Trade Log</h3>
@@ -3018,9 +3043,15 @@ function renderCockpitUI(st) {
       else if (m.status === 'STOP_EXIT') { statusBadgeCls = 'pill-mono'; statusText = 'STOPPED OUT'; }
 
       let posStr = 'FLAT';
-      if (m.filled_up && m.filled_down) { posStr = `MERGED PAIR (${m.order_shares || 5})`; }
-      else if (m.filled_up) { posStr = `LONG UP (${m.order_shares || 5}) @ $${(m.resting_up || 0.48).toFixed(2)}`; }
-      else if (m.filled_down) { posStr = `LONG DOWN (${m.order_shares || 5}) @ $${(m.resting_down || 0.48).toFixed(2)}`; }
+      const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
+      const actualDown = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
+      if (m.filled_up && m.filled_down) { posStr = `MERGED PAIR (${m.order_shares || 5}) @ $${actualUp.toFixed(2)} + $${actualDown.toFixed(2)}`; }
+      else if (m.filled_up) { posStr = `LONG UP (${m.order_shares || 5}) @ $${actualUp.toFixed(2)}`; }
+      else if (m.filled_down) { posStr = `LONG DOWN (${m.order_shares || 5}) @ $${actualDown.toFixed(2)}`; }
+
+      const fillsSub = (m.fill_price_up != null || m.fill_price_down != null)
+        ? ` · Fills: $${(m.fill_price_up != null ? m.fill_price_up.toFixed(2) : '-')} / $${(m.fill_price_down != null ? m.fill_price_down.toFixed(2) : '-')}`
+        : '';
 
       gridHtml += `
         <div class="card" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin:0;display:flex;flex-direction:column;justify-content:space-between">
@@ -3051,7 +3082,7 @@ function renderCockpitUI(st) {
             <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
               <div style="font-size:9px;color:var(--faint);font-weight:700;text-transform:uppercase;margin-bottom:2px">Orders & Position</div>
               <div class="mono" style="font-size:11px;font-weight:600;color:var(--tx)">${posStr}</div>
-              <div class="mono" style="font-size:10px;color:var(--dim)">Bids: $${(m.resting_up || 0.48).toFixed(2)} / $${(m.resting_down || 0.48).toFixed(2)}</div>
+              <div class="mono" style="font-size:10px;color:var(--dim)">Bids: $${(m.resting_up || 0.48).toFixed(2)} / $${(m.resting_down || 0.48).toFixed(2)}${fillsSub}</div>
             </div>
           </div>
 
@@ -3108,6 +3139,41 @@ function renderCockpitUI(st) {
       ordersBodyEl.querySelectorAll('.cancel-order-btn').forEach(btn => {
         btn.addEventListener('click', () => cancelSingleOrder(btn.dataset.orderId));
       });
+    }
+  }
+
+  // 4b. Render Live Polymarket Open Positions Table
+  const posBodyEl = $('cockpitPositionsBody');
+  const posCountEl = $('cockpitPositionsCount');
+  const openPos = st.open_positions || st.positions || [];
+  if (posCountEl) posCountEl.textContent = String(openPos.length);
+  if (posBodyEl) {
+    if (openPos.length === 0) {
+      posBodyEl.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:16px">No open positions on Polymarket account.</td></tr>';
+    } else {
+      let posHtml = '';
+      for (const p of openPos) {
+        const titleStr = p.title || p.asset || '-';
+        const outcomeStr = p.outcome || '-';
+        const sizeStr = p.size != null ? Number(p.size).toFixed(2) : '-';
+        const avgPriceStr = p.avgPrice != null ? `$${Number(p.avgPrice).toFixed(3)}` : '-';
+        const curPriceStr = p.curPrice != null ? `$${Number(p.curPrice).toFixed(3)}` : '-';
+        const cashPnl = p.cashPnl != null ? Number(p.cashPnl) : null;
+        const pnlCol = cashPnl != null ? (cashPnl >= 0 ? 'var(--up)' : 'var(--down)') : 'var(--tx)';
+        const pnlStr = cashPnl != null ? `${cashPnl >= 0 ? '+' : ''}$${cashPnl.toFixed(2)}` : '-';
+
+        posHtml += `
+          <tr>
+            <td style="font-weight:600;max-width:240px;overflow:hidden;text-overflow:ellipsis" title="${esc(titleStr)}">${esc(titleStr)}</td>
+            <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(outcomeStr)}</span></td>
+            <td class="mono">${sizeStr}</td>
+            <td class="mono">${avgPriceStr}</td>
+            <td class="mono">${curPriceStr}</td>
+            <td class="mono" style="font-weight:700;color:${pnlCol}">${pnlStr}</td>
+          </tr>
+        `;
+      }
+      posBodyEl.innerHTML = posHtml;
     }
   }
 

@@ -742,3 +742,124 @@ def test_live_trader_start_sets_quoting_halted_under_lock(monkeypatch):
     assert engine.is_running
     assert not engine.quoting_halted
 
+
+def test_fetch_polymarket_account_value_positions(monkeypatch):
+    """Verify fetch_polymarket_account_value returns parsed positions array with full attributes."""
+    monkeypatch.setattr("strategy.live_trader._load_env_file", lambda: None)
+    for name in ("POLY_PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY", "POLY_API_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE"):
+        monkeypatch.delenv(name, raising=False)
+    from unittest.mock import MagicMock
+    from strategy.live_trader import fetch_polymarket_account_value
+
+    fake_sess = MagicMock()
+    fake_pos_resp = MagicMock()
+    fake_pos_resp.ok = True
+    fake_pos_resp.json.return_value = [
+        {
+            "asset": "0xtoken123",
+            "conditionId": "0xcond123",
+            "size": "10.0",
+            "avgPrice": "0.485",
+            "curPrice": "0.52",
+            "initialValue": "4.85",
+            "currentValue": "5.20",
+            "cashPnl": "0.35",
+            "title": "Bitcoin Up or Down 5m",
+            "outcome": "Up",
+        }
+    ]
+    fake_sess.get.return_value = fake_pos_resp
+
+    res = fetch_polymarket_account_value(wallet_address="0xee3b778a783510bc833384919f709e3d2fee1624", session=fake_sess)
+    assert res["success"] is True
+    assert "positions" in res
+    assert len(res["positions"]) == 1
+    p = res["positions"][0]
+    assert p["asset"] == "0xtoken123"
+    assert p["conditionId"] == "0xcond123"
+    assert p["size"] == 10.0
+    assert p["avgPrice"] == 0.485
+    assert p["curPrice"] == 0.52
+    assert p["cashPnl"] == 0.35
+    assert p["title"] == "Bitcoin Up or Down 5m"
+    assert p["outcome"] == "Up"
+
+
+def test_fill_price_and_slippage_pair_merge_pnl(monkeypatch):
+    """Verify live fill price records true match price from CLOB order and pair merge reflects slippage."""
+    from unittest.mock import MagicMock
+    from strategy.live_trader import LiveTraderEngine
+
+    engine = LiveTraderEngine(selected_markets=["btc-up-or-down-5m"])
+    engine.mode = "live"
+    engine.is_running = True
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    monkeypatch.setattr(engine, "merge_positions", lambda *args, **kwargs: None)
+
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    mstate.start_ts = 100.0
+    mstate.end_ts = 400.0
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+    mstate.order_id_up = "ord_up_1"
+    mstate.order_id_down = "ord_dn_1"
+    mstate.resting_up = 0.48
+    mstate.resting_down = 0.48
+    mstate.order_shares = 5
+
+    # Mock CLOB client returning orders with slippage
+    fake_client = MagicMock()
+    fake_client.get_order.side_effect = lambda order_id: {
+        "ord_up_1": {
+            "status": "MATCHED",
+            "size_matched": "5.0",
+            "price": "0.49",
+            "associate_trades": [{"price": "0.49", "size": "5.0"}],
+        },
+        "ord_dn_1": {
+            "status": "FILLED",
+            "size_matched": "5.0",
+            "price": "0.485",
+            "associate_trades": [{"price": "0.485", "size": "5.0"}],
+        },
+    }.get(order_id, {})
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+
+    poll_data = {
+        "market": {
+            "conditionId": "cond1",
+            "slug": "mkt1",
+            "up_token": "tok_up",
+            "down_token": "tok_dn",
+            "start_ts": 100.0,
+            "end_ts": 400.0,
+        },
+        "up_book": {"best_bid": 0.47, "best_ask": 0.50},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.50},
+    }
+
+    # Run update
+    engine._update_market_strategy(slug, poll_data, 150.0)
+
+    # Assertions
+    assert mstate.filled_up is True
+    assert mstate.filled_down is True
+    assert mstate.fill_price_up == 0.49
+    assert mstate.fill_price_down == 0.485
+    assert mstate.pair_captured is True
+
+    # Realized PnL: (1.00 - (0.49 + 0.485)) * 5 = (1.00 - 0.975) * 5 = 0.025 * 5 = 0.125
+    assert abs(mstate.realized_pnl_usd - 0.125) < 1e-4
+
+    # Assert trade event recorded true entry prices and pnl
+    assert len(engine.trades) == 1
+    tr = engine.trades[0]
+    assert tr.action == "PAIR_MERGE"
+    assert tr.entry_price_up == 0.49
+    assert tr.entry_price_down == 0.485
+    assert abs(tr.pnl_usd - 0.125) < 1e-4
+
+
+

@@ -133,6 +133,8 @@ def fetch_polymarket_account_value(
             errors.append(f"CLOB cash error: {e}")
             log.debug("CLOB balance fetch failed: %s", e)
 
+    positions_list: List[Dict[str, Any]] = []
+
     # 2. Polymarket Data API Open Positions Market Value
     if funder and funder.startswith("0x"):
         try:
@@ -142,6 +144,20 @@ def fetch_polymarket_account_value(
                 if isinstance(data, list):
                     positions_value = sum(float(p.get("currentValue", 0.0) or 0.0) for p in data)
                     open_positions_count = len(data)
+                    for p in data:
+                        if isinstance(p, dict):
+                            positions_list.append({
+                                "asset": str(p.get("asset") or ""),
+                                "conditionId": str(p.get("conditionId") or ""),
+                                "size": float(p.get("size", 0.0) or 0.0),
+                                "avgPrice": float(p.get("avgPrice", 0.0) or 0.0),
+                                "curPrice": float(p.get("curPrice", 0.0) or 0.0),
+                                "initialValue": float(p.get("initialValue", 0.0) or 0.0),
+                                "currentValue": float(p.get("currentValue", 0.0) or 0.0),
+                                "cashPnl": float(p.get("cashPnl", 0.0) or 0.0),
+                                "title": str(p.get("title") or ""),
+                                "outcome": str(p.get("outcome") or ""),
+                            })
                     log.debug("Polymarket positions value for %s: $%.2f across %d positions", funder, positions_value, open_positions_count)
         except Exception as e:
             errors.append(f"Positions error: {e}")
@@ -182,6 +198,7 @@ def fetch_polymarket_account_value(
         "cash_balance": round(cash_balance or 0.0, 2),
         "positions_value": round(positions_value, 2),
         "open_positions": open_positions_count,
+        "positions": positions_list,
         "errors": errors,
     }
 
@@ -480,6 +497,7 @@ class LiveTraderEngine:
         self.total_pairs_merged: int = 0
         self.total_stops_triggered: int = 0
         self.session_start_ts: float = time.time()
+        self.open_positions: List[Dict[str, Any]] = []
         
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
@@ -1048,8 +1066,8 @@ class LiveTraderEngine:
             "pairs_merged": sum(m.pairs_count for m in self.markets.values()),
             "stops_triggered": sum(m.stops_count for m in self.markets.values()),
             "active_exposure": round(sum(
-                (m.order_shares * (m.resting_up if m.filled_up else 0) +
-                 m.order_shares * (m.resting_down if m.filled_down else 0))
+                (m.order_shares * ((m.fill_price_up if m.fill_price_up is not None else m.resting_up) if m.filled_up else 0) +
+                 m.order_shares * ((m.fill_price_down if m.fill_price_down is not None else m.resting_down) if m.filled_down else 0))
                 for m in self.markets.values() if not m.pair_captured
             ), 2),
             "params": {
@@ -1063,6 +1081,9 @@ class LiveTraderEngine:
             "trades": recent_trades,
             "open_orders": open_orders,
             "open_orders_count": len(open_orders),
+            "positions": self.open_positions,
+            "open_positions": self.open_positions,
+            "positions_count": len(self.open_positions),
             "selected_series": [s[0] for s in self.selected_series],
             "available_series": [
                 {
@@ -1185,6 +1206,7 @@ class LiveTraderEngine:
             val_info = fetch_polymarket_account_value(addr)
             if val_info.get("success"):
                 self.starting_balance = float(val_info["net_value"])
+                self.open_positions = val_info.get("positions", [])
                 if not self.wallet_address and val_info.get("wallet_address"):
                     self.wallet_address = val_info["wallet_address"]
                 log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
@@ -1218,6 +1240,7 @@ class LiveTraderEngine:
             info = fetch_polymarket_account_value(addr)
             if info.get("success"):
                 net_val = float(info.get("net_value", 0.0))
+                self.open_positions = info.get("positions", [])
                 if self.mode == "live":
                     self.starting_balance = net_val
                     log.info("Live mode: fetched Polymarket portfolio balance: $%.2f", net_val)
@@ -1715,6 +1738,18 @@ class LiveTraderEngine:
             ),
         ]
         self.trades = demo_trades
+        self.open_positions = [
+            {
+                "asset": "0x1234567890abcdef1",
+                "conditionId": "0xabcdef1234567890",
+                "size": 5.0,
+                "avgPrice": 0.485,
+                "curPrice": 0.510,
+                "cashPnl": 0.125,
+                "title": "ETH Up or Down 5m",
+                "outcome": "Up",
+            },
+        ]
 
         m_btc = self.markets.get("btc-up-or-down-5m")
         if m_btc:
@@ -1734,7 +1769,8 @@ class LiveTraderEngine:
             m_eth.status = "FILLED_UP"
             m_eth.filled_up = True
             m_eth.resting_up = 0.48
-            m_eth.last_action = "Filled UP 5 shares @ 0.48"
+            m_eth.fill_price_up = 0.485
+            m_eth.last_action = "Filled UP 5 shares @ 0.485"
 
         m_sol = self.markets.get("sol-up-or-down-5m")
         if m_sol:
@@ -1744,6 +1780,7 @@ class LiveTraderEngine:
             m_sol.trades_count = 1
             m_sol.status = "STOP_EXIT"
             m_sol.exit_taken = True
+            m_sol.fill_price_up = 0.48
             m_sol.last_action = "Stop Loss UP @ 0.43 (-$0.25)"
 
         m_bnb = self.markets.get("bnb-up-or-down-5m")
@@ -1754,6 +1791,10 @@ class LiveTraderEngine:
             m_bnb.trades_count = 1
             m_bnb.status = "PAIR_MERGED"
             m_bnb.pair_captured = True
+            m_bnb.filled_up = True
+            m_bnb.filled_down = True
+            m_bnb.fill_price_up = 0.48
+            m_bnb.fill_price_down = 0.48
             m_bnb.last_action = "Pair Merged! +$0.20"
 
         m_xrp = self.markets.get("xrp-up-or-down-5m")
@@ -2062,11 +2103,22 @@ class LiveTraderEngine:
                             sz_up = float(ord_up.get("size_matched", 0.0) or 0.0)
                             if st_up in ("MATCHED", "FILLED") or sz_up >= mstate.order_shares:
                                 mstate.filled_up = True
-                                mstate.fill_price_up = resting_up
+                                actual_px_up = None
+                                trades_up = ord_up.get("associate_trades") or ord_up.get("trades")
+                                if isinstance(trades_up, list) and trades_up:
+                                    tot_vol = sum(float(t.get("size", 0.0) or 0.0) for t in trades_up)
+                                    if tot_vol > 0:
+                                        actual_px_up = sum(float(t.get("price", 0.0) or 0.0) * float(t.get("size", 0.0) or 0.0) for t in trades_up) / tot_vol
+                                if actual_px_up is None and ord_up.get("price") is not None:
+                                    try:
+                                        actual_px_up = float(ord_up["price"])
+                                    except (ValueError, TypeError):
+                                        pass
+                                mstate.fill_price_up = round(actual_px_up if actual_px_up is not None else resting_up, 4)
                                 mstate.order_status_up = "FILLED"
                                 mstate.status = "FILLED_UP"
-                                mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
-                                log.info("[%s] UP leg FILLED on CLOB (status=%s, matched=%.1f)", slug, st_up, sz_up)
+                                mstate.last_action = f"Filled UP {self.shares} shares @ {mstate.fill_price_up:.2f}"
+                                log.info("[%s] UP leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_up, sz_up, mstate.fill_price_up)
                         except Exception as e:
                             log.debug("[%s] Error checking UP order: %s", slug, e)
 
@@ -2077,11 +2129,22 @@ class LiveTraderEngine:
                             sz_dn = float(ord_dn.get("size_matched", 0.0) or 0.0)
                             if st_dn in ("MATCHED", "FILLED") or sz_dn >= mstate.order_shares:
                                 mstate.filled_down = True
-                                mstate.fill_price_down = resting_down
+                                actual_px_dn = None
+                                trades_dn = ord_dn.get("associate_trades") or ord_dn.get("trades")
+                                if isinstance(trades_dn, list) and trades_dn:
+                                    tot_vol = sum(float(t.get("size", 0.0) or 0.0) for t in trades_dn)
+                                    if tot_vol > 0:
+                                        actual_px_dn = sum(float(t.get("price", 0.0) or 0.0) * float(t.get("size", 0.0) or 0.0) for t in trades_dn) / tot_vol
+                                if actual_px_dn is None and ord_dn.get("price") is not None:
+                                    try:
+                                        actual_px_dn = float(ord_dn["price"])
+                                    except (ValueError, TypeError):
+                                        pass
+                                mstate.fill_price_down = round(actual_px_dn if actual_px_dn is not None else resting_down, 4)
                                 mstate.order_status_down = "FILLED"
                                 mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
-                                mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
-                                log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f)", slug, st_dn, sz_dn)
+                                mstate.last_action = f"Filled DOWN {self.shares} shares @ {mstate.fill_price_down:.2f}"
+                                log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_dn, sz_dn, mstate.fill_price_down)
                         except Exception as e:
                             log.debug("[%s] Error checking DOWN order: %s", slug, e)
             else:
@@ -2111,19 +2174,21 @@ class LiveTraderEngine:
             if mstate.filled_up and mstate.filled_down:
                 mstate.pair_captured = True
                 mstate.status = "PAIR_MERGED"
-                pair_profit_usd = (1.00 - (resting_up + resting_down)) * self.shares
+                fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                pair_profit_usd = (1.00 - (fill_up + fill_dn)) * self.shares
                 mstate.realized_pnl_usd += pair_profit_usd
                 mstate.unrealized_pnl_usd = 0.0
                 mstate.total_pnl_usd = mstate.realized_pnl_usd
                 mstate.pairs_count += 1
                 mstate.trades_count += 1
                 mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
-                log.info("[%s] PAIR MERGED! Profit: +$%.2f", slug, pair_profit_usd)
+                log.info("[%s] PAIR MERGED! Profit: +$%.2f (entry=%.3f+%.3f)", slug, pair_profit_usd, fill_up, fill_dn)
                 
                 if self.mode == "live":
                     self.merge_positions(mstate.condition_id)
 
-                denom = max(0.01, 2 * resting_up * max(1, self.shares))
+                denom = max(0.01, (fill_up + fill_dn) * max(1, self.shares))
                 with self._engine_lock:
                     self.trades.append(TradeEvent(
                         id=f"{slug}_{int(now)}",
@@ -2132,12 +2197,12 @@ class LiveTraderEngine:
                         label=mstate.label,
                         action="PAIR_MERGE",
                         shares=self.shares,
-                        entry_price_up=resting_up,
-                        entry_price_down=resting_down,
+                        entry_price_up=fill_up,
+                        entry_price_down=fill_dn,
                         exit_price=1.00,
                         pnl_usd=round(pair_profit_usd, 3),
                         pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
-                        notes=f"Complete spread capture @ {resting_up:.2f} + {resting_down:.2f}",
+                        notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
                     ))
                     self._save_persisted_trades()
                 return
@@ -2185,10 +2250,12 @@ class LiveTraderEngine:
             mstate.unrealized_pnl_usd = 0.0
         else:
             unrealized = 0.0
+            fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+            fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
             if mstate.filled_up and mstate.up_bid is not None:
-                unrealized += (mstate.up_bid - resting_up) * self.shares
+                unrealized += (mstate.up_bid - fill_up) * self.shares
             if mstate.filled_down and mstate.down_bid is not None:
-                unrealized += (mstate.down_bid - resting_down) * self.shares
+                unrealized += (mstate.down_bid - fill_dn) * self.shares
             mstate.unrealized_pnl_usd = round(unrealized, 3)
 
         mstate.total_pnl_usd = round(mstate.realized_pnl_usd + mstate.unrealized_pnl_usd, 3)
@@ -2218,13 +2285,15 @@ class LiveTraderEngine:
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down
+            fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+            fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
             settle_pnl = 0.0
             if mstate.filled_up:
                 bid = mstate.up_bid or 0.50
-                settle_pnl += (bid - resting_up) * self.shares
+                settle_pnl += (bid - fill_up) * self.shares
             if mstate.filled_down:
                 bid = mstate.down_bid or 0.50
-                settle_pnl += (bid - resting_down) * self.shares
+                settle_pnl += (bid - fill_dn) * self.shares
 
             mstate.realized_pnl_usd += settle_pnl
             mstate.unrealized_pnl_usd = 0.0
@@ -2232,6 +2301,7 @@ class LiveTraderEngine:
             mstate.trades_count += 1
             log.info("[%s] Window Rollover Settled PnL: $%.2f", mstate.slug, settle_pnl)
 
+            cost_basis = max(0.01, (fill_up if mstate.filled_up else fill_dn) * self.shares)
             with self._engine_lock:
                 self.trades.append(TradeEvent(
                     id=f"{mstate.slug}_{int(now)}",
@@ -2240,11 +2310,11 @@ class LiveTraderEngine:
                     label=mstate.label,
                     action="WINDOW_SETTLE",
                     shares=self.shares,
-                    entry_price_up=resting_up if mstate.filled_up else None,
-                    entry_price_down=resting_down if mstate.filled_down else None,
+                    entry_price_up=fill_up if mstate.filled_up else None,
+                    entry_price_down=fill_dn if mstate.filled_down else None,
                     exit_price=mstate.mid,
                     pnl_usd=round(settle_pnl, 3),
-                    pnl_pct=round((settle_pnl / (resting_up * self.shares)) * 100.0, 1),
+                    pnl_pct=round((settle_pnl / cost_basis) * 100.0, 1),
                     notes="Window expired, position auto-settled",
                 ))
                 self._save_persisted_trades()

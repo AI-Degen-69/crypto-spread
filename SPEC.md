@@ -1,78 +1,107 @@
-# SPEC: Part 2 — Dashboard UI Controls for Market Selection by Token and Duration
+# Spec: Display Actual Polymarket Position Values and Fill History (Issue #49)
 
-## Objective
-Provide operators with live interactive controls in the Cockpit dashboard (`server/osc_dash.py`) to select which cryptocurrency markets and window durations (`5m`, `15m`, or `both`) to quote and trade on, updating the live engine dynamically via `/api/live/config` and filtering the Cockpit status cards and charts accordingly.
+## 1. Objective
+Enable accurate live execution reporting and slippage-aware PnL accounting across the engine and dashboard.
+Today, `LiveTraderEngine` and the Live Cockpit dashboard assume fixed 0.48 entry quotes for position values and pair merge profits. When live orders fill with slippage or adverse fills, the dashboard shows theoretical 0.48 prices, and pair merge profit is computed as `(1.00 - (0.48 + 0.48)) * shares = $0.20`, ignoring real execution prices.
 
-## Tech Stack
-- Backend: Python 3.10+, FastAPI, Pydantic, Uvicorn
-- Frontend: Vanilla HTML5 / CSS3 / ES6 JavaScript (embedded in `server/osc_dash.py`), Chart.js
-- Testing: `pytest`, `httpx` / FastAPI `TestClient`
+This change:
+1. Ingests and preserves full position details (`avgPrice`, `curPrice`, `size`, `initialValue`, `currentValue`, `cashPnl`) from Polymarket Data API (`https://data-api.polymarket.com/positions?user={wallet}`).
+2. Records true executed match prices into `MarketLiveState.fill_price_up` and `MarketLiveState.fill_price_down` when orders match on CLOB or via positions reconciliation.
+3. Computes realized pair merge PnL using actual fill prices: `(1.00 - (fill_price_up + fill_price_down)) * shares`.
+4. Updates the Live Cockpit dashboard UI to display actual average fill prices (`m.fill_price_up || m.resting_up`) and exposes open positions in `/api/live/state` and `/api/live/account`.
 
-## Commands
+---
+
+## 2. Capability Map (Phase 0)
+
+| Module ID | Responsibility | Depends on |
+|---|---|---|
+| `positions-api` | Fetch, parse, and expose full open positions array from Polymarket Data API `/positions` | — |
+| `execution-fill-tracking` | Ingest real match prices on fill from CLOB/positions; compute slippage-aware realized & unrealized PnL | `positions-api` |
+| `cockpit-ui-reflection` | Update dashboard position cards & trades table to display true fill prices and live positions | `execution-fill-tracking`, `positions-api` |
+
+Build order: `positions-api` `→` `execution-fill-tracking` `→` `cockpit-ui-reflection`
+
+---
+
+## 3. Tech Stack
+- Python 3.11+
+- FastAPI, Uvicorn, Requests
+- Vanilla JavaScript & HTML/CSS (in `server/osc_dash.py`)
+- Pytest for automated unit and integration tests
+
+---
+
+## 4. Commands
 - Run test suite: `python -m pytest -q`
-- Run dashboard integration tests: `python -m pytest tests/test_osc_dash_integration.py -v`
+- Run live trader tests: `python -m pytest tests/test_live_trader.py -q`
+- Run dashboard tests: `python -m pytest tests/test_osc_dash_integration.py -q`
 - Start dashboard server: `python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802`
-- Verify docstrings: `python -m pytest tests/test_docstrings.py`
 
-## Project Structure
-- `server/osc_dash.py`:
-  - `LiveConfigPayload`: Add `selected_markets`, `tokens`, `durations`.
-  - `/api/live/config`: Handle and validate selection parameters, returning HTTP 400 on `ValueError`.
-  - `/api/live/state`: Return `available_series` (all 10 markets with token and duration metadata) and `selected_series`.
-  - HTML/JS Cockpit UI:
-    - Token filter toggles (`BTC`, `ETH`, `BNB`, `SOL`, `XRP`) + All / Clear.
-    - Duration filter toggles (`5m`, `15m`, `Both`).
-    - Dynamic market cards grid rendering only currently selected series.
-    - Persist user UI selection in `localStorage` and synchronize with backend `/api/live/state`.
-- `tests/test_osc_dash_integration.py`:
-  - Test `/api/live/config` with valid and invalid `selected_markets`, `tokens`, and `durations`.
-  - Test `/api/live/state` includes `available_series` and active `selected_series`.
-  - Test error handling when deselecting an active position returns HTTP 400 with explanation.
+---
 
-## Code Style & Architecture
-- **Pydantic Schema Extension**:
-```python
-class LiveConfigPayload(BaseModel):
-    offset: Optional[float] = Field(default=None, ge=0.001, le=0.49)
-    exit_thresh: Optional[float] = Field(default=None, ge=0.001, le=0.50)
-    shares: Optional[int] = Field(default=None, ge=1, le=10000)
-    mode: Optional[str] = Field(default=None, pattern="^(paper|live)$")
-    wallet_address: Optional[str] = None
-    starting_balance: Optional[float] = Field(default=None, ge=0.0)
-    selected_markets: Optional[List[str]] = None
-    tokens: Optional[List[str]] = None
-    durations: Optional[List[int]] = None
+## 5. Project Structure
 ```
-- **Error Propagation**: Catch `ValueError` in `api_live_config` and return `JSONResponse(status_code=400, content={"error": str(e)})`.
-- **UI State Synchronization**:
-  - `renderCockpitUI()` renders token pills and duration buttons reflecting active selections.
-  - Changing token or duration triggers an asynchronous `POST /api/live/config` call with updated selection.
-  - If server rejects (e.g. market has open position), UI alerts the operator and rolls back the toggle.
+strategy/
+  live_trader.py       -> fetch_polymarket_account_value, fill price tracking, pair merge PnL, get_state()
+server/
+  osc_dash.py          -> /api/live/account, /api/live/state, Cockpit UI cards & tables
+tests/
+  test_live_trader.py  -> Unit tests for position parsing, fill price recording, and slippage PnL
+SPEC.md                -> This specification
+```
 
-## Testing Strategy
-- Unit & integration tests in `tests/test_osc_dash_integration.py`:
-  - `test_api_live_config_market_selection()`: POST tokens and durations, assert 200 and updated state.
-  - `test_api_live_config_invalid_token()`: POST invalid token (e.g. `DOGE`), assert 400 error.
-  - `test_api_live_config_open_position_rejection()`: With an open leg in market, assert deselecting returns 400.
-  - `test_api_live_state_series_metadata()`: Assert available series list contains all 10 markets with slug, token, duration, label, and color.
-- Regression testing: `python -m pytest -q` (160+ passing).
-- Docstring coverage: 100% on non-test source files.
+---
 
-## Boundaries
-- **Always**:
-  - Return HTTP 400 with clean error message when payload fails validation or position guard triggers.
-  - Preserve backward compatibility for existing `/api/live/config` callers who do not provide selection fields.
-  - Sync UI state seamlessly with backend engine state on initial load.
-- **Ask first**:
-  - Removing or deprecating existing `/api/live/*` routes.
-- **Never**:
-  - Hardcode the 5m markets in frontend card rendering loops; derive cards dynamically from selected series.
-  - Silently ignore market selection failures in the UI.
+## 6. Code Style
+Use dataclasses, explicit typing, and thread safety with `_engine_lock`. Keep functions pure where possible.
 
-## Success Criteria
-1. `/api/live/state` returns all 10 series in `available_series` and active selections in `selected_series`.
-2. `/api/live/config` accepts `selected_markets`, `tokens`, and `durations`, updates `LiveTraderEngine`, and returns updated state.
-3. `/api/live/config` returns HTTP 400 with descriptive error if tokens/durations are invalid or if an active market with open position cannot be deselected.
-4. Live Cockpit UI displays interactive token chips (`BTC`, `ETH`, `BNB`, `SOL`, `XRP`) and duration toggles (`5m`, `15m`, `Both`).
-5. Cockpit market card matrix renders only active selected markets (e.g. 1 card for BTC 15m or 10 cards for all).
-6. 100% docstring coverage preserved and all tests pass (`python -m pytest -q`).
+```python
+# Example: Slippage-aware pair merge profit calculation
+fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else mstate.resting_up
+fill_down = mstate.fill_price_down if mstate.fill_price_down is not None else mstate.resting_down
+pair_profit_usd = (1.00 - (fill_up + fill_down)) * self.shares
+```
+
+---
+
+## 7. Testing Strategy
+- Unit tests in `tests/test_live_trader.py`:
+  1. Test `fetch_polymarket_account_value` preserves structured positions list (`size`, `avgPrice`, `curPrice`, `cashPnl`, `asset`, `title`).
+  2. Test CLOB order fill detection records actual match price (`price` / `associate_trades`) instead of default `resting_up`.
+  3. Test pair merge realized PnL correctly computes `(1.00 - (fill_up + fill_down)) * shares` when fills experience slippage (e.g., 0.49 + 0.485 `→` 0.025/share).
+  4. Test unrealized PnL reflects actual entry fill price rather than initial resting price.
+- Integration tests in `tests/test_osc_dash_integration.py`:
+  1. Test `/api/live/account` and `/api/live/state` include `positions` payload.
+  2. Ensure full suite passes (`176+ passed`).
+
+---
+
+## 8. Boundaries
+- **Always do:**
+  - Fall back gracefully to `resting_up` / `resting_down` if fill price or position lookup is unavailable.
+  - Maintain thread safety with `with self._engine_lock:`.
+  - Preserve backward compatibility for paper mode and demo mode.
+  - Run `python -m pytest -q` before committing.
+- **Ask first:**
+  - Modifying backtest engine logic (`backtest/engine.py`).
+  - Adding external dependencies to `requirements.txt`.
+- **Never do:**
+  - Commit private keys or secrets.
+  - Hardcode 0.48 in live accounting formulas.
+  - Break existing `/api/live/*` contract for UI consumers.
+
+---
+
+## 9. Success Criteria
+- [ ] `fetch_polymarket_account_value` returns `positions` list containing structured objects (`asset`, `conditionId`, `size`, `avgPrice`, `curPrice`, `cashPnl`, `title`, `outcome`).
+- [ ] In `LiveTraderEngine._on_tick`, when a live order fills on CLOB, `MarketLiveState.fill_price_up` and `MarketLiveState.fill_price_down` record the actual match price from the order/trade.
+- [ ] Pair merge realized PnL formula is `(1.00 - (fill_price_up + fill_price_down)) * shares`.
+- [ ] `/api/live/state` returns open positions list and actual fill prices.
+- [ ] Cockpit UI cards in `server/osc_dash.py` render actual average fill price instead of fixed `$0.48`.
+- [ ] All unit and integration tests pass (`python -m pytest -q`).
+
+---
+
+## 10. Open Questions
+- None identified. Requirements and contracts are fully specified in Issue #49 and aligned with Polymarket Data API.
