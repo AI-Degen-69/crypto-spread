@@ -12,22 +12,22 @@ Replace the 3 separate Cockpit cards in `server/osc_dash.py` with a single unifi
 ## Task List
 
 ### Phase 1: Structure & Styling
-- [ ] Task 1: CSS styling & unified HTML shell in `server/osc_dash.py`
+- [x] Task 1: CSS styling & unified HTML shell in `server/osc_dash.py`
   - Acceptance: `#orders-trades-card` renders tab navigation (`.ot-tabs`), count pills, and 3 tab panes. Old 3 separate card containers are removed.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`
 
 ### Checkpoint 1: Structure
-- [ ] All 178 existing tests pass.
-- [ ] UI shell displays cleanly with no syntax errors.
+- [x] All 178 existing tests pass.
+- [x] UI shell displays cleanly with no syntax errors.
 
 ### Phase 2: JavaScript Builders & Table Renderers
-- [ ] Task 2: Pure pair grouping & formatting helpers
+- [x] Task 2: Pure pair grouping & formatting helpers
   - Acceptance: `groupOrdersByPair`, `groupPositionsByPair`, `formatSignedMoneyPct`, and `switchOtTab` correctly group legs (UP above DOWN), calculate rowspans, format signed money/percentages, and save tab state.
   - Verify: Unit checks in test harness.
   - Files: `server/osc_dash.py`
 
-- [ ] Task 3: Render Open Orders, Positions, and Closed Trades
+- [x] Task 3: Render Open Orders, Positions, and Closed Trades
   - Acceptance:
     - Tab 1 renders 9 columns (`Time`, `Market`, `Side`, `Price`, `Size`, `Filled`, `Total Cost`, `Status`, `Action`), excludes clutter (`Remaining`, `Queue Ahead`, `Age`).
     - Tab 2 renders 8 columns (`Time`, `Market`, `Side`, `Size`, `Base Cost`, `Market Value`, `Unrealized $ (%)`, `Realized $ (%)`), excludes separate `Cost`.
@@ -38,11 +38,11 @@ Replace the 3 separate Cockpit cards in `server/osc_dash.py` with a single unifi
   - Files: `server/osc_dash.py`, `strategy/live_trader.py`
 
 ### Checkpoint 2: Feature Complete
-- [ ] All three tabs render live and mock states properly.
-- [ ] Tab switching works without page refresh.
+- [x] All three tabs render live and mock states properly.
+- [x] Tab switching works without page refresh.
 
 ### Phase 3: Test Suite & Verification
-- [ ] Task 4: Comprehensive behavioural test suite in `tests/test_orders_trades_table.py`
+- [x] Task 4: Comprehensive behavioural test suite in `tests/test_orders_trades_table.py`
   - Acceptance: Tests verify 9/8/8 columns, absence of excluded columns, pair grouping, mark values, signed money formatting (`-$0.25`), and empty states.
   - Verify: `python -m pytest tests/test_orders_trades_table.py -q` and `python -m pytest -q`.
   - Files: `tests/test_orders_trades_table.py`
