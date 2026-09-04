@@ -80,6 +80,33 @@ def test_favicon_served():
     assert "#f0684d" in response.text
 
 
+def test_root_ltr_layout_and_attributes():
+    """Verify that the dashboard root HTML uses LTR direction and English language with left-aligned headers."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert 'lang="en"' in html
+    assert 'dir="ltr"' in html
+    assert 'dir="rtl"' not in html
+    assert 'lang="he"' not in html
+    assert "text-align:left" in html
+
+
+def test_no_hebrew_characters_in_dashboard():
+    """Verify that all legacy Hebrew strings in server/osc_dash.py have been standardized to English."""
+    import re
+    from pathlib import Path
+    server_file = Path(__file__).resolve().parent.parent / "server" / "osc_dash.py"
+    with open(server_file, "r", encoding="utf-8") as f:
+        hebrew_lines = [
+            (idx, line.strip())
+            for idx, line in enumerate(f, 1)
+            if re.search(r"[\u0590-\u05ff]", line)
+        ]
+    assert len(hebrew_lines) == 0, f"Found {len(hebrew_lines)} lines with Hebrew in osc_dash.py: {hebrew_lines[:5]}"
+
+
+
 def test_api_oscillation():
     """Verify oscillation payload returns summary, windows, live snapshots, and goals."""
     response = client.get("/api/oscillation")
