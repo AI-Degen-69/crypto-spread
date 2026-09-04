@@ -863,6 +863,7 @@ def test_fill_price_and_slippage_pair_merge_pnl(monkeypatch):
 
 
 def test_paper_mode_ignores_wallet_positions(monkeypatch):
+    """Verify paper simulation mode ignores on-chain wallet positions fetched from API."""
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.wallet_address = "0x111122223333444455556666"
@@ -879,6 +880,7 @@ def test_paper_mode_ignores_wallet_positions(monkeypatch):
 
 
 def test_paper_mode_dynamic_open_positions():
+    """Verify open positions are dynamically synthesized in paper mode and cleared on merge."""
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.shares = 5
@@ -906,6 +908,7 @@ def test_paper_mode_dynamic_open_positions():
 
 
 def test_adverse_open_drift_gate():
+    """Verify market entry is skipped when initial drift from 0.50 exceeds exit threshold."""
     engine = LiveTraderEngine(load_persisted=False)
     engine.is_running = True
     engine.mode = "paper"
@@ -935,6 +938,7 @@ def test_adverse_open_drift_gate():
 
 
 def test_reset_pnl_clears_open_positions():
+    """Verify reset_pnl clears open positions and resets market fill states."""
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.open_positions = [{"title": "Stale", "size": 10.0}]
@@ -945,4 +949,37 @@ def test_reset_pnl_clears_open_positions():
     assert engine.open_positions == []
     assert engine.get_open_positions() == []
     assert m.filled_up is False
+
+
+def test_cannot_switch_live_to_paper_with_open_exposure():
+    """Verify switching from live to paper mode raises ValueError if unresolved live fills exist."""
+    import pytest
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    m = engine.markets["btc-up-or-down-5m"]
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    with pytest.raises(ValueError, match="Cannot switch from live to paper mode"):
+        engine.update_config(mode="paper")
+
+
+def test_get_open_orders_list_excludes_idle_and_tokenless_markets():
+    """Verify get_open_orders_list does not emit fabricated orders for IDLE or tokenless markets."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    # All markets start in IDLE with empty tokens
+    orders = engine.get_open_orders_list()
+    assert orders == []
+    
+    # When quoting with tokens, orders appear
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "QUOTING"
+    m.up_token = "tok_up_123"
+    m.down_token = "tok_dn_123"
+    orders_quoting = engine.get_open_orders_list()
+    assert len(orders_quoting) == 2
+    assert orders_quoting[0]["token_id"] == "tok_up_123"
+    assert orders_quoting[1]["token_id"] == "tok_dn_123"
+
 

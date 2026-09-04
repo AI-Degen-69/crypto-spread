@@ -1080,12 +1080,13 @@ class LiveTraderEngine:
             for m in self.markets.values():
                 if m.pair_captured or m.exit_taken or m.entry_cancelled_timeout:
                     continue
-                if m.status in ("QUOTING", "PRE_QUOTING", "IDLE"):
+                # Only include active quoting markets with resolved tokens within active window
+                if m.status in ("QUOTING", "PRE_QUOTING") and m.up_token and m.down_token:
                     if not m.filled_up:
                         orders.append({
                             "order_id": f"paper_up_{m.slug}",
                             "market": m.label,
-                            "token_id": m.up_token or f"tok_up_{m.slug}",
+                            "token_id": m.up_token,
                             "side": "BUY (UP)",
                             "price": m.resting_up,
                             "size": m.order_shares,
@@ -1097,7 +1098,7 @@ class LiveTraderEngine:
                         orders.append({
                             "order_id": f"paper_dn_{m.slug}",
                             "market": m.label,
-                            "token_id": m.down_token or f"tok_dn_{m.slug}",
+                            "token_id": m.down_token,
                             "side": "BUY (DOWN)",
                             "price": m.resting_down,
                             "size": m.order_shares,
@@ -1386,6 +1387,13 @@ class LiveTraderEngine:
         if shares is not None and shares > 0:
             self.shares = int(shares)
         if mode in ("paper", "live"):
+            if self.mode == "live" and mode == "paper":
+                has_active_live_exposure = any(
+                    (m.filled_up or m.filled_down) and not m.pair_captured and not m.exit_taken
+                    for m in self.markets.values()
+                ) or bool(self.open_positions)
+                if has_active_live_exposure:
+                    raise ValueError("Cannot switch from live to paper mode while unresolved live positions or fills remain")
             self.mode = mode
             if self.mode == "paper":
                 self.open_positions = []
@@ -2291,8 +2299,16 @@ class LiveTraderEngine:
                         log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
 
         # --- LIVE ORDER PLACEMENT (if in live mode and orders not placed yet) ---
-        if (self.mode == "live" and not self.quoting_halted and not mstate.pair_captured 
-            and not mstate.exit_taken and not mstate.entry_cancelled_timeout and not is_late_start):
+        can_place_entry = (
+            not self.quoting_halted
+            and not mstate.pair_captured
+            and not mstate.exit_taken
+            and not mstate.entry_cancelled_timeout
+            and not is_late_start
+            and not is_adverse_open
+            and not is_touch_pair_invalid
+        )
+        if self.mode == "live" and can_place_entry:
             if not mstate.order_id_up and mstate.up_token:
                 res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
                 if res_up and res_up.get("order_id"):
@@ -2307,7 +2323,7 @@ class LiveTraderEngine:
                     mstate.order_status_down = "RESTING"
 
         # --- FILL DETECTION ---
-        if mstate.status in ("IDLE", "PRE_QUOTING") and not mstate.entry_cancelled_timeout:
+        if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
             mstate.status = "QUOTING"
             mstate.last_action = f"Quoting bids @ {resting_up:.2f} / {resting_down:.2f}"
 
@@ -2369,8 +2385,8 @@ class LiveTraderEngine:
                             log.debug("[%s] Error checking DOWN order: %s", slug, e)
             else:
                 # Paper / Backtest simulation fallback using order book asks
-                can_sim_up = (not mstate.filled_up) and (not mstate.entry_cancelled_timeout or mstate.filled_down)
-                can_sim_dn = (not mstate.filled_down) and (not mstate.entry_cancelled_timeout or mstate.filled_up)
+                can_sim_up = (not mstate.filled_up) and (mstate.filled_down or can_place_entry)
+                can_sim_dn = (not mstate.filled_down) and (mstate.filled_up or can_place_entry)
 
                 if can_sim_up:
                     if mstate.up_ask is not None and mstate.up_ask <= resting_up:
