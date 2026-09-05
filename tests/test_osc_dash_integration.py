@@ -994,3 +994,21 @@ def test_api_live_latency():
     assert "clob_ws_connected" in data
 
 
+def test_card_stream_telemetry_rendered_in_html():
+    """Verify #card-stream-telemetry and its metric elements are present in the cockpit HTML."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    assert 'id="card-stream-telemetry"' in html
+    assert 'LIVE STREAM TELEMETRY (RTDS vs CLOB)' in html
+    assert 'id="telSpotPrice"' in html
+    assert 'id="telSpotDrift"' in html
+    assert 'id="telClobMid"' in html
+    assert 'id="telLeadLatency"' in html
+    assert 'id="telFeedStatus"' in html
+    assert "function renderStreamTelemetry(" in html
+    assert "async function fetchCockpitLatency()" in html
+    assert "async function pollCockpit()" in html
+
+
+

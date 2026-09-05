@@ -33,11 +33,11 @@
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -k test_api_live_latency -q`
   - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
 
-- [ ] Task 6: Add Live Stream Telemetry card to Cockpit (Tab 1) in `server/osc_dash.py`
+- [x] Task 6: Add Live Stream Telemetry card to Cockpit (Tab 1) in `server/osc_dash.py`
   - Acceptance: Renders `#card-stream-telemetry` displaying RTDS Spot, Drift %, CLOB Mid, Lead Latency, and Feed Health. Updates via `pollCockpit()` and SSE.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
 
 ## Checkpoint 3: End-to-End Verification
-- [ ] All new tests pass.
-- [ ] Full regression suite passes cleanly: `python -m pytest -q` (all 200+ tests).
+- [x] All new tests pass.
+- [x] Full regression suite passes cleanly: `python -m pytest -q` (all 200+ tests).

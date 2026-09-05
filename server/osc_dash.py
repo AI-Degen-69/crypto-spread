@@ -1295,6 +1295,16 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-tag-paired{background:rgba(51,201,181,0.12);color:var(--up);border:1px solid rgba(51,201,181,0.25)}
 .ot-tag-partial{background:rgba(235,178,74,0.12);color:var(--gold);border:1px solid rgba(235,178,74,0.25)}
 .ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
+.card-title{font:700 12px var(--disp);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
+.telemetry-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+@media(max-width:1000px){.telemetry-grid{grid-template-columns:repeat(2,1fr)}}
+.tel-item{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center;display:flex;flex-direction:column;gap:4px}
+.tel-lbl{font:600 9px var(--disp);letter-spacing:.07em;color:var(--faint);text-transform:uppercase}
+.tel-val{font:700 16px var(--mono);color:var(--tx)}
+.tel-badge{font:700 10px var(--disp);letter-spacing:.06em;padding:2px 8px;border-radius:99px;display:inline-block;margin:0 auto}
+.tel-badge.ok{background:rgba(51,201,181,.15);color:var(--up);border:1px solid rgba(51,201,181,.3)}
+.tel-badge.warn{background:rgba(243,186,47,.15);color:var(--gold);border:1px solid rgba(243,186,47,.3)}
+.tel-badge.err{background:rgba(240,104,77,.15);color:var(--down);border:1px solid rgba(240,104,77,.3)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -1684,6 +1694,18 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
             <button type="button" id="btnDurBoth" class="tab-btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitDuration('both')">Both</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Live Stream Telemetry (RTDS vs CLOB) Card -->
+    <div class="card" id="card-stream-telemetry">
+      <div class="card-title">LIVE STREAM TELEMETRY (RTDS vs CLOB)</div>
+      <div class="telemetry-grid">
+        <div class="tel-item"><span class="tel-lbl">RTDS SPOT</span><span class="tel-val" id="telSpotPrice">--</span></div>
+        <div class="tel-item"><span class="tel-lbl">SPOT DRIFT</span><span class="tel-val" id="telSpotDrift">--</span></div>
+        <div class="tel-item"><span class="tel-lbl">CLOB MID</span><span class="tel-val" id="telClobMid">--</span></div>
+        <div class="tel-item"><span class="tel-lbl">LEAD LATENCY</span><span class="tel-val" id="telLeadLatency">--</span></div>
+        <div class="tel-item"><span class="tel-lbl">FEED HEALTH</span><span class="tel-badge ok" id="telFeedStatus">CONNECTED</span></div>
       </div>
     </div>
 
@@ -3092,16 +3114,95 @@ async function setCockpitDuration(dur) {
   await applyCockpitConfig();
 }
 
+function renderStreamTelemetry(data) {
+  if (!data) return;
+  const spotEl = $('telSpotPrice');
+  const driftEl = $('telSpotDrift');
+  const clobEl = $('telClobMid');
+  const latEl = $('telLeadLatency');
+  const feedEl = $('telFeedStatus');
+
+  if (spotEl) {
+    if (data.spot_price != null && !isNaN(Number(data.spot_price))) {
+      spotEl.textContent = '$' + Number(data.spot_price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    } else {
+      spotEl.textContent = '--';
+    }
+  }
+
+  if (driftEl) {
+    if (data.spot_drift != null && !isNaN(Number(data.spot_drift))) {
+      const d = Number(data.spot_drift);
+      driftEl.textContent = (d >= 0 ? '+' : '') + (d * 100).toFixed(2) + '%';
+      driftEl.style.color = d > 0 ? 'var(--up)' : d < 0 ? 'var(--down)' : 'var(--tx)';
+    } else {
+      driftEl.textContent = '--';
+      driftEl.style.color = 'var(--tx)';
+    }
+  }
+
+  if (clobEl) {
+    if (data.clob_mid != null && !isNaN(Number(data.clob_mid))) {
+      clobEl.textContent = (Number(data.clob_mid) * 100).toFixed(1) + '¢';
+    } else {
+      clobEl.textContent = '--';
+    }
+  }
+
+  if (latEl) {
+    if (data.latency_ms != null && !isNaN(Number(data.latency_ms))) {
+      const ms = Number(data.latency_ms);
+      latEl.textContent = ms.toFixed(0) + ' ms';
+      latEl.style.color = ms < 500 ? 'var(--up)' : ms < 1500 ? 'var(--gold)' : 'var(--down)';
+    } else {
+      latEl.textContent = '--';
+      latEl.style.color = 'var(--tx)';
+    }
+  }
+
+  if (feedEl) {
+    const rtds = !!(data.rtds_connected || liveStreamConnected);
+    const clob = !!data.clob_ws_connected;
+    if (rtds && clob) {
+      feedEl.textContent = 'CONNECTED';
+      feedEl.className = 'tel-badge ok';
+    } else if (rtds || clob) {
+      feedEl.textContent = 'DEGRADED';
+      feedEl.className = 'tel-badge warn';
+    } else {
+      feedEl.textContent = 'DISCONNECTED';
+      feedEl.className = 'tel-badge err';
+    }
+  }
+}
+
+async function fetchCockpitLatency() {
+  try {
+    const res = await fetch('/api/live/latency', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    renderStreamTelemetry(data);
+  } catch (e) {
+    console.debug('Failed fetching live latency telemetry', e);
+  }
+}
+
 async function fetchCockpitState() {
   try {
     const res = await fetch('/api/live/state', { cache: 'no-store' });
-    if (!res.ok) return;
-    const data = await res.json();
-    cockpitState = data;
-    renderCockpitUI(data);
+    if (res.ok) {
+      const data = await res.json();
+      cockpitState = data;
+      renderCockpitUI(data);
+    }
   } catch (e) {
     console.error('Failed fetching cockpit state', e);
   }
+  await fetchCockpitLatency();
+}
+
+async function pollCockpit() {
+  await fetchCockpitState();
 }
 
 async function toggleCockpitBot() {
@@ -3419,6 +3520,24 @@ function renderCockpitUI(st) {
       streamPill.textContent = '🟡 REST POLLING';
       streamPill.className = 'pill pill-flat';
       streamPill.style.color = 'var(--gold)';
+    }
+  }
+
+  // Update Live Stream Telemetry card from engine state
+  if (st && st.markets) {
+    const mkKeys = Object.keys(st.markets);
+    const targetSlug = mkKeys.find(k => k.startsWith('btc')) || mkKeys[0];
+    if (targetSlug && st.markets[targetSlug]) {
+      const m = st.markets[targetSlug];
+      const sb = st.stream_bridge || {};
+      renderStreamTelemetry({
+        spot_price: m.spot_price,
+        spot_drift: m.spot_drift,
+        clob_mid: m.mid,
+        latency_ms: m.spot_updated_ts ? Math.max(0, (Date.now() - m.spot_updated_ts * 1000)) : null,
+        rtds_connected: sb.rtds_connected || liveStreamConnected,
+        clob_ws_connected: sb.clob_ws_connected,
+      });
     }
   }
 
@@ -4161,7 +4280,7 @@ let cockpitPollTimer = null;
 
 function ensureCockpitPolling() {
   if (!cockpitPollTimer) {
-    cockpitPollTimer = setInterval(fetchCockpitState, 5000);
+    cockpitPollTimer = setInterval(pollCockpit, 5000);
   }
 }
 
@@ -4183,6 +4302,11 @@ function initLiveCockpitStream() {
         sp.textContent = '🟢 RTDS STREAM: 1s';
         sp.className = 'pill pill-osc';
         sp.style.color = 'var(--up)';
+      }
+      const feedBadge = $('telFeedStatus');
+      if (feedBadge) {
+        feedBadge.textContent = 'CONNECTED';
+        feedBadge.className = 'tel-badge ok';
       }
     };
     liveEventSource.onmessage = (e) => {
@@ -4221,6 +4345,22 @@ function initLiveCockpitStream() {
                 dEl.textContent = (drift >= 0 ? '+' : '') + (drift * 100).toFixed(2) + '%';
                 dEl.style.color = drift > 0 ? 'var(--up)' : drift < 0 ? 'var(--down)' : 'var(--dim)';
               }
+              if (slug && (slug.startsWith('btc') || slug === Object.keys(cockpitState.markets)[0])) {
+                const sEl = $('telSpotPrice');
+                const drEl = $('telSpotDrift');
+                if (sEl && price != null) {
+                  sEl.textContent = '$' + price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                }
+                if (drEl) {
+                  const drift = m.spot_drift || 0;
+                  drEl.textContent = (drift >= 0 ? '+' : '') + (drift * 100).toFixed(2) + '%';
+                  drEl.style.color = drift > 0 ? 'var(--up)' : drift < 0 ? 'var(--down)' : 'var(--tx)';
+                }
+                const cEl = $('telClobMid');
+                if (cEl && m.mid != null) {
+                  cEl.textContent = (Number(m.mid) * 100).toFixed(1) + '¢';
+                }
+              }
             }
           }
         }
@@ -4235,6 +4375,11 @@ function initLiveCockpitStream() {
         sp.textContent = '🟡 REST POLLING';
         sp.className = 'pill pill-flat';
         sp.style.color = 'var(--gold)';
+      }
+      const feedBadge = $('telFeedStatus');
+      if (feedBadge) {
+        feedBadge.textContent = 'DEGRADED';
+        feedBadge.className = 'tel-badge warn';
       }
       fetchCockpitState();
       ensureCockpitPolling();
