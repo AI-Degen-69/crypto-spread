@@ -33,14 +33,14 @@ Build a real-time stream comparison engine, standalone CLI tool (`scripts/monito
   - Verify: `python -m pytest tests/test_monitor_stream_latency.py -k test_latency_auditor -q`
   - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`
 
-- [ ] Task 4: Publish empirical latency audit report in `docs/rtds-clob-latency-audit.md`
+- [x] Task 4: Publish empirical latency audit report in `docs/rtds-clob-latency-audit.md`
   - Acceptance: Documentation report detailing empirical lead times, lead-lag dynamics, RTDS leading signal vs CLOB execution ground truth, stop-loss trigger mechanics, and unit non-fungibility.
   - Verify: Document exists with verified links and clear quantitative tables.
   - Files: `docs/rtds-clob-latency-audit.md`
 
 ### Checkpoint 2: Latency Audit Complete & Documented
-- [ ] Auditor unit tests pass.
-- [ ] Documentation report is published and fully detailed.
+- [x] Auditor unit tests pass.
+- [x] Documentation report is published and fully detailed.
 
 ### Phase 3: Dashboard Cockpit Integration (`cockpit-telemetry`)
 - [ ] Task 5: Add `/api/live/latency` endpoint in `server/osc_dash.py`
