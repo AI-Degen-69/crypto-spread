@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import datetime
 import json
 import logging
@@ -19,7 +20,7 @@ import signal
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -84,11 +85,10 @@ class StreamTickSnapshot:
         dn_str = f"{dn_bid_s}/{dn_ask_s} ({dn_mid_s})"
 
         clob_mid_s = f"{self.clob_mid:.3f}" if self.clob_mid is not None else "--"
-        sign = "+" if self.spot_drift_pct >= 0 else ""
 
         return (
             f"[{self.time_str}] | "
-            f"Spot: ${self.spot_price:9.2f} ({sign}{self.spot_drift_pct * 100:+.2f}%) | "
+            f"Spot: ${self.spot_price:9.2f} ({self.spot_drift_pct * 100:+.2f}%) | "
             f"UP: {up_str:18} | DN: {dn_str:18} | "
             f"CLOB Mid: {clob_mid_s:5} | Δt: {self.latency_ms:4.0f}ms"
         )
@@ -216,18 +216,38 @@ class LatencyAuditor:
         self.response_window_sec = response_window_sec
         self.events: List[Dict[str, Any]] = []
         self._pending_shock: Optional[Dict[str, Any]] = None
+        self._in_shock: bool = False
+        self._recent_prices: collections.deque[Tuple[float, float]] = collections.deque()
 
     def record_tick(self, snapshot: StreamTickSnapshot) -> None:
         """Process tick snapshot and track shock events and reactions."""
         now = snapshot.timestamp
         resolved_shock = False
 
+        # Maintain rolling 3-second window of spot prices: (timestamp, price)
+        self._recent_prices.append((now, snapshot.spot_price))
+        while self._recent_prices and (now - self._recent_prices[0][0]) > 3.0:
+            self._recent_prices.popleft()
+
         # Check existing pending shock
         if self._pending_shock:
             dt = now - self._pending_shock["shock_ts"]
-            base_mid = self._pending_shock["baseline_mid"]
+            base_mid = self._pending_shock.get("baseline_mid")
+            base_bid = self._pending_shock.get("baseline_bid")
+            base_ask = self._pending_shock.get("baseline_ask")
             if dt <= self.response_window_sec:
-                if snapshot.clob_mid is not None and abs(snapshot.clob_mid - base_mid) >= 0.01:
+                reacted = False
+                if base_mid is not None and snapshot.clob_mid is not None:
+                    if abs(snapshot.clob_mid - base_mid) >= 0.01:
+                        reacted = True
+                if base_bid is not None and snapshot.up_bid is not None:
+                    if abs(snapshot.up_bid - base_bid) >= 0.01:
+                        reacted = True
+                if base_ask is not None and snapshot.up_ask is not None:
+                    if abs(snapshot.up_ask - base_ask) >= 0.01:
+                        reacted = True
+
+                if reacted:
                     self._pending_shock["reaction_time_sec"] = dt
                     self._pending_shock["reaction_time_ms"] = dt * 1000.0
                     self._pending_shock["clob_reacted"] = True
@@ -243,13 +263,28 @@ class LatencyAuditor:
         if resolved_shock:
             return
 
-        # Check for new spot price shock
-        if abs(snapshot.spot_drift_pct) >= self.drift_threshold and not self._pending_shock:
+        # Check for acute price movement within preceding 3-second window
+        short_window_drift = 0.0
+        if len(self._recent_prices) >= 2:
+            oldest_price = self._recent_prices[0][1]
+            if oldest_price > 0:
+                short_window_drift = (snapshot.spot_price - oldest_price) / oldest_price
+
+        drift_active = abs(snapshot.spot_drift_pct) >= self.drift_threshold or abs(short_window_drift) >= self.drift_threshold
+
+        if not drift_active:
+            self._in_shock = False
+
+        # Require an observed CLOB baseline to register a shock
+        if drift_active and not self._in_shock and not self._pending_shock and snapshot.clob_mid is not None:
+            self._in_shock = True
             self._pending_shock = {
                 "shock_ts": now,
                 "spot_price": snapshot.spot_price,
                 "drift_pct": snapshot.spot_drift_pct,
-                "baseline_mid": snapshot.clob_mid if snapshot.clob_mid is not None else 0.50,
+                "baseline_mid": snapshot.clob_mid,
+                "baseline_bid": snapshot.up_bid,
+                "baseline_ask": snapshot.up_ask,
                 "reaction_time_sec": None,
                 "reaction_time_ms": None,
                 "clob_reacted": False,
@@ -430,13 +465,13 @@ def run_monitor(
         spot_val = fetch_spot_price(sync.symbol, session=sess)
         now_ms = int(time.time() * 1000)
         if spot_val is not None:
-            sync.update_spot(spot_val, now_ms)
+            sync.update_spot(spot_val, now_ms, source="REST")
 
         # Ingest CLOB books
         up_b, up_a, dn_b, dn_a = fetch_clob_books(args.series, session=sess)
         b_now = time.time()
-        sync.update_up_book(up_b, up_a, updated_ts=b_now)
-        sync.update_down_book(dn_b, dn_a, updated_ts=b_now)
+        sync.update_up_book(up_b, up_a, updated_ts=b_now, source="REST")
+        sync.update_down_book(dn_b, dn_a, updated_ts=b_now, source="REST")
 
         snap = sync.create_snapshot(now_ts=b_now)
         if snap:

@@ -22,7 +22,7 @@ Build a comprehensive real-time streaming comparison engine, standalone CLI moni
 - **Language & Runtime**: Python 3.10+
 - **Web & API Framework**: FastAPI, Starlette, Uvicorn, `sse-starlette`
 - **Networking & Ingestion**: `requests`, Python standard library (`asyncio`, `dataclasses`, `collections`, `threading`, `time`, `typing`)
-- **Existing Bridge**: [`strategy/streaming.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/strategy/streaming.py) (`UnifiedStreamBridge`, `RTDSStreamClient`, `CLOBMarketWSClient`)
+- **Existing Bridge**: [`strategy/streaming.py`](strategy/streaming.py) (`UnifiedStreamBridge`, `RTDSStreamClient`, `CLOBMarketWSClient`)
 - **Testing Framework**: `pytest`, `pytest-asyncio`, FastAPI `TestClient`
 - **Zero New Dependencies**: Uses only packages already listed in `requirements.txt`.
 
@@ -126,7 +126,7 @@ class StreamTickSnapshot:
         sign = "+" if self.spot_drift_pct >= 0 else ""
         return (
             f"[{self.time_str}] | "
-            f"Spot: ${self.spot_price:9.2f} ({sign}{self.spot_drift_pct*100:+.2f}%) | "
+            f"Spot: ${self.spot_price:9.2f} ({sign}{self.spot_drift_pct*100:.2f}%) | "
             f"UP: {up_str:18} | DN: {dn_str:18} | "
             f"CLOB Mid: {self.clob_mid or 0:.3f} | Δt: {self.latency_ms:4.0f}ms"
         )
@@ -142,32 +142,73 @@ class LatencyAuditor:
         self.response_window_sec = response_window_sec
         self.events: List[Dict[str, Any]] = []
         self._pending_shock: Optional[Dict[str, Any]] = None
+        self._in_shock: bool = False
+        self._recent_prices: collections.deque[Tuple[float, float]] = collections.deque()
 
     def record_tick(self, snapshot: StreamTickSnapshot) -> None:
         now = snapshot.timestamp
+        resolved_shock = False
+
+        # Maintain rolling 3-second window of spot prices: (timestamp, price)
+        self._recent_prices.append((now, snapshot.spot_price))
+        while self._recent_prices and (now - self._recent_prices[0][0]) > 3.0:
+            self._recent_prices.popleft()
+
         # Check if an existing shock event is awaiting CLOB reaction
         if self._pending_shock:
             dt = now - self._pending_shock["shock_ts"]
+            base_mid = self._pending_shock.get("baseline_mid")
+            base_bid = self._pending_shock.get("baseline_bid")
+            base_ask = self._pending_shock.get("baseline_ask")
             if dt <= self.response_window_sec:
-                if snapshot.clob_mid is not None and abs(snapshot.clob_mid - self._pending_shock["baseline_mid"]) >= 0.01:
+                reacted = False
+                if base_mid is not None and snapshot.clob_mid is not None and abs(snapshot.clob_mid - base_mid) >= 0.01:
+                    reacted = True
+                if base_bid is not None and snapshot.up_bid is not None and abs(snapshot.up_bid - base_bid) >= 0.01:
+                    reacted = True
+                if base_ask is not None and snapshot.up_ask is not None and abs(snapshot.up_ask - base_ask) >= 0.01:
+                    reacted = True
+
+                if reacted:
                     self._pending_shock["reaction_time_sec"] = dt
                     self._pending_shock["reaction_time_ms"] = dt * 1000.0
                     self._pending_shock["clob_reacted"] = True
                     self.events.append(self._pending_shock)
                     self._pending_shock = None
+                    resolved_shock = True
             else:
                 self._pending_shock["clob_reacted"] = False
                 self.events.append(self._pending_shock)
                 self._pending_shock = None
+                resolved_shock = True
 
-        # Detect new spot price shock
-        if abs(snapshot.spot_drift_pct) >= self.drift_threshold and not self._pending_shock:
+        if resolved_shock:
+            return
+
+        # Check for acute price movement within preceding 3-second window
+        short_window_drift = 0.0
+        if len(self._recent_prices) >= 2:
+            oldest_price = self._recent_prices[0][1]
+            if oldest_price > 0:
+                short_window_drift = (snapshot.spot_price - oldest_price) / oldest_price
+
+        drift_active = abs(snapshot.spot_drift_pct) >= self.drift_threshold or abs(short_window_drift) >= self.drift_threshold
+
+        if not drift_active:
+            self._in_shock = False
+
+        # Require an observed CLOB baseline to register a shock and prevent re-shocking during sustained drift
+        if drift_active and not self._in_shock and not self._pending_shock and snapshot.clob_mid is not None:
+            self._in_shock = True
             self._pending_shock = {
                 "shock_ts": now,
                 "spot_price": snapshot.spot_price,
                 "drift_pct": snapshot.spot_drift_pct,
-                "baseline_mid": snapshot.clob_mid or 0.50,
+                "baseline_mid": snapshot.clob_mid,
+                "baseline_bid": snapshot.up_bid,
+                "baseline_ask": snapshot.up_ask,
                 "reaction_time_sec": None,
+                "reaction_time_ms": None,
                 "clob_reacted": False,
             }
 ```

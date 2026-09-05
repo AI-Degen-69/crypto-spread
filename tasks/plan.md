@@ -5,7 +5,7 @@ Build a real-time stream comparison engine, standalone CLI tool (`scripts/monito
 
 ## Architecture Decisions
 1. **Reuse Existing Streaming Infrastructure**: Leverage `strategy/streaming.py` (`UnifiedStreamBridge`, `RTDSStreamClient`, `CLOBMarketWSClient`) with automatic REST fallbacks for reliable tick capture without adding new third-party dependencies.
-2. **Deterministic Time Alignment**: Pair spot ticks and CLOB order book state to the nearest second, calculating both price drift from the baseline open and transit latency ($\Delta t$ ms).
+2. **Deterministic Time Alignment Contract**: Pair spot ticks and CLOB order book state to integer 1-second timestamp buckets (`int(ts)`), enforcing exact-second alignment with a maximum allowable sampling tolerance of $\le 1.0\text{s}$ between feed arrivals. When either feed is missing for that second bucket, record `None` for book/spot fields rather than silently pairing adjacent seconds, ensuring precise drift and latency provenance.
 3. **Formal State Machine for Lead-Time Tracking**: Implement `LatencyAuditor` to detect spot price shocks ($\ge 0.10\%$ within $\le 3\text{s}$) and measure the elapsed time until the CLOB book shifts (BBO moves $\ge 1¢$ or mid changes), tracking reaction rates and percentiles (median, p95).
 4. **Execution Ground Truth**: Explicitly document and enforce that CLOB is the sole execution venue and ground truth pricing; RTDS is an external reference/leading indicator for stop-loss execution.
 5. **Zero-Friction Cockpit Integration**: Expose telemetry via `/api/live/latency` and a dedicated telemetry card in Tab 1 (Cockpit) of `server/osc_dash.py` without disturbing existing bot controls or layout.

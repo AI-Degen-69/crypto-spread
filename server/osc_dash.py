@@ -3161,7 +3161,7 @@ function renderStreamTelemetry(data) {
   }
 
   if (feedEl) {
-    const rtds = !!(data.rtds_connected || liveStreamConnected);
+    const rtds = !!data.rtds_connected;
     const clob = !!data.clob_ws_connected;
     if (rtds && clob) {
       feedEl.textContent = 'CONNECTED';
@@ -4303,11 +4303,7 @@ function initLiveCockpitStream() {
         sp.className = 'pill pill-osc';
         sp.style.color = 'var(--up)';
       }
-      const feedBadge = $('telFeedStatus');
-      if (feedBadge) {
-        feedBadge.textContent = 'CONNECTED';
-        feedBadge.className = 'tel-badge ok';
-      }
+      fetchCockpitLatency();
     };
     liveEventSource.onmessage = (e) => {
       try {
@@ -4376,11 +4372,7 @@ function initLiveCockpitStream() {
         sp.className = 'pill pill-flat';
         sp.style.color = 'var(--gold)';
       }
-      const feedBadge = $('telFeedStatus');
-      if (feedBadge) {
-        feedBadge.textContent = 'DEGRADED';
-        feedBadge.className = 'tel-badge warn';
-      }
+      fetchCockpitLatency();
       fetchCockpitState();
       ensureCockpitPolling();
     };

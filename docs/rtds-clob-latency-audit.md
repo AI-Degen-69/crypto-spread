@@ -1,7 +1,7 @@
 # Empirical Latency Audit: Polymarket RTDS Spot vs. CLOB Order Book
 
 > **Audit Objective:** Measure empirical lead-lag latency between Binance crypto spot price movements (via Polymarket RTDS / Binance ticker) and Polymarket CLOB binary contract order book adjustments.
-> **Measurement Tool:** [`scripts/monitor_stream_latency.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/scripts/monitor_stream_latency.py) with `--audit` engine.
+> **Measurement Tool:** [`scripts/monitor_stream_latency.py`](scripts/monitor_stream_latency.py) with `--audit` engine.
 > **Scope:** 5m and 15m crypto binary markets across BTC, ETH, SOL, XRP, and BNB.
 
 ---
@@ -17,7 +17,7 @@
    - **Prediction Market (CLOB)**: Probability outcome tokens priced between `$0.00` and `$1.00` (e.g., UP token at `$0.48`, DOWN token at `$0.52`).
    - The bot does not compute cross-asset min/max; instead, it observes normalized percentage drift $\Delta S / S_0$ on spot and compares it against implied probability shifts on CLOB.
 3. **RTDS as a Leading Signal**:
-   - In [`strategy/live_trader.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/strategy/live_trader.py#L731-L772), RTDS spot ticks are ingested at 1-second cadence to serve as a **leading warning signal**.
+   - In [`strategy/live_trader.py`](strategy/live_trader.py), RTDS spot ticks are ingested at 1-second cadence to serve as a **leading warning signal**.
    - When a naked open leg (e.g., filled UP at `$0.48`) experiences adverse spot drift ($\le -0.30\%$), the bot triggers an immediate fast stop-loss exit before the slower CLOB book digests the move.
 
 ---
@@ -28,7 +28,7 @@ The table below summarizes empirical lead-time measurements captured during acti
 
 | Metric | Empirical Value | Description |
 |:---|:---:|:---|
-| **Network Transit $\Delta t$** | `120 – 280 ms` | Timestamp arrival delta between RTDS tick publish and CLOB book snapshot receipt |
+| **Local Sampling Offset ($\Delta t$)** | `120 – 280 ms` | Local arrival time interval between sequential spot/RTDS sampling and CLOB REST snapshot receipt |
 | **Spot Impulse Threshold** | `≥ 0.10%` | Minimum spot move within $\le 3\text{s}$ triggering a shock detection event |
 | **Min Reaction Lead Time** | `450 ms` | Fastest observed algorithmic adjustment by market makers on CLOB |
 | **Median Reaction Time ($P_{50}$)** | `1,850 ms` (~`1.85 s`) | Median time elapsed from spot impulse to CLOB BBO/mid shift ($\ge 1¢$) |
@@ -47,7 +47,7 @@ sequenceDiagram
     Note over Bot: t = 0 ms (Leading Signal Detected)
     Note over Bot: Fast Stop Trigger Evaluated (adverse DOWN leg protected)
     Bot->>CLOB: Cancel open quote / exit order submitted via Relayer
-    Note over CLOB: t = +400ms: Relayer order executed (Gasless)
+    Note over CLOB: t = +400ms (Hypothesized): Relayer gasless order submission & execution transit
     Note over CLOB: t = +1,850ms (Median Reaction): Other CLOB MM quotes re-price
 ```
 
@@ -57,19 +57,19 @@ sequenceDiagram
 
 ### 3.1 The 1.5-Second Window of Opportunity
 The empirical **~1.85-second median lead time** between external spot movement and Polymarket order book adjustment creates an informational advantage:
-- When the bot is filled on one leg (e.g., UP at `$0.48`), an adverse spot breakdown typically takes 1 to 3 seconds to fully reflect in the DOWN token bid/ask levels.
-- By triggering fast cancellations upon detecting $\text{drift} \le -0.003$ on RTDS, the bot can successfully cancel or dump before market takers sweep resting quotes.
+- When the bot is filled on one leg (e.g., UP at `$0.48`), an adverse spot breakdown typically takes 1 to 3 seconds to fully reflect in the DOWN token bid/ask levels on the book.
+- By triggering fast cancellations upon detecting $\text{drift} \le -0.003$ on RTDS, the bot aims to cancel or dump before market takers sweep resting quotes (subject to relayer execution transit and queue latency).
 
 ### 3.2 Squeeze & Adverse Selection Defense
 Without leading spot signal integration:
 - Resting limit quotes at `$0.48` are exposed to latency arbitrage: high-frequency takers detect Binance spot surges and immediately fill resting DOWN orders on Polymarket before the maker cancels.
-- With real-time RTDS monitoring, the engine cancels resting orders inside the first 200–500ms, effectively neutralizing adverse selection.
+- With real-time RTDS monitoring, the engine initiates cancellations within the first 200–500ms, substantially mitigating adverse selection risks under normal relayer queue conditions.
 
 ---
 
 ## 4. CLI Monitor & Audit Tooling
 
-The live streaming monitor CLI [`scripts/monitor_stream_latency.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/scripts/monitor_stream_latency.py) allows operators to verify cross-venue synchronization and lead-lag statistics.
+The live streaming monitor CLI [`scripts/monitor_stream_latency.py`](scripts/monitor_stream_latency.py) allows operators to verify cross-venue synchronization and lead-lag statistics.
 
 ### 4.1 Running Live Inspection
 ```powershell
@@ -110,7 +110,7 @@ P95 Reaction Time:         2000.0 ms
 
 ## 5. Architectural Touchpoints
 
-- [`scripts/monitor_stream_latency.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/scripts/monitor_stream_latency.py) — Core synchronizer, CLI dispatcher, and `LatencyAuditor`.
-- [`strategy/streaming.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/strategy/streaming.py) — `UnifiedStreamBridge`, `RTDSStreamClient`, and `CLOBMarketWSClient`.
-- [`strategy/live_trader.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/strategy/live_trader.py) — Fast stop-loss execution on adverse drift triggers (`on_spot_tick`).
-- [`server/osc_dash.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/server/osc_dash.py) — Live cockpit telemetry and SSE streaming endpoints.
+- [`scripts/monitor_stream_latency.py`](scripts/monitor_stream_latency.py) — Core synchronizer, CLI dispatcher, and `LatencyAuditor`.
+- [`strategy/streaming.py`](strategy/streaming.py) — `UnifiedStreamBridge`, `RTDSStreamClient`, and `CLOBMarketWSClient`.
+- [`strategy/live_trader.py`](strategy/live_trader.py) — Fast stop-loss execution on adverse drift triggers (`on_spot_tick`).
+- [`server/osc_dash.py`](server/osc_dash.py) — Live cockpit telemetry and SSE streaming endpoints.

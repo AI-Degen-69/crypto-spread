@@ -262,3 +262,48 @@ def test_latency_auditor_summary_metrics():
     assert "CLOB Reactions Detected:   2" in text
 
 
+def test_latency_auditor_sustained_drift_and_bbo():
+    """Verify LatencyAuditor responds to BBO moves and does not re-shock during sustained drift."""
+    from scripts.monitor_stream_latency import LatencyAuditor, StreamTickSnapshot
+
+    auditor = LatencyAuditor(drift_threshold=0.001)
+
+    # Initial tick
+    snap0 = StreamTickSnapshot(
+        timestamp=100.0, time_str="12:00:00", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60000.0, spot_drift_pct=0.0, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=50.0,
+    )
+    auditor.record_tick(snap0)
+
+    # Shock tick (drift 0.002)
+    snap1 = StreamTickSnapshot(
+        timestamp=101.0, time_str="12:00:01", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=50.0,
+    )
+    auditor.record_tick(snap1)
+    assert auditor._pending_shock is not None
+
+    # Reaction occurs via BBO up_bid move (0.48 -> 0.495 >= 0.01)
+    snap2 = StreamTickSnapshot(
+        timestamp=102.0, time_str="12:00:02", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.495, up_ask=0.52, up_mid=0.5075,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=50.0,
+    )
+    auditor.record_tick(snap2)
+    assert len(auditor.events) == 1
+    assert auditor.events[0]["clob_reacted"] is True
+
+    # Sustained drift: next tick still at drift 0.002 must not trigger a new shock
+    snap3 = StreamTickSnapshot(
+        timestamp=103.0, time_str="12:00:03", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.495, up_ask=0.52, up_mid=0.5075,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=50.0,
+    )
+    auditor.record_tick(snap3)
+    assert auditor._pending_shock is None
+    assert len(auditor.events) == 1
+
+
+
