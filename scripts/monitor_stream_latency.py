@@ -205,3 +205,172 @@ class StreamSynchronizer:
             spot_source=self.spot_source,
             clob_source=self.clob_source,
         )
+
+
+def fetch_spot_price(symbol: str, session: Optional[requests.Session] = None) -> Optional[float]:
+    """Fetch current spot price from Binance ticker API."""
+    sess = session or requests.Session()
+    pair = symbol.upper()
+    if not pair.endswith("USDT"):
+        pair += "USDT"
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={pair}"
+    try:
+        r = sess.get(url, timeout=(2.0, 3.0))
+        if r.status_code == 200:
+            return float(r.json().get("price", 0.0))
+    except Exception as e:
+        log.debug("Spot fetch error for %s: %s", symbol, e)
+    return None
+
+
+def fetch_clob_books(
+    series_slug: str, session: Optional[requests.Session] = None
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Fetch UP and DOWN top-of-book prices from Polymarket CLOB for active live market."""
+    sess = session or requests.Session()
+    try:
+        live_mkt = fetch_live_market("https://gamma-api.polymarket.com", series_slug)
+        if not live_mkt:
+            return None, None, None, None
+
+        up_bid, up_ask = None, None
+        down_bid, down_ask = None, None
+
+        # Fetch UP book
+        r_up = sess.get(f"https://clob.polymarket.com/book?token_id={live_mkt.up_token}", timeout=(2.0, 3.0))
+        if r_up.status_code == 200:
+            b_up = parse_book(r_up.json(), live_mkt.up_token)
+            up_bid = b_up.get("best_bid")
+            up_ask = b_up.get("best_ask")
+
+        # Fetch DOWN book
+        r_dn = sess.get(f"https://clob.polymarket.com/book?token_id={live_mkt.down_token}", timeout=(2.0, 3.0))
+        if r_dn.status_code == 200:
+            b_dn = parse_book(r_dn.json(), live_mkt.down_token)
+            down_bid = b_dn.get("best_bid")
+            down_ask = b_dn.get("best_ask")
+
+        return up_bid, up_ask, down_bid, down_ask
+    except Exception as e:
+        log.debug("CLOB book fetch error for %s: %s", series_slug, e)
+        return None, None, None, None
+
+
+def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse CLI command line flags."""
+    parser = argparse.ArgumentParser(
+        description="Side-by-side RTDS spot vs. Polymarket CLOB live stream monitor & latency auditor."
+    )
+    parser.add_argument(
+        "-s", "--series",
+        default="btc-up-or-down-5m",
+        help="Target series slug from strategy.series (default: btc-up-or-down-5m)",
+    )
+    parser.add_argument(
+        "-d", "--duration",
+        type=float,
+        default=0,
+        help="Maximum run duration in seconds (default: 0 = continuous)",
+    )
+    parser.add_argument(
+        "-t", "--ticks",
+        type=int,
+        default=0,
+        help="Maximum tick snapshots to capture before exiting (default: 0 = unlimited)",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.001,
+        help="Drift threshold for latency tracking (default: 0.001 = 0.10%)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit single-line JSON records instead of table view",
+    )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Run empirical latency lead-time audit and print summary on exit",
+    )
+    return parser.parse_args(args)
+
+
+def run_monitor(
+    args: argparse.Namespace,
+    stop_event: Optional[Any] = None,
+    sleep_interval: float = 1.0,
+) -> int:
+    """Execute streaming observation loop and print synchronized ticks."""
+    sync = StreamSynchronizer(series_slug=args.series)
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": "Mozilla/5.0"})
+
+    if not args.json:
+        print("=" * 110)
+        print(f"CROSS-VENUE STREAM MONITOR: RTDS Spot vs. CLOB Books | Series: {args.series}")
+        print("=" * 110)
+
+    start_time = time.time()
+    ticks_emitted = 0
+
+    while True:
+        if stop_event and stop_event.is_set():
+            break
+        now = time.time()
+        if args.duration > 0 and (now - start_time) >= args.duration:
+            break
+        if args.ticks > 0 and ticks_emitted >= args.ticks:
+            break
+
+        # Ingest spot price
+        spot_val = fetch_spot_price(sync.symbol, session=sess)
+        now_ms = int(time.time() * 1000)
+        if spot_val is not None:
+            sync.update_spot(spot_val, now_ms)
+
+        # Ingest CLOB books
+        up_b, up_a, dn_b, dn_a = fetch_clob_books(args.series, session=sess)
+        b_now = time.time()
+        sync.update_up_book(up_b, up_a, updated_ts=b_now)
+        sync.update_down_book(dn_b, dn_a, updated_ts=b_now)
+
+        snap = sync.create_snapshot(now_ts=b_now)
+        if snap:
+            ticks_emitted += 1
+            if args.json:
+                print(json.dumps(snap.to_dict()), flush=True)
+            else:
+                print(snap.format_row(), flush=True)
+
+        if (args.ticks > 0 and ticks_emitted >= args.ticks) or (args.duration > 0 and (time.time() - start_time) >= args.duration):
+            break
+
+        time.sleep(sleep_interval)
+
+    return ticks_emitted
+
+
+def main() -> None:
+    """CLI application entry point."""
+    args = parse_args()
+    import threading
+    stop_ev = threading.Event()
+
+    def _sig_handler(sig, frame):
+        """Handle termination signals and stop observation loop."""
+        stop_ev.set()
+
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    try:
+        run_monitor(args, stop_event=stop_ev)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
+

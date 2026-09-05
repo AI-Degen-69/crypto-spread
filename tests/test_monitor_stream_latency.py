@@ -103,3 +103,58 @@ def test_synchronizer_tick_generation():
     assert snap.up_mid == 0.50
     assert snap.clob_mid == 0.50
     assert snap.latency_ms >= 0.0
+
+
+def test_parse_args_defaults():
+    """Verify default CLI arguments."""
+    from scripts.monitor_stream_latency import parse_args
+    args = parse_args([])
+    assert args.series == "btc-up-or-down-5m"
+    assert args.duration == 0
+    assert args.ticks == 0
+    assert pytest.approx(args.threshold, 0.0001) == 0.001
+    assert not args.json
+    assert not args.audit
+
+
+def test_parse_args_custom():
+    """Verify custom CLI argument parsing."""
+    from scripts.monitor_stream_latency import parse_args
+    args = parse_args([
+        "--series", "eth-up-or-down-5m",
+        "--duration", "45",
+        "--ticks", "10",
+        "--threshold", "0.002",
+        "--json",
+        "--audit",
+    ])
+    assert args.series == "eth-up-or-down-5m"
+    assert args.duration == 45
+    assert args.ticks == 10
+    assert pytest.approx(args.threshold, 0.0001) == 0.002
+    assert args.json
+    assert args.audit
+
+
+def test_run_monitor_ticks_limit(capsys):
+    """Verify run_monitor terminates when requested ticks limit is reached."""
+    from scripts.monitor_stream_latency import run_monitor, parse_args
+    from unittest.mock import patch, MagicMock
+
+    args = parse_args(["--series", "btc-up-or-down-5m", "--ticks", "2", "--json"])
+
+    with patch("scripts.monitor_stream_latency.fetch_spot_price", return_value=65000.0), \
+         patch("scripts.monitor_stream_latency.fetch_clob_books", return_value=(0.48, 0.52, 0.48, 0.52)):
+        count = run_monitor(args, sleep_interval=0.01)
+        assert count == 2
+
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.strip().split("\n") if ln.strip()]
+    assert len(lines) == 2
+    for ln in lines:
+        import json
+        data = json.loads(ln)
+        assert data["symbol"] == "btcusdt"
+        assert data["spot_price"] == 65000.0
+        assert data["clob_mid"] == 0.50
+

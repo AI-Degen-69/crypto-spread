@@ -5,14 +5,14 @@
   - Verify: `python -m pytest tests/test_monitor_stream_latency.py -k test_snapshot -q`
   - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`
 
-- [ ] Task 2: CLI arguments, execution loop, and JSON output mode
+- [x] Task 2: CLI arguments, execution loop, and JSON output mode
   - Acceptance: CLI supports `--series`, `--duration`, `--ticks`, `--threshold`, and `--json`. Prints formatted table or single-line JSON records. Gracefully exits on Ctrl+C or when limits expire.
   - Verify: `python -m scripts.monitor_stream_latency --series btc-up-or-down-5m --ticks 2 --json`
   - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`
 
 ## Checkpoint 1: Core Stream Monitor Operational
-- [ ] Snapshot formatting, alignment, and CLI unit tests pass.
-- [ ] CLI runs smoke test with `--ticks 2` and exits cleanly.
+- [x] Snapshot formatting, alignment, and CLI unit tests pass.
+- [x] CLI runs smoke test with `--ticks 2` and exits cleanly.
 
 - [ ] Task 3: Implement `LatencyAuditor` state machine and `--audit` summary reporting
   - Acceptance: `LatencyAuditor` detects spot shocks, measures elapsed time until CLOB response within a 10s window, and calculates summary metrics (total shocks, reaction count, reaction rate %, median and p95 reaction latency). `--audit` flag prints formatted summary on completion.
