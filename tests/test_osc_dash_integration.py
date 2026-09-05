@@ -977,3 +977,20 @@ def test_api_live_config_accepts_non_rectangular_selection():
     finally:
         engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
 
+
+def test_api_live_latency():
+    """Verify /api/live/latency endpoint returns valid schema and metrics."""
+    res = client.get("/api/live/latency?series=btc-up-or-down-5m")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert data["series"] == "btc-up-or-down-5m"
+    assert data["symbol"] == "btcusdt"
+    assert "spot_price" in data
+    assert "spot_drift" in data
+    assert "clob_mid" in data
+    assert "latency_ms" in data
+    assert "rtds_connected" in data
+    assert "clob_ws_connected" in data
+
+

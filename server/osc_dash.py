@@ -686,6 +686,54 @@ def api_live_state():
     return engine.get_state()
 
 
+@app.get("/api/live/latency")
+def api_live_latency(series: str = "btc-up-or-down-5m"):
+    """Return real-time side-by-side stream metrics and latency lead times."""
+    from strategy.streaming import SERIES_TO_SYMBOL
+    symbol = SERIES_TO_SYMBOL.get(series, "btcusdt")
+    engine = get_live_trader_engine()
+    bridge_st = engine.stream_bridge.get_status()
+
+    spot_price = None
+    spot_drift = 0.0
+    clob_mid = None
+    latency_ms = 0.0
+    streaming_active = False
+    updated_ts = None
+
+    if series in engine.markets:
+        m = engine.markets[series]
+        spot_price = m.spot_price
+        spot_drift = m.spot_drift
+        streaming_active = m.streaming_active
+        updated_ts = m.spot_updated_ts
+        if m.up_bid is not None and m.up_ask is not None:
+            clob_mid = round((m.up_bid + m.up_ask) / 2.0, 4)
+        elif m.resting_up is not None:
+            clob_mid = m.resting_up
+
+    # Fallback to bridge symbols if market spot is not populated yet
+    if spot_price is None and bridge_st.get("symbols"):
+        spot_price = bridge_st["symbols"].get(symbol)
+
+    if updated_ts:
+        latency_ms = round(abs(time.time() - updated_ts) * 1000.0, 1)
+
+    return {
+        "ok": True,
+        "series": series,
+        "symbol": symbol,
+        "spot_price": spot_price,
+        "spot_drift": round(spot_drift, 4),
+        "clob_mid": clob_mid,
+        "latency_ms": latency_ms,
+        "streaming_active": streaming_active,
+        "rtds_connected": bridge_st.get("rtds_connected", False),
+        "clob_ws_connected": bridge_st.get("clob_ws_connected", False),
+        "updated_ts": updated_ts,
+    }
+
+
 @app.get("/api/live/stream")
 async def api_live_stream(request: Request):
     """Real-time SSE stream broadcasting versioned DashboardEnvelope events."""

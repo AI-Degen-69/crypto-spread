@@ -28,7 +28,7 @@
 - [x] Auditor unit tests pass.
 - [x] Documentation report is published and fully detailed.
 
-- [ ] Task 5: Add `/api/live/latency` endpoint in `server/osc_dash.py`
+- [x] Task 5: Add `/api/live/latency` endpoint in `server/osc_dash.py`
   - Acceptance: GET `/api/live/latency` returns JSON with `spot_price`, `spot_drift`, `clob_mid`, `latency_ms`, and feed health metrics.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -k test_api_live_latency -q`
   - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`

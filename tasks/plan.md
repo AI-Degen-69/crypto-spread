@@ -43,7 +43,7 @@ Build a real-time stream comparison engine, standalone CLI tool (`scripts/monito
 - [x] Documentation report is published and fully detailed.
 
 ### Phase 3: Dashboard Cockpit Integration (`cockpit-telemetry`)
-- [ ] Task 5: Add `/api/live/latency` endpoint in `server/osc_dash.py`
+- [x] Task 5: Add `/api/live/latency` endpoint in `server/osc_dash.py`
   - Acceptance: GET `/api/live/latency` returns JSON with `spot_price`, `spot_drift`, `clob_mid`, `latency_ms`, and feed health metrics.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -k test_api_live_latency -q`
   - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
