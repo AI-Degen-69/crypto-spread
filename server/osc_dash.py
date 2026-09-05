@@ -1135,8 +1135,31 @@ FULL_APP_HTML = r"""<!doctype html><html lang="en" dir="ltr"><head>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-:root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui}
-*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased}
+:root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui;--sidebar-w-collapsed: 48px;--sidebar-w-expanded: 220px}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased;padding-left:var(--sidebar-w-collapsed);transition:padding-left .25s cubic-bezier(.16,1,.3,1)}
+body.sidebar-pinned{padding-left:var(--sidebar-w-expanded)}
+.cui-sidebar{position:fixed;top:0;left:0;bottom:0;width:var(--sidebar-w-collapsed);background:var(--bg);border-right:1px solid var(--line);z-index:1000;display:flex;flex-direction:column;transition:width .25s cubic-bezier(.16,1,.3,1);overflow:hidden;box-shadow:2px 0 10px rgba(0,0,0,.35)}
+.cui-sidebar:hover,.cui-sidebar.pinned{width:var(--sidebar-w-expanded)}
+.sidebar-header{height:48px;display:flex;align-items:center;padding:0 12px;gap:12px;border-bottom:1px solid var(--line);flex-shrink:0}
+.sidebar-toggle-btn{background:transparent;border:none;color:var(--dim);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:6px;border-radius:6px;transition:color .15s,background .15s}
+.sidebar-toggle-btn:hover{color:var(--tx);background:var(--panel2)}
+.cui-sidebar.pinned .sidebar-toggle-btn{color:var(--up);background:rgba(51,201,181,0.15)}
+.sidebar-brand-text{font:800 12px var(--disp);letter-spacing:.08em;color:var(--tx);white-space:nowrap;opacity:0;transition:opacity .2s ease}
+.cui-sidebar:hover .sidebar-brand-text,.cui-sidebar.pinned .sidebar-brand-text{opacity:1}
+.sidebar-nav{display:flex;flex-direction:column;gap:4px;padding:10px 6px;flex:1}
+.sidebar-tab-btn,.sidebar-link-btn{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:transparent;border:1px solid transparent;color:var(--dim);font:600 12px var(--disp);cursor:pointer;text-decoration:none;white-space:nowrap;transition:all .15s ease;width:100%;text-align:left}
+.sidebar-tab-btn:hover,.sidebar-link-btn:hover{color:var(--tx);background:var(--panel2)}
+.sidebar-tab-btn.active{color:var(--up);background:rgba(51,201,181,0.12);border-color:rgba(51,201,181,0.25);font-weight:700}
+.nav-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;flex-shrink:0}
+.nav-label{opacity:0;transition:opacity .2s ease;white-space:nowrap}
+.cui-sidebar:hover .nav-label,.cui-sidebar.pinned .nav-label{opacity:1}
+.sidebar-divider{height:1px;background:var(--line);margin:6px 10px}
+.sidebar-footer{padding:10px 6px;border-top:1px solid var(--line);flex-shrink:0}
+.sidebar-status-pill{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:var(--panel);border:1px solid var(--line);white-space:nowrap}
+.status-indicator-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0;transition:all .2s ease}
+.status-indicator-dot.running{background:var(--up);box-shadow:0 0 6px var(--up)}
+.status-indicator-text{font:700 10px var(--mono);color:var(--dim);opacity:0;transition:opacity .2s ease}
+.cui-sidebar:hover .status-indicator-text,.cui-sidebar.pinned .status-indicator-text{opacity:1}
 a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .mono{font-family:var(--mono)}
 .hdr{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -1225,16 +1248,98 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-tag-partial{background:rgba(235,178,74,0.12);color:var(--gold);border:1px solid rgba(235,178,74,0.25)}
 .ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 </style></head><body>
+<aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
+  <div class="sidebar-header">
+    <button class="sidebar-toggle-btn" id="sidebarToggleBtn" onclick="toggleSidebarPin()" title="Pin/Unpin Sidebar" aria-label="Toggle Sidebar Navigation">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <line x1="9" y1="3" x2="9" y2="21"></line>
+      </svg>
+    </button>
+    <div class="sidebar-brand-text">CRYPTO SPREAD</div>
+  </div>
+  <nav class="sidebar-nav">
+    <button class="sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+      </span>
+      <span class="nav-label">Live Trading Cockpit</span>
+    </button>
+    <button class="sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.93 4.93a10 10 0 0 1 14.14 0"></path>
+          <path d="M7.76 7.76a6 6 0 0 1 8.48 0"></path>
+          <circle cx="12" cy="12" r="2"></circle>
+          <path d="M12 14v7"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Live Books & Queue</span>
+    </button>
+    <button class="sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline>
+          <polyline points="16 7 22 7 22 13"></polyline>
+        </svg>
+      </span>
+      <span class="nav-label">Backtest Sweeper</span>
+    </button>
+    <button class="sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="20" x2="18" y2="10"></line>
+          <line x1="12" y1="20" x2="12" y2="4"></line>
+          <line x1="6" y1="20" x2="6" y2="14"></line>
+        </svg>
+      </span>
+      <span class="nav-label">Stats Summary</span>
+    </button>
+    <button class="sidebar-tab-btn" id="tab-btn-ticks" onclick="switchTab('ticks')" title="Tick Files">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Tick Files</span>
+    </button>
+  </nav>
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-nav" style="flex:0">
+    <a href="https://polymarket.com" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="Polymarket CLOB">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Polymarket Venue</span>
+    </a>
+    <a href="https://github.com/AI-Degen-69/crypto-spread" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="GitHub Repository">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+        </svg>
+      </span>
+      <span class="nav-label">GitHub Repo</span>
+    </a>
+  </div>
+  <div class="sidebar-footer">
+    <div class="sidebar-status-pill" id="sidebarBotStatusPill" title="Trading Bot Engine Status">
+      <span class="status-indicator-dot" id="sidebarStatusDot"></span>
+      <span class="status-indicator-text" id="sidebarStatusText">ENGINE IDLE</span>
+    </div>
+  </div>
+</aside>
+
 <div class="hdr" id="app-hdr">
   <h1><span>◆</span> Crypto Spread <span>5m/15m Engine</span></h1>
   <span class="tag">SPREAD-2 · POLYMARKET CLOB</span>
-  <div class="nav-tabs" id="main-nav">
-    <button class="tab-btn active" onclick="switchTab('cockpit')" id="tab-btn-cockpit">⚡ Live Trading Cockpit</button>
-    <button class="tab-btn" onclick="switchTab('live')" id="tab-btn-live">📡 Live Books & Queue</button>
-    <button class="tab-btn" onclick="switchTab('backtest')" id="tab-btn-backtest">⚡ Backtest Sweeper</button>
-    <button class="tab-btn" onclick="switchTab('summary')" id="tab-btn-summary">📊 Stats Summary</button>
-    <button class="tab-btn" onclick="switchTab('ticks')" id="tab-btn-ticks">💾 Tick Files</button>
-  </div>
   <span style="flex:1"></span>
   <div style="display:flex;align-items:center;gap:8px">
     <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Collector: Loading...</span>
@@ -1882,8 +1987,28 @@ function groupPositionsByPair(positions, markets) {
   return groups;
 }
 
+function toggleSidebarPin(){
+  const sb = $('app-sidebar');
+  if(!sb) return;
+  const isPinned = sb.classList.toggle('pinned');
+  document.body.classList.toggle('sidebar-pinned', isPinned);
+  try{
+    localStorage.setItem('cui_sidebar_pinned', isPinned ? 'true' : 'false');
+  }catch(e){}
+}
+
+function initSidebarState(){
+  try{
+    if(localStorage.getItem('cui_sidebar_pinned') === 'true'){
+      const sb = $('app-sidebar');
+      if(sb) sb.classList.add('pinned');
+      document.body.classList.add('sidebar-pinned');
+    }
+  }catch(e){}
+}
+
 function switchTab(name){
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.sidebar-tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   const btn = $('tab-btn-'+name);
   const cont = $('tab-'+name);
@@ -3165,6 +3290,19 @@ function setCockpitChartMode(mode) {
 function renderCockpitUI(st) {
   if (!st) return;
 
+  const sbDot = $('sidebarStatusDot');
+  const sbText = $('sidebarStatusText');
+  if (sbDot) {
+    if (st.is_running) {
+      sbDot.classList.add('running');
+    } else {
+      sbDot.classList.remove('running');
+    }
+  }
+  if (sbText) {
+    sbText.textContent = st.is_running ? 'BOT ACTIVE' : 'BOT IDLE';
+  }
+
   // Sync mode dropdown & lock state only when not actively focused
   if (st.mode && $('cockpitMode') && document.activeElement !== $('cockpitMode')) {
     if ($('cockpitMode').value !== st.mode) {
@@ -4061,6 +4199,7 @@ function initLiveCockpitStream() {
 
 setupBacktestInputListeners();
 switchOtTab(activeOtTab);
+initSidebarState();
 
 // Initialize real-time streams and polls
 fetchCockpitState();

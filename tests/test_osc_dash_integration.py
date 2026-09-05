@@ -45,6 +45,9 @@ def test_root_returns_4tab_spa():
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     html = response.text
+    assert "app-sidebar" in html
+    assert "sidebarToggleBtn" in html
+    assert "tab-btn-cockpit" in html
     assert "tab-btn-live" in html
     assert "tab-btn-backtest" in html
     assert "tab-btn-summary" in html
@@ -99,6 +102,75 @@ def test_root_ltr_layout_and_attributes():
     # Verify that required selectors explicitly set left text alignment
     assert re.search(r"\.tbl\s+th\s*\{[^}]*text-align:\s*left", html) is not None
     assert re.search(r"\.form-group\s+label\s*\{[^}]*text-align:\s*left", html) is not None
+
+
+def test_sidebar_css_architecture():
+    """Verify that CSS defines sidebar variables, layout classes, and transition rules."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert "--sidebar-w-collapsed:48px" in html or "--sidebar-w-collapsed: 48px" in html
+    assert "--sidebar-w-expanded:220px" in html or "--sidebar-w-expanded: 220px" in html
+    assert ".cui-sidebar" in html
+    assert ".sidebar-header" in html
+    assert ".sidebar-toggle-btn" in html
+    assert ".sidebar-brand-text" in html
+    assert ".sidebar-nav" in html
+    assert ".sidebar-tab-btn" in html
+    assert ".sidebar-link-btn" in html
+    assert ".nav-icon" in html
+    assert ".nav-label" in html
+    assert ".sidebar-divider" in html
+    assert ".sidebar-footer" in html
+    assert ".sidebar-status-pill" in html
+    assert ".status-indicator-dot" in html
+    assert "sidebar-pinned" in html
+
+
+def test_sidebar_dom_structure_and_header_streamlining():
+    """Verify that <aside id="app-sidebar"> is present with SVG icons and header tabs are removed."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Sidebar element exists and has proper attributes
+    assert 'id="app-sidebar"' in html
+    assert 'class="cui-sidebar"' in html
+    assert 'id="sidebarToggleBtn"' in html
+    assert 'onclick="toggleSidebarPin()"' in html
+
+    # All 5 navigation tab buttons exist with SVG icons and labels
+    for tab_id in ["tab-btn-cockpit", "tab-btn-live", "tab-btn-backtest", "tab-btn-summary", "tab-btn-ticks"]:
+        assert f'id="{tab_id}"' in html
+
+    assert 'sidebarBotStatusPill' in html
+    assert 'sidebarStatusDot' in html
+    assert 'sidebarStatusText' in html
+
+    # Verify that header no longer contains horizontal tab container
+    assert '<div class="nav-tabs" id="main-nav">' not in html
+    assert '<div class="nav-tabs">' not in html
+
+    # Verify header still contains title, status badges, and polling buttons
+    assert 'id="collectorBadge"' in html
+    assert 'id="tapeBadge"' in html
+    assert 'id="btnToggleCollector"' in html
+    assert 'pollOnce()' in html
+
+
+def test_sidebar_pinning_and_status_sync_scripts():
+    """Verify that toggleSidebarPin, initSidebarState, and status dot sync scripts are present."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    assert "function toggleSidebarPin()" in html
+    assert "cui_sidebar_pinned" in html
+    assert "sidebar-pinned" in html
+    assert "function initSidebarState()" in html
+    assert "initSidebarState();" in html
+    assert "sidebarStatusDot" in html
+    assert "sidebarStatusText" in html
 
 
 def test_no_hebrew_characters_in_dashboard():
