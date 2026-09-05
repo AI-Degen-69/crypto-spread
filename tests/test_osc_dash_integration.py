@@ -45,6 +45,9 @@ def test_root_returns_4tab_spa():
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     html = response.text
+    assert "app-sidebar" in html
+    assert "sidebarToggleBtn" in html
+    assert "tab-btn-cockpit" in html
     assert "tab-btn-live" in html
     assert "tab-btn-backtest" in html
     assert "tab-btn-summary" in html

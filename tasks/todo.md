@@ -15,7 +15,7 @@
   - Verify: DOM inspection and integration tests.
   - Files: `server/osc_dash.py`
 
-- [ ] Task 4: Add sidebar DOM contract tests in `tests/test_osc_dash_integration.py` and run full regression suite
+- [x] Task 4: Add sidebar DOM contract tests in `tests/test_osc_dash_integration.py` and run full regression suite
   - Acceptance: Assert presence of `#app-sidebar`, `#sidebarToggleBtn`, all 5 tab buttons with SVG icons, absence of duplicate header tabs, and toggle functions. Full test suite passes with zero regressions (`python -m pytest -q`).
   - Verify: `python -m pytest -q`
   - Files: `tests/test_osc_dash_integration.py`
