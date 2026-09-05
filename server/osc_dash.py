@@ -1259,7 +1259,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     <div class="sidebar-brand-text">CRYPTO SPREAD</div>
   </div>
   <nav class="sidebar-nav">
-    <button class="tab-btn sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
+    <button class="sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
@@ -1267,7 +1267,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </span>
       <span class="nav-label">Live Trading Cockpit</span>
     </button>
-    <button class="tab-btn sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
+    <button class="sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4.93 4.93a10 10 0 0 1 14.14 0"></path>
@@ -1278,7 +1278,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </span>
       <span class="nav-label">Live Books & Queue</span>
     </button>
-    <button class="tab-btn sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
+    <button class="sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline>
@@ -1287,7 +1287,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </span>
       <span class="nav-label">Backtest Sweeper</span>
     </button>
-    <button class="tab-btn sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
+    <button class="sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="20" x2="18" y2="10"></line>
@@ -1297,7 +1297,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </span>
       <span class="nav-label">Stats Summary</span>
     </button>
-    <button class="tab-btn sidebar-tab-btn" id="tab-btn-ticks" onclick="switchTab('ticks')" title="Tick Files">
+    <button class="sidebar-tab-btn" id="tab-btn-ticks" onclick="switchTab('ticks')" title="Tick Files">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
@@ -2008,7 +2008,7 @@ function initSidebarState(){
 }
 
 function switchTab(name){
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.sidebar-tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   const btn = $('tab-btn-'+name);
   const cont = $('tab-'+name);
