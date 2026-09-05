@@ -10,7 +10,7 @@
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`
 
-- [ ] Task 3: Implement sidebar toggle pinning, localStorage persistence, and live engine status sync
+- [x] Task 3: Implement sidebar toggle pinning, localStorage persistence, and live engine status sync
   - Acceptance: `toggleSidebarPin()` toggles `.pinned` on `#app-sidebar` and `.sidebar-pinned` on `document.body` with `localStorage` persistence. `initSidebarState()` restores pinned state on load. `renderCockpitUI(st)` updates `#sidebarStatusDot` and `#sidebarStatusText`.
   - Verify: DOM inspection and integration tests.
   - Files: `server/osc_dash.py`

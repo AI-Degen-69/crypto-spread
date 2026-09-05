@@ -1987,6 +1987,26 @@ function groupPositionsByPair(positions, markets) {
   return groups;
 }
 
+function toggleSidebarPin(){
+  const sb = $('app-sidebar');
+  if(!sb) return;
+  const isPinned = sb.classList.toggle('pinned');
+  document.body.classList.toggle('sidebar-pinned', isPinned);
+  try{
+    localStorage.setItem('cui_sidebar_pinned', isPinned ? 'true' : 'false');
+  }catch(e){}
+}
+
+function initSidebarState(){
+  try{
+    if(localStorage.getItem('cui_sidebar_pinned') === 'true'){
+      const sb = $('app-sidebar');
+      if(sb) sb.classList.add('pinned');
+      document.body.classList.add('sidebar-pinned');
+    }
+  }catch(e){}
+}
+
 function switchTab(name){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
@@ -3270,6 +3290,19 @@ function setCockpitChartMode(mode) {
 function renderCockpitUI(st) {
   if (!st) return;
 
+  const sbDot = $('sidebarStatusDot');
+  const sbText = $('sidebarStatusText');
+  if (sbDot) {
+    if (st.is_running) {
+      sbDot.classList.add('running');
+    } else {
+      sbDot.classList.remove('running');
+    }
+  }
+  if (sbText) {
+    sbText.textContent = st.is_running ? 'BOT ACTIVE' : 'BOT IDLE';
+  }
+
   // Sync mode dropdown & lock state only when not actively focused
   if (st.mode && $('cockpitMode') && document.activeElement !== $('cockpitMode')) {
     if ($('cockpitMode').value !== st.mode) {
@@ -4166,6 +4199,7 @@ function initLiveCockpitStream() {
 
 setupBacktestInputListeners();
 switchOtTab(activeOtTab);
+initSidebarState();
 
 // Initialize real-time streams and polls
 fetchCockpitState();

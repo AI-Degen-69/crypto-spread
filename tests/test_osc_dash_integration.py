@@ -155,6 +155,21 @@ def test_sidebar_dom_structure_and_header_streamlining():
     assert 'pollOnce()' in html
 
 
+def test_sidebar_pinning_and_status_sync_scripts():
+    """Verify that toggleSidebarPin, initSidebarState, and status dot sync scripts are present."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    assert "function toggleSidebarPin()" in html
+    assert "cui_sidebar_pinned" in html
+    assert "sidebar-pinned" in html
+    assert "function initSidebarState()" in html
+    assert "initSidebarState();" in html
+    assert "sidebarStatusDot" in html
+    assert "sidebarStatusText" in html
+
+
 def test_no_hebrew_characters_in_dashboard():
     """Verify that all legacy Hebrew strings in server/osc_dash.py have been standardized to English."""
     import re
