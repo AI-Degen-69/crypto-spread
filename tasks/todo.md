@@ -10,7 +10,7 @@
   - Verify: DOM inspection and integration tests.
   - Files: `server/osc_dash.py`
 
-- [ ] Task 3: Integration tests in `tests/test_osc_dash_integration.py` and regression test run
+- [x] Task 3: Integration tests in `tests/test_osc_dash_integration.py` and regression test run
   - Acceptance: `POST /api/live/config` returns 400 when bot runs and parameters change, returns 200 for idempotent requests, returns 200 when bot is stopped. DOM asserts `#cockpitParamsLockHint`. Full test suite passes.
   - Verify: `python -m pytest -q`
   - Files: `tests/test_osc_dash_integration.py`

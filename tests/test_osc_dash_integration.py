@@ -766,13 +766,28 @@ def test_api_live_config_rejects_changes_while_running():
         assert res.status_code == 400
         assert "Cannot change market selection while the trading bot is running" in res.json().get("error", "")
 
-        # Parameter changes (offset, shares) while running are also rejected
-        res2 = client.post("/api/live/config", json={"offset": 0.04})
-        assert res2.status_code == 400
-        assert "Cannot change strategy parameters while the trading bot is running" in res2.json().get("error", "")
+        # All scalar parameter changes while running must be rejected with HTTP 400
+        for param_payload in [
+            {"offset": 0.04},
+            {"exit_thresh": 0.08},
+            {"shares": 10},
+            {"mode": "live"},
+            {"wallet_address": "0x9999999999999999999999999999999999999999"},
+            {"starting_balance": 5000.0},
+        ]:
+            res_param = client.post("/api/live/config", json=param_payload)
+            assert res_param.status_code == 400, f"Expected 400 for payload {param_payload}"
+            assert "Cannot change strategy parameters while the trading bot is running" in res_param.json().get("error", "")
 
         # Idempotent call with matching active parameters is accepted
-        res_idempotent = client.post("/api/live/config", json={"offset": engine.offset, "shares": engine.shares})
+        res_idempotent = client.post("/api/live/config", json={
+            "offset": engine.offset,
+            "exit_thresh": engine.exit_thresh,
+            "shares": engine.shares,
+            "mode": engine.mode,
+            "wallet_address": engine.wallet_address,
+            "starting_balance": engine.starting_balance,
+        })
         assert res_idempotent.status_code == 200
 
         # Once stopped, updating parameters is accepted
@@ -785,7 +800,11 @@ def test_api_live_config_rejects_changes_while_running():
         engine.is_running = False
         engine.update_config(
             offset=0.02,
+            exit_thresh=0.05,
             shares=5,
+            mode="paper",
+            wallet_address="",
+            starting_balance=1000.0,
             selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"],
         )
 
