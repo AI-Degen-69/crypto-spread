@@ -1,33 +1,52 @@
-# Spec: Collapsible Hover-Expandable Sidebar Navigation (Issue #65)
+# Spec: Side-by-Side RTDS vs CLOB Live Stream Monitor & Price Latency Audit (Issue #54)
 
 ## 1. Objective
-Redesign the primary dashboard navigation in `server/osc_dash.py` by replacing the horizontal tabs in the top header with a modern, collapsible vertical sidebar menu:
-1. **Collapsed State (`48px` / `w-12`)**: A slim vertical strip anchored to the left of the viewport (`height: 100vh`, `position: fixed`, `z-index: 100`) showing centered, crisp SVG icons with tooltips (`title` attribute).
-2. **Hover / Expanded State (`220px`)**: Smoothly expands on hover (`transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1)`) or when toggled/pinned, unveiling left-aligned tab labels with zero text wrap (`white-space: nowrap`).
-3. **Pinning / Toggle Support**: A top toggle button (`#sidebarToggleBtn`) allows the operator to pin the sidebar open (persisting state via `localStorage.getItem('cui_sidebar_pinned')`).
-4. **Header Streamlining**: Remove `.nav-tabs` from `#app-hdr`, leaving a clean, balanced header focused on branding/title on the left and system telemetry badges (`#collectorBadge`, `#tapeBadge`) and polling controls on the right.
-5. **Main Content Offset**: The main application content (`.wrap` / `#app-main`) adjusts its left margin (`margin-left: 48px`, or `220px` when pinned) to prevent any content occlusion.
-6. **100% Backward Compatibility**: Preserve all existing tab button IDs (`tab-btn-cockpit`, `tab-btn-live`, `tab-btn-backtest`, `tab-btn-summary`, `tab-btn-ticks`) and onclick handlers (`switchTab(...)`).
+
+Build a comprehensive real-time streaming comparison engine, standalone CLI monitor, empirical latency audit, and live Cockpit dashboard widget:
+1. **Real-Time Synchronized Stream Ingestion**: Concurrently ingest Polymarket RTDS spot ticks (`prices.crypto.binance` / REST fallback) and Polymarket CLOB order book updates (Market WebSocket / REST) aligned to the exact same second.
+2. **Standalone CLI Monitor (`scripts/monitor_stream_latency.py`)**:
+   - Display a live, formatted console table of spot prices, percentage drift, UP/DOWN best bid/ask/mid, CLOB contract mid, and latency delta ($\Delta t$ ms).
+   - Support automated inspection with `--duration <sec>`, `--ticks <n>`, and machine-readable `--json` output.
+   - Provide an `--audit` flag to run empirical lead-lag correlation tracking and print summary statistics.
+3. **Empirical Latency Audit & Ground Truth Documentation (`docs/rtds-clob-latency-audit.md`)**:
+   - Measure empirical lead times: how many milliseconds/seconds elapse between an RTDS spot price shift ($\ge 0.10\%$) and the subsequent CLOB order book response (BBO/mid shift).
+   - Formally document the execution ground truth: CLOB is the sole execution venue, RTDS is an informational leading indicator for fast stop-loss execution, and asset units ($65,000 USD vs $0.48 binary contract) are non-fungible.
+4. **Dashboard Cockpit Integration (`server/osc_dash.py`)**:
+   - Expose side-by-side stream metrics via `/api/live/latency` and real-time SSE broadcasts.
+   - Add a compact "Live Stream Telemetry & Latency" telemetry card in Tab 1 (Cockpit) displaying spot price, drift, CLOB mid, feed latency, and leading signal health.
 
 ---
 
 ## 2. Tech Stack & Dependencies
-- **Backend Framework**: FastAPI + Uvicorn (Python 3.10+)
-- **Frontend Architecture**: Embedded Vanilla ES6 JavaScript + Modern CSS3 custom properties in `server/osc_dash.py` (zero external CDN or build dependencies)
-- **Testing Framework**: `pytest`, `pytest-asyncio`, FastAPI `TestClient` in `tests/test_osc_dash_integration.py`
+
+- **Language & Runtime**: Python 3.10+
+- **Web & API Framework**: FastAPI, Starlette, Uvicorn, `sse-starlette`
+- **Networking & Ingestion**: `requests`, Python standard library (`asyncio`, `dataclasses`, `collections`, `threading`, `time`, `typing`)
+- **Existing Bridge**: [`strategy/streaming.py`](file:///c:/Users/Tiger/Agents/Projects/AI%20Trading/crypto-spread/strategy/streaming.py) (`UnifiedStreamBridge`, `RTDSStreamClient`, `CLOBMarketWSClient`)
+- **Testing Framework**: `pytest`, `pytest-asyncio`, FastAPI `TestClient`
+- **Zero New Dependencies**: Uses only packages already listed in `requirements.txt`.
 
 ---
 
 ## 3. Commands
-- Run all tests:
+
+- Run all unit and integration tests:
   ```powershell
   python -m pytest -q
   ```
-- Run Dashboard integration tests:
+- Run the stream monitor CLI interactively:
   ```powershell
-  python -m pytest tests/test_osc_dash_integration.py -q
+  python -m scripts.monitor_stream_latency --series btc-up-or-down-5m
   ```
-- Start Dashboard server:
+- Run stream monitor with automated duration and JSON output:
+  ```powershell
+  python -m scripts.monitor_stream_latency --series btc-up-or-down-5m --duration 30 --json
+  ```
+- Run empirical latency lead-time audit:
+  ```powershell
+  python -m scripts.monitor_stream_latency --series btc-up-or-down-5m --audit --duration 60
+  ```
+- Start dashboard server:
   ```powershell
   python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802
   ```
@@ -35,418 +54,195 @@ Redesign the primary dashboard navigation in `server/osc_dash.py` by replacing t
 ---
 
 ## 4. Project Structure & Touchpoints
+
 ```
+scripts/
+  monitor_stream_latency.py        -> [NEW] Standalone CLI monitor and latency auditor
+strategy/
+  streaming.py                     -> Enhance bridge with latency calculation & synced tick snapshots
 server/
-  osc_dash.py                  -> Add sidebar CSS, inject <aside id="app-sidebar">, clean #app-hdr, update layout offset, add toggle JS
+  osc_dash.py                      -> Add /api/live/latency endpoint & Cockpit UI telemetry card
+docs/
+  rtds-clob-latency-audit.md       -> [NEW] Empirical audit report & execution ground truth documentation
 tests/
-  test_osc_dash_integration.py -> Update nav tests, assert #app-sidebar, assert SVG icons, assert tab switching
-SPEC.md                        -> This specification document
+  test_monitor_stream_latency.py   -> [NEW] Unit tests for CLI monitor, calculations & audit tracker
+  test_osc_dash_integration.py     -> Add integration tests for /api/live/latency & Cockpit telemetry DOM
+SPEC.md                            -> This specification document
 ```
 
 ---
 
-## 5. Implementation Details & Code Style
+## 5. Code Style & Architecture
 
-### 5.1 Sidebar Layout & Structure (`server/osc_dash.py`)
-Add `<aside class="cui-sidebar" id="app-sidebar">` directly inside `<body>` before `#app-hdr`:
+### 5.1 Latency Tracker & Stream Synchronizer Architecture
+In `scripts/monitor_stream_latency.py`:
+```python
+from dataclasses import dataclass, field
+import time
+from typing import Optional, List, Dict, Any
 
+@dataclass
+class StreamTickSnapshot:
+    timestamp: float
+    time_str: str
+    symbol: str
+    series_slug: str
+    spot_price: float
+    spot_drift_pct: float
+    up_bid: Optional[float]
+    up_ask: Optional[float]
+    up_mid: Optional[float]
+    down_bid: Optional[float]
+    down_ask: Optional[float]
+    down_mid: Optional[float]
+    clob_mid: Optional[float]
+    latency_ms: float
+    spot_source: str = "RTDS"
+    clob_source: str = "WS"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "timestamp": self.timestamp,
+            "time_str": self.time_str,
+            "symbol": self.symbol,
+            "series": self.series_slug,
+            "spot_price": round(self.spot_price, 2),
+            "spot_drift_pct": round(self.spot_drift_pct, 4),
+            "up_bid": self.up_bid,
+            "up_ask": self.up_ask,
+            "up_mid": self.up_mid,
+            "down_bid": self.down_bid,
+            "down_ask": self.down_ask,
+            "down_mid": self.down_mid,
+            "clob_mid": self.clob_mid,
+            "latency_ms": round(self.latency_ms, 1),
+            "spot_source": self.spot_source,
+            "clob_source": self.clob_source,
+        }
+
+    def format_row(self) -> str:
+        up_str = f"{self.up_bid or 0:.2f}/{self.up_ask or 0:.2f} ({self.up_mid or 0:.3f})"
+        dn_str = f"{self.down_bid or 0:.2f}/{self.down_ask or 0:.2f} ({self.down_mid or 0:.3f})"
+        sign = "+" if self.spot_drift_pct >= 0 else ""
+        return (
+            f"[{self.time_str}] | "
+            f"Spot: ${self.spot_price:9.2f} ({sign}{self.spot_drift_pct*100:+.2f}%) | "
+            f"UP: {up_str:18} | DN: {dn_str:18} | "
+            f"CLOB Mid: {self.clob_mid or 0:.3f} | Δt: {self.latency_ms:4.0f}ms"
+        )
+```
+
+### 5.2 Latency Audit Engine
+```python
+class LatencyAuditor:
+    """Detects spot price impulse moves and measures elapsed time until CLOB book adjustments."""
+
+    def __init__(self, drift_threshold: float = 0.0010, response_window_sec: float = 10.0):
+        self.drift_threshold = drift_threshold  # 0.10% spot move
+        self.response_window_sec = response_window_sec
+        self.events: List[Dict[str, Any]] = []
+        self._pending_shock: Optional[Dict[str, Any]] = None
+
+    def record_tick(self, snapshot: StreamTickSnapshot) -> None:
+        now = snapshot.timestamp
+        # Check if an existing shock event is awaiting CLOB reaction
+        if self._pending_shock:
+            dt = now - self._pending_shock["shock_ts"]
+            if dt <= self.response_window_sec:
+                if snapshot.clob_mid is not None and abs(snapshot.clob_mid - self._pending_shock["baseline_mid"]) >= 0.01:
+                    self._pending_shock["reaction_time_sec"] = dt
+                    self._pending_shock["reaction_time_ms"] = dt * 1000.0
+                    self._pending_shock["clob_reacted"] = True
+                    self.events.append(self._pending_shock)
+                    self._pending_shock = None
+            else:
+                self._pending_shock["clob_reacted"] = False
+                self.events.append(self._pending_shock)
+                self._pending_shock = None
+
+        # Detect new spot price shock
+        if abs(snapshot.spot_drift_pct) >= self.drift_threshold and not self._pending_shock:
+            self._pending_shock = {
+                "shock_ts": now,
+                "spot_price": snapshot.spot_price,
+                "drift_pct": snapshot.spot_drift_pct,
+                "baseline_mid": snapshot.clob_mid or 0.50,
+                "reaction_time_sec": None,
+                "clob_reacted": False,
+            }
+```
+
+### 5.3 Cockpit UI Widget (`server/osc_dash.py`)
+Add a dedicated card in Cockpit Tab 1:
 ```html
-<aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
-  <!-- Top: Pin/Toggle Button & Logo Symbol -->
-  <div class="sidebar-header">
-    <button class="sidebar-toggle-btn" id="sidebarToggleBtn" onclick="toggleSidebarPin()" title="Pin/Unpin Sidebar" aria-label="Toggle Sidebar Navigation">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-        <line x1="9" y1="3" x2="9" y2="21"></line>
-      </svg>
-    </button>
-    <div class="sidebar-brand-text">CRYPTO SPREAD</div>
+<div class="card" id="card-stream-telemetry">
+  <div class="card-title">LIVE STREAM TELEMETRY (RTDS vs CLOB)</div>
+  <div class="telemetry-grid">
+    <div class="tel-item"><span class="tel-lbl">RTDS SPOT</span><span class="tel-val" id="telSpotPrice">--</span></div>
+    <div class="tel-item"><span class="tel-lbl">SPOT DRIFT</span><span class="tel-val" id="telSpotDrift">--</span></div>
+    <div class="tel-item"><span class="tel-lbl">CLOB MID</span><span class="tel-val" id="telClobMid">--</span></div>
+    <div class="tel-item"><span class="tel-lbl">LEAD LATENCY</span><span class="tel-val" id="telLeadLatency">--</span></div>
+    <div class="tel-item"><span class="tel-lbl">FEED HEALTH</span><span class="tel-badge ok" id="telFeedStatus">CONNECTED</span></div>
   </div>
-
-  <!-- Middle: Primary Nav Tabs -->
-  <nav class="sidebar-nav">
-    <button class="sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
-      <span class="nav-icon">
-        <!-- Lightning Bolt SVG -->
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-        </svg>
-      </span>
-      <span class="nav-label">Live Trading Cockpit</span>
-    </button>
-
-    <button class="sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
-      <span class="nav-icon">
-        <!-- Radar / Signal SVG -->
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4.93 4.93a10 10 0 0 1 14.14 0"></path>
-          <path d="M7.76 7.76a6 6 0 0 1 8.48 0"></path>
-          <circle cx="12" cy="12" r="2"></circle>
-          <path d="M12 14v7"></path>
-        </svg>
-      </span>
-      <span class="nav-label">Live Books & Queue</span>
-    </button>
-
-    <button class="sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
-      <span class="nav-icon">
-        <!-- Trending Chart SVG -->
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline>
-          <polyline points="16 7 22 7 22 13"></polyline>
-        </svg>
-      </span>
-      <span class="nav-label">Backtest Sweeper</span>
-    </button>
-
-    <button class="sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
-      <span class="nav-icon">
-        <!-- Bar Chart SVG -->
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="18" y1="20" x2="18" y2="10"></line>
-          <line x1="12" y1="20" x2="12" y2="4"></line>
-          <line x1="6" y1="20" x2="6" y2="14"></line>
-        </svg>
-      </span>
-      <span class="nav-label">Stats Summary</span>
-    </button>
-
-    <button class="sidebar-tab-btn" id="tab-btn-ticks" onclick="switchTab('ticks')" title="Tick Files">
-      <span class="nav-icon">
-        <!-- Hard Drive / Database SVG -->
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
-        </svg>
-      </span>
-      <span class="nav-label">Tick Files</span>
-    </button>
-  </nav>
-
-  <div class="sidebar-divider"></div>
-
-  <!-- Utility Links -->
-  <div class="sidebar-nav sidebar-utility">
-    <a href="https://polymarket.com" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="Polymarket CLOB">
-      <span class="nav-icon">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"></circle>
-          <line x1="2" y1="12" x2="22" y2="12"></line>
-          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
-        </svg>
-      </span>
-      <span class="nav-label">Polymarket Venue</span>
-    </a>
-    <a href="https://github.com/AI-Degen-69/crypto-spread" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="GitHub Repository">
-      <span class="nav-icon">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
-        </svg>
-      </span>
-      <span class="nav-label">GitHub Repo</span>
-    </a>
-  </div>
-
-  <!-- Bottom: Connection / Bot Status Pill -->
-  <div class="sidebar-footer">
-    <div class="sidebar-status-pill" id="sidebarBotStatusPill" title="Trading Bot Engine Status">
-      <span class="status-indicator-dot" id="sidebarStatusDot"></span>
-      <span class="status-indicator-text" id="sidebarStatusText">ENGINE IDLE</span>
-    </div>
-  </div>
-</aside>
-```
-
-### 5.2 CSS Architecture
-```css
-:root {
-  --sidebar-w-collapsed: 48px;
-  --sidebar-w-expanded: 220px;
-}
-
-.cui-sidebar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: var(--sidebar-w-collapsed);
-  background: var(--bg2);
-  border-right: 1px solid var(--line);
-  z-index: 1000;
-  display: flex;
-  flex-direction: column;
-  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  overflow: hidden;
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2);
-}
-
-.cui-sidebar:hover,
-.cui-sidebar.pinned {
-  width: var(--sidebar-w-expanded);
-}
-
-body {
-  padding-left: var(--sidebar-w-collapsed);
-  transition: padding-left 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-body.sidebar-pinned {
-  padding-left: var(--sidebar-w-expanded);
-}
-
-.sidebar-header {
-  height: 48px;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
-  flex-shrink: 0;
-}
-
-.sidebar-toggle-btn {
-  background: transparent;
-  border: none;
-  color: var(--dim);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px;
-  border-radius: 6px;
-  transition: color 0.15s, background 0.15s;
-}
-
-.sidebar-toggle-btn:hover {
-  color: var(--tx);
-  background: var(--panel2);
-}
-
-.cui-sidebar.pinned .sidebar-toggle-btn {
-  color: var(--up);
-  background: rgba(51, 201, 181, 0.15);
-}
-
-.sidebar-brand-text {
-  font: 800 12px var(--disp);
-  letter-spacing: 0.08em;
-  color: var(--tx);
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.cui-sidebar:hover .sidebar-brand-text,
-.cui-sidebar.pinned .sidebar-brand-text {
-  opacity: 1;
-}
-
-.sidebar-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 6px;
-  flex: 1;
-}
-
-.sidebar-tab-btn,
-.sidebar-link-btn {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--dim);
-  font: 600 12px var(--disp);
-  cursor: pointer;
-  text-decoration: none;
-  white-space: nowrap;
-  transition: all 0.15s ease;
-  width: 100%;
-  text-align: left;
-}
-
-.sidebar-tab-btn:hover,
-.sidebar-link-btn:hover {
-  color: var(--tx);
-  background: var(--panel2);
-}
-
-.sidebar-tab-btn.active {
-  color: var(--up);
-  background: rgba(51, 201, 181, 0.12);
-  border-color: rgba(51, 201, 181, 0.25);
-  font-weight: 700;
-}
-
-.nav-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-}
-
-.nav-label {
-  opacity: 0;
-  transition: opacity 0.2s ease;
-  white-space: nowrap;
-}
-
-.cui-sidebar:hover .nav-label,
-.cui-sidebar.pinned .nav-label {
-  opacity: 1;
-}
-
-.sidebar-divider {
-  height: 1px;
-  background: var(--line);
-  margin: 6px 10px;
-}
-
-.sidebar-footer {
-  padding: 10px 6px;
-  border-top: 1px solid var(--line);
-  flex-shrink: 0;
-}
-
-.sidebar-status-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-.status-indicator-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--dim);
-  flex-shrink: 0;
-}
-
-.status-indicator-dot.running {
-  background: var(--up);
-  box-shadow: 0 0 6px var(--up);
-}
-
-.status-indicator-text {
-  font: 700 10px var(--mono);
-  color: var(--dim);
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.cui-sidebar:hover .status-indicator-text,
-.cui-sidebar.pinned .status-indicator-text {
-  opacity: 1;
-}
-```
-
-### 5.3 JavaScript Interaction & State Persistence
-In `server/osc_dash.py`:
-```javascript
-function toggleSidebarPin() {
-  const sb = $('app-sidebar');
-  if (!sb) return;
-  const isPinned = sb.classList.toggle('pinned');
-  document.body.classList.toggle('sidebar-pinned', isPinned);
-  try {
-    localStorage.setItem('cui_sidebar_pinned', isPinned ? 'true' : 'false');
-  } catch (e) {}
-}
-
-function initSidebarState() {
-  try {
-    if (localStorage.getItem('cui_sidebar_pinned') === 'true') {
-      const sb = $('app-sidebar');
-      if (sb) sb.classList.add('pinned');
-      document.body.classList.add('sidebar-pinned');
-    }
-  } catch (e) {}
-}
-
-// In switchTab(tabName):
-function switchTab(name) {
-  document.querySelectorAll('.tab-content').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.sidebar-tab-btn').forEach(b => b.classList.remove('active'));
-  const pane = $('tab-' + name);
-  const btn = $('tab-btn-' + name);
-  if (pane) pane.classList.add('active');
-  if (btn) btn.classList.add('active');
-  if (name === 'cockpit') pollCockpit();
-  if (name === 'live') pollLive();
-  if (name === 'ticks') loadManifest();
-}
+</div>
 ```
 
 ---
 
 ## 6. Testing Strategy
 
-### 6.1 Integration Contract Tests (`tests/test_osc_dash_integration.py`)
-1. **DOM Navigation Elements Verification**:
-   - `assert "app-sidebar" in html`
-   - `assert "sidebarToggleBtn" in html`
-   - `assert "tab-btn-cockpit" in html`
-   - `assert "tab-btn-live" in html`
-   - `assert "tab-btn-backtest" in html`
-   - `assert "tab-btn-summary" in html`
-   - `assert "tab-btn-ticks" in html`
-   - `assert "toggleSidebarPin" in html`
-   - `assert "sidebarBotStatusPill" in html`
-2. **SVG Icon Presence**:
-   - Verify that all tab navigation buttons contain an SVG element `<svg` and `<span class="nav-label">`.
-3. **Streamlined Header Check**:
-   - Verify `#app-hdr` still contains `collectorBadge`, `tapeBadge`, `btnToggleCollector`, and does *not* contain duplicate horizontal tab buttons.
-4. **Active Tab Switching Logic**:
-   - Verify `switchTab` updates `.sidebar-tab-btn.active`.
+### 6.1 Unit Tests (`tests/test_monitor_stream_latency.py`)
+1. **Snapshot Formatting & Serialization**: Verify `StreamTickSnapshot` accurately computes drift, mid prices, and generates both formatted table rows and JSON dictionaries.
+2. **Latency Auditor State Machine**:
+   - Verify shock detection triggers on drift exceeding threshold.
+   - Verify reaction detection records accurate $\Delta t$ when CLOB mid updates.
+   - Verify timeout handling when CLOB does not react within `response_window_sec`.
+   - Verify statistical summaries (mean, median, p95, reaction rate).
+3. **CLI Arguments & Execution Modes**:
+   - Verify parser options (`--series`, `--duration`, `--ticks`, `--json`, `--audit`, `--threshold`).
+   - Mocked loop testing for clean termination on `--ticks` or `--duration`.
 
-### 6.2 Regression Testing
-- Execute full test suite: `python -m pytest -q` (all 197+ tests must pass).
+### 6.2 Integration Tests (`tests/test_osc_dash_integration.py`)
+1. Verify `/api/live/latency` endpoint responds with 200 OK and valid JSON schema containing `spot_price`, `spot_drift`, `clob_mid`, and `latency_ms`.
+2. Verify HTML template in `server/osc_dash.py` renders `#card-stream-telemetry` and telemetry display elements (`telSpotPrice`, `telSpotDrift`, `telClobMid`, `telLeadLatency`).
+
+### 6.3 Regression Verification
+- Run the full suite with `python -m pytest -q` ensuring all existing 200 tests pass without regression.
 
 ---
 
 ## 7. Boundaries
 
 - **Always do:**
-  - Preserve all existing tab button element IDs (`tab-btn-cockpit`, `tab-btn-live`, `tab-btn-backtest`, `tab-btn-summary`, `tab-btn-ticks`).
-  - Preserve existing JavaScript function signatures (`switchTab(name)`, `toggleCollector()`, `pollOnce()`, etc.).
-  - Preserve responsive layout so tables, grids, and cards in tabs scale cleanly.
-  - Run `python -m pytest -q` before opening any PR.
+  - Enforce CLOB as the sole order execution venue.
+  - Maintain thread safety when accessing shared state from background streaming workers.
+  - Gracefully handle situations where the Polymarket WebSocket SDK is absent or idling by falling back to REST endpoints.
+  - Keep test coverage comprehensive and ensure all 200+ tests pass.
 - **Ask first:**
-  - Introducing new external fonts or external CDN script/style dependencies.
-  - Removing or reordering primary application views.
+  - Altering the core quoting spread calculation or entry criteria in `strategy/live_trader.py`.
+  - Adding any new external pip dependency.
 - **Never do:**
-  - Break existing SPA DOM selectors required by client-side tests.
-  - Introduce horizontal layout shifts or content occlusion on load.
-  - Hardcode fixed pixel widths for main content containers that break responsive resizing.
+  - Route trading orders to RTDS or treat RTDS spot prices as binary contract probabilities.
+  - Introduce blocking network calls into FastAPI async route handlers.
+  - Allow unhandled exceptions in the streaming loop to crash the server or CLI process.
 
 ---
 
 ## 8. Success Criteria
-- [ ] `#app-sidebar` is rendered anchored to the left of the viewport.
-- [ ] Sidebar starts collapsed (`~48px`) displaying centered SVG icons.
-- [ ] Hovering over the sidebar smoothly transitions its width to `~220px` without text clipping.
-- [ ] `#sidebarToggleBtn` pins/unpins the sidebar and persists setting across page reloads via `localStorage`.
-- [ ] Main page content offsets smoothly with zero content clipping or overlap.
-- [ ] Horizontal tab container is removed from `#app-hdr`; title, badges, and polling buttons remain intact.
-- [ ] Clicking any sidebar tab switches the active tab pane seamlessly via `switchTab()`.
-- [ ] All existing automated tests in `tests/test_osc_dash_integration.py` pass.
-- [ ] New unit and integration tests covering the sidebar DOM, toggle, and SVG icons pass.
-- [ ] Full regression suite passes cleanly (`python -m pytest -q`).
+
+- [ ] `scripts/monitor_stream_latency.py` exists, is fully documented, and executable with `python -m scripts.monitor_stream_latency --series btc-up-or-down-5m`.
+- [ ] Running with `--json` outputs clean, single-line JSON records.
+- [ ] Running with `--audit` computes and prints empirical latency lead-time statistics.
+- [ ] Documentation report `docs/rtds-clob-latency-audit.md` is published with empirical lead-lag dynamics and ground truth execution rules.
+- [ ] FastAPI endpoint `/api/live/latency` is active and tested.
+- [ ] Tab 1 (Cockpit) renders the live stream telemetry card and updates via SSE/polling.
+- [ ] New unit tests in `tests/test_monitor_stream_latency.py` and integration tests in `tests/test_osc_dash_integration.py` pass.
+- [ ] All 200+ existing project tests pass cleanly (`python -m pytest -q`).
 
 ---
 
 ## 9. Assumptions Surface
-1. **Scope**: Scoped specifically to Issue #65 (Sidebar redesign). Issues #54 and #64 remain queued in the recommended roadmap order.
-2. **Styling**: Zero external UI frameworks; purely native CSS transitions and embedded SVGs consistent with the existing dark theme in `server/osc_dash.py`.
-3. **Local Storage**: `localStorage` key `'cui_sidebar_pinned'` is safely wrapped in `try/catch` to support private/sandboxed iframe modes.
+
+1. **RTDS Feed Latency**: RTDS publishes at 1s intervals; WebSocket network transport jitter is typically 50–200ms.
+2. **BNB Handling**: As per project rules, BNB lacks Binance/Chainlink RTDS feeds and automatically utilizes the 1s Binance REST fallback.
+3. **Execution Ground Truth**: CLOB BBO updates lag underlying spot moves during volatile price action, providing an informational window for fast stop-loss execution ahead of adverse fills.
