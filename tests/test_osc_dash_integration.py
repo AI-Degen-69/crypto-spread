@@ -101,6 +101,29 @@ def test_root_ltr_layout_and_attributes():
     assert re.search(r"\.form-group\s+label\s*\{[^}]*text-align:\s*left", html) is not None
 
 
+def test_sidebar_css_architecture():
+    """Verify that CSS defines sidebar variables, layout classes, and transition rules."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert "--sidebar-w-collapsed:48px" in html or "--sidebar-w-collapsed: 48px" in html
+    assert "--sidebar-w-expanded:220px" in html or "--sidebar-w-expanded: 220px" in html
+    assert ".cui-sidebar" in html
+    assert ".sidebar-header" in html
+    assert ".sidebar-toggle-btn" in html
+    assert ".sidebar-brand-text" in html
+    assert ".sidebar-nav" in html
+    assert ".sidebar-tab-btn" in html
+    assert ".sidebar-link-btn" in html
+    assert ".nav-icon" in html
+    assert ".nav-label" in html
+    assert ".sidebar-divider" in html
+    assert ".sidebar-footer" in html
+    assert ".sidebar-status-pill" in html
+    assert ".status-indicator-dot" in html
+    assert "sidebar-pinned" in html
+
+
 def test_no_hebrew_characters_in_dashboard():
     """Verify that all legacy Hebrew strings in server/osc_dash.py have been standardized to English."""
     import re

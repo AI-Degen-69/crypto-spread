@@ -1,22 +1,20 @@
-# Spec: Lock Strategy Parameters While Trading Bot Is Running (Issue #62)
+# Spec: Collapsible Hover-Expandable Sidebar Navigation (Issue #65)
 
 ## 1. Objective
-Eliminate runtime configuration race conditions and state desynchronization in both the trading engine backend (`strategy/live_trader.py`) and dashboard UI (`server/osc_dash.py`):
-1. **Frontend Input Locking**: When the live trading bot is running (`is_running == True`), disable all strategy parameter input fields (`#cockpitOffset`, `#cockpitExit`, `#cockpitShares`, `#cockpitMode`, `#cockpitWallet`, `#cockpitStartBal`) and the `#btnApplyParams` button with visual lock styling (`opacity: 0.4`, `cursor: not-allowed`, tooltip) and a visible lock banner (`#cockpitParamsLockHint`).
-2. **Frontend Client Guard**: Short-circuit `applyCockpitConfig()` immediately if `cockpitState && cockpitState.is_running`.
-3. **Frontend State Synchronization**: While running, ensure input field values mirror active engine configuration (`st.params`, `st.mode`, `st.starting_balance`, `st.wallet_address`) to prevent stale UI values.
-4. **Backend Engine Validation**: In `LiveTraderEngine.update_config()` under `self._engine_lock`, raise `ValueError("Cannot change strategy parameters while the trading bot is running. Stop the bot first.")` if any requested scalar parameter (`offset`, `exit_thresh`, `shares`, `mode`, `wallet_address`, `starting_balance`) differs from the active configuration while `self.is_running == True`.
-5. **Idempotency**: Allow calls to `update_config()` where requested parameter values match existing active values (idempotent configuration calls).
-6. **REST API Contract**: Ensure `POST /api/live/config` returns HTTP 400 with `{"error": str(e)}` when mid-run mutations are rejected.
-7. **Automatic Unlocking**: When the bot is stopped (`is_running == False`), immediately re-enable all parameter inputs and the Apply button.
+Redesign the primary dashboard navigation in `server/osc_dash.py` by replacing the horizontal tabs in the top header with a modern, collapsible vertical sidebar menu:
+1. **Collapsed State (`48px` / `w-12`)**: A slim vertical strip anchored to the left of the viewport (`height: 100vh`, `position: fixed`, `z-index: 100`) showing centered, crisp SVG icons with tooltips (`title` attribute).
+2. **Hover / Expanded State (`220px`)**: Smoothly expands on hover (`transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1)`) or when toggled/pinned, unveiling left-aligned tab labels with zero text wrap (`white-space: nowrap`).
+3. **Pinning / Toggle Support**: A top toggle button (`#sidebarToggleBtn`) allows the operator to pin the sidebar open (persisting state via `localStorage.getItem('cui_sidebar_pinned')`).
+4. **Header Streamlining**: Remove `.nav-tabs` from `#app-hdr`, leaving a clean, balanced header focused on branding/title on the left and system telemetry badges (`#collectorBadge`, `#tapeBadge`) and polling controls on the right.
+5. **Main Content Offset**: The main application content (`.wrap` / `#app-main`) adjusts its left margin (`margin-left: 48px`, or `220px` when pinned) to prevent any content occlusion.
+6. **100% Backward Compatibility**: Preserve all existing tab button IDs (`tab-btn-cockpit`, `tab-btn-live`, `tab-btn-backtest`, `tab-btn-summary`, `tab-btn-ticks`) and onclick handlers (`switchTab(...)`).
 
 ---
 
 ## 2. Tech Stack & Dependencies
-- **Runtime**: Python 3.11+
-- **Backend Framework**: FastAPI + Uvicorn + Pydantic
-- **Frontend Architecture**: Embedded Vanilla ES6 JavaScript + CSS3 SPA in `server/osc_dash.py`
-- **Testing Framework**: `pytest`, `pytest-asyncio`, FastAPI `TestClient`
+- **Backend Framework**: FastAPI + Uvicorn (Python 3.10+)
+- **Frontend Architecture**: Embedded Vanilla ES6 JavaScript + Modern CSS3 custom properties in `server/osc_dash.py` (zero external CDN or build dependencies)
+- **Testing Framework**: `pytest`, `pytest-asyncio`, FastAPI `TestClient` in `tests/test_osc_dash_integration.py`
 
 ---
 
@@ -24,10 +22,6 @@ Eliminate runtime configuration race conditions and state desynchronization in b
 - Run all tests:
   ```powershell
   python -m pytest -q
-  ```
-- Run Live Trader engine tests:
-  ```powershell
-  python -m pytest tests/test_live_trader.py -q
   ```
 - Run Dashboard integration tests:
   ```powershell
@@ -40,200 +34,419 @@ Eliminate runtime configuration race conditions and state desynchronization in b
 
 ---
 
-## 4. Project Structure
+## 4. Project Structure & Touchpoints
 ```
-strategy/
-  live_trader.py               -> LiveTraderEngine.update_config() validation under self._engine_lock
 server/
-  osc_dash.py                  -> Dashboard UI HTML inputs, #cockpitParamsLockHint, lock helpers & sync
+  osc_dash.py                  -> Add sidebar CSS, inject <aside id="app-sidebar">, clean #app-hdr, update layout offset, add toggle JS
 tests/
-  test_live_trader.py          -> Unit tests for mid-run parameter rejection, idempotency, and post-stop update
-  test_osc_dash_integration.py -> Integration tests for POST /api/live/config HTTP 400 rejection and DOM elements
+  test_osc_dash_integration.py -> Update nav tests, assert #app-sidebar, assert SVG icons, assert tab switching
 SPEC.md                        -> This specification document
 ```
 
 ---
 
-## 5. Implementation Contracts & Code Style
+## 5. Implementation Details & Code Style
 
-### 5.1 Backend Validation Contract (`strategy/live_trader.py`)
-In `LiveTraderEngine.update_config()`, within `with self._engine_lock:` before applying any mutations:
+### 5.1 Sidebar Layout & Structure (`server/osc_dash.py`)
+Add `<aside class="cui-sidebar" id="app-sidebar">` directly inside `<body>` before `#app-hdr`:
 
-```python
-with self._engine_lock:
-    # 1. Check market selection change while running
-    if self.is_running and new_slugs != set(self.markets.keys()):
-        raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
-
-    # 2. Check scalar strategy parameters change while running
-    if self.is_running:
-        param_changed = False
-        if offset is not None and abs(float(offset) - self.offset) > 1e-6:
-            param_changed = True
-        elif exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
-            param_changed = True
-        elif shares is not None and int(shares) != self.shares:
-            param_changed = True
-        elif mode is not None and mode != self.mode:
-            param_changed = True
-        elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
-            param_changed = True
-        elif starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
-            param_changed = True
-
-        if param_changed:
-            raise ValueError("Cannot change strategy parameters while the trading bot is running. Stop the bot first.")
-```
-
-### 5.2 Frontend UI & Interactivity Contract (`server/osc_dash.py`)
-
-#### A. HTML Banner Element (`#cockpitParamsLockHint`)
-Place directly beside `#btnApplyParams` in the `.form-grid` or form actions container:
 ```html
-<div class="form-group" style="justify-content:flex-end;align-items:center;display:flex;gap:10px">
-  <span id="cockpitParamsLockHint" style="display:none;font:700 11px var(--disp);color:var(--down);letter-spacing:0.04em">
-    🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS
-  </span>
-  <button id="btnApplyParams" class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
-</div>
+<aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
+  <!-- Top: Pin/Toggle Button & Logo Symbol -->
+  <div class="sidebar-header">
+    <button class="sidebar-toggle-btn" id="sidebarToggleBtn" onclick="toggleSidebarPin()" title="Pin/Unpin Sidebar" aria-label="Toggle Sidebar Navigation">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <line x1="9" y1="3" x2="9" y2="21"></line>
+      </svg>
+    </button>
+    <div class="sidebar-brand-text">CRYPTO SPREAD</div>
+  </div>
+
+  <!-- Middle: Primary Nav Tabs -->
+  <nav class="sidebar-nav">
+    <button class="sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
+      <span class="nav-icon">
+        <!-- Lightning Bolt SVG -->
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+      </span>
+      <span class="nav-label">Live Trading Cockpit</span>
+    </button>
+
+    <button class="sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
+      <span class="nav-icon">
+        <!-- Radar / Signal SVG -->
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.93 4.93a10 10 0 0 1 14.14 0"></path>
+          <path d="M7.76 7.76a6 6 0 0 1 8.48 0"></path>
+          <circle cx="12" cy="12" r="2"></circle>
+          <path d="M12 14v7"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Live Books & Queue</span>
+    </button>
+
+    <button class="sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
+      <span class="nav-icon">
+        <!-- Trending Chart SVG -->
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline>
+          <polyline points="16 7 22 7 22 13"></polyline>
+        </svg>
+      </span>
+      <span class="nav-label">Backtest Sweeper</span>
+    </button>
+
+    <button class="sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
+      <span class="nav-icon">
+        <!-- Bar Chart SVG -->
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="20" x2="18" y2="10"></line>
+          <line x1="12" y1="20" x2="12" y2="4"></line>
+          <line x1="6" y1="20" x2="6" y2="14"></line>
+        </svg>
+      </span>
+      <span class="nav-label">Stats Summary</span>
+    </button>
+
+    <button class="sidebar-tab-btn" id="tab-btn-ticks" onclick="switchTab('ticks')" title="Tick Files">
+      <span class="nav-icon">
+        <!-- Hard Drive / Database SVG -->
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Tick Files</span>
+    </button>
+  </nav>
+
+  <div class="sidebar-divider"></div>
+
+  <!-- Utility Links -->
+  <div class="sidebar-nav sidebar-utility">
+    <a href="https://polymarket.com" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="Polymarket CLOB">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Polymarket Venue</span>
+    </a>
+    <a href="https://github.com/AI-Degen-69/crypto-spread" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="GitHub Repository">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+        </svg>
+      </span>
+      <span class="nav-label">GitHub Repo</span>
+    </a>
+  </div>
+
+  <!-- Bottom: Connection / Bot Status Pill -->
+  <div class="sidebar-footer">
+    <div class="sidebar-status-pill" id="sidebarBotStatusPill" title="Trading Bot Engine Status">
+      <span class="status-indicator-dot" id="sidebarStatusDot"></span>
+      <span class="status-indicator-text" id="sidebarStatusText">ENGINE IDLE</span>
+    </div>
+  </div>
+</aside>
 ```
 
-#### B. JavaScript Lock Helper Function
+### 5.2 CSS Architecture
+```css
+:root {
+  --sidebar-w-collapsed: 48px;
+  --sidebar-w-expanded: 220px;
+}
+
+.cui-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-w-collapsed);
+  background: var(--bg2);
+  border-right: 1px solid var(--line);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2);
+}
+
+.cui-sidebar:hover,
+.cui-sidebar.pinned {
+  width: var(--sidebar-w-expanded);
+}
+
+body {
+  padding-left: var(--sidebar-w-collapsed);
+  transition: padding-left 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body.sidebar-pinned {
+  padding-left: var(--sidebar-w-expanded);
+}
+
+.sidebar-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.sidebar-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.sidebar-toggle-btn:hover {
+  color: var(--tx);
+  background: var(--panel2);
+}
+
+.cui-sidebar.pinned .sidebar-toggle-btn {
+  color: var(--up);
+  background: rgba(51, 201, 181, 0.15);
+}
+
+.sidebar-brand-text {
+  font: 800 12px var(--disp);
+  letter-spacing: 0.08em;
+  color: var(--tx);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.cui-sidebar:hover .sidebar-brand-text,
+.cui-sidebar.pinned .sidebar-brand-text {
+  opacity: 1;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 6px;
+  flex: 1;
+}
+
+.sidebar-tab-btn,
+.sidebar-link-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--dim);
+  font: 600 12px var(--disp);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  width: 100%;
+  text-align: left;
+}
+
+.sidebar-tab-btn:hover,
+.sidebar-link-btn:hover {
+  color: var(--tx);
+  background: var(--panel2);
+}
+
+.sidebar-tab-btn.active {
+  color: var(--up);
+  background: rgba(51, 201, 181, 0.12);
+  border-color: rgba(51, 201, 181, 0.25);
+  font-weight: 700;
+}
+
+.nav-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.nav-label {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  white-space: nowrap;
+}
+
+.cui-sidebar:hover .nav-label,
+.cui-sidebar.pinned .nav-label {
+  opacity: 1;
+}
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 6px 10px;
+}
+
+.sidebar-footer {
+  padding: 10px 6px;
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.sidebar-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.status-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex-shrink: 0;
+}
+
+.status-indicator-dot.running {
+  background: var(--up);
+  box-shadow: 0 0 6px var(--up);
+}
+
+.status-indicator-text {
+  font: 700 10px var(--mono);
+  color: var(--dim);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.cui-sidebar:hover .status-indicator-text,
+.cui-sidebar.pinned .status-indicator-text {
+  opacity: 1;
+}
+```
+
+### 5.3 JavaScript Interaction & State Persistence
+In `server/osc_dash.py`:
 ```javascript
-function updateCockpitParamsLockUI(locked) {
-  const paramIds = [
-    'cockpitOffset',
-    'cockpitExit',
-    'cockpitShares',
-    'cockpitMode',
-    'cockpitWallet',
-    'cockpitStartBal',
-    'btnApplyParams',
-  ];
-  paramIds.forEach(id => {
-    const el = $(id);
-    if (!el) return;
-    if (locked) {
-      el.disabled = true;
-      el.style.opacity = '0.4';
-      el.style.cursor = 'not-allowed';
-      el.title = 'Stop the bot to change parameters';
-    } else {
-      // Do not re-enable starting balance if locked by LIVE mode net value
-      if (id === 'cockpitStartBal' && $('cockpitMode') && $('cockpitMode').value === 'live') {
-        el.disabled = false;
-        el.readOnly = true;
-        el.style.opacity = '0.7';
-        el.style.cursor = 'not-allowed';
-        el.title = 'Starting balance is locked to real Polymarket net account value in LIVE mode.';
-      } else {
-        el.disabled = false;
-        el.readOnly = false;
-        el.style.opacity = '';
-        el.style.cursor = '';
-        el.title = '';
-      }
+function toggleSidebarPin() {
+  const sb = $('app-sidebar');
+  if (!sb) return;
+  const isPinned = sb.classList.toggle('pinned');
+  document.body.classList.toggle('sidebar-pinned', isPinned);
+  try {
+    localStorage.setItem('cui_sidebar_pinned', isPinned ? 'true' : 'false');
+  } catch (e) {}
+}
+
+function initSidebarState() {
+  try {
+    if (localStorage.getItem('cui_sidebar_pinned') === 'true') {
+      const sb = $('app-sidebar');
+      if (sb) sb.classList.add('pinned');
+      document.body.classList.add('sidebar-pinned');
     }
-  });
+  } catch (e) {}
+}
 
-  const hint = $('cockpitParamsLockHint');
-  if (hint) hint.style.display = locked ? 'inline' : 'none';
+// In switchTab(tabName):
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar-tab-btn').forEach(b => b.classList.remove('active'));
+  const pane = $('tab-' + name);
+  const btn = $('tab-btn-' + name);
+  if (pane) pane.classList.add('active');
+  if (btn) btn.classList.add('active');
+  if (name === 'cockpit') pollCockpit();
+  if (name === 'live') pollLive();
+  if (name === 'ticks') loadManifest();
 }
 ```
-
-#### C. Guard in `applyCockpitConfig()`
-```javascript
-async function applyCockpitConfig() {
-  if (cockpitState && cockpitState.is_running) {
-    return;
-  }
-  if (isApplyingCockpitConfig) return;
-  // ... proceed with config POST
-}
-```
-
-#### D. Synchronization in `renderCockpitUI(st)`
-When `st.is_running == True`:
-- Synchronize `#cockpitOffset.value = st.params.offset`.
-- Synchronize `#cockpitExit.value = st.params.exit_thresh`.
-- Synchronize `#cockpitShares.value = st.params.shares`.
-- Call `updateCockpitParamsLockUI(st.is_running)`.
 
 ---
 
 ## 6. Testing Strategy
 
-### 6.1 Backend Unit Tests (`tests/test_live_trader.py`)
-1. **`test_live_trader_mid_run_parameter_lock`**:
-   - Instantiate `LiveTraderEngine` with default parameters (`offset=0.02, exit_thresh=0.05, shares=5, mode="paper"`).
-   - Set `engine.is_running = True`.
-   - Assert `engine.update_config(offset=0.03)` raises `ValueError` with `"Cannot change strategy parameters while the trading bot is running"`.
-   - Assert `engine.update_config(exit_thresh=0.08)` raises `ValueError`.
-   - Assert `engine.update_config(shares=10)` raises `ValueError`.
-   - Assert `engine.update_config(mode="live")` raises `ValueError`.
-   - Assert `engine.update_config(wallet_address="0xabc...")` raises `ValueError`.
-   - Assert `engine.update_config(starting_balance=5000.0)` raises `ValueError`.
-   - Assert engine attributes remain unchanged (`offset == 0.02`, `shares == 5`, etc.).
-2. **`test_live_trader_idempotent_config_while_running`**:
-   - Set `engine.is_running = True`.
-   - Call `engine.update_config(offset=0.02, exit_thresh=0.05, shares=5, mode="paper")`.
-   - Assert call succeeds without raising `ValueError`.
-3. **`test_live_trader_update_config_after_stopped`**:
-   - Set `engine.is_running = False`.
-   - Call `engine.update_config(offset=0.03, exit_thresh=0.07, shares=12)`.
-   - Assert call succeeds and `engine.offset == 0.03`, `engine.exit_thresh == 0.07`, `engine.shares == 12`.
+### 6.1 Integration Contract Tests (`tests/test_osc_dash_integration.py`)
+1. **DOM Navigation Elements Verification**:
+   - `assert "app-sidebar" in html`
+   - `assert "sidebarToggleBtn" in html`
+   - `assert "tab-btn-cockpit" in html`
+   - `assert "tab-btn-live" in html`
+   - `assert "tab-btn-backtest" in html`
+   - `assert "tab-btn-summary" in html`
+   - `assert "tab-btn-ticks" in html`
+   - `assert "toggleSidebarPin" in html`
+   - `assert "sidebarBotStatusPill" in html`
+2. **SVG Icon Presence**:
+   - Verify that all tab navigation buttons contain an SVG element `<svg` and `<span class="nav-label">`.
+3. **Streamlined Header Check**:
+   - Verify `#app-hdr` still contains `collectorBadge`, `tapeBadge`, `btnToggleCollector`, and does *not* contain duplicate horizontal tab buttons.
+4. **Active Tab Switching Logic**:
+   - Verify `switchTab` updates `.sidebar-tab-btn.active`.
 
-### 6.2 API Integration Tests (`tests/test_osc_dash_integration.py`)
-1. **`test_api_live_config_locked_while_running`**:
-   - Start bot via `POST /api/live/control` with `{"action": "start"}`.
-   - Send `POST /api/live/config` with `{"offset": 0.04}`.
-   - Assert `response.status_code == 400` and `response.json()["error"]` mentions stopping the bot.
-   - Send `POST /api/live/config` with identical active parameters (`{"offset": 0.02, "shares": 5}`).
-   - Assert `response.status_code == 200`.
-   - Stop bot via `POST /api/live/control` with `{"action": "stop"}`.
-   - Send `POST /api/live/config` with `{"offset": 0.04}`.
-   - Assert `response.status_code == 200` and `response.json()["params"]["offset"] == 0.04`.
-   - Reset back to defaults.
-2. **`test_cockpit_params_lock_dom_elements`**:
-   - Fetch GET `/`.
-   - Verify presence of `#cockpitParamsLockHint`.
-   - Verify presence of `#btnApplyParams` and all 6 parameter input IDs.
-
-### 6.3 Regression Testing
-- Execute full test suite: `python -m pytest -q` (all 195+ tests must pass).
+### 6.2 Regression Testing
+- Execute full test suite: `python -m pytest -q` (all 197+ tests must pass).
 
 ---
 
 ## 7. Boundaries
 
 - **Always do:**
-  - Execute parameter comparison and validation strictly under `self._engine_lock`.
-  - Validate parameters before any state mutation occurs.
-  - Allow idempotent calls where values match current engine state.
-  - Preserve all element IDs and existing REST API response schema.
-  - Run `python -m pytest -q` to ensure 0 regressions.
+  - Preserve all existing tab button element IDs (`tab-btn-cockpit`, `tab-btn-live`, `tab-btn-backtest`, `tab-btn-summary`, `tab-btn-ticks`).
+  - Preserve existing JavaScript function signatures (`switchTab(name)`, `toggleCollector()`, `pollOnce()`, etc.).
+  - Preserve responsive layout so tables, grids, and cards in tabs scale cleanly.
+  - Run `python -m pytest -q` before opening any PR.
 - **Ask first:**
-  - Introducing any new strategy parameters to `LiveConfigPayload` or `LiveTraderEngine`.
-  - Changing default parameter values (`offset=0.02`, `shares=5`, etc.).
+  - Introducing new external fonts or external CDN script/style dependencies.
+  - Removing or reordering primary application views.
 - **Never do:**
-  - Allow mutating strategy parameters while `is_running == True`.
-  - Leave inputs editable in the UI when the bot is running.
-  - Allow a client-side config submission while `is_running == True`.
+  - Break existing SPA DOM selectors required by client-side tests.
+  - Introduce horizontal layout shifts or content occlusion on load.
+  - Hardcode fixed pixel widths for main content containers that break responsive resizing.
 
 ---
 
 ## 8. Success Criteria
-- [ ] `engine.update_config()` raises `ValueError` if `offset`, `exit_thresh`, `shares`, `mode`, `wallet_address`, or `starting_balance` are modified while `is_running == True`.
-- [ ] Idempotent `update_config()` calls with unchanged values succeed while `is_running == True`.
-- [ ] `/api/live/config` returns HTTP 400 with a descriptive error message when parameter changes are attempted while running.
-- [ ] UI inputs (`#cockpitOffset`, `#cockpitExit`, `#cockpitShares`, `#cockpitMode`, `#cockpitWallet`, `#cockpitStartBal`, `#btnApplyParams`) are disabled with visual lock styling when the bot is running.
-- [ ] Visible lock notice banner (`#cockpitParamsLockHint`) displays when running and hides when stopped.
-- [ ] `applyCockpitConfig()` in JavaScript rejects execution early if `cockpitState.is_running` is true.
-- [ ] UI inputs and Apply button are immediately re-enabled when the bot stops.
-- [ ] All new unit tests pass in `tests/test_live_trader.py` and `tests/test_osc_dash_integration.py`.
-- [ ] Full project test suite passes cleanly (`python -m pytest -q`) with zero regressions.
+- [ ] `#app-sidebar` is rendered anchored to the left of the viewport.
+- [ ] Sidebar starts collapsed (`~48px`) displaying centered SVG icons.
+- [ ] Hovering over the sidebar smoothly transitions its width to `~220px` without text clipping.
+- [ ] `#sidebarToggleBtn` pins/unpins the sidebar and persists setting across page reloads via `localStorage`.
+- [ ] Main page content offsets smoothly with zero content clipping or overlap.
+- [ ] Horizontal tab container is removed from `#app-hdr`; title, badges, and polling buttons remain intact.
+- [ ] Clicking any sidebar tab switches the active tab pane seamlessly via `switchTab()`.
+- [ ] All existing automated tests in `tests/test_osc_dash_integration.py` pass.
+- [ ] New unit and integration tests covering the sidebar DOM, toggle, and SVG icons pass.
+- [ ] Full regression suite passes cleanly (`python -m pytest -q`).
 
 ---
 
-## 9. Open Questions & User Clarifications
-- None identified. Requirements and design decisions are fully aligned with Issue #62.
+## 9. Assumptions Surface
+1. **Scope**: Scoped specifically to Issue #65 (Sidebar redesign). Issues #54 and #64 remain queued in the recommended roadmap order.
+2. **Styling**: Zero external UI frameworks; purely native CSS transitions and embedded SVGs consistent with the existing dark theme in `server/osc_dash.py`.
+3. **Local Storage**: `localStorage` key `'cui_sidebar_pinned'` is safely wrapped in `try/catch` to support private/sandboxed iframe modes.

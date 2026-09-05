@@ -1135,8 +1135,31 @@ FULL_APP_HTML = r"""<!doctype html><html lang="en" dir="ltr"><head>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-:root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui}
-*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased}
+:root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui;--sidebar-w-collapsed: 48px;--sidebar-w-expanded: 220px}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased;padding-left:var(--sidebar-w-collapsed);transition:padding-left .25s cubic-bezier(.16,1,.3,1)}
+body.sidebar-pinned{padding-left:var(--sidebar-w-expanded)}
+.cui-sidebar{position:fixed;top:0;left:0;bottom:0;width:var(--sidebar-w-collapsed);background:var(--bg);border-right:1px solid var(--line);z-index:1000;display:flex;flex-direction:column;transition:width .25s cubic-bezier(.16,1,.3,1);overflow:hidden;box-shadow:2px 0 10px rgba(0,0,0,.35)}
+.cui-sidebar:hover,.cui-sidebar.pinned{width:var(--sidebar-w-expanded)}
+.sidebar-header{height:48px;display:flex;align-items:center;padding:0 12px;gap:12px;border-bottom:1px solid var(--line);flex-shrink:0}
+.sidebar-toggle-btn{background:transparent;border:none;color:var(--dim);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:6px;border-radius:6px;transition:color .15s,background .15s}
+.sidebar-toggle-btn:hover{color:var(--tx);background:var(--panel2)}
+.cui-sidebar.pinned .sidebar-toggle-btn{color:var(--up);background:rgba(51,201,181,0.15)}
+.sidebar-brand-text{font:800 12px var(--disp);letter-spacing:.08em;color:var(--tx);white-space:nowrap;opacity:0;transition:opacity .2s ease}
+.cui-sidebar:hover .sidebar-brand-text,.cui-sidebar.pinned .sidebar-brand-text{opacity:1}
+.sidebar-nav{display:flex;flex-direction:column;gap:4px;padding:10px 6px;flex:1}
+.sidebar-tab-btn,.sidebar-link-btn{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:transparent;border:1px solid transparent;color:var(--dim);font:600 12px var(--disp);cursor:pointer;text-decoration:none;white-space:nowrap;transition:all .15s ease;width:100%;text-align:left}
+.sidebar-tab-btn:hover,.sidebar-link-btn:hover{color:var(--tx);background:var(--panel2)}
+.sidebar-tab-btn.active{color:var(--up);background:rgba(51,201,181,0.12);border-color:rgba(51,201,181,0.25);font-weight:700}
+.nav-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;flex-shrink:0}
+.nav-label{opacity:0;transition:opacity .2s ease;white-space:nowrap}
+.cui-sidebar:hover .nav-label,.cui-sidebar.pinned .nav-label{opacity:1}
+.sidebar-divider{height:1px;background:var(--line);margin:6px 10px}
+.sidebar-footer{padding:10px 6px;border-top:1px solid var(--line);flex-shrink:0}
+.sidebar-status-pill{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:var(--panel);border:1px solid var(--line);white-space:nowrap}
+.status-indicator-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0;transition:all .2s ease}
+.status-indicator-dot.running{background:var(--up);box-shadow:0 0 6px var(--up)}
+.status-indicator-text{font:700 10px var(--mono);color:var(--dim);opacity:0;transition:opacity .2s ease}
+.cui-sidebar:hover .status-indicator-text,.cui-sidebar.pinned .status-indicator-text{opacity:1}
 a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .mono{font-family:var(--mono)}
 .hdr{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
