@@ -641,9 +641,14 @@ def test_live_trader_cannot_change_parameters_while_running():
     with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
         engine.update_config(wallet_address="0x2222222222222222222222222222222222222222")
 
-    # 6. starting_balance change must raise ValueError
+    # 6. starting_balance change must raise ValueError (in paper and live mode)
     with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
         engine.update_config(starting_balance=2500.0)
+
+    engine.mode = "live"
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(starting_balance=2500.0)
+    engine.mode = "paper"
 
     # Verify no state was corrupted
     assert engine.offset == 0.02
@@ -662,6 +667,10 @@ def test_live_trader_cannot_change_parameters_while_running():
         wallet_address="0x1111111111111111111111111111111111111111",
         starting_balance=1000.0,
     )
+    assert engine.offset == 0.02
+
+    # Tolerance-equivalent offset while running does not mutate stored value
+    engine.update_config(offset=0.02000000001)
     assert engine.offset == 0.02
 
     # 8. Once stopped, changing all parameters succeeds

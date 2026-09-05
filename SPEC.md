@@ -78,7 +78,7 @@ with self._engine_lock:
             param_changed = True
         elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
             param_changed = True
-        elif starting_balance is not None and self.mode != "live" and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+        elif starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
             param_changed = True
 
         if param_changed:

@@ -3182,10 +3182,15 @@ function renderCockpitUI(st) {
   }
 
   // Sync strategy parameter fields from engine state while running
-  if (st.is_running && st.params) {
-    if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
-    if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
-    if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
+  if (st.is_running) {
+    if (st.params) {
+      if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
+      if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
+      if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
+    }
+    if ($('cockpitWallet') && st.wallet_address != null) {
+      $('cockpitWallet').value = st.wallet_address;
+    }
   }
 
   // Sync asset/duration filters from engine state on first receipt, and whenever

@@ -1306,6 +1306,9 @@ class LiveTraderEngine:
                 open position, or would change the traded market set while running.
                 No configuration field is modified when this is raised.
         """
+        fetch_live_balance = False
+        live_addr = ""
+
         with self._engine_lock:
             # Market selection is resolved and checked before any scalar field is
             # assigned, so a rejected selection leaves the whole configuration untouched.
@@ -1321,8 +1324,10 @@ class LiveTraderEngine:
             # Guard against modifying scalar strategy parameters while the trading bot is running
             if self.is_running:
                 param_changed = False
-                if offset is not None and abs(float(offset) - self.offset) > 1e-6:
-                    param_changed = True
+                if offset is not None:
+                    norm_offset = max(0.001, min(0.490, float(offset)))
+                    if abs(norm_offset - self.offset) > 1e-6:
+                        param_changed = True
                 elif exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
                     param_changed = True
                 elif shares is not None and int(shares) != self.shares:
@@ -1331,119 +1336,130 @@ class LiveTraderEngine:
                     param_changed = True
                 elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
                     param_changed = True
-                elif starting_balance is not None and self.mode != "live" and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+                elif starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
                     param_changed = True
 
                 if param_changed:
                     raise ValueError("Cannot change strategy parameters while the trading bot is running. Stop the bot first.")
 
-            if new_series is not None:
-                to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
-                # Guard against deselecting markets with open positions or active pending exits
-                for s in to_remove:
-                    m = self.markets[s]
-                    has_unhedged_position = (m.filled_up != m.filled_down) and not m.exit_taken
-                    if m.status == "STOP_EXIT_PENDING" or has_unhedged_position:
-                        raise ValueError(
-                            f"Cannot deselect active market '{s}' with open positions or in-flight exits "
-                            f"(status={m.status}, filled_up={m.filled_up}, filled_down={m.filled_down}, exit_taken={m.exit_taken}). "
-                            f"Wait for window settlement or stop exit before deselecting."
-                        )
+            # Only perform parameter mutations when NOT running.
+            # Idempotent calls while running leave active strategy parameters intact and unmutated.
+            if not self.is_running:
+                if new_series is not None:
+                    to_remove = [s for s in list(self.markets.keys()) if s not in new_slugs]
+                    # Guard against deselecting markets with open positions or active pending exits
+                    for s in to_remove:
+                        m = self.markets[s]
+                        has_unhedged_position = (m.filled_up != m.filled_down) and not m.exit_taken
+                        if m.status == "STOP_EXIT_PENDING" or has_unhedged_position:
+                            raise ValueError(
+                                f"Cannot deselect active market '{s}' with open positions or in-flight exits "
+                                f"(status={m.status}, filled_up={m.filled_up}, filled_down={m.filled_down}, exit_taken={m.exit_taken}). "
+                                f"Wait for window settlement or stop exit before deselecting."
+                            )
 
-                removed_slugs = set()
-                order_attr_names = (
-                    "order_id_up",
-                    "order_id_down",
-                    "next_order_id_up",
-                    "next_order_id_down",
-                    "order_id_exit_up",
-                    "order_id_exit_down",
-                )
-                for s in to_remove:
-                    m = self.markets[s]
-                    cancel_failed = False
-                    for attr in order_attr_names:
-                        oid = getattr(m, attr, None)
-                        if oid:
-                            try:
-                                success = self.cancel_live_order(oid)
-                                if success:
-                                    setattr(m, attr, None)
-                                else:
-                                    log.warning("[%s] Failed to cancel order %s on removal", s, oid)
+                    removed_slugs = set()
+                    order_attr_names = (
+                        "order_id_up",
+                        "order_id_down",
+                        "next_order_id_up",
+                        "next_order_id_down",
+                        "order_id_exit_up",
+                        "order_id_exit_down",
+                    )
+                    for s in to_remove:
+                        m = self.markets[s]
+                        cancel_failed = False
+                        for attr in order_attr_names:
+                            oid = getattr(m, attr, None)
+                            if oid:
+                                try:
+                                    success = self.cancel_live_order(oid)
+                                    if success:
+                                        setattr(m, attr, None)
+                                    else:
+                                        log.warning("[%s] Failed to cancel order %s on removal", s, oid)
+                                        cancel_failed = True
+                                        break
+                                except Exception as e:
+                                    log.warning("[%s] Error cancelling order %s on removal: %s", s, oid, e)
                                     cancel_failed = True
                                     break
-                            except Exception as e:
-                                log.warning("[%s] Error cancelling order %s on removal: %s", s, oid, e)
-                                cancel_failed = True
-                                break
 
-                    if cancel_failed:
-                        log.error("[%s] Aborting removal of market: order cancellation failed or raised. Retaining market.", s)
-                        continue
+                        if cancel_failed:
+                            log.error("[%s] Aborting removal of market: order cancellation failed or raised. Retaining market.", s)
+                            continue
 
-                    self.historical_realized_pnl += m.realized_pnl_usd
-                    del self.markets[s]
-                    removed_slugs.add(s)
+                        self.historical_realized_pnl += m.realized_pnl_usd
+                        del self.markets[s]
+                        removed_slugs.add(s)
 
-                for slug, _dur, label in new_series:
-                    if slug not in self.markets:
-                        self.markets[slug] = MarketLiveState(
-                            slug=slug,
-                            label=label,
-                            color=SERIES_COLORS.get(slug, "#33c9b5"),
-                            order_shares=self.shares,
-                            resting_up=round(0.50 - self.offset, 3),
-                            resting_down=round(0.50 - self.offset, 3),
-                        )
+                    for slug, _dur, label in new_series:
+                        if slug not in self.markets:
+                            self.markets[slug] = MarketLiveState(
+                                slug=slug,
+                                label=label,
+                                color=SERIES_COLORS.get(slug, "#33c9b5"),
+                                order_shares=self.shares,
+                                resting_up=round(0.50 - self.offset, 3),
+                                resting_down=round(0.50 - self.offset, 3),
+                            )
 
-                # Keep any retained markets that failed cancellation in selected_series
-                retained_series = [s for s in self.selected_series if s[0] in self.markets and s[0] not in {x[0] for x in new_series}]
-                self.selected_series = list(new_series) + retained_series
+                    # Keep any retained markets that failed cancellation in selected_series
+                    retained_series = [s for s in self.selected_series if s[0] in self.markets and s[0] not in {x[0] for x in new_series}]
+                    self.selected_series = list(new_series) + retained_series
 
-            if offset is not None:
-                self.offset = max(0.001, min(0.490, float(offset)))
-            if exit_thresh is not None and exit_thresh > 0:
-                self.exit_thresh = float(exit_thresh)
-            if shares is not None and shares > 0:
-                self.shares = int(shares)
-            if mode in ("paper", "live"):
-                if self.mode == "live" and mode == "paper":
-                    has_active_live_exposure = any(
-                        (m.filled_up or m.filled_down) and not m.pair_captured and not m.exit_taken
-                        for m in self.markets.values()
-                    ) or bool(self.open_positions)
-                    if has_active_live_exposure:
-                        raise ValueError("Cannot switch from live to paper mode while unresolved live positions or fills remain")
-                self.mode = mode
-                if self.mode == "paper":
-                    self.open_positions = []
-            if wallet_address is not None:
-                self.wallet_address = wallet_address.strip()
-                self._clob_client = None  # Reset client if wallet changed
+                if offset is not None:
+                    self.offset = max(0.001, min(0.490, float(offset)))
+                if exit_thresh is not None and exit_thresh > 0:
+                    self.exit_thresh = float(exit_thresh)
+                if shares is not None and shares > 0:
+                    self.shares = int(shares)
+                if mode in ("paper", "live"):
+                    if self.mode == "live" and mode == "paper":
+                        has_active_live_exposure = any(
+                            (m.filled_up or m.filled_down) and not m.pair_captured and not m.exit_taken
+                            for m in self.markets.values()
+                        ) or bool(self.open_positions)
+                        if has_active_live_exposure:
+                            raise ValueError("Cannot switch from live to paper mode while unresolved live positions or fills remain")
+                    self.mode = mode
+                    if self.mode == "paper":
+                        self.open_positions = []
+                if wallet_address is not None:
+                    self.wallet_address = wallet_address.strip()
+                    self._clob_client = None  # Reset client if wallet changed
 
-            if self.mode == "live":
-                addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
-                val_info = fetch_polymarket_account_value(addr)
-                if val_info.get("success"):
-                    self.starting_balance = float(val_info["net_value"])
-                    self.open_positions = val_info.get("positions", [])
-                    if not self.wallet_address and val_info.get("wallet_address"):
-                        self.wallet_address = val_info["wallet_address"]
-                    log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
+                if self.mode == "live":
+                    live_addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
+                    fetch_live_balance = True
                 else:
-                    self._schedule_wallet_balance_fetch()
-            else:
-                if starting_balance is not None and starting_balance >= 0:
-                    self.starting_balance = float(starting_balance)
+                    if starting_balance is not None and starting_balance >= 0:
+                        self.starting_balance = float(starting_balance)
 
-            # Update per-market resting prices
-            for m in self.markets.values():
-                m.resting_up = round(0.50 - self.offset, 3)
-                m.resting_down = round(0.50 - self.offset, 3)
-                m.order_shares = self.shares
+                # Update per-market resting prices
+                for m in self.markets.values():
+                    m.resting_up = round(0.50 - self.offset, 3)
+                    m.resting_down = round(0.50 - self.offset, 3)
+                    m.order_shares = self.shares
 
-            return self.get_state()
+        # Perform remote account fetch outside _engine_lock so network I/O never blocks stop()
+        if fetch_live_balance:
+            val_info = fetch_polymarket_account_value(live_addr)
+            with self._engine_lock:
+                current_addr = self.wallet_address or os.getenv("POLY_FUNDER") or ""
+                if self.mode == "live" and current_addr == live_addr:
+                    if val_info.get("success"):
+                        self.starting_balance = float(val_info["net_value"])
+                        self.open_positions = val_info.get("positions", [])
+                        if not self.wallet_address and val_info.get("wallet_address"):
+                            self.wallet_address = val_info["wallet_address"]
+                        log.info("Live mode: locked starting balance to Polymarket net account value: $%.2f", self.starting_balance)
+                    else:
+                        self._schedule_wallet_balance_fetch()
+
+        # get_state() executed outside _engine_lock to prevent order retrieval from blocking engine control
+        return self.get_state()
 
     def _schedule_wallet_balance_fetch(self):
         """Schedule non-blocking wallet balance fetch in executor if loop is running."""
