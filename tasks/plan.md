@@ -28,7 +28,7 @@ Build a real-time stream comparison engine, standalone CLI tool (`scripts/monito
 - [x] CLI runs smoke test with `--ticks 2` and exits cleanly.
 
 ### Phase 2: Latency Lead-Time Audit Engine & Documentation (`latency-audit`)
-- [ ] Task 3: Implement `LatencyAuditor` state machine and `--audit` summary reporting
+- [x] Task 3: Implement `LatencyAuditor` state machine and `--audit` summary reporting
   - Acceptance: `LatencyAuditor` detects spot shocks, measures elapsed time until CLOB response within a 10s window, and calculates summary metrics (total shocks, reaction count, reaction rate %, median and p95 reaction latency). `--audit` flag prints formatted summary on completion.
   - Verify: `python -m pytest tests/test_monitor_stream_latency.py -k test_latency_auditor -q`
   - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`

@@ -207,6 +207,105 @@ class StreamSynchronizer:
         )
 
 
+class LatencyAuditor:
+    """Detects spot price impulse moves and measures elapsed time until CLOB book adjustments."""
+
+    def __init__(self, drift_threshold: float = 0.0010, response_window_sec: float = 10.0):
+        """Initialize latency auditor with drift threshold and response window."""
+        self.drift_threshold = drift_threshold
+        self.response_window_sec = response_window_sec
+        self.events: List[Dict[str, Any]] = []
+        self._pending_shock: Optional[Dict[str, Any]] = None
+
+    def record_tick(self, snapshot: StreamTickSnapshot) -> None:
+        """Process tick snapshot and track shock events and reactions."""
+        now = snapshot.timestamp
+        resolved_shock = False
+
+        # Check existing pending shock
+        if self._pending_shock:
+            dt = now - self._pending_shock["shock_ts"]
+            base_mid = self._pending_shock["baseline_mid"]
+            if dt <= self.response_window_sec:
+                if snapshot.clob_mid is not None and abs(snapshot.clob_mid - base_mid) >= 0.01:
+                    self._pending_shock["reaction_time_sec"] = dt
+                    self._pending_shock["reaction_time_ms"] = dt * 1000.0
+                    self._pending_shock["clob_reacted"] = True
+                    self.events.append(self._pending_shock)
+                    self._pending_shock = None
+                    resolved_shock = True
+            else:
+                self._pending_shock["clob_reacted"] = False
+                self.events.append(self._pending_shock)
+                self._pending_shock = None
+                resolved_shock = True
+
+        if resolved_shock:
+            return
+
+        # Check for new spot price shock
+        if abs(snapshot.spot_drift_pct) >= self.drift_threshold and not self._pending_shock:
+            self._pending_shock = {
+                "shock_ts": now,
+                "spot_price": snapshot.spot_price,
+                "drift_pct": snapshot.spot_drift_pct,
+                "baseline_mid": snapshot.clob_mid if snapshot.clob_mid is not None else 0.50,
+                "reaction_time_sec": None,
+                "reaction_time_ms": None,
+                "clob_reacted": False,
+            }
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Calculate statistical summary of empirical latency measurements."""
+        total = len(self.events)
+        reacted = [e for e in self.events if e.get("clob_reacted")]
+        n_reacted = len(reacted)
+        rate = (n_reacted / total * 100.0) if total > 0 else 0.0
+
+        latencies = sorted([e["reaction_time_ms"] for e in reacted if e.get("reaction_time_ms") is not None])
+        min_lat = min(latencies) if latencies else 0.0
+        median_lat = 0.0
+        mean_lat = 0.0
+        p95_lat = 0.0
+        if latencies:
+            mean_lat = sum(latencies) / len(latencies)
+            mid_idx = len(latencies) // 2
+            if len(latencies) % 2 == 1:
+                median_lat = latencies[mid_idx]
+            else:
+                median_lat = (latencies[mid_idx - 1] + latencies[mid_idx]) / 2.0
+            idx_95 = min(len(latencies) - 1, int(len(latencies) * 0.95))
+            p95_lat = latencies[idx_95]
+
+        return {
+            "total_shocks": total,
+            "reaction_count": n_reacted,
+            "reaction_rate_pct": round(rate, 2),
+            "min_latency_ms": round(min_lat, 1),
+            "median_latency_ms": round(median_lat, 1),
+            "mean_latency_ms": round(mean_lat, 1),
+            "p95_latency_ms": round(p95_lat, 1),
+        }
+
+    def format_summary(self) -> str:
+        """Format empirical audit summary as readable text block."""
+        s = self.get_summary()
+        lines = [
+            "=" * 80,
+            "EMPIRICAL LATENCY AUDIT SUMMARY (RTDS Spot -> CLOB Book Response)",
+            "=" * 80,
+            f"Total Spot Price Shocks:   {s['total_shocks']}",
+            f"CLOB Reactions Detected:   {s['reaction_count']}",
+            f"Reaction Rate:             {s['reaction_rate_pct']:.1f}%",
+            f"Min Lead Reaction Time:    {s['min_latency_ms']:.1f} ms",
+            f"Median Reaction Time:      {s['median_latency_ms']:.1f} ms",
+            f"Mean Reaction Time:        {s['mean_latency_ms']:.1f} ms",
+            f"P95 Reaction Time:         {s['p95_latency_ms']:.1f} ms",
+            "=" * 80,
+        ]
+        return "\n".join(lines)
+
+
 def fetch_spot_price(symbol: str, session: Optional[requests.Session] = None) -> Optional[float]:
     """Fetch current spot price from Binance ticker API."""
     sess = session or requests.Session()
@@ -314,6 +413,9 @@ def run_monitor(
 
     start_time = time.time()
     ticks_emitted = 0
+    auditor: Optional[LatencyAuditor] = None
+    if args.audit:
+        auditor = LatencyAuditor(drift_threshold=args.threshold)
 
     while True:
         if stop_event and stop_event.is_set():
@@ -339,6 +441,8 @@ def run_monitor(
         snap = sync.create_snapshot(now_ts=b_now)
         if snap:
             ticks_emitted += 1
+            if auditor:
+                auditor.record_tick(snap)
             if args.json:
                 print(json.dumps(snap.to_dict()), flush=True)
             else:
@@ -348,6 +452,12 @@ def run_monitor(
             break
 
         time.sleep(sleep_interval)
+
+    if auditor:
+        if args.json:
+            print(json.dumps({"audit_summary": auditor.get_summary()}), flush=True)
+        else:
+            print(auditor.format_summary(), flush=True)
 
     return ticks_emitted
 

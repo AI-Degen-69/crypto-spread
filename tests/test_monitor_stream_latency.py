@@ -158,3 +158,107 @@ def test_run_monitor_ticks_limit(capsys):
         assert data["spot_price"] == 65000.0
         assert data["clob_mid"] == 0.50
 
+
+def test_latency_auditor_shock_and_reaction():
+    """Verify LatencyAuditor detects shock and measures reaction latency."""
+    from scripts.monitor_stream_latency import LatencyAuditor, StreamTickSnapshot
+
+    auditor = LatencyAuditor(drift_threshold=0.001, response_window_sec=10.0)
+
+    # Baseline tick at t=100.0
+    snap0 = StreamTickSnapshot(
+        timestamp=100.0, time_str="12:00:00", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60000.0, spot_drift_pct=0.0, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=100.0,
+    )
+    auditor.record_tick(snap0)
+    assert len(auditor.events) == 0
+    assert auditor._pending_shock is None
+
+    # Shock tick at t=101.0 (drift +0.2% >= 0.1%)
+    snap1 = StreamTickSnapshot(
+        timestamp=101.0, time_str="12:00:01", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=100.0,
+    )
+    auditor.record_tick(snap1)
+    assert len(auditor.events) == 0
+    assert auditor._pending_shock is not None
+    assert auditor._pending_shock["shock_ts"] == 101.0
+
+    # Intermediate tick at t=102.5 (no CLOB adjustment yet)
+    snap2 = StreamTickSnapshot(
+        timestamp=102.5, time_str="12:00:02", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=100.0,
+    )
+    auditor.record_tick(snap2)
+    assert len(auditor.events) == 0
+
+    # Reaction tick at t=103.2 (CLOB mid moves to 0.52 >= 0.01 shift)
+    snap3 = StreamTickSnapshot(
+        timestamp=103.2, time_str="12:00:03", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.50, up_ask=0.54, up_mid=0.52,
+        down_bid=0.46, down_ask=0.50, down_mid=0.48, clob_mid=0.52, latency_ms=100.0,
+    )
+    auditor.record_tick(snap3)
+    assert len(auditor.events) == 1
+    assert auditor._pending_shock is None
+
+    ev = auditor.events[0]
+    assert ev["clob_reacted"] is True
+    assert pytest.approx(ev["reaction_time_sec"], 0.001) == 2.2
+    assert pytest.approx(ev["reaction_time_ms"], 0.1) == 2200.0
+
+
+def test_latency_auditor_timeout():
+    """Verify LatencyAuditor times out if CLOB fails to react within window."""
+    from scripts.monitor_stream_latency import LatencyAuditor, StreamTickSnapshot
+
+    auditor = LatencyAuditor(drift_threshold=0.001, response_window_sec=5.0)
+
+    # Shock at t=100.0
+    snap0 = StreamTickSnapshot(
+        timestamp=100.0, time_str="12:00:00", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60100.0, spot_drift_pct=0.0016, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=100.0,
+    )
+    auditor.record_tick(snap0)
+
+    # Advance past window (t=106.0 > 100.0 + 5.0)
+    snap1 = StreamTickSnapshot(
+        timestamp=106.0, time_str="12:00:06", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60100.0, spot_drift_pct=0.0016, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=100.0,
+    )
+    auditor.record_tick(snap1)
+    assert len(auditor.events) == 1
+    assert auditor.events[0]["clob_reacted"] is False
+    assert auditor.events[0]["reaction_time_sec"] is None
+
+
+def test_latency_auditor_summary_metrics():
+    """Verify summary metrics and format_summary output."""
+    from scripts.monitor_stream_latency import LatencyAuditor
+
+    auditor = LatencyAuditor()
+    auditor.events = [
+        {"clob_reacted": True, "reaction_time_sec": 1.0, "reaction_time_ms": 1000.0},
+        {"clob_reacted": True, "reaction_time_sec": 2.0, "reaction_time_ms": 2000.0},
+        {"clob_reacted": False, "reaction_time_sec": None, "reaction_time_ms": None},
+    ]
+
+    summary = auditor.get_summary()
+    assert summary["total_shocks"] == 3
+    assert summary["reaction_count"] == 2
+    assert pytest.approx(summary["reaction_rate_pct"], 0.1) == 66.7
+    assert summary["min_latency_ms"] == 1000.0
+    assert summary["median_latency_ms"] == 1500.0
+    assert summary["mean_latency_ms"] == 1500.0
+
+    text = auditor.format_summary()
+    assert "EMPIRICAL LATENCY AUDIT SUMMARY" in text
+    assert "Total Spot Price Shocks:   3" in text
+    assert "CLOB Reactions Detected:   2" in text
+
+
