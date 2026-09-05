@@ -810,6 +810,29 @@ def test_cockpit_ui_locks_market_filters_while_running():
     assert 'id="btnTokensClear"' in html
 
 
+def test_cockpit_ui_locks_strategy_parameters_while_running():
+    """Verify the cockpit page ships the client-side lock and banner for strategy parameters during a run."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+
+    # Verify presence of lock banner and parameter inputs
+    assert 'id="cockpitParamsLockHint"' in html
+    assert "LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS" in html
+    assert 'id="btnApplyParams"' in html
+    assert 'id="cockpitOffset"' in html
+    assert 'id="cockpitExit"' in html
+    assert 'id="cockpitShares"' in html
+    assert 'id="cockpitMode"' in html
+    assert 'id="cockpitWallet"' in html
+    assert 'id="cockpitStartBal"' in html
+
+    # Verify parameter lock helper and client guard exist
+    assert "function updateCockpitParamsLockUI(" in html
+    apply_cfg_idx = html.index("async function applyCockpitConfig(")
+    assert "cockpitState.is_running" in html[apply_cfg_idx:apply_cfg_idx + 400]
+
+
 def test_api_live_config_selection_roundtrip_while_stopped():
     """Verify filters chosen in the UI while stopped drive the engine's active market set."""
     engine = osc_dash.get_live_trader_engine()

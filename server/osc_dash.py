@@ -1502,7 +1502,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
           <label id="lblCockpitStartBal">Starting Portfolio Balance ($)</label>
           <input type="number" step="10" id="cockpitStartBal" value="1000.00">
         </div>
-        <div class="form-group" style="justify-content:flex-end">
+        <div class="form-group" style="justify-content:flex-end;align-items:flex-end;gap:6px">
+          <span id="cockpitParamsLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn,#f0b90b);letter-spacing:0.04em;text-align:right">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS</span>
           <button id="btnApplyParams" class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
         </div>
       </div>
@@ -2799,6 +2800,45 @@ function updateCockpitFilterUI() {
   if (hint) hint.style.display = locked ? 'inline' : 'none';
 }
 
+function updateCockpitParamsLockUI(locked) {
+  const paramIds = [
+    'cockpitOffset',
+    'cockpitExit',
+    'cockpitShares',
+    'cockpitMode',
+    'cockpitWallet',
+    'cockpitStartBal',
+    'btnApplyParams',
+  ];
+  paramIds.forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    if (locked) {
+      el.disabled = true;
+      el.style.opacity = '0.4';
+      el.style.cursor = 'not-allowed';
+      el.title = 'Stop the bot to change parameters';
+    } else {
+      if (id === 'cockpitStartBal' && $('cockpitMode') && $('cockpitMode').value === 'live') {
+        el.disabled = false;
+        el.readOnly = true;
+        el.style.opacity = '0.7';
+        el.style.cursor = 'not-allowed';
+        el.title = 'Starting balance is locked to real Polymarket net account value in LIVE mode.';
+      } else {
+        el.disabled = false;
+        if (id === 'cockpitStartBal') el.readOnly = false;
+        el.style.opacity = '';
+        el.style.cursor = '';
+        el.title = '';
+      }
+    }
+  });
+
+  const hint = $('cockpitParamsLockHint');
+  if (hint) hint.style.display = locked ? 'inline' : 'none';
+}
+
 function cockpitFilterProductSlugs(tokens, durations) {
   const durSet = new Set(durations);
   const seriesList = (cockpitState && cockpitState.available_series) || ALL_COCKPIT_SERIES;
@@ -3061,6 +3101,9 @@ async function onCockpitModeChange(autoApply = true) {
 }
 
 async function applyCockpitConfig() {
+  if (cockpitState && cockpitState.is_running) {
+    return;
+  }
   if (isApplyingCockpitConfig) return;
   isApplyingCockpitConfig = true;
   const offset = parseFloat($('cockpitOffset').value) || 0.02;
@@ -3138,6 +3181,13 @@ function renderCockpitUI(st) {
     $('cockpitWallet').value = st.wallet_address;
   }
 
+  // Sync strategy parameter fields from engine state while running
+  if (st.is_running && st.params) {
+    if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
+    if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
+    if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
+  }
+
   // Sync asset/duration filters from engine state on first receipt, and whenever
   // the bot is running (selection is engine-owned and immutable mid-run).
   if (!hasInitializedCockpitFilters && st.selected_series) {
@@ -3151,6 +3201,7 @@ function renderCockpitUI(st) {
 
   // 1. Status Badges & Buttons
   const isRun = !!st.is_running;
+  updateCockpitParamsLockUI(isRun);
   const statusPill = $('cockpitStatusPill');
   if (statusPill) {
     statusPill.textContent = isRun ? '🟢 BOT: RUNNING (1s)' : '⚪ BOT: STOPPED';

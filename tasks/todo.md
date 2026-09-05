@@ -5,7 +5,7 @@
   - Verify: `python -m pytest tests/test_live_trader.py -q`
   - Files: `strategy/live_trader.py`, `tests/test_live_trader.py`
 
-- [ ] Task 2: Cockpit form inputs lock, notice banner, and client guard in `server/osc_dash.py`
+- [x] Task 2: Cockpit form inputs lock, notice banner, and client guard in `server/osc_dash.py`
   - Acceptance: Inputs and `#btnApplyParams` are disabled with lock styling and tooltip when `st.is_running` is true. `#cockpitParamsLockHint` is displayed. `applyCockpitConfig()` rejects early while running. Interactivity restores when bot stops.
   - Verify: DOM inspection and integration tests.
   - Files: `server/osc_dash.py`
