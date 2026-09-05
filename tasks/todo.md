@@ -1,21 +1,16 @@
-# Tasks: Issue #61 LTR Layout & English Localization
+# Tasks: Issue #62 Lock Strategy Parameters While Trading Bot Is Running
 
-- [x] Task 1: Add automated integration tests in `tests/test_osc_dash_integration.py` (RED)
-  - Acceptance: Tests assert `dir="ltr"`, `lang="en"`, absence of `dir="rtl"`, `.tbl th` left-aligned, and 0 Hebrew characters in `server/osc_dash.py`.
-  - Verify: `python -m pytest tests/test_osc_dash_integration.py -k "ltr or hebrew"` fails on existing codebase.
+- [x] Task 1: Backend parameter locking under `_engine_lock` in `strategy/live_trader.py` and unit tests in `tests/test_live_trader.py`
+  - Acceptance: `engine.update_config()` raises `ValueError` if any strategy parameter (`offset`, `exit_thresh`, `shares`, `mode`, `wallet_address`, `starting_balance`) changes while `is_running=True`. Idempotent calls succeed. Modification succeeds when stopped.
+  - Verify: `python -m pytest tests/test_live_trader.py -q`
+  - Files: `strategy/live_trader.py`, `tests/test_live_trader.py`
+
+- [x] Task 2: Cockpit form inputs lock, notice banner, and client guard in `server/osc_dash.py`
+  - Acceptance: Inputs and `#btnApplyParams` are disabled with lock styling and tooltip when `st.is_running` is true. `#cockpitParamsLockHint` is displayed. `applyCockpitConfig()` rejects early while running. Interactivity restores when bot stops.
+  - Verify: DOM inspection and integration tests.
+  - Files: `server/osc_dash.py`
+
+- [x] Task 3: Integration tests in `tests/test_osc_dash_integration.py` and regression test run
+  - Acceptance: `POST /api/live/config` returns 400 when bot runs and parameters change, returns 200 for idempotent requests, returns 200 when bot is stopped. DOM asserts `#cockpitParamsLockHint`. Full test suite passes.
+  - Verify: `python -m pytest -q`
   - Files: `tests/test_osc_dash_integration.py`
-
-- [x] Task 2: Refactor HTML root attributes, CSS alignments, Cockpit control bar, and parameter form grid in `server/osc_dash.py`
-  - Acceptance: Document root is `<html lang="en" dir="ltr">`, `.tbl th` and `.form-group label` are left-aligned, Cockpit header is left-anchored, action buttons right-anchored, and form grid reads LTR.
-  - Verify: Integration tests for LTR and CSS pass.
-  - Files: `server/osc_dash.py`
-
-- [x] Task 3: Translate all remaining Hebrew strings across all tabs, modals, and dynamic JS in `server/osc_dash.py`
-  - Acceptance: All 138 lines containing Hebrew characters are replaced with clean English strings.
-  - Verify: Regex scan for `[\u0590-\u05ff]` finds 0 lines in `server/osc_dash.py`.
-  - Files: `server/osc_dash.py`
-
-- [x] Task 4: Full verification and regression suite run
-  - Acceptance: Full test suite passes (`python -m pytest -q`).
-  - Verify: `python -m pytest -q` reports 100% pass with 0 errors.
-  - Files: none (verification)

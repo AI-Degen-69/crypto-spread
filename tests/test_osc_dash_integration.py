@@ -756,23 +756,57 @@ def test_api_live_state_includes_series_metadata():
     assert "selected_series" in data
 
 
-def test_api_live_config_rejects_market_change_while_running():
-    """Verify /api/live/config returns HTTP 400 if user tries to change markets while bot is running."""
+def test_api_live_config_rejects_changes_while_running():
+    """Verify /api/live/config returns HTTP 400 if user tries to change markets or parameters while bot is running."""
     engine = osc_dash.get_live_trader_engine()
     engine.is_running = True
     try:
+        # Market change while running rejected
         res = client.post("/api/live/config", json={"tokens": ["SOL"]})
         assert res.status_code == 400
         assert "Cannot change market selection while the trading bot is running" in res.json().get("error", "")
 
-        # But updating other parameters (offset, shares) while running is accepted
-        res2 = client.post("/api/live/config", json={"offset": 0.025, "shares": 6})
-        assert res2.status_code == 200
+        # All scalar parameter changes while running must be rejected with HTTP 400
+        for param_payload in [
+            {"offset": 0.04},
+            {"exit_thresh": 0.08},
+            {"shares": 10},
+            {"mode": "live"},
+            {"wallet_address": "0x9999999999999999999999999999999999999999"},
+            {"starting_balance": 5000.0},
+        ]:
+            res_param = client.post("/api/live/config", json=param_payload)
+            assert res_param.status_code == 400, f"Expected 400 for payload {param_payload}"
+            assert "Cannot change strategy parameters while the trading bot is running" in res_param.json().get("error", "")
+
+        # Idempotent call with matching active parameters is accepted
+        res_idempotent = client.post("/api/live/config", json={
+            "offset": engine.offset,
+            "exit_thresh": engine.exit_thresh,
+            "shares": engine.shares,
+            "mode": engine.mode,
+            "wallet_address": engine.wallet_address,
+            "starting_balance": engine.starting_balance,
+        })
+        assert res_idempotent.status_code == 200
+
+        # Once stopped, updating parameters is accepted
+        engine.is_running = False
+        res3 = client.post("/api/live/config", json={"offset": 0.025, "shares": 6})
+        assert res3.status_code == 200
         assert engine.offset == 0.025
         assert engine.shares == 6
     finally:
         engine.is_running = False
-        engine.update_config(selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"])
+        engine.update_config(
+            offset=0.02,
+            exit_thresh=0.05,
+            shares=5,
+            mode="paper",
+            wallet_address="",
+            starting_balance=1000.0,
+            selected_markets=["btc-up-or-down-5m", "eth-up-or-down-5m", "bnb-up-or-down-5m", "sol-up-or-down-5m", "xrp-up-or-down-5m"],
+        )
 
 
 def test_cockpit_ui_locks_market_filters_while_running():
@@ -793,6 +827,29 @@ def test_cockpit_ui_locks_market_filters_while_running():
     assert 'id="cockpitFilterLockHint"' in html
     assert 'id="btnTokensAll"' in html
     assert 'id="btnTokensClear"' in html
+
+
+def test_cockpit_ui_locks_strategy_parameters_while_running():
+    """Verify the cockpit page ships the client-side lock and banner for strategy parameters during a run."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+
+    # Verify presence of lock banner and parameter inputs
+    assert 'id="cockpitParamsLockHint"' in html
+    assert "LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS" in html
+    assert 'id="btnApplyParams"' in html
+    assert 'id="cockpitOffset"' in html
+    assert 'id="cockpitExit"' in html
+    assert 'id="cockpitShares"' in html
+    assert 'id="cockpitMode"' in html
+    assert 'id="cockpitWallet"' in html
+    assert 'id="cockpitStartBal"' in html
+
+    # Verify parameter lock helper and client guard exist
+    assert "function updateCockpitParamsLockUI(" in html
+    apply_cfg_idx = html.index("async function applyCockpitConfig(")
+    assert "cockpitState.is_running" in html[apply_cfg_idx:apply_cfg_idx + 400]
 
 
 def test_api_live_config_selection_roundtrip_while_stopped():
