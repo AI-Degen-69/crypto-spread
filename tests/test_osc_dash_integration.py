@@ -124,6 +124,37 @@ def test_sidebar_css_architecture():
     assert "sidebar-pinned" in html
 
 
+def test_sidebar_dom_structure_and_header_streamlining():
+    """Verify that <aside id="app-sidebar"> is present with SVG icons and header tabs are removed."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Sidebar element exists and has proper attributes
+    assert 'id="app-sidebar"' in html
+    assert 'class="cui-sidebar"' in html
+    assert 'id="sidebarToggleBtn"' in html
+    assert 'onclick="toggleSidebarPin()"' in html
+
+    # All 5 navigation tab buttons exist with SVG icons and labels
+    for tab_id in ["tab-btn-cockpit", "tab-btn-live", "tab-btn-backtest", "tab-btn-summary", "tab-btn-ticks"]:
+        assert f'id="{tab_id}"' in html
+
+    assert 'sidebarBotStatusPill' in html
+    assert 'sidebarStatusDot' in html
+    assert 'sidebarStatusText' in html
+
+    # Verify that header no longer contains horizontal tab container
+    assert '<div class="nav-tabs" id="main-nav">' not in html
+    assert '<div class="nav-tabs">' not in html
+
+    # Verify header still contains title, status badges, and polling buttons
+    assert 'id="collectorBadge"' in html
+    assert 'id="tapeBadge"' in html
+    assert 'id="btnToggleCollector"' in html
+    assert 'pollOnce()' in html
+
+
 def test_no_hebrew_characters_in_dashboard():
     """Verify that all legacy Hebrew strings in server/osc_dash.py have been standardized to English."""
     import re

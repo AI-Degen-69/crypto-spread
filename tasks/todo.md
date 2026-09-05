@@ -5,7 +5,7 @@
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`
 
-- [ ] Task 2: Inject `<aside id="app-sidebar">` with SVG icons, streamline `#app-hdr`, and update `switchTab()`
+- [x] Task 2: Inject `<aside id="app-sidebar">` with SVG icons, streamline `#app-hdr`, and update `switchTab()`
   - Acceptance: `<aside id="app-sidebar">` inserted before `#app-hdr` containing `#sidebarToggleBtn`, all 5 tab buttons with inline SVG icons (`#tab-btn-cockpit`, `#tab-btn-live`, `#tab-btn-backtest`, `#tab-btn-summary`, `#tab-btn-ticks`), utility links (Polymarket & GitHub), and `#sidebarBotStatusPill`. Obsolete horizontal tabs removed from `#app-hdr`. `switchTab()` activates `.sidebar-tab-btn.active`.
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
   - Files: `server/osc_dash.py`

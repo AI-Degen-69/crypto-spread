@@ -1248,16 +1248,98 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-tag-partial{background:rgba(235,178,74,0.12);color:var(--gold);border:1px solid rgba(235,178,74,0.25)}
 .ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 </style></head><body>
+<aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
+  <div class="sidebar-header">
+    <button class="sidebar-toggle-btn" id="sidebarToggleBtn" onclick="toggleSidebarPin()" title="Pin/Unpin Sidebar" aria-label="Toggle Sidebar Navigation">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <line x1="9" y1="3" x2="9" y2="21"></line>
+      </svg>
+    </button>
+    <div class="sidebar-brand-text">CRYPTO SPREAD</div>
+  </div>
+  <nav class="sidebar-nav">
+    <button class="tab-btn sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+      </span>
+      <span class="nav-label">Live Trading Cockpit</span>
+    </button>
+    <button class="tab-btn sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.93 4.93a10 10 0 0 1 14.14 0"></path>
+          <path d="M7.76 7.76a6 6 0 0 1 8.48 0"></path>
+          <circle cx="12" cy="12" r="2"></circle>
+          <path d="M12 14v7"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Live Books & Queue</span>
+    </button>
+    <button class="tab-btn sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline>
+          <polyline points="16 7 22 7 22 13"></polyline>
+        </svg>
+      </span>
+      <span class="nav-label">Backtest Sweeper</span>
+    </button>
+    <button class="tab-btn sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="20" x2="18" y2="10"></line>
+          <line x1="12" y1="20" x2="12" y2="4"></line>
+          <line x1="6" y1="20" x2="6" y2="14"></line>
+        </svg>
+      </span>
+      <span class="nav-label">Stats Summary</span>
+    </button>
+    <button class="tab-btn sidebar-tab-btn" id="tab-btn-ticks" onclick="switchTab('ticks')" title="Tick Files">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Tick Files</span>
+    </button>
+  </nav>
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-nav" style="flex:0">
+    <a href="https://polymarket.com" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="Polymarket CLOB">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+      </span>
+      <span class="nav-label">Polymarket Venue</span>
+    </a>
+    <a href="https://github.com/AI-Degen-69/crypto-spread" target="_blank" rel="noopener noreferrer" class="sidebar-link-btn" title="GitHub Repository">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+        </svg>
+      </span>
+      <span class="nav-label">GitHub Repo</span>
+    </a>
+  </div>
+  <div class="sidebar-footer">
+    <div class="sidebar-status-pill" id="sidebarBotStatusPill" title="Trading Bot Engine Status">
+      <span class="status-indicator-dot" id="sidebarStatusDot"></span>
+      <span class="status-indicator-text" id="sidebarStatusText">ENGINE IDLE</span>
+    </div>
+  </div>
+</aside>
+
 <div class="hdr" id="app-hdr">
   <h1><span>◆</span> Crypto Spread <span>5m/15m Engine</span></h1>
   <span class="tag">SPREAD-2 · POLYMARKET CLOB</span>
-  <div class="nav-tabs" id="main-nav">
-    <button class="tab-btn active" onclick="switchTab('cockpit')" id="tab-btn-cockpit">⚡ Live Trading Cockpit</button>
-    <button class="tab-btn" onclick="switchTab('live')" id="tab-btn-live">📡 Live Books & Queue</button>
-    <button class="tab-btn" onclick="switchTab('backtest')" id="tab-btn-backtest">⚡ Backtest Sweeper</button>
-    <button class="tab-btn" onclick="switchTab('summary')" id="tab-btn-summary">📊 Stats Summary</button>
-    <button class="tab-btn" onclick="switchTab('ticks')" id="tab-btn-ticks">💾 Tick Files</button>
-  </div>
   <span style="flex:1"></span>
   <div style="display:flex;align-items:center;gap:8px">
     <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Collector: Loading...</span>
