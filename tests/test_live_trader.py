@@ -1193,6 +1193,9 @@ def test_stop_exit_retains_cancelled_opposite_order_paper() -> None:
     assert cancelled_dn[0]["price"] == 0.48
     assert cancelled_dn[0]["order_id"] == "paper_dn_custom_1"
 
+    from unittest.mock import MagicMock
+    engine.get_clob_client = MagicMock(return_value=None)
+
     # Verify get_open_orders_list contains the cancelled order
     orders = engine.get_open_orders_list()
     cancelled_in_list = [o for o in orders if o.get("status") in ("CANCELLED", "CANCELED")]
@@ -1244,6 +1247,39 @@ def test_stop_exit_retains_cancelled_opposite_order_live() -> None:
     assert matching[0]["status"] == "CANCELLED"
 
 
+def test_stop_exit_live_failed_cancellation_preserves_handle() -> None:
+    """Issue #76: In live mode, if cancelling opposite unhedged leg fails, preserve handle and mark STOP_EXIT_PENDING."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = True
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "FILLED_UP"
+    m.market_slug = "btc-updown-5m-win1"
+    m.up_token = "tok_up_1"
+    m.down_token = "tok_dn_1"
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    m.order_id_down = "ord_dn_active"
+    m.order_status_down = "RESTING"
+
+    mock_client = MagicMock()
+    mock_client.cancel.return_value = False
+    mock_client.cancel_orders.return_value = False
+    engine.get_clob_client = MagicMock(return_value=mock_client)
+    engine.place_live_quote = MagicMock()
+
+    engine._execute_stop_exit("btc-up-or-down-5m", m, "UP", 0.43, "Stop test", 1000.0)
+
+    # Opposite handle must be preserved so cancellation can be retried
+    assert m.order_id_down == "ord_dn_active"
+    assert m.status == "STOP_EXIT_PENDING"
+    assert m.exit_taken is False
+    # Market sell order must NOT have been submitted
+    engine.place_live_quote.assert_not_called()
+
+
 def test_window_rollover_clears_cancelled_orders() -> None:
     """Issue #76: Window rollover clears retained cancelled orders for the new window."""
     import time
@@ -1275,9 +1311,11 @@ def test_window_rollover_clears_cancelled_orders() -> None:
 
 def test_cancel_all_orders_retains_cancelled_orders() -> None:
     """Issue #76: Emergency panic cancel records active orders into cancelled_orders before clearing handles."""
+    from unittest.mock import MagicMock
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
 
     m = engine.markets["btc-up-or-down-5m"]
     m.order_id_up = "ord_panic_up"
@@ -1302,3 +1340,28 @@ def test_cancel_all_orders_retains_cancelled_orders() -> None:
     open_ids = [o["order_id"] for o in open_orders]
     assert "ord_panic_up" in open_ids
     assert "ord_panic_dn" in open_ids
+
+
+def test_cancel_all_orders_live_failure_returns_false() -> None:
+    """Issue #76: Emergency panic cancel fails cleanly if remote CLOB cancel raises, preserving local handles."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = True
+
+    mock_client = MagicMock()
+    mock_client.cancel_all.side_effect = RuntimeError("CLOB remote error")
+    engine.get_clob_client = MagicMock(return_value=mock_client)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "ord_panic_up"
+    m.order_id_down = "ord_panic_dn"
+    m.order_status_up = "RESTING"
+    m.order_status_down = "RESTING"
+
+    res = engine.cancel_all_orders()
+    assert res["ok"] is False
+    assert "CLOB remote error" in res["error"]
+    # Local handles must NOT be cleared if remote cancel failed
+    assert m.order_id_up == "ord_panic_up"
+    assert m.order_id_down == "ord_panic_dn"

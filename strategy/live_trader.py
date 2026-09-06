@@ -731,14 +731,30 @@ class LiveTraderEngine:
         self.quoting_halted = True
         self.is_running = False
         cancelled_remote = False
-        client = self.get_clob_client()
-        if client:
+        if self.mode == "live" or self._clob_client is not None:
+            client = self.get_clob_client()
+            if not client:
+                log.error("Live emergency cancel_all failed: no CLOB client available")
+                return {
+                    "ok": False,
+                    "error": "No CLOB client available",
+                    "remote_cancel_called": False,
+                    "markets_cleared": 0,
+                    "timestamp": time.time(),
+                }
             try:
                 client.cancel_all()
                 cancelled_remote = True
                 log.info("Emergency cancel_all invoked on Polymarket CLOB")
             except Exception as e:
                 log.error("Error in remote cancel_all: %s", e)
+                return {
+                    "ok": False,
+                    "error": str(e),
+                    "remote_cancel_called": False,
+                    "markets_cleared": 0,
+                    "timestamp": time.time(),
+                }
 
         # Clear local order handles across all markets
         cleared_count = 0
@@ -874,7 +890,16 @@ class LiveTraderEngine:
         if self.mode == "live":
             # 1. Cancel unhedged opposite resting order
             if opp_order_id:
-                self.cancel_live_order(opp_order_id)
+                cancel_ok = self.cancel_live_order(opp_order_id)
+                if not cancel_ok:
+                    log.warning(
+                        "[%s] Failed to cancel opposite leg %s during stop exit, retaining handle and marking STOP_EXIT_PENDING",
+                        mstate.slug,
+                        opp_order_id,
+                    )
+                    with self._engine_lock:
+                        mstate.status = "STOP_EXIT_PENDING"
+                    return
                 with self._engine_lock:
                     if is_up:
                         mstate.order_status_down = "CANCELLED"
