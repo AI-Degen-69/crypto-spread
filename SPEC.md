@@ -1,60 +1,51 @@
-# SPEC: Control Center Menu Script (csm) & Telemetry Monitor
+# SPEC: Direct Polymarket Market Hyperlinks in Cockpit Dashboard (Issue #75)
 
 ## Objective
-Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) for `crypto-spread` alongside terminal aliases (`csm`, `crypto-spread-menu`) in `C:\Program Files\PowerShell\7\profile.ps1`. The menu provides background dashboard hosting on port `:8802`, PID tracking with recycling protection, clean process tree termination, system telemetry status display, and real-time streaming of Binance spot vs. Polymarket CLOB order book tick prices.
+Add direct clickable hyperlinks pointing to the active Polymarket live markets in the Cockpit dashboard across both the 🎯 Live Market Matrix cards and the unified Orders & Trades table (Open Orders, Positions, and Closed Trades tabs). All links must open in a new browser tab with `target="_blank"` and `rel="noopener"`, and fall back safely to the series slug if `market_slug` is pending discovery.
+
+## Background & Context
+Currently, market labels across the Cockpit dashboard are rendered as static text (e.g. `BTC 5m`, `ETH 5m`). Operators managing automated or paper strategies need immediate access to inspect order books, open interest, and settlement conditions on Polymarket. Hyperlinking directly to `https://polymarket.com/market/{market_slug}` enables instant one-click navigation without manual searching.
 
 ## Tech Stack
-- PowerShell 7 (`pwsh`), UTF-8 encoding without BOM.
-- Python 3.10+ (`uvicorn`, `fastapi`, `requests`, `websockets`).
-- `Theme-ColorSystem.ps1` and `Theme-Templates.ps1` from `C:\Program Files\PowerShell\7\scripts\Theme\`.
-- Windows process & network utilities (`taskkill`, `netstat`).
+- Python 3.10+ (`dataclasses`, `FastAPI`, `uvicorn`, `requests`)
+- Vanilla ES6 JavaScript embedded in `server/osc_dash.py` (DOM manipulation, template literals)
+- Node.js test runner for frontend DOM validation in `tests/test_orders_trades_table.py`
+- Pytest test suite (`python -m pytest -q`)
 
-## Commands
-- **Interactive Menu**: `.\scripts\crypto-spread-menu.ps1` or `csm`
-- **CLI Direct Dispatch**:
-  - `csm status` / `.\scripts\crypto-spread-menu.ps1 status` — Displays system telemetry, dashboard state, bot status, and tick store manifest.
-  - `csm open` / `.\scripts\crypto-spread-menu.ps1 open` — Starts uvicorn on `:8802` detached, registers PID + ticks, and opens browser.
-  - `csm stop` / `.\scripts\crypto-spread-menu.ps1 stop` — Terminates dashboard process tree, frees `:8802`, and cleans PID registry.
-  - `csm compare` / `.\scripts\crypto-spread-menu.ps1 compare` — Terminal live price monitor comparing Binance spot vs CLOB order book ticks.
-- **Verification**: `python -m pytest -q`
+## Interfaces & Contracts
 
-## Project Structure
-```
-c:\Users\Tiger\Agents\Projects\AI Trading\crypto-spread\
-├── scripts/
-│   └── crypto-spread-menu.ps1  [NEW] Control center script
-├── run/
-│   └── dash.pids.json          PID and tick registry for dashboard process
-├── tests/
-│   └── test_crypto_spread_menu.py [NEW] Verification tests for menu helper endpoints/CLI behavior
-└── C:\Program Files\PowerShell\7\profile.ps1 [MODIFY] Register csm & crypto-spread-menu aliases
-```
+### 1. Backend Dataclasses & Dictionaries (`strategy/live_trader.py`)
+- `TradeEvent` dataclass:
+  - Add `market_slug: str = ""` field with default value for backwards compatibility.
+- `get_open_orders_list()`:
+  - Each returned order dict includes `"market_slug": str` and `"series_slug": str`.
+- `get_open_positions()`:
+  - Each returned position dict includes `"market_slug": str` and `"series_slug": str`.
+- `TradeEvent` instantiations in stop-loss, pair-merge, window settle, and demo seeding:
+  - Pass `market_slug=mstate.market_slug or ""` (or equivalent).
 
-## Code Style & Principles
-- **PowerShell 7 Native**: `[CmdletBinding()]`, UTF-8, strict handling of process objects and network ports.
-- **Theme-First Formatting**: Dot-source `Theme-ColorSystem.ps1` and `Theme-Templates.ps1`. Render banners via `Write-ProfileBanner`/`Write-ProfileSection`, status lines via `Write-ProfileSuccess`/`Warning`/`Error`/`Info`, and key-value tables via `Write-ProfileKeyValue`.
-- **Graceful Fallbacks**: Include inline ASCII fallback implementations for all `Write-Profile*` functions if Theme files are missing or host is non-interactive.
-- **PID Safety**: Always check `.StartTime.ToUniversalTime().Ticks` when evaluating PID ownership from `run/dash.pids.json` to prevent killing recycled PIDs.
+### 2. Frontend Grouping & Rendering (`server/osc_dash.py`)
+- `groupOrdersByPair(orders)`:
+  - Preserves `market_slug` and `series_slug` on grouped order objects.
+- `groupPositionsByPair(positions, markets)`:
+  - Preserves `market_slug` and `series_slug` on grouped position objects.
+- Live Market Matrix (`#cockpitMarketGrid`):
+  - Wraps the market title/label in `<a href="https://polymarket.com/market/${encodeURIComponent(m.market_slug || item.slug)}" target="_blank" rel="noopener">`.
+- Tab 1: Open Orders (`#cockpitOrdersBody`):
+  - Wraps the market title in `<a href="https://polymarket.com/market/${encodeURIComponent(grp.market_slug || grp.series_slug || '')}" target="_blank" rel="noopener">`.
+- Tab 2: Positions (`#cockpitPositionsBody`):
+  - Wraps the market title in `<a href="https://polymarket.com/market/${encodeURIComponent(grp.market_slug || grp.series_slug || '')}" target="_blank" rel="noopener">`.
+- Tab 3: Closed Trades (`#cockpitTradesBody`):
+  - Wraps the trade market label in `<a href="https://polymarket.com/market/${encodeURIComponent(t.market_slug || t.slug || t.series_slug || '')}" target="_blank" rel="noopener">`.
 
 ## Testing Strategy
-- Run unit test suite: `python -m pytest -q`
-- Validate `csm` execution from PowerShell 7 shell across direct dispatches (`status`, `open`, `stop`, `compare`).
-- Test process tree termination and orphan adoption logic under test scenarios.
+- Unit test suite in `tests/test_orders_trades_table.py` verifying:
+  - Hyperlink URL structure (`https://polymarket.com/market/...`)
+  - Target attributes (`target="_blank" rel="noopener"`)
+  - Safe fallback to series slug when `market_slug` is absent
+  - DOM presence across Matrix cards and all 3 tabs (Orders, Positions, Trades)
+- Full regression test run: `python -m pytest -q` (all 242+ tests passing).
 
-## Boundaries
-- **Always do**: Validate `:8802` status before binding or killing; check PID creation ticks before killing recorded process IDs; support CLI parameters without prompting.
-- **Ask first**: Editing existing unrelated profile functions in `profile.ps1`.
-- **Never do**: Kill un-owned third-party processes on port `:8802`; remove `run/` from `.gitignore`.
-
-## Success Criteria
-1. `csm` executes `scripts/crypto-spread-menu.ps1` from any working directory in PowerShell 7.
-2. `csm status`, `csm open`, `csm stop`, `csm compare` dispatch immediately without opening interactive prompts.
-3. Native `Theme-ColorSystem.ps1` & `Theme-Templates.ps1` integration renders themed banners, sections, tables, and status badges.
-4. `open` action launches `uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802` in background, records PID & start ticks in `run/dash.pids.json`, verifies `:8802`, and opens `http://127.0.0.1:8802`.
-5. `stop` action tree-kills dashboard process (`taskkill /F /T`), verifies `:8802` release, and sweeps stale PID file.
-6. `status` action queries `/api/live/state`, `/api/collector/status`, `:8802` listener, and `run/ticks/manifest.json`.
-7. `compare` action streams real-time Binance spot vs. Polymarket CLOB book ticks in terminal.
-8. All existing 186 unit tests pass.
-
-## Open Questions
-- None. Requirements and architecture are fully locked in.
+## Boundaries & Constraints
+- **Always do**: Use `target="_blank" rel="noopener"` on all external links; URI-encode slugs via `encodeURIComponent`; maintain backward compatibility for existing serialized trade logs.
+- **Never do**: Alter trading algorithms, execution logic, sizing, or offset pricing; break existing table CSS structure.

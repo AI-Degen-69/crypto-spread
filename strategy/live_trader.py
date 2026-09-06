@@ -448,6 +448,7 @@ class TradeEvent:
     pnl_usd: float
     pnl_pct: float
     notes: str
+    market_slug: str = ""
 
 
 class LiveTraderEngine:
@@ -888,6 +889,7 @@ class LiveTraderEngine:
                 pnl_usd=round(exit_pnl_usd, 3),
                 pnl_pct=round(((exit_pnl_usd) / denom) * 100.0, 1),
                 notes=trigger_note,
+                market_slug=mstate.market_slug or "",
             ))
             self._save_persisted_trades()
 
@@ -1814,6 +1816,9 @@ class LiveTraderEngine:
             entry_down = round(down_cost / down_bought, 3) if down_bought > 0 else None
             time_str = datetime.datetime.fromtimestamp(last_ts).strftime("%H:%M:%S")
 
+            m_obj = self.markets.get(series_slug)
+            ev_mkt_slug = m_obj.market_slug if (m_obj and m_obj.market_slug) else ""
+
             ev = TradeEvent(
                 id=f"{series_slug}_{last_ts}",
                 timestamp=time_str,
@@ -1827,6 +1832,7 @@ class LiveTraderEngine:
                 pnl_usd=round(window_pnl, 2),
                 pnl_pct=round((window_pnl / max(0.01, buys_cost)) * 100.0, 1),
                 notes=notes,
+                market_slug=ev_mkt_slug,
             )
             new_events.append((last_ts, ev))
 
@@ -2497,6 +2503,7 @@ class LiveTraderEngine:
                         pnl_usd=round(pair_profit_usd, 3),
                         pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
                         notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
+                        market_slug=mstate.market_slug or "",
                     ))
                     self._save_persisted_trades()
                 return
@@ -2610,6 +2617,7 @@ class LiveTraderEngine:
                     pnl_usd=round(settle_pnl, 3),
                     pnl_pct=round((settle_pnl / cost_basis) * 100.0, 1),
                     notes="Window expired, position auto-settled",
+                    market_slug=mstate.market_slug or "",
                 ))
                 self._save_persisted_trades()
 

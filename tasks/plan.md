@@ -1,67 +1,59 @@
-# Implementation Plan: Control Center Menu Script (`csm`) & Telemetry Monitor (Issue #64)
+# Implementation Plan: Direct Polymarket Links in Dashboard (Issue #75)
 
 ## Overview
-Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) for `crypto-spread` alongside terminal aliases (`csm`, `crypto-spread-menu`) in `C:\Program Files\PowerShell\7\profile.ps1`. The menu provides background dashboard hosting on port `:8802`, PID tracking with recycling protection (`run/dash.pids.json`), clean process tree termination (`taskkill`), system telemetry status display (`/api/live/state`, `/api/collector/status`, `manifest.json`), and real-time streaming of Binance spot vs. Polymarket CLOB order book tick prices.
+Add direct clickable hyperlinks pointing to the active Polymarket live markets in the Cockpit dashboard across both the 🎯 Live Market Matrix cards and the Orders & Trades table (Open Orders, Positions, and Closed Trades tabs). All links will open in a new browser tab with `target="_blank"` and `rel="noopener"`, and fall back safely to the series slug if `market_slug` is pending discovery.
 
 ## Architecture Decisions
-1. **Native Profile Theme System Integration**: Dot-source `Theme-ColorSystem.ps1` and `Theme-Templates.ps1` from `C:\Program Files\PowerShell\7\scripts\Theme\`. Include self-contained fallback functions (`Write-ProfileSuccess`, `Write-ProfileWarning`, `Write-ProfileError`, `Write-ProfileInfo`, `Write-ProfileBanner`, `Write-ProfileKeyValue`) so the menu functions seamlessly even if theme scripts are missing.
-2. **PID Recycling Protection**: Record process start ticks (`.StartTime.ToUniversalTime().Ticks`) into `run/dash.pids.json` on launch. Validate start ticks prior to terminating processes to ensure recycled process IDs are never accidentally killed.
-3. **Clean Tree Termination**: Use `taskkill /F /T /PID $pid` followed by process exit verification (`Get-Process -Id $pid`) and netstat listener sweep to ensure port `:8802` is completely freed.
-4. **Zero-Interaction CLI Dispatch**: Support direct CLI action dispatching (`csm status`, `csm open`, `csm stop`, `csm compare`) without prompting or waiting for menu keypresses.
-5. **Global Terminal Access (`csm`)**: Register `function csm` and `function crypto-spread-menu` in `C:\Program Files\PowerShell\7\profile.ps1` with script path existence checks before execution.
+1. **Backward-Compatible Dataclass Extension**: Add `market_slug: str = ""` to `TradeEvent` with a default empty string so existing persisted JSON records in `run/trades.json` load without schema migration errors.
+2. **Comprehensive Slug Propagation**: Expose both `market_slug` and `series_slug` across all order sources in `get_open_orders_list()` (CLOB API, active engine, advance next window, paper simulation) and `get_open_positions()`.
+3. **Robust Client-Side URL Formation**: Construct Polymarket market URLs using `https://polymarket.com/market/${encodeURIComponent(market_slug || series_slug)}` with `target="_blank" rel="noopener"` and clear visual cues (e.g. `↗` symbol and hover accent).
+4. **End-to-End Test Validation**: Verify both Python API serialization and client-side JavaScript DOM rendering using the existing Node.js test harness in `tests/test_orders_trades_table.py`.
 
 ## Task List
 
-### Phase 1: Script Core & Telemetry (`status`)
-- [x] Task 1: Create `scripts/crypto-spread-menu.ps1` with Theme integration, ASCII fallback, parameter handling, and `status` action
-  - **Acceptance**: Script parses positional parameter (`status`, `open`, `stop`, `compare`), dot-sources theme scripts or falls back, queries port `:8802`, `/api/live/state`, `/api/collector/status`, and reads `run/ticks/manifest.json`.
-  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 status"`
-  - **Files**: `scripts/crypto-spread-menu.ps1`
+### Phase 1: Backend Data Model & Slug Propagation
+- [x] Task 1: Extend `TradeEvent` dataclass and propagate `market_slug` in `strategy/live_trader.py`
+  - **Acceptance**: `TradeEvent` has `market_slug: str = ""`. All `TradeEvent` instances in `_execute_stop_exit`, `_reconcile_live_positions`, `_run_execution_cycle`, and `_seed_demo_positions` pass `market_slug`.
+  - **Verify**: `python -m pytest tests/test_live_trader.py -q`
+  - **Files**: `strategy/live_trader.py`
 
-### Phase 2: Process Control (`open` & `stop`)
-- [x] Task 2: Implement `open` (background hosting) and PID safety tracking in `scripts/crypto-spread-menu.ps1`
-  - **Acceptance**: `open` launches `uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802` in hidden window, records PID + start ticks in `run/dash.pids.json`, verifies `:8802`, provides adoption check if already running, and opens browser.
-  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 open"`
-  - **Files**: `scripts/crypto-spread-menu.ps1`
+- [ ] Task 2: Propagate `market_slug` and `series_slug` in `get_open_orders_list` and `get_open_positions`
+  - **Acceptance**: Returned order dictionaries and position dictionaries contain `market_slug` and `series_slug`.
+  - **Verify**: `python -m pytest tests/test_live_trader.py -q`
+  - **Files**: `strategy/live_trader.py`
 
-- [x] Task 3: Implement `stop` (tree cleanup & orphan sweep) in `scripts/crypto-spread-menu.ps1`
-  - **Acceptance**: `stop` tree-kills dashboard process (`taskkill /F /T`), verifies process exit, confirms `:8802` port release, and deletes `run/dash.pids.json`.
-  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 stop"`
-  - **Files**: `scripts/crypto-spread-menu.ps1`
+### Phase 2: Frontend Grouping & Dashboard UI Hyperlinks
+- [ ] Task 3: Update `groupOrdersByPair` and `groupPositionsByPair` in `server/osc_dash.py`
+  - **Acceptance**: Grouped records preserve `market_slug` and `series_slug` from underlying legs.
+  - **Verify**: `python -m pytest tests/test_orders_trades_table.py -q`
+  - **Files**: `server/osc_dash.py`
 
-### Checkpoint 1: Core Process Control & Telemetry Operational
-- [x] `status` action renders formatted system dashboard.
-- [x] `open` action starts dashboard in background, writes PID registry, and opens browser.
-- [x] `stop` action cleanly kills process tree and frees port `:8802`.
+- [ ] Task 4: Render hyperlinks in Live Market Matrix and Orders & Trades tabs
+  - **Acceptance**:
+    - `#cockpitMarketGrid` card headers link to `https://polymarket.com/market/{slug}`.
+    - Tab 1 (Open Orders) `mktCell` links to `https://polymarket.com/market/{slug}`.
+    - Tab 2 (Positions) `mktCell` links to `https://polymarket.com/market/{slug}`.
+    - Tab 3 (Closed Trades) market column links to `https://polymarket.com/market/{slug}`.
+    - All links have `target="_blank" rel="noopener"` and fall back to series slug if `market_slug` is absent.
+  - **Verify**: `python -m pytest tests/test_orders_trades_table.py -q`
+  - **Files**: `server/osc_dash.py`
 
-### Phase 3: Live Price Stream Monitor & Terminal Wrapper (`compare` & `csm`)
-- [x] Task 4: Implement `compare` action in `scripts/crypto-spread-menu.ps1`
-  - **Acceptance**: `compare` streams live Binance spot vs. Polymarket CLOB book ticks to terminal.
-  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 compare --ticks 2"`
-  - **Files**: `scripts/crypto-spread-menu.ps1`
+### Phase 3: Automated Verification & Regression Suite
+- [ ] Task 5: Add automated unit & Node DOM tests for market hyperlinks
+  - **Acceptance**: Tests verify link URLs, attributes (`target="_blank"`, `rel="noopener"`), and fallbacks across matrix cards and all three tabs.
+  - **Verify**: `python -m pytest tests/test_orders_trades_table.py -q`
+  - **Files**: `tests/test_orders_trades_table.py`
 
-- [x] Task 5: Register global `csm` & `crypto-spread-menu` functions in `C:\Program Files\PowerShell\7\profile.ps1`
-  - **Acceptance**: Functions forward `@Args` directly to `scripts/crypto-spread-menu.ps1` with path existence check.
-  - **Verify**: `pwsh -Command "csm status"`
-  - **Files**: `C:\Program Files\PowerShell\7\profile.ps1`
-
-### Phase 4: Automated Verification & Integration
-- [x] Task 6: Add Pytest verification suite in `tests/test_crypto_spread_menu.py`
-  - **Acceptance**: Tests PID registry JSON format, start ticks validation, and verifies full test suite passes.
-  - **Verify**: `python -m pytest tests/test_crypto_spread_menu.py -q`
-  - **Files**: `tests/test_crypto_spread_menu.py`
-
-### Checkpoint 2: Complete Implementation & Final Verification
-- [x] Interactive menu `[1]`, `[2]`, `[3]`, `[4]`, `[q]` and direct CLI parameters (`status`, `open`, `stop`, `compare`) execute cleanly.
-- [x] Global `csm` alias works from any directory.
-- [x] All unit tests pass: `python -m pytest -q`.
+- [ ] Task 6: Run full test suite regression
+  - **Acceptance**: All 242+ tests pass with zero regressions.
+  - **Verify**: `python -m pytest -q`
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Process ID recycled by Windows OS | High | Record `started_ticks` (`.StartTime.ToUniversalTime().Ticks`) in `run/dash.pids.json` and verify before calling `taskkill`. |
-| Port 8802 occupied by unrelated process | Medium | Verify instance identity before attempting adoption or termination; warn user if port is occupied by foreign process. |
-| Profile theme files absent or corrupted | Low | Self-contained fallback implementations defined in `crypto-spread-menu.ps1`. |
+| `market_slug` not yet discovered (market initializing) | Low | Automatically fall back to series slug (`market_slug || series_slug`). |
+| Persisted legacy trade records missing `market_slug` | Low | Set default `market_slug: str = ""` on `TradeEvent` dataclass so `TradeEvent(**d)` never errors. |
+| Malformed slug string causing broken URL | Low | Wrap slug with `encodeURIComponent` before embedding in `href`. |
 
 ## Open Questions
-- None. Requirements and architecture are fully locked in.
+- None. Requirements and implementation boundaries are fully locked in.

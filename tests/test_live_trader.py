@@ -1061,3 +1061,56 @@ def test_get_open_orders_list_excludes_idle_and_tokenless_markets(monkeypatch):
     assert orders_quoting[1]["token_id"] == "tok_dn_123"
 
 
+def test_trade_event_market_slug():
+    """Verify TradeEvent supports market_slug with default empty string and preserves market_slug on events."""
+    from strategy.live_trader import TradeEvent, LiveTraderEngine
+    ev_default = TradeEvent(
+        id="test_1",
+        timestamp="12:00:00",
+        slug="btc-5m",
+        label="BTC 5m",
+        action="PAIR_MERGE",
+        shares=5,
+        entry_price_up=0.48,
+        entry_price_down=0.48,
+        exit_price=1.00,
+        pnl_usd=0.20,
+        pnl_pct=4.2,
+        notes="Spread capture",
+    )
+    assert ev_default.market_slug == ""
+
+    ev_with_slug = TradeEvent(
+        id="test_2",
+        timestamp="12:00:00",
+        slug="btc-5m",
+        label="BTC 5m",
+        action="PAIR_MERGE",
+        shares=5,
+        entry_price_up=0.48,
+        entry_price_down=0.48,
+        exit_price=1.00,
+        pnl_usd=0.20,
+        pnl_pct=4.2,
+        notes="Spread capture",
+        market_slug="btc-updown-5m-active",
+    )
+    assert ev_with_slug.market_slug == "btc-updown-5m-active"
+
+    # Verify live trader engine seeds/passes market_slug
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.market_slug = "btc-updown-5m-active"
+    m.filled_up = True
+    m.resting_up = 0.48
+    m.fill_price_up = 0.48
+    m.order_shares = 5
+    m.status = "STOP_EXIT_PENDING"
+    
+    # Run execution cycle to trigger stop exit
+    engine._execute_stop_exit("btc-up-or-down-5m", m, "UP", 0.43, "Test stop", 1000.0)
+    assert len(engine.trades) == 1
+    assert engine.trades[0].market_slug == "btc-updown-5m-active"
+
+
+
