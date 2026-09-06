@@ -243,6 +243,7 @@ def test_ensure_telemetry_streaming_and_stop_decoupling(monkeypatch):
 
     monkeypatch.setattr(engine.stream_bridge, "start", mock_start)
     monkeypatch.setattr(engine.stream_bridge, "stop", mock_stop)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
 
     # ensure_telemetry_streaming starts the bridge
     engine.ensure_telemetry_streaming()

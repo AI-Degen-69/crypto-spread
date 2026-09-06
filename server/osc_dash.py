@@ -799,7 +799,7 @@ async def api_live_control(request: Request):
     if action == "start":
         engine.start()
     elif action == "stop":
-        stop_streams = bool(body.get("stop_streams", False))
+        stop_streams = body.get("stop_streams") is True
         engine.stop(stop_streams=stop_streams)
     elif action == "restart":
         engine.restart()

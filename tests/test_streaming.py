@@ -365,3 +365,27 @@ def test_binance_direct_ws_edge_cases_and_shielding():
     assert client.spot_prices["btcusdt"] == 85005.0
 
 
+def test_unified_stream_bridge_restart_rearms_stop_events():
+    """Verify stopping and restarting UnifiedStreamBridge clears client stop events."""
+    bridge = UnifiedStreamBridge()
+    # Simulate stopping the bridge and clients
+    bridge.is_running = True
+    bridge.stop()
+    assert bridge.is_running is False
+    assert bridge.binance._stop_event.is_set() is True
+    assert bridge.rtds._stop_event.is_set() is True
+    assert bridge.clob._stop_event.is_set() is True
+    assert bridge.user._stop_event.is_set() is True
+
+    # When start() is called, stop events must be cleared/re-armed
+    with patch.object(bridge, "_worker_main"):
+        bridge.start()
+        assert bridge.is_running is True
+        assert bridge.binance._stop_event.is_set() is False
+        assert bridge.rtds._stop_event.is_set() is False
+        assert bridge.clob._stop_event.is_set() is False
+        assert bridge.user._stop_event.is_set() is False
+        bridge.is_running = False
+
+
+
