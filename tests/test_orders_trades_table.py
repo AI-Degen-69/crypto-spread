@@ -680,4 +680,210 @@ def test_polymarket_hyperlinks_fallback():
     assert "ALL_FALLBACK_TESTS_PASSED" in res.stdout
 
 
+@requires_node
+def test_stopped_market_matrix_and_bids_cancelled_dom():
+    """Verify stopped-out and timed-out markets render FLAT (STOPPED OUT) and CANCELLED bids in Matrix."""
+    import subprocess
 
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{
+        'btc-up-or-down-5m': {{
+          mid: 0.50,
+          spread: 0.02,
+          resting_up: 0.48,
+          resting_down: 0.48,
+          status: 'STOP_EXIT',
+          exit_taken: true,
+          filled_up: true,
+          filled_down: false,
+          fill_price_up: 0.48
+        }},
+        'eth-up-or-down-5m': {{
+          mid: 0.50,
+          spread: 0.02,
+          resting_up: 0.48,
+          resting_down: 0.48,
+          status: 'TIMEOUT_NO_FILL',
+          entry_cancelled_timeout: true
+        }},
+        'sol-up-or-down-5m': {{
+          mid: 0.50,
+          spread: 0.02,
+          resting_up: 0.48,
+          resting_down: 0.48,
+          status: 'DRIFT_SKIPPED'
+        }}
+      }},
+      open_orders: [],
+      open_positions: [],
+      trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const matrixHtml = elements['cockpitMarketGrid'].innerHTML;
+
+    // BTC 5m stopped out: should render FLAT (STOPPED OUT) and CANCELLED (STOPPED OUT)
+    if (!matrixHtml.includes('FLAT (STOPPED OUT)')) {{
+      throw new Error('Matrix card missing FLAT (STOPPED OUT): ' + matrixHtml);
+    }}
+    if (matrixHtml.includes('LONG UP') || matrixHtml.includes('LONG DOWN')) {{
+      throw new Error('Matrix card should not show stale LONG UP/DOWN when stopped: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('CANCELLED (STOPPED OUT)')) {{
+      throw new Error('Matrix card missing CANCELLED (STOPPED OUT) bids text: ' + matrixHtml);
+    }}
+
+    // ETH 5m timeout: should render CANCELLED (10% TIMEOUT)
+    if (!matrixHtml.includes('CANCELLED (10% TIMEOUT)')) {{
+      throw new Error('Matrix card missing CANCELLED (10% TIMEOUT) bids text: ' + matrixHtml);
+    }}
+
+    // SOL 5m drift: should render CANCELLED (ADVERSE DRIFT)
+    if (!matrixHtml.includes('CANCELLED (ADVERSE DRIFT)')) {{
+      throw new Error('Matrix card missing CANCELLED (ADVERSE DRIFT) bids text: ' + matrixHtml);
+    }}
+
+    console.log('STOPPED_MATRIX_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node stopped matrix test failed: {res.stderr}\n{res.stdout}"
+    assert "STOPPED_MATRIX_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_cancelled_orders_table_rendering_dom():
+    """Verify cancelled orders render with CANCELED badge, disabled action button, and proper pair status."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{}},
+      open_orders: [
+        // BTC 5m: one open leg, one cancelled leg -> Partial group
+        {{ order_id: 'ord-btc-up', market: 'BTC 5m', side: 'BUY (UP)', price: 0.48, size: 5, status: 'OPEN', time: '14:00:00' }},
+        {{ order_id: 'ord-btc-down', market: 'BTC 5m', side: 'BUY (DOWN)', price: 0.48, size: 5, status: 'CANCELED', time: '14:00:01' }},
+        // ETH 5m: both legs cancelled -> Cancelled group
+        {{ order_id: 'ord-eth-up', market: 'ETH 5m', side: 'BUY (UP)', price: 0.48, size: 5, status: 'CANCELLED', time: '14:00:02' }},
+        {{ order_id: 'ord-eth-down', market: 'ETH 5m', side: 'BUY (DOWN)', price: 0.48, size: 5, status: 'CANCELED', time: '14:00:03' }}
+      ],
+      open_positions: [],
+      trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+
+    // BTC 5m should be marked PARTIAL
+    if (!ordHtml.includes('PARTIAL')) {{
+      throw new Error('Orders table missing PARTIAL tag for mixed group: ' + ordHtml);
+    }}
+    // ETH 5m should be marked CANCELLED
+    if (!ordHtml.includes('CANCELLED')) {{
+      throw new Error('Orders table missing CANCELLED tag for all-cancelled group: ' + ordHtml);
+    }}
+
+    // ord-btc-up (OPEN) should have a cancel button
+    if (!ordHtml.includes('data-order-id="ord-btc-up"')) {{
+      throw new Error('ord-btc-up should have an active Cancel button: ' + ordHtml);
+    }}
+
+    // ord-btc-down (CANCELED) and ord-eth-* should NOT have cancel buttons
+    if (ordHtml.includes('data-order-id="ord-btc-down"')) {{
+      throw new Error('Cancelled order ord-btc-down should not have a Cancel button');
+    }}
+    if (ordHtml.includes('data-order-id="ord-eth-up"')) {{
+      throw new Error('Cancelled order ord-eth-up should not have a Cancel button');
+    }}
+    if (ordHtml.includes('data-order-id="ord-eth-down"')) {{
+      throw new Error('Cancelled order ord-eth-down should not have a Cancel button');
+    }}
+
+    // Cancelled orders should render with ot-tag-cancelled
+    if (!ordHtml.includes('ot-tag-cancelled')) {{
+      throw new Error('Orders table missing ot-tag-cancelled class for cancelled orders: ' + ordHtml);
+    }}
+
+    console.log('CANCELLED_ORDERS_TABLE_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node cancelled orders table test failed: {res.stderr}\n{res.stdout}"
+    assert "CANCELLED_ORDERS_TABLE_DOM_TESTS_PASSED" in res.stdout

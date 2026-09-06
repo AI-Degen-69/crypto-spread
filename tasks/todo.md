@@ -1,8 +1,7 @@
-# Tasks: Issue #75 Direct Polymarket Links
+# Tasks: Issue #76 Synchronize Matrix & Retain Cancelled Orders
 
-- [x] Task 1: Extend `TradeEvent` dataclass with `market_slug: str = ""` and pass `market_slug` in all trade instantiations (`strategy/live_trader.py`)
-- [x] Task 2: Add `market_slug` and `series_slug` to `get_open_orders_list()` and `get_open_positions()` (`strategy/live_trader.py`)
-- [x] Task 3: Preserve `market_slug` and `series_slug` in `groupOrdersByPair` and `groupPositionsByPair` (`server/osc_dash.py`)
-- [x] Task 4: Add direct Polymarket market hyperlinks to Live Market Matrix cards and all 3 tabs (Open Orders, Positions, Closed Trades) in `server/osc_dash.py`
-- [x] Task 5: Add automated unit & Node DOM tests for market hyperlinks in `tests/test_orders_trades_table.py`
-- [x] Task 6: Run full test suite regression (`python -m pytest -q`)
+- [x] Task 1: Add cancelled order retention per window to `MarketLiveState`, `_execute_stop_exit`, `_update_market_strategy`, `get_open_orders_list`, and rollover in `strategy/live_trader.py`
+- [x] Task 2: Synchronize Live Market Matrix card UI: show `FLAT (STOPPED OUT)` and inactive/cancelled bids when stopped or timed out in `server/osc_dash.py`
+- [x] Task 3: Update Orders table: render status `CANCELED`, disable cancel button for cancelled/filled orders, update pair grouping in `server/osc_dash.py`
+- [x] Task 4: Add comprehensive backend and DOM integration tests in `tests/test_live_trader.py` and `tests/test_orders_trades_table.py`
+- [x] Task 5: Run full test suite regression (`python -m pytest -q`) — 253 passed

@@ -422,6 +422,9 @@ class MarketLiveState:
     spot_drift: float = 0.0
     streaming_active: bool = False
 
+    # Retained cancelled orders for active window
+    cancelled_orders: List[Dict[str, Any]] = field(default_factory=list)
+
     # Performance metrics
     realized_pnl_usd: float = 0.0
     unrealized_pnl_usd: float = 0.0
@@ -662,17 +665,52 @@ class LiveTraderEngine:
                 self._clear_order_handles(order_id)
         return success
 
+    @staticmethod
+    def _record_cancelled_order(m: MarketLiveState, order_dict: Dict[str, Any]) -> None:
+        """Append cancelled order to market's retained list if not already present."""
+        oid = order_dict.get("order_id")
+        side = order_dict.get("side")
+        if not any(o.get("order_id") == oid and o.get("side") == side for o in m.cancelled_orders):
+            m.cancelled_orders.append(order_dict.copy())
+
     def _clear_order_handles(self, order_id: str) -> None:
         """Clear cached order handles and status markers for a cancelled order ID.
 
         Caller must hold _engine_lock.
         """
+        now_time_str = time.strftime("%H:%M:%S")
         for m in self.markets.values():
             if m.order_id_up == order_id:
+                self._record_cancelled_order(m, {
+                    "order_id": order_id,
+                    "market": m.label,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
+                    "token_id": m.up_token,
+                    "side": "BUY (UP)",
+                    "price": m.resting_up,
+                    "size": m.order_shares,
+                    "status": "CANCELLED",
+                    "source": "CLOB_API" if self.mode == "live" else "PAPER_SIMULATION",
+                    "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
+                })
                 m.order_id_up = None
                 m.order_status_up = "CANCELLED"
                 m.order_time_up = "-"
             if m.order_id_down == order_id:
+                self._record_cancelled_order(m, {
+                    "order_id": order_id,
+                    "market": m.label,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
+                    "token_id": m.down_token,
+                    "side": "BUY (DOWN)",
+                    "price": m.resting_down,
+                    "size": m.order_shares,
+                    "status": "CANCELLED",
+                    "source": "CLOB_API" if self.mode == "live" else "PAPER_SIMULATION",
+                    "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
+                })
                 m.order_id_down = None
                 m.order_status_down = "CANCELLED"
                 m.order_time_down = "-"
@@ -693,34 +731,80 @@ class LiveTraderEngine:
         self.quoting_halted = True
         self.is_running = False
         cancelled_remote = False
-        client = self.get_clob_client()
-        if client:
+        if self.mode == "live" or self._clob_client is not None:
+            client = self.get_clob_client()
+            if not client:
+                log.error("Live emergency cancel_all failed: no CLOB client available")
+                return {
+                    "ok": False,
+                    "error": "No CLOB client available",
+                    "remote_cancel_called": False,
+                    "markets_cleared": 0,
+                    "timestamp": time.time(),
+                }
             try:
                 client.cancel_all()
                 cancelled_remote = True
                 log.info("Emergency cancel_all invoked on Polymarket CLOB")
             except Exception as e:
                 log.error("Error in remote cancel_all: %s", e)
+                return {
+                    "ok": False,
+                    "error": str(e),
+                    "remote_cancel_called": False,
+                    "markets_cleared": 0,
+                    "timestamp": time.time(),
+                }
 
         # Clear local order handles across all markets
         cleared_count = 0
-        for m in self.markets.values():
-            if m.order_id_up or m.order_id_down or m.next_order_id_up or m.next_order_id_down or m.order_id_exit_up or m.order_id_exit_down:
-                cleared_count += 1
-            m.order_id_up = None
-            m.order_id_down = None
-            m.order_status_up = "CANCELLED"
-            m.order_status_down = "CANCELLED"
-            m.order_id_exit_up = None
-            m.order_id_exit_down = None
-            m.order_status_exit_up = "CANCELLED"
-            m.order_status_exit_down = "CANCELLED"
-            m.next_order_id_up = None
-            m.next_order_id_down = None
-            m.next_quoted = False
-            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
-                m.status = "IDLE"
-            m.last_action = "All orders cancelled"
+        now_time_str = datetime.datetime.now().strftime("%H:%M:%S")
+        with self._engine_lock:
+            for m in self.markets.values():
+                if m.order_id_up or m.order_id_down or m.next_order_id_up or m.next_order_id_down or m.order_id_exit_up or m.order_id_exit_down:
+                    cleared_count += 1
+                if m.order_id_up:
+                    self._record_cancelled_order(m, {
+                        "order_id": m.order_id_up,
+                        "market": m.label,
+                        "market_slug": m.market_slug or "",
+                        "series_slug": m.slug,
+                        "token_id": m.up_token or "",
+                        "side": "BUY (UP)",
+                        "price": m.resting_up,
+                        "size": m.order_shares,
+                        "status": "CANCELLED",
+                        "source": "CLOB_API" if self.mode == "live" else "PAPER_SIMULATION",
+                        "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
+                    })
+                if m.order_id_down:
+                    self._record_cancelled_order(m, {
+                        "order_id": m.order_id_down,
+                        "market": m.label,
+                        "market_slug": m.market_slug or "",
+                        "series_slug": m.slug,
+                        "token_id": m.down_token or "",
+                        "side": "BUY (DOWN)",
+                        "price": m.resting_down,
+                        "size": m.order_shares,
+                        "status": "CANCELLED",
+                        "source": "CLOB_API" if self.mode == "live" else "PAPER_SIMULATION",
+                        "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
+                    })
+                m.order_id_up = None
+                m.order_id_down = None
+                m.order_status_up = "CANCELLED"
+                m.order_status_down = "CANCELLED"
+                m.order_id_exit_up = None
+                m.order_id_exit_down = None
+                m.order_status_exit_up = "CANCELLED"
+                m.order_status_exit_down = "CANCELLED"
+                m.next_order_id_up = None
+                m.next_order_id_down = None
+                m.next_quoted = False
+                if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
+                    m.status = "IDLE"
+                m.last_action = "All orders cancelled"
 
         return {
             "ok": True,
@@ -802,15 +886,53 @@ class LiveTraderEngine:
             book_bid = mstate.up_bid if is_up else mstate.down_bid
             sell_bid = exit_price if exit_price is not None else (book_bid if book_bid is not None else 0.40)
 
+        now_time_str = datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S")
         if self.mode == "live":
             # 1. Cancel unhedged opposite resting order
             if opp_order_id:
-                self.cancel_live_order(opp_order_id)
+                cancel_ok = self.cancel_live_order(opp_order_id)
+                if not cancel_ok:
+                    log.warning(
+                        "[%s] Failed to cancel opposite leg %s during stop exit, retaining handle and marking STOP_EXIT_PENDING",
+                        mstate.slug,
+                        opp_order_id,
+                    )
+                    with self._engine_lock:
+                        mstate.status = "STOP_EXIT_PENDING"
+                    return
                 with self._engine_lock:
                     if is_up:
                         mstate.order_status_down = "CANCELLED"
+                        mstate.order_id_down = None
+                        self._record_cancelled_order(mstate, {
+                            "order_id": opp_order_id,
+                            "market": mstate.label,
+                            "market_slug": mstate.market_slug or "",
+                            "series_slug": mstate.slug,
+                            "token_id": mstate.down_token,
+                            "side": "BUY (DOWN)",
+                            "price": mstate.resting_down,
+                            "size": mstate.order_shares,
+                            "status": "CANCELLED",
+                            "source": "CLOB_API",
+                            "time": now_time_str,
+                        })
                     else:
                         mstate.order_status_up = "CANCELLED"
+                        mstate.order_id_up = None
+                        self._record_cancelled_order(mstate, {
+                            "order_id": opp_order_id,
+                            "market": mstate.label,
+                            "market_slug": mstate.market_slug or "",
+                            "series_slug": mstate.slug,
+                            "token_id": mstate.up_token,
+                            "side": "BUY (UP)",
+                            "price": mstate.resting_up,
+                            "size": mstate.order_shares,
+                            "status": "CANCELLED",
+                            "source": "CLOB_API",
+                            "time": now_time_str,
+                        })
 
             # 2. Market sell the filled leg if not yet submitted
             if not exit_order_id and exit_token:
@@ -858,6 +980,42 @@ class LiveTraderEngine:
                     mstate.status = "STOP_EXIT_PENDING"
                     mstate.last_action = f"Stop Loss {side} resting @ {sell_bid:.2f}"
                 return
+        else:
+            with self._engine_lock:
+                if is_up:
+                    paper_oid = opp_order_id or f"paper_dn_{mstate.slug}"
+                    mstate.order_status_down = "CANCELLED"
+                    mstate.order_id_down = None
+                    self._record_cancelled_order(mstate, {
+                        "order_id": paper_oid,
+                        "market": mstate.label,
+                        "market_slug": mstate.market_slug or "",
+                        "series_slug": mstate.slug,
+                        "token_id": mstate.down_token,
+                        "side": "BUY (DOWN)",
+                        "price": mstate.resting_down,
+                        "size": mstate.order_shares,
+                        "status": "CANCELLED",
+                        "source": "PAPER_SIMULATION",
+                        "time": now_time_str,
+                    })
+                else:
+                    paper_oid = opp_order_id or f"paper_up_{mstate.slug}"
+                    mstate.order_status_up = "CANCELLED"
+                    mstate.order_id_up = None
+                    self._record_cancelled_order(mstate, {
+                        "order_id": paper_oid,
+                        "market": mstate.label,
+                        "market_slug": mstate.market_slug or "",
+                        "series_slug": mstate.slug,
+                        "token_id": mstate.up_token,
+                        "side": "BUY (UP)",
+                        "price": mstate.resting_up,
+                        "size": mstate.order_shares,
+                        "status": "CANCELLED",
+                        "source": "PAPER_SIMULATION",
+                        "time": now_time_str,
+                    })
 
         # 4. Finalize stop exit state & PnL accounting
         with self._engine_lock:
@@ -1054,6 +1212,7 @@ class LiveTraderEngine:
                     "source": "ENGINE_ACTIVE",
                     "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
                 })
+                existing_ids.add(m.order_id_up)
             if m.order_id_down and m.order_id_down not in existing_ids:
                 orders.append({
                     "order_id": m.order_id_down,
@@ -1068,6 +1227,7 @@ class LiveTraderEngine:
                     "source": "ENGINE_ACTIVE",
                     "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
                 })
+                existing_ids.add(m.order_id_down)
             if m.next_order_id_up and m.next_order_id_up not in existing_ids:
                 orders.append({
                     "order_id": m.next_order_id_up,
@@ -1082,6 +1242,7 @@ class LiveTraderEngine:
                     "source": "ENGINE_ADVANCE",
                     "time": m.next_order_time_up if m.next_order_time_up != "-" else now_time_str,
                 })
+                existing_ids.add(m.next_order_id_up)
             if m.next_order_id_down and m.next_order_id_down not in existing_ids:
                 orders.append({
                     "order_id": m.next_order_id_down,
@@ -1096,6 +1257,7 @@ class LiveTraderEngine:
                     "source": "ENGINE_ADVANCE",
                     "time": m.next_order_time_down if m.next_order_time_down != "-" else now_time_str,
                 })
+                existing_ids.add(m.next_order_id_down)
 
         # In paper mode, expose resting simulation orders for active quoting markets
         if self.mode == "paper" and self.is_running:
@@ -1105,33 +1267,50 @@ class LiveTraderEngine:
                 # Only include active quoting markets with resolved tokens within active window
                 if m.status in ("QUOTING", "PRE_QUOTING") and m.up_token and m.down_token:
                     if not m.filled_up:
-                        orders.append({
-                            "order_id": f"paper_up_{m.slug}",
-                            "market": m.label,
-                            "market_slug": m.market_slug or "",
-                            "series_slug": m.slug,
-                            "token_id": m.up_token,
-                            "side": "BUY (UP)",
-                            "price": m.resting_up,
-                            "size": m.order_shares,
-                            "status": "RESTING",
-                            "source": "PAPER_SIMULATION",
-                            "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
-                        })
+                        oid_up = f"paper_up_{m.slug}"
+                        if oid_up not in existing_ids:
+                            orders.append({
+                                "order_id": oid_up,
+                                "market": m.label,
+                                "market_slug": m.market_slug or "",
+                                "series_slug": m.slug,
+                                "token_id": m.up_token,
+                                "side": "BUY (UP)",
+                                "price": m.resting_up,
+                                "size": m.order_shares,
+                                "status": "RESTING",
+                                "source": "PAPER_SIMULATION",
+                                "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
+                            })
+                            existing_ids.add(oid_up)
                     if not m.filled_down:
-                        orders.append({
-                            "order_id": f"paper_dn_{m.slug}",
-                            "market": m.label,
-                            "market_slug": m.market_slug or "",
-                            "series_slug": m.slug,
-                            "token_id": m.down_token,
-                            "side": "BUY (DOWN)",
-                            "price": m.resting_down,
-                            "size": m.order_shares,
-                            "status": "RESTING",
-                            "source": "PAPER_SIMULATION",
-                            "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
-                        })
+                        oid_dn = f"paper_dn_{m.slug}"
+                        if oid_dn not in existing_ids:
+                            orders.append({
+                                "order_id": oid_dn,
+                                "market": m.label,
+                                "market_slug": m.market_slug or "",
+                                "series_slug": m.slug,
+                                "token_id": m.down_token,
+                                "side": "BUY (DOWN)",
+                                "price": m.resting_down,
+                                "size": m.order_shares,
+                                "status": "RESTING",
+                                "source": "PAPER_SIMULATION",
+                                "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
+                            })
+                            existing_ids.add(oid_dn)
+
+        # Append retained cancelled orders across all markets for the active window
+        with self._engine_lock:
+            for m in self.markets.values():
+                for c_ord in list(m.cancelled_orders):
+                    c_id = c_ord.get("order_id")
+                    if c_id and c_id in existing_ids:
+                        continue
+                    orders.append(c_ord.copy())
+                    if c_id:
+                        existing_ids.add(c_id)
 
         return orders
 
@@ -2367,28 +2546,87 @@ class LiveTraderEngine:
         # --- PRE-ENTRY DRIFT & 10% WINDOW TIMEOUT ENTRY CANCELLATION ---
         if (is_late_start or is_adverse_open or is_touch_pair_invalid) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
+                now_str = datetime.datetime.now().strftime("%H:%M:%S")
                 if self.mode == "live":
                     cancel_ok_up = True
                     cancel_ok_down = True
                     if mstate.order_id_up and mstate.order_status_up == "RESTING":
-                        if self.cancel_live_order(mstate.order_id_up):
-                            mstate.order_status_up = "CANCELLED"
+                        oid = mstate.order_id_up
+                        if self.cancel_live_order(oid):
+                            with self._engine_lock:
+                                mstate.order_status_up = "CANCELLED"
+                                self._record_cancelled_order(mstate, {
+                                    "order_id": oid,
+                                    "market": mstate.label,
+                                    "market_slug": mstate.market_slug or "",
+                                    "series_slug": mstate.slug,
+                                    "token_id": mstate.up_token or "",
+                                    "side": "BUY (UP)",
+                                    "price": resting_up,
+                                    "size": mstate.order_shares,
+                                    "status": "CANCELLED",
+                                    "source": "CLOB_API",
+                                    "time": now_str,
+                                })
                         else:
                             cancel_ok_up = False
                     if mstate.order_id_down and mstate.order_status_down == "RESTING":
-                        if self.cancel_live_order(mstate.order_id_down):
-                            mstate.order_status_down = "CANCELLED"
+                        oid = mstate.order_id_down
+                        if self.cancel_live_order(oid):
+                            with self._engine_lock:
+                                mstate.order_status_down = "CANCELLED"
+                                self._record_cancelled_order(mstate, {
+                                    "order_id": oid,
+                                    "market": mstate.label,
+                                    "market_slug": mstate.market_slug or "",
+                                    "series_slug": mstate.slug,
+                                    "token_id": mstate.down_token or "",
+                                    "side": "BUY (DOWN)",
+                                    "price": resting_down,
+                                    "size": mstate.order_shares,
+                                    "status": "CANCELLED",
+                                    "source": "CLOB_API",
+                                    "time": now_str,
+                                })
                         else:
                             cancel_ok_down = False
 
                     if cancel_ok_up and cancel_ok_down:
-                        mstate.entry_cancelled_timeout = True
+                        with self._engine_lock:
+                            mstate.entry_cancelled_timeout = True
                 else:
-                    if mstate.order_status_up == "RESTING":
-                        mstate.order_status_up = "CANCELLED"
-                    if mstate.order_status_down == "RESTING":
-                        mstate.order_status_down = "CANCELLED"
-                    mstate.entry_cancelled_timeout = True
+                    with self._engine_lock:
+                        if mstate.order_status_up in ("RESTING", "NONE", "OPEN"):
+                            mstate.order_status_up = "CANCELLED"
+                            self._record_cancelled_order(mstate, {
+                                "order_id": mstate.order_id_up or f"paper_up_{slug}",
+                                "market": mstate.label,
+                                "market_slug": mstate.market_slug or "",
+                                "series_slug": mstate.slug,
+                                "token_id": mstate.up_token or "",
+                                "side": "BUY (UP)",
+                                "price": resting_up,
+                                "size": mstate.order_shares,
+                                "status": "CANCELLED",
+                                "source": "PAPER_SIMULATION",
+                                "time": now_str,
+                            })
+                        if mstate.order_status_down in ("RESTING", "NONE", "OPEN"):
+                            mstate.order_status_down = "CANCELLED"
+                            self._record_cancelled_order(mstate, {
+                                "order_id": mstate.order_id_down or f"paper_dn_{slug}",
+                                "market": mstate.label,
+                                "market_slug": mstate.market_slug or "",
+                                "series_slug": mstate.slug,
+                                "token_id": mstate.down_token or "",
+                                "side": "BUY (DOWN)",
+                                "price": resting_down,
+                                "size": mstate.order_shares,
+                                "status": "CANCELLED",
+                                "source": "PAPER_SIMULATION",
+                                "time": now_str,
+                            })
+                        mstate.entry_cancelled_timeout = True
 
                 if mstate.entry_cancelled_timeout:
                     if is_adverse_open:
@@ -2695,16 +2933,18 @@ class LiveTraderEngine:
             mstate.order_status_down = "NONE"
 
         # Reset window execution state for the new 5m period
-        mstate.filled_up = False
-        mstate.filled_down = False
-        mstate.fill_price_up = None
-        mstate.fill_price_down = None
-        mstate.pair_captured = False
-        mstate.exit_taken = False
-        mstate.entry_cancelled_timeout = False
-        mstate.exit_side = None
-        mstate.spot_open_price = None
-        mstate.spot_drift = 0.0
+        with self._engine_lock:
+            mstate.cancelled_orders.clear()
+            mstate.filled_up = False
+            mstate.filled_down = False
+            mstate.fill_price_up = None
+            mstate.fill_price_down = None
+            mstate.pair_captured = False
+            mstate.exit_taken = False
+            mstate.entry_cancelled_timeout = False
+            mstate.exit_side = None
+            mstate.spot_open_price = None
+            mstate.spot_drift = 0.0
         if self.mode == "live":
             if mstate.order_id_exit_up:
                 if self.cancel_live_order(mstate.order_id_exit_up):
