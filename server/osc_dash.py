@@ -1981,12 +1981,16 @@ function groupOrdersByPair(orders) {
     if (!groups[rawMkt]) {
       groups[rawMkt] = {
         market: rawMkt,
+        market_slug: o.market_slug || '',
+        series_slug: o.series_slug || '',
         legs: [],
         pair_cost: '--',
         status: 'Unpaired',
         rowspan: 0
       };
     }
+    if (!groups[rawMkt].market_slug && o.market_slug) groups[rawMkt].market_slug = o.market_slug;
+    if (!groups[rawMkt].series_slug && o.series_slug) groups[rawMkt].series_slug = o.series_slug;
     const sideRaw = String(o.side || 'BUY').toUpperCase();
     const isUp = sideRaw.includes('UP');
     const sideClean = isUp ? 'Up' : (sideRaw.includes('DOWN') ? 'Down' : (sideRaw.charAt(0) + sideRaw.slice(1).toLowerCase()));
@@ -2031,6 +2035,8 @@ function groupPositionsByPair(positions, markets) {
     if (!groups[rawMkt]) {
       groups[rawMkt] = {
         market: rawMkt,
+        market_slug: p.market_slug || '',
+        series_slug: p.series_slug || '',
         legs: [],
         status: 'Unpaired',
         market_val: null,
@@ -2041,6 +2047,8 @@ function groupPositionsByPair(positions, markets) {
         rowspan: 0
       };
     }
+    if (!groups[rawMkt].market_slug && p.market_slug) groups[rawMkt].market_slug = p.market_slug;
+    if (!groups[rawMkt].series_slug && p.series_slug) groups[rawMkt].series_slug = p.series_slug;
     const outRaw = String(p.outcome || p.side || '').toUpperCase();
     const isUp = outRaw.includes('UP');
     const sideClean = isUp ? 'Up' : (outRaw.includes('DOWN') ? 'Down' : (outRaw.charAt(0) + outRaw.slice(1).toLowerCase()));

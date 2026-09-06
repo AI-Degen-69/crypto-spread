@@ -23,7 +23,7 @@ Add direct clickable hyperlinks pointing to the active Polymarket live markets i
   - **Files**: `strategy/live_trader.py`
 
 ### Phase 2: Frontend Grouping & Dashboard UI Hyperlinks
-- [ ] Task 3: Update `groupOrdersByPair` and `groupPositionsByPair` in `server/osc_dash.py`
+- [x] Task 3: Update `groupOrdersByPair` and `groupPositionsByPair` in `server/osc_dash.py`
   - **Acceptance**: Grouped records preserve `market_slug` and `series_slug` from underlying legs.
   - **Verify**: `python -m pytest tests/test_orders_trades_table.py -q`
   - **Files**: `server/osc_dash.py`

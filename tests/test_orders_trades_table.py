@@ -403,3 +403,73 @@ def test_engine_order_resolution_and_cleanup():
     assert m.order_time_up == "-"
 
 
+@requires_node
+def test_group_helpers_preserve_slugs():
+    """Verify groupOrdersByPair and groupPositionsByPair preserve market_slug and series_slug."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    const testOrders = [
+      {{ order_id: '1', market: 'BTC 5m', market_slug: 'btc-updown-5m-1', series_slug: 'btc-5m', side: 'BUY (UP)', price: 0.48, size: 5 }},
+      {{ order_id: '2', market: 'BTC 5m', market_slug: 'btc-updown-5m-1', series_slug: 'btc-5m', side: 'BUY (DOWN)', price: 0.48, size: 5 }}
+    ];
+    const grpOrders = groupOrdersByPair(testOrders);
+    const btcOrderGrp = grpOrders['BTC 5m'];
+    if (!btcOrderGrp) throw new Error('BTC 5m group missing');
+    if (btcOrderGrp.market_slug !== 'btc-updown-5m-1') throw new Error('market_slug missing on order group: ' + btcOrderGrp.market_slug);
+    if (btcOrderGrp.series_slug !== 'btc-5m') throw new Error('series_slug missing on order group: ' + btcOrderGrp.series_slug);
+
+    const testPositions = [
+      {{ title: 'ETH 5m', market_slug: 'eth-updown-5m-2', series_slug: 'eth-5m', outcome: 'UP', size: 5, avgPrice: 0.48, curPrice: 0.50 }}
+    ];
+    const grpPositions = groupPositionsByPair(testPositions, {{}});
+    const ethPosGrp = grpPositions['ETH 5m'];
+    if (!ethPosGrp) throw new Error('ETH 5m position group missing');
+    if (ethPosGrp.market_slug !== 'eth-updown-5m-2') throw new Error('market_slug missing on pos group: ' + ethPosGrp.market_slug);
+    if (ethPosGrp.series_slug !== 'eth-5m') throw new Error('series_slug missing on pos group: ' + ethPosGrp.series_slug);
+
+    console.log('SLUG_PRESERVATION_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node slug preservation test failed: {res.stderr}\n{res.stdout}"
+    assert "SLUG_PRESERVATION_TESTS_PASSED" in res.stdout
+
+
+
