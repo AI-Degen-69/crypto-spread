@@ -35,7 +35,7 @@ Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) fo
 - [ ] `stop` action cleanly kills process tree and frees port `:8802`.
 
 ### Phase 3: Live Price Stream Monitor & Terminal Wrapper (`compare` & `csm`)
-- [ ] Task 4: Implement `compare` action in `scripts/crypto-spread-menu.ps1`
+- [x] Task 4: Implement `compare` action in `scripts/crypto-spread-menu.ps1`
   - **Acceptance**: `compare` streams live Binance spot vs. Polymarket CLOB book ticks to terminal.
   - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 compare --ticks 2"`
   - **Files**: `scripts/crypto-spread-menu.ps1`

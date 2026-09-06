@@ -16,7 +16,9 @@
 param(
     [Parameter(Position = 0)]
     [string]$Action = "",
-    [switch]$Yes
+    [switch]$Yes,
+    [Parameter(ValueFromRemainingArguments)]
+    [string[]]$Remaining
 )
 
 $ErrorActionPreference = "Stop"
@@ -357,7 +359,12 @@ function Stop-DashboardProcess {
 }
 
 function Start-PriceMonitor {
-    Write-ProfileInfo -Message "Start-PriceMonitor" -Detail "Will be fully implemented in Task 4"
+    param([string[]]$MonitorArgs)
+    $env:PYTHONIOENCODING = "utf-8"
+    Write-ProfileBanner -Title "CRYPTO SPREAD — LIVE BINANCE SPOT vs CLOB BOOK MONITOR" -Subtitle "Side-by-Side Real-Time Tick Stream & Latency Audit"
+    Write-ProfileInfo -Message "Starting live stream monitor..." -Detail "python -X utf8 -m scripts.monitor_stream_latency $($MonitorArgs -join ' ')"
+    Write-Host ""
+    & python -X utf8 -m scripts.monitor_stream_latency @MonitorArgs
 }
 
 # ── Menu Dispatcher ──
@@ -365,7 +372,7 @@ switch -Exact ($Action.ToLower()) {
     "status"  { Show-SystemStatus; exit 0 }
     "open"    { Host-Dashboard; exit 0 }
     "stop"    { Stop-DashboardProcess; exit 0 }
-    "compare" { Start-PriceMonitor; exit 0 }
+    "compare" { Start-PriceMonitor -MonitorArgs $Remaining; exit 0 }
     ""        {
         # Interactive loop
         while ($true) {
