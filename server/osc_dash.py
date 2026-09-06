@@ -857,7 +857,7 @@ class LiveConfigPayload(BaseModel):
         if v is not None:
             try:
                 fv = float(v)
-                if 1.0 <= fv <= 49.0:
+                if fv.is_integer() and 1.0 <= fv <= 49.0:
                     return fv / 100.0
                 return fv
             except (ValueError, TypeError):
@@ -871,7 +871,7 @@ class LiveConfigPayload(BaseModel):
         if v is not None:
             try:
                 fv = float(v)
-                if 1.0 <= fv <= 50.0:
+                if fv.is_integer() and 1.0 <= fv <= 50.0:
                     return fv / 100.0
                 return fv
             except (ValueError, TypeError):
@@ -3525,14 +3525,14 @@ async function applyCockpitConfig() {
   const offsetEl = $('cockpitOffset');
   if (offsetEl) {
     let ov = parseFloat(offsetEl.value);
-    if (!isNaN(ov) && ov >= 1.0 && ov <= 49.0) {
+    if (!isNaN(ov) && Number.isInteger(ov) && ov >= 1.0 && ov <= 49.0) {
       offsetEl.value = (ov / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
     }
   }
   const exitEl = $('cockpitExit');
   if (exitEl) {
     let ev = parseFloat(exitEl.value);
-    if (!isNaN(ev) && ev >= 1.0 && ev <= 50.0) {
+    if (!isNaN(ev) && Number.isInteger(ev) && ev >= 1.0 && ev <= 50.0) {
       exitEl.value = (ev / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
     }
   }
