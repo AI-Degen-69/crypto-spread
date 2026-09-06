@@ -1,23 +1,20 @@
-# Quality Guardrails & Constraints (`CONSTRAINTS.md`) — Issue #83
+# CONSTRAINTS.md — Issue #81 Quality & Architectural Constraints
 
-## 1. Test & Regression Bar (Non-Negotiable)
-- **Zero Regression**: All existing unit and DOM tests must remain 100% green (`python -m pytest -q`).
-- **Comprehensive Coverage**: New assertions in `tests/test_orders_trades_table.py` covering:
-  - Merged `Time` cell with `rowspan` attribute matching `grp.rowspan` for paired orders.
-  - Absence of redundant `Time` cell on follow-up legs (`idx > 0`).
-  - Leading status accent border (`border-left: 2px solid <color>`) on the `Time` cell reflecting pair status (`Paired` = green, `Partial` = gold, `Cancelled` = dim).
-  - Removal of `border-left: 2px solid` from the `Market` cell (`mktCell`).
-  - Merged `Time` cell and proper row rendering for paired positions in `#cockpitPositionsBody`.
+## 1. Testing & Zero Regressions
+- All existing 265 tests in python -m pytest -q must remain 100% passing.
+- New unit and integration tests must cover:
+  - Presence of #toastContainer in the DOM and CSS classes (.toast-container, .toast, .toast-merged, .toast-stoploss, .toast-filled).
+  - Toast trigger logic for merges, stop-loss exits, and order fills.
+  - Page-load history seeding: initial boot must NOT fire toasts for already existing trades/fills.
+  - Auto-dismiss (5000ms) and manual close button removal.
 
-## 2. Performance & DOM Efficiency
-- **Zero Runtime Overhead**: Grouping and string template interpolation occurs in O(N) where N is the number of active open orders/positions (typically < 30 rows).
-- **Clean Semantic Markup**: Table layout strictly preserves valid HTML table structure with matching row/column spans across header and body.
+## 2. Anti-Cheating & Integrity
+- Strictly no disabling, skipping, or mocking out real assertions to achieve passing tests.
+- No modifications to the core trading execution logic in strategy/live_trader.py.
+- No new external dependencies in equirements.txt (only stdlib, existing FastAPI/Uvicorn/Chart.js/vanilla JS).
 
-## 3. Anti-Cheat Discipline
-- **No Test Silencing**: No tests may be skipped, commented out, deleted, or assertions weakened to pass.
-- **Strict Verification**: DOM assertions must check actual rendered HTML attributes (`rowspan`, `style*="border-left:2px solid"`) using Node.js execution harness.
-
-## 4. Architectural Boundaries
-- **Scope Isolation**: Strictly confined to dashboard rendering in `server/osc_dash.py` and test verification in `tests/test_orders_trades_table.py`.
-- **Zero Backend Changes**: No modifications to `strategy/live_trader.py`, `strategy/streaming.py`, or data schemas.
-- **No External Libraries**: Zero changes to `requirements.txt`.
+## 3. UI & Performance Guardrails
+- Toast container must have pointer-events: none so clicks pass through empty spaces to underlying charts and buttons.
+- Individual toasts must have pointer-events: auto.
+- DOM reconciliation must be lightweight: O(N) where N is the number of active markets/trades.
+- Toasts must cleanly auto-dismiss without memory leaks (clear timers and remove DOM nodes).

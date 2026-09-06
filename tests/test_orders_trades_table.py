@@ -911,3 +911,24 @@ def test_cancelled_orders_table_rendering_dom():
     res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
     assert res.returncode == 0, f"Node cancelled orders table test failed: {res.stderr}\n{res.stdout}"
     assert "CANCELLED_ORDERS_TABLE_DOM_TESTS_PASSED" in res.stdout
+
+
+def test_toast_container_and_css():
+    """Verify #toastContainer exists in dashboard DOM and toast CSS styles are defined (Issue #81)."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # 1. Container element in DOM
+    assert 'id="toastContainer"' in html
+    assert 'class="toast-container"' in html or "toast-container" in html
+
+    # 2. CSS rules
+    assert ".toast-container" in html
+    assert ".toast{" in html or ".toast {" in html or ".toast " in html
+    assert ".toast-merged" in html
+    assert ".toast-stoploss" in html
+    assert ".toast-filled" in html
+    assert ".toast-close" in html
+    assert "z-index:9999" in html or "z-index: 9999" in html
+

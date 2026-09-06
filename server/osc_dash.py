@@ -1390,6 +1390,22 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .tel-badge.warn{background:rgba(243,186,47,.15);color:var(--gold);border:1px solid rgba(243,186,47,.3)}
 .tel-badge.err{background:rgba(240,104,77,.15);color:var(--down);border:1px solid rgba(240,104,77,.3)}
 .tel-badge.idle{background:rgba(120,135,155,.15);color:var(--dim);border:1px solid rgba(120,135,155,.3)}
+/* Floating Side Toast Notifications (Issue #81) */
+.toast-container{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:360px;width:calc(100vw - 40px);pointer-events:none}
+.toast{pointer-events:auto;background:var(--panel2);border:1px solid var(--line-hi);border-radius:8px;padding:10px 14px;color:var(--tx);font:12px/1.4 var(--body);box-shadow:0 4px 16px rgba(0,0,0,.5);display:flex;align-items:flex-start;justify-content:space-between;gap:10px;animation:toast-slide-in .25s cubic-bezier(.16,1,.3,1) forwards;transition:opacity .25s ease,transform .25s ease}
+.toast.fade-out{opacity:0;transform:translateX(30px)}
+@keyframes toast-slide-in{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+.toast-merged{border-left:4px solid var(--up);background:linear-gradient(90deg,rgba(51,201,181,.12) 0%,var(--panel2) 100%)}
+.toast-stoploss{border-left:4px solid var(--down);background:linear-gradient(90deg,rgba(240,104,77,.12) 0%,var(--panel2) 100%)}
+.toast-filled{border-left:4px solid var(--line-hi);background:var(--panel2)}
+.toast-content{flex:1}
+.toast-header{display:flex;align-items:center;gap:6px;margin-bottom:2px;font:700 12px var(--disp)}
+.toast-header-merged{color:var(--up)}
+.toast-header-stoploss{color:var(--down)}
+.toast-header-filled{color:var(--tx)}
+.toast-msg{font:11px var(--mono);color:var(--dim);word-break:break-word}
+.toast-close{background:none;border:none;color:var(--faint);font-size:16px;line-height:1;cursor:pointer;padding:0 2px;transition:color .15s ease}
+.toast-close:hover{color:var(--tx)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -1945,6 +1961,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     </div>
   </div>
 </div>
+
+<div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 const $=s=>document.getElementById(s);
