@@ -1224,6 +1224,9 @@ class LiveTraderEngine:
                 m.order_status_exit_up = status
             elif m.order_id_exit_down == order_id:
                 m.order_status_exit_down = status
+            elif m.stop_order_id == order_id:
+                # Keep pre-placed stop-loss status in sync for dashboard display (issue #87)
+                m.stop_order_status = status
 
     def get_open_orders_list(self) -> List[Dict[str, Any]]:
         """List active open orders from CLOB and current engine state."""

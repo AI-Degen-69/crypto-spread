@@ -88,6 +88,21 @@ def test_cancelled_stop_not_in_open_orders():
     assert not any(o.get("source") == "ENGINE_STOP" for o in orders)
 
 
+def test_user_order_event_syncs_stop_status():
+    """UserSpec stream events keep the stop-order status in sync for the dashboard."""
+    engine = LiveTraderEngine()
+    mstate = engine.markets[SLUG]
+    mstate.fill_price_up = 0.48
+    mstate.up_token = "tok_up"
+
+    engine.place_stop_order(mstate, "UP")
+    stop_id = mstate.stop_order_id
+    assert mstate.stop_order_status == "RESTING"
+
+    engine.on_user_order_event({"id": stop_id, "status": "MATCHED"})
+    assert mstate.stop_order_status == "MATCHED"
+
+
 def _fake_market(now: float) -> LiveMarket:
     return LiveMarket(
         condition_id="0xabc123",
