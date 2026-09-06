@@ -1,68 +1,67 @@
-# Implementation Plan: Side-by-Side RTDS vs CLOB Live Stream Monitor & Price Latency Audit (Issue #54)
+# Implementation Plan: Control Center Menu Script (`csm`) & Telemetry Monitor (Issue #64)
 
 ## Overview
-Build a real-time stream comparison engine, standalone CLI tool (`scripts/monitor_stream_latency.py`), empirical latency audit with documentation report (`docs/rtds-clob-latency-audit.md`), and Cockpit dashboard integration (`server/osc_dash.py`). The system synchronously captures Polymarket RTDS Binance spot ticks and Polymarket CLOB binary contract order books in the exact same second, measuring price drift, empirical reaction lead times ($\Delta t$), and establishing ground truth execution rules.
+Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) for `crypto-spread` alongside terminal aliases (`csm`, `crypto-spread-menu`) in `C:\Program Files\PowerShell\7\profile.ps1`. The menu provides background dashboard hosting on port `:8802`, PID tracking with recycling protection (`run/dash.pids.json`), clean process tree termination (`taskkill`), system telemetry status display (`/api/live/state`, `/api/collector/status`, `manifest.json`), and real-time streaming of Binance spot vs. Polymarket CLOB order book tick prices.
 
 ## Architecture Decisions
-1. **Reuse Existing Streaming Infrastructure**: Leverage `strategy/streaming.py` (`UnifiedStreamBridge`, `RTDSStreamClient`, `CLOBMarketWSClient`) with automatic REST fallbacks for reliable tick capture without adding new third-party dependencies.
-2. **Deterministic Time Alignment Contract**: Pair spot ticks and CLOB order book state to integer 1-second timestamp buckets (`int(ts)`), enforcing exact-second alignment with a maximum allowable sampling tolerance of $\le 1.0\text{s}$ between feed arrivals. When either feed is missing for that second bucket, record `None` for book/spot fields rather than silently pairing adjacent seconds, ensuring precise drift and latency provenance.
-3. **Formal State Machine for Lead-Time Tracking**: Implement `LatencyAuditor` to detect spot price shocks ($\ge 0.10\%$ within $\le 3\text{s}$) and measure the elapsed time until the CLOB book shifts (BBO moves $\ge 1¢$ or mid changes), tracking reaction rates and percentiles (median, p95).
-4. **Execution Ground Truth**: Explicitly document and enforce that CLOB is the sole execution venue and ground truth pricing; RTDS is an external reference/leading indicator for stop-loss execution.
-5. **Zero-Friction Cockpit Integration**: Expose telemetry via `/api/live/latency` and a dedicated telemetry card in Tab 1 (Cockpit) of `server/osc_dash.py` without disturbing existing bot controls or layout.
+1. **Native Profile Theme System Integration**: Dot-source `Theme-ColorSystem.ps1` and `Theme-Templates.ps1` from `C:\Program Files\PowerShell\7\scripts\Theme\`. Include self-contained fallback functions (`Write-ProfileSuccess`, `Write-ProfileWarning`, `Write-ProfileError`, `Write-ProfileInfo`, `Write-ProfileBanner`, `Write-ProfileKeyValue`) so the menu functions seamlessly even if theme scripts are missing.
+2. **PID Recycling Protection**: Record process start ticks (`.StartTime.ToUniversalTime().Ticks`) into `run/dash.pids.json` on launch. Validate start ticks prior to terminating processes to ensure recycled process IDs are never accidentally killed.
+3. **Clean Tree Termination**: Use `taskkill /F /T /PID $pid` followed by process exit verification (`Get-Process -Id $pid`) and netstat listener sweep to ensure port `:8802` is completely freed.
+4. **Zero-Interaction CLI Dispatch**: Support direct CLI action dispatching (`csm status`, `csm open`, `csm stop`, `csm compare`) without prompting or waiting for menu keypresses.
+5. **Global Terminal Access (`csm`)**: Register `function csm` and `function crypto-spread-menu` in `C:\Program Files\PowerShell\7\profile.ps1` with script path existence checks before execution.
 
 ## Task List
 
-### Phase 1: Stream Synchronizer & CLI Monitor (`stream-monitor`)
-- [x] Task 1: Implement `StreamTickSnapshot` and core synchronizer in `scripts/monitor_stream_latency.py`
-  - Acceptance: Ingests RTDS spot ticks and CLOB book for any target series in `strategy/series.py`. Aligns them by timestamp. Computes spot drift % and CLOB mid. Provides string formatting for console table rows and dictionary conversion for JSON.
-  - Verify: `python -m pytest tests/test_monitor_stream_latency.py -k test_snapshot -q`
-  - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`
+### Phase 1: Script Core & Telemetry (`status`)
+- [x] Task 1: Create `scripts/crypto-spread-menu.ps1` with Theme integration, ASCII fallback, parameter handling, and `status` action
+  - **Acceptance**: Script parses positional parameter (`status`, `open`, `stop`, `compare`), dot-sources theme scripts or falls back, queries port `:8802`, `/api/live/state`, `/api/collector/status`, and reads `run/ticks/manifest.json`.
+  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 status"`
+  - **Files**: `scripts/crypto-spread-menu.ps1`
 
-- [x] Task 2: CLI arguments, execution loop, and JSON output mode
-  - Acceptance: CLI supports `--series`, `--duration`, `--ticks`, `--threshold`, and `--json`. Prints formatted table or single-line JSON records. Gracefully exits on Ctrl+C or when limits expire.
-  - Verify: `python -m scripts.monitor_stream_latency --series btc-up-or-down-5m --ticks 2 --json`
-  - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`
+### Phase 2: Process Control (`open` & `stop`)
+- [x] Task 2: Implement `open` (background hosting) and PID safety tracking in `scripts/crypto-spread-menu.ps1`
+  - **Acceptance**: `open` launches `uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802` in hidden window, records PID + start ticks in `run/dash.pids.json`, verifies `:8802`, provides adoption check if already running, and opens browser.
+  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 open"`
+  - **Files**: `scripts/crypto-spread-menu.ps1`
 
-### Checkpoint 1: Core Stream Monitor Operational
-- [x] Snapshot formatting, alignment, and CLI unit tests pass.
-- [x] CLI runs smoke test with `--ticks 2` and exits cleanly.
+- [x] Task 3: Implement `stop` (tree cleanup & orphan sweep) in `scripts/crypto-spread-menu.ps1`
+  - **Acceptance**: `stop` tree-kills dashboard process (`taskkill /F /T`), verifies process exit, confirms `:8802` port release, and deletes `run/dash.pids.json`.
+  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 stop"`
+  - **Files**: `scripts/crypto-spread-menu.ps1`
 
-### Phase 2: Latency Lead-Time Audit Engine & Documentation (`latency-audit`)
-- [x] Task 3: Implement `LatencyAuditor` state machine and `--audit` summary reporting
-  - Acceptance: `LatencyAuditor` detects spot shocks, measures elapsed time until CLOB response within a 10s window, and calculates summary metrics (total shocks, reaction count, reaction rate %, median and p95 reaction latency). `--audit` flag prints formatted summary on completion.
-  - Verify: `python -m pytest tests/test_monitor_stream_latency.py -k test_latency_auditor -q`
-  - Files: `scripts/monitor_stream_latency.py`, `tests/test_monitor_stream_latency.py`
+### Checkpoint 1: Core Process Control & Telemetry Operational
+- [x] `status` action renders formatted system dashboard.
+- [x] `open` action starts dashboard in background, writes PID registry, and opens browser.
+- [x] `stop` action cleanly kills process tree and frees port `:8802`.
 
-- [x] Task 4: Publish empirical latency audit report in `docs/rtds-clob-latency-audit.md`
-  - Acceptance: Documentation report detailing empirical lead times, lead-lag dynamics, RTDS leading signal vs CLOB execution ground truth, stop-loss trigger mechanics, and unit non-fungibility.
-  - Verify: Document exists with verified links and clear quantitative tables.
-  - Files: `docs/rtds-clob-latency-audit.md`
+### Phase 3: Live Price Stream Monitor & Terminal Wrapper (`compare` & `csm`)
+- [x] Task 4: Implement `compare` action in `scripts/crypto-spread-menu.ps1`
+  - **Acceptance**: `compare` streams live Binance spot vs. Polymarket CLOB book ticks to terminal.
+  - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 compare --ticks 2"`
+  - **Files**: `scripts/crypto-spread-menu.ps1`
 
-### Checkpoint 2: Latency Audit Complete & Documented
-- [x] Auditor unit tests pass.
-- [x] Documentation report is published and fully detailed.
+- [x] Task 5: Register global `csm` & `crypto-spread-menu` functions in `C:\Program Files\PowerShell\7\profile.ps1`
+  - **Acceptance**: Functions forward `@Args` directly to `scripts/crypto-spread-menu.ps1` with path existence check.
+  - **Verify**: `pwsh -Command "csm status"`
+  - **Files**: `C:\Program Files\PowerShell\7\profile.ps1`
 
-### Phase 3: Dashboard Cockpit Integration (`cockpit-telemetry`)
-- [x] Task 5: Add `/api/live/latency` endpoint in `server/osc_dash.py`
-  - Acceptance: GET `/api/live/latency` returns JSON with `spot_price`, `spot_drift`, `clob_mid`, `latency_ms`, and feed health metrics.
-  - Verify: `python -m pytest tests/test_osc_dash_integration.py -k test_api_live_latency -q`
-  - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
+### Phase 4: Automated Verification & Integration
+- [x] Task 6: Add Pytest verification suite in `tests/test_crypto_spread_menu.py`
+  - **Acceptance**: Tests PID registry JSON format, start ticks validation, and verifies full test suite passes.
+  - **Verify**: `python -m pytest tests/test_crypto_spread_menu.py -q`
+  - **Files**: `tests/test_crypto_spread_menu.py`
 
-- [x] Task 6: Add Live Stream Telemetry card to Cockpit (Tab 1) in `server/osc_dash.py`
-  - Acceptance: Renders `#card-stream-telemetry` displaying RTDS Spot, Drift %, CLOB Mid, Lead Latency, and Feed Health. Updates via `pollCockpit()` and SSE.
-  - Verify: `python -m pytest tests/test_osc_dash_integration.py -q`
-  - Files: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
-
-### Checkpoint 3: End-to-End Verification
-- [x] All new tests pass.
-- [x] Full regression suite passes cleanly: `python -m pytest -q` (all 200+ tests).
+### Checkpoint 2: Complete Implementation & Final Verification
+- [x] Interactive menu `[1]`, `[2]`, `[3]`, `[4]`, `[q]` and direct CLI parameters (`status`, `open`, `stop`, `compare`) execute cleanly.
+- [x] Global `csm` alias works from any directory.
+- [x] All unit tests pass: `python -m pytest -q`.
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Polymarket WebSocket SDK unavailable in environment | Low | `RTDSStreamClient` and `CLOBMarketWSClient` include automatic fallback to REST polling, ensuring uninterrupted operation. |
-| Inactive or low-liquidity CLOB books showing stale prices | Medium | Synchronizer tracks timestamp of last book update and marks stale quotes if gap exceeds 10s. |
-| High-frequency SSE broadcast saturating client browser | Low | Limit envelope queue size to 100 with safe drop on full, plus 1s tick throttle. |
+| Process ID recycled by Windows OS | High | Record `started_ticks` (`.StartTime.ToUniversalTime().Ticks`) in `run/dash.pids.json` and verify before calling `taskkill`. |
+| Port 8802 occupied by unrelated process | Medium | Verify instance identity before attempting adoption or termination; warn user if port is occupied by foreign process. |
+| Profile theme files absent or corrupted | Low | Self-contained fallback implementations defined in `crypto-spread-menu.ps1`. |
 
 ## Open Questions
-- None. Requirements, CLI interface, and API contracts are fully resolved in `SPEC.md`.
+- None. Requirements and architecture are fully locked in.
