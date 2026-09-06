@@ -1017,4 +1017,72 @@ def test_card_stream_telemetry_rendered_in_html():
     assert 'async function pollCockpit()' in html
 
 
+def test_cockpit_input_placeholders_and_validation_script_in_html():
+    """Verify placeholders, invalid-input CSS, and validation function exist in cockpit HTML, without under-field hints."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    assert 'placeholder="0.001 – 0.490"' in html
+    assert 'placeholder="0.001 – 0.500"' in html
+    assert 'placeholder="5 – 10000"' in html
+    assert 'placeholder="≥ 5.00"' in html
+    assert '.form-group input.input-invalid' in html
+    assert 'function validateCockpitInputs()' in html
+    assert 'hintCockpitOffset' not in html
+    assert 'hintCockpitExit' not in html
+    assert 'hintCockpitShares' not in html
+    assert 'hintCockpitStartBal' not in html
 
+
+def test_api_live_config_shares_and_balance_minimums():
+    """Verify shares < 5 or starting_balance < 5.0 return HTTP 422, while values >= 5 succeed."""
+    engine = osc_dash.get_live_trader_engine()
+    engine.is_running = False
+    orig_shares = engine.shares
+    orig_bal = engine.starting_balance
+
+    try:
+        # Shares < 5 rejected
+        res_shares_err = client.post("/api/live/config", json={"shares": 4})
+        assert res_shares_err.status_code == 422
+
+        # Balance < 5.0 rejected
+        res_bal_err = client.post("/api/live/config", json={"starting_balance": 4.99})
+        assert res_bal_err.status_code == 422
+
+        # Shares = 5 and Balance = 5.0 accepted
+        res_ok = client.post("/api/live/config", json={"shares": 5, "starting_balance": 5.0})
+        assert res_ok.status_code == 200
+        data = res_ok.json()
+        assert data["params"]["shares"] == 5
+        assert data["starting_balance"] == 5.0
+    finally:
+        engine.update_config(shares=orig_shares, starting_balance=orig_bal)
+
+
+def test_api_live_config_smart_cent_normalization():
+    """Verify whole-number offset and exit_thresh entered as cents (e.g. 2, 5) normalize to decimals, while fractional entries are not converted."""
+    engine = osc_dash.get_live_trader_engine()
+    engine.is_running = False
+    try:
+        res = client.post("/api/live/config", json={"offset": 2, "exit_thresh": 5})
+        assert res.status_code == 200
+        data = res.json()
+        assert abs(data["params"]["offset"] - 0.02) < 1e-4
+        assert abs(data["params"]["exit_thresh"] - 0.05) < 1e-4
+
+        # Non-integer values like 1.5 must NOT normalize to cents and should be rejected (> 0.49)
+        res_frac = client.post("/api/live/config", json={"offset": 1.5})
+        assert res_frac.status_code == 422
+    finally:
+        engine.update_config(offset=0.02, exit_thresh=0.05)
+
+
+def test_api_live_config_validation_error_format():
+    """Verify validation error responses return HTTP 422 with an explicit error string message."""
+    res = client.post("/api/live/config", json={"offset": 99.0})
+    assert res.status_code == 422
+    data = res.json()
+    assert "error" in data
+    assert "Invalid configuration:" in data["error"]
+    assert "detail" in data
