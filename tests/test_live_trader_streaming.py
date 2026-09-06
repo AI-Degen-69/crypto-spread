@@ -119,6 +119,8 @@ def test_api_live_state_contains_stream_bridge():
     assert "stream_bridge" in data
     assert "is_running" in data["stream_bridge"]
     assert "rtds_connected" in data["stream_bridge"]
+    assert "binance_ws_connected" in data["stream_bridge"]
+    assert "active_spot_source" in data["stream_bridge"]
 
 
 @pytest.mark.anyio
@@ -158,3 +160,67 @@ def test_cockpit_html_contains_streaming_ui():
     assert "cockpitStreamPill" in html
     assert "initLiveCockpitStream" in html
     assert "Spot 1s:" in html
+
+
+def test_on_spot_tick_subsecond_rapid_burst():
+    """Verify rapid sub-second spot tick bursts update state and trigger stop loss cleanly."""
+    engine = LiveTraderEngine()
+    engine.is_running = True
+    sol = engine.markets["sol-up-or-down-5m"]
+
+    # Filled UP leg
+    sol.filled_up = True
+    sol.filled_down = False
+    sol.fill_price_up = 0.48
+    sol.up_bid = 0.44
+    sol.down_bid = 0.51
+    sol.up_token = "tok_sol_up"
+    sol.down_token = "tok_sol_dn"
+
+    base_ms = int(time.time() * 1000)
+
+    # Initial reference price
+    engine.on_spot_tick("solusdt", base_ms, 200.0)
+    assert sol.spot_price == 200.0
+    assert sol.spot_open_price == 200.0
+    assert sol.spot_drift == 0.0
+    assert not sol.exit_taken
+
+    # Rapid sub-second ticks: 5 ticks arriving 15ms apart
+    deltas = [
+        (15, 199.9),   # -0.05%
+        (30, 199.7),   # -0.15%
+        (45, 199.5),   # -0.25%
+        (60, 199.3),   # -0.35% (breaches -0.003 threshold -> triggers fast stop)
+        (75, 199.1),   # post-exit tick
+    ]
+
+    for offset_ms, px in deltas:
+        engine.on_spot_tick("solusdt", base_ms + offset_ms, px)
+
+    assert sol.spot_price == 199.1
+    assert sol.exit_taken
+    assert sol.exit_side == "UP"
+    assert sol.status == "STOP_EXIT"
+    assert sol.stops_count == 1
+
+
+def test_live_trader_state_binance_telemetry():
+    """Verify LiveTraderEngine get_state reflects Binance WS streaming telemetry."""
+    engine = LiveTraderEngine()
+    state = engine.get_state()
+    assert "stream_bridge" in state
+    sb = state["stream_bridge"]
+    assert "binance_ws_connected" in sb
+    assert "active_spot_source" in sb
+
+    # Default disconnected state
+    assert sb["binance_ws_connected"] is False
+    assert sb["active_spot_source"] == "RTDS"
+
+    # Simulate connected Binance WS
+    engine.stream_bridge.binance.is_connected = True
+    state_conn = engine.get_state()
+    assert state_conn["stream_bridge"]["binance_ws_connected"] is True
+    assert state_conn["stream_bridge"]["active_spot_source"] == "BINANCE_WS"
+
