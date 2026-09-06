@@ -31,6 +31,9 @@ $DashPidFile = Join-Path $RunDir "dash.pids.json"
 $OutLog      = Join-Path $RunDir "dash.out.log"
 $ErrLog      = Join-Path $RunDir "dash.err.log"
 
+# Ensure PYTHONPATH includes project root for python -m invocations
+$env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectPath;$env:PYTHONPATH" } else { $ProjectPath }
+
 # Ensure runtime directory exists
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 
@@ -215,11 +218,11 @@ function Show-SystemStatus {
 
     if ($inst) {
         Csm-Ok "Dashboard Server RUNNING (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))"
-        Write-ProfileKeyValue -Key "URL" -Value $DashUrl -Style "Link"
-        Write-ProfileKeyValue -Key "PID Registry" -Value $DashPidFile -Style "Path"
+        Write-ProfileKeyValue -Key "URL" -Value $DashUrl -Style "Link" -KeyWidth 22
+        Write-ProfileKeyValue -Key "PID Registry" -Value $DashPidFile -Style "Path" -KeyWidth 22
     } elseif ($isListening) {
         Csm-Warn "Dashboard Server LISTENING (PID $portPid, unowned by menu registry)"
-        Write-ProfileKeyValue -Key "URL" -Value $DashUrl -Style "Link"
+        Write-ProfileKeyValue -Key "URL" -Value $DashUrl -Style "Link" -KeyWidth 22
     } else {
         Write-ProfileNeutral -Message "Dashboard Server" -Detail "STOPPED (Port $Port is free)"
     }
@@ -236,13 +239,13 @@ function Show-SystemStatus {
                 Write-ProfileInfo -Message "Trading Engine" -Detail "STANDBY (Mode: $($state.mode))"
             }
             if ($null -ne $state.starting_capital) {
-                Write-ProfileKeyValue -Key "Starting Capital" -Value ("${0:N2}" -f $state.starting_capital) -Style "Value"
+                Write-ProfileKeyValue -Key "Starting Capital" -Value ("${0:N2}" -f $state.starting_capital) -Style "Value" -KeyWidth 22
             }
             if ($null -ne $state.portfolio_value) {
-                Write-ProfileKeyValue -Key "Portfolio Value" -Value ("${0:N2}" -f $state.portfolio_value) -Style "Value"
+                Write-ProfileKeyValue -Key "Portfolio Value" -Value ("${0:N2}" -f $state.portfolio_value) -Style "Value" -KeyWidth 22
             }
             $openOrders = if ($state.orders) { $state.orders.Count } else { 0 }
-            Write-ProfileKeyValue -Key "Open Orders" -Value "$openOrders" -Style "Info"
+            Write-ProfileKeyValue -Key "Open Orders" -Value "$openOrders" -Style "Info" -KeyWidth 22
         } catch {
             Csm-Warn "Trading Engine: Could not query /api/live/state ($_)"
         }
@@ -263,7 +266,7 @@ function Show-SystemStatus {
             }
             if ($null -ne $coll.tape_empty_rate) {
                 $emptyPct = [math]::Round($coll.tape_empty_rate * 100, 2)
-                Write-ProfileKeyValue -Key "Tape Empty Rate" -Value "$emptyPct%" -Style "Info"
+                Write-ProfileKeyValue -Key "Tape Empty Rate" -Value "$emptyPct%" -Style "Info" -KeyWidth 22
             }
         } catch {
             Csm-Warn "Collector: Could not query /api/collector/status"
@@ -278,16 +281,16 @@ function Show-SystemStatus {
     $manifestPath = Join-Path $TicksDir "manifest.json"
     $tickFiles = Get-ChildItem $TicksDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in ".jsonl", ".gz" -or $_.Name -like "*.jsonl.gz" }
     
-    Write-ProfileKeyValue -Key "Tick Directory" -Value $TicksDir -Style "Path"
-    Write-ProfileKeyValue -Key "Total Files" -Value "$($tickFiles.Count)" -Style "Info"
+    Write-ProfileKeyValue -Key "Tick Directory" -Value $TicksDir -Style "Path" -KeyWidth 22
+    Write-ProfileKeyValue -Key "Total Files" -Value "$($tickFiles.Count)" -Style "Info" -KeyWidth 22
     
     if (Test-Path $manifestPath) {
         try {
             $mf = Get-Content $manifestPath -Raw | ConvertFrom-Json
-            Write-ProfileKeyValue -Key "Manifest Date" -Value "$($mf.day)" -Style "Neutral"
-            Write-ProfileKeyValue -Key "Series Tracked" -Value "$($mf.series_seen.Count)" -Style "Info"
-            Write-ProfileKeyValue -Key "Sample Ticks" -Value "$($mf.lines)" -Style "Success"
-            Write-ProfileKeyValue -Key "Tape Entries" -Value "$($mf.tape_entries_total)" -Style "Success"
+            Write-ProfileKeyValue -Key "Manifest Date" -Value "$($mf.day)" -Style "Neutral" -KeyWidth 22
+            Write-ProfileKeyValue -Key "Series Tracked" -Value "$($mf.series_seen.Count)" -Style "Info" -KeyWidth 22
+            Write-ProfileKeyValue -Key "Sample Ticks" -Value "$($mf.lines)" -Style "Success" -KeyWidth 22
+            Write-ProfileKeyValue -Key "Tape Entries" -Value "$($mf.tape_entries_total)" -Style "Success" -KeyWidth 22
         } catch {
             Csm-Warn "Tick Store: Unreadable manifest.json"
         }
@@ -388,10 +391,16 @@ function Stop-DashboardProcess {
 function Start-PriceMonitor {
     param([string[]]$MonitorArgs)
     $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectPath;$env:PYTHONPATH" } else { $ProjectPath }
     Csm-Banner -Title "CRYPTO SPREAD — LIVE BINANCE SPOT vs CLOB BOOK MONITOR" -Subtitle "Side-by-Side Real-Time Tick Stream & Latency Audit"
     Csm-Step "Starting live stream monitor (python -X utf8 -m scripts.monitor_stream_latency $($MonitorArgs -join ' '))..."
     Write-Host ""
-    & python -X utf8 -m scripts.monitor_stream_latency @MonitorArgs
+    Push-Location $ProjectPath
+    try {
+        & python -X utf8 -m scripts.monitor_stream_latency @MonitorArgs
+    } finally {
+        Pop-Location
+    }
 }
 
 # ── Menu Grid Renderer (spread-hunter-menu style) ──

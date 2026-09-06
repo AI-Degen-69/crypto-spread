@@ -416,7 +416,7 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         "--threshold",
         type=float,
         default=0.001,
-        help="Drift threshold for latency tracking (default: 0.001 = 0.10%)",
+        help="Drift threshold for latency tracking (default: 0.001 = 0.10%%)",
     )
     parser.add_argument(
         "--json",
