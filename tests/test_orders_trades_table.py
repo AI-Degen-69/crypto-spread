@@ -310,7 +310,8 @@ def test_cockpit_dom_rendering_with_state():
         {{ order_id: 'ord-2', market: 'BTC 5m', side: 'BUY (DOWN)', price: 0.48, size: 5, status: 'OPEN', time: '14:05:01' }}
       ],
       open_positions: [
-        {{ asset: 'ETH 5m', title: 'ETH 5m', outcome: 'UP', size: 5, avgPrice: 0.48, curPrice: 0.50, time: '14:01:00' }}
+        {{ asset: 'ETH 5m', title: 'ETH 5m', outcome: 'UP', size: 5, avgPrice: 0.48, curPrice: 0.50, time: '14:01:00' }},
+        {{ asset: 'ETH 5m', title: 'ETH 5m', outcome: 'DOWN', size: 5, avgPrice: 0.48, curPrice: 0.50, time: '14:01:01' }}
       ],
       trades: [
         {{ timestamp: '14:00:00', label: 'BTC 5m', action: 'PAIR_MERGE', shares: 5, entry_price_up: 0.48, entry_price_down: 0.48, exit_price: 1.00, pnl_usd: 0.20, pnl_pct: 4.2 }}
@@ -321,19 +322,31 @@ def test_cockpit_dom_rendering_with_state():
 
     // Verify Tab count badges updated
     if (elements['otOrdersCount'].textContent !== '2') throw new Error('otOrdersCount should be 2, got: ' + elements['otOrdersCount'].textContent);
-    if (elements['otPositionsCount'].textContent !== '1') throw new Error('otPositionsCount should be 1, got: ' + elements['otPositionsCount'].textContent);
+    if (elements['otPositionsCount'].textContent !== '2') throw new Error('otPositionsCount should be 2, got: ' + elements['otPositionsCount'].textContent);
     if (elements['otTradesCount'].textContent !== '1') throw new Error('otTradesCount should be 1, got: ' + elements['otTradesCount'].textContent);
 
-    // Verify Orders Body HTML contains pair status and 9 columns
+    // Verify Orders Body HTML contains pair status, merged time cell with status border, and no divider on Market cell
     const ordHtml = elements['cockpitOrdersBody'].innerHTML;
     if (!ordHtml.includes('PAIRED')) throw new Error('Orders body missing PAIRED tag: ' + ordHtml);
     if (!ordHtml.includes('$0.96')) throw new Error('Orders body missing pair cost $0.96: ' + ordHtml);
     if (!ordHtml.includes('14:05:00')) throw new Error('Orders body missing time: ' + ordHtml);
+    if (!ordHtml.includes('<td rowspan="2" class="mono ot-pair-lead"')) throw new Error('Orders body missing merged Time cell with rowspan="2": ' + ordHtml);
+    if (!ordHtml.includes('border-left:2px solid var(--up)')) throw new Error('Orders Time cell missing green status border: ' + ordHtml);
+    if (ordHtml.includes('14:05:01')) throw new Error('Secondary order leg should not render duplicate time cell: ' + ordHtml);
+    if (ordHtml.includes('class="ot-pair-lead" style="vertical-align:top;border-left:2px solid')) {{
+      throw new Error('Orders Market cell should not have border-left divider: ' + ordHtml);
+    }}
 
-    // Verify Positions Body HTML contains Base Cost and Market Value
+    // Verify Positions Body HTML contains merged time cell with status border, Base Cost, and Market Value
     const posHtml = elements['cockpitPositionsBody'].innerHTML;
     if (!posHtml.includes('ETH 5m')) throw new Error('Positions body missing ETH 5m: ' + posHtml);
     if (!posHtml.includes('$0.480')) throw new Error('Positions body missing Base Cost $0.480: ' + posHtml);
+    if (!posHtml.includes('<td rowspan="2" class="mono ot-pair-lead"')) throw new Error('Positions body missing merged Time cell with rowspan="2": ' + posHtml);
+    if (!posHtml.includes('border-left:2px solid var(--up)')) throw new Error('Positions Time cell missing green status border: ' + posHtml);
+    if (posHtml.includes('14:01:01')) throw new Error('Secondary position leg should not render duplicate time cell: ' + posHtml);
+    if (posHtml.includes('class="ot-pair-lead" style="vertical-align:top;border-left:2px solid')) {{
+      throw new Error('Positions Market cell should not have border-left divider: ' + posHtml);
+    }}
 
     // Verify Trades Body HTML contains Merged cause and signed gain
     const tradesHtml = elements['cockpitTradesBody'].innerHTML;
@@ -878,6 +891,17 @@ def test_cancelled_orders_table_rendering_dom():
     // Cancelled orders should render with ot-tag-cancelled
     if (!ordHtml.includes('ot-tag-cancelled')) {{
       throw new Error('Orders table missing ot-tag-cancelled class for cancelled orders: ' + ordHtml);
+    }}
+
+    // Verify leading Time cell has gold border for Partial (BTC 5m) and dim border for Cancelled (ETH 5m)
+    if (!ordHtml.includes('border-left:2px solid var(--gold)')) {{
+      throw new Error('Partial order group missing gold border on Time cell: ' + ordHtml);
+    }}
+    if (!ordHtml.includes('border-left:2px solid var(--dim)')) {{
+      throw new Error('Cancelled order group missing dim border on Time cell: ' + ordHtml);
+    }}
+    if (ordHtml.includes('class="ot-pair-lead" style="vertical-align:top;border-left:2px solid')) {{
+      throw new Error('Orders Market cell should not have border-left divider: ' + ordHtml);
     }}
 
     console.log('CANCELLED_ORDERS_TABLE_DOM_TESTS_PASSED');

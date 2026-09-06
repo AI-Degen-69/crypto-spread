@@ -1,93 +1,64 @@
-# Task Plan: Issue #78 — Display Live Coin Actual Exchange Price vs. RTDS Spot Price with Real-Time Difference
+# Task Plan: Issue #83 — Merge Paired Timestamp Cells and Refine Column Separator in Cockpit Tables
 
 ## Overview
-Enable concurrent ingestion of Binance Direct WebSocket spot prices and Polymarket RTDS prices in `UnifiedStreamBridge` without discarding RTDS ticks. Compute instantaneous price differences ($ and %), propagate them through `MarketLiveState` and `LiveTraderEngine`, expose them in `/api/live/latency` and `/api/live/state`, and render both feeds side-by-side with signed, color-coded price differences in the Cockpit telemetry card and monitor scripts.
+Merge duplicate timestamp cells across paired multi-leg rows in the Live Trading Cockpit's Open Orders (`#cockpitOrdersTable`) and Positions (`#cockpitPositionsTable`) tables into a single `rowspan` cell, relocate the pair status accent border to the leading outer edge of the `Time` cell, and remove the harsh vertical border divider currently placed between `Time` and `Market`.
 
 ---
 
-### Task 1: Concurrent Feed Tracking & Delta Calculation in `strategy/streaming.py`
-- **Target File**: `strategy/streaming.py`
+### Task 1: Merge Timestamp Cells & Move Status Border in Open Orders Table (`#cockpitOrdersTable`)
+- **Target File**: `server/osc_dash.py:3970-4025`
 - **Details**:
-  - In `UnifiedStreamBridge.__init__`:
-    - Add optional callback `on_rtds_tick: Optional[Callable[[str, int, float], None]] = None`.
-    - Expose `binance_spot_prices` and `rtds_spot_prices` property or dict references.
-  - In `_handle_binance_spot_tick`:
-    - Look up `rtds_price = self.rtds.spot_prices.get(symbol.lower())`.
-    - Calculate `price_diff = round(price - rtds_price, 4)` and `price_diff_pct = round(((price - rtds_price) / rtds_price) * 100.0, 4)` if `rtds_price` is available.
-    - Include `actual_price`, `rtds_price`, `price_diff`, and `price_diff_pct` in the `"spot"` broadcast envelope.
-  - In `_handle_rtds_spot_tick`:
-    - Do NOT return early when Binance is connected.
-    - If `on_rtds_tick` is provided, call `on_rtds_tick(symbol, ts, price)`.
-    - If `not self.binance.is_connected` and `self.on_spot_tick_ext`: invoke `self.on_spot_tick_ext(symbol, ts, price)` (preserving fallback behavior).
-    - Look up `binance_price = self.binance.spot_prices.get(symbol.lower())`.
-    - Calculate `price_diff` and `price_diff_pct` when `binance_price` is available.
-    - Broadcast `"spot"` envelope with `price=binance_price or price`, `actual_price=binance_price`, `rtds_price=price`, `price_diff`, `price_diff_pct`, `source="RTDS"`.
-  - In `get_status`:
-    - Include `binance_prices`, `rtds_prices`, `price_diffs`, and `price_diff_pcts`.
-- **Verification**: `python -m pytest tests/test_streaming.py`
+  - In `renderCockpitUI`:
+    - Compute `statusBorderColor` based on `grp.status`:
+      - `Paired`: `var(--up)`
+      - `Partial`: `var(--gold)`
+      - `Cancelled`: `var(--dim)`
+      - `Unpaired`: `var(--line)`
+    - Construct `timeCell`:
+      - `<td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid ${statusBorderColor};padding-left:10px">${esc(timeStr)}</td>`
+      - Where `timeStr` is `grp.legs[0]?.time && grp.legs[0].time !== '-' ? grp.legs[0].time : '-'`.
+    - In `mktCell`:
+      - Remove `border-left:2px solid ...` inline style.
+      - Retain `rowspan="${grp.rowspan}"`, class `ot-pair-lead`, and padding `style="vertical-align:top;padding-left:10px"`.
+    - In `grp.legs.forEach((leg, idx) => { ... })`:
+      - For `idx === 0`: render `${timeCell}${mktCell}` followed by leg columns.
+      - For `idx > 0`: omit both `timeCell` and `mktCell`, rendering only the leg-specific columns.
+- **Verification**: `python -m pytest -q tests/test_orders_trades_table.py`
 
 ---
 
-### Task 2: Propagate Both Feeds & Divergence in `strategy/live_trader.py`
-- **Target File**: `strategy/live_trader.py`
+### Task 2: Merge Timestamp Cells & Move Status Border in Positions Table (`#cockpitPositionsTable`)
+- **Target File**: `server/osc_dash.py:4040-4090`
 - **Details**:
-  - In `MarketLiveState`:
-    - Add `actual_price: Optional[float] = None`, `rtds_price: Optional[float] = None`, `price_diff: Optional[float] = None`, `price_diff_pct: Optional[float] = None`.
-  - In `LiveTraderEngine.__init__`:
-    - Wire `on_rtds_tick=self.on_rtds_tick` to `UnifiedStreamBridge`.
-  - Add `on_rtds_tick(self, symbol: str, ts_ms: int, price: float) -> None`:
-    - Updates `m.rtds_price = price`.
-    - Recalculates `m.price_diff` and `m.price_diff_pct` only when `m.actual_price` exists; sets to None otherwise.
-  - In `on_spot_tick`:
-    - Set `m.actual_price = price` (when source is Binance), or unset when fallback.
-    - If `m.actual_price` and `m.rtds_price` are present, recalculate `m.price_diff` and `m.price_diff_pct`.
-  - In `get_state()`:
-    - Include `actual_price`, `rtds_price`, `price_diff`, `price_diff_pct` in each market state dictionary.
-- **Verification**: `python -m pytest tests/test_live_trader.py`
+  - In `renderCockpitUI`:
+    - Compute `statusBorderColor` based on `grp.status`:
+      - `Paired`: `var(--up)`
+      - `Partial`: `var(--gold)`
+      - `Unpaired`: `var(--line)`
+    - Construct `timeCell`:
+      - `<td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid ${statusBorderColor};padding-left:10px">${esc(timeStr)}</td>`
+      - Where `timeStr` is `grp.legs[0]?.time && grp.legs[0].time !== '-' ? grp.legs[0].time : '-'`.
+    - In `mktCell`:
+      - Remove `border-left:2px solid ...` inline style.
+      - Retain `rowspan="${grp.rowspan}"`, class `ot-pair-lead`, and padding `style="vertical-align:top;padding-left:10px"`.
+    - In `grp.legs.forEach((leg, idx) => { ... })`:
+      - For `idx === 0`: render `${timeCell}${mktCell}` followed by `Side`, `Size`, `Base Cost`, and `${pairSharedCells}` (`Market Value`, `Unrealized`, `Realized`).
+      - For `idx > 0`: omit `timeCell`, `mktCell`, and `pairSharedCells`, rendering only leg-specific columns (`Side`, `Size`, `Base Cost`).
+- **Verification**: `python -m pytest -q tests/test_orders_trades_table.py`
 
 ---
 
-### Task 3: Expose Feeds in `/api/live/latency` and Cockpit Card in `server/osc_dash.py`
-- **Target File**: `server/osc_dash.py`
+### Task 3: Update and Expand Unit & DOM Integration Tests
+- **Target File**: `tests/test_orders_trades_table.py`
 - **Details**:
-  - In `/api/live/latency`:
-    - Extract `actual_price`, `rtds_price`, `price_diff`, `price_diff_pct` from market state or bridge fallback.
-    - Return them in the JSON response.
-  - In `#card-stream-telemetry` HTML markup:
-    - Display `ACTUAL SPOT (BINANCE)` with id `telActualPrice`.
-    - Display `RTDS SPOT` with id `telSpotPrice`.
-    - Display `PRICE SPREAD / DIFF` with id `telPriceDiff`.
-    - Maintain `CLOB MID`, `LEAD LATENCY`, and `FEED HEALTH`.
-  - In `renderStreamTelemetry(data)`:
-    - Populate `telActualPrice` formatted as `$XX,XXX.XX`.
-    - Populate `telSpotPrice` formatted as `$XX,XXX.XX`.
-    - Populate `telPriceDiff` formatted with signed dollar and percentage: e.g. `+$11.52 (+0.014%)`, with green for positive, red for negative, dim for zero.
-  - In `renderCockpitUI` and SSE message handler (`liveEventSource.onmessage`):
-    - Feed incoming spot price deltas (`actual_price`, `rtds_price`, `price_diff`, `price_diff_pct`) into telemetry rendering.
-- **Verification**: `python -m pytest tests/test_osc_dash_integration.py`
-
----
-
-### Task 4: Enhance `scripts/monitor_stream_latency.py`
-- **Target File**: `scripts/monitor_stream_latency.py`
-- **Details**:
-  - In `StreamTickSnapshot`:
-    - Add `actual_price: Optional[float] = None`, `rtds_price: Optional[float] = None`, `price_diff: Optional[float] = None`, `price_diff_pct: Optional[float] = None`.
-  - In `to_dict()`:
-    - Include new fields.
-  - In `format_row()`:
-    - Include actual vs RTDS price display and basis spread.
-- **Verification**: `python -m pytest tests/`
-
----
-
-### Task 5: Automated Unit & Integration Tests and Full Regression
-- **Target Files**: `tests/test_streaming.py`, `tests/test_osc_dash_integration.py`
-- **Details**:
-  - Test concurrent Binance and RTDS tick tracking in `UnifiedStreamBridge`.
-  - Test `price_diff` and `price_diff_pct` calculation logic and rounding.
-  - Test `/api/live/latency` response structure includes new fields.
-  - Test telemetry card markup contains new element IDs and labels.
-  - Run full test suite: `python -m pytest -q` ensuring all 256+ tests pass.
-- **Verification**: `python -m pytest -q`
-
+  - In `test_cockpit_orders_trades_dom_rendering`:
+    - Verify that `cockpitOrdersBody` has `rowspan="2"` on the `Time` cell.
+    - Verify that `cockpitOrdersBody` does not render a second `Time` cell for the secondary leg (`14:05:01`).
+    - Verify that `Time` cell contains `border-left:2px solid` with pair status color (`var(--up)`).
+    - Verify that `mktCell` does not contain `border-left:2px solid`.
+  - In `test_cockpit_orders_table_cancelled_orders_dom`:
+    - Verify `Partial` and `Cancelled` groups apply gold (`var(--gold)`) and dim (`var(--dim)`) borders respectively to the merged `Time` cell.
+  - Add a dedicated multi-leg positions DOM rendering test:
+    - Verify paired positions have a single merged `Time` cell with `rowspan="2"` and `border-left:2px solid var(--up)`.
+    - Verify secondary position leg does not render duplicate timestamp or market cells.
+- **Verification**: `python -m pytest -q tests/test_orders_trades_table.py` and `python -m pytest -q`
