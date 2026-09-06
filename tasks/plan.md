@@ -28,7 +28,7 @@ Add direct clickable hyperlinks pointing to the active Polymarket live markets i
   - **Verify**: `python -m pytest tests/test_orders_trades_table.py -q`
   - **Files**: `server/osc_dash.py`
 
-- [ ] Task 4: Render hyperlinks in Live Market Matrix and Orders & Trades tabs
+- [x] Task 4: Render hyperlinks in Live Market Matrix and Orders & Trades tabs
   - **Acceptance**:
     - `#cockpitMarketGrid` card headers link to `https://polymarket.com/market/{slug}`.
     - Tab 1 (Open Orders) `mktCell` links to `https://polymarket.com/market/{slug}`.
@@ -39,12 +39,12 @@ Add direct clickable hyperlinks pointing to the active Polymarket live markets i
   - **Files**: `server/osc_dash.py`
 
 ### Phase 3: Automated Verification & Regression Suite
-- [ ] Task 5: Add automated unit & Node DOM tests for market hyperlinks
+- [x] Task 5: Add automated unit & Node DOM tests for market hyperlinks
   - **Acceptance**: Tests verify link URLs, attributes (`target="_blank"`, `rel="noopener"`), and fallbacks across matrix cards and all three tabs.
   - **Verify**: `python -m pytest tests/test_orders_trades_table.py -q`
   - **Files**: `tests/test_orders_trades_table.py`
 
-- [ ] Task 6: Run full test suite regression
+- [x] Task 6: Run full test suite regression
   - **Acceptance**: All 242+ tests pass with zero regressions.
   - **Verify**: `python -m pytest -q`
 

@@ -472,4 +472,212 @@ def test_group_helpers_preserve_slugs():
     assert "SLUG_PRESERVATION_TESTS_PASSED" in res.stdout
 
 
+@requires_node
+def test_polymarket_market_hyperlinks_dom():
+    """Verify Live Market Matrix, Open Orders, Positions, and Closed Trades render direct Polymarket links."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{
+        'btc-up-or-down-5m': {{
+          mid: 0.50,
+          spread: 0.02,
+          resting_up: 0.48,
+          resting_down: 0.48,
+          market_slug: 'btc-updown-5m-window-101'
+        }}
+      }},
+      open_orders: [
+        {{ order_id: 'ord-1', market: 'BTC 5m', market_slug: 'btc-updown-5m-window-101', series_slug: 'btc-5m', side: 'BUY (UP)', price: 0.48, size: 5, status: 'OPEN', time: '14:05:00' }}
+      ],
+      open_positions: [
+        {{ asset: 'ETH 5m', title: 'ETH 5m', market_slug: 'eth-updown-5m-window-202', series_slug: 'eth-5m', outcome: 'UP', size: 5, avgPrice: 0.48, curPrice: 0.50, time: '14:01:00' }}
+      ],
+      trades: [
+        {{ timestamp: '14:00:00', label: 'SOL 5m', market_slug: 'sol-updown-5m-window-303', slug: 'sol-5m', action: 'PAIR_MERGE', shares: 5, entry_price_up: 0.48, entry_price_down: 0.48, exit_price: 1.00, pnl_usd: 0.20, pnl_pct: 4.2 }}
+      ]
+    }};
+
+    renderCockpitUI(mockState);
+
+    // 1. Check Matrix Card Header link
+    const matrixHtml = elements['cockpitMarketGrid'].innerHTML;
+    if (!matrixHtml.includes('https://polymarket.com/market/btc-updown-5m-window-101')) {{
+      throw new Error('Matrix grid missing direct Polymarket market link: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('target="_blank"') || !matrixHtml.includes('rel="noopener"')) {{
+      throw new Error('Matrix grid link missing target="_blank" or rel="noopener"');
+    }}
+
+    // 2. Check Open Orders table link
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+    if (!ordHtml.includes('https://polymarket.com/market/btc-updown-5m-window-101')) {{
+      throw new Error('Orders table missing direct Polymarket market link: ' + ordHtml);
+    }}
+    if (!ordHtml.includes('target="_blank"') || !ordHtml.includes('rel="noopener"')) {{
+      throw new Error('Orders table link missing target="_blank" or rel="noopener"');
+    }}
+
+    // 3. Check Positions table link
+    const posHtml = elements['cockpitPositionsBody'].innerHTML;
+    if (!posHtml.includes('https://polymarket.com/market/eth-updown-5m-window-202')) {{
+      throw new Error('Positions table missing direct Polymarket market link: ' + posHtml);
+    }}
+    if (!posHtml.includes('target="_blank"') || !posHtml.includes('rel="noopener"')) {{
+      throw new Error('Positions table link missing target="_blank" or rel="noopener"');
+    }}
+
+    // 4. Check Closed Trades table link
+    const tradesHtml = elements['cockpitTradesBody'].innerHTML;
+    if (!tradesHtml.includes('https://polymarket.com/market/sol-updown-5m-window-303')) {{
+      throw new Error('Trades table missing direct Polymarket market link: ' + tradesHtml);
+    }}
+    if (!tradesHtml.includes('target="_blank"') || !tradesHtml.includes('rel="noopener"')) {{
+      throw new Error('Trades table link missing target="_blank" or rel="noopener"');
+    }}
+
+    console.log('ALL_HYPERLINK_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node hyperlink DOM test failed: {res.stderr}\n{res.stdout}"
+    assert "ALL_HYPERLINK_DOM_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_polymarket_hyperlinks_fallback():
+    """Verify fallback to series slug when market_slug is empty or absent."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{
+        'btc-up-or-down-5m': {{
+          mid: 0.50,
+          spread: 0.02,
+          resting_up: 0.48,
+          resting_down: 0.48,
+          market_slug: '' // pending discovery
+        }}
+      }},
+      open_orders: [
+        {{ order_id: 'ord-1', market: 'BTC 5m', series_slug: 'btc-5m', side: 'BUY (UP)', price: 0.48, size: 5, status: 'OPEN', time: '14:05:00' }}
+      ],
+      open_positions: [
+        {{ asset: 'ETH 5m', title: 'ETH 5m', series_slug: 'eth-5m', outcome: 'UP', size: 5, avgPrice: 0.48, curPrice: 0.50, time: '14:01:00' }}
+      ],
+      trades: [
+        {{ timestamp: '14:00:00', label: 'SOL 5m', slug: 'sol-5m', action: 'PAIR_MERGE', shares: 5, entry_price_up: 0.48, entry_price_down: 0.48, exit_price: 1.00, pnl_usd: 0.20, pnl_pct: 4.2 }}
+      ]
+    }};
+
+    renderCockpitUI(mockState);
+
+    // Verify matrix grid fell back to series slug
+    const matrixHtml = elements['cockpitMarketGrid'].innerHTML;
+    if (!matrixHtml.includes('https://polymarket.com/market/btc-up-or-down-5m') && !matrixHtml.includes('https://polymarket.com/market/btc-5m')) {{
+      throw new Error('Matrix grid fallback missing: ' + matrixHtml);
+    }}
+
+    // Verify orders table fell back to series slug
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+    if (!ordHtml.includes('https://polymarket.com/market/btc-5m')) {{
+      throw new Error('Orders table fallback missing: ' + ordHtml);
+    }}
+
+    // Verify positions table fell back to series slug
+    const posHtml = elements['cockpitPositionsBody'].innerHTML;
+    if (!posHtml.includes('https://polymarket.com/market/eth-5m')) {{
+      throw new Error('Positions table fallback missing: ' + posHtml);
+    }}
+
+    // Verify trades table fell back to series slug
+    const tradesHtml = elements['cockpitTradesBody'].innerHTML;
+    if (!tradesHtml.includes('https://polymarket.com/market/sol-5m')) {{
+      throw new Error('Trades table fallback missing: ' + tradesHtml);
+    }}
+
+    console.log('ALL_FALLBACK_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node fallback test failed: {res.stderr}\n{res.stdout}"
+    assert "ALL_FALLBACK_TESTS_PASSED" in res.stdout
+
+
 

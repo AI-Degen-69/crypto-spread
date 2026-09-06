@@ -3811,7 +3811,7 @@ function renderCockpitUI(st) {
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
               <div style="display:flex;align-items:center;gap:6px">
                 <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${item.color}"></span>
-                <span style="font:700 13px var(--disp);letter-spacing:0.04em">${item.label}</span>
+                <a href="https://polymarket.com/market/${encodeURIComponent(m.market_slug || item.slug)}" target="_blank" rel="noopener" style="font:700 13px var(--disp);letter-spacing:0.04em;color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View ${esc(item.label)} on Polymarket">${item.label} ↗</a>
               </div>
               <span class="mono" style="font-size:11px;color:var(--gold);font-weight:600">⏱ ${remStr}</span>
             </div>
@@ -3869,9 +3869,14 @@ function renderCockpitUI(st) {
       for (const mktKey of Object.keys(groupedOrders)) {
         const grp = groupedOrders[mktKey];
         const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
+        const mktSlug = grp.market_slug || grp.series_slug || '';
+        const mktUrl = mktSlug ? `https://polymarket.com/market/${encodeURIComponent(mktSlug)}` : '';
+        const mktLinkHtml = mktUrl
+          ? `<a href="${mktUrl}" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View on Polymarket">${esc(grp.market)} ↗</a>`
+          : esc(grp.market);
         const mktCell = `
           <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : 'var(--line)'};padding-left:10px">
-            <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${esc(grp.market)}</div>
+            <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
               <span class="mono" style="font-size:10px;color:var(--dim)">Pair: <b style="color:${grp.pair_cost !== '--' ? 'var(--gold)' : 'var(--dim)'}">${esc(grp.pair_cost)}</b></span>
@@ -3933,9 +3938,14 @@ function renderCockpitUI(st) {
         const grp = groupedPos[mktKey];
         const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
         
+        const mktSlug = grp.market_slug || grp.series_slug || '';
+        const mktUrl = mktSlug ? `https://polymarket.com/market/${encodeURIComponent(mktSlug)}` : '';
+        const mktLinkHtml = mktUrl
+          ? `<a href="${mktUrl}" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View on Polymarket">${esc(grp.market)} ↗</a>`
+          : esc(grp.market);
         const mktCell = `
           <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : 'var(--line)'};padding-left:10px">
-            <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${esc(grp.market)}</div>
+            <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
             </div>
@@ -4006,11 +4016,17 @@ function renderCockpitUI(st) {
 
         const exitStr = t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '-';
         const gainLossFmt = formatSignedMoneyPct(t.pnl_usd, t.pnl_pct);
+        const tradeSlug = t.market_slug || t.slug || t.series_slug || '';
+        const tradeUrl = tradeSlug ? `https://polymarket.com/market/${encodeURIComponent(tradeSlug)}` : '';
+        const tradeLabel = esc(t.label || t.market || '-');
+        const tradeLinkHtml = tradeUrl
+          ? `<a href="${tradeUrl}" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View on Polymarket">${tradeLabel} ↗</a>`
+          : tradeLabel;
 
         rowsHtml += `
           <tr>
             <td class="mono" style="font-size:11px;color:var(--faint)">${esc(t.timestamp || '-')}</td>
-            <td style="font-weight:700">${esc(t.label || t.market || '-')}</td>
+            <td style="font-weight:700">${tradeLinkHtml}</td>
             <td>${causeBadge}</td>
             <td class="mono">${t.shares || 0}</td>
             <td class="mono">${baseCostStr}</td>
