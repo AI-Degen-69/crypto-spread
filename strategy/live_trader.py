@@ -2963,6 +2963,13 @@ class LiveTraderEngine:
                 if sell_bid is not None:
                     with self._engine_lock:
                         mstate.status = "STOP_EXIT_PENDING"
+                    if mstate.stop_order_id:
+                        # Resting stop is already working at/below this level — mark it
+                        # FILLED and let _execute_stop_exit cancel the opposite leg
+                        mstate.stop_order_status = "FILLED"
+                        mstate.stop_order_id = None
+                        mstate.stop_price = None
+                        mstate.stop_side = None
                     trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
                     self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
                     return
@@ -2974,6 +2981,13 @@ class LiveTraderEngine:
                 if sell_bid is not None:
                     with self._engine_lock:
                         mstate.status = "STOP_EXIT_PENDING"
+                    if mstate.stop_order_id:
+                        # Resting stop is already working at/above this level — mark it
+                        # FILLED and let _execute_stop_exit cancel the opposite leg
+                        mstate.stop_order_status = "FILLED"
+                        mstate.stop_order_id = None
+                        mstate.stop_price = None
+                        mstate.stop_side = None
                     trigger_note = f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}"
                     self._execute_stop_exit(slug, mstate, "DOWN", sell_bid, trigger_note, now)
                     return

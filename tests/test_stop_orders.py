@@ -144,3 +144,30 @@ def test_pair_completion_clears_stop_paper():
     assert mstate.status == "PAIR_MERGED"
     assert mstate.stop_order_id is None
     assert mstate.stop_order_status == "NONE"
+
+
+def test_stop_fill_triggers_stop_exit_paper():
+    """OCO Case B (paper): bid drops to the stop -> stop fills, entry cancelled, STOP_EXIT."""
+    engine = LiveTraderEngine()
+    engine.start()
+    now = time.time()
+    market = _fake_market(now)
+
+    # UP leg fills at 0.48; stop staged at 0.43
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    mstate = engine.markets[SLUG]
+    assert mstate.stop_order_id == f"paper_stop_{SLUG}"
+    assert mstate.order_status_down == "RESTING"
+
+    # Bid collapses to the stop price: the resting stop fills as taker
+    engine._update_market_strategy(SLUG, _poll(market, 0.43, 0.44, 0.55, 0.56), now + 1)
+
+    assert mstate.exit_taken is True
+    assert mstate.status == "STOP_EXIT"
+    assert mstate.stop_order_status == "FILLED"
+    # Sold at the staged stop 0.43 vs entry 0.48: (0.43-0.48)*5 = -0.25
+    assert round(mstate.realized_pnl_usd, 2) == -0.25
+    assert any(t.action == "STOP_EXIT_UP" for t in engine.trades)
+    # Reciprocal OCO: the unhedged DOWN entry must be cancelled
+    assert mstate.order_status_down == "CANCELLED"
+    assert mstate.order_id_down is None
