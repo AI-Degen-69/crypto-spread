@@ -990,6 +990,10 @@ def test_api_live_latency(monkeypatch):
     assert data["series"] == "btc-up-or-down-5m"
     assert data["symbol"] == "btcusdt"
     assert "spot_price" in data
+    assert "actual_price" in data
+    assert "rtds_price" in data
+    assert "price_diff" in data
+    assert "price_diff_pct" in data
     assert "spot_drift" in data
     assert "clob_mid" in data
     assert "latency_ms" in data
@@ -1006,7 +1010,9 @@ def test_card_stream_telemetry_rendered_in_html():
     html = res.text
     assert 'id="card-stream-telemetry"' in html
     assert 'LIVE STREAM TELEMETRY (RTDS vs CLOB)' in html
+    assert 'id="telActualPrice"' in html
     assert 'id="telSpotPrice"' in html
+    assert 'id="telPriceDiff"' in html
     assert 'id="telSpotDrift"' in html
     assert 'id="telClobMid"' in html
     assert 'id="telLeadLatency"' in html
