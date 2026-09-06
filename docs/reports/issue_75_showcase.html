@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Issue #75 Showcase: Direct Polymarket Links in Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #111827;
+      --panel-hover: #162032;
+      --card: #151d30;
+      --line: #222f49;
+      --tx: #f3f4f6;
+      --tx-dim: #9ca3af;
+      --tx-faint: #6b7280;
+      --gold: #f59e0b;
+      --gold-glow: rgba(245, 158, 11, 0.15);
+      --green: #10b981;
+      --green-glow: rgba(16, 185, 129, 0.15);
+      --blue: #3b82f6;
+      --red: #ef4444;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--tx);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      padding: 30px 20px;
+    }
+    .container {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    /* Header & Badges */
+    .header-card {
+      background: linear-gradient(135deg, #111827 0%, #151f33 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 28px;
+      margin-bottom: 28px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 4px 10px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .badge-merged { background: var(--green-glow); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-issue { background: var(--gold-glow); color: var(--gold); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-branch { background: rgba(59, 130, 246, 0.15); color: var(--blue); border: 1px solid rgba(59, 130, 246, 0.3); }
+
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      color: #ffffff;
+      margin-bottom: 8px;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--tx-dim);
+      font-size: 15px;
+      margin-bottom: 20px;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .meta-item {
+      font-size: 13px;
+    }
+    .meta-label { color: var(--tx-faint); margin-bottom: 2px; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+    .meta-val { font-weight: 600; color: var(--tx); }
+    .meta-val a { color: var(--gold); text-decoration: none; }
+    .meta-val a:hover { text-decoration: underline; }
+
+    /* ELI5 Callout */
+    .eli5-card {
+      background: rgba(245, 158, 11, 0.05);
+      border-left: 4px solid var(--gold);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-bottom: 28px;
+    }
+    .eli5-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--gold);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Comparison Section */
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 28px;
+    }
+    @media (max-width: 768px) {
+      .comparison-grid { grid-template-columns: 1fr; }
+    }
+    .comp-card {
+      border-radius: 10px;
+      padding: 20px;
+      border: 1px solid var(--line);
+    }
+    .comp-card.before {
+      background: rgba(239, 68, 68, 0.04);
+      border-color: rgba(239, 68, 68, 0.2);
+    }
+    .comp-card.after {
+      background: rgba(16, 185, 129, 0.04);
+      border-color: rgba(16, 185, 129, 0.25);
+    }
+    .comp-header {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .comp-header.before { color: var(--red); }
+    .comp-header.after { color: var(--green); }
+    .preview-box {
+      background: #0d131f;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin-top: 12px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+    }
+    .mock-link {
+      color: var(--tx);
+      text-decoration: none;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: color 0.15s;
+    }
+    .mock-link:hover {
+      color: var(--gold);
+    }
+
+    /* Architecture Flow */
+    .flow-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 28px;
+    }
+    .flow-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .flow-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .step-num {
+      background: var(--gold-glow);
+      color: var(--gold);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+    .step-content h4 { font-size: 14px; margin-bottom: 3px; }
+    .step-content p { font-size: 13px; color: var(--tx-dim); }
+
+    /* Verification Steps */
+    .guide-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 28px;
+    }
+    .code-block {
+      background: #090d16;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin: 10px 0;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      color: #38bdf8;
+      overflow-x: auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .expected-box {
+      background: rgba(16, 185, 129, 0.05);
+      border-left: 3px solid var(--green);
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: var(--tx-dim);
+      border-radius: 0 6px 6px 0;
+      margin-bottom: 16px;
+    }
+
+    /* File Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+    }
+    th { color: var(--tx-faint); text-transform: uppercase; font-size: 11px; font-weight: 600; }
+    td.file-name { font-family: var(--font-mono); color: var(--gold); }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header Card -->
+    <div class="header-card">
+      <div class="badge-row">
+        <span class="badge badge-merged">✓ Merged to Master</span>
+        <span class="badge badge-issue">Issue #75</span>
+        <span class="badge badge-branch">Branch: master</span>
+      </div>
+      <h1>Direct Polymarket Market Links in Live Cockpit</h1>
+      <p class="subtitle">Enables instant 1-click navigation to Polymarket binary options directly from the Live Market Matrix and Orders & Trades table.</p>
+      
+      <div class="meta-grid">
+        <div class="meta-item">
+          <div class="meta-label">GitHub Issue</div>
+          <div class="meta-val"><a href="https://github.com/AI-Degen-69/crypto-spread/issues/75" target="_blank" rel="noopener">#75 (Closed)</a></div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Commits Applied</div>
+          <div class="meta-val"><code>0a519e0</code> → <code>3dc9306</code> (5 commits)</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Test Verification</div>
+          <div class="meta-val" style="color:var(--green)">100% Pass (248/248 tests)</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Security & Integrity</div>
+          <div class="meta-val"><code>rel="noopener"</code> + <code>encodeURIComponent</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ELI5 Box -->
+    <div class="eli5-card">
+      <div class="eli5-title">💡 In Plain English (ELI5)</div>
+      <p style="font-size:14px;color:var(--tx)">
+        When trading 5m/15m crypto spread-capture strategies on Polymarket, you often need to inspect the live Polymarket order book or market page. Previously, market labels were completely static text, meaning you had to manually search or guess slugs. Now, every single market card header and table row across Open Orders, Positions, and Closed Trades is a direct, secure link opening that specific window on Polymarket in a new tab!
+      </p>
+    </div>
+
+    <!-- Before vs After -->
+    <div class="section-title">🔄 Before vs. After Visual Comparison</div>
+    <div class="comparison-grid">
+      <div class="comp-card before">
+        <div class="comp-header before">
+          <span>❌ BEFORE (Issue #75)</span>
+          <span style="font-size:11px">Static Plaintext</span>
+        </div>
+        <p style="font-size:13px;color:var(--tx-dim)">Market titles and table cells rendered unclickable text labels. No easy way to navigate to the live venue book.</p>
+        <div class="preview-box">
+          <div style="color:var(--tx-faint);margin-bottom:6px">// Matrix Header:</div>
+          <div style="color:var(--tx);font-weight:700">BTC 5m</div>
+          <div style="color:var(--tx-faint);margin-top:10px;margin-bottom:6px">// Orders Table Cell:</div>
+          <div style="color:var(--tx)">BTC 5m · Pair: $0.96</div>
+        </div>
+      </div>
+
+      <div class="comp-card after">
+        <div class="comp-header after">
+          <span>✅ AFTER (Implemented)</span>
+          <span style="font-size:11px">Direct Secure Hyperlink</span>
+        </div>
+        <p style="font-size:13px;color:var(--tx-dim)">Full clickable links with external arrow ↗, gold hover glow, secure <code>target="_blank" rel="noopener"</code>, and series-slug fallback.</p>
+        <div class="preview-box">
+          <div style="color:var(--tx-faint);margin-bottom:6px">// Interactive Matrix Header:</div>
+          <a class="mock-link" href="https://polymarket.com/market/btc-updown-5m-window" target="_blank" rel="noopener">BTC 5m ↗</a>
+          <div style="color:var(--tx-faint);margin-top:10px;margin-bottom:6px">// Interactive Orders Table Cell:</div>
+          <div><a class="mock-link" href="https://polymarket.com/market/btc-updown-5m-window" target="_blank" rel="noopener">BTC 5m ↗</a> <span style="color:var(--tx-faint);font-size:11px">· Pair: $0.96</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Architecture & Data Flow -->
+    <div class="flow-card">
+      <div class="section-title">🏗️ Data Flow & Architecture</div>
+      <p style="font-size:13.5px;color:var(--tx-dim)">How the specific active market slug travels from discovery through execution into the client-side DOM:</p>
+      
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <h4>Market Discovery & Dataclass Foundation</h4>
+            <p><code>TradeEvent</code> extended with <code>market_slug: str = ""</code> (backward compatible). Engine dynamically tracks <code>m.market_slug</code> alongside <code>m.slug</code> across all 10 series.</p>
+          </div>
+        </div>
+
+        <div class="flow-step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <h4>Unified Slug Propagation</h4>
+            <p><code>get_open_orders_list()</code> and <code>get_open_positions()</code> propagate both <code>market_slug</code> and <code>series_slug</code> across live CLOB, paper engine, and advance-window states.</p>
+          </div>
+        </div>
+
+        <div class="flow-step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <h4>Client-Side Leg Pairing Preservation</h4>
+            <p><code>groupOrdersByPair()</code> and <code>groupPositionsByPair()</code> in <code>server/osc_dash.py</code> preserve slugs when merging UP and DOWN legs into unified pair cards.</p>
+          </div>
+        </div>
+
+        <div class="flow-step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <h4>Defensive DOM Hyperlink Rendering</h4>
+            <p>Client JS safely formats <code>https://polymarket.com/market/${encodeURIComponent(mktSlug)}</code> with <code>target="_blank" rel="noopener"</code>. If the specific window slug is still discovering, it seamlessly falls back to <code>series_slug</code>.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hands-On Verification Guide -->
+    <div class="guide-card">
+      <div class="section-title">🧪 Hands-On Manual Verification Guide</div>
+      <p style="font-size:13.5px;color:var(--tx-dim);margin-bottom:16px">Follow these 3 simple steps to verify the changes hands-on right now on your machine:</p>
+
+      <div style="margin-bottom:18px">
+        <h4 style="font-size:14px;margin-bottom:4px">Step 1: Run Headless Node.js DOM Tests</h4>
+        <p style="font-size:13px;color:var(--tx-dim)">Verifies that the client-side JavaScript actually builds valid HTML with proper attributes:</p>
+        <div class="code-block">
+          <span>rtk python -m pytest tests/test_orders_trades_table.py -k "hyperlink" -v</span>
+        </div>
+        <div class="expected-box">
+          ✓ Expected: <code>2 passed</code> (verifying matrix headers, 3 table tabs, and series-slug fallback).
+        </div>
+      </div>
+
+      <div style="margin-bottom:18px">
+        <h4 style="font-size:14px;margin-bottom:4px">Step 2: Launch the Cockpit Dashboard</h4>
+        <p style="font-size:13px;color:var(--tx-dim)">Start the FastAPI dashboard server locally on port 8802:</p>
+        <div class="code-block">
+          <span>rtk python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</span>
+        </div>
+        <div class="expected-box">
+          ✓ Expected: <code>Uvicorn running on http://127.0.0.1:8802</code>.
+        </div>
+      </div>
+
+      <div>
+        <h4 style="font-size:14px;margin-bottom:4px">Step 3: Inspect Live Market Links in Browser</h4>
+        <p style="font-size:13px;color:var(--tx-dim)">Open the dashboard in your web browser and click the links:</p>
+        <div class="code-block">
+          <span>Start-Process "http://127.0.0.1:8802"</span>
+        </div>
+        <div class="expected-box">
+          ✓ Expected:
+          <ul style="margin-left:18px;margin-top:4px">
+            <li>In the 🎯 <b>Live Market Matrix</b>: Hover over any card title (e.g. <code>BTC 5m</code>) — observe the gold hover color and ↗ symbol. Click to open the live market on Polymarket.</li>
+            <li>In the 📋 <b>Orders & Trades Card</b>: Click through tabs (Open Orders, Positions, Closed Trades). Market cells are clickable hyperlinks opening directly to Polymarket in a new tab.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Technical File Summary -->
+    <div class="flow-card">
+      <div class="section-title">📁 Modified Files Summary</div>
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Changes Made</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="file-name">strategy/live_trader.py</td>
+            <td>Added <code>market_slug</code> to <code>TradeEvent</code>, propagated in <code>get_open_orders_list</code> & <code>get_open_positions</code>, and added live wallet position slug enrichment.</td>
+          </tr>
+          <tr>
+            <td class="file-name">server/osc_dash.py</td>
+            <td>Preserved slugs in <code>groupOrdersByPair</code> and <code>groupPositionsByPair</code>; rendered sanitized external links in Matrix cards and 3 table tabs.</td>
+          </tr>
+          <tr>
+            <td class="file-name">tests/test_orders_trades_table.py</td>
+            <td>Added headless Node.js DOM rendering tests and fallback tests for all 4 UI touchpoints.</td>
+          </tr>
+          <tr>
+            <td class="file-name">tests/test_live_trader.py</td>
+            <td>Added unit tests for <code>TradeEvent</code> slug initialization, order/position listing slug propagation, and live mode position enrichment.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+</body>
+</html>
