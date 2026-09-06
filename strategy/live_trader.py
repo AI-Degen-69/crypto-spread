@@ -631,6 +631,28 @@ class LiveTraderEngine:
             log.error("Failed placing live quote for %s: %s", token_id, e)
             return {"error": str(e), "order_id": None}
 
+    def _cancel_stop_order(self, mstate: MarketLiveState, reason: str) -> None:
+        """Cancel and clear the staged resting stop-loss order (OCO reciprocal leg)."""
+        with self._engine_lock:
+            stop_id = mstate.stop_order_id
+        if not stop_id:
+            return
+        if self.mode == "live":
+            if not self.cancel_live_order(stop_id):
+                log.warning(
+                    "[%s] Failed to cancel resting stop-loss %s (%s); clearing handle anyway",
+                    mstate.slug,
+                    stop_id,
+                    reason,
+                )
+        with self._engine_lock:
+            mstate.stop_order_id = None
+            mstate.stop_order_status = "NONE"
+            mstate.stop_price = None
+            mstate.stop_side = None
+            mstate.stop_order_time = "-"
+        log.info("[%s] Resting stop-loss cancelled and cleared (%s)", mstate.slug, reason)
+
     def place_stop_order(self, mstate: MarketLiveState, side: str) -> None:
         """Stage a resting stop-loss SELL order for a single-leg filled position.
 
@@ -2879,6 +2901,9 @@ class LiveTraderEngine:
 
             # --- PAIR COMPLETION & MERGE ---
             if mstate.filled_up and mstate.filled_down:
+                # OCO Case A: cancel the resting stop-loss before the merge — a hedged
+                # pair must never keep protection resting against one leg (issue #87)
+                self._cancel_stop_order(mstate, reason="pair completed")
                 mstate.pair_captured = True
                 mstate.status = "PAIR_MERGED"
                 fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up

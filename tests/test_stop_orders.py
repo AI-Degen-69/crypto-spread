@@ -76,3 +76,71 @@ def test_single_leg_fill_places_stop_paper():
     assert mstate.stop_order_status == "RESTING"
     assert mstate.stop_side == "UP"
     assert mstate.stop_price == 0.43
+
+
+def test_pair_completion_cancels_stop_live():
+    """OCO Case A: pair completion cancels the resting stop before PAIR_MERGED."""
+    from unittest.mock import MagicMock
+
+    engine = LiveTraderEngine()
+    engine.mode = "live"
+    engine.is_running = True
+    now = time.time()
+    fake_client = MagicMock()
+
+    # Sequential order placements: UP entry, DOWN entry, then the stop SELL
+    fake_client.create_and_post_order.side_effect = [
+        {"orderID": "ord_up", "status": "unmatched"},
+        {"orderID": "ord_dn", "status": "unmatched"},
+        {"orderID": "ord_stop_sell", "status": "unmatched"},
+    ]
+    fake_client.cancel.return_value = {"success": True}
+
+    dn_polls = {"n": 0}
+
+    def fake_get_order(order_id):
+        if order_id == "ord_up":
+            return {"status": "MATCHED", "size_matched": 5.0, "price": 0.48}
+        if order_id == "ord_dn":
+            # DOWN leg only fills on the second strategy tick
+            dn_polls["n"] += 1
+            if dn_polls["n"] >= 2:
+                return {"status": "MATCHED", "size_matched": 5.0, "price": 0.48}
+            return {"status": "UNMATCHED", "size_matched": 0.0}
+        return {"status": "UNMATCHED", "size_matched": 0.0}
+
+    fake_client.get_order.side_effect = fake_get_order
+    engine._clob_client = fake_client
+
+    # UP leg fills live -> resting stop placed via CLOB
+    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.47, 0.48, 0.51, 0.52), now)
+    mstate = engine.markets[SLUG]
+    assert mstate.filled_up is True
+    assert mstate.stop_order_id == "ord_stop_sell"
+
+    # DOWN leg fills -> pair complete -> stop must be cancelled and cleared
+    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.48), now + 1)
+    fake_client.cancel.assert_any_call("ord_stop_sell")
+    assert mstate.pair_captured is True
+    assert mstate.status == "PAIR_MERGED"
+    assert mstate.stop_order_id is None
+    assert mstate.stop_order_status == "NONE"
+    assert mstate.stop_price is None
+
+
+def test_pair_completion_clears_stop_paper():
+    """OCO Case A in paper mode: simulated stop is cleared without venue calls."""
+    engine = LiveTraderEngine()
+    engine.start()
+    now = time.time()
+    market = _fake_market(now)
+
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    mstate = engine.markets[SLUG]
+    assert mstate.stop_order_id == f"paper_stop_{SLUG}"
+
+    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now + 1)
+    assert mstate.pair_captured is True
+    assert mstate.status == "PAIR_MERGED"
+    assert mstate.stop_order_id is None
+    assert mstate.stop_order_status == "NONE"
