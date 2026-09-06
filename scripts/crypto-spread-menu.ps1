@@ -93,7 +93,34 @@ if (-not (Get-Command Write-ProfileSuccess -ErrorAction SilentlyContinue)) {
         Write-Host "  $k" -ForegroundColor (Get-ProfileColor -Name Neutral) -NoNewline
         Write-Host " : $Value" -ForegroundColor (Get-ProfileColor -Name $Style)
     }
+    function Write-ProfileRuleWithText { param([string]$Text, [string]$Style = "Neutral") Write-Host ("--- $Text " + ("-" * [Math]::Max(5, (75 - $Text.Length)))) -ForegroundColor (Get-ProfileColor -Name Border) }
 }
+
+# ── Console helpers (spread-hunter-menu style thin wrappers) ──
+function Csm-Banner {
+    param([string]$Title, [string]$Subtitle)
+    try { Clear-Host } catch {}
+    $cBorder = Get-ProfileColor -Name Border
+    $cTitle  = [ConsoleColor]::Yellow
+    $cSub    = Get-ProfileColor -Name Neutral
+    $w = 78
+    Write-Host ("╔" + ("═" * $w) + "╗") -ForegroundColor $cBorder
+    Write-Host "║ " -ForegroundColor $cBorder -NoNewline
+    Write-Host $Title.PadRight($w - 2) -ForegroundColor $cTitle -NoNewline
+    Write-Host " ║" -ForegroundColor $cBorder
+    if ($Subtitle) {
+        Write-Host "║ " -ForegroundColor $cBorder -NoNewline
+        Write-Host $Subtitle.PadRight($w - 2) -ForegroundColor $cSub -NoNewline
+        Write-Host " ║" -ForegroundColor $cBorder
+    }
+    Write-Host ("╚" + ("═" * $w) + "╝") -ForegroundColor $cBorder
+    Write-Host ""
+}
+function Csm-Step   { param([string]$Msg) Write-ProfileInfo -Message $Msg }
+function Csm-Ok     { param([string]$Msg) Write-ProfileSuccess -Message $Msg }
+function Csm-Warn   { param([string]$Msg) Write-ProfileWarning -Message $Msg }
+function Csm-Fail   { param([string]$Msg) Write-ProfileError -Message $Msg }
+function Csm-Phase  { param([string]$Text) Write-Host ""; Write-ProfileRuleWithText -Text $Text -Style "Info"; Write-Host "" }
 
 # ── Process & Network Primitives ──
 function Test-Port {
@@ -178,7 +205,7 @@ function Adopt-DashboardInstance {
 
 # ── Status Action ──
 function Show-SystemStatus {
-    Write-ProfileBanner -Title "CRYPTO SPREAD — TELEMETRY & SYSTEM STATUS" -Subtitle "5m/15m BTC/ETH/BNB/SOL/XRP Spread Capture Lab"
+    Csm-Banner -Title "CRYPTO SPREAD — TELEMETRY & SYSTEM STATUS" -Subtitle "5m/15m BTC/ETH/BNB/SOL/XRP Spread Capture Lab"
     
     # 1. Dashboard Process & Port Status
     Write-ProfileSection -Title "Dashboard Server (:8802)"
@@ -187,11 +214,11 @@ function Show-SystemStatus {
     $portPid = Get-PortPid
 
     if ($inst) {
-        Write-ProfileSuccess -Message "Dashboard Server" -Detail "RUNNING (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))"
+        Csm-Ok "Dashboard Server RUNNING (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))"
         Write-ProfileKeyValue -Key "URL" -Value $DashUrl -Style "Link"
         Write-ProfileKeyValue -Key "PID Registry" -Value $DashPidFile -Style "Path"
     } elseif ($isListening) {
-        Write-ProfileWarning -Message "Dashboard Server" -Detail "LISTENING (PID $portPid, unowned by menu registry)"
+        Csm-Warn "Dashboard Server LISTENING (PID $portPid, unowned by menu registry)"
         Write-ProfileKeyValue -Key "URL" -Value $DashUrl -Style "Link"
     } else {
         Write-ProfileNeutral -Message "Dashboard Server" -Detail "STOPPED (Port $Port is free)"
@@ -204,7 +231,7 @@ function Show-SystemStatus {
         try {
             $state = Invoke-RestMethod -Uri "$DashUrl/api/live/state" -UseBasicParsing -TimeoutSec 3
             if ($state.is_running -or $state.active) {
-                Write-ProfileSuccess -Message "Trading Engine" -Detail "ACTIVE (Mode: $($state.mode))"
+                Csm-Ok "Trading Engine ACTIVE (Mode: $($state.mode))"
             } else {
                 Write-ProfileInfo -Message "Trading Engine" -Detail "STANDBY (Mode: $($state.mode))"
             }
@@ -217,7 +244,7 @@ function Show-SystemStatus {
             $openOrders = if ($state.orders) { $state.orders.Count } else { 0 }
             Write-ProfileKeyValue -Key "Open Orders" -Value "$openOrders" -Style "Info"
         } catch {
-            Write-ProfileWarning -Message "Trading Engine" -Detail "Could not query /api/live/state ($_)"
+            Csm-Warn "Trading Engine: Could not query /api/live/state ($_)"
         }
     } else {
         Write-ProfileNeutral -Message "Trading Engine" -Detail "OFFLINE (Start dashboard to inspect)"
@@ -230,7 +257,7 @@ function Show-SystemStatus {
         try {
             $coll = Invoke-RestMethod -Uri "$DashUrl/api/collector/status" -UseBasicParsing -TimeoutSec 3
             if ($coll.running) {
-                Write-ProfileSuccess -Message "Collector" -Detail "RUNNING (PID $($coll.pid), Today Ticks: $($coll.total_ticks_collected))"
+                Csm-Ok "Collector RUNNING (PID $($coll.pid), Today Ticks: $($coll.total_ticks_collected))"
             } else {
                 Write-ProfileInfo -Message "Collector" -Detail "IDLE (Today Ticks: $($coll.total_ticks_collected))"
             }
@@ -239,7 +266,7 @@ function Show-SystemStatus {
                 Write-ProfileKeyValue -Key "Tape Empty Rate" -Value "$emptyPct%" -Style "Info"
             }
         } catch {
-            Write-ProfileWarning -Message "Collector" -Detail "Could not query /api/collector/status"
+            Csm-Warn "Collector: Could not query /api/collector/status"
         }
     } else {
         Write-ProfileNeutral -Message "Collector" -Detail "OFFLINE (Start dashboard to inspect)"
@@ -262,7 +289,7 @@ function Show-SystemStatus {
             Write-ProfileKeyValue -Key "Sample Ticks" -Value "$($mf.lines)" -Style "Success"
             Write-ProfileKeyValue -Key "Tape Entries" -Value "$($mf.tape_entries_total)" -Style "Success"
         } catch {
-            Write-ProfileWarning -Message "Tick Store" -Detail "Unreadable manifest.json"
+            Csm-Warn "Tick Store: Unreadable manifest.json"
         }
     }
     Write-Host ""
@@ -272,7 +299,7 @@ function Show-SystemStatus {
 function Host-Dashboard {
     $inst = Get-DashInstance
     if ($null -ne $inst) {
-        Write-ProfileSuccess -Message "Dashboard already running" -Detail "(PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
+        Csm-Ok "Dashboard already running (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
         return $true
     }
     if (Test-Port) {
@@ -287,18 +314,18 @@ function Host-Dashboard {
             }
             if ($adopt -and (Adopt-DashboardInstance)) {
                 $inst = Get-DashInstance
-                Write-ProfileSuccess -Message "Adopted dashboard" -Detail "(PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
+                Csm-Ok "Adopted dashboard (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
                 return $true
             } else {
-                Write-ProfileWarning -Message "Adoption skipped for PID $portPid."
+                Csm-Warn "Adoption skipped for PID $portPid."
                 return $true
             }
         }
-        Write-ProfileError -Message "Port $Port occupied" -Detail "PID $portPid does NOT answer as a crypto-spread dashboard. Free the port manually first."
+        Csm-Fail "Port $Port occupied: PID $portPid does NOT answer as a crypto-spread dashboard. Free the port manually first."
         return $false
     }
     
-    Write-ProfileInfo -Message "Launching dashboard..." -Detail "python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port $Port"
+    Csm-Step "Launching dashboard (python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port $Port)..."
     $dash = Start-Process -FilePath "python" `
         -ArgumentList "-m", "uvicorn", "server.osc_dash:app", "--host", "127.0.0.1", "--port", "$Port" `
         -WorkingDirectory $ProjectPath -WindowStyle Hidden -PassThru `
@@ -314,11 +341,11 @@ function Host-Dashboard {
         if ($dash.HasExited) { break }
     }
     if (-not (Test-Port)) {
-        Write-ProfileError -Message "Dashboard failed to bind port $Port." -Detail "See $ErrLog"
+        Csm-Fail "Dashboard failed to bind port $Port. See $ErrLog"
         Remove-Item $DashPidFile -ErrorAction SilentlyContinue
         return $false
     }
-    Write-ProfileSuccess -Message "Dashboard serving on $DashUrl" -Detail "(PID $($dash.Id))."
+    Csm-Ok "Dashboard serving on $DashUrl (PID $($dash.Id))."
     try { Start-Process $DashUrl } catch {}
     return $true
 }
@@ -339,64 +366,130 @@ function Stop-DashboardProcess {
     $inst = Get-DashInstance
     $stopped = $false
     if ($null -ne $inst) {
-        Write-ProfileInfo -Message "Stopping dashboard PID $($inst.pid)..."
+        Csm-Step "Stopping dashboard PID $($inst.pid)..."
         taskkill /F /T /PID $inst.pid 2>$null | Out-Null
         if (Wait-ProcessGone -ProcessId $inst.pid) {
-            Write-ProfileSuccess -Message "Dashboard process tree stopped."
+            Csm-Ok "Dashboard process tree stopped."
             $stopped = $true
             Remove-Item $DashPidFile -ErrorAction SilentlyContinue
         } else {
-            Write-ProfileWarning -Message "Dashboard PID $($inst.pid) did not exit cleanly; PID record kept."
+            Csm-Warn "Dashboard PID $($inst.pid) did not exit cleanly; PID record kept."
         }
     }
     if ($null -eq $inst) { Remove-Item $DashPidFile -ErrorAction SilentlyContinue }
     if (Test-Port) {
-        Write-ProfileWarning -Message "Port $Port still LISTENING" -Detail "(PID $(Get-PortPid)) — not owned by menu registry, left running."
+        Csm-Warn "Port $Port still LISTENING (PID $(Get-PortPid)) — not owned by menu registry, left running."
         return $false
     }
-    Write-ProfileSuccess -Message "Port $Port free."
+    Csm-Ok "Port $Port free."
     return $true
 }
 
 function Start-PriceMonitor {
     param([string[]]$MonitorArgs)
     $env:PYTHONIOENCODING = "utf-8"
-    Write-ProfileBanner -Title "CRYPTO SPREAD — LIVE BINANCE SPOT vs CLOB BOOK MONITOR" -Subtitle "Side-by-Side Real-Time Tick Stream & Latency Audit"
-    Write-ProfileInfo -Message "Starting live stream monitor..." -Detail "python -X utf8 -m scripts.monitor_stream_latency $($MonitorArgs -join ' ')"
+    Csm-Banner -Title "CRYPTO SPREAD — LIVE BINANCE SPOT vs CLOB BOOK MONITOR" -Subtitle "Side-by-Side Real-Time Tick Stream & Latency Audit"
+    Csm-Step "Starting live stream monitor (python -X utf8 -m scripts.monitor_stream_latency $($MonitorArgs -join ' '))..."
     Write-Host ""
     & python -X utf8 -m scripts.monitor_stream_latency @MonitorArgs
 }
 
-# ── Menu Dispatcher ──
-switch -Exact ($Action.ToLower()) {
-    "status"  { Show-SystemStatus; exit 0 }
-    "open"    { if (Host-Dashboard) { exit 0 } else { exit 1 } }
-    "stop"    { if (Stop-DashboardProcess) { exit 0 } else { exit 1 } }
-    "compare" { Start-PriceMonitor -MonitorArgs $Remaining; exit 0 }
-    ""        {
-        # Interactive loop
-        while ($true) {
-            Write-Host ""
-            Write-ProfileBanner -Title "CRYPTO SPREAD — CONTROL CENTER" -Subtitle "5m/15m SPREAD-2 Capture Operations"
-            Write-Host "  [1] Check System Status" -ForegroundColor (Get-ProfileColor -Name Info)
-            Write-Host "  [2] Host & Open Dashboard (Background)" -ForegroundColor (Get-ProfileColor -Name Path)
-            Write-Host "  [3] Stop Dashboard & Clean Up Processes" -ForegroundColor (Get-ProfileColor -Name Error)
-            Write-Host "  [4] Live Binance Spot vs. CLOB Book Monitor" -ForegroundColor (Get-ProfileColor -Name Highlight)
-            Write-Host "  [q] Exit" -ForegroundColor (Get-ProfileColor -Name Neutral)
-            Write-Host ""
-            $choice = Read-Host "Select option [1-4, q]"
-            switch ($choice.Trim().ToLower()) {
-                "1" { Show-SystemStatus }
-                "2" { Host-Dashboard }
-                "3" { Stop-DashboardProcess }
-                "4" { Start-PriceMonitor }
-                "q" { Write-ProfileInfo -Message "Exiting Control Center."; exit 0 }
-                default { Write-ProfileWarning -Message "Invalid choice: '$choice'" }
-            }
+# ── Menu Grid Renderer (spread-hunter-menu style) ──
+function Show-MenuGrid {
+    $cInfo    = Get-ProfileColor -Name Info
+    $cStrong  = Get-ProfileColor -Name Strong
+    $cNeutral = Get-ProfileColor -Name Neutral
+
+    Write-Host "  CRYPTO SPREAD — CONTROL CENTER" -ForegroundColor $cInfo
+    Write-Host ("  " + ("─" * 32)) -ForegroundColor (Get-ProfileColor -Name Border)
+    Write-Host ""
+
+    $groups = @(
+        @{ Header = "🟢 DASHBOARD & TELEMETRY"; Items = @(
+            @{ K = "1"; Icon = "≡"; IconColor = "Info";      V = "Check System Status";        D = "System telemetry, collector status & tick store metrics" }
+            @{ K = "2"; Icon = "▶"; IconColor = "Success";   V = "Host & Open Dashboard";     D = "Hosts background dashboard on :8802 & opens browser" }
+            @{ K = "3"; Icon = "■"; IconColor = "Error";     V = "Stop Dashboard Process";     D = "Stops dashboard process tree & frees port 8802" }
+        ) }
+        @{ Header = "⚡ REAL-TIME MONITORING"; Items = @(
+            @{ K = "4"; Icon = "◈"; IconColor = "Highlight"; V = "Spot vs CLOB Monitor";      D = "Side-by-side Binance spot vs Polymarket CLOB book ticks stream" }
+        ) }
+    )
+
+    foreach ($g in $groups) {
+        Write-Host ("  " + $g.Header) -ForegroundColor $cInfo
+        foreach ($it in $g.Items) {
+            Write-Host "   " -NoNewline
+            Write-Host (" {0} " -f $it.K) -BackgroundColor (Get-ProfileColor -Name Border) -ForegroundColor (Get-ProfileColor -Name Strong) -NoNewline
+            Write-Host ("  {0} " -f $it.Icon) -ForegroundColor (Get-ProfileColor -Name $it.IconColor) -NoNewline
+            Write-Host ("{0,-28}" -f $it.V) -ForegroundColor $cStrong -NoNewline
+            Write-Host $it.D -ForegroundColor $cNeutral
+        }
+        Write-Host ""
+    }
+    Write-Host "  q  × Exit · Return to PowerShell" -ForegroundColor $cNeutral
+}
+
+function Invoke-MenuAction {
+    param([string]$Key)
+    switch ($Key) {
+        "1" { Show-SystemStatus }
+        "2" { Host-Dashboard }
+        "3" { Stop-DashboardProcess }
+        "4" { Start-PriceMonitor }
+        "q" { Csm-Step "Exiting Control Center."; exit 0 }
+        default {
+            Csm-Warn "Invalid selection: '$Key' (choose 1-4, or q)."
+            Start-Sleep -Seconds 1
         }
     }
-    default {
-        Write-ProfileError -Message "Unknown action '$Action'." -Detail "Valid actions: status, open, stop, compare"
-        exit 1
+}
+
+# ── Menu Dispatcher ──
+if ($Action -ne "") {
+    $actionMap = @{
+        "1"            = "1"
+        "status"       = "1"
+        "get"          = "1"
+        "2"            = "2"
+        "open"         = "2"
+        "host"         = "2"
+        "dash"         = "2"
+        "dashboard"    = "2"
+        "3"            = "3"
+        "stop"         = "3"
+        "clean"        = "3"
+        "kill"         = "3"
+        "4"            = "4"
+        "compare"      = "4"
+        "monitor"      = "4"
+        "stream"       = "4"
+    }
+    $key = $Action.Trim().ToLower()
+    if ($actionMap.ContainsKey($key)) { $key = $actionMap[$key] }
+
+    switch ($key) {
+        "1" { Show-SystemStatus; exit 0 }
+        "2" { if (Host-Dashboard) { exit 0 } else { exit 1 } }
+        "3" { if (Stop-DashboardProcess) { exit 0 } else { exit 1 } }
+        "4" { Start-PriceMonitor -MonitorArgs $Remaining; exit 0 }
+        default {
+            Csm-Fail "Unknown action '$Action'. Valid actions: status, open, stop, compare"
+            exit 1
+        }
     }
 }
+
+# Interactive loop
+while ($true) {
+    Csm-Banner -Title "CRYPTO SPREAD — CONTROL CENTER" -Subtitle "5m/15m SPREAD-2 Capture Operations"
+    Show-MenuGrid
+    Write-Host "  Select " -ForegroundColor (Get-ProfileColor -Name Text) -NoNewline
+    Write-Host "[1-4, q]" -ForegroundColor (Get-ProfileColor -Name Command) -NoNewline
+    Write-Host " › " -ForegroundColor (Get-ProfileColor -Name Highlight) -NoNewline
+    $choice = Read-Host
+    if ($null -eq $choice) { exit 0 }
+    $choice = $choice.Trim().ToLower()
+    if ($choice -eq "") { exit 0 }
+    Invoke-MenuAction $choice
+}
+
