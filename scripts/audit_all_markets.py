@@ -87,18 +87,19 @@ def get_series_to_audit(
 def format_comparison_table(results: List[Dict[str, Any]]) -> str:
     """Format cross-market empirical latency comparison table for console and reports."""
     lines = [
-        "=" * 126,
+        "=" * 138,
         "CROSS-MARKET EMPIRICAL LATENCY AUDIT BENCHMARK (Spot -> CLOB Book Response)",
-        "=" * 126,
-        f"{'Asset':<6} | {'Window':<6} | {'Feed':<6} | {'Shocks':<6} | {'Reacted':<7} | {'Rate':<7} | "
+        "=" * 138,
+        f"{'Asset':<6} | {'Window':<6} | {'Transport':<9} | {'Bot Feed':<8} | {'Shocks':<6} | {'Reacted':<7} | {'Rate':<7} | "
         f"{'Min Lat':<10} | {'Med Lat':<10} | {'Mean Lat':<10} | {'P95 Lat':<10} | {'Mean Drift':<10} | {'P95 Drift':<10}",
-        "-" * 126,
+        "-" * 138,
     ]
 
     for item in results:
         token = item.get("token", "")
         win = item.get("duration_label", "")
-        transport = item.get("transport", "")
+        transport = item.get("transport", "REST")
+        bot_feed = item.get("bot_stream_mode", "RTDS" if f"{token.lower()}usdt" in RTDS_SYMBOLS else "REST")
         s = item.get("summary", {})
         shocks = s.get("total_shocks", 0)
         reacted = s.get("reaction_count", 0)
@@ -119,16 +120,16 @@ def format_comparison_table(results: List[Dict[str, Any]]) -> str:
             mean_drift = p95_drift = "--"
 
         lines.append(
-            f"{token:<6} | {win:<6} | {transport:<6} | {shocks:<6} | {reacted:<7} | {rate:<7} | "
+            f"{token:<6} | {win:<6} | {transport:<9} | {bot_feed:<8} | {shocks:<6} | {reacted:<7} | {rate:<7} | "
             f"{min_lat:<10} | {med_lat:<10} | {mean_lat:<10} | {p95_lat:<10} | {mean_drift:<10} | {p95_drift:<10}"
         )
 
-    lines.append("=" * 126)
+    lines.append("=" * 138)
     lines.append(
-        "Note: Probe samples Binance REST ticker & Polymarket CLOB books. Feed column indicates live bot "
-        "bridge stream mode (RTDS relay vs. BNB REST fallback path in strategy/streaming.py)."
+        "Note: Probe samples Binance REST ticker & Polymarket CLOB books (1s poll). 'Bot Feed' column indicates live "
+        "trading bridge stream mode (RTDS relay vs. BNB REST fallback path in strategy/streaming.py)."
     )
-    lines.append("=" * 126)
+    lines.append("=" * 138)
     return "\n".join(lines)
 
 
@@ -149,10 +150,11 @@ def run_all_audits(
             token = token_for_slug(series_slug)
             dur_label = "5m" if dur_sec == 300 else f"{dur_sec // 60}m"
             symbol = f"{token.lower()}usdt"
-            transport = "RTDS" if symbol in RTDS_SYMBOLS else "REST"
+            transport = "REST"
+            bot_stream_mode = "RTDS" if symbol in RTDS_SYMBOLS else "REST"
 
             if not quiet:
-                print(f"\n>>> Starting Latency Audit for {label} ({series_slug}) [{transport}] for {duration:.0f}s ...")
+                print(f"\n>>> Starting Latency Audit for {label} ({series_slug}) [Probe: {transport} | Bot: {bot_stream_mode}] for {duration:.0f}s ...")
 
             series_args = argparse.Namespace(
                 series=series_slug,
@@ -188,6 +190,7 @@ def run_all_audits(
                 "duration_sec": dur_sec,
                 "duration_label": dur_label,
                 "transport": transport,
+                "bot_stream_mode": bot_stream_mode,
                 "summary": summary,
             })
     except KeyboardInterrupt:

@@ -28,20 +28,20 @@
 
 Empirical lead-lag latency and drift distribution metrics captured across all 10 series in the canonical universe (`strategy/series.py:SERIES`) using [`scripts/audit_all_markets.py`](../scripts/audit_all_markets.py):
 
-| Asset | Window | Feed Transport | Total Shocks | CLOB Reactions | Reaction Rate | Min Latency | Median ($P_{50}$) | Mean Latency | $P_{95}$ Latency | Mean Drift | $P_{95}$ Drift |
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **BTC** | 5m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **ETH** | 5m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **BNB** | 5m | REST Fallback | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **SOL** | 5m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **XRP** | 5m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **BTC** | 15m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **ETH** | 15m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **BNB** | 15m | REST Fallback | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
-| **SOL** | 15m | RTDS Relay | 1 | 1 | `100.0%` | `2,895.7 ms` | `2,895.7 ms` | `2,895.7 ms` | `2,895.7 ms` | `0.06%` | `0.06%` |
-| **XRP** | 15m | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| Asset | Window | Probe Transport | Bot Stream Mode | Total Shocks | CLOB Reactions | Reaction Rate | Min Latency | Median ($P_{50}$) | Mean Latency | $P_{95}$ Latency | Mean Drift | $P_{95}$ Drift |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **BTC** | 5m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **ETH** | 5m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **BNB** | 5m | REST (Binance) | REST Fallback | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **SOL** | 5m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **XRP** | 5m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **BTC** | 15m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **ETH** | 15m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **BNB** | 15m | REST (Binance) | REST Fallback | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
+| **SOL** | 15m | REST (Binance) | RTDS Relay | 1 | 1 | `100.0%` | `2,895.7 ms` | `2,895.7 ms` | `2,895.7 ms` | `2,895.7 ms` | `0.06%` | `0.06%` |
+| **XRP** | 15m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
 
-> *Source Artifact: [`run/latency_audit_20260906_065157.json`](../run/latency_audit_20260906_065157.json). Audit run configured with spot impulse threshold $\Delta S / S_0 \ge 0.05\%$. Note that during calm consolidation intervals, shocks occur selectively on highest-beta assets (e.g. SOL experiencing acute impulse moves).*
+> *Source Artifact: [`run/latency_audit_20260906_065157.json`](../run/latency_audit_20260906_065157.json). Note: The latency audit probe (`scripts/monitor_stream_latency.py`) samples Binance REST ticker prices at 1s cadence across all assets to baseline CLOB book reactions. 'Bot Stream Mode' indicates the production bot's live streaming bridge configuration (`strategy/streaming.py`).*
 
 ---
 

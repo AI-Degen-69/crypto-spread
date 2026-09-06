@@ -175,3 +175,22 @@ def test_run_all_audits_and_save_artifact(tmp_path):
         assert data["threshold"] == 0.001
         assert len(data["series_audits"]) == 1
         assert data["series_audits"][0]["token"] == "BTC"
+        assert data["series_audits"][0]["transport"] == "REST"
+        assert data["series_audits"][0]["bot_stream_mode"] == "RTDS"
+
+
+def test_emitted_transport_matches_collection_path():
+    """Verify that run_all_audits reports the actual probe collection transport (REST)."""
+    with patch("scripts.audit_all_markets.run_monitor", return_value=LatencyAuditor()):
+        results = run_all_audits(
+            tokens=["BTC", "BNB"],
+            durations=[300],
+            duration=1.0,
+            ticks=1,
+            quiet=True,
+        )
+        assert len(results) == 2
+        for item in results:
+            assert item["transport"] == "REST"
+        assert results[0]["bot_stream_mode"] == "RTDS"
+        assert results[1]["bot_stream_mode"] == "REST"
