@@ -59,7 +59,11 @@ def _verify_safe_origin(request: Request) -> None:
         p = urllib.parse.urlparse(origin)
         if p.hostname not in ("127.0.0.1", "localhost", "::1", "testclient"):
             raise HTTPException(status_code=403, detail="Forbidden: cross-origin request rejected")
-        if p.port is not None and p.port not in (8802, 8000, 80, 443):
+        server_port = request.url.port
+        allowed_ports = {8802, 8888, 8000, 80, 443}
+        if server_port:
+            allowed_ports.add(server_port)
+        if p.port is not None and p.port not in allowed_ports:
             raise HTTPException(status_code=403, detail="Forbidden: invalid origin port")
     sec_site = request.headers.get("sec-fetch-site")
     if sec_site == "cross-site":
@@ -728,7 +732,9 @@ def api_live_latency(series: str = "btc-up-or-down-5m"):
         "clob_mid": clob_mid,
         "latency_ms": latency_ms,
         "streaming_active": streaming_active,
+        "binance_ws_connected": bridge_st.get("binance_ws_connected", False),
         "rtds_connected": bridge_st.get("rtds_connected", False),
+        "active_spot_source": bridge_st.get("active_spot_source", "RTDS"),
         "clob_ws_connected": bridge_st.get("clob_ws_connected", False),
         "updated_ts": updated_ts,
     }
@@ -3161,12 +3167,12 @@ function renderStreamTelemetry(data) {
   }
 
   if (feedEl) {
-    const rtds = !!data.rtds_connected;
+    const spot = !!(data.binance_ws_connected || data.rtds_connected);
     const clob = !!data.clob_ws_connected;
-    if (rtds && clob) {
+    if (spot && clob) {
       feedEl.textContent = 'CONNECTED';
       feedEl.className = 'tel-badge ok';
-    } else if (rtds || clob) {
+    } else if (spot || clob) {
       feedEl.textContent = 'DEGRADED';
       feedEl.className = 'tel-badge warn';
     } else {
@@ -3216,6 +3222,11 @@ async function toggleCockpitBot() {
       body: JSON.stringify({ action: nextAction }),
     });
     const st = await res.json();
+    if (!res.ok) {
+      alert('Error toggling bot: ' + (st.detail || st.error || res.statusText));
+      await fetchCockpitState();
+      return;
+    }
     cockpitState = st;
     renderCockpitUI(st);
   } catch (e) {
@@ -3512,7 +3523,11 @@ function renderCockpitUI(st) {
   const streamPill = $('cockpitStreamPill');
   if (streamPill) {
     const sb = st.stream_bridge || {};
-    if (sb.rtds_connected || liveStreamConnected) {
+    if (sb.binance_ws_connected) {
+      streamPill.textContent = '🟢 BINANCE WS: <1s';
+      streamPill.className = 'pill pill-osc';
+      streamPill.style.color = 'var(--up)';
+    } else if (sb.rtds_connected || liveStreamConnected) {
       streamPill.textContent = '🟢 RTDS STREAM: 1s';
       streamPill.className = 'pill pill-osc';
       streamPill.style.color = 'var(--up)';
@@ -4299,7 +4314,8 @@ function initLiveCockpitStream() {
       liveStreamConnected = true;
       const sp = $('cockpitStreamPill');
       if (sp) {
-        sp.textContent = '🟢 RTDS STREAM: 1s';
+        const isBinance = cockpitState && cockpitState.stream_bridge && cockpitState.stream_bridge.binance_ws_connected;
+        sp.textContent = isBinance ? '🟢 BINANCE WS: <1s' : '🟢 RTDS STREAM: 1s';
         sp.className = 'pill pill-osc';
         sp.style.color = 'var(--up)';
       }

@@ -771,9 +771,9 @@ class LiveTraderEngine:
                             trigger_side = "DOWN"
 
             if trigger_side:
-                log.info("[%s] RTDS leading tick triggered fast stop exit for %s leg: spot=%.2f drift=%.3f",
+                log.info("[%s] Spot leading tick triggered fast stop exit for %s leg: spot=%.2f drift=%.3f",
                          slug, trigger_side, price, m.spot_drift)
-                note = f"RTDS Fast stop: drift {m.spot_drift:.3f} {'<=' if trigger_side == 'UP' else '>='} {'-' if trigger_side == 'UP' else ''}{self.spot_exit_drift:.3f}"
+                note = f"Spot Fast stop: drift {m.spot_drift:.3f} {'<=' if trigger_side == 'UP' else '>='} {'-' if trigger_side == 'UP' else ''}{self.spot_exit_drift:.3f}"
                 if self.mode == "live":
                     fut = self._executor.submit(self._execute_stop_exit, slug, m, trigger_side, None, note, now)
                     fut.add_done_callback(

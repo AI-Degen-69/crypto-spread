@@ -1,5 +1,6 @@
 """Unit tests for strategy/streaming.py real-time streaming bridge."""
 import asyncio
+import json
 import time
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -198,3 +199,169 @@ def test_unified_stream_bridge_lifecycle():
         assert "symbols" in status
         bridge.stop()
         assert not bridge.is_running
+
+
+def test_binance_direct_ws_book_ticker_payload():
+    """Verify BinanceDirectWSClient parses bookTicker payload and calculates mid price."""
+    from strategy.streaming import BinanceDirectWSClient
+
+    ticks = []
+
+    def on_tick(sym, ts, price):
+        ticks.append((sym, ts, price))
+
+    client = BinanceDirectWSClient(on_spot_tick=on_tick)
+
+    # Raw bookTicker payload
+    raw = json.dumps({
+        "u": 400900217,
+        "s": "BTCUSDT",
+        "b": "85000.00",
+        "B": "10.0",
+        "a": "85000.20",
+        "A": "15.0",
+    })
+    client._handle_raw_message(raw)
+
+    assert len(ticks) == 1
+    sym, ts, price = ticks[0]
+    assert sym == "btcusdt"
+    assert pytest.approx(price, 0.001) == 85000.10
+    assert client.spot_prices["btcusdt"] == 85000.10
+
+
+def test_binance_direct_ws_trade_payload():
+    """Verify BinanceDirectWSClient parses trade payload with execution price."""
+    from strategy.streaming import BinanceDirectWSClient
+
+    ticks = []
+    client = BinanceDirectWSClient(on_spot_tick=lambda sym, ts, price: ticks.append((sym, ts, price)))
+
+    raw = json.dumps({
+        "e": "trade",
+        "E": 1788394715123,
+        "s": "BNBUSDT",
+        "t": 123456,
+        "p": "620.50",
+        "q": "1.2",
+        "T": 1788394715100,
+    })
+    client._handle_raw_message(raw)
+
+    assert len(ticks) == 1
+    sym, ts, price = ticks[0]
+    assert sym == "bnbusdt"
+    assert ts == 1788394715100
+    assert price == 620.50
+    assert client.spot_prices["bnbusdt"] == 620.50
+
+
+def test_binance_direct_ws_combined_stream_envelope():
+    """Verify BinanceDirectWSClient handles combined /stream?streams= wrapper."""
+    from strategy.streaming import BinanceDirectWSClient
+
+    ticks = []
+    client = BinanceDirectWSClient(on_spot_tick=lambda sym, ts, price: ticks.append((sym, ts, price)))
+
+    raw = json.dumps({
+        "stream": "solusdt@bookTicker",
+        "data": {
+            "u": 5001,
+            "s": "SOLUSDT",
+            "b": "180.00",
+            "B": "5.0",
+            "a": "180.10",
+            "A": "8.0",
+        },
+    })
+    client._handle_raw_message(raw)
+
+    assert len(ticks) == 1
+    sym, ts, price = ticks[0]
+    assert sym == "solusdt"
+    assert pytest.approx(price, 0.001) == 180.05
+    assert client.spot_prices["solusdt"] == 180.05
+
+
+def test_binance_direct_ws_stop_event():
+    """Verify BinanceDirectWSClient stop() sets stop event."""
+    from strategy.streaming import BinanceDirectWSClient
+
+    client = BinanceDirectWSClient()
+    assert not client._stop_event.is_set()
+    client.stop()
+    assert client._stop_event.is_set()
+
+
+def test_unified_stream_bridge_primary_and_fallback():
+    """Verify UnifiedStreamBridge prioritizes Binance WS and falls back to RTDS."""
+    from strategy.streaming import BinanceDirectWSClient, RTDSStreamClient, UnifiedStreamBridge
+
+    ticks_received = []
+
+    def on_tick(sym, ts, price):
+        ticks_received.append((sym, ts, price))
+
+    bridge = UnifiedStreamBridge(symbols=["btcusdt"], on_spot_tick=on_tick)
+
+    # 1. When Binance WS is connected, Binance ticks are processed
+    bridge.binance.is_connected = True
+    bridge._handle_binance_spot_tick("btcusdt", 1000, 85000.0)
+
+    assert len(ticks_received) == 1
+    assert ticks_received[-1] == ("btcusdt", 1000, 85000.0)
+
+    # When RTDS tick arrives while Binance WS is connected, RTDS tick is secondary/skipped
+    bridge._handle_rtds_spot_tick("btcusdt", 1050, 85001.0)
+    assert len(ticks_received) == 1  # Not forwarded since Binance is connected
+
+    # 2. When Binance WS disconnects, RTDS ticks fall back to being forwarded
+    bridge.binance.is_connected = False
+    bridge._handle_rtds_spot_tick("btcusdt", 1100, 85002.0)
+
+    assert len(ticks_received) == 2
+    assert ticks_received[-1] == ("btcusdt", 1100, 85002.0)
+
+    status = bridge.get_status()
+    assert "binance_ws_connected" in status
+    assert status["binance_ws_connected"] is False
+    assert status["active_spot_source"] == "RTDS"
+
+    bridge.binance.is_connected = True
+    status = bridge.get_status()
+    assert status["binance_ws_connected"] is True
+    assert status["active_spot_source"] == "BINANCE_WS"
+
+
+def test_binance_direct_ws_edge_cases_and_shielding():
+    """Verify BinanceDirectWSClient shields against malformed frames and callback errors."""
+    from strategy.streaming import BinanceDirectWSClient
+
+    def buggy_callback(sym, ts, price):
+        raise RuntimeError("Callback crash")
+
+    client = BinanceDirectWSClient(on_spot_tick=buggy_callback)
+
+    # 1. Subscription control frame
+    assert client._parse_message('{"result": null, "id": 1}') is None
+
+    # 2. Non-dict frames
+    assert client._parse_message('"plain string"') is None
+    assert client._parse_message('[1, 2, 3]') is None
+
+    # 3. Malformed JSON
+    assert client._parse_message('{"s": "BTCUSDT", "b":') is None
+
+    # 4. Non-numeric price strings
+    assert client._parse_message('{"s": "BTCUSDT", "b": "bad", "a": "bad"}') is None
+
+    # 5. Non-positive prices
+    assert client._parse_message('{"s": "BTCUSDT", "b": "0", "a": "0"}') is None
+
+    # 6. Callback exception is caught and shielded inside _handle_raw_message
+    valid_raw = json.dumps({"s": "BTCUSDT", "b": "85000", "a": "85010"})
+    client._handle_raw_message(valid_raw)
+    # Execution continues cleanly, prices are updated despite callback exception
+    assert client.spot_prices["btcusdt"] == 85005.0
+
+

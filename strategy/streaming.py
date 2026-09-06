@@ -21,6 +21,13 @@ from typing import Callable, Dict, List, Optional, Any, Set
 import requests
 
 try:
+    import websockets
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:
+    WEBSOCKETS_AVAILABLE = False
+    websockets = None
+
+try:
     from polymarket import AsyncPublicClient, AsyncSecureClient
     from polymarket.streams import CryptoPricesSpec, MarketSpec, UserSpec
     POLYMARKET_AVAILABLE = True
@@ -76,6 +83,8 @@ SERIES_TO_SYMBOL = {
 }
 
 RTDS_SYMBOLS = ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
+BINANCE_SYMBOLS = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt"]
+
 
 
 def series_for_symbol(symbol: str) -> list[str]:
@@ -214,6 +223,145 @@ class RTDSStreamClient:
         finally:
             bnb_task.cancel()
             self.is_connected = False
+
+    def stop(self) -> None:
+        """Signal client to stop ingestion loop."""
+        self._stop_event.set()
+
+
+class BinanceDirectWSClient:
+    """Direct WebSocket client for Binance sub-second spot ticks and book tickers."""
+
+    def __init__(
+        self,
+        symbols: Optional[List[str]] = None,
+        on_spot_tick: Optional[Callable[[str, int, float], None]] = None,
+        ws_base_url: str = "wss://stream.binance.com:9443",
+    ):
+        """Initialize Binance direct WebSocket client."""
+        self.symbols = [s.lower() for s in (symbols or BINANCE_SYMBOLS)]
+        self.on_spot_tick = on_spot_tick
+        self.ws_base_url = ws_base_url
+        self.spot_prices: Dict[str, float] = {}
+        self.last_tick_ts: Dict[str, int] = {}
+        self.is_connected: bool = False
+        self._stop_event = asyncio.Event()
+
+    def _parse_message(self, raw_msg: str | bytes) -> Optional[tuple[str, int, float]]:
+        """Parse incoming WebSocket message from Binance stream."""
+        try:
+            msg = json.loads(raw_msg)
+
+            # Support combined stream format ({"stream": "...", "data": {...}}) or raw payload
+            data = msg.get("data") if isinstance(msg, dict) and "data" in msg else msg
+            if not isinstance(data, dict):
+                return None
+
+            raw_sym = data.get("s")
+            if not raw_sym:
+                stream = msg.get("stream", "") if isinstance(msg, dict) else ""
+                if "@" in stream:
+                    raw_sym = stream.split("@")[0]
+
+            if not raw_sym:
+                return None
+
+            symbol = str(raw_sym).lower()
+
+            # 1. bookTicker: "b" (best bid) and "a" (best ask)
+            price: Optional[float] = None
+            if "b" in data and "a" in data:
+                try:
+                    bid = float(data["b"])
+                    ask = float(data["a"])
+                    if bid > 0 and ask > 0:
+                        price = (bid + ask) / 2.0
+                    elif bid > 0:
+                        price = bid
+                    elif ask > 0:
+                        price = ask
+                except (ValueError, TypeError):
+                    price = None
+
+            # 2. trade: "p" (price)
+            if price is None and "p" in data:
+                try:
+                    price = float(data["p"])
+                except (ValueError, TypeError):
+                    price = None
+
+            # 3. 24hrTicker / miniTicker: "c" (close / last price)
+            if price is None and "c" in data:
+                try:
+                    price = float(data["c"])
+                except (ValueError, TypeError):
+                    price = None
+
+            if price is None or price <= 0:
+                return None
+
+            # bookTicker streams omit T/E event timestamps; fallback to local millisecond clock
+            raw_ts = data.get("T") or data.get("E")
+            ts = int(raw_ts) if raw_ts is not None else int(time.time() * 1000)
+            return symbol, ts, price
+        except Exception as e:
+            log.debug("Error parsing Binance WS message: %s", e)
+            return None
+
+    def _handle_raw_message(self, raw_msg: str | bytes) -> None:
+        """Process and dispatch incoming message from stream."""
+        try:
+            parsed = self._parse_message(raw_msg)
+            if not parsed:
+                return
+            symbol, ts, price = parsed
+            self.spot_prices[symbol] = price
+            self.last_tick_ts[symbol] = ts
+            if self.on_spot_tick:
+                self.on_spot_tick(symbol, ts, price)
+        except Exception as e:
+            log.debug("Error handling Binance WS message: %s", e)
+
+    async def run(self) -> None:
+        """Connect to Binance WebSocket stream with auto-reconnect loop."""
+        if not WEBSOCKETS_AVAILABLE or websockets is None:
+            log.warning("websockets package not available; BinanceDirectWSClient disabled")
+            return
+
+        stream_names = [f"{s}@bookTicker" for s in self.symbols]
+        combined_url = f"{self.ws_base_url}/stream?streams={'/'.join(stream_names)}"
+
+        backoff = 1.0
+        max_backoff = 30.0
+
+        while not self._stop_event.is_set():
+            try:
+                log.info("Connecting to Binance direct WebSocket: %s", combined_url)
+                async with websockets.connect(
+                    combined_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ) as ws:
+                    self.is_connected = True
+                    backoff = 1.0
+                    log.info("Connected to Binance direct WebSocket stream (%d symbols)", len(self.symbols))
+
+                    while not self._stop_event.is_set():
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                            self._handle_raw_message(msg)
+                        except asyncio.TimeoutError:
+                            continue
+            except Exception as e:
+                self.is_connected = False
+                if self._stop_event.is_set():
+                    break
+                log.debug("Binance WebSocket stream disconnect (%s); retrying in %.1fs", e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 1.5, max_backoff)
+            finally:
+                self.is_connected = False
 
     def stop(self) -> None:
         """Signal client to stop ingestion loop."""
@@ -465,15 +613,18 @@ class UnifiedStreamBridge:
     ):
         """Initialize unified stream bridge with callbacks."""
         self.symbols = symbols or RTDS_SYMBOLS
+        self.binance_symbols = BINANCE_SYMBOLS
         self.on_spot_tick_ext = on_spot_tick
         self.on_book_update_ext = on_book_update
         self.on_order_event_ext = on_order_event
 
-        self.rtds = RTDSStreamClient(symbols=self.symbols, on_spot_tick=self._handle_spot_tick)
+        self.binance = BinanceDirectWSClient(symbols=self.binance_symbols, on_spot_tick=self._handle_binance_spot_tick)
+        self.rtds = RTDSStreamClient(symbols=self.symbols, on_spot_tick=self._handle_rtds_spot_tick)
         self.clob = CLOBMarketWSClient(on_book_update=self._handle_book_update)
         self.user = UserSpecStreamClient(on_order_event=self._handle_order_event)
 
         self.is_running: bool = False
+        self._binance_task: Optional[asyncio.Task] = None
         self._rtds_task: Optional[asyncio.Task] = None
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -482,13 +633,34 @@ class UnifiedStreamBridge:
         self._lock = threading.Lock()
         self._subscribers: List[asyncio.Queue] = []
 
-    def _handle_spot_tick(self, symbol: str, ts: int, price: float) -> None:
-        """Handle incoming spot tick and broadcast envelope."""
+    def _handle_binance_spot_tick(self, symbol: str, ts: int, price: float) -> None:
+        """Handle incoming sub-second spot tick from Binance Direct WS."""
         if self.on_spot_tick_ext:
             self.on_spot_tick_ext(symbol, ts, price)
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
         slugs = series_for_symbol(symbol)
-        self._broadcast(stream_id="spot", data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug, "slugs": slugs})
+        self._broadcast(
+            stream_id="spot",
+            data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug, "slugs": slugs, "source": "BINANCE_WS"},
+        )
+
+    def _handle_rtds_spot_tick(self, symbol: str, ts: int, price: float) -> None:
+        """Handle incoming spot tick from RTDS or REST fallback (active when Binance WS disconnected)."""
+        if self.binance.is_connected:
+            return
+
+        if self.on_spot_tick_ext:
+            self.on_spot_tick_ext(symbol, ts, price)
+        slug = SYMBOL_TO_SERIES.get(symbol.lower())
+        slugs = series_for_symbol(symbol)
+        self._broadcast(
+            stream_id="spot",
+            data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug, "slugs": slugs, "source": "RTDS"},
+        )
+
+    def _handle_spot_tick(self, symbol: str, ts: int, price: float) -> None:
+        """Backward-compatible alias for spot tick handling."""
+        self._handle_binance_spot_tick(symbol, ts, price)
 
     def _handle_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
         """Handle incoming book snapshot/delta and broadcast envelope."""
@@ -528,7 +700,9 @@ class UnifiedStreamBridge:
 
             for q in list(self._subscribers):
                 try:
-                    self._loop.call_soon_threadsafe(_offer, q, msg)
+                    target_loop = getattr(q, "_loop", None) or self._loop
+                    if target_loop and target_loop.is_running():
+                        target_loop.call_soon_threadsafe(_offer, q, msg)
                 except Exception:
                     pass
 
@@ -560,10 +734,11 @@ class UnifiedStreamBridge:
         asyncio.set_event_loop(self._loop)
         self._loop_ready.set()
         try:
+            self._binance_task = self._loop.create_task(self.binance.run())
             self._rtds_task = self._loop.create_task(self.rtds.run())
             clob_task = self._loop.create_task(self.clob.run())
             user_task = self._loop.create_task(self.user.run())
-            self._tasks = [self._rtds_task, clob_task, user_task]
+            self._tasks = [self._binance_task, self._rtds_task, clob_task, user_task]
             self._loop.run_until_complete(asyncio.gather(*self._tasks, return_exceptions=True))
         except Exception as e:
             log.debug("Stream worker loop ended: %s", e)
@@ -578,6 +753,15 @@ class UnifiedStreamBridge:
                 pass
             self._loop.close()
             self.is_running = False
+
+    @property
+    def is_binance_running(self) -> bool:
+        """Check whether the Binance direct WS stream task is currently running."""
+        if not self.is_running:
+            return False
+        if self._binance_task is not None:
+            return not self._binance_task.done()
+        return True
 
     @property
     def is_rtds_running(self) -> bool:
@@ -596,6 +780,7 @@ class UnifiedStreamBridge:
         """Stop background worker thread gracefully."""
         if not self.is_running:
             return
+        self.binance.stop()
         self.rtds.stop()
         self.clob.stop()
         self.user.stop()
@@ -611,13 +796,22 @@ class UnifiedStreamBridge:
 
     def get_status(self) -> Dict[str, Any]:
         """Return streaming health and telemetry."""
+        if self.binance.is_connected:
+            active_source = "BINANCE_WS"
+            active_prices = {**self.rtds.spot_prices, **self.binance.spot_prices}
+        else:
+            active_source = "RTDS"
+            active_prices = {**self.binance.spot_prices, **self.rtds.spot_prices}
         return {
             "is_running": self.is_running,
+            "binance_ws_connected": self.binance.is_connected,
             "rtds_connected": self.rtds.is_connected,
             "clob_ws_connected": self.clob.is_connected,
             "user_ws_connected": self.user.is_connected,
-            "symbols": self.rtds.spot_prices,
+            "active_spot_source": active_source,
+            "symbols": active_prices,
             "token_count": len(self.clob.token_ids),
             "open_orders_count": len(self.user.open_orders),
             "seq": self._seq,
         }
+
