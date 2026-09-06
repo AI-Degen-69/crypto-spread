@@ -2027,7 +2027,9 @@ function showToast({ type = 'filled', title = '', message = '', durationMs = 500
 
   // Cap max visible toasts at 6
   while (container.children.length > 6) {
-    container.removeChild(container.children[0]);
+    const old = container.children[0];
+    if (old && old._dismissTimer) { clearTimeout(old._dismissTimer); old._dismissTimer = null; }
+    container.removeChild(old);
   }
 
   return toast;
