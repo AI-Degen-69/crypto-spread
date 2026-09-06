@@ -203,7 +203,7 @@ function Show-SystemStatus {
     if ($isListening) {
         try {
             $state = Invoke-RestMethod -Uri "$DashUrl/api/live/state" -UseBasicParsing -TimeoutSec 3
-            if ($state.active) {
+            if ($state.is_running -or $state.active) {
                 Write-ProfileSuccess -Message "Trading Engine" -Detail "ACTIVE (Mode: $($state.mode))"
             } else {
                 Write-ProfileInfo -Message "Trading Engine" -Detail "STANDBY (Mode: $($state.mode))"
@@ -370,8 +370,8 @@ function Start-PriceMonitor {
 # ── Menu Dispatcher ──
 switch -Exact ($Action.ToLower()) {
     "status"  { Show-SystemStatus; exit 0 }
-    "open"    { Host-Dashboard; exit 0 }
-    "stop"    { Stop-DashboardProcess; exit 0 }
+    "open"    { if (Host-Dashboard) { exit 0 } else { exit 1 } }
+    "stop"    { if (Stop-DashboardProcess) { exit 0 } else { exit 1 } }
     "compare" { Start-PriceMonitor -MonitorArgs $Remaining; exit 0 }
     ""        {
         # Interactive loop
