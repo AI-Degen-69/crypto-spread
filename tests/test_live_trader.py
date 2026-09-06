@@ -1061,7 +1061,7 @@ def test_get_open_orders_list_excludes_idle_and_tokenless_markets(monkeypatch):
     assert orders_quoting[1]["token_id"] == "tok_dn_123"
 
 
-def test_trade_event_market_slug():
+def test_trade_event_market_slug() -> None:
     """Verify TradeEvent supports market_slug with default empty string and preserves market_slug on events."""
     from strategy.live_trader import TradeEvent, LiveTraderEngine
     ev_default = TradeEvent(
@@ -1113,7 +1113,7 @@ def test_trade_event_market_slug():
     assert engine.trades[0].market_slug == "btc-updown-5m-active"
 
 
-def test_open_orders_and_positions_market_slug():
+def test_open_orders_and_positions_market_slug() -> None:
     """Verify get_open_orders_list and get_open_positions propagate market_slug and series_slug."""
     from strategy.live_trader import LiveTraderEngine
     engine = LiveTraderEngine(load_persisted=False)
@@ -1143,5 +1143,19 @@ def test_open_orders_and_positions_market_slug():
     assert positions[0]["series_slug"] == "btc-up-or-down-5m"
 
 
+def test_live_positions_slug_enrichment() -> None:
+    """Verify live mode open positions are enriched with market_slug and series_slug."""
+    from strategy.live_trader import LiveTraderEngine
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    m = engine.markets["btc-up-or-down-5m"]
+    m.condition_id = "0xcond123"
+    m.market_slug = "btc-updown-5m-live-window"
 
-
+    engine.open_positions = [
+        {"asset": "0xtok1", "conditionId": "0xcond123", "outcome": "Up", "size": 10.0}
+    ]
+    positions = engine.get_open_positions()
+    assert len(positions) == 1
+    assert positions[0]["market_slug"] == "btc-updown-5m-live-window"
+    assert positions[0]["series_slug"] == "btc-up-or-down-5m"

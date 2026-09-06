@@ -1182,7 +1182,21 @@ class LiveTraderEngine:
     def get_open_positions(self) -> List[Dict[str, Any]]:
         """Return currently open positions (dynamic for paper, wallet/clob for live, static for demo)."""
         if self.mode == "live":
-            return self.open_positions
+            enriched: List[Dict[str, Any]] = []
+            for p in self.open_positions:
+                p_copy = dict(p)
+                if not p_copy.get("market_slug") or not p_copy.get("series_slug"):
+                    cid = p_copy.get("conditionId") or p_copy.get("condition_id")
+                    asset_id = p_copy.get("asset")
+                    for m in self.markets.values():
+                        if (cid and m.condition_id == cid) or (asset_id and asset_id in (m.up_token, m.down_token)):
+                            if not p_copy.get("market_slug"):
+                                p_copy["market_slug"] = m.market_slug or ""
+                            if not p_copy.get("series_slug"):
+                                p_copy["series_slug"] = m.slug
+                            break
+                enriched.append(p_copy)
+            return enriched
 
         # Paper mode: dynamically synthesize open positions from active markets
         positions: List[Dict[str, Any]] = []
@@ -1845,7 +1859,8 @@ class LiveTraderEngine:
             time_str = datetime.datetime.fromtimestamp(last_ts).strftime("%H:%M:%S")
 
             m_obj = self.markets.get(series_slug)
-            ev_mkt_slug = m_obj.market_slug if (m_obj and m_obj.market_slug) else ""
+            slug_name = str(first.get("slug") or "")
+            ev_mkt_slug = slug_name or (m_obj.market_slug if (m_obj and m_obj.market_slug) else "")
 
             ev = TradeEvent(
                 id=f"{series_slug}_{last_ts}",

@@ -3811,7 +3811,7 @@ function renderCockpitUI(st) {
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
               <div style="display:flex;align-items:center;gap:6px">
                 <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${item.color}"></span>
-                <a href="https://polymarket.com/market/${encodeURIComponent(m.market_slug || item.slug)}" target="_blank" rel="noopener" style="font:700 13px var(--disp);letter-spacing:0.04em;color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View ${esc(item.label)} on Polymarket">${item.label} ↗</a>
+                <a href="https://polymarket.com/market/${encodeURIComponent(m.market_slug || item.slug)}" target="_blank" rel="noopener" style="font:700 13px var(--disp);letter-spacing:0.04em;color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View ${esc(item.label)} on Polymarket">${esc(item.label)} ↗</a>
               </div>
               <span class="mono" style="font-size:11px;color:var(--gold);font-weight:600">⏱ ${remStr}</span>
             </div>
