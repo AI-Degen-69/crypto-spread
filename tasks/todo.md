@@ -7,12 +7,12 @@
   - Files: `scripts/crypto-spread-menu.ps1`
 
 ## Phase 2: Process Control (`open` & `stop`)
-- [ ] Task 2: Implement `open` (background hosting) and PID safety tracking in `scripts/crypto-spread-menu.ps1`
+- [x] Task 2: Implement `open` (background hosting) and PID safety tracking in `scripts/crypto-spread-menu.ps1`
   - Acceptance: `open` launches `uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802` in hidden window, records PID + start ticks in `run/dash.pids.json`, verifies `:8802`, provides adoption check if already running, and opens browser.
   - Verify: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 open"`
   - Files: `scripts/crypto-spread-menu.ps1`
 
-- [ ] Task 3: Implement `stop` (tree cleanup & orphan sweep) in `scripts/crypto-spread-menu.ps1`
+- [x] Task 3: Implement `stop` (tree cleanup & orphan sweep) in `scripts/crypto-spread-menu.ps1`
   - Acceptance: `stop` tree-kills dashboard process (`taskkill /F /T`), verifies process exit, confirms `:8802` port release, and deletes `run/dash.pids.json`.
   - Verify: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 stop"`
   - Files: `scripts/crypto-spread-menu.ps1`

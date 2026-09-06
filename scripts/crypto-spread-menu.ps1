@@ -161,6 +161,19 @@ function Test-DashboardServer {
     }
 }
 
+function Adopt-DashboardInstance {
+    <# Record running dashboard process on port 8802 as owned by this menu. #>
+    $portPid = Get-PortPid
+    if (-not $portPid) { return $false }
+    try {
+        $proc = Get-Process -Id $portPid -ErrorAction Stop
+        Save-DashInstance -DashProcess $proc
+    } catch {
+        return $false
+    }
+    return ($null -ne (Get-DashInstance))
+}
+
 # ── Status Action ──
 function Show-SystemStatus {
     Write-ProfileBanner -Title "CRYPTO SPREAD — TELEMETRY & SYSTEM STATUS" -Subtitle "5m/15m BTC/ETH/BNB/SOL/XRP Spread Capture Lab"
@@ -253,13 +266,94 @@ function Show-SystemStatus {
     Write-Host ""
 }
 
-# ── Placeholders for open / stop / compare ──
+# ── Host Dashboard Action ──
 function Host-Dashboard {
-    Write-ProfileInfo -Message "Host-Dashboard" -Detail "Will be fully implemented in Task 2"
+    $inst = Get-DashInstance
+    if ($null -ne $inst) {
+        Write-ProfileSuccess -Message "Dashboard already running" -Detail "(PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
+        return $true
+    }
+    if (Test-Port) {
+        $portPid = Get-PortPid
+        if (Test-DashboardServer) {
+            $adopt = $false
+            if ($Action -ne "") {
+                $adopt = $true
+            } else {
+                $resp = Read-Host "  A dashboard is already serving on :$Port (PID $portPid). Adopt it so stop/status own it? [y/N]"
+                $adopt = ($resp -match '^[yY]')
+            }
+            if ($adopt -and (Adopt-DashboardInstance)) {
+                $inst = Get-DashInstance
+                Write-ProfileSuccess -Message "Adopted dashboard" -Detail "(PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
+                return $true
+            } else {
+                Write-ProfileWarning -Message "Adoption skipped for PID $portPid."
+                return $true
+            }
+        }
+        Write-ProfileError -Message "Port $Port occupied" -Detail "PID $portPid does NOT answer as a crypto-spread dashboard. Free the port manually first."
+        return $false
+    }
+    
+    Write-ProfileInfo -Message "Launching dashboard..." -Detail "python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port $Port"
+    $dash = Start-Process -FilePath "python" `
+        -ArgumentList "-m", "uvicorn", "server.osc_dash:app", "--host", "127.0.0.1", "--port", "$Port" `
+        -WorkingDirectory $ProjectPath -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $OutLog `
+        -RedirectStandardError  $ErrLog
+    Save-DashInstance -DashProcess $dash
+
+    $deadline = (Get-Date).AddSeconds(25)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Port) { break }
+        $dash.Refresh()
+        if ($dash.HasExited) { break }
+    }
+    if (-not (Test-Port)) {
+        Write-ProfileError -Message "Dashboard failed to bind port $Port." -Detail "See $ErrLog"
+        Remove-Item $DashPidFile -ErrorAction SilentlyContinue
+        return $false
+    }
+    Write-ProfileSuccess -Message "Dashboard serving on $DashUrl" -Detail "(PID $($dash.Id))."
+    try { Start-Process $DashUrl } catch {}
+    return $true
+}
+
+function Wait-ProcessGone {
+    param([int]$ProcessId, [int]$TimeoutSec = 10)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    return (-not [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
 }
 
 function Stop-DashboardProcess {
-    Write-ProfileInfo -Message "Stop-DashboardProcess" -Detail "Will be fully implemented in Task 3"
+    $inst = Get-DashInstance
+    $stopped = $false
+    if ($null -ne $inst) {
+        Write-ProfileInfo -Message "Stopping dashboard PID $($inst.pid)..."
+        taskkill /F /T /PID $inst.pid 2>$null | Out-Null
+        if (Wait-ProcessGone -ProcessId $inst.pid) {
+            Write-ProfileSuccess -Message "Dashboard process tree stopped."
+            $stopped = $true
+            Remove-Item $DashPidFile -ErrorAction SilentlyContinue
+        } else {
+            Write-ProfileWarning -Message "Dashboard PID $($inst.pid) did not exit cleanly; PID record kept."
+        }
+    }
+    if ($null -eq $inst) { Remove-Item $DashPidFile -ErrorAction SilentlyContinue }
+    if (Test-Port) {
+        Write-ProfileWarning -Message "Port $Port still LISTENING" -Detail "(PID $(Get-PortPid)) — not owned by menu registry, left running."
+        return $false
+    }
+    Write-ProfileSuccess -Message "Port $Port free."
+    return $true
 }
 
 function Start-PriceMonitor {
