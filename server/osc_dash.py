@@ -24,11 +24,12 @@ import time
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.gzip import GZipMiddleware
 
 from strategy.live_trader import get_live_trader_engine, fetch_polymarket_account_value
@@ -43,6 +44,21 @@ TICKS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Crypto Spread Lab")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Format FastAPI request validation errors into a clear JSON error payload."""
+    errors = []
+    for err in exc.errors():
+        field = ".".join(str(loc) for loc in err.get("loc", []) if loc != "body")
+        msg = err.get("msg", "Invalid value")
+        errors.append(f"{field}: {msg}" if field else msg)
+    err_str = "; ".join(errors)
+    return JSONResponse(
+        status_code=422,
+        content={"error": f"Invalid configuration: {err_str}", "detail": exc.errors()},
+    )
 
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
@@ -826,13 +842,41 @@ class LiveConfigPayload(BaseModel):
 
     offset: Optional[float] = Field(default=None, ge=0.001, le=0.49)
     exit_thresh: Optional[float] = Field(default=None, ge=0.001, le=0.50)
-    shares: Optional[int] = Field(default=None, ge=1, le=10000)
+    shares: Optional[int] = Field(default=None, ge=5, le=10000)
     mode: Optional[str] = Field(default=None, pattern="^(paper|live)$")
     wallet_address: Optional[str] = None
-    starting_balance: Optional[float] = Field(default=None, ge=0.0)
+    starting_balance: Optional[float] = Field(default=None, ge=5.0)
     selected_markets: Optional[list[str]] = None
     tokens: Optional[list[str]] = None
     durations: Optional[list[int]] = None
+
+    @field_validator("offset", mode="before")
+    @classmethod
+    def normalize_offset(cls, v: Any) -> Any:
+        """Normalize whole-number offset values (1-49) entered as cents to decimal dollars."""
+        if v is not None:
+            try:
+                fv = float(v)
+                if 1.0 <= fv <= 49.0:
+                    return fv / 100.0
+                return fv
+            except (ValueError, TypeError):
+                pass
+        return v
+
+    @field_validator("exit_thresh", mode="before")
+    @classmethod
+    def normalize_exit_thresh(cls, v: Any) -> Any:
+        """Normalize whole-number exit threshold values (1-50) entered as cents to decimal dollars."""
+        if v is not None:
+            try:
+                fv = float(v)
+                if 1.0 <= fv <= 50.0:
+                    return fv / 100.0
+                return fv
+            except (ValueError, TypeError):
+                pass
+        return v
 
 
 @app.post("/api/live/config")
@@ -1282,7 +1326,11 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 @media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
-.form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono)}
+.form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+.form-group input::placeholder{color:var(--faint,#78879b);opacity:0.75}
+.form-group input.input-invalid{border:1px solid var(--down,#f0684d) !important;box-shadow:0 0 6px rgba(240,104,77,0.45) !important;background:rgba(240,104,77,0.06) !important}
+.form-group .input-hint{font:500 10px var(--mono);color:var(--faint,#78879b);margin-top:2px;display:block}
+.form-group .input-hint.err{color:var(--down,#f0684d);font-weight:600}
 .tab-content{display:none}
 .tab-content.active{display:block}
 .toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
@@ -1653,15 +1701,15 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div class="form-grid" style="margin-top:10px">
         <div class="form-group">
           <label>Spread Offset (Rest @ 0.50 - offset)</label>
-          <input type="number" step="0.005" id="cockpitOffset" value="0.02">
+          <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" value="0.02" placeholder="0.001 – 0.490" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label>Exit Stop Loss Threshold ($)</label>
-          <input type="number" step="0.01" id="cockpitExit" value="0.05">
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label>Share Size (per leg)</label>
-          <input type="number" min="1" step="1" id="cockpitShares" value="5">
+          <input type="number" min="5" max="10000" step="1" id="cockpitShares" value="5" placeholder="5 – 10000" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label>Execution Mode</label>
@@ -1676,7 +1724,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label id="lblCockpitStartBal">Starting Portfolio Balance ($)</label>
-          <input type="number" step="10" id="cockpitStartBal" value="1000.00">
+          <input type="number" min="5" step="10" id="cockpitStartBal" value="1000.00" placeholder="≥ 5.00" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group" style="justify-content:flex-end;align-items:flex-end;gap:6px">
           <span id="cockpitParamsLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn,#f0b90b);letter-spacing:0.04em;text-align:right">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS</span>
@@ -3045,6 +3093,9 @@ function updateCockpitParamsLockUI(locked) {
 
   const hint = $('cockpitParamsLockHint');
   if (hint) hint.style.display = locked ? 'inline' : 'none';
+  if (!locked && typeof validateCockpitInputs === 'function') {
+    validateCockpitInputs();
+  }
 }
 
 function cockpitFilterProductSlugs(tokens, durations) {
@@ -3397,11 +3448,100 @@ async function onCockpitModeChange(autoApply = true) {
   }
 }
 
+function validateCockpitInputs() {
+  let allValid = true;
+
+  // 1. Offset: 0.001 to 0.490
+  const offsetEl = $('cockpitOffset');
+  if (offsetEl) {
+    const raw = offsetEl.value.trim();
+    const val = parseFloat(raw);
+    if (raw === '' || isNaN(val) || val < 0.001 || val > 0.490) {
+      offsetEl.classList.add('input-invalid');
+      allValid = false;
+    } else {
+      offsetEl.classList.remove('input-invalid');
+    }
+  }
+
+  // 2. Exit Threshold: 0.001 to 0.500
+  const exitEl = $('cockpitExit');
+  if (exitEl) {
+    const raw = exitEl.value.trim();
+    const val = parseFloat(raw);
+    if (raw === '' || isNaN(val) || val < 0.001 || val > 0.500) {
+      exitEl.classList.add('input-invalid');
+      allValid = false;
+    } else {
+      exitEl.classList.remove('input-invalid');
+    }
+  }
+
+  // 3. Shares: 5 to 10000
+  const sharesEl = $('cockpitShares');
+  if (sharesEl) {
+    const raw = sharesEl.value.trim();
+    const val = parseInt(raw, 10);
+    if (raw === '' || isNaN(val) || val < 5 || val > 10000 || !Number.isInteger(Number(raw))) {
+      sharesEl.classList.add('input-invalid');
+      allValid = false;
+    } else {
+      sharesEl.classList.remove('input-invalid');
+    }
+  }
+
+  // 4. Starting Balance: >= 5.0
+  const startBalEl = $('cockpitStartBal');
+  if (startBalEl && !startBalEl.readOnly) {
+    const raw = startBalEl.value.trim();
+    const val = parseFloat(raw);
+    if (raw === '' || isNaN(val) || val < 5.0) {
+      startBalEl.classList.add('input-invalid');
+      allValid = false;
+    } else {
+      startBalEl.classList.remove('input-invalid');
+    }
+  }
+
+  const applyBtn = $('btnApplyParams');
+  if (applyBtn && !areCockpitFiltersLocked()) {
+    applyBtn.disabled = !allValid;
+    applyBtn.style.opacity = allValid ? '' : '0.5';
+    applyBtn.style.cursor = allValid ? 'pointer' : 'not-allowed';
+    applyBtn.title = allValid ? 'Apply strategy parameters' : 'Fix invalid parameters marked with red border';
+  }
+
+  return allValid;
+}
+
 async function applyCockpitConfig() {
   if (cockpitState && cockpitState.is_running) {
     return;
   }
+  const filtersLocked = areCockpitFiltersLocked();
   if (isApplyingCockpitConfig) return;
+
+  // Auto-convert whole numbers entered as cents (e.g. 2 -> 0.02, 5 -> 0.05)
+  const offsetEl = $('cockpitOffset');
+  if (offsetEl) {
+    let ov = parseFloat(offsetEl.value);
+    if (!isNaN(ov) && ov >= 1.0 && ov <= 49.0) {
+      offsetEl.value = (ov / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    }
+  }
+  const exitEl = $('cockpitExit');
+  if (exitEl) {
+    let ev = parseFloat(exitEl.value);
+    if (!isNaN(ev) && ev >= 1.0 && ev <= 50.0) {
+      exitEl.value = (ev / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    }
+  }
+
+  if (!validateCockpitInputs()) {
+    alert('Please correct the invalid parameters highlighted with a red border before applying.');
+    return;
+  }
+
   isApplyingCockpitConfig = true;
   const offset = parseFloat($('cockpitOffset').value) || 0.02;
   const exit_thresh = parseFloat($('cockpitExit').value) || 0.05;
@@ -3418,7 +3558,7 @@ async function applyCockpitConfig() {
     starting_balance: startBal,
   };
   // Market selection is immutable while the bot runs; only send filters when stopped
-  if (!areCockpitFiltersLocked()) {
+  if (!filtersLocked) {
     if (cockpitExactSelection) {
       body.selected_markets = cockpitExactSelection;
     } else {
@@ -3435,9 +3575,14 @@ async function applyCockpitConfig() {
     });
     const st = await res.json();
     if (!res.ok) {
-      alert('Configuration rejected: ' + (st.error || res.statusText));
-      await fetchCockpitState();
-      syncCockpitFiltersFromState(cockpitState);
+      let errMsg = st.error;
+      if (!errMsg && Array.isArray(st.detail)) {
+        errMsg = st.detail.map(d => {
+          const loc = (d.loc || []).filter(x => x !== 'body').join('.');
+          return (loc ? loc + ': ' : '') + d.msg;
+        }).join('; ');
+      }
+      alert('Configuration rejected: ' + (errMsg || res.statusText));
       return;
     }
     cockpitState = st;
