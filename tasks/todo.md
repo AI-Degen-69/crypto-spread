@@ -18,7 +18,7 @@
   - Files: `scripts/crypto-spread-menu.ps1`
 
 ## Checkpoint 1: Core Process Control & Telemetry Operational
-- [ ] Status, open, and stop actions verified via `pwsh -NoProfile`.
+- [x] Status, open, and stop actions verified via `pwsh -NoProfile`.
 
 ## Phase 3: Live Price Stream Monitor & Terminal Wrapper (`compare` & `csm`)
 - [x] Task 4: Implement `compare` action in `scripts/crypto-spread-menu.ps1`
@@ -32,11 +32,11 @@
   - Files: `C:\Program Files\PowerShell\7\profile.ps1`
 
 ## Phase 4: Automated Verification & Integration
-- [ ] Task 6: Add Pytest verification suite in `tests/test_crypto_spread_menu.py`
+- [x] Task 6: Add Pytest verification suite in `tests/test_crypto_spread_menu.py`
   - Acceptance: Tests PID registry JSON format, start ticks validation, and verifies full test suite passes.
   - Verify: `python -m pytest tests/test_crypto_spread_menu.py -q`
   - Files: `tests/test_crypto_spread_menu.py`
 
 ## Checkpoint 2: Complete Implementation & Final Verification
-- [ ] All 6 tasks completed.
-- [ ] `python -m pytest -q` passes all tests.
+- [x] All 6 tasks completed.
+- [x] `python -m pytest -q` passes all tests.

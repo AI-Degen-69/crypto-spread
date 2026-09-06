@@ -30,9 +30,9 @@ Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) fo
   - **Files**: `scripts/crypto-spread-menu.ps1`
 
 ### Checkpoint 1: Core Process Control & Telemetry Operational
-- [ ] `status` action renders formatted system dashboard.
-- [ ] `open` action starts dashboard in background, writes PID registry, and opens browser.
-- [ ] `stop` action cleanly kills process tree and frees port `:8802`.
+- [x] `status` action renders formatted system dashboard.
+- [x] `open` action starts dashboard in background, writes PID registry, and opens browser.
+- [x] `stop` action cleanly kills process tree and frees port `:8802`.
 
 ### Phase 3: Live Price Stream Monitor & Terminal Wrapper (`compare` & `csm`)
 - [x] Task 4: Implement `compare` action in `scripts/crypto-spread-menu.ps1`
@@ -46,15 +46,15 @@ Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) fo
   - **Files**: `C:\Program Files\PowerShell\7\profile.ps1`
 
 ### Phase 4: Automated Verification & Integration
-- [ ] Task 6: Add Pytest verification suite in `tests/test_crypto_spread_menu.py`
+- [x] Task 6: Add Pytest verification suite in `tests/test_crypto_spread_menu.py`
   - **Acceptance**: Tests PID registry JSON format, start ticks validation, and verifies full test suite passes.
   - **Verify**: `python -m pytest tests/test_crypto_spread_menu.py -q`
   - **Files**: `tests/test_crypto_spread_menu.py`
 
 ### Checkpoint 2: Complete Implementation & Final Verification
-- [ ] Interactive menu `[1]`, `[2]`, `[3]`, `[4]`, `[q]` and direct CLI parameters (`status`, `open`, `stop`, `compare`) execute cleanly.
-- [ ] Global `csm` alias works from any directory.
-- [ ] All unit tests pass: `python -m pytest -q`.
+- [x] Interactive menu `[1]`, `[2]`, `[3]`, `[4]`, `[q]` and direct CLI parameters (`status`, `open`, `stop`, `compare`) execute cleanly.
+- [x] Global `csm` alias works from any directory.
+- [x] All unit tests pass: `python -m pytest -q`.
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
