@@ -1390,6 +1390,22 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .tel-badge.warn{background:rgba(243,186,47,.15);color:var(--gold);border:1px solid rgba(243,186,47,.3)}
 .tel-badge.err{background:rgba(240,104,77,.15);color:var(--down);border:1px solid rgba(240,104,77,.3)}
 .tel-badge.idle{background:rgba(120,135,155,.15);color:var(--dim);border:1px solid rgba(120,135,155,.3)}
+/* Floating Side Toast Notifications (Issue #81) */
+.toast-container{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:360px;width:calc(100vw - 40px);pointer-events:none}
+.toast{pointer-events:auto;background:var(--panel2);border:1px solid var(--line-hi);border-radius:8px;padding:10px 14px;color:var(--tx);font:12px/1.4 var(--body);box-shadow:0 4px 16px rgba(0,0,0,.5);display:flex;align-items:flex-start;justify-content:space-between;gap:10px;animation:toast-slide-in .25s cubic-bezier(.16,1,.3,1) forwards;transition:opacity .25s ease,transform .25s ease}
+.toast.fade-out{opacity:0;transform:translateX(30px)}
+@keyframes toast-slide-in{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+.toast-merged{border-left:4px solid var(--up);background:linear-gradient(90deg,rgba(51,201,181,.12) 0%,var(--panel2) 100%)}
+.toast-stoploss{border-left:4px solid var(--down);background:linear-gradient(90deg,rgba(240,104,77,.12) 0%,var(--panel2) 100%)}
+.toast-filled{border-left:4px solid var(--line-hi);background:var(--panel2)}
+.toast-content{flex:1}
+.toast-header{display:flex;align-items:center;gap:6px;margin-bottom:2px;font:700 12px var(--disp)}
+.toast-header-merged{color:var(--up)}
+.toast-header-stoploss{color:var(--down)}
+.toast-header-filled{color:var(--tx)}
+.toast-msg{font:11px var(--mono);color:var(--dim);word-break:break-word}
+.toast-close{background:none;border:none;color:var(--faint);font-size:16px;line-height:1;cursor:pointer;padding:0 2px;transition:color .15s ease}
+.toast-close:hover{color:var(--tx)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -1946,6 +1962,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   </div>
 </div>
 
+<div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
 <script>
 const $=s=>document.getElementById(s);
 const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -1963,6 +1981,163 @@ const fmtPrice=(p)=>{
 };
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
 function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating'):c==='monotonic'?pill('pill-mono','monotonic'):c==='flat'?pill('pill-flat','flat'):pill('pill-flat',esc(c));}
+
+// Floating Side Toast Notifications (Issue #81)
+function showToast({ type = 'filled', title = '', message = '', durationMs = 5000 } = {}) {
+  const container = $('toastContainer');
+  if (!container) return null;
+
+  const toast = document.createElement('div');
+  toast.className = 'toast toast-' + type;
+
+  const content = document.createElement('div');
+  content.className = 'toast-content';
+
+  const header = document.createElement('div');
+  header.className = 'toast-header toast-header-' + type;
+  const icon = type === 'merged' ? '🟢' : type === 'stoploss' ? '🔴' : '⚪';
+  header.textContent = icon + ' ' + title;
+
+  const msg = document.createElement('div');
+  msg.className = 'toast-msg';
+  msg.textContent = message;
+
+  content.appendChild(header);
+  content.appendChild(msg);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'toast-close';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.onclick = function(e) {
+    e.stopPropagation();
+    toast.classList.add('fade-out');
+    if (toast._dismissTimer) { clearTimeout(toast._dismissTimer); toast._dismissTimer = null; }
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 280);
+  };
+
+  toast.appendChild(content);
+  toast.appendChild(closeBtn);
+  container.appendChild(toast);
+
+  toast._dismissTimer = setTimeout(function() {
+    toast._dismissTimer = null;
+    toast.classList.add('fade-out');
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 280);
+  }, durationMs);
+
+  // Cap max visible toasts at 6
+  while (container.children.length > 6) {
+    const old = container.children[0];
+    if (old && old._dismissTimer) { clearTimeout(old._dismissTimer); old._dismissTimer = null; }
+    container.removeChild(old);
+  }
+
+  return toast;
+}
+
+let _toastInitialized = false;
+let _seenTradeIds = new Set();
+let _prevMarketFills = {}; // slug -> { filled_up: bool, filled_down: bool }
+
+function resetToastState() {
+  _seenTradeIds.clear();
+  _prevMarketFills = {};
+  _toastInitialized = false;
+}
+
+function reconcileCockpitToasts(st) {
+  if (!st) return;
+
+  // 1. Initial boot / page load seeding: suppress historical notifications
+  if (!_toastInitialized) {
+    _toastInitialized = true;
+    if (Array.isArray(st.trades)) {
+      st.trades.forEach(t => {
+        if (t && t.id) _seenTradeIds.add(t.id);
+      });
+    }
+    if (st.markets) {
+      for (const [slug, m] of Object.entries(st.markets)) {
+        if (m) {
+          _prevMarketFills[slug] = {
+            filled_up: !!m.filled_up,
+            filled_down: !!m.filled_down
+          };
+        }
+      }
+    }
+    return;
+  }
+
+  // 2. Detect new Trade Events (Position Merged & Stop-Loss Exits)
+  if (Array.isArray(st.trades)) {
+    st.trades.forEach(t => {
+      if (!t || !t.id) return;
+      if (!_seenTradeIds.has(t.id)) {
+        _seenTradeIds.add(t.id);
+        const mktLabel = t.label || t.market || t.slug || 'Market';
+        const action = String(t.action || '').toUpperCase();
+
+        if (action === 'PAIR_MERGE') {
+          const shares = t.shares || 0;
+          const pnlUsd = t.pnl_usd != null ? (t.pnl_usd >= 0 ? `+$${t.pnl_usd.toFixed(2)}` : `-$${Math.abs(t.pnl_usd).toFixed(2)}`) : '+$0.00';
+          const pnlPct = t.pnl_pct != null ? ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%)` : '';
+          showToast({
+            type: 'merged',
+            title: 'Position Merged',
+            message: `${mktLabel}: ${shares} pairs merged back to USDC (${pnlUsd}${pnlPct})`
+          });
+        } else if (action.startsWith('STOP') || action === 'STOP_EXIT_UP' || action === 'STOP_EXIT_DOWN') {
+          const isUp = action.includes('UP') || (t.notes && t.notes.includes('UP'));
+          const isDown = action.includes('DOWN') || (t.notes && t.notes.includes('DOWN'));
+          const leg = isUp ? 'UP' : (isDown ? 'DOWN' : 'Position');
+          const exitPrice = t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '-';
+          const pnlUsd = t.pnl_usd != null ? (t.pnl_usd >= 0 ? `+$${t.pnl_usd.toFixed(2)}` : `-$${Math.abs(t.pnl_usd).toFixed(2)}`) : '$0.00';
+          showToast({
+            type: 'stoploss',
+            title: 'Stop-Loss Exit',
+            message: `${mktLabel} (${leg}): Stopped out @ ${exitPrice} (${pnlUsd})`
+          });
+        }
+      }
+    });
+  }
+
+  // 3. Detect new Market Leg Fills (Order Filled)
+  if (st.markets) {
+    for (const [slug, m] of Object.entries(st.markets)) {
+      if (!m) continue;
+      const prev = _prevMarketFills[slug] || { filled_up: false, filled_down: false };
+      const mktLabel = m.label || slug;
+      const shares = m.order_shares || 5;
+
+      // Check UP leg fill transition
+      if (!prev.filled_up && m.filled_up) {
+        const price = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
+        showToast({
+          type: 'filled',
+          title: 'Order Filled',
+          message: `${mktLabel} (UP): ${shares} shares filled @ $${price.toFixed(2)}`
+        });
+      }
+
+      // Check DOWN leg fill transition
+      if (!prev.filled_down && m.filled_down) {
+        const price = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
+        showToast({
+          type: 'filled',
+          title: 'Order Filled',
+          message: `${mktLabel} (DOWN): ${shares} shares filled @ $${price.toFixed(2)}`
+        });
+      }
+
+      _prevMarketFills[slug] = {
+        filled_up: !!m.filled_up,
+        filled_down: !!m.filled_down
+      };
+    }
+  }
+}
 
 // Orders & Trades Tab State & Switching (Issue #59)
 let activeOtTab = (typeof localStorage !== 'undefined' && localStorage.getItem('crypto-spread-ot-view')) || 'orders';
@@ -3433,6 +3608,7 @@ async function resetCockpitPnL() {
     });
     const st = await res.json();
     cockpitState = st;
+    resetToastState();
     renderCockpitUI(st);
   } catch (e) {
     alert('Error resetting PnL: ' + e);
@@ -3448,6 +3624,7 @@ async function loadCockpitDemoData() {
     });
     const st = await res.json();
     cockpitState = st;
+    resetToastState();
     renderCockpitUI(st);
   } catch (e) {
     alert('Error loading demo data: ' + e);
@@ -3683,6 +3860,8 @@ function setCockpitChartMode(mode) {
 
 function renderCockpitUI(st) {
   if (!st) return;
+
+  reconcileCockpitToasts(st);
 
   const sbDot = $('sidebarStatusDot');
   const sbText = $('sidebarStatusText');

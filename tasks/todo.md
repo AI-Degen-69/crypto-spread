@@ -1,5 +1,6 @@
-# Tasks: Issue #83 Merge paired timestamp cells and refine column separator in cockpit tables
+# Tasks Checklist — Issue #81
 
-- [x] Task 1: Merge timestamp cells & move status border in Open Orders table (`server/osc_dash.py`)
-- [x] Task 2: Merge timestamp cells & move status border in Positions table (`server/osc_dash.py`)
-- [x] Task 3: Update and expand unit & DOM integration tests (`tests/test_orders_trades_table.py`)
+- [x] Task 1: DOM Container & CSS Styles for Floating Toasts
+- [x] Task 2: Toast Helper Function (showToast) & Dismissal Handling
+- [x] Task 3: State Reconciliation & Diffing Logic (econcileCockpitToasts)
+- [x] Task 4: Full Suite Regression Verification

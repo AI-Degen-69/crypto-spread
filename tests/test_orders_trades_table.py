@@ -911,3 +911,295 @@ def test_cancelled_orders_table_rendering_dom():
     res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
     assert res.returncode == 0, f"Node cancelled orders table test failed: {res.stderr}\n{res.stdout}"
     assert "CANCELLED_ORDERS_TABLE_DOM_TESTS_PASSED" in res.stdout
+
+
+def test_toast_container_and_css():
+    """Verify #toastContainer exists in dashboard DOM and toast CSS styles are defined (Issue #81)."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # 1. Container element in DOM
+    assert 'id="toastContainer"' in html
+    assert 'class="toast-container"' in html or "toast-container" in html
+
+    # 2. CSS rules
+    assert ".toast-container" in html
+    assert ".toast{" in html or ".toast {" in html or ".toast " in html
+    assert ".toast-merged" in html
+    assert ".toast-stoploss" in html
+    assert ".toast-filled" in html
+    assert ".toast-close" in html
+    assert "z-index:9999" in html or "z-index: 9999" in html
+
+
+@requires_node
+def test_show_toast_dom_and_lifecycle():
+    """Verify showToast helper creates correct DOM structure, variant classes, close button, and auto-dismiss (Issue #81)."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function makeElement(tag, id = '') {{
+      const el = {{
+        tagName: tag.toUpperCase(),
+        id,
+        textContent: '',
+        innerHTML: '',
+        className: '',
+        classList: {{
+          classes: new Set(),
+          add(c) {{ this.classes.add(c); }},
+          remove(c) {{ this.classes.delete(c); }},
+          contains(c) {{ return this.classes.has(c); }}
+        }},
+        children: [],
+        parentNode: null,
+        appendChild(child) {{
+          this.children.push(child);
+          child.parentNode = this;
+          return child;
+        }},
+        removeChild(child) {{
+          const idx = this.children.indexOf(child);
+          if (idx >= 0) this.children.splice(idx, 1);
+          child.parentNode = null;
+          return child;
+        }},
+        setAttribute(k, v) {{ this[k] = v; }},
+        style: {{}},
+        onclick: null
+      }};
+      return el;
+    }}
+
+    const container = makeElement('div', 'toastContainer');
+    container.className = 'toast-container';
+    elements['toastContainer'] = container;
+
+    global.document = {{
+      getElementById: (id) => elements[id] || null,
+      createElement: (tag) => makeElement(tag)
+    }};
+    global.window = global;
+
+    {js_code}
+
+    if (typeof showToast !== 'function') {{
+      throw new Error('showToast function is not defined');
+    }}
+
+    // 1. Create a merged toast
+    const tMerged = showToast({{ type: 'merged', title: 'Position Merged', message: 'BTC 5m: 5 shares merged', durationMs: 1000 }});
+    if (!tMerged) throw new Error('showToast returned null');
+    if (!tMerged.className.includes('toast-merged')) {{
+      throw new Error('Expected toast-merged class, got: ' + tMerged.className);
+    }}
+    if (container.children.length !== 1) {{
+      throw new Error('Expected 1 toast in container, got: ' + container.children.length);
+    }}
+
+    // 2. Create a stoploss toast
+    const tStop = showToast({{ type: 'stoploss', title: 'Stop-Loss Exit', message: 'ETH 5m: Exited @ $0.42', durationMs: 1000 }});
+    if (!tStop.className.includes('toast-stoploss')) {{
+      throw new Error('Expected toast-stoploss class, got: ' + tStop.className);
+    }}
+
+    // 3. Create a filled toast
+    const tFill = showToast({{ type: 'filled', title: 'Order Filled', message: 'SOL 5m (UP): 5 shares @ $0.48', durationMs: 1000 }});
+    if (!tFill.className.includes('toast-filled')) {{
+      throw new Error('Expected toast-filled class, got: ' + tFill.className);
+    }}
+    if (container.children.length !== 3) {{
+      throw new Error('Expected 3 toasts in container, got: ' + container.children.length);
+    }}
+
+    // 4. Test manual close button click
+    const closeBtn = tFill.children.find(c => c.className === 'toast-close');
+    if (!closeBtn) throw new Error('Missing close button on toast');
+    if (typeof closeBtn.onclick !== 'function') throw new Error('Close button has no onclick handler');
+    closeBtn.onclick({{ stopPropagation: () => {{}} }});
+    if (!tFill.classList.contains('fade-out')) {{
+      throw new Error('Toast did not get fade-out class on close click');
+    }}
+
+    console.log('SHOW_TOAST_DOM_AND_LIFECYCLE_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node showToast test failed: {res.stderr}\n{res.stdout}"
+    assert "SHOW_TOAST_DOM_AND_LIFECYCLE_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_reconcile_cockpit_toasts():
+    """Verify reconcileCockpitToasts suppresses toasts on boot and triggers on new merges, stops, and fills (Issue #81)."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function makeElement(tag, id = '') {{
+      const el = {{
+        tagName: tag.toUpperCase(),
+        id,
+        textContent: '',
+        innerHTML: '',
+        className: '',
+        classList: {{
+          classes: new Set(),
+          add(c) {{ this.classes.add(c); }},
+          remove(c) {{ this.classes.delete(c); }},
+          contains(c) {{ return this.classes.has(c); }}
+        }},
+        children: [],
+        parentNode: null,
+        appendChild(child) {{
+          this.children.push(child);
+          child.parentNode = this;
+          return child;
+        }},
+        removeChild(child) {{
+          const idx = this.children.indexOf(child);
+          if (idx >= 0) this.children.splice(idx, 1);
+          child.parentNode = null;
+          return child;
+        }},
+        querySelectorAll: () => [],
+        setAttribute(k, v) {{ this[k] = v; }},
+        style: {{}},
+        onclick: null
+      }};
+      return el;
+    }}
+
+    const container = makeElement('div', 'toastContainer');
+    container.className = 'toast-container';
+    elements['toastContainer'] = container;
+
+    // Elements required by renderCockpitUI
+    ['cockpitStatusPill', 'cockpitModePill', 'cockpitStreamPill', 'btnCockpitToggle',
+     'cockpitRealizedPnl', 'cockpitRealizedSub', 'cockpitPortfolioVal', 'cockpitWinRate',
+     'cockpitTradesSummary', 'cockpitPairsCount', 'cockpitStopsCount', 'cockpitExposure',
+     'cockpitMarketGrid', 'cockpitActiveMarketsBadge', 'cockpitOrdersBody', 'otOrdersCount',
+     'cockpitPositionsBody', 'otPositionsCount', 'cockpitTradesBody', 'otTradesCount',
+     'sidebarStatusDot', 'sidebarStatusText'].forEach(id => {{
+      elements[id] = makeElement('div', id);
+    }});
+
+    global.document = {{
+      getElementById: (id) => elements[id] || null,
+      createElement: (tag) => makeElement(tag),
+      activeElement: null
+    }};
+    global.window = global;
+
+    {js_code}
+
+    if (typeof reconcileCockpitToasts !== 'function') {{
+      throw new Error('reconcileCockpitToasts function is not defined');
+    }}
+
+    // State snapshot 1 (Initial boot with 1 existing trade and 1 market)
+    const state1 = {{
+      is_running: true,
+      trades: [
+        {{ id: 'trade-init-1', label: 'BTC 5m', action: 'PAIR_MERGE', shares: 5, pnl_usd: 0.10, pnl_pct: 2.1 }}
+      ],
+      markets: {{
+        'btc-5m': {{ label: 'BTC 5m', filled_up: false, filled_down: false, order_shares: 5, resting_up: 0.48, resting_down: 0.48 }}
+      }}
+    }};
+
+    renderCockpitUI(state1);
+
+    // 1. Initial boot should seed history with ZERO toasts
+    if (container.children.length !== 0) {{
+      throw new Error('Initial boot should not fire toasts. Got: ' + container.children.length);
+    }}
+
+    // State snapshot 2 (New PAIR_MERGE trade added)
+    const state2 = {{
+      is_running: true,
+      trades: [
+        {{ id: 'trade-init-1', label: 'BTC 5m', action: 'PAIR_MERGE', shares: 5, pnl_usd: 0.10, pnl_pct: 2.1 }},
+        {{ id: 'trade-new-merge', label: 'ETH 5m', action: 'PAIR_MERGE', shares: 10, pnl_usd: 0.25, pnl_pct: 2.6 }}
+      ],
+      markets: {{
+        'btc-5m': {{ label: 'BTC 5m', filled_up: false, filled_down: false, order_shares: 5, resting_up: 0.48, resting_down: 0.48 }}
+      }}
+    }};
+
+    renderCockpitUI(state2);
+
+    // 2. Should have fired 1 green merged toast
+    if (container.children.length !== 1) {{
+      throw new Error('Expected 1 toast after new merge trade, got: ' + container.children.length);
+    }}
+    const toastMerge = container.children[0];
+    if (!toastMerge.className.includes('toast-merged')) {{
+      throw new Error('Expected toast-merged class, got: ' + toastMerge.className);
+    }}
+
+    // State snapshot 3 (New STOP_EXIT_UP trade and market leg filled)
+    const state3 = {{
+      is_running: true,
+      trades: [
+        {{ id: 'trade-init-1', label: 'BTC 5m', action: 'PAIR_MERGE', shares: 5, pnl_usd: 0.10, pnl_pct: 2.1 }},
+        {{ id: 'trade-new-merge', label: 'ETH 5m', action: 'PAIR_MERGE', shares: 10, pnl_usd: 0.25, pnl_pct: 2.6 }},
+        {{ id: 'trade-new-stop', label: 'SOL 5m', action: 'STOP_EXIT_UP', shares: 5, exit_price: 0.42, pnl_usd: -0.30, pnl_pct: -6.2 }}
+      ],
+      markets: {{
+        'btc-5m': {{ label: 'BTC 5m', filled_up: true, filled_down: false, order_shares: 5, fill_price_up: 0.485 }}
+      }}
+    }};
+
+    renderCockpitUI(state3);
+
+    // 3. Should now have 3 toasts (1 merge + 1 stop + 1 fill)
+    if (container.children.length !== 3) {{
+      throw new Error('Expected 3 total toasts, got: ' + container.children.length);
+    }}
+
+    const toastStop = container.children[1];
+    if (!toastStop.className.includes('toast-stoploss')) {{
+      throw new Error('Expected toast-stoploss class, got: ' + toastStop.className);
+    }}
+
+    const toastFill = container.children[2];
+    if (!toastFill.className.includes('toast-filled')) {{
+      throw new Error('Expected toast-filled class, got: ' + toastFill.className);
+    }}
+
+    // State snapshot 4 (Same state rendered again -> NO duplicate toasts)
+    renderCockpitUI(state3);
+    if (container.children.length !== 3) {{
+      throw new Error('Duplicate toasts fired on unchanged state. Count: ' + container.children.length);
+    }}
+
+    console.log('RECONCILE_COCKPIT_TOASTS_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node reconcileCockpitToasts test failed: {res.stderr}\n{res.stdout}"
+    assert "RECONCILE_COCKPIT_TOASTS_TESTS_PASSED" in res.stdout
+
+
+
