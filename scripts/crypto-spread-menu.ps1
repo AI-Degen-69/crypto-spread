@@ -419,7 +419,7 @@ function Show-MenuGrid {
         Write-Host ("  " + $g.Header) -ForegroundColor $cInfo
         foreach ($it in $g.Items) {
             Write-Host "   " -NoNewline
-            Write-Host (" {0} " -f $it.K) -BackgroundColor (Get-ProfileColor -Name Border) -ForegroundColor (Get-ProfileColor -Name Strong) -NoNewline
+            Write-Host (" {0} " -f $it.K) -BackgroundColor (Get-ProfileColor -Name Border) -ForegroundColor Black -NoNewline
             Write-Host ("  {0} " -f $it.Icon) -ForegroundColor (Get-ProfileColor -Name $it.IconColor) -NoNewline
             Write-Host ("{0,-28}" -f $it.V) -ForegroundColor $cStrong -NoNewline
             Write-Host $it.D -ForegroundColor $cNeutral
