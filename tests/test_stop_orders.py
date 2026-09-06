@@ -7,6 +7,51 @@ from strategy.markets import LiveMarket
 SLUG = "btc-up-or-down-5m"
 
 
+def test_window_rollover_cancels_stop():
+    """OCO Case C: window expiry cancels the resting stop and resets stop fields."""
+    from unittest.mock import MagicMock
+
+    engine = LiveTraderEngine()
+    engine.mode = "live"
+    engine.is_running = True
+    fake_client = MagicMock()
+    fake_client.cancel.return_value = {"success": True}
+    engine._clob_client = fake_client
+
+    mstate = engine.markets[SLUG]
+    mstate.stop_order_id = "ord_stop_resting"
+    mstate.stop_order_status = "RESTING"
+    mstate.stop_price = 0.43
+    mstate.stop_side = "UP"
+    mstate.stop_order_time = "12:00:00"
+
+    engine._handle_window_rollover(mstate, time.time())
+
+    fake_client.cancel.assert_any_call("ord_stop_resting")
+    assert mstate.stop_order_id is None
+    assert mstate.stop_order_status == "NONE"
+    assert mstate.stop_price is None
+    assert mstate.stop_side is None
+    assert mstate.stop_order_time == "-"
+
+
+def test_window_rollover_resets_stop_paper():
+    """OCO Case C in paper mode: simulated stop cleared without venue calls."""
+    engine = LiveTraderEngine()
+    engine.start()
+    mstate = engine.markets[SLUG]
+    mstate.stop_order_id = f"paper_stop_{SLUG}"
+    mstate.stop_order_status = "RESTING"
+    mstate.stop_price = 0.43
+    mstate.stop_side = "UP"
+
+    engine._handle_window_rollover(mstate, time.time())
+
+    assert mstate.stop_order_id is None
+    assert mstate.stop_order_status == "NONE"
+    assert mstate.stop_price is None
+
+
 def _fake_market(now: float) -> LiveMarket:
     return LiveMarket(
         condition_id="0xabc123",

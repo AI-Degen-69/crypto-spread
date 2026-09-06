@@ -3028,6 +3028,8 @@ class LiveTraderEngine:
                 self.cancel_live_order(mstate.order_id_up)
             if mstate.order_id_down and not mstate.filled_down:
                 self.cancel_live_order(mstate.order_id_down)
+        # OCO Case C: cancel any resting stop-loss alongside entry orders (issue #87)
+        self._cancel_stop_order(mstate, reason="window rollover")
 
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
             resting_up = mstate.resting_up
