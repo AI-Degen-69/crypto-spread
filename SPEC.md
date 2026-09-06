@@ -1,51 +1,74 @@
-# SPEC: Direct Polymarket Market Hyperlinks in Cockpit Dashboard (Issue #75)
+# SPEC: Synchronize Live Market Matrix Stopped State & Retain Cancelled Orders (Issue #76)
 
 ## Objective
-Add direct clickable hyperlinks pointing to the active Polymarket live markets in the Cockpit dashboard across both the 🎯 Live Market Matrix cards and the unified Orders & Trades table (Open Orders, Positions, and Closed Trades tabs). All links must open in a new browser tab with `target="_blank"` and `rel="noopener"`, and fall back safely to the series slug if `market_slug` is pending discovery.
+Synchronize the Live Market Matrix cards and the Orders table during stop exits and order cancellations. Ensure stopped-out positions and cancelled quotes display as `FLAT` and inactive in the market matrix, while retaining cancelled orders in the Orders table with status `CANCELED` and no cancel action button until the 5m/15m market window rolls over.
 
-## Background & Context
-Currently, market labels across the Cockpit dashboard are rendered as static text (e.g. `BTC 5m`, `ETH 5m`). Operators managing automated or paper strategies need immediate access to inspect order books, open interest, and settlement conditions on Polymarket. Hyperlinking directly to `https://polymarket.com/market/{market_slug}` enables instant one-click navigation without manual searching.
+## Background & Problem Statement
+In the Live Trading Cockpit (`server/osc_dash.py`), when a market triggers a stop-loss exit (`STOP_EXIT`), the status badge changes to `STOPPED OUT`, but the card continues displaying stale position details (e.g. `LONG UP (5) @ $0.47`) and active target quotes (`Bids: $0.47 / $0.47`). At the same time, the Orders table immediately drops cancelled orders and reports `No orders are resting on the book (0)`. This causes visual desynchronization and operator confusion.
 
-## Tech Stack
-- Python 3.10+ (`dataclasses`, `FastAPI`, `uvicorn`, `requests`)
-- Vanilla ES6 JavaScript embedded in `server/osc_dash.py` (DOM manipulation, template literals)
-- Node.js test runner for frontend DOM validation in `tests/test_orders_trades_table.py`
-- Pytest test suite (`python -m pytest -q`)
+## Scope
+
+### In Scope
+1. **Live Market Matrix (`server/osc_dash.py`)**:
+   - When `m.status === 'STOP_EXIT'` or `m.exit_taken` is True:
+     - Set `Orders & Position` to `FLAT (STOPPED OUT)` or `FLAT`.
+     - Suppress active resting bid quotes (`Bids: $X / $Y`) and display inactive/cancelled state (`Bids: CANCELLED (STOPPED OUT)` or greyed-out inactive indicator).
+   - When market is stopped (`!st.is_running`), drift-skipped (`DRIFT_SKIPPED`), or timed out (`TIMEOUT_NO_FILL`):
+     - Display clear inactive/cancelled indicator instead of active resting bid prices.
+
+2. **Order Lifecycle & Retention (`strategy/live_trader.py`)**:
+   - Maintain `cancelled_orders: List[Dict[str, Any]]` on `MarketLiveState`.
+   - In `_execute_stop_exit`:
+     - Both in live and paper modes, mark the opposite unhedged leg as `CANCELLED` and retain it in `cancelled_orders`.
+   - In `_update_market_strategy`:
+     - When entry orders are cancelled due to 10% window timeout, adverse drift, or wide touch pair, retain the cancelled orders in `cancelled_orders` with status `CANCELLED`.
+   - In `cancel_live_order` / `_clear_order_handles`:
+     - Record cancelled orders in `cancelled_orders`.
+   - In `get_open_orders_list()`:
+     - Merge `cancelled_orders` from all active markets into the returned orders list so they remain visible in the dashboard.
+   - In `_handle_window_rollover`:
+     - Clear `cancelled_orders` when the market window expires and transitions to the new window.
+
+3. **Orders Table Display (`server/osc_dash.py`)**:
+   - Render cancelled orders with status `CANCELED`.
+   - Do NOT display an active `✖ Cancel` button for orders in `CANCELLED` / `CANCELED` or `FILLED` status.
+   - Update `groupOrdersByPair` so that cancelled legs do not falsely mark an unpaired order group as `Paired`.
+
+4. **Testing**:
+   - Backend unit tests in `tests/test_live_trader.py`.
+   - Frontend DOM integration tests in `tests/test_orders_trades_table.py`.
+
+### Out of Scope
+- Persisting cancelled orders across engine/server restarts (in-memory per window lifecycle only).
+- Changing order execution logic, stop-loss price thresholds, or CLOB cancel endpoints.
 
 ## Interfaces & Contracts
 
-### 1. Backend Dataclasses & Dictionaries (`strategy/live_trader.py`)
-- `TradeEvent` dataclass:
-  - Add `market_slug: str = ""` field with default value for backwards compatibility.
-- `get_open_orders_list()`:
-  - Each returned order dict includes `"market_slug": str` and `"series_slug": str`.
-- `get_open_positions()`:
-  - Each returned position dict includes `"market_slug": str` and `"series_slug": str`.
-- `TradeEvent` instantiations in stop-loss, pair-merge, window settle, and demo seeding:
-  - Pass `market_slug=mstate.market_slug or ""` (or equivalent).
+### 1. `MarketLiveState` (`strategy/live_trader.py`)
+```python
+@dataclass
+class MarketLiveState:
+    ...
+    cancelled_orders: List[Dict[str, Any]] = field(default_factory=list)
+```
 
-### 2. Frontend Grouping & Rendering (`server/osc_dash.py`)
-- `groupOrdersByPair(orders)`:
-  - Preserves `market_slug` and `series_slug` on grouped order objects.
-- `groupPositionsByPair(positions, markets)`:
-  - Preserves `market_slug` and `series_slug` on grouped position objects.
-- Live Market Matrix (`#cockpitMarketGrid`):
-  - Wraps the market title/label in `<a href="https://polymarket.com/market/${encodeURIComponent(m.market_slug || item.slug)}" target="_blank" rel="noopener">`.
-- Tab 1: Open Orders (`#cockpitOrdersBody`):
-  - Wraps the market title in `<a href="https://polymarket.com/market/${encodeURIComponent(grp.market_slug || grp.series_slug || '')}" target="_blank" rel="noopener">`.
-- Tab 2: Positions (`#cockpitPositionsBody`):
-  - Wraps the market title in `<a href="https://polymarket.com/market/${encodeURIComponent(grp.market_slug || grp.series_slug || '')}" target="_blank" rel="noopener">`.
-- Tab 3: Closed Trades (`#cockpitTradesBody`):
-  - Wraps the trade market label in `<a href="https://polymarket.com/market/${encodeURIComponent(t.market_slug || t.slug || t.series_slug || '')}" target="_blank" rel="noopener">`.
+### 2. Cancelled Order Dictionary Schema
+```python
+{
+    "order_id": str,
+    "market": str,
+    "market_slug": str,
+    "series_slug": str,
+    "token_id": str,
+    "side": str,          # e.g. "BUY (DOWN)"
+    "price": float,
+    "size": int,
+    "status": "CANCELLED",
+    "source": str,        # "PAPER_SIMULATION" | "CLOB_API" | "ENGINE"
+    "time": str,          # "HH:MM:SS"
+}
+```
 
-## Testing Strategy
-- Unit test suite in `tests/test_orders_trades_table.py` verifying:
-  - Hyperlink URL structure (`https://polymarket.com/market/...`)
-  - Target attributes (`target="_blank" rel="noopener"`)
-  - Safe fallback to series slug when `market_slug` is absent
-  - DOM presence across Matrix cards and all 3 tabs (Orders, Positions, Trades)
-- Full regression test run: `python -m pytest -q` (all 242+ tests passing).
-
-## Boundaries & Constraints
-- **Always do**: Use `target="_blank" rel="noopener"` on all external links; URI-encode slugs via `encodeURIComponent`; maintain backward compatibility for existing serialized trade logs.
-- **Never do**: Alter trading algorithms, execution logic, sizing, or offset pricing; break existing table CSS structure.
+### 3. Frontend Order Grouping & Button Logic (`server/osc_dash.py`)
+- `groupOrdersByPair`: Only active (non-cancelled) legs count toward `Paired` status. Groups consisting solely of cancelled legs have status `Cancelled`.
+- Cancel button rule: `canCancel = oId && oId !== '-' && !isCancelled && !isFilled`.

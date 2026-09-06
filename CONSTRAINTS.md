@@ -1,23 +1,30 @@
 # Quality Guardrails & Constraints (`CONSTRAINTS.md`)
 
 ## 1. Test & Regression Bar (Non-Negotiable)
-- **Zero Regression**: All 242 existing unit and integration tests must remain 100% green at all times (`python -m pytest -q`).
-- **Comprehensive Coverage**: New tests must be added in `tests/test_orders_trades_table.py` covering:
-  - Live Market Matrix header link rendering with `target="_blank" rel="noopener"`.
-  - Open Orders table market link rendering with fallback to series slug.
-  - Positions table market link rendering with fallback to series slug.
-  - Closed Trades table market link rendering with fallback to series slug.
-  - Backwards compatibility when `market_slug` is omitted or empty.
+- **Zero Regression**: All 248 existing unit and integration tests must remain 100% green (`python -m pytest -q`).
+- **Comprehensive Coverage**: New tests must be added covering:
+  - Live Market Matrix card rendering:
+    - Displays `FLAT (STOPPED OUT)` or `FLAT` when `status === 'STOP_EXIT'` or `exit_taken === true`.
+    - Shows inactive/cancelled bids indicator instead of active resting bid prices when market is stopped out, drift-skipped, or not running.
+  - Live Trader order lifecycle:
+    - Retaining cancelled orders per window in paper and live modes.
+    - Opposite leg cancellation during stop-loss exit.
+    - Entry timeout / adverse open order cancellation and retention.
+    - Window rollover clearing retained cancelled orders.
+  - Orders Table:
+    - Rendering status `CANCELED` for cancelled orders.
+    - Disabling / omitting the `✖ Cancel` action button for cancelled or filled orders.
+    - Excluding cancelled legs from false `Paired` grouping status.
 
 ## 2. Performance & Latency Thresholds
-- **Zero Polling Overhead**: Data model additions (`market_slug`, `series_slug`) must add zero network calls or latency overhead to the 1s execution loop and SSE streaming.
-- **Client Render Performance**: DOM link construction in JavaScript must use direct string concatenation or template literals without introducing external DOM libraries or re-renders.
+- **Zero Polling Overhead**: In-memory retention of window cancelled orders must have O(1) appending and minimal memory footprint (< 100 orders per cycle).
+- **Client Render Performance**: DOM rendering must remain fast with template literals and pure vanilla JS, without UI lag during 1s SSE or polling refreshes.
 
 ## 3. Anti-Cheat Discipline
-- **No Test Silencing**: No tests may be skipped, commented out, deleted, or weakened to make tests pass.
-- **Strict Assertions**: Assertions must verify actual HTML attribute values (`href`, `target="_blank"`, `rel="noopener"`), not just generic substring presence.
+- **No Test Silencing**: No tests may be skipped, commented out, deleted, or assertions weakened to pass.
+- **Strict Assertions**: Assertions must verify exact state transitions, dictionary fields, and rendered HTML/DOM structures.
 
 ## 4. Architectural Boundaries
 - **No External Libraries**: No new dependencies in `requirements.txt`.
-- **Trading Engine Integrity**: No changes to quoter pricing, order placement, order cancellation, or risk limits. Purely UI data propagation and presentation.
-- **Security**: All external anchor tags must include `rel="noopener"` to prevent tab-nabbing vulnerabilities.
+- **In-Memory Retention**: Cancelled orders are retained in memory per window lifecycle; no database or disk persistence requirement for cancelled order logs beyond existing trade logs.
+- **Safety First**: Orders marked cancelled must never be re-quoted or submitted to CLOB.
