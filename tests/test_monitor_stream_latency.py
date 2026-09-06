@@ -406,6 +406,78 @@ def test_run_monitor_returns_auditor_and_quiet_mode(capsys):
     assert captured.out == ""
 
 
+def test_snapshot_actual_and_rtds_price_diff():
+    """Verify StreamTickSnapshot serializes divergence and formats console row with price diff."""
+    snap = StreamTickSnapshot(
+        timestamp=1788394715.0,
+        time_str="12:45:15",
+        symbol="btcusdt",
+        series_slug="btc-up-or-down-5m",
+        spot_price=65012.50,
+        spot_drift_pct=0.0015,
+        up_bid=0.48,
+        up_ask=0.52,
+        up_mid=0.500,
+        down_bid=0.48,
+        down_ask=0.52,
+        down_mid=0.500,
+        clob_mid=0.500,
+        latency_ms=125.0,
+        spot_source="BINANCE_WS",
+        clob_source="WS",
+        actual_price=65012.50,
+        rtds_price=65000.00,
+        price_diff=12.50,
+        price_diff_pct=0.0192,
+    )
+    d = snap.to_dict()
+    assert d["actual_price"] == 65012.50
+    assert d["rtds_price"] == 65000.00
+    assert d["price_diff"] == 12.50
+    assert d["price_diff_pct"] == 0.0192
+
+    row = snap.format_row()
+    assert "Δ: +$12.50 (+0.019%)" in row
+
+
+def test_synchronizer_actual_and_rtds_divergence():
+    """Verify StreamSynchronizer tracks actual and RTDS prices and calculates divergence."""
+    sync = StreamSynchronizer(series_slug="btc-up-or-down-5m")
+    now_ms = int(time.time() * 1000)
+
+    # Ingest direct Binance actual spot tick
+    sync.update_spot(65015.0, now_ms, source="BINANCE_WS")
+    assert sync.actual_price == 65015.0
+    assert sync.rtds_price is None
+    assert sync.price_diff is None
+
+    # Ingest Polymarket RTDS spot tick
+    sync.update_spot(65000.0, now_ms, source="RTDS")
+    assert sync.actual_price == 65015.0
+    assert sync.rtds_price == 65000.0
+    assert sync.price_diff == 15.0
+    assert pytest.approx(sync.price_diff_pct, 0.0001) == 0.0231
+
+    # Snapshot includes divergence
+    snap = sync.create_snapshot(now_ts=now_ms / 1000.0)
+    assert snap is not None
+    assert snap.actual_price == 65015.0
+    assert snap.rtds_price == 65000.0
+    assert snap.price_diff == 15.0
+    assert pytest.approx(snap.price_diff_pct, 0.0001) == 0.0231
+
+    # Test explicit update methods
+    sync.update_actual_spot(65020.0, now_ms + 500)
+    assert sync.actual_price == 65020.0
+    assert sync.price_diff == 20.0
+    assert pytest.approx(sync.price_diff_pct, 0.0001) == 0.0308
+
+    sync.update_rtds_spot(65010.0, now_ms + 600)
+    assert sync.rtds_price == 65010.0
+    assert sync.price_diff == 10.0
+    assert pytest.approx(sync.price_diff_pct, 0.0001) == 0.0154
+
+
 
 
 

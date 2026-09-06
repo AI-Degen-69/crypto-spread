@@ -50,6 +50,10 @@ class StreamTickSnapshot:
     latency_ms: float
     spot_source: str = "RTDS"
     clob_source: str = "WS"
+    actual_price: Optional[float] = None
+    rtds_price: Optional[float] = None
+    price_diff: Optional[float] = None
+    price_diff_pct: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert snapshot to dictionary for JSON output."""
@@ -60,6 +64,10 @@ class StreamTickSnapshot:
             "series": self.series_slug,
             "spot_price": round(self.spot_price, 2),
             "spot_drift_pct": round(self.spot_drift_pct, 4),
+            "actual_price": round(self.actual_price, 2) if self.actual_price is not None else None,
+            "rtds_price": round(self.rtds_price, 2) if self.rtds_price is not None else None,
+            "price_diff": round(self.price_diff, 4) if self.price_diff is not None else None,
+            "price_diff_pct": round(self.price_diff_pct, 4) if self.price_diff_pct is not None else None,
             "up_bid": self.up_bid,
             "up_ask": self.up_ask,
             "up_mid": self.up_mid,
@@ -86,9 +94,14 @@ class StreamTickSnapshot:
 
         clob_mid_s = f"{self.clob_mid:.3f}" if self.clob_mid is not None else "--"
 
+        diff_str = ""
+        if self.price_diff is not None and self.price_diff_pct is not None:
+            sign = "+" if self.price_diff > 0 else ""
+            diff_str = f" | Δ: {sign}${self.price_diff:.2f} ({self.price_diff_pct:+.3f}%)"
+
         return (
             f"[{self.time_str}] | "
-            f"Spot: ${self.spot_price:9.2f} ({self.spot_drift_pct * 100:+.2f}%) | "
+            f"Spot: ${self.spot_price:9.2f} ({self.spot_drift_pct * 100:+.2f}%){diff_str} | "
             f"UP: {up_str:18} | DN: {dn_str:18} | "
             f"CLOB Mid: {clob_mid_s:5} | Δt: {self.latency_ms:4.0f}ms"
         )
@@ -106,6 +119,11 @@ class StreamSynchronizer:
         self.latest_spot: Optional[float] = None
         self.spot_ts: Optional[float] = None
         self.spot_source: str = "RTDS"
+
+        self.actual_price: Optional[float] = None
+        self.rtds_price: Optional[float] = None
+        self.price_diff: Optional[float] = None
+        self.price_diff_pct: Optional[float] = None
 
         self.up_bid: Optional[float] = None
         self.up_ask: Optional[float] = None
@@ -126,6 +144,47 @@ class StreamSynchronizer:
         self.latest_spot = price
         self.spot_ts = ts_ms / 1000.0
         self.spot_source = source
+
+        src_upper = (source or "").upper()
+        if "BINANCE" in src_upper or src_upper == "ACTUAL":
+            self.actual_price = price
+        elif "RTDS" in src_upper:
+            self.rtds_price = price
+        else:
+            if self.actual_price is None:
+                self.actual_price = price
+
+        self._recalc_price_diff()
+
+    def update_actual_spot(self, price: float, ts_ms: Optional[int] = None) -> None:
+        """Record direct exchange (Binance) actual spot price."""
+        if price <= 0:
+            return
+        self.actual_price = price
+        if ts_ms:
+            self.spot_ts = ts_ms / 1000.0
+        self._recalc_price_diff()
+
+    def update_rtds_spot(self, price: float, ts_ms: Optional[int] = None) -> None:
+        """Record Polymarket RTDS spot price."""
+        if price <= 0:
+            return
+        self.rtds_price = price
+        if ts_ms:
+            self.spot_ts = ts_ms / 1000.0
+        self._recalc_price_diff()
+
+    def _recalc_price_diff(self) -> None:
+        """Recalculate instantaneous price difference and percent."""
+        if self.actual_price is not None and self.rtds_price is not None and self.rtds_price > 0:
+            self.price_diff = round(self.actual_price - self.rtds_price, 4)
+            self.price_diff_pct = round(((self.actual_price - self.rtds_price) / self.rtds_price) * 100.0, 4)
+        elif self.actual_price is not None and self.rtds_price is not None:
+            self.price_diff = round(self.actual_price - self.rtds_price, 4)
+            self.price_diff_pct = 0.0
+        else:
+            self.price_diff = None
+            self.price_diff_pct = None
 
     def update_up_book(
         self,
@@ -204,6 +263,10 @@ class StreamSynchronizer:
             latency_ms=latency_ms,
             spot_source=self.spot_source,
             clob_source=self.clob_source,
+            actual_price=self.actual_price,
+            rtds_price=self.rtds_price,
+            price_diff=self.price_diff,
+            price_diff_pct=self.price_diff_pct,
         )
 
 
