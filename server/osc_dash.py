@@ -1355,6 +1355,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-tag-paired{background:rgba(51,201,181,0.12);color:var(--up);border:1px solid rgba(51,201,181,0.25)}
 .ot-tag-partial{background:rgba(235,178,74,0.12);color:var(--gold);border:1px solid rgba(235,178,74,0.25)}
 .ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
+.ot-tag-cancelled{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 .card-title{font:700 12px var(--disp);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
 .telemetry-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
 @media(max-width:1000px){.telemetry-grid{grid-template-columns:repeat(2,1fr)}}
@@ -2011,15 +2012,29 @@ function groupOrdersByPair(orders) {
     g.legs.sort((a, b) => (a.isUp === b.isUp ? 0 : a.isUp ? -1 : 1));
     g.rowspan = g.legs.length;
     
-    const hasUp = g.legs.some(l => l.isUp);
-    const hasDown = g.legs.some(l => !l.isUp);
-    if (hasUp && hasDown) {
+    const hasCancelled = g.legs.some(l => {
+      const s = String(l.status || '').toUpperCase();
+      return s === 'CANCELLED' || s === 'CANCELED';
+    });
+    const activeLegs = g.legs.filter(l => {
+      const s = String(l.status || '').toUpperCase();
+      return s !== 'CANCELLED' && s !== 'CANCELED';
+    });
+    const hasActiveUp = activeLegs.some(l => l.isUp);
+    const hasActiveDown = activeLegs.some(l => !l.isUp);
+    if (hasActiveUp && hasActiveDown) {
       g.status = 'Paired';
-      const upLeg = g.legs.find(l => l.isUp);
-      const downLeg = g.legs.find(l => !l.isUp);
+      const upLeg = activeLegs.find(l => l.isUp);
+      const downLeg = activeLegs.find(l => !l.isUp);
       if (upLeg?.priceNum != null && downLeg?.priceNum != null) {
         g.pair_cost = `$${(upLeg.priceNum + downLeg.priceNum).toFixed(2)}`;
       }
+    } else if (activeLegs.length === 0 && g.legs.length > 0) {
+      g.status = 'Cancelled';
+      g.pair_cost = '--';
+    } else if (hasCancelled && activeLegs.length > 0) {
+      g.status = 'Partial';
+      g.pair_cost = '--';
     } else {
       g.status = 'Unpaired';
       g.pair_cost = '--';
@@ -3793,17 +3808,43 @@ function renderCockpitUI(st) {
       else if (m.status === 'FILLED_DOWN') { statusBadgeCls = 'pill-mono'; statusText = 'FILLED DOWN'; }
       else if (m.status === 'PAIR_MERGED') { statusBadgeCls = 'pill-osc'; statusText = 'PAIR MERGED'; }
       else if (m.status === 'STOP_EXIT') { statusBadgeCls = 'pill-mono'; statusText = 'STOPPED OUT'; }
+      else if (m.status === 'STOP_EXIT_PENDING') { statusBadgeCls = 'pill-mono'; statusText = 'STOP EXITING'; }
+      else if (m.status === 'TIMEOUT_NO_FILL') { statusBadgeCls = 'pill-flat'; statusText = 'TIMEOUT NO FILL'; }
+      else if (m.status === 'DRIFT_SKIPPED') { statusBadgeCls = 'pill-flat'; statusText = 'DRIFT SKIPPED'; }
 
       let posStr = 'FLAT';
       const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
       const actualDown = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
-      if (m.filled_up && m.filled_down) { posStr = `MERGED PAIR (${m.order_shares || 5}) @ $${actualUp.toFixed(2)} + $${actualDown.toFixed(2)}`; }
-      else if (m.filled_up) { posStr = `LONG UP (${m.order_shares || 5}) @ $${actualUp.toFixed(2)}`; }
-      else if (m.filled_down) { posStr = `LONG DOWN (${m.order_shares || 5}) @ $${actualDown.toFixed(2)}`; }
+      if (m.status === 'STOP_EXIT' || m.exit_taken) {
+        posStr = 'FLAT (STOPPED OUT)';
+      } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.entry_cancelled_timeout) {
+        posStr = 'FLAT';
+      } else if (m.filled_up && m.filled_down) {
+        posStr = `MERGED PAIR (${m.order_shares || 5}) @ $${actualUp.toFixed(2)} + $${actualDown.toFixed(2)}`;
+      } else if (m.filled_up) {
+        posStr = `LONG UP (${m.order_shares || 5}) @ $${actualUp.toFixed(2)}`;
+      } else if (m.filled_down) {
+        posStr = `LONG DOWN (${m.order_shares || 5}) @ $${actualDown.toFixed(2)}`;
+      }
 
       const fillsSub = (m.fill_price_up != null || m.fill_price_down != null)
         ? ` · Fills: $${(m.fill_price_up != null ? m.fill_price_up.toFixed(2) : '-')} / $${(m.fill_price_down != null ? m.fill_price_down.toFixed(2) : '-')}`
         : '';
+
+      let bidsTextHtml = '';
+      if (m.status === 'STOP_EXIT' || m.exit_taken) {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (STOPPED OUT)</span>${fillsSub}`;
+      } else if (m.status === 'TIMEOUT_NO_FILL') {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (10% TIMEOUT)</span>`;
+      } else if (m.status === 'DRIFT_SKIPPED') {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (ADVERSE DRIFT)</span>`;
+      } else if (m.status === 'PAIR_MERGED' || m.pair_captured) {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">MERGED / COMPLETE</span>${fillsSub}`;
+      } else if (!st.is_running) {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">INACTIVE (BOT STOPPED)</span>`;
+      } else {
+        bidsTextHtml = `Bids: $${(m.resting_up || 0.48).toFixed(2)} / $${(m.resting_down || 0.48).toFixed(2)}${fillsSub}`;
+      }
 
       gridHtml += `
         <div class="card" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin:0;display:flex;flex-direction:column;justify-content:space-between">
@@ -3834,7 +3875,7 @@ function renderCockpitUI(st) {
             <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
               <div style="font-size:9px;color:var(--faint);font-weight:700;text-transform:uppercase;margin-bottom:2px">Orders & Position</div>
               <div class="mono" style="font-size:11px;font-weight:600;color:var(--tx)">${posStr}</div>
-              <div class="mono" style="font-size:10px;color:var(--dim)">Bids: $${(m.resting_up || 0.48).toFixed(2)} / $${(m.resting_down || 0.48).toFixed(2)}${fillsSub}</div>
+              <div class="mono" style="font-size:10px;color:var(--dim)">${bidsTextHtml}</div>
             </div>
           </div>
 
@@ -3868,14 +3909,14 @@ function renderCockpitUI(st) {
       let ordHtml = '';
       for (const mktKey of Object.keys(groupedOrders)) {
         const grp = groupedOrders[mktKey];
-        const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
+        const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : (grp.status === 'Cancelled' ? 'ot-tag-cancelled' : 'ot-tag-unpaired'));
         const mktSlug = grp.market_slug || grp.series_slug || '';
         const mktUrl = mktSlug ? `https://polymarket.com/market/${encodeURIComponent(mktSlug)}` : '';
         const mktLinkHtml = mktUrl
           ? `<a href="${mktUrl}" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View on Polymarket">${esc(grp.market)} ↗</a>`
           : esc(grp.market);
         const mktCell = `
-          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : 'var(--line)'};padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : (grp.status === 'Cancelled' ? 'var(--dim)' : 'var(--line)')};padding-left:10px">
             <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
@@ -3886,14 +3927,18 @@ function renderCockpitUI(st) {
 
         grp.legs.forEach((leg, idx) => {
           const oId = leg.order_id || '-';
-          const canCancel = oId && oId !== '-';
+          const statusRaw = String(leg.status || 'OPEN').toUpperCase();
+          const isCancelled = ['CANCELLED', 'CANCELED'].includes(statusRaw);
+          const isFilled = ['FILLED', 'MATCHED'].includes(statusRaw);
+          const canCancel = oId && oId !== '-' && !isCancelled && !isFilled;
           const isUp = leg.isUp;
-          const sideBadgeCls = isUp ? 'ot-tag-up' : 'ot-tag-down';
+          const sideBadgeCls = isCancelled ? 'ot-tag-cancelled' : (isUp ? 'ot-tag-up' : 'ot-tag-down');
           const priceStr = leg.priceNum != null ? `$${leg.priceNum.toFixed(2)}` : '-';
           const sizeStr = leg.sizeNum ? String(leg.sizeNum) : '-';
           const filledStr = leg.filledNum != null ? String(leg.filledNum) : '0';
           const totalCostStr = (leg.priceNum != null && leg.sizeNum) ? `$${(leg.priceNum * leg.sizeNum).toFixed(2)}` : '-';
-          const statusStr = leg.status || 'OPEN';
+          const statusStr = isCancelled ? 'CANCELED' : (leg.status || 'OPEN');
+          const statusBadgePill = isCancelled ? 'pill pill-mono ot-tag-cancelled' : (isFilled ? 'pill pill-osc' : 'pill pill-mono');
           const timeStr = leg.time && leg.time !== '-' ? leg.time : '-';
 
           ordHtml += `
@@ -3905,7 +3950,7 @@ function renderCockpitUI(st) {
               <td class="mono">${sizeStr}</td>
               <td class="mono" style="color:var(--dim)">${filledStr}</td>
               <td class="mono" style="color:var(--tx)">${totalCostStr}</td>
-              <td><span class="pill pill-mono" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
+              <td><span class="${statusBadgePill}" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
               <td>
                 ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
               </td>
