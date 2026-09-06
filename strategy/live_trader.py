@@ -838,6 +838,8 @@ class LiveTraderEngine:
                     m.price_diff = round(effective_actual - price, 4)
                     if price > 0:
                         m.price_diff_pct = round(((effective_actual - price) / price) * 100.0, 4)
+                    else:
+                        m.price_diff_pct = None
 
     def on_spot_tick(self, symbol: str, ts_ms: int, price: float) -> None:
         """Handle real-time spot tick from RTDS or fallback across all matching active series."""
@@ -867,6 +869,8 @@ class LiveTraderEngine:
                     m.price_diff = round(price - m.rtds_price, 4)
                     if m.rtds_price > 0:
                         m.price_diff_pct = round(((price - m.rtds_price) / m.rtds_price) * 100.0, 4)
+                    else:
+                        m.price_diff_pct = None
 
                 if m.spot_open_price is None or m.spot_open_price <= 0:
                     m.spot_open_price = price

@@ -458,3 +458,36 @@ def test_unified_stream_bridge_concurrent_feeds_and_delta():
     assert status["rtds_prices"]["btcusdt"] == 80000.0
     assert status["price_diffs"]["btcusdt"] == 15.0
     assert "price_diff_pcts" in status
+
+
+def test_unified_stream_bridge_edge_cases_and_disconnection():
+    """Verify negative divergence, zero division protection, and disconnected fallback in UnifiedStreamBridge."""
+    bridge = UnifiedStreamBridge()
+    envelopes = []
+    bridge._broadcast = lambda stream_id, data, event_type="delta": envelopes.append((stream_id, data))
+
+    # 1. Negative divergence (Binance < RTDS)
+    bridge.binance.is_connected = True
+    bridge.binance.spot_prices["btcusdt"] = 79990.0
+    bridge.rtds.spot_prices["btcusdt"] = 80000.0
+
+    bridge._handle_binance_spot_tick("btcusdt", 2000, 79990.0)
+    bin_env = envelopes[-1][1]
+    assert bin_env["price_diff"] == -10.0
+    assert bin_env["price_diff_pct"] == pytest.approx(-0.0125, 0.0001)
+
+    # 2. Zero price in RTDS protects against ZeroDivisionError
+    bridge.rtds.spot_prices["btcusdt"] = 0.0
+    bridge._handle_binance_spot_tick("btcusdt", 2001, 80000.0)
+    zero_env = envelopes[-1][1]
+    assert zero_env["price_diff"] == 80000.0
+    assert zero_env["price_diff_pct"] is None  # Guarded against division by zero
+
+    # 3. Disconnected Binance: RTDS tick uses active RTDS price, not stale Binance price
+    bridge.binance.is_connected = False
+    bridge.binance.spot_prices["btcusdt"] = 99999.0  # Stale price
+    bridge._handle_rtds_spot_tick("btcusdt", 2002, 80050.0)
+    disc_env = envelopes[-1][1]
+    assert disc_env["price"] == 80050.0  # Fallback to RTDS price
+    assert disc_env["actual_price"] is None  # Does not claim stale disconnected price as actual
+

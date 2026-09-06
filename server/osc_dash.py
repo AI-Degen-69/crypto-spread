@@ -1380,7 +1380,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 .ot-tag-cancelled{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 .card-title{font:700 12px var(--disp);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
-.telemetry-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.telemetry-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
 @media(max-width:1000px){.telemetry-grid{grid-template-columns:repeat(2,1fr)}}
 .tel-item{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center;display:flex;flex-direction:column;gap:4px}
 .tel-lbl{font:600 9px var(--disp);letter-spacing:.07em;color:var(--faint);text-transform:uppercase}
@@ -3258,8 +3258,9 @@ function renderStreamTelemetry(data) {
     if (data.price_diff != null && !isNaN(Number(data.price_diff))) {
       const d = Number(data.price_diff);
       const pct = data.price_diff_pct != null ? Number(data.price_diff_pct) : 0;
-      const sign = d > 0 ? '+' : '';
-      diffEl.textContent = `${sign}$${d.toFixed(2)} (${sign}${pct.toFixed(3)}%)`;
+      const formattedD = d < 0 ? `-$${Math.abs(d).toFixed(2)}` : (d > 0 ? `+$${d.toFixed(2)}` : `$${d.toFixed(2)}`);
+      const formattedPct = pct > 0 ? `+${pct.toFixed(3)}%` : `${pct.toFixed(3)}%`;
+      diffEl.textContent = `${formattedD} (${formattedPct})`;
       diffEl.style.color = d > 0 ? 'var(--up)' : d < 0 ? 'var(--down)' : 'var(--tx)';
     } else if (data.price_diff !== undefined) {
       diffEl.textContent = '--';
@@ -4616,50 +4617,57 @@ function initLiveCockpitStream() {
           renderCockpitUI(env.data);
         } else if (env.stream_id === 'spot' && env.data) {
           if (cockpitState && cockpitState.markets) {
-            const slug = env.data.slug || (function() {
+            const targetSlugs = (env.data.slugs && env.data.slugs.length) ? env.data.slugs : (env.data.slug ? [env.data.slug] : (function() {
               const sym = (env.data.symbol || '').toLowerCase();
               const prefix = sym.replace('usdt', '');
+              const res = [];
               for (const k in cockpitState.markets) {
-                if (k.startsWith(prefix)) return k;
+                if (k.startsWith(prefix)) res.push(k);
               }
-              return null;
-            })();
-            if (slug && cockpitState.markets[slug]) {
-              const m = cockpitState.markets[slug];
-              const price = env.data.price;
-              if (env.data.actual_price != null) m.actual_price = env.data.actual_price;
-              if (env.data.rtds_price != null) m.rtds_price = env.data.rtds_price;
-              if (env.data.price_diff != null) m.price_diff = env.data.price_diff;
-              if (env.data.price_diff_pct != null) m.price_diff_pct = env.data.price_diff_pct;
+              return res;
+            })());
 
-              m.spot_price = price;
-              if (m.spot_open_price == null && price) {
-                m.spot_open_price = price;
+            for (const slug of targetSlugs) {
+              if (slug && cockpitState.markets[slug]) {
+                const m = cockpitState.markets[slug];
+                const price = env.data.price;
+                if (env.data.actual_price != null) m.actual_price = env.data.actual_price;
+                if (env.data.rtds_price != null) m.rtds_price = env.data.rtds_price;
+                if (env.data.price_diff != null) m.price_diff = env.data.price_diff;
+                if (env.data.price_diff_pct != null) m.price_diff_pct = env.data.price_diff_pct;
+
+                m.spot_price = price;
+                if (m.spot_open_price == null && price) {
+                  m.spot_open_price = price;
+                }
+                if (m.spot_open_price && price) {
+                  m.spot_drift = (price - m.spot_open_price) / m.spot_open_price;
+                }
+                const pEl = $(`cockpit-spot-price-${slug}`);
+                if (pEl && price != null) {
+                  pEl.textContent = '$' + price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                }
+                const dEl = $(`cockpit-spot-drift-${slug}`);
+                if (dEl) {
+                  const drift = m.spot_drift || 0;
+                  dEl.textContent = (drift >= 0 ? '+' : '') + (drift * 100).toFixed(2) + '%';
+                  dEl.style.color = drift > 0 ? 'var(--up)' : drift < 0 ? 'var(--down)' : 'var(--dim)';
+                }
               }
-              if (m.spot_open_price && price) {
-                m.spot_drift = (price - m.spot_open_price) / m.spot_open_price;
-              }
-              const pEl = $(`cockpit-spot-price-${slug}`);
-              if (pEl && price != null) {
-                pEl.textContent = '$' + price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-              }
-              const dEl = $(`cockpit-spot-drift-${slug}`);
-              if (dEl) {
-                const drift = m.spot_drift || 0;
-                dEl.textContent = (drift >= 0 ? '+' : '') + (drift * 100).toFixed(2) + '%';
-                dEl.style.color = drift > 0 ? 'var(--up)' : drift < 0 ? 'var(--down)' : 'var(--dim)';
-              }
-              if (slug && (slug.startsWith('btc') || slug === Object.keys(cockpitState.markets)[0])) {
-                renderStreamTelemetry({
-                  actual_price: m.actual_price,
-                  rtds_price: m.rtds_price,
-                  price_diff: m.price_diff,
-                  price_diff_pct: m.price_diff_pct,
-                  spot_price: m.spot_price,
-                  spot_drift: m.spot_drift,
-                  clob_mid: m.mid,
-                });
-              }
+            }
+
+            const primarySlug = (targetSlugs && targetSlugs.length) ? targetSlugs[0] : (env.data.slug || Object.keys(cockpitState.markets)[0]);
+            if (primarySlug && (primarySlug.startsWith('btc') || primarySlug === Object.keys(cockpitState.markets)[0])) {
+              const pm = cockpitState.markets[primarySlug] || {};
+              renderStreamTelemetry({
+                actual_price: pm.actual_price != null ? pm.actual_price : env.data.actual_price,
+                rtds_price: pm.rtds_price != null ? pm.rtds_price : env.data.rtds_price,
+                price_diff: pm.price_diff != null ? pm.price_diff : env.data.price_diff,
+                price_diff_pct: pm.price_diff_pct != null ? pm.price_diff_pct : env.data.price_diff_pct,
+                spot_price: pm.spot_price != null ? pm.spot_price : env.data.price,
+                spot_drift: pm.spot_drift,
+                clob_mid: pm.mid,
+              });
             }
           }
         }

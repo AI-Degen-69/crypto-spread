@@ -1003,6 +1003,56 @@ def test_api_live_latency(monkeypatch):
     assert "clob_ws_connected" in data
 
 
+def test_api_live_latency_divergence_values_and_fallback(monkeypatch):
+    """Verify /api/live/latency returns calculated divergence values and falls back to stream bridge."""
+    from server.osc_dash import get_live_trader_engine
+    engine = get_live_trader_engine()
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+
+    # Test with market state populated
+    m.actual_price = 80010.0
+    m.rtds_price = 80000.0
+    m.price_diff = 10.0
+    m.price_diff_pct = 0.0125
+
+    res = client.get(f"/api/live/latency?series={slug}")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["actual_price"] == 80010.0
+    assert data["rtds_price"] == 80000.0
+    assert data["price_diff"] == 10.0
+    assert data["price_diff_pct"] == 0.0125
+
+    # Test fallback to stream bridge when market fields are None
+    m.actual_price = None
+    m.rtds_price = None
+    m.price_diff = None
+    m.price_diff_pct = None
+
+    monkeypatch.setattr(engine.stream_bridge, "get_status", lambda: {
+        "is_running": True,
+        "binance_ws_connected": True,
+        "rtds_connected": True,
+        "clob_ws_connected": True,
+        "user_ws_connected": False,
+        "active_spot_source": "BINANCE_WS",
+        "symbols": {"btcusdt": 80010.0},
+        "binance_prices": {"btcusdt": 80010.0},
+        "rtds_prices": {"btcusdt": 80000.0},
+        "price_diffs": {"btcusdt": 10.0},
+        "price_diff_pcts": {"btcusdt": 0.0125},
+    })
+
+    res2 = client.get(f"/api/live/latency?series={slug}")
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["actual_price"] == 80010.0
+    assert data2["rtds_price"] == 80000.0
+    assert data2["price_diff"] == 10.0
+    assert data2["price_diff_pct"] == 0.0125
+
+
 def test_card_stream_telemetry_rendered_in_html():
     """Verify #card-stream-telemetry and its metric elements are present in the cockpit HTML."""
     res = client.get("/")

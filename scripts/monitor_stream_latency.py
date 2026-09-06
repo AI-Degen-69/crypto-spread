@@ -96,8 +96,13 @@ class StreamTickSnapshot:
 
         diff_str = ""
         if self.price_diff is not None and self.price_diff_pct is not None:
-            sign = "+" if self.price_diff > 0 else ""
-            diff_str = f" | Δ: {sign}${self.price_diff:.2f} ({self.price_diff_pct:+.3f}%)"
+            if self.price_diff < 0:
+                diff_val_s = f"-${abs(self.price_diff):.2f}"
+            elif self.price_diff > 0:
+                diff_val_s = f"+${self.price_diff:.2f}"
+            else:
+                diff_val_s = f"${self.price_diff:.2f}"
+            diff_str = f" | Δ: {diff_val_s} ({self.price_diff_pct:+.3f}%)"
 
         return (
             f"[{self.time_str}] | "
@@ -151,8 +156,7 @@ class StreamSynchronizer:
         elif "RTDS" in src_upper:
             self.rtds_price = price
         else:
-            if self.actual_price is None:
-                self.actual_price = price
+            self.actual_price = price
 
         self._recalc_price_diff()
 
@@ -160,6 +164,9 @@ class StreamSynchronizer:
         """Record direct exchange (Binance) actual spot price."""
         if price <= 0:
             return
+        if self.spot_baseline is None or self.spot_baseline <= 0:
+            self.spot_baseline = price
+        self.latest_spot = price
         self.actual_price = price
         if ts_ms:
             self.spot_ts = ts_ms / 1000.0
@@ -169,6 +176,9 @@ class StreamSynchronizer:
         """Record Polymarket RTDS spot price."""
         if price <= 0:
             return
+        if self.spot_baseline is None or self.spot_baseline <= 0:
+            self.spot_baseline = price
+        self.latest_spot = price
         self.rtds_price = price
         if ts_ms:
             self.spot_ts = ts_ms / 1000.0
@@ -589,7 +599,7 @@ def run_monitor(
         spot_val = fetch_spot_price(sync.symbol, session=sess)
         now_ms = int(time.time() * 1000)
         if spot_val is not None:
-            sync.update_spot(spot_val, now_ms, source="REST")
+            sync.update_spot(spot_val, now_ms, source="BINANCE_REST")
 
         # Ingest CLOB books
         up_b, up_a, dn_b, dn_a = fetch_clob_books(args.series, session=sess)

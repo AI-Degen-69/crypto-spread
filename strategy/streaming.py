@@ -681,7 +681,7 @@ class UnifiedStreamBridge:
 
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
         slugs = series_for_symbol(symbol)
-        binance_price = self.binance.spot_prices.get(symbol.lower())
+        binance_price = self.binance.spot_prices.get(symbol.lower()) if self.binance.is_connected else None
         price_diff = round(binance_price - price, 4) if binance_price is not None else None
         price_diff_pct = round(((binance_price - price) / price) * 100.0, 4) if (binance_price is not None and price > 0) else None
         self._broadcast(
@@ -689,7 +689,7 @@ class UnifiedStreamBridge:
             data={
                 "symbol": symbol,
                 "timestamp": ts,
-                "price": binance_price if binance_price is not None else price,
+                "price": binance_price if (self.binance.is_connected and binance_price is not None) else price,
                 "actual_price": binance_price,
                 "rtds_price": price,
                 "price_diff": price_diff,
@@ -848,8 +848,16 @@ class UnifiedStreamBridge:
 
     def get_status(self) -> Dict[str, Any]:
         """Return streaming health and telemetry."""
-        binance_prices = dict(self.binance.spot_prices)
-        rtds_prices = dict(self.rtds.spot_prices)
+        for _ in range(3):
+            try:
+                binance_prices = self.binance.spot_prices.copy()
+                rtds_prices = self.rtds.spot_prices.copy()
+                break
+            except RuntimeError:
+                continue
+        else:
+            binance_prices = dict(list(self.binance.spot_prices.items()))
+            rtds_prices = dict(list(self.rtds.spot_prices.items()))
         price_diffs: Dict[str, float] = {}
         price_diff_pcts: Dict[str, float] = {}
 

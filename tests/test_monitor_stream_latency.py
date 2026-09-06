@@ -478,6 +478,35 @@ def test_synchronizer_actual_and_rtds_divergence():
     assert pytest.approx(sync.price_diff_pct, 0.0001) == 0.0154
 
 
+def test_synchronizer_and_snapshot_negative_divergence_and_zero_rejection():
+    """Verify negative divergence formatting and zero price rejection in StreamSynchronizer."""
+    sync = StreamSynchronizer(series_slug="btc-up-or-down-5m")
+    now_ms = int(time.time() * 1000)
+
+    # Negative divergence: Binance 64990 < RTDS 65000
+    sync.update_actual_spot(64990.0, now_ms)
+    sync.update_rtds_spot(65000.0, now_ms)
+    assert sync.price_diff == -10.0
+    assert pytest.approx(sync.price_diff_pct, 0.0001) == -0.0154
+
+    snap = sync.create_snapshot(now_ts=now_ms / 1000.0)
+    assert snap is not None
+    row = snap.format_row()
+    assert "Δ: -$10.00 (-0.015%)" in row
+
+    # Zero and negative price updates are rejected
+    prev_actual = sync.actual_price
+    prev_rtds = sync.rtds_price
+    sync.update_actual_spot(0.0)
+    sync.update_actual_spot(-100.0)
+    sync.update_rtds_spot(0.0)
+    sync.update_rtds_spot(-50.0)
+    sync.update_spot(0.0, now_ms)
+    sync.update_spot(-10.0, now_ms)
+    assert sync.actual_price == prev_actual
+    assert sync.rtds_price == prev_rtds
+
+
 
 
 
