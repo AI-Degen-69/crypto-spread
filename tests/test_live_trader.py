@@ -1365,3 +1365,67 @@ def test_cancel_all_orders_live_failure_returns_false() -> None:
     # Local handles must NOT be cleared if remote cancel failed
     assert m.order_id_up == "ord_panic_up"
     assert m.order_id_down == "ord_panic_dn"
+
+
+def test_live_trader_actual_vs_rtds_price_tracking() -> None:
+    """Issue #78: Verify LiveTraderEngine tracks actual price, RTDS price, and calculates price_diff."""
+    engine = LiveTraderEngine(load_persisted=False)
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+
+    assert m.actual_price is None
+    assert m.rtds_price is None
+    assert m.price_diff is None
+    assert m.price_diff_pct is None
+
+    # 1. Simulate RTDS tick arriving
+    engine.on_rtds_tick("btcusdt", 1000, 80000.0)
+    assert m.rtds_price == 80000.0
+    assert m.actual_price is None
+
+    # 2. Simulate primary spot tick (Binance WS) arriving
+    engine.on_spot_tick("btcusdt", 1050, 80012.0)
+    assert m.actual_price == 80012.0
+    assert m.spot_price == 80012.0
+    assert m.rtds_price == 80000.0
+    assert m.price_diff == 12.0
+    assert m.price_diff_pct == round((12.0 / 80000.0) * 100.0, 4)
+
+    # 3. Verify get_state() exposes these fields
+    st = engine.get_state()
+    mkt_st = st["markets"][slug]
+    assert mkt_st["actual_price"] == 80012.0
+    assert mkt_st["rtds_price"] == 80000.0
+    assert mkt_st["price_diff"] == 12.0
+    assert mkt_st["price_diff_pct"] == round((12.0 / 80000.0) * 100.0, 4)
+
+    # 4. Subsequent RTDS tick updates divergence
+    engine.on_rtds_tick("btcusdt", 1100, 80008.0)
+    assert m.rtds_price == 80008.0
+    assert m.price_diff == 4.0
+    assert m.price_diff_pct == round((4.0 / 80008.0) * 100.0, 4)
+
+
+def test_live_trader_divergence_edge_cases():
+    """Verify negative divergence and zero price handling in LiveTraderEngine."""
+    engine = LiveTraderEngine(load_persisted=False)
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+
+    # Negative divergence: Binance spot lower than RTDS
+    engine.on_rtds_tick("btcusdt", 1000, 80000.0)
+    engine.on_spot_tick("btcusdt", 1001, 79990.0)
+    assert m.price_diff == -10.0
+    assert m.price_diff_pct == pytest.approx(-0.0125, 0.0001)
+
+    # Zero price in RTDS does not raise ZeroDivisionError and sets pct to None
+    engine.on_rtds_tick("btcusdt", 1002, 0.0)
+    assert m.rtds_price == 0.0
+    assert m.price_diff == 79990.0
+    assert m.price_diff_pct is None
+
+    # Zero RTDS price on spot tick update also safely resets pct
+    engine.on_spot_tick("btcusdt", 1003, 80010.0)
+    assert m.price_diff == 80010.0
+    assert m.price_diff_pct is None
+

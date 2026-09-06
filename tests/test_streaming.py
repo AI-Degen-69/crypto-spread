@@ -388,4 +388,106 @@ def test_unified_stream_bridge_restart_rearms_stop_events():
         bridge.is_running = False
 
 
+def test_unified_stream_bridge_concurrent_feeds_and_delta():
+    """Verify UnifiedStreamBridge tracks both feeds concurrently, calculates price diff, and broadcasts telemetry."""
+    from strategy.streaming import UnifiedStreamBridge
+
+    rtds_ticks = []
+    spot_ticks = []
+    envelopes = []
+
+    def on_rtds(sym, ts, price):
+        rtds_ticks.append((sym, ts, price))
+
+    def on_spot(sym, ts, price):
+        spot_ticks.append((sym, ts, price))
+
+    bridge = UnifiedStreamBridge(
+        symbols=["btcusdt"],
+        on_spot_tick=on_spot,
+        on_rtds_tick=on_rtds,
+    )
+
+    orig_broadcast = bridge._broadcast
+
+    def record_broadcast(stream_id, data, event_type="delta"):
+        envelopes.append((stream_id, data))
+        orig_broadcast(stream_id, data, event_type)
+
+    bridge._broadcast = record_broadcast
+
+    # 1. Binance WS connects and receives tick
+    bridge.binance.is_connected = True
+    bridge.binance.spot_prices["btcusdt"] = 80010.0
+    bridge._handle_binance_spot_tick("btcusdt", 1000, 80010.0)
+
+    assert len(spot_ticks) == 1
+    assert spot_ticks[-1] == ("btcusdt", 1000, 80010.0)
+    assert envelopes[-1][0] == "spot"
+    assert envelopes[-1][1]["actual_price"] == 80010.0
+    assert envelopes[-1][1]["rtds_price"] is None
+
+    # 2. RTDS receives tick while Binance is connected
+    bridge.rtds.spot_prices["btcusdt"] = 80000.0
+    bridge._handle_rtds_spot_tick("btcusdt", 1050, 80000.0)
+
+    # on_rtds_tick is called, but on_spot_tick is NOT called (Binance WS is primary)
+    assert len(rtds_ticks) == 1
+    assert rtds_ticks[-1] == ("btcusdt", 1050, 80000.0)
+    assert len(spot_ticks) == 1
+
+    # RTDS envelope is broadcast with price diff
+    rtds_env = envelopes[-1][1]
+    assert rtds_env["symbol"] == "btcusdt"
+    assert rtds_env["actual_price"] == 80010.0
+    assert rtds_env["rtds_price"] == 80000.0
+    assert rtds_env["price_diff"] == 10.0
+    assert round(rtds_env["price_diff_pct"], 4) == round((10.0 / 80000.0) * 100.0, 4)
+
+    # 3. New Binance tick calculates diff against stored RTDS price
+    bridge.binance.spot_prices["btcusdt"] = 80015.0
+    bridge._handle_binance_spot_tick("btcusdt", 1100, 80015.0)
+    bin_env = envelopes[-1][1]
+    assert bin_env["actual_price"] == 80015.0
+    assert bin_env["rtds_price"] == 80000.0
+    assert bin_env["price_diff"] == 15.0
+
+    # 4. Status reflects both prices and calculated diffs
+    status = bridge.get_status()
+    assert status["binance_prices"]["btcusdt"] == 80015.0
+    assert status["rtds_prices"]["btcusdt"] == 80000.0
+    assert status["price_diffs"]["btcusdt"] == 15.0
+    assert "price_diff_pcts" in status
+
+
+def test_unified_stream_bridge_edge_cases_and_disconnection():
+    """Verify negative divergence, zero division protection, and disconnected fallback in UnifiedStreamBridge."""
+    bridge = UnifiedStreamBridge()
+    envelopes = []
+    bridge._broadcast = lambda stream_id, data, event_type="delta": envelopes.append((stream_id, data))
+
+    # 1. Negative divergence (Binance < RTDS)
+    bridge.binance.is_connected = True
+    bridge.binance.spot_prices["btcusdt"] = 79990.0
+    bridge.rtds.spot_prices["btcusdt"] = 80000.0
+
+    bridge._handle_binance_spot_tick("btcusdt", 2000, 79990.0)
+    bin_env = envelopes[-1][1]
+    assert bin_env["price_diff"] == -10.0
+    assert bin_env["price_diff_pct"] == pytest.approx(-0.0125, 0.0001)
+
+    # 2. Zero price in RTDS protects against ZeroDivisionError
+    bridge.rtds.spot_prices["btcusdt"] = 0.0
+    bridge._handle_binance_spot_tick("btcusdt", 2001, 80000.0)
+    zero_env = envelopes[-1][1]
+    assert zero_env["price_diff"] == 80000.0
+    assert zero_env["price_diff_pct"] is None  # Guarded against division by zero
+
+    # 3. Disconnected Binance: RTDS tick uses active RTDS price, not stale Binance price
+    bridge.binance.is_connected = False
+    bridge.binance.spot_prices["btcusdt"] = 99999.0  # Stale price
+    bridge._handle_rtds_spot_tick("btcusdt", 2002, 80050.0)
+    disc_env = envelopes[-1][1]
+    assert disc_env["price"] == 80050.0  # Fallback to RTDS price
+    assert disc_env["actual_price"] is None  # Does not claim stale disconnected price as actual
 
