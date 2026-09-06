@@ -224,3 +224,87 @@ def test_live_trader_state_binance_telemetry():
     assert state_conn["stream_bridge"]["binance_ws_connected"] is True
     assert state_conn["stream_bridge"]["active_spot_source"] == "BINANCE_WS"
 
+
+def test_ensure_telemetry_streaming_and_stop_decoupling(monkeypatch):
+    """Verify stream bridge can run in background observer mode and is preserved across stop()."""
+    engine = LiveTraderEngine()
+    started = False
+    stopped = False
+
+    def mock_start():
+        nonlocal started
+        started = True
+        engine.stream_bridge.is_running = True
+
+    def mock_stop():
+        nonlocal stopped
+        stopped = True
+        engine.stream_bridge.is_running = False
+
+    monkeypatch.setattr(engine.stream_bridge, "start", mock_start)
+    monkeypatch.setattr(engine.stream_bridge, "stop", mock_stop)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+
+    # ensure_telemetry_streaming starts the bridge
+    engine.ensure_telemetry_streaming()
+    assert started is True
+    assert engine.stream_bridge.is_running is True
+
+    # engine.start() starts trading loop
+    engine.start()
+    assert engine.is_running is True
+
+    # engine.stop() halts trading but preserves stream_bridge for cockpit observation
+    engine.stop()
+    assert engine.is_running is False
+    assert stopped is False  # preserved by default
+    assert engine.stream_bridge.is_running is True
+
+    # engine.stop(stop_streams=True) halts stream bridge
+    engine.stop(stop_streams=True)
+    assert stopped is True
+    assert engine.stream_bridge.is_running is False
+
+
+def test_api_live_latency_stale_suppression(monkeypatch):
+    """Verify /api/live/latency returns binance_ws_connected, is_running, and suppresses stale latency."""
+    import time
+    from fastapi.testclient import TestClient
+    from server.osc_dash import app, get_live_trader_engine
+
+    engine = get_live_trader_engine()
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    client = TestClient(app)
+
+    btc = engine.markets.get("btc-up-or-down-5m")
+    assert btc is not None
+    orig_price = btc.spot_price
+    orig_active = btc.streaming_active
+    orig_ts = btc.spot_updated_ts
+
+    try:
+        now = time.time()
+        btc.spot_price = 85000.0
+        btc.streaming_active = True
+        btc.spot_updated_ts = now - 0.2
+
+        res = client.get("/api/live/latency?series=btc-up-or-down-5m")
+        assert res.status_code == 200
+        data = res.json()
+        assert "is_running" in data
+        assert "binance_ws_connected" in data
+        assert data["latency_ms"] is not None
+        assert 0 <= data["latency_ms"] < 2000
+
+        # Stale tick (> 15 seconds old)
+        btc.spot_updated_ts = now - 45.0
+        res_stale = client.get("/api/live/latency?series=btc-up-or-down-5m")
+        assert res_stale.status_code == 200
+        data_stale = res_stale.json()
+        assert data_stale["latency_ms"] is None  # Stale latency suppressed
+    finally:
+        btc.spot_price = orig_price
+        btc.streaming_active = orig_active
+        btc.spot_updated_ts = orig_ts
+
+

@@ -720,18 +720,27 @@ class UnifiedStreamBridge:
 
     def start(self) -> None:
         """Start the background streaming worker thread."""
-        if self.is_running:
-            return
-        self.is_running = True
-        self._loop_ready.clear()
-        self._thread = threading.Thread(target=self._worker_main, daemon=True, name="UnifiedStreamBridge")
-        self._thread.start()
-        self._loop_ready.wait(timeout=5.0)
+        with self._lock:
+            if self.is_running:
+                return
+            self.binance._stop_event.clear()
+            self.rtds._stop_event.clear()
+            self.clob._stop_event.clear()
+            self.user._stop_event.clear()
+            self.is_running = True
+            self._loop_ready.clear()
+            self._thread = threading.Thread(target=self._worker_main, daemon=True, name="UnifiedStreamBridge")
+            self._thread.start()
+            self._loop_ready.wait(timeout=5.0)
 
     def _worker_main(self) -> None:
         """Worker thread entry point."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        self.binance._stop_event = asyncio.Event()
+        self.rtds._stop_event = asyncio.Event()
+        self.clob._stop_event = asyncio.Event()
+        self.user._stop_event = asyncio.Event()
         self._loop_ready.set()
         try:
             self._binance_task = self._loop.create_task(self.binance.run())
@@ -778,21 +787,22 @@ class UnifiedStreamBridge:
 
     def stop(self) -> None:
         """Stop background worker thread gracefully."""
-        if not self.is_running:
-            return
-        self.binance.stop()
-        self.rtds.stop()
-        self.clob.stop()
-        self.user.stop()
-        if self._loop and self._loop.is_running():
-            def _cancel_and_stop():
-                """Cancel all running tasks on the worker loop."""
-                for t in getattr(self, "_tasks", []):
-                    t.cancel()
-            self._loop.call_soon_threadsafe(_cancel_and_stop)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
-        self.is_running = False
+        with self._lock:
+            if not self.is_running:
+                return
+            self.binance.stop()
+            self.rtds.stop()
+            self.clob.stop()
+            self.user.stop()
+            if self._loop and self._loop.is_running():
+                def _cancel_and_stop():
+                    """Cancel all running tasks on the worker loop."""
+                    for t in getattr(self, "_tasks", []):
+                        t.cancel()
+                self._loop.call_soon_threadsafe(_cancel_and_stop)
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=3.0)
+            self.is_running = False
 
     def get_status(self) -> Dict[str, Any]:
         """Return streaming health and telemetry."""
