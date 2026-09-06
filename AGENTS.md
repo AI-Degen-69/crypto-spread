@@ -46,3 +46,34 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
 - No `opencode.json` or `CLAUDE.md` exists — no hidden verification steps to run.
 - Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard.
+
+## GBrain search guidance
+
+This repo is indexed in gbrain as source `crypto-spread`, pinned by `.gbrain-source` in
+the repo root, so the commands below route here without a `--source` flag.
+
+**Prefer gbrain over Grep for structural questions** — who calls a symbol, where
+it is defined, what it references, what it calls. One query beats opening every
+file:
+
+```bash
+gbrain code-def <symbol>       # where it is defined
+gbrain code-refs <symbol>      # every reference
+gbrain code-callers <symbol>   # who calls it
+gbrain code-callees <symbol>   # what it calls
+gbrain query "<question>"      # semantic search over this repo
+```
+
+**Read `status` before trusting an empty result.** `count: 0` means "nothing
+found" only when `status` is `ready`. `not_built` or `indexing` means the call
+graph is still being built and the empty list proves nothing — fall back to Grep
+and say that is what you did.
+
+**Use Grep instead** for literal text, config values, comments, and anything
+added since the last sync. The index refreshes on every commit (a `post-commit`
+hook) and nightly at 03:00; uncommitted work in progress is not in it. To
+refresh now:
+
+```bash
+gbrain sync --source crypto-spread --strategy code
+```
