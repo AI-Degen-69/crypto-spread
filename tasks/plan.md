@@ -40,7 +40,7 @@ Add a standalone PowerShell 7 control menu (`scripts/crypto-spread-menu.ps1`) fo
   - **Verify**: `pwsh -NoProfile -Command ".\scripts\crypto-spread-menu.ps1 compare --ticks 2"`
   - **Files**: `scripts/crypto-spread-menu.ps1`
 
-- [ ] Task 5: Register global `csm` & `crypto-spread-menu` functions in `C:\Program Files\PowerShell\7\profile.ps1`
+- [x] Task 5: Register global `csm` & `crypto-spread-menu` functions in `C:\Program Files\PowerShell\7\profile.ps1`
   - **Acceptance**: Functions forward `@Args` directly to `scripts/crypto-spread-menu.ps1` with path existence check.
   - **Verify**: `pwsh -Command "csm status"`
   - **Files**: `C:\Program Files\PowerShell\7\profile.ps1`
