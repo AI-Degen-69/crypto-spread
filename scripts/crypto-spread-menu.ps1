@@ -378,11 +378,11 @@ switch -Exact ($Action.ToLower()) {
         while ($true) {
             Write-Host ""
             Write-ProfileBanner -Title "CRYPTO SPREAD — CONTROL CENTER" -Subtitle "5m/15m SPREAD-2 Capture Operations"
-            Write-Host "  [1] Check System Status" -ForegroundColor Cyan
-            Write-Host "  [2] Host & Open Dashboard (Background)" -ForegroundColor Green
-            Write-Host "  [3] Stop Dashboard & Clean Up Processes" -ForegroundColor Red
-            Write-Host "  [4] Live Binance Spot vs. CLOB Book Monitor" -ForegroundColor Yellow
-            Write-Host "  [q] Exit" -ForegroundColor DarkGray
+            Write-Host "  [1] Check System Status" -ForegroundColor (Get-ProfileColor -Name Info)
+            Write-Host "  [2] Host & Open Dashboard (Background)" -ForegroundColor (Get-ProfileColor -Name Path)
+            Write-Host "  [3] Stop Dashboard & Clean Up Processes" -ForegroundColor (Get-ProfileColor -Name Error)
+            Write-Host "  [4] Live Binance Spot vs. CLOB Book Monitor" -ForegroundColor (Get-ProfileColor -Name Highlight)
+            Write-Host "  [q] Exit" -ForegroundColor (Get-ProfileColor -Name Neutral)
             Write-Host ""
             $choice = Read-Host "Select option [1-4, q]"
             switch ($choice.Trim().ToLower()) {
