@@ -391,6 +391,13 @@ class MarketLiveState:
     next_order_time_down: str = "-"
     next_quoted: bool = False
     
+    # Pre-placed resting stop-loss protection (issue #87)
+    stop_order_id: Optional[str] = None
+    stop_order_status: str = "NONE"
+    stop_price: Optional[float] = None
+    stop_side: Optional[str] = None
+    stop_order_time: str = "-"
+
     # Live Exit Order Tracking
     order_id_exit_up: Optional[str] = None
     order_id_exit_down: Optional[str] = None
@@ -623,6 +630,58 @@ class LiveTraderEngine:
         except Exception as e:
             log.error("Failed placing live quote for %s: %s", token_id, e)
             return {"error": str(e), "order_id": None}
+
+    def place_stop_order(self, mstate: MarketLiveState, side: str) -> None:
+        """Stage a resting stop-loss SELL order for a single-leg filled position.
+
+        Idempotent: a no-op when a stop is already staged for this window.
+        Live mode submits a limit SELL at the stop threshold (crosses and fills
+        immediately as taker if the bid is already at/below the threshold);
+        paper mode stages a simulated order.
+        """
+        is_up = (side.upper() == "UP")
+        with self._engine_lock:
+            if mstate.stop_order_id:
+                return
+            fill_price = mstate.fill_price_up if is_up else mstate.fill_price_down
+            token = mstate.up_token if is_up else mstate.down_token
+            if fill_price is None or not token:
+                return
+            stop_price = round(min(0.99, max(0.01, fill_price - self.exit_thresh)), 2)
+
+        stop_order_id: Optional[str] = None
+        stop_status = "NONE"
+        if self.mode == "live":
+            res = self.place_live_quote(token, stop_price, self.shares, "SELL")
+            if res and res.get("order_id"):
+                stop_order_id = res["order_id"]
+                stop_status = res.get("status") or "RESTING"
+            else:
+                log.warning(
+                    "[%s] Failed to place resting stop-loss order for %s leg; "
+                    "falling back to reactive stop exit",
+                    mstate.slug,
+                    side.upper(),
+                )
+                return
+        else:
+            stop_order_id = f"paper_stop_{mstate.slug}"
+            stop_status = "RESTING"
+
+        with self._engine_lock:
+            mstate.stop_order_id = stop_order_id
+            mstate.stop_order_status = stop_status
+            mstate.stop_price = stop_price
+            mstate.stop_side = side.upper()
+            mstate.stop_order_time = time.strftime("%H:%M:%S")
+            log.info(
+                "[%s] Resting stop-loss %s SELL %s shares @ %.2f staged (%s)",
+                mstate.slug,
+                mstate.stop_side,
+                self.shares,
+                stop_price,
+                stop_order_id,
+            )
 
     @staticmethod
     def _cancel_succeeded(res: Any) -> bool:
@@ -2477,23 +2536,31 @@ class LiveTraderEngine:
                 mstate.next_order_id_down = None
                 mstate.next_quoted = False
 
-        # 2. Advance Pre-Quoting on Next Window (T+1) if live mode is active
-        if self.is_running and self.mode == "live" and not self.quoting_halted and mstate.next_condition_id and not mstate.next_quoted:
+        # 2. Advance Pre-Quoting on Next Window (T+1) (live CLOB or paper simulation)
+        if self.is_running and not self.quoting_halted and mstate.next_condition_id and not mstate.next_quoted:
             resting_up = round(0.50 - self.offset, 3)
             resting_down = round(0.50 - self.offset, 3)
-            if mstate.next_up_token and not mstate.next_order_id_up:
-                res_up = self.place_live_quote(mstate.next_up_token, resting_up, self.shares, "BUY")
-                if res_up and res_up.get("order_id"):
-                    mstate.next_order_id_up = res_up["order_id"]
-                    mstate.next_order_time_up = time.strftime("%H:%M:%S")
-            if mstate.next_down_token and not mstate.next_order_id_down:
-                res_dn = self.place_live_quote(mstate.next_down_token, resting_down, self.shares, "BUY")
-                if res_dn and res_dn.get("order_id"):
-                    mstate.next_order_id_down = res_dn["order_id"]
-                    mstate.next_order_time_down = time.strftime("%H:%M:%S")
-            if mstate.next_order_id_up and mstate.next_order_id_down:
+            if self.mode == "live":
+                if mstate.next_up_token and not mstate.next_order_id_up:
+                    res_up = self.place_live_quote(mstate.next_up_token, resting_up, self.shares, "BUY")
+                    if res_up and res_up.get("order_id"):
+                        mstate.next_order_id_up = res_up["order_id"]
+                        mstate.next_order_time_up = time.strftime("%H:%M:%S")
+                if mstate.next_down_token and not mstate.next_order_id_down:
+                    res_dn = self.place_live_quote(mstate.next_down_token, resting_down, self.shares, "BUY")
+                    if res_dn and res_dn.get("order_id"):
+                        mstate.next_order_id_down = res_dn["order_id"]
+                        mstate.next_order_time_down = time.strftime("%H:%M:%S")
+                if mstate.next_order_id_up and mstate.next_order_id_down:
+                    mstate.next_quoted = True
+                    log.info("[%s] ADVANCE PRE-QUOTING (live) active on %s (UP: %s, DN: %s)", slug, mstate.next_market_slug, mstate.next_order_id_up, mstate.next_order_id_down)
+            else:
+                mstate.next_order_id_up = f"paper_up_{mstate.next_market_slug or slug}"
+                mstate.next_order_id_down = f"paper_dn_{mstate.next_market_slug or slug}"
+                mstate.next_order_time_up = time.strftime("%H:%M:%S")
+                mstate.next_order_time_down = time.strftime("%H:%M:%S")
                 mstate.next_quoted = True
-                log.info("[%s] ADVANCE PRE-QUOTING active on %s (UP: %s, DN: %s)", slug, mstate.next_market_slug, mstate.next_order_id_up, mstate.next_order_id_down)
+                log.info("[%s] ADVANCE PRE-QUOTING (paper) active on %s", slug, mstate.next_market_slug)
 
         if not minfo:
             return
@@ -2584,11 +2651,9 @@ class LiveTraderEngine:
         # the market is already strongly monotonic / skewed. Never enter or quote into an immediate stop.
         initial_drift = abs(mid - 0.50)
         is_adverse_open = (initial_drift >= self.exit_thresh)
-        touch_pair = (mstate.up_ask + mstate.down_ask) if (mstate.up_ask is not None and mstate.down_ask is not None) else None
-        is_touch_pair_invalid = (touch_pair is not None and touch_pair > 1.03)
 
         # --- PRE-ENTRY DRIFT & 10% WINDOW TIMEOUT ENTRY CANCELLATION ---
-        if (is_late_start or is_adverse_open or is_touch_pair_invalid) and not mstate.entry_cancelled_timeout:
+        if (is_late_start or is_adverse_open) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
                 if self.mode == "live":
@@ -2611,7 +2676,7 @@ class LiveTraderEngine:
                                     "status": "CANCELLED",
                                     "source": "CLOB_API",
                                     "time": now_str,
-                                })
+                                    })
                         else:
                             cancel_ok_up = False
                     if mstate.order_id_down and mstate.order_status_down == "RESTING":
@@ -2677,16 +2742,12 @@ class LiveTraderEngine:
                         mstate.status = "DRIFT_SKIPPED"
                         mstate.last_action = f"Adverse drift ({initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
                         log.info("[%s] Entry skipped due to adverse open drift (drift=%.3f >= %.2f)", slug, initial_drift, self.exit_thresh)
-                    elif is_touch_pair_invalid:
-                        mstate.status = "DRIFT_SKIPPED"
-                        mstate.last_action = f"Touch pair wide ({touch_pair:.2f} > 1.03) — entry skipped"
-                        log.info("[%s] Entry skipped due to wide touch pair (touch=%.3f > 1.03)", slug, touch_pair)
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
                         mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
                         log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
 
-        # --- LIVE ORDER PLACEMENT (if in live mode and orders not placed yet) ---
+        # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         can_place_entry = (
             not self.quoting_halted
             and not mstate.pair_captured
@@ -2694,21 +2755,30 @@ class LiveTraderEngine:
             and not mstate.entry_cancelled_timeout
             and not is_late_start
             and not is_adverse_open
-            and not is_touch_pair_invalid
         )
-        if self.mode == "live" and can_place_entry:
-            if not mstate.order_id_up and mstate.up_token:
-                res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
-                if res_up and res_up.get("order_id"):
-                    mstate.order_id_up = res_up["order_id"]
-                    mstate.order_time_up = time.strftime("%H:%M:%S")
+        if can_place_entry:
+            if self.mode == "live":
+                if not mstate.order_id_up and mstate.up_token:
+                    res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
+                    if res_up and res_up.get("order_id"):
+                        mstate.order_id_up = res_up["order_id"]
+                        mstate.order_time_up = time.strftime("%H:%M:%S")
+                        mstate.order_status_up = "RESTING"
+                if not mstate.order_id_down and mstate.down_token:
+                    res_dn = self.place_live_quote(mstate.down_token, resting_down, self.shares, "BUY")
+                    if res_dn and res_dn.get("order_id"):
+                        mstate.order_id_down = res_dn["order_id"]
+                        mstate.order_time_down = time.strftime("%H:%M:%S")
+                        mstate.order_status_down = "RESTING"
+            else:
+                if not mstate.filled_up and mstate.order_status_up != "RESTING":
+                    mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
                     mstate.order_status_up = "RESTING"
-            if not mstate.order_id_down and mstate.down_token:
-                res_dn = self.place_live_quote(mstate.down_token, resting_down, self.shares, "BUY")
-                if res_dn and res_dn.get("order_id"):
-                    mstate.order_id_down = res_dn["order_id"]
-                    mstate.order_time_down = time.strftime("%H:%M:%S")
+                    mstate.order_time_up = mstate.order_time_up if mstate.order_time_up != "-" else time.strftime("%H:%M:%S")
+                if not mstate.filled_down and mstate.order_status_down != "RESTING":
+                    mstate.order_id_down = mstate.order_id_down or f"paper_dn_{slug}"
                     mstate.order_status_down = "RESTING"
+                    mstate.order_time_down = mstate.order_time_down if mstate.order_time_down != "-" else time.strftime("%H:%M:%S")
 
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
@@ -2743,6 +2813,8 @@ class LiveTraderEngine:
                                 mstate.status = "FILLED_UP"
                                 mstate.last_action = f"Filled UP {self.shares} shares @ {mstate.fill_price_up:.2f}"
                                 log.info("[%s] UP leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_up, sz_up, mstate.fill_price_up)
+                                # Pre-place resting stop-loss protection for the filled leg (issue #87)
+                                self.place_stop_order(mstate, "UP")
                         except Exception as e:
                             log.debug("[%s] Error checking UP order: %s", slug, e)
 
@@ -2769,6 +2841,9 @@ class LiveTraderEngine:
                                 mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
                                 mstate.last_action = f"Filled DOWN {self.shares} shares @ {mstate.fill_price_down:.2f}"
                                 log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_dn, sz_dn, mstate.fill_price_down)
+                                if not mstate.filled_up:
+                                    # Pre-place resting stop-loss protection for the filled leg (issue #87)
+                                    self.place_stop_order(mstate, "DOWN")
                         except Exception as e:
                             log.debug("[%s] Error checking DOWN order: %s", slug, e)
             else:
@@ -2785,6 +2860,8 @@ class LiveTraderEngine:
                         mstate.status = "FILLED_UP"
                         mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
                         log.info("[%s] Filled UP @ %.2f", slug, resting_up)
+                        # Pre-place resting stop-loss protection for the filled leg (issue #87)
+                        self.place_stop_order(mstate, "UP")
 
                 if can_sim_dn:
                     if mstate.down_ask is not None and mstate.down_ask <= resting_down:
@@ -2795,6 +2872,9 @@ class LiveTraderEngine:
                         mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
                         mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
                         log.info("[%s] Filled DOWN @ %.2f", slug, resting_down)
+                        if not mstate.filled_up:
+                            # Pre-place resting stop-loss protection for the filled leg (issue #87)
+                            self.place_stop_order(mstate, "DOWN")
 
 
             # --- PAIR COMPLETION & MERGE ---
