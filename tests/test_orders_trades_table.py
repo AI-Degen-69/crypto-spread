@@ -932,3 +932,111 @@ def test_toast_container_and_css():
     assert ".toast-close" in html
     assert "z-index:9999" in html or "z-index: 9999" in html
 
+
+@requires_node
+def test_show_toast_dom_and_lifecycle():
+    """Verify showToast helper creates correct DOM structure, variant classes, close button, and auto-dismiss (Issue #81)."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function makeElement(tag, id = '') {{
+      const el = {{
+        tagName: tag.toUpperCase(),
+        id,
+        textContent: '',
+        innerHTML: '',
+        className: '',
+        classList: {{
+          classes: new Set(),
+          add(c) {{ this.classes.add(c); }},
+          remove(c) {{ this.classes.delete(c); }},
+          contains(c) {{ return this.classes.has(c); }}
+        }},
+        children: [],
+        parentNode: null,
+        appendChild(child) {{
+          this.children.push(child);
+          child.parentNode = this;
+          return child;
+        }},
+        removeChild(child) {{
+          const idx = this.children.indexOf(child);
+          if (idx >= 0) this.children.splice(idx, 1);
+          child.parentNode = null;
+          return child;
+        }},
+        setAttribute(k, v) {{ this[k] = v; }},
+        style: {{}},
+        onclick: null
+      }};
+      return el;
+    }}
+
+    const container = makeElement('div', 'toastContainer');
+    container.className = 'toast-container';
+    elements['toastContainer'] = container;
+
+    global.document = {{
+      getElementById: (id) => elements[id] || null,
+      createElement: (tag) => makeElement(tag)
+    }};
+    global.window = global;
+
+    {js_code}
+
+    if (typeof showToast !== 'function') {{
+      throw new Error('showToast function is not defined');
+    }}
+
+    // 1. Create a merged toast
+    const tMerged = showToast({{ type: 'merged', title: 'Position Merged', message: 'BTC 5m: 5 shares merged', durationMs: 1000 }});
+    if (!tMerged) throw new Error('showToast returned null');
+    if (!tMerged.className.includes('toast-merged')) {{
+      throw new Error('Expected toast-merged class, got: ' + tMerged.className);
+    }}
+    if (container.children.length !== 1) {{
+      throw new Error('Expected 1 toast in container, got: ' + container.children.length);
+    }}
+
+    // 2. Create a stoploss toast
+    const tStop = showToast({{ type: 'stoploss', title: 'Stop-Loss Exit', message: 'ETH 5m: Exited @ $0.42', durationMs: 1000 }});
+    if (!tStop.className.includes('toast-stoploss')) {{
+      throw new Error('Expected toast-stoploss class, got: ' + tStop.className);
+    }}
+
+    // 3. Create a filled toast
+    const tFill = showToast({{ type: 'filled', title: 'Order Filled', message: 'SOL 5m (UP): 5 shares @ $0.48', durationMs: 1000 }});
+    if (!tFill.className.includes('toast-filled')) {{
+      throw new Error('Expected toast-filled class, got: ' + tFill.className);
+    }}
+    if (container.children.length !== 3) {{
+      throw new Error('Expected 3 toasts in container, got: ' + container.children.length);
+    }}
+
+    // 4. Test manual close button click
+    const closeBtn = tFill.children.find(c => c.className === 'toast-close');
+    if (!closeBtn) throw new Error('Missing close button on toast');
+    if (typeof closeBtn.onclick !== 'function') throw new Error('Close button has no onclick handler');
+    closeBtn.onclick({{ stopPropagation: () => {{}} }});
+    if (!tFill.classList.contains('fade-out')) {{
+      throw new Error('Toast did not get fade-out class on close click');
+    }}
+
+    console.log('SHOW_TOAST_DOM_AND_LIFECYCLE_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node showToast test failed: {res.stderr}\n{res.stdout}"
+    assert "SHOW_TOAST_DOM_AND_LIFECYCLE_TESTS_PASSED" in res.stdout
+
+

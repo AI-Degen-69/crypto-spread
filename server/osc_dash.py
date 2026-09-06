@@ -1982,6 +1982,57 @@ const fmtPrice=(p)=>{
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
 function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating'):c==='monotonic'?pill('pill-mono','monotonic'):c==='flat'?pill('pill-flat','flat'):pill('pill-flat',esc(c));}
 
+// Floating Side Toast Notifications (Issue #81)
+function showToast({ type = 'filled', title = '', message = '', durationMs = 5000 } = {}) {
+  const container = $('toastContainer');
+  if (!container) return null;
+
+  const toast = document.createElement('div');
+  toast.className = 'toast toast-' + type;
+
+  const content = document.createElement('div');
+  content.className = 'toast-content';
+
+  const header = document.createElement('div');
+  header.className = 'toast-header toast-header-' + type;
+  const icon = type === 'merged' ? '🟢' : type === 'stoploss' ? '🔴' : '⚪';
+  header.textContent = icon + ' ' + title;
+
+  const msg = document.createElement('div');
+  msg.className = 'toast-msg';
+  msg.textContent = message;
+
+  content.appendChild(header);
+  content.appendChild(msg);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'toast-close';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.onclick = function(e) {
+    e.stopPropagation();
+    toast.classList.add('fade-out');
+    if (toast._dismissTimer) { clearTimeout(toast._dismissTimer); toast._dismissTimer = null; }
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 280);
+  };
+
+  toast.appendChild(content);
+  toast.appendChild(closeBtn);
+  container.appendChild(toast);
+
+  toast._dismissTimer = setTimeout(function() {
+    toast._dismissTimer = null;
+    toast.classList.add('fade-out');
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 280);
+  }, durationMs);
+
+  // Cap max visible toasts at 6
+  while (container.children.length > 6) {
+    container.removeChild(container.children[0]);
+  }
+
+  return toast;
+}
+
 // Orders & Trades Tab State & Switching (Issue #59)
 let activeOtTab = (typeof localStorage !== 'undefined' && localStorage.getItem('crypto-spread-ot-view')) || 'orders';
 
