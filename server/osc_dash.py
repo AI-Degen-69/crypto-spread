@@ -3970,13 +3970,20 @@ function renderCockpitUI(st) {
       for (const mktKey of Object.keys(groupedOrders)) {
         const grp = groupedOrders[mktKey];
         const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : (grp.status === 'Cancelled' ? 'ot-tag-cancelled' : 'ot-tag-unpaired'));
+        const statusBorderColor = grp.status === 'Paired' ? 'var(--up)' : (grp.status === 'Partial' ? 'var(--gold)' : (grp.status === 'Cancelled' ? 'var(--dim)' : 'var(--line)'));
         const mktSlug = grp.market_slug || grp.series_slug || '';
         const mktUrl = mktSlug ? `https://polymarket.com/market/${encodeURIComponent(mktSlug)}` : '';
         const mktLinkHtml = mktUrl
           ? `<a href="${mktUrl}" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View on Polymarket">${esc(grp.market)} ↗</a>`
           : esc(grp.market);
+        const groupTime = (grp.legs.length > 0 && grp.legs[0].time && grp.legs[0].time !== '-') ? grp.legs[0].time : '-';
+        const timeCell = `
+          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid ${statusBorderColor};padding-left:10px">
+            ${esc(groupTime)}
+          </td>
+        `;
         const mktCell = `
-          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : (grp.status === 'Cancelled' ? 'var(--dim)' : 'var(--line)')};padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;padding-left:10px">
             <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
@@ -3999,12 +4006,10 @@ function renderCockpitUI(st) {
           const totalCostStr = (leg.priceNum != null && leg.sizeNum) ? `$${(leg.priceNum * leg.sizeNum).toFixed(2)}` : '-';
           const statusStr = isCancelled ? 'CANCELED' : (leg.status || 'OPEN');
           const statusBadgePill = isCancelled ? 'pill pill-mono ot-tag-cancelled' : (isFilled ? 'pill pill-osc' : 'pill pill-mono');
-          const timeStr = leg.time && leg.time !== '-' ? leg.time : '-';
 
           ordHtml += `
             <tr class="${idx === 0 ? 'ot-pair-lead' : ''}">
-              <td class="mono" style="font-size:11px;color:var(--faint)">${esc(timeStr)}</td>
-              ${idx === 0 ? mktCell : ''}
+              ${idx === 0 ? (timeCell + mktCell) : ''}
               <td><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
               <td class="mono" style="font-weight:600">${priceStr}</td>
               <td class="mono">${sizeStr}</td>
@@ -4042,14 +4047,21 @@ function renderCockpitUI(st) {
       for (const mktKey of Object.keys(groupedPos)) {
         const grp = groupedPos[mktKey];
         const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
+        const statusBorderColor = grp.status === 'Paired' ? 'var(--up)' : (grp.status === 'Partial' ? 'var(--gold)' : 'var(--line)');
         
         const mktSlug = grp.market_slug || grp.series_slug || '';
         const mktUrl = mktSlug ? `https://polymarket.com/market/${encodeURIComponent(mktSlug)}` : '';
         const mktLinkHtml = mktUrl
           ? `<a href="${mktUrl}" target="_blank" rel="noopener" style="color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View on Polymarket">${esc(grp.market)} ↗</a>`
           : esc(grp.market);
+        const groupTime = (grp.legs.length > 0 && grp.legs[0].time && grp.legs[0].time !== '-') ? grp.legs[0].time : '-';
+        const timeCell = `
+          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid ${statusBorderColor};padding-left:10px">
+            ${esc(groupTime)}
+          </td>
+        `;
         const mktCell = `
-          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;border-left:2px solid ${grp.status === 'Paired' ? 'var(--up)' : 'var(--line)'};padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;padding-left:10px">
             <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
@@ -4074,12 +4086,10 @@ function renderCockpitUI(st) {
           const sideBadgeCls = isUp ? 'ot-tag-up' : 'ot-tag-down';
           const sizeStr = leg.sizeNum ? leg.sizeNum.toFixed(2) : '-';
           const baseCostStr = leg.baseCost != null ? `$${leg.baseCost.toFixed(3)}` : '-';
-          const timeStr = leg.time && leg.time !== '-' ? leg.time : '-';
 
           posHtml += `
             <tr class="${idx === 0 ? 'ot-pair-lead' : ''}">
-              <td class="mono" style="font-size:11px;color:var(--faint)">${esc(timeStr)}</td>
-              ${idx === 0 ? mktCell : ''}
+              ${idx === 0 ? (timeCell + mktCell) : ''}
               <td><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
               <td class="mono">${sizeStr}</td>
               <td class="mono">${baseCostStr}</td>

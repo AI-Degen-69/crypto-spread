@@ -1,124 +1,112 @@
-# SPEC: Display Live Coin Actual Exchange Price vs. RTDS Spot Price with Real-Time Price Difference (Issue #78)
+# SPEC: Merge Paired Timestamp Cells and Refine Column Separator in Cockpit Tables (Issue #83)
 
 ## 1. Objective
-Enhance the Live Stream Telemetry system and Live Trading Cockpit dashboard to concurrently ingest and display both the direct exchange spot price (Binance Direct WebSocket) and Polymarket's RTDS feed price (`prices.crypto.binance`), calculating and displaying the real-time price difference (in $ and %) to monitor feed basis, drift, and latency.
+Refactor the table rendering for Open Orders (`#cockpitOrdersTable`) and Positions (`#cockpitPositionsTable`) in the Live Trading Cockpit dashboard (`server/osc_dash.py`) so that multi-leg paired markets render a single, merged `Time` cell spanning across the entire pair (`rowspan="${grp.rowspan}"`), move the pair status accent border to the leading left edge of the row / Time cell, and remove the harsh vertical border divider between Time and Market.
 
 ## 2. Background & Problem Statement
-Polymarket binary crypto markets settle against external oracle feeds broadcast over RTDS (`prices.crypto.binance`). In `strategy/streaming.py`, `UnifiedStreamBridge` currently maintains both a Binance WebSocket client and an RTDS WebSocket client, but drops incoming RTDS ticks whenever Binance is connected (`if self.binance.is_connected: return`).
-
-On the Cockpit dashboard (`server/osc_dash.py`), the Live Stream Telemetry card only displays a single spot value under "RTDS SPOT". Operators cannot observe whether Polymarket's RTDS feed lags behind Binance or drifts away from it, nor can they quantify the basis/spread between the two feeds. Ingesting and displaying both prices simultaneously alongside their instantaneous difference (`Actual - RTDS = Δ$ / Δ%`) provides crucial real-time visibility into feed lag, basis divergence, and potential latency arbitrage.
+In the Cockpit's Open Orders and Positions tables:
+1. Binary market legs (UP and DOWN) are grouped by market.
+2. While the `Market` cell spans both legs using `rowspan`, the `Time` cell currently generates an independent `<td>` for every individual leg. This results in duplicate timestamps stacked vertically for the same pair.
+3. The `Market` cell currently carries `border-left: 2px solid ...`, creating a stark vertical divider directly between `Time` and `Market`. This disrupts column flow, breaks visual alignment, and disconnects the timestamp from its market card.
 
 ## 3. Scope
 
 ### In Scope
-1. **`strategy/streaming.py`**:
-   - Concurrently track both feed prices in `UnifiedStreamBridge`: direct exchange spot prices (`binance_spot_prices`) and Polymarket RTDS prices (`rtds_spot_prices`).
-   - Do NOT drop RTDS ticks when Binance WS is active; update `self.rtds.spot_prices` and broadcast RTDS telemetry.
-   - Calculate instantaneous price divergence:
-     - `price_diff = binance_price - rtds_price`
-     - `price_diff_pct = ((binance_price - rtds_price) / rtds_price) * 100.0`
-   - Include both prices and divergence metrics in `UnifiedStreamBridge.get_status()` and `DashboardEnvelope(stream_id="spot")` broadcasts.
-   - Forward leading ticks to `on_spot_tick_ext` (Binance when connected, fallback to RTDS when disconnected) without breaking existing tests or triggering duplicate stop-losses.
-   - Add an optional `on_rtds_tick` callback to `UnifiedStreamBridge` so engine state updates RTDS basis immediately.
+1. **`server/osc_dash.py` — Open Orders Table (`#cockpitOrdersTable`)**:
+   - Merge `Time` cell across grouped legs using `rowspan="${grp.rowspan}"` (rendered once on `idx === 0`).
+   - Relocate the status accent border (`border-left: 2px solid <color>`) to the leading `Time` cell:
+     - `Paired` -> `var(--up)` (green)
+     - `Partial` -> `var(--gold)` (gold)
+     - `Cancelled` -> `var(--dim)` (gray/dim)
+     - `Unpaired` -> `var(--line)`
+   - Remove the harsh `border-left: 2px solid ...` from the `Market` `<td>`.
+   - On secondary legs (`idx > 0`), omit both `Time` and `Market` cells.
 
-2. **`strategy/live_trader.py`**:
-   - Add fields to `MarketLiveState`:
-     - `actual_price: Optional[float] = None`
-     - `rtds_price: Optional[float] = None`
-     - `price_diff: Optional[float] = None`
-     - `price_diff_pct: Optional[float] = None`
-   - Update `on_spot_tick` and `on_rtds_tick` to record both prices and recalculate `price_diff` and `price_diff_pct`.
-   - Expose these fields in `engine.get_state()` for each market.
+2. **`server/osc_dash.py` — Positions Table (`#cockpitPositionsTable`)**:
+   - Merge `Time` cell across grouped legs using `rowspan="${grp.rowspan}"` (rendered once on `idx === 0`).
+   - Apply status accent border (`border-left: 2px solid <color>`) to the leading `Time` cell:
+     - `Paired` -> `var(--up)` (green)
+     - `Partial` -> `var(--gold)` (gold)
+     - `Unpaired` -> `var(--line)`
+   - Remove `border-left: 2px solid ...` from the `Market` `<td>`.
+   - On secondary legs (`idx > 0`), omit `Time`, `Market`, and pair-level shared cells (`Market Value`, `Unrealized`, `Realized`).
 
-3. **`server/osc_dash.py`**:
-   - Update `/api/live/latency` to return `actual_price`, `rtds_price`, `price_diff`, and `price_diff_pct`.
-   - Update `#card-stream-telemetry` HTML layout:
-     - `ACTUAL SPOT (BINANCE)`: e.g. `$79,875.10`
-     - `RTDS SPOT`: e.g. `$79,863.58`
-     - `SPREAD / DIFF`: e.g. `+$11.52 (+0.014%)` with color coding (green positive, red negative, dim zero).
-     - Keep `CLOB MID`, `LEAD LATENCY`, and `FEED HEALTH`.
-   - Update `renderStreamTelemetry()` and SSE stream handler (`liveEventSource.onmessage`) to update all elements in real time.
-   - Update `renderCockpitUI` when state snapshots arrive.
-
-4. **`scripts/monitor_stream_latency.py`**:
-   - Add `actual_price: Optional[float] = None`, `rtds_price: Optional[float] = None`, and `price_diff: Optional[float] = None` to `StreamTickSnapshot`.
-   - Include these metrics in `to_dict()` and `format_row()`.
-
-5. **Automated Tests**:
-   - Unit tests in `tests/test_streaming.py` verifying concurrent tracking, delta math, `get_status()`, and broadcast envelopes.
-   - Integration tests in `tests/test_osc_dash_integration.py` verifying `/api/live/latency` and `/api/live/state` payload fields.
+3. **`tests/test_orders_trades_table.py`**:
+   - Update existing Node.js DOM tests and add new tests verifying:
+     - `Time` cell rendered once per group with `rowspan` attribute matching group size.
+     - `border-left: 2px solid` applied to the `Time` cell according to group status.
+     - `Market` cell does not contain `border-left: 2px solid`.
+     - Non-leading rows (`idx > 0`) do not render redundant `Time` or `Market` cells.
+     - Both Orders and Positions tables pass all assertions.
 
 ### Out of Scope
-- Changing market settlement or resolution contracts on Polymarket.
-- Connecting to non-Binance external exchanges (e.g. Coinbase, Kraken).
-- Altering core maker order sizing, spread offset, or stop loss thresholds.
+- Modifying backend order generation, state management, or execution logic in `strategy/live_trader.py`.
+- Modifying Tab 3 (Closed Trades), which does not use multi-leg paired row grouping.
+- Altering column order, column widths, or table data schemas.
 
----
+## 4. UI & DOM Architecture
 
-## 4. Interfaces & Data Contracts
-
-### 1. `UnifiedStreamBridge.get_status()`
-```python
-{
-    "is_running": bool,
-    "binance_ws_connected": bool,
-    "rtds_connected": bool,
-    "clob_ws_connected": bool,
-    "user_ws_connected": bool,
-    "active_spot_source": str,
-    "symbols": Dict[str, float],         # primary active prices
-    "binance_prices": Dict[str, float],  # direct exchange prices
-    "rtds_prices": Dict[str, float],     # polymarket rtds prices
-    "price_diffs": Dict[str, float],     # binance - rtds ($)
-    "price_diff_pcts": Dict[str, float], # binance - rtds (%)
-    "token_count": int,
-    "open_orders_count": int,
-    "seq": int,
-}
+### Orders Row HTML Structure
+```html
+<!-- Leading Row (idx === 0) -->
+<tr class="ot-pair-lead">
+  <td rowspan="2" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid var(--up);padding-left:10px">
+    14:05:00
+  </td>
+  <td rowspan="2" class="ot-pair-lead" style="vertical-align:top;padding-left:10px">
+    <div style="font-weight:700;font-size:12.5px;color:var(--tx)">...</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:4px">...</div>
+  </td>
+  <td><span class="ot-tag ot-tag-up">Up</span></td>
+  <td class="mono">$0.48</td>
+  <td class="mono">5</td>
+  <td class="mono">0</td>
+  <td class="mono">$2.40</td>
+  <td><span class="pill pill-mono">OPEN</span></td>
+  <td><button class="btn btn-danger cancel-order-btn">✖ Cancel</button></td>
+</tr>
+<!-- Follow-up Row (idx === 1) -->
+<tr>
+  <td><span class="ot-tag ot-tag-down">Down</span></td>
+  <td class="mono">$0.48</td>
+  <td class="mono">5</td>
+  <td class="mono">0</td>
+  <td class="mono">$2.40</td>
+  <td><span class="pill pill-mono">OPEN</span></td>
+  <td><button class="btn btn-danger cancel-order-btn">✖ Cancel</button></td>
+</tr>
 ```
 
-### 2. Spot Broadcast Envelope (`stream_id="spot"`)
-```python
-{
-    "type": "delta",
-    "stream_id": "spot",
-    "seq": int,
-    "server_time": int,
-    "data": {
-        "symbol": str,
-        "timestamp": int,
-        "price": float,
-        "actual_price": Optional[float],
-        "rtds_price": Optional[float],
-        "price_diff": Optional[float],
-        "price_diff_pct": Optional[float],
-        "slug": Optional[str],
-        "slugs": List[str],
-        "source": str,  # "BINANCE_WS" | "RTDS"
-    }
-}
+### Positions Row HTML Structure
+```html
+<!-- Leading Row (idx === 0) -->
+<tr class="ot-pair-lead">
+  <td rowspan="2" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid var(--up);padding-left:10px">
+    14:01:00
+  </td>
+  <td rowspan="2" class="ot-pair-lead" style="vertical-align:top;padding-left:10px">
+    <div style="font-weight:700;font-size:12.5px;color:var(--tx)">...</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:4px">...</div>
+  </td>
+  <td><span class="ot-tag ot-tag-up">Up</span></td>
+  <td class="mono">5.00</td>
+  <td class="mono">$0.480</td>
+  <td rowspan="2" class="mono ot-pair-lead" style="vertical-align:middle;font-weight:600">$5.00</td>
+  <td rowspan="2" class="mono ot-pair-lead" style="vertical-align:middle;font-weight:700;color:var(--up)">+$0.10 (+2.1%)</td>
+  <td rowspan="2" class="mono ot-pair-lead" style="vertical-align:middle;font-weight:700;color:var(--tx)">--</td>
+</tr>
+<!-- Follow-up Row (idx === 1) -->
+<tr>
+  <td><span class="ot-tag ot-tag-down">Down</span></td>
+  <td class="mono">5.00</td>
+  <td class="mono">$0.480</td>
+</tr>
 ```
 
-### 3. `/api/live/latency` Response Schema
-```python
-{
-    "ok": True,
-    "series": str,
-    "symbol": str,
-    "spot_price": Optional[float],
-    "actual_price": Optional[float],
-    "rtds_price": Optional[float],
-    "price_diff": Optional[float],
-    "price_diff_pct": Optional[float],
-    "spot_drift": float,
-    "clob_mid": Optional[float],
-    "latency_ms": Optional[float],
-    "streaming_active": bool,
-    "is_running": bool,
-    "binance_ws_connected": bool,
-    "rtds_connected": bool,
-    "active_spot_source": str,
-    "clob_ws_connected": bool,
-    "updated_ts": Optional[float],
-}
-```
+## 5. Acceptance Criteria
+- [ ] For paired orders with multiple legs, the `Time` cell in `#cockpitOrdersBody` spans the entire group using `rowspan` instead of repeating separate timestamp cells.
+- [ ] For paired positions with multiple legs, the `Time` cell in `#cockpitPositionsBody` spans the entire group using `rowspan`.
+- [ ] The heavy 2px vertical border between the Time and Market columns is removed from `mktCell`.
+- [ ] A refined status accent border is positioned at the leading outer edge of the pair row/time cell (`border-left: 2px solid ...`) without an abrupt divider between Time and Market.
+- [ ] Unit and DOM tests verify the presence of merged timestamp cells (`rowspan`) and proper rendering under mixed, cancelled, and paired states.
+- [ ] All test suites pass: `python -m pytest -q tests/test_orders_trades_table.py` and `python -m pytest -q`.

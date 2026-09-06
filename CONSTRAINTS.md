@@ -1,34 +1,23 @@
-# Quality Guardrails & Constraints (`CONSTRAINTS.md`) — Issue #78
+# Quality Guardrails & Constraints (`CONSTRAINTS.md`) — Issue #83
 
 ## 1. Test & Regression Bar (Non-Negotiable)
-- **Zero Regression**: All 256 existing unit and integration tests must remain 100% green (`python -m pytest -q`).
-- **Comprehensive Coverage**: New tests must be added covering:
-  - `UnifiedStreamBridge`:
-    - Concurrent tracking of both `binance_spot_prices` and `rtds_spot_prices`.
-    - Calculation of `price_diff` and `price_diff_pct`.
-    - Forwarding RTDS ticks to SSE broadcasts without dropping ticks when Binance is connected.
-    - Preserving fallback leading tick behavior when Binance is disconnected.
-    - Health and telemetry metrics in `get_status()`.
-  - `MarketLiveState` & `LiveTraderEngine`:
-    - Retaining `actual_price`, `rtds_price`, `price_diff`, and `price_diff_pct`.
-    - Exposure of delta metrics in `get_state()`.
-  - API & Dashboard Integration:
-    - `/api/live/latency` returns `actual_price`, `rtds_price`, `price_diff`, and `price_diff_pct`.
-    - SSE stream dispatches spot events with actual, RTDS, and diff values.
-    - Live Stream Telemetry card renders both prices and signed, color-coded price difference.
-  - Latency Monitor:
-    - `StreamTickSnapshot` to_dict and format_row include actual and RTDS prices and diffs.
+- **Zero Regression**: All existing unit and DOM tests must remain 100% green (`python -m pytest -q`).
+- **Comprehensive Coverage**: New assertions in `tests/test_orders_trades_table.py` covering:
+  - Merged `Time` cell with `rowspan` attribute matching `grp.rowspan` for paired orders.
+  - Absence of redundant `Time` cell on follow-up legs (`idx > 0`).
+  - Leading status accent border (`border-left: 2px solid <color>`) on the `Time` cell reflecting pair status (`Paired` = green, `Partial` = gold, `Cancelled` = dim).
+  - Removal of `border-left: 2px solid` from the `Market` cell (`mktCell`).
+  - Merged `Time` cell and proper row rendering for paired positions in `#cockpitPositionsBody`.
 
-## 2. Performance & Latency Thresholds
-- **Zero Ingestion Lag**: Math operations (`price_diff = binance - rtds`) must be O(1) in-memory float operations (< 1µs per tick).
-- **Non-Blocking SSE**: Broadcasting to SSE queues must never block the WebSocket receiving loops.
-- **Client DOM Efficiency**: UI updates in `renderStreamTelemetry()` must use direct element ID references and Avoid unnecessary DOM reflows during sub-second ticks.
+## 2. Performance & DOM Efficiency
+- **Zero Runtime Overhead**: Grouping and string template interpolation occurs in O(N) where N is the number of active open orders/positions (typically < 30 rows).
+- **Clean Semantic Markup**: Table layout strictly preserves valid HTML table structure with matching row/column spans across header and body.
 
 ## 3. Anti-Cheat Discipline
 - **No Test Silencing**: No tests may be skipped, commented out, deleted, or assertions weakened to pass.
-- **Strict Calculations**: Mathematical tests must verify exact float delta calculations (`diff == round(binance - rtds, 4)`).
+- **Strict Verification**: DOM assertions must check actual rendered HTML attributes (`rowspan`, `style*="border-left:2px solid"`) using Node.js execution harness.
 
 ## 4. Architectural Boundaries
-- **No External Libraries**: No new dependencies in `requirements.txt`. Only Python stdlib, `fastapi`, `uvicorn`, `requests`, and existing WS clients.
-- **Feed Independence**: Binance WebSocket and Polymarket RTDS clients must run independently without tight failure coupling.
-- **Safety First**: Order execution and stop-loss logic must continue relying on verified leading spot signals without race conditions.
+- **Scope Isolation**: Strictly confined to dashboard rendering in `server/osc_dash.py` and test verification in `tests/test_orders_trades_table.py`.
+- **Zero Backend Changes**: No modifications to `strategy/live_trader.py`, `strategy/streaming.py`, or data schemas.
+- **No External Libraries**: Zero changes to `requirements.txt`.
