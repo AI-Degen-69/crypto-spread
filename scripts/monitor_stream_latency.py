@@ -562,11 +562,31 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         help="Suppress per-tick console printing",
     )
     parser.add_argument(
+        "--symbol",
+        default=None,
+        help="Crypto symbol (e.g. btc, eth, sol) to monitor (resolves to series slug)",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=None,
+        help="Alias for --ticks (number of tick snapshots to capture)",
+    )
+    parser.add_argument(
         "--stream",
         action="store_true",
         help="Connect UnifiedStreamBridge to ingest live RTDS ticks alongside Binance spot",
     )
-    return parser.parse_args(args)
+    parsed = parser.parse_args(args)
+    if parsed.symbol:
+        sym_lower = parsed.symbol.lower()
+        if sym_lower in SYMBOL_TO_SERIES:
+            parsed.series = SYMBOL_TO_SERIES[sym_lower]
+        else:
+            parsed.series = f"{sym_lower}-up-or-down-5m"
+    if parsed.samples is not None:
+        parsed.ticks = parsed.samples
+    return parsed
 
 
 def run_monitor(
@@ -665,6 +685,11 @@ def run_monitor(
 
 def main() -> None:
     """CLI application entry point."""
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = parse_args()
     import threading
     stop_ev = threading.Event()
