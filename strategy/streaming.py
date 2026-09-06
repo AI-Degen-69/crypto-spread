@@ -610,6 +610,7 @@ class UnifiedStreamBridge:
         on_spot_tick: Optional[Callable[[str, int, float], None]] = None,
         on_book_update: Optional[Callable[[str, Dict[float, float], Dict[float, float]], None]] = None,
         on_order_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_rtds_tick: Optional[Callable[[str, int, float], None]] = None,
     ):
         """Initialize unified stream bridge with callbacks."""
         self.symbols = symbols or RTDS_SYMBOLS
@@ -617,6 +618,7 @@ class UnifiedStreamBridge:
         self.on_spot_tick_ext = on_spot_tick
         self.on_book_update_ext = on_book_update
         self.on_order_event_ext = on_order_event
+        self.on_rtds_tick = on_rtds_tick
 
         self.binance = BinanceDirectWSClient(symbols=self.binance_symbols, on_spot_tick=self._handle_binance_spot_tick)
         self.rtds = RTDSStreamClient(symbols=self.symbols, on_spot_tick=self._handle_rtds_spot_tick)
@@ -633,29 +635,69 @@ class UnifiedStreamBridge:
         self._lock = threading.Lock()
         self._subscribers: List[asyncio.Queue] = []
 
+    @property
+    def binance_spot_prices(self) -> Dict[str, float]:
+        """Direct Binance WebSocket spot prices."""
+        return self.binance.spot_prices
+
+    @property
+    def rtds_spot_prices(self) -> Dict[str, float]:
+        """Polymarket RTDS spot prices."""
+        return self.rtds.spot_prices
+
     def _handle_binance_spot_tick(self, symbol: str, ts: int, price: float) -> None:
         """Handle incoming sub-second spot tick from Binance Direct WS."""
         if self.on_spot_tick_ext:
             self.on_spot_tick_ext(symbol, ts, price)
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
         slugs = series_for_symbol(symbol)
+        rtds_price = self.rtds.spot_prices.get(symbol.lower())
+        price_diff = round(price - rtds_price, 4) if rtds_price is not None else None
+        price_diff_pct = round(((price - rtds_price) / rtds_price) * 100.0, 4) if (rtds_price is not None and rtds_price > 0) else None
         self._broadcast(
             stream_id="spot",
-            data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug, "slugs": slugs, "source": "BINANCE_WS"},
+            data={
+                "symbol": symbol,
+                "timestamp": ts,
+                "price": price,
+                "actual_price": price,
+                "rtds_price": rtds_price,
+                "price_diff": price_diff,
+                "price_diff_pct": price_diff_pct,
+                "slug": slug,
+                "slugs": slugs,
+                "source": "BINANCE_WS",
+            },
         )
 
     def _handle_rtds_spot_tick(self, symbol: str, ts: int, price: float) -> None:
-        """Handle incoming spot tick from RTDS or REST fallback (active when Binance WS disconnected)."""
-        if self.binance.is_connected:
-            return
+        """Handle incoming spot tick from RTDS or REST fallback."""
+        if self.on_rtds_tick:
+            self.on_rtds_tick(symbol, ts, price)
 
-        if self.on_spot_tick_ext:
+        # Fallback: if Binance WS is disconnected, forward RTDS tick as primary spot tick
+        if not self.binance.is_connected and self.on_spot_tick_ext:
             self.on_spot_tick_ext(symbol, ts, price)
+
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
         slugs = series_for_symbol(symbol)
+        binance_price = self.binance.spot_prices.get(symbol.lower())
+        price_diff = round(binance_price - price, 4) if binance_price is not None else None
+        price_diff_pct = round(((binance_price - price) / price) * 100.0, 4) if (binance_price is not None and price > 0) else None
         self._broadcast(
             stream_id="spot",
-            data={"symbol": symbol, "timestamp": ts, "price": price, "slug": slug, "slugs": slugs, "source": "RTDS"},
+            data={
+                "symbol": symbol,
+                "timestamp": ts,
+                "price": binance_price if binance_price is not None else price,
+                "actual_price": binance_price,
+                "rtds_price": price,
+                "price_diff": price_diff,
+                "price_diff_pct": price_diff_pct,
+                "slug": slug,
+                "slugs": slugs,
+                "source": "RTDS",
+            },
         )
 
     def _handle_spot_tick(self, symbol: str, ts: int, price: float) -> None:
@@ -806,12 +848,26 @@ class UnifiedStreamBridge:
 
     def get_status(self) -> Dict[str, Any]:
         """Return streaming health and telemetry."""
+        binance_prices = dict(self.binance.spot_prices)
+        rtds_prices = dict(self.rtds.spot_prices)
+        price_diffs: Dict[str, float] = {}
+        price_diff_pcts: Dict[str, float] = {}
+
+        common_syms = set(binance_prices.keys()).intersection(rtds_prices.keys())
+        for sym in common_syms:
+            bp = binance_prices[sym]
+            rp = rtds_prices[sym]
+            d = round(bp - rp, 4)
+            price_diffs[sym] = d
+            if rp > 0:
+                price_diff_pcts[sym] = round((d / rp) * 100.0, 4)
+
         if self.binance.is_connected:
             active_source = "BINANCE_WS"
-            active_prices = {**self.rtds.spot_prices, **self.binance.spot_prices}
+            active_prices = {**rtds_prices, **binance_prices}
         else:
             active_source = "RTDS"
-            active_prices = {**self.binance.spot_prices, **self.rtds.spot_prices}
+            active_prices = {**binance_prices, **rtds_prices}
         return {
             "is_running": self.is_running,
             "binance_ws_connected": self.binance.is_connected,
@@ -820,6 +876,10 @@ class UnifiedStreamBridge:
             "user_ws_connected": self.user.is_connected,
             "active_spot_source": active_source,
             "symbols": active_prices,
+            "binance_prices": binance_prices,
+            "rtds_prices": rtds_prices,
+            "price_diffs": price_diffs,
+            "price_diff_pcts": price_diff_pcts,
             "token_count": len(self.clob.token_ids),
             "open_orders_count": len(self.user.open_orders),
             "seq": self._seq,
