@@ -52,6 +52,42 @@ def test_window_rollover_resets_stop_paper():
     assert mstate.stop_price is None
 
 
+def test_resting_stop_visible_in_open_orders():
+    """The staged stop appears in get_open_orders_list() as an ENGINE_STOP SELL row."""
+    engine = LiveTraderEngine()
+    mstate = engine.markets[SLUG]
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+    mstate.fill_price_up = 0.48
+    mstate.up_bid = 0.47
+
+    engine.place_stop_order(mstate, "UP")
+
+    orders = engine.get_open_orders_list()
+    stop_rows = [o for o in orders if o.get("source") == "ENGINE_STOP"]
+    assert len(stop_rows) == 1
+    row = stop_rows[0]
+    assert row["order_id"] == f"paper_stop_{SLUG}"
+    assert row["side"] == "SELL (UP)"
+    assert row["status"] == "RESTING"
+    assert row["price"] == 0.43
+    assert row["size"] == 5
+
+
+def test_cancelled_stop_not_in_open_orders():
+    """A cleared/cancelled stop must not linger in the open-orders list."""
+    engine = LiveTraderEngine()
+    mstate = engine.markets[SLUG]
+    mstate.up_token = "tok_up"
+    mstate.fill_price_up = 0.48
+
+    engine.place_stop_order(mstate, "UP")
+    engine._cancel_stop_order(mstate, reason="test")
+
+    orders = engine.get_open_orders_list()
+    assert not any(o.get("source") == "ENGINE_STOP" for o in orders)
+
+
 def _fake_market(now: float) -> LiveMarket:
     return LiveMarket(
         condition_id="0xabc123",

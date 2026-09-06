@@ -1353,6 +1353,22 @@ class LiveTraderEngine:
                     "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
                 })
                 existing_ids.add(m.order_id_down)
+            # Pre-placed resting stop-loss protection (issue #87)
+            if m.stop_order_id and m.stop_order_status not in ("NONE", "CANCELLED", "FILLED") and m.stop_order_id not in existing_ids:
+                orders.append({
+                    "order_id": m.stop_order_id,
+                    "market": m.label,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
+                    "token_id": m.up_token if m.stop_side == "UP" else m.down_token,
+                    "side": f"SELL ({m.stop_side})" if m.stop_side else "SELL",
+                    "price": m.stop_price,
+                    "size": m.order_shares,
+                    "status": m.stop_order_status,
+                    "source": "ENGINE_STOP",
+                    "time": m.stop_order_time if m.stop_order_time != "-" else now_time_str,
+                })
+                existing_ids.add(m.stop_order_id)
             if m.next_order_id_up and m.next_order_id_up not in existing_ids:
                 orders.append({
                     "order_id": m.next_order_id_up,
