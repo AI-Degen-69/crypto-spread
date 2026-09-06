@@ -1113,4 +1113,35 @@ def test_trade_event_market_slug():
     assert engine.trades[0].market_slug == "btc-updown-5m-active"
 
 
+def test_open_orders_and_positions_market_slug():
+    """Verify get_open_orders_list and get_open_positions propagate market_slug and series_slug."""
+    from strategy.live_trader import LiveTraderEngine
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "QUOTING"
+    m.market_slug = "btc-updown-5m-12345"
+    m.up_token = "tok_up_1"
+    m.down_token = "tok_dn_1"
+
+    # Test open orders
+    orders = engine.get_open_orders_list()
+    assert len(orders) == 2
+    assert orders[0]["market_slug"] == "btc-updown-5m-12345"
+    assert orders[0]["series_slug"] == "btc-up-or-down-5m"
+    assert orders[1]["market_slug"] == "btc-updown-5m-12345"
+    assert orders[1]["series_slug"] == "btc-up-or-down-5m"
+
+    # Test open positions
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    positions = engine.get_open_positions()
+    assert len(positions) == 1
+    assert positions[0]["market_slug"] == "btc-updown-5m-12345"
+    assert positions[0]["series_slug"] == "btc-up-or-down-5m"
+
+
+
 

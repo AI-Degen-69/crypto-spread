@@ -17,7 +17,7 @@ Add direct clickable hyperlinks pointing to the active Polymarket live markets i
   - **Verify**: `python -m pytest tests/test_live_trader.py -q`
   - **Files**: `strategy/live_trader.py`
 
-- [ ] Task 2: Propagate `market_slug` and `series_slug` in `get_open_orders_list` and `get_open_positions`
+- [x] Task 2: Propagate `market_slug` and `series_slug` in `get_open_orders_list` and `get_open_positions`
   - **Acceptance**: Returned order dictionaries and position dictionaries contain `market_slug` and `series_slug`.
   - **Verify**: `python -m pytest tests/test_live_trader.py -q`
   - **Files**: `strategy/live_trader.py`

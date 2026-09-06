@@ -985,25 +985,35 @@ class LiveTraderEngine:
                         raw_asset = str(o.get("asset_id") or o.get("token_id") or "")
                         market_label = str(o.get("market") or "")
                         side_val = str(o.get("side") or "BUY").upper()
+                        mkt_slug = str(o.get("market_slug") or "")
+                        series_slug = str(o.get("series_slug") or "")
                         for m in self.markets.values():
                             if raw_asset:
                                 if raw_asset == m.up_token:
                                     market_label = m.label
+                                    mkt_slug = m.market_slug or ""
+                                    series_slug = m.slug
                                     if "UP" not in side_val:
                                         side_val = f"{side_val} (UP)"
                                     break
                                 elif raw_asset == m.down_token:
                                     market_label = m.label
+                                    mkt_slug = m.market_slug or ""
+                                    series_slug = m.slug
                                     if "DOWN" not in side_val:
                                         side_val = f"{side_val} (DOWN)"
                                     break
                                 elif raw_asset == m.next_up_token:
                                     market_label = f"{m.label} (Next Window)"
+                                    mkt_slug = m.next_market_slug or m.market_slug or ""
+                                    series_slug = m.slug
                                     if "UP" not in side_val:
                                         side_val = f"{side_val} (UP)"
                                     break
                                 elif raw_asset == m.next_down_token:
                                     market_label = f"{m.label} (Next Window)"
+                                    mkt_slug = m.next_market_slug or m.market_slug or ""
+                                    series_slug = m.slug
                                     if "DOWN" not in side_val:
                                         side_val = f"{side_val} (DOWN)"
                                     break
@@ -1013,6 +1023,8 @@ class LiveTraderEngine:
                         orders.append({
                             "order_id": o.get("id") or o.get("order_id", ""),
                             "market": market_label,
+                            "market_slug": mkt_slug,
+                            "series_slug": series_slug,
                             "token_id": raw_asset,
                             "side": side_val,
                             "price": float(o.get("price", 0.0)),
@@ -1032,6 +1044,8 @@ class LiveTraderEngine:
                 orders.append({
                     "order_id": m.order_id_up,
                     "market": m.label,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
                     "token_id": m.up_token,
                     "side": "BUY (UP)",
                     "price": m.resting_up,
@@ -1044,6 +1058,8 @@ class LiveTraderEngine:
                 orders.append({
                     "order_id": m.order_id_down,
                     "market": m.label,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
                     "token_id": m.down_token,
                     "side": "BUY (DOWN)",
                     "price": m.resting_down,
@@ -1056,6 +1072,8 @@ class LiveTraderEngine:
                 orders.append({
                     "order_id": m.next_order_id_up,
                     "market": f"{m.label} (Next Window)",
+                    "market_slug": m.next_market_slug or m.market_slug or "",
+                    "series_slug": m.slug,
                     "token_id": m.next_up_token,
                     "side": "BUY (UP)",
                     "price": m.resting_up,
@@ -1068,6 +1086,8 @@ class LiveTraderEngine:
                 orders.append({
                     "order_id": m.next_order_id_down,
                     "market": f"{m.label} (Next Window)",
+                    "market_slug": m.next_market_slug or m.market_slug or "",
+                    "series_slug": m.slug,
                     "token_id": m.next_down_token,
                     "side": "BUY (DOWN)",
                     "price": m.resting_down,
@@ -1088,6 +1108,8 @@ class LiveTraderEngine:
                         orders.append({
                             "order_id": f"paper_up_{m.slug}",
                             "market": m.label,
+                            "market_slug": m.market_slug or "",
+                            "series_slug": m.slug,
                             "token_id": m.up_token,
                             "side": "BUY (UP)",
                             "price": m.resting_up,
@@ -1100,6 +1122,8 @@ class LiveTraderEngine:
                         orders.append({
                             "order_id": f"paper_dn_{m.slug}",
                             "market": m.label,
+                            "market_slug": m.market_slug or "",
+                            "series_slug": m.slug,
                             "token_id": m.down_token,
                             "side": "BUY (DOWN)",
                             "price": m.resting_down,
@@ -1174,6 +1198,8 @@ class LiveTraderEngine:
                 positions.append({
                     "asset": m.up_token or f"paper_up_{m.slug}",
                     "conditionId": m.condition_id,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
                     "title": f"{m.label} - {m.market_slug}" if m.market_slug else m.label,
                     "outcome": "Up",
                     "side": "Up",
@@ -1194,6 +1220,8 @@ class LiveTraderEngine:
                 positions.append({
                     "asset": m.down_token or f"paper_dn_{m.slug}",
                     "conditionId": m.condition_id,
+                    "market_slug": m.market_slug or "",
+                    "series_slug": m.slug,
                     "title": f"{m.label} - {m.market_slug}" if m.market_slug else m.label,
                     "outcome": "Down",
                     "side": "Down",
@@ -2006,6 +2034,8 @@ class LiveTraderEngine:
             {
                 "asset": "0x1234567890abcdef1",
                 "conditionId": "0xabcdef1234567890",
+                "market_slug": "eth-up-or-down-5m",
+                "series_slug": "eth-up-or-down-5m",
                 "size": 5.0,
                 "avgPrice": 0.485,
                 "curPrice": 0.510,
