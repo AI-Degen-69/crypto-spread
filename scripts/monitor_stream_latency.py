@@ -235,6 +235,8 @@ class LatencyAuditor:
             base_mid = self._pending_shock.get("baseline_mid")
             base_bid = self._pending_shock.get("baseline_bid")
             base_ask = self._pending_shock.get("baseline_ask")
+            base_dn_b = self._pending_shock.get("baseline_down_bid")
+            base_dn_a = self._pending_shock.get("baseline_down_ask")
             if dt <= self.response_window_sec:
                 reacted = False
                 if base_mid is not None and snapshot.clob_mid is not None:
@@ -245,6 +247,12 @@ class LatencyAuditor:
                         reacted = True
                 if base_ask is not None and snapshot.up_ask is not None:
                     if abs(snapshot.up_ask - base_ask) >= 0.01:
+                        reacted = True
+                if base_dn_b is not None and snapshot.down_bid is not None:
+                    if abs(snapshot.down_bid - base_dn_b) >= 0.01:
+                        reacted = True
+                if base_dn_a is not None and snapshot.down_ask is not None:
+                    if abs(snapshot.down_ask - base_dn_a) >= 0.01:
                         reacted = True
 
                 if reacted:
@@ -264,13 +272,20 @@ class LatencyAuditor:
             return
 
         # Check for acute price movement within preceding 3-second window
-        short_window_drift = 0.0
         if len(self._recent_prices) >= 2:
             oldest_price = self._recent_prices[0][1]
-            if oldest_price > 0:
-                short_window_drift = (snapshot.spot_price - oldest_price) / oldest_price
-
-        drift_active = abs(snapshot.spot_drift_pct) >= self.drift_threshold or abs(short_window_drift) >= self.drift_threshold
+            short_window_drift = (snapshot.spot_price - oldest_price) / oldest_price if oldest_price > 0 else 0.0
+            drift_active = abs(short_window_drift) >= self.drift_threshold
+            trigger_drift = short_window_drift
+        else:
+            short_window_drift = 0.0
+            # On first tick of a session or isolated test, allow cumulative spot_drift_pct to seed shock
+            if not self.events and not self._pending_shock:
+                drift_active = abs(snapshot.spot_drift_pct) >= self.drift_threshold
+                trigger_drift = snapshot.spot_drift_pct
+            else:
+                drift_active = False
+                trigger_drift = 0.0
 
         if not drift_active:
             self._in_shock = False
@@ -281,10 +296,12 @@ class LatencyAuditor:
             self._pending_shock = {
                 "shock_ts": now,
                 "spot_price": snapshot.spot_price,
-                "drift_pct": snapshot.spot_drift_pct,
+                "drift_pct": trigger_drift,
                 "baseline_mid": snapshot.clob_mid,
                 "baseline_bid": snapshot.up_bid,
                 "baseline_ask": snapshot.up_ask,
+                "baseline_down_bid": snapshot.down_bid,
+                "baseline_down_ask": snapshot.down_ask,
                 "reaction_time_sec": None,
                 "reaction_time_ms": None,
                 "clob_reacted": False,
@@ -312,6 +329,21 @@ class LatencyAuditor:
             idx_95 = min(len(latencies) - 1, int(len(latencies) * 0.95))
             p95_lat = latencies[idx_95]
 
+        drifts = sorted([abs(e["drift_pct"]) for e in self.events if e.get("drift_pct") is not None])
+        min_drift = min(drifts) if drifts else 0.0
+        median_drift = 0.0
+        mean_drift = 0.0
+        p95_drift = 0.0
+        if drifts:
+            mean_drift = sum(drifts) / len(drifts)
+            mid_idx = len(drifts) // 2
+            if len(drifts) % 2 == 1:
+                median_drift = drifts[mid_idx]
+            else:
+                median_drift = (drifts[mid_idx - 1] + drifts[mid_idx]) / 2.0
+            idx_95 = min(len(drifts) - 1, int(len(drifts) * 0.95))
+            p95_drift = drifts[idx_95]
+
         return {
             "total_shocks": total,
             "reaction_count": n_reacted,
@@ -320,11 +352,19 @@ class LatencyAuditor:
             "median_latency_ms": round(median_lat, 1),
             "mean_latency_ms": round(mean_lat, 1),
             "p95_latency_ms": round(p95_lat, 1),
+            "min_drift_pct": round(min_drift, 6),
+            "median_drift_pct": round(median_drift, 6),
+            "mean_drift_pct": round(mean_drift, 6),
+            "p95_drift_pct": round(p95_drift, 6),
         }
 
     def format_summary(self) -> str:
         """Format empirical audit summary as readable text block."""
         s = self.get_summary()
+        min_lat_str = f"{s['min_latency_ms']:.1f} ms" if s['reaction_count'] > 0 else "N/A"
+        med_lat_str = f"{s['median_latency_ms']:.1f} ms" if s['reaction_count'] > 0 else "N/A"
+        mean_lat_str = f"{s['mean_latency_ms']:.1f} ms" if s['reaction_count'] > 0 else "N/A"
+        p95_lat_str = f"{s['p95_latency_ms']:.1f} ms" if s['reaction_count'] > 0 else "N/A"
         lines = [
             "=" * 80,
             "EMPIRICAL LATENCY AUDIT SUMMARY (RTDS Spot -> CLOB Book Response)",
@@ -332,10 +372,14 @@ class LatencyAuditor:
             f"Total Spot Price Shocks:   {s['total_shocks']}",
             f"CLOB Reactions Detected:   {s['reaction_count']}",
             f"Reaction Rate:             {s['reaction_rate_pct']:.1f}%",
-            f"Min Lead Reaction Time:    {s['min_latency_ms']:.1f} ms",
-            f"Median Reaction Time:      {s['median_latency_ms']:.1f} ms",
-            f"Mean Reaction Time:        {s['mean_latency_ms']:.1f} ms",
-            f"P95 Reaction Time:         {s['p95_latency_ms']:.1f} ms",
+            f"Min Lead Reaction Time:    {min_lat_str}",
+            f"Median Reaction Time:      {med_lat_str}",
+            f"Mean Reaction Time:        {mean_lat_str}",
+            f"P95 Reaction Time:         {p95_lat_str}",
+            f"Min Spot Drift:            {s['min_drift_pct'] * 100:.2f}%",
+            f"Median Spot Drift:         {s['median_drift_pct'] * 100:.2f}%",
+            f"Mean Spot Drift:           {s['mean_drift_pct'] * 100:.2f}%",
+            f"P95 Spot Drift:            {s['p95_drift_pct'] * 100:.2f}%",
             "=" * 80,
         ]
         return "\n".join(lines)
@@ -357,13 +401,22 @@ def fetch_spot_price(symbol: str, session: Optional[requests.Session] = None) ->
     return None
 
 
+_LIVE_MARKET_CACHE: dict[str, Any] = {}
+
+
 def fetch_clob_books(
     series_slug: str, session: Optional[requests.Session] = None
 ) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     """Fetch UP and DOWN top-of-book prices from Polymarket CLOB for active live market."""
     sess = session or requests.Session()
     try:
-        live_mkt = fetch_live_market("https://gamma-api.polymarket.com", series_slug)
+        now = time.time()
+        live_mkt = _LIVE_MARKET_CACHE.get(series_slug)
+        if not live_mkt or now >= (live_mkt.end_ts - 2.0):
+            live_mkt = fetch_live_market("https://gamma-api.polymarket.com", series_slug)
+            if live_mkt:
+                _LIVE_MARKET_CACHE[series_slug] = live_mkt
+
         if not live_mkt:
             return None, None, None, None
 
@@ -428,6 +481,11 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Run empirical latency lead-time audit and print summary on exit",
     )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress per-tick console printing",
+    )
     return parser.parse_args(args)
 
 
@@ -435,13 +493,16 @@ def run_monitor(
     args: argparse.Namespace,
     stop_event: Optional[Any] = None,
     sleep_interval: float = 1.0,
-) -> int:
+    quiet: bool = False,
+) -> int | LatencyAuditor:
     """Execute streaming observation loop and print synchronized ticks."""
     sync = StreamSynchronizer(series_slug=args.series)
     sess = requests.Session()
     sess.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    if not args.json:
+    is_quiet = getattr(args, "quiet", False) or quiet
+
+    if not is_quiet and not args.json:
         print("=" * 110)
         print(f"CROSS-VENUE STREAM MONITOR: RTDS Spot vs. CLOB Books | Series: {args.series}")
         print("=" * 110)
@@ -478,10 +539,11 @@ def run_monitor(
             ticks_emitted += 1
             if auditor:
                 auditor.record_tick(snap)
-            if args.json:
-                print(json.dumps(snap.to_dict()), flush=True)
-            else:
-                print(snap.format_row(), flush=True)
+            if not is_quiet:
+                if args.json:
+                    print(json.dumps(snap.to_dict()), flush=True)
+                else:
+                    print(snap.format_row(), flush=True)
 
         if (args.ticks > 0 and ticks_emitted >= args.ticks) or (args.duration > 0 and (time.time() - start_time) >= args.duration):
             break
@@ -489,10 +551,12 @@ def run_monitor(
         time.sleep(sleep_interval)
 
     if auditor:
-        if args.json:
-            print(json.dumps({"audit_summary": auditor.get_summary()}), flush=True)
-        else:
-            print(auditor.format_summary(), flush=True)
+        if not is_quiet:
+            if args.json:
+                print(json.dumps({"audit_summary": auditor.get_summary()}), flush=True)
+            else:
+                print(auditor.format_summary(), flush=True)
+        return auditor
 
     return ticks_emitted
 

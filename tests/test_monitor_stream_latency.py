@@ -306,4 +306,106 @@ def test_latency_auditor_sustained_drift_and_bbo():
     assert len(auditor.events) == 1
 
 
+def test_latency_auditor_drift_distribution():
+    """Verify LatencyAuditor computes drift distribution statistics and formats them."""
+    from scripts.monitor_stream_latency import LatencyAuditor
+
+    auditor = LatencyAuditor()
+    # Test with empty events: drift fields should default safely to 0.0
+    summary_empty = auditor.get_summary()
+    assert summary_empty["min_drift_pct"] == 0.0
+    assert summary_empty["median_drift_pct"] == 0.0
+    assert summary_empty["mean_drift_pct"] == 0.0
+    assert summary_empty["p95_drift_pct"] == 0.0
+
+    # Test with events having mixed positive and negative drift_pct values
+    auditor.events = [
+        {"clob_reacted": True, "reaction_time_sec": 1.0, "reaction_time_ms": 1000.0, "drift_pct": 0.0012},
+        {"clob_reacted": True, "reaction_time_sec": 2.0, "reaction_time_ms": 2000.0, "drift_pct": -0.0020},
+        {"clob_reacted": False, "reaction_time_sec": None, "reaction_time_ms": None, "drift_pct": -0.0035},
+    ]
+
+    summary = auditor.get_summary()
+    assert summary["min_drift_pct"] == 0.0012
+    assert summary["median_drift_pct"] == 0.0020
+    assert summary["mean_drift_pct"] == pytest.approx((0.0012 + 0.0020 + 0.0035) / 3.0, abs=1e-5)
+    assert summary["p95_drift_pct"] == 0.0035
+
+    text = auditor.format_summary()
+    assert "Min Spot Drift:" in text
+    assert "Median Spot Drift:" in text
+    assert "Mean Spot Drift:" in text
+    assert "P95 Spot Drift:" in text
+
+
+def test_latency_auditor_subsequent_shock_after_stabilization():
+    """Verify LatencyAuditor triggers subsequent shocks after initial shock resolves and price settles."""
+    from scripts.monitor_stream_latency import LatencyAuditor, StreamTickSnapshot
+
+    auditor = LatencyAuditor(drift_threshold=0.001)
+
+    # Initial tick (t=100)
+    snap0 = StreamTickSnapshot(
+        timestamp=100.0, time_str="12:00:00", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60000.0, spot_drift_pct=0.0, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=50.0,
+    )
+    auditor.record_tick(snap0)
+
+    # Shock 1 (t=101, +0.2% jump)
+    snap1 = StreamTickSnapshot(
+        timestamp=101.0, time_str="12:00:01", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.48, up_ask=0.52, up_mid=0.50,
+        down_bid=0.48, down_ask=0.52, down_mid=0.50, clob_mid=0.50, latency_ms=50.0,
+    )
+    auditor.record_tick(snap1)
+    assert auditor._pending_shock is not None
+
+    # Shock 1 reacts at t=102
+    snap2 = StreamTickSnapshot(
+        timestamp=102.0, time_str="12:00:02", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.50, up_ask=0.54, up_mid=0.52,
+        down_bid=0.46, down_ask=0.50, down_mid=0.48, clob_mid=0.52, latency_ms=50.0,
+    )
+    auditor.record_tick(snap2)
+    assert len(auditor.events) == 1
+
+    # Stabilize at 60,120 for 4 seconds (t=106 > 102+3.0)
+    snap3 = StreamTickSnapshot(
+        timestamp=106.0, time_str="12:00:06", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60120.0, spot_drift_pct=0.002, up_bid=0.50, up_ask=0.54, up_mid=0.52,
+        down_bid=0.46, down_ask=0.50, down_mid=0.48, clob_mid=0.52, latency_ms=50.0,
+    )
+    auditor.record_tick(snap3)
+    assert not auditor._in_shock
+
+    # Shock 2 triggers at t=107 (jump from 60,120 to 60,300, +0.3% acute velocity)
+    snap4 = StreamTickSnapshot(
+        timestamp=107.0, time_str="12:00:07", symbol="btcusdt", series_slug="btc-up-or-down-5m",
+        spot_price=60300.0, spot_drift_pct=0.005, up_bid=0.50, up_ask=0.54, up_mid=0.52,
+        down_bid=0.46, down_ask=0.50, down_mid=0.48, clob_mid=0.52, latency_ms=50.0,
+    )
+    auditor.record_tick(snap4)
+    assert auditor._pending_shock is not None
+    assert auditor._pending_shock["shock_ts"] == 107.0
+
+
+def test_run_monitor_returns_auditor_and_quiet_mode(capsys):
+    """Verify run_monitor returns LatencyAuditor instance and quiet mode suppresses per-tick printing."""
+    from scripts.monitor_stream_latency import run_monitor, parse_args, LatencyAuditor
+    from unittest.mock import patch
+
+    args = parse_args(["--series", "btc-up-or-down-5m", "--ticks", "2", "--audit", "--quiet"])
+
+    with patch("scripts.monitor_stream_latency.fetch_spot_price", return_value=65000.0), \
+         patch("scripts.monitor_stream_latency.fetch_clob_books", return_value=(0.48, 0.52, 0.48, 0.52)):
+        result = run_monitor(args, sleep_interval=0.01)
+        assert isinstance(result, LatencyAuditor)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+
+
 

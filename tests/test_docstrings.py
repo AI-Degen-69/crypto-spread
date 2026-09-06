@@ -11,7 +11,7 @@ def test_docstring_coverage():
     """Verify that all non-test modules achieve 100% docstring coverage."""
     files = [
         p for p in ROOT.rglob("*.py")
-        if not any(x in p.parts for x in (".git", "tests", "run", "__pycache__", ".pytest_cache"))
+        if not any(x in p.parts for x in (".git", ".agents", ".claude", "tests", "run", "__pycache__", ".pytest_cache"))
     ]
     missing = []
     total = 0
