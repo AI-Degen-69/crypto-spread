@@ -2033,6 +2033,110 @@ function showToast({ type = 'filled', title = '', message = '', durationMs = 500
   return toast;
 }
 
+let _toastInitialized = false;
+let _seenTradeIds = new Set();
+let _prevMarketFills = {}; // slug -> { filled_up: bool, filled_down: bool }
+
+function resetToastState() {
+  _seenTradeIds.clear();
+  _prevMarketFills = {};
+  _toastInitialized = false;
+}
+
+function reconcileCockpitToasts(st) {
+  if (!st) return;
+
+  // 1. Initial boot / page load seeding: suppress historical notifications
+  if (!_toastInitialized) {
+    _toastInitialized = true;
+    if (Array.isArray(st.trades)) {
+      st.trades.forEach(t => {
+        if (t && t.id) _seenTradeIds.add(t.id);
+      });
+    }
+    if (st.markets) {
+      for (const [slug, m] of Object.entries(st.markets)) {
+        if (m) {
+          _prevMarketFills[slug] = {
+            filled_up: !!m.filled_up,
+            filled_down: !!m.filled_down
+          };
+        }
+      }
+    }
+    return;
+  }
+
+  // 2. Detect new Trade Events (Position Merged & Stop-Loss Exits)
+  if (Array.isArray(st.trades)) {
+    st.trades.forEach(t => {
+      if (!t || !t.id) return;
+      if (!_seenTradeIds.has(t.id)) {
+        _seenTradeIds.add(t.id);
+        const mktLabel = t.label || t.market || t.slug || 'Market';
+        const action = String(t.action || '').toUpperCase();
+
+        if (action === 'PAIR_MERGE') {
+          const shares = t.shares || 0;
+          const pnlUsd = t.pnl_usd != null ? (t.pnl_usd >= 0 ? `+$${t.pnl_usd.toFixed(2)}` : `-$${Math.abs(t.pnl_usd).toFixed(2)}`) : '+$0.00';
+          const pnlPct = t.pnl_pct != null ? ` (${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%)` : '';
+          showToast({
+            type: 'merged',
+            title: 'Position Merged',
+            message: `${mktLabel}: ${shares} pairs merged back to USDC (${pnlUsd}${pnlPct})`
+          });
+        } else if (action.startsWith('STOP') || action === 'STOP_EXIT_UP' || action === 'STOP_EXIT_DOWN') {
+          const isUp = action.includes('UP') || (t.notes && t.notes.includes('UP'));
+          const isDown = action.includes('DOWN') || (t.notes && t.notes.includes('DOWN'));
+          const leg = isUp ? 'UP' : (isDown ? 'DOWN' : 'Position');
+          const exitPrice = t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '-';
+          const pnlUsd = t.pnl_usd != null ? (t.pnl_usd >= 0 ? `+$${t.pnl_usd.toFixed(2)}` : `-$${Math.abs(t.pnl_usd).toFixed(2)}`) : '$0.00';
+          showToast({
+            type: 'stoploss',
+            title: 'Stop-Loss Exit',
+            message: `${mktLabel} (${leg}): Stopped out @ ${exitPrice} (${pnlUsd})`
+          });
+        }
+      }
+    });
+  }
+
+  // 3. Detect new Market Leg Fills (Order Filled)
+  if (st.markets) {
+    for (const [slug, m] of Object.entries(st.markets)) {
+      if (!m) continue;
+      const prev = _prevMarketFills[slug] || { filled_up: false, filled_down: false };
+      const mktLabel = m.label || slug;
+      const shares = m.order_shares || 5;
+
+      // Check UP leg fill transition
+      if (!prev.filled_up && m.filled_up) {
+        const price = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
+        showToast({
+          type: 'filled',
+          title: 'Order Filled',
+          message: `${mktLabel} (UP): ${shares} shares filled @ $${price.toFixed(2)}`
+        });
+      }
+
+      // Check DOWN leg fill transition
+      if (!prev.filled_down && m.filled_down) {
+        const price = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
+        showToast({
+          type: 'filled',
+          title: 'Order Filled',
+          message: `${mktLabel} (DOWN): ${shares} shares filled @ $${price.toFixed(2)}`
+        });
+      }
+
+      _prevMarketFills[slug] = {
+        filled_up: !!m.filled_up,
+        filled_down: !!m.filled_down
+      };
+    }
+  }
+}
+
 // Orders & Trades Tab State & Switching (Issue #59)
 let activeOtTab = (typeof localStorage !== 'undefined' && localStorage.getItem('crypto-spread-ot-view')) || 'orders';
 
@@ -3502,6 +3606,7 @@ async function resetCockpitPnL() {
     });
     const st = await res.json();
     cockpitState = st;
+    resetToastState();
     renderCockpitUI(st);
   } catch (e) {
     alert('Error resetting PnL: ' + e);
@@ -3517,6 +3622,7 @@ async function loadCockpitDemoData() {
     });
     const st = await res.json();
     cockpitState = st;
+    resetToastState();
     renderCockpitUI(st);
   } catch (e) {
     alert('Error loading demo data: ' + e);
@@ -3752,6 +3858,8 @@ function setCockpitChartMode(mode) {
 
 function renderCockpitUI(st) {
   if (!st) return;
+
+  reconcileCockpitToasts(st);
 
   const sbDot = $('sidebarStatusDot');
   const sbText = $('sidebarStatusText');
