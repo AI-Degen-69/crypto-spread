@@ -491,5 +491,9 @@ while ($true) {
     $choice = $choice.Trim().ToLower()
     if ($choice -eq "") { exit 0 }
     Invoke-MenuAction $choice
+
+    Write-Host ""
+    Write-Host "  Press Enter to return to main menu..." -ForegroundColor (Get-ProfileColor -Name Neutral)
+    $null = Read-Host
 }
 
