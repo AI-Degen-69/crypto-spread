@@ -168,6 +168,7 @@ class StreamSynchronizer:
             self.spot_baseline = price
         self.latest_spot = price
         self.actual_price = price
+        self.spot_source = "BINANCE"
         if ts_ms:
             self.spot_ts = ts_ms / 1000.0
         self._recalc_price_diff()
@@ -180,6 +181,7 @@ class StreamSynchronizer:
             self.spot_baseline = price
         self.latest_spot = price
         self.rtds_price = price
+        self.spot_source = "RTDS"
         if ts_ms:
             self.spot_ts = ts_ms / 1000.0
         self._recalc_price_diff()
@@ -559,6 +561,11 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Suppress per-tick console printing",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Connect UnifiedStreamBridge to ingest live RTDS ticks alongside Binance spot",
+    )
     return parser.parse_args(args)
 
 
@@ -567,11 +574,30 @@ def run_monitor(
     stop_event: Optional[Any] = None,
     sleep_interval: float = 1.0,
     quiet: bool = False,
+    bridge: Optional[UnifiedStreamBridge] = None,
 ) -> int | LatencyAuditor:
     """Execute streaming observation loop and print synchronized ticks."""
     sync = StreamSynchronizer(series_slug=args.series)
     sess = requests.Session()
     sess.headers.update({"User-Agent": "Mozilla/5.0"})
+
+    local_bridge: Optional[UnifiedStreamBridge] = None
+    if getattr(args, "stream", False) and bridge is None:
+        local_bridge = UnifiedStreamBridge()
+        local_bridge.start()
+        bridge = local_bridge
+
+    if bridge:
+        orig_rtds_cb = bridge.on_rtds_tick
+
+        def _on_rtds(sym: str, ts: int, p: float) -> None:
+            """Forward matching RTDS tick to synchronizer and original callback."""
+            if sym.lower() == sync.symbol.lower():
+                sync.update_rtds_spot(p, ts)
+            if orig_rtds_cb:
+                orig_rtds_cb(sym, ts, p)
+
+        bridge.on_rtds_tick = _on_rtds
 
     is_quiet = getattr(args, "quiet", False) or quiet
 
@@ -622,6 +648,9 @@ def run_monitor(
             break
 
         time.sleep(sleep_interval)
+
+    if local_bridge:
+        local_bridge.stop()
 
     if auditor:
         if not is_quiet:

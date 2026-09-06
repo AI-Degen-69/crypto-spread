@@ -3257,10 +3257,13 @@ function renderStreamTelemetry(data) {
   if (diffEl) {
     if (data.price_diff != null && !isNaN(Number(data.price_diff))) {
       const d = Number(data.price_diff);
-      const pct = data.price_diff_pct != null ? Number(data.price_diff_pct) : 0;
       const formattedD = d < 0 ? `-$${Math.abs(d).toFixed(2)}` : (d > 0 ? `+$${d.toFixed(2)}` : `$${d.toFixed(2)}`);
-      const formattedPct = pct > 0 ? `+${pct.toFixed(3)}%` : `${pct.toFixed(3)}%`;
-      diffEl.textContent = `${formattedD} (${formattedPct})`;
+      let pctStr = '';
+      if (data.price_diff_pct != null && !isNaN(Number(data.price_diff_pct))) {
+        const pct = Number(data.price_diff_pct);
+        pctStr = ` (${pct > 0 ? '+' : ''}${pct.toFixed(3)}%)`;
+      }
+      diffEl.textContent = `${formattedD}${pctStr}`;
       diffEl.style.color = d > 0 ? 'var(--up)' : d < 0 ? 'var(--down)' : 'var(--tx)';
     } else if (data.price_diff !== undefined) {
       diffEl.textContent = '--';
@@ -4631,10 +4634,10 @@ function initLiveCockpitStream() {
               if (slug && cockpitState.markets[slug]) {
                 const m = cockpitState.markets[slug];
                 const price = env.data.price;
-                if (env.data.actual_price != null) m.actual_price = env.data.actual_price;
-                if (env.data.rtds_price != null) m.rtds_price = env.data.rtds_price;
-                if (env.data.price_diff != null) m.price_diff = env.data.price_diff;
-                if (env.data.price_diff_pct != null) m.price_diff_pct = env.data.price_diff_pct;
+                if ('actual_price' in env.data) m.actual_price = env.data.actual_price;
+                if ('rtds_price' in env.data) m.rtds_price = env.data.rtds_price;
+                if ('price_diff' in env.data) m.price_diff = env.data.price_diff;
+                if ('price_diff_pct' in env.data) m.price_diff_pct = env.data.price_diff_pct;
 
                 m.spot_price = price;
                 if (m.spot_open_price == null && price) {

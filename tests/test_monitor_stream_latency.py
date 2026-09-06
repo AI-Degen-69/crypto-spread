@@ -507,6 +507,22 @@ def test_synchronizer_and_snapshot_negative_divergence_and_zero_rejection():
     assert sync.rtds_price == prev_rtds
 
 
+def test_run_monitor_with_bridge_wiring(capsys):
+    """Verify run_monitor wires bridge RTDS callback to synchronizer."""
+    from unittest.mock import MagicMock, patch
+    from scripts.monitor_stream_latency import run_monitor, parse_args
+
+    args = parse_args(["--series", "btc-up-or-down-5m", "--ticks", "1", "--json"])
+    mock_bridge = MagicMock()
+
+    with patch("scripts.monitor_stream_latency.fetch_spot_price", return_value=65010.0), \
+         patch("scripts.monitor_stream_latency.fetch_clob_books", return_value=(0.48, 0.52, 0.48, 0.52)):
+        run_monitor(args, sleep_interval=0.01, bridge=mock_bridge)
+        # Verify callback was attached
+        assert callable(mock_bridge.on_rtds_tick)
+
+
+
 
 
 

@@ -37,10 +37,10 @@ Enable concurrent ingestion of Binance Direct WebSocket spot prices and Polymark
     - Wire `on_rtds_tick=self.on_rtds_tick` to `UnifiedStreamBridge`.
   - Add `on_rtds_tick(self, symbol: str, ts_ms: int, price: float) -> None`:
     - Updates `m.rtds_price = price`.
-    - Recalculates `m.price_diff` and `m.price_diff_pct` if `m.actual_price` or `m.spot_price` exists.
+    - Recalculates `m.price_diff` and `m.price_diff_pct` only when `m.actual_price` exists; sets to None otherwise.
   - In `on_spot_tick`:
-    - Set `m.actual_price = price` (when source is Binance or primary).
-    - If `m.rtds_price` is present, recalculate `m.price_diff` and `m.price_diff_pct`.
+    - Set `m.actual_price = price` (when source is Binance), or unset when fallback.
+    - If `m.actual_price` and `m.rtds_price` are present, recalculate `m.price_diff` and `m.price_diff_pct`.
   - In `get_state()`:
     - Include `actual_price`, `rtds_price`, `price_diff`, `price_diff_pct` in each market state dictionary.
 - **Verification**: `python -m pytest tests/test_live_trader.py`

@@ -648,7 +648,10 @@ class UnifiedStreamBridge:
     def _handle_binance_spot_tick(self, symbol: str, ts: int, price: float) -> None:
         """Handle incoming sub-second spot tick from Binance Direct WS."""
         if self.on_spot_tick_ext:
-            self.on_spot_tick_ext(symbol, ts, price)
+            try:
+                self.on_spot_tick_ext(symbol, ts, price, source="BINANCE")
+            except TypeError:
+                self.on_spot_tick_ext(symbol, ts, price)
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
         slugs = series_for_symbol(symbol)
         rtds_price = self.rtds.spot_prices.get(symbol.lower())
@@ -677,7 +680,10 @@ class UnifiedStreamBridge:
 
         # Fallback: if Binance WS is disconnected, forward RTDS tick as primary spot tick
         if not self.binance.is_connected and self.on_spot_tick_ext:
-            self.on_spot_tick_ext(symbol, ts, price)
+            try:
+                self.on_spot_tick_ext(symbol, ts, price, source="RTDS")
+            except TypeError:
+                self.on_spot_tick_ext(symbol, ts, price)
 
         slug = SYMBOL_TO_SERIES.get(symbol.lower())
         slugs = series_for_symbol(symbol)

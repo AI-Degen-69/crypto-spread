@@ -1007,6 +1007,7 @@ def test_api_live_latency_divergence_values_and_fallback(monkeypatch):
     """Verify /api/live/latency returns calculated divergence values and falls back to stream bridge."""
     from server.osc_dash import get_live_trader_engine
     engine = get_live_trader_engine()
+    monkeypatch.setattr(engine, "ensure_telemetry_streaming", lambda: None)
     slug = "btc-up-or-down-5m"
     m = engine.markets[slug]
 

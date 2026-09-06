@@ -833,15 +833,17 @@ class LiveTraderEngine:
                     continue
                 m = self.markets[slug]
                 m.rtds_price = price
-                effective_actual = m.actual_price if m.actual_price is not None else m.spot_price
-                if effective_actual is not None:
-                    m.price_diff = round(effective_actual - price, 4)
+                if m.actual_price is not None:
+                    m.price_diff = round(m.actual_price - price, 4)
                     if price > 0:
-                        m.price_diff_pct = round(((effective_actual - price) / price) * 100.0, 4)
+                        m.price_diff_pct = round(((m.actual_price - price) / price) * 100.0, 4)
                     else:
                         m.price_diff_pct = None
+                else:
+                    m.price_diff = None
+                    m.price_diff_pct = None
 
-    def on_spot_tick(self, symbol: str, ts_ms: int, price: float) -> None:
+    def on_spot_tick(self, symbol: str, ts_ms: int, price: float, source: str = "BINANCE") -> None:
         """Handle real-time spot tick from RTDS or fallback across all matching active series."""
         slugs = series_for_symbol(symbol)
         if not slugs:
@@ -861,16 +863,22 @@ class LiveTraderEngine:
                     continue
                 m = self.markets[slug]
                 m.spot_price = price
-                m.actual_price = price
+                if (source or "").upper().startswith("BINANCE"):
+                    m.actual_price = price
+                else:
+                    m.actual_price = None
                 m.spot_updated_ts = ts_ms / 1000.0
                 m.streaming_active = True
 
-                if m.rtds_price is not None:
-                    m.price_diff = round(price - m.rtds_price, 4)
+                if m.actual_price is not None and m.rtds_price is not None:
+                    m.price_diff = round(m.actual_price - m.rtds_price, 4)
                     if m.rtds_price > 0:
-                        m.price_diff_pct = round(((price - m.rtds_price) / m.rtds_price) * 100.0, 4)
+                        m.price_diff_pct = round(((m.actual_price - m.rtds_price) / m.rtds_price) * 100.0, 4)
                     else:
                         m.price_diff_pct = None
+                elif m.actual_price is None or m.rtds_price is None:
+                    m.price_diff = None
+                    m.price_diff_pct = None
 
                 if m.spot_open_price is None or m.spot_open_price <= 0:
                     m.spot_open_price = price
