@@ -696,12 +696,13 @@ def api_live_latency(series: str = "btc-up-or-down-5m"):
     from strategy.streaming import SERIES_TO_SYMBOL
     symbol = SERIES_TO_SYMBOL.get(series, "btcusdt")
     engine = get_live_trader_engine()
+    engine.ensure_telemetry_streaming()
     bridge_st = engine.stream_bridge.get_status()
 
     spot_price = None
     spot_drift = 0.0
     clob_mid = None
-    latency_ms = 0.0
+    latency_ms = None
     streaming_active = False
     updated_ts = None
 
@@ -721,7 +722,9 @@ def api_live_latency(series: str = "btc-up-or-down-5m"):
         spot_price = bridge_st["symbols"].get(symbol)
 
     if updated_ts:
-        latency_ms = round(abs(time.time() - updated_ts) * 1000.0, 1)
+        raw_lat = abs(time.time() - updated_ts)
+        if raw_lat <= 15.0:
+            latency_ms = round(raw_lat * 1000.0, 1)
 
     return {
         "ok": True,
@@ -732,6 +735,7 @@ def api_live_latency(series: str = "btc-up-or-down-5m"):
         "clob_mid": clob_mid,
         "latency_ms": latency_ms,
         "streaming_active": streaming_active,
+        "is_running": bridge_st.get("is_running", False),
         "binance_ws_connected": bridge_st.get("binance_ws_connected", False),
         "rtds_connected": bridge_st.get("rtds_connected", False),
         "active_spot_source": bridge_st.get("active_spot_source", "RTDS"),
@@ -745,6 +749,7 @@ async def api_live_stream(request: Request):
     """Real-time SSE stream broadcasting versioned DashboardEnvelope events."""
     _verify_safe_origin(request)
     engine = get_live_trader_engine()
+    engine.ensure_telemetry_streaming()
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
     engine.stream_bridge.register_queue(q)
 
@@ -766,8 +771,8 @@ async def api_live_stream(request: Request):
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
-                    yield {"event": "message", "data": msg}
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield {"event": "message", "data": payload}
                 except asyncio.TimeoutError:
                     ping_env = DashboardEnvelope(
                         type="delta",
@@ -794,7 +799,8 @@ async def api_live_control(request: Request):
     if action == "start":
         engine.start()
     elif action == "stop":
-        engine.stop()
+        stop_streams = bool(body.get("stop_streams", False))
+        engine.stop(stop_streams=stop_streams)
     elif action == "restart":
         engine.restart()
     elif action == "reset_pnl":
@@ -1311,6 +1317,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .tel-badge.ok{background:rgba(51,201,181,.15);color:var(--up);border:1px solid rgba(51,201,181,.3)}
 .tel-badge.warn{background:rgba(243,186,47,.15);color:var(--gold);border:1px solid rgba(243,186,47,.3)}
 .tel-badge.err{background:rgba(240,104,77,.15);color:var(--down);border:1px solid rgba(240,104,77,.3)}
+.tel-badge.idle{background:rgba(120,135,155,.15);color:var(--dim);border:1px solid rgba(120,135,155,.3)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -1711,7 +1718,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <div class="tel-item"><span class="tel-lbl">SPOT DRIFT</span><span class="tel-val" id="telSpotDrift">--</span></div>
         <div class="tel-item"><span class="tel-lbl">CLOB MID</span><span class="tel-val" id="telClobMid">--</span></div>
         <div class="tel-item"><span class="tel-lbl">LEAD LATENCY</span><span class="tel-val" id="telLeadLatency">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">FEED HEALTH</span><span class="tel-badge ok" id="telFeedStatus">CONNECTED</span></div>
+        <div class="tel-item"><span class="tel-lbl">FEED HEALTH</span><span class="tel-badge idle" id="telFeedStatus">IDLE</span></div>
       </div>
     </div>
 
@@ -3156,7 +3163,7 @@ function renderStreamTelemetry(data) {
   }
 
   if (latEl) {
-    if (data.latency_ms != null && !isNaN(Number(data.latency_ms))) {
+    if (data.latency_ms != null && !isNaN(Number(data.latency_ms)) && Number(data.latency_ms) <= 15000) {
       const ms = Number(data.latency_ms);
       latEl.textContent = ms.toFixed(0) + ' ms';
       latEl.style.color = ms < 500 ? 'var(--up)' : ms < 1500 ? 'var(--gold)' : 'var(--down)';
@@ -3167,9 +3174,13 @@ function renderStreamTelemetry(data) {
   }
 
   if (feedEl) {
+    const isRunning = data.is_running !== false && (data.is_running || data.binance_ws_connected || data.rtds_connected || data.clob_ws_connected);
     const spot = !!(data.binance_ws_connected || data.rtds_connected);
     const clob = !!data.clob_ws_connected;
-    if (spot && clob) {
+    if (!isRunning && !spot && !clob) {
+      feedEl.textContent = 'IDLE';
+      feedEl.className = 'tel-badge idle';
+    } else if (spot && clob) {
       feedEl.textContent = 'CONNECTED';
       feedEl.className = 'tel-badge ok';
     } else if (spot || clob) {
@@ -3184,7 +3195,8 @@ function renderStreamTelemetry(data) {
 
 async function fetchCockpitLatency() {
   try {
-    const res = await fetch('/api/live/latency', { cache: 'no-store' });
+    const activeSlug = (cockpitState && cockpitState.markets && Object.keys(cockpitState.markets)[0]) || 'btc-up-or-down-5m';
+    const res = await fetch('/api/live/latency?series=' + encodeURIComponent(activeSlug), { cache: 'no-store' });
     if (!res.ok) return;
     const data = await res.json();
     renderStreamTelemetry(data);
@@ -3545,11 +3557,16 @@ function renderCockpitUI(st) {
     if (targetSlug && st.markets[targetSlug]) {
       const m = st.markets[targetSlug];
       const sb = st.stream_bridge || {};
+      const latencyVal = (m.spot_updated_ts && Math.abs(Date.now() - m.spot_updated_ts * 1000) <= 15000)
+        ? Math.max(0, (Date.now() - m.spot_updated_ts * 1000))
+        : null;
       renderStreamTelemetry({
         spot_price: m.spot_price,
         spot_drift: m.spot_drift,
         clob_mid: m.mid,
-        latency_ms: m.spot_updated_ts ? Math.max(0, (Date.now() - m.spot_updated_ts * 1000)) : null,
+        latency_ms: latencyVal,
+        is_running: sb.is_running,
+        binance_ws_connected: sb.binance_ws_connected,
         rtds_connected: sb.rtds_connected || liveStreamConnected,
         clob_ws_connected: sb.clob_ws_connected,
       });

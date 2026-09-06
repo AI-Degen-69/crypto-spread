@@ -720,13 +720,14 @@ class UnifiedStreamBridge:
 
     def start(self) -> None:
         """Start the background streaming worker thread."""
-        if self.is_running:
-            return
-        self.is_running = True
-        self._loop_ready.clear()
-        self._thread = threading.Thread(target=self._worker_main, daemon=True, name="UnifiedStreamBridge")
-        self._thread.start()
-        self._loop_ready.wait(timeout=5.0)
+        with self._lock:
+            if self.is_running:
+                return
+            self.is_running = True
+            self._loop_ready.clear()
+            self._thread = threading.Thread(target=self._worker_main, daemon=True, name="UnifiedStreamBridge")
+            self._thread.start()
+            self._loop_ready.wait(timeout=5.0)
 
     def _worker_main(self) -> None:
         """Worker thread entry point."""

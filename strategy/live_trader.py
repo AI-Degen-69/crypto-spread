@@ -1486,14 +1486,27 @@ class LiveTraderEngine:
             log.warning("Could not fetch wallet balance: %s", e)
 
 
-    def start(self):
+    def ensure_telemetry_streaming(self) -> None:
+        """Ensure stream bridge is running in background observer mode for dashboard telemetry."""
+        with self._engine_lock:
+            if not self.stream_bridge.is_running:
+                self.stream_bridge.start()
+            active_tokens: List[str] = []
+            for m in self.markets.values():
+                for t in (m.up_token, m.down_token, m.next_up_token, m.next_down_token):
+                    if t and t not in active_tokens:
+                        active_tokens.append(t)
+            if active_tokens:
+                self.stream_bridge.update_market_tokens(active_tokens)
+
+    def start(self) -> None:
         """Start the background live trading ticker."""
         with self._engine_lock:
             if self.is_running:
                 return
             self.quoting_halted = False
             self.is_running = True
-        self.stream_bridge.start()
+        self.ensure_telemetry_streaming()
         self._schedule_wallet_balance_fetch()
         try:
             loop = asyncio.get_running_loop()
@@ -1503,22 +1516,28 @@ class LiveTraderEngine:
             pass
         log.info("LiveTraderEngine started in %s mode", self.mode)
 
-    def stop(self):
-        """Stop trading engine and cancel active quoting."""
+    def stop(self, stop_streams: bool = False) -> None:
+        """Stop trading engine and cancel active quoting.
+
+        Args:
+            stop_streams: If True, also stop background WebSocket stream bridge.
+                Defaults to False so cockpit telemetry continues observing live prices.
+        """
         with self._engine_lock:
             self.is_running = False
-        self.stream_bridge.stop()
-        if self.mode == "live":
-            self.cancel_all_orders()
-        for m in self.markets.values():
-            if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
-                m.status = "IDLE"
-                m.last_action = "Stopped"
-        log.info("LiveTraderEngine stopped")
+            if stop_streams:
+                self.stream_bridge.stop()
+            if self.mode == "live":
+                self.cancel_all_orders()
+            for m in self.markets.values():
+                if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
+                    m.status = "IDLE"
+                    m.last_action = "Stopped"
+        log.info("LiveTraderEngine stopped (streams_active=%s)", self.stream_bridge.is_running)
 
-    def restart(self):
+    def restart(self) -> None:
         """Restart engine and reload markets."""
-        self.stop()
+        self.stop(stop_streams=False)
         self.start()
 
     def _load_persisted_trades(self):

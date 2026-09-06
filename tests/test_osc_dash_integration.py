@@ -990,6 +990,8 @@ def test_api_live_latency():
     assert "spot_drift" in data
     assert "clob_mid" in data
     assert "latency_ms" in data
+    assert "is_running" in data
+    assert "binance_ws_connected" in data
     assert "rtds_connected" in data
     assert "clob_ws_connected" in data
 
@@ -1006,9 +1008,10 @@ def test_card_stream_telemetry_rendered_in_html():
     assert 'id="telClobMid"' in html
     assert 'id="telLeadLatency"' in html
     assert 'id="telFeedStatus"' in html
-    assert "function renderStreamTelemetry(" in html
-    assert "async function fetchCockpitLatency()" in html
-    assert "async function pollCockpit()" in html
+    assert '.tel-badge.idle' in html
+    assert 'function renderStreamTelemetry(' in html
+    assert 'async function fetchCockpitLatency()' in html
+    assert 'async function pollCockpit()' in html
 
 
 
