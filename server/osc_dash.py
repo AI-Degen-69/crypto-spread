@@ -3834,6 +3834,8 @@ function renderCockpitUI(st) {
       let bidsTextHtml = '';
       if (m.status === 'STOP_EXIT' || m.exit_taken) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (STOPPED OUT)</span>${fillsSub}`;
+      } else if (m.status === 'STOP_EXIT_PENDING') {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">STOP EXITING</span>${fillsSub}`;
       } else if (m.status === 'TIMEOUT_NO_FILL') {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (10% TIMEOUT)</span>`;
       } else if (m.status === 'DRIFT_SKIPPED') {
