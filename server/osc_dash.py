@@ -905,7 +905,13 @@ class LiveConfigPayload(BaseModel):
     @field_validator("entry_timeout_pct", mode="before")
     @classmethod
     def normalize_entry_timeout_pct(cls, v: Any) -> Any:
-        """Normalize whole-number percentage (1-100) to decimal (0.01-1.0)."""
+        """Normalize a whole-number percentage above 1 (2-100) to a decimal (0.02-1.0).
+
+        Values of 1.0 or below are passed through as decimals already in range, so
+        `1` and `1.0` both mean a full window rather than one percent. The cockpit
+        never relies on this ambiguity -- it divides its 1-100 field by 100 before
+        posting -- but API callers can send either form.
+        """
         if v is not None:
             try:
                 fv = float(v)
@@ -3839,7 +3845,12 @@ async function applyCockpitConfig() {
   const startBal = parseFloat($('cockpitStartBal').value) || 1000.0;
   const timeoutEl = $('cockpitEntryTimeout');
   const timeoutVal = timeoutEl ? parseFloat(timeoutEl.value) : 100;
-  const entry_timeout_pct = !isNaN(timeoutVal) ? (timeoutVal > 1.0 ? timeoutVal / 100.0 : timeoutVal) : 1.0;
+  // The cockpit input is always a whole percentage (min=1, max=100), so divide
+  // unconditionally. The old `timeoutVal > 1.0` guard left a typed 1 as 1.0,
+  // silently turning a 1% timeout into a full-window timeout.
+  const entry_timeout_pct = !isNaN(timeoutVal)
+    ? Math.min(1.0, Math.max(0.01, timeoutVal / 100.0))
+    : 1.0;
   const body = {
     offset,
     exit_thresh,

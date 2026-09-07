@@ -1150,6 +1150,11 @@ def test_api_live_config_entry_timeout_pct():
     engine = osc_dash.get_live_trader_engine()
     engine.is_running = False
     orig_pct = engine.entry_timeout_pct
+    # get_live_trader_engine() is a module-global singleton. Pin it to paper for the
+    # duration so update_config cannot reach fetch_polymarket_account_value and make
+    # a real Polymarket request if an earlier test left the singleton in live mode.
+    orig_mode = engine.mode
+    engine.mode = "paper"
     try:
         # Test whole number 10 -> 0.10
         res = client.post("/api/live/config", json={"entry_timeout_pct": 10})
@@ -1170,3 +1175,4 @@ def test_api_live_config_entry_timeout_pct():
         assert abs(data_dec["params"]["entry_timeout_pct"] - 0.25) < 1e-4
     finally:
         engine.update_config(entry_timeout_pct=orig_pct)
+        engine.mode = orig_mode

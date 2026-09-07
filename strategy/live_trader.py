@@ -1715,22 +1715,26 @@ class LiveTraderEngine:
 
             # Guard against modifying scalar strategy parameters while the trading bot is running
             if self.is_running:
+                # Each parameter is checked independently. An elif chain would let an
+                # unchanged leading parameter mask a changed trailing one: the dashboard
+                # always posts `offset`, so a changed entry_timeout_pct went undetected
+                # and the "stop the bot first" guard silently failed to fire.
                 param_changed = False
                 if offset is not None:
                     norm_offset = max(0.001, min(0.490, float(offset)))
                     if abs(norm_offset - self.offset) > 1e-6:
                         param_changed = True
-                elif exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
+                if exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
                     param_changed = True
-                elif shares is not None and int(shares) != self.shares:
+                if shares is not None and int(shares) != self.shares:
                     param_changed = True
-                elif mode is not None and mode != self.mode:
+                if mode is not None and mode != self.mode:
                     param_changed = True
-                elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
+                if wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
                     param_changed = True
-                elif starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+                if starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
                     param_changed = True
-                elif entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
+                if entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
                     param_changed = True
 
                 if param_changed:
