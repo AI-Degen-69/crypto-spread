@@ -1532,17 +1532,20 @@ def test_orders_render_preserves_backend_group_order_dom():
 
     const ordHtml = elements['cockpitOrdersBody'].innerHTML;
 
-    // Current-window BTC group must render above its next-window group.
+    // Full backend group sequence: BTC current < ETH current < BTC next < cancelled.
+    // Pairwise checks alone would pass a BTC current -> BTC next -> ETH current
+    // renderer, which violates the backend order contract.
     const btcPos = ordHtml.indexOf('BTC 5m \\u2197');
+    const ethPos = ordHtml.indexOf('ETH 5m \\u2197');
     const nxtPos = ordHtml.indexOf('(Next Window)');
-    if (btcPos === -1 || nxtPos === -1 || !(btcPos < nxtPos)) {{
-      throw new Error('Current-window group must precede next-window group: ' + ordHtml);
-    }}
-
-    // Cancelled group sinks below pre-quotes.
     const cancelPos = ordHtml.indexOf('CANCELLED');
-    if (cancelPos === -1 || !(nxtPos < cancelPos)) {{
-      throw new Error('Cancelled group must follow pre-quote groups: ' + ordHtml);
+    for (const [name, pos] of [['BTC current', btcPos], ['ETH current', ethPos], ['BTC next', nxtPos], ['CANCELLED', cancelPos]]) {{
+      if (pos === -1) {{
+        throw new Error('Missing group in rendered orders: ' + name + ' / ' + ordHtml);
+      }}
+    }}
+    if (!(btcPos < ethPos && ethPos < nxtPos && nxtPos < cancelPos)) {{
+      throw new Error('Rendered groups violate backend sequence BTC current < ETH current < BTC next < cancelled: ' + ordHtml);
     }}
 
     // Reordering must not change the badge: 4 resting rows in, 4 counted.
