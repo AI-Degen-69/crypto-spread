@@ -413,3 +413,43 @@ def test_backtest_allows_second_leg_fill_after_timeout_if_first_filled_early():
     assert res.filled_up is True
     assert res.filled_down is True
     assert res.pair_captured is True
+
+
+# ============================================================================
+# Issue #92: adverse-open drift gate parity between live and backtest
+# ============================================================================
+
+def test_backtest_cancels_entry_on_adverse_open_drift():
+    """A window whose opening two-sided mid is >= exit_thresh off 0.50 is not entered."""
+    snaps = [
+        _make_snap(1005.0, mid=0.35, up_ask=0.355, down_ask=0.655,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
+    res = _simulate_window(snaps, p)
+    assert res.filled_up is False
+    assert res.filled_down is False
+
+
+def test_backtest_enters_window_with_balanced_open():
+    """Control for the adverse-open gate: a mid at 0.50 still fills normally."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
+    res = _simulate_window(snaps, p)
+    assert res.filled_up is True
+
+
+def test_backtest_one_sided_open_book_does_not_cancel_entry():
+    """A one-sided book at open must not be trusted as an adverse-drift signal."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    # Strip the DOWN ask so the opening mid cannot be evaluated on this tick.
+    snaps[0]["down_book"]["best_ask"] = None
+    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
+    res = _simulate_window(snaps, p)
+    assert res.filled_up is True

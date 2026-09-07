@@ -378,6 +378,14 @@ class MarketLiveState:
     order_status_down: str = "NONE"
     entry_cancelled_timeout: bool = False
 
+    # Adverse-open drift gate snapshot (issue #92). Captured once per window
+    # from the first tick with a two-sided book on both legs, never re-evaluated
+    # against the live mid, and cleared on window rollover.
+    open_mid: Optional[float] = None
+    open_drift: float = 0.0
+    adverse_open: bool = False
+    open_gate_evaluated: bool = False
+
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
     next_market_slug: str = ""
@@ -2274,6 +2282,10 @@ class LiveTraderEngine:
             m.max_down_drift = 0.0
             m.reversal_seen_up = False
             m.reversal_seen_down = False
+            m.open_mid = None
+            m.open_drift = 0.0
+            m.adverse_open = False
+            m.open_gate_evaluated = False
             m.status = "QUOTING" if self.is_running else "IDLE"
             m.last_action = "PnL Reset"
         self._record_timeline_point(time.time())
@@ -2713,10 +2725,25 @@ class LiveTraderEngine:
             entry_timeout_sec = win_duration
             is_late_start = False
 
-        # Pre-entry drift check: if mid has already drifted >= exit_thresh vs 0.50 before any fills,
-        # the market is already strongly monotonic / skewed. Never enter or quote into an immediate stop.
-        initial_drift = abs(mid - 0.50)
-        is_adverse_open = (initial_drift >= self.exit_thresh)
+        # Pre-entry drift check (issue #92): if the mid was already drifted >= exit_thresh
+        # vs 0.50 *when the window opened*, the market is already strongly monotonic /
+        # skewed. Never enter or quote into an immediate stop. The gate is evaluated once
+        # per window from the opening snapshot -- re-running it against the live mid on
+        # every 1s tick cancelled healthy resting bids seconds into a window.
+        # A one-sided book collapses `mid` onto whichever side exists, which reports a
+        # synthetic drift that is a book artifact rather than a real skew, so the snapshot
+        # is only taken once both legs quote two sides.
+        book_two_sided = (
+            mstate.up_bid is not None and mstate.up_ask is not None
+            and mstate.down_bid is not None and mstate.down_ask is not None
+        )
+        if not mstate.open_gate_evaluated and book_two_sided:
+            mstate.open_mid = mid
+            mstate.open_drift = abs(mid - 0.50)
+            mstate.adverse_open = (mstate.open_drift >= self.exit_thresh)
+            mstate.open_gate_evaluated = True
+        initial_drift = mstate.open_drift
+        is_adverse_open = mstate.adverse_open
 
         # --- PRE-ENTRY DRIFT & ENTRY TIMEOUT CANCELLATION ---
         if (is_late_start or is_adverse_open) and not mstate.entry_cancelled_timeout:
@@ -2806,8 +2833,9 @@ class LiveTraderEngine:
                 if mstate.entry_cancelled_timeout:
                     if is_adverse_open:
                         mstate.status = "DRIFT_SKIPPED"
-                        mstate.last_action = f"Adverse drift ({initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
-                        log.info("[%s] Entry skipped due to adverse open drift (drift=%.3f >= %.2f)", slug, initial_drift, self.exit_thresh)
+                        open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
+                        mstate.last_action = f"Adverse drift at open (mid {open_mid_txt}, drift {initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
+                        log.info("[%s] Entry skipped due to adverse open drift (open_mid=%s, drift=%.3f >= %.2f)", slug, open_mid_txt, initial_drift, self.exit_thresh)
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
                         pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
@@ -3215,6 +3243,10 @@ class LiveTraderEngine:
             mstate.pair_captured = False
             mstate.exit_taken = False
             mstate.entry_cancelled_timeout = False
+            mstate.open_mid = None
+            mstate.open_drift = 0.0
+            mstate.adverse_open = False
+            mstate.open_gate_evaluated = False
             mstate.exit_side = None
             mstate.spot_open_price = None
             mstate.spot_drift = 0.0

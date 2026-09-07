@@ -191,6 +191,22 @@ def _mid(book: dict):
     return None
 
 
+def _two_sided_mid(up_book: dict, down_book: dict):
+    """Synthetic mid across both legs, or None when either leg is one-sided.
+
+    Mirrors the live engine's `mstate.mid` so the adverse-open gate agrees
+    between backtest and live (issue #92). Returning None for a one-sided book
+    keeps a thin open from being read as a real skew.
+    """
+    ubb, uba = up_book.get("best_bid"), up_book.get("best_ask")
+    dbb, dba = down_book.get("best_bid"), down_book.get("best_ask")
+    if ubb is None or uba is None or dbb is None or dba is None:
+        return None
+    up_mid = (ubb + uba) / 2.0
+    down_mid = (dbb + dba) / 2.0
+    return round((up_mid + (1.0 - down_mid)) / 2.0, 4)
+
+
 def _taker_fee(p: float, rate: float) -> float:
     """Calculate Polymarket crypto taker fee for trade price p."""
     if p is None or p <= 0 or p >= 1:
@@ -257,6 +273,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     resting_down = round(0.50 - params.offset, 3)
 
     entry_cancelled = False
+    adverse_gate_evaluated = False
     if params.entry_timeout_pct > 0 and duration > 0:
         cutoff_sec = params.entry_timeout_pct * duration
         if raw_start_delay_sec >= cutoff_sec:
@@ -295,6 +312,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             reversal_seen_down = True
         if max_up >= exit_thr and (mid - 0.50) < params.exit_reversal:
             reversal_seen_up = True
+
+        # Adverse-open gate (issue #92): evaluated once per window against the
+        # first snapshot quoting two sides on both legs, so backtest and live
+        # agree on which windows are entered.
+        if not adverse_gate_evaluated:
+            open_mid = _two_sided_mid(ub, db)
+            if open_mid is not None:
+                adverse_gate_evaluated = True
+                if abs(open_mid - 0.50) >= exit_thr:
+                    entry_cancelled = True
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:

@@ -1429,3 +1429,117 @@ def test_live_trader_divergence_edge_cases():
     assert m.price_diff == 80010.0
     assert m.price_diff_pct is None
 
+
+
+# ============================================================================
+# Issue #92: adverse-open drift gate must be a window-open snapshot
+# ============================================================================
+
+def _drift_poll_data(now: float, up_book: dict, down_book: dict, cid: str = "cid_92") -> dict:
+    """Build a poll payload for a freshly opened 5m window."""
+    return {
+        "market": {
+            "conditionId": cid,
+            "slug": f"btc-updown-5m-{cid}",
+            "up_token": "tok_up",
+            "down_token": "tok_dn",
+            "start_ts": now - 1.0,
+            "end_ts": now + 299.0,
+        },
+        "up_book": up_book,
+        "down_book": down_book,
+    }
+
+
+def _drift_engine() -> LiveTraderEngine:
+    """Paper engine with the default full-window entry timeout."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.is_running = True
+    engine.mode = "paper"
+    engine.offset = 0.02
+    engine.exit_thresh = 0.05
+    engine.shares = 5
+    engine.entry_timeout_pct = 1.0
+    return engine
+
+
+def test_adverse_gate_ignores_one_sided_book_at_open():
+    """A one-sided book yields a synthetic mid that must not latch the drift gate."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    # UP book has no ask: mid collapses to the lone bid (0.34) and fakes a 0.15 drift.
+    engine._update_market_strategy(slug, _drift_poll_data(
+        now,
+        {"best_bid": 0.34, "best_ask": None},
+        {"best_bid": 0.64, "best_ask": 0.66},
+    ), now)
+    m = engine.markets[slug]
+    assert m.entry_cancelled_timeout is False
+    assert m.status != "DRIFT_SKIPPED"
+    assert m.order_status_up == "RESTING"
+    assert m.order_status_down == "RESTING"
+
+
+def test_adverse_gate_not_reevaluated_after_window_open():
+    """Once a window opens near 0.50, later live drift must not cancel resting bids."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    engine._update_market_strategy(slug, _drift_poll_data(
+        now,
+        {"best_bid": 0.49, "best_ask": 0.51},
+        {"best_bid": 0.49, "best_ask": 0.51},
+    ), now)
+    m = engine.markets[slug]
+    assert m.order_status_up == "RESTING"
+    assert m.order_status_down == "RESTING"
+
+    # Second tick, same window: mid drifts to ~0.35. Asks stay above the resting
+    # price so nothing fills and only the gate can change the order state.
+    engine._update_market_strategy(slug, _drift_poll_data(
+        now + 1.0,
+        {"best_bid": 0.20, "best_ask": 0.49},
+        {"best_bid": 0.60, "best_ask": 0.70},
+    ), now + 1.0)
+    assert m.entry_cancelled_timeout is False
+    assert m.status != "DRIFT_SKIPPED"
+    assert m.order_status_up == "RESTING"
+    assert m.order_status_down == "RESTING"
+
+
+def test_adverse_gate_fires_on_genuine_two_sided_open_drift():
+    """A two-sided book already skewed past exit_thresh at open still skips entry."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    engine._update_market_strategy(slug, _drift_poll_data(
+        now,
+        {"best_bid": 0.33, "best_ask": 0.35},
+        {"best_bid": 0.64, "best_ask": 0.66},
+    ), now)
+    m = engine.markets[slug]
+    assert m.entry_cancelled_timeout is True
+    assert m.status == "DRIFT_SKIPPED"
+    assert f"{engine.exit_thresh:.2f}" in m.last_action
+
+
+def test_adverse_gate_snapshot_resets_on_window_rollover():
+    """The opening snapshot is per-window and must be cleared on rollover."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    engine._update_market_strategy(slug, _drift_poll_data(
+        now,
+        {"best_bid": 0.33, "best_ask": 0.35},
+        {"best_bid": 0.64, "best_ask": 0.66},
+    ), now)
+    m = engine.markets[slug]
+    assert m.adverse_open is True
+    assert m.open_gate_evaluated is True
+
+    engine._handle_window_rollover(m, now + 300.0, "cid_92_next")
+    assert m.adverse_open is False
+    assert m.open_gate_evaluated is False
+    assert m.open_mid is None
+    assert m.open_drift == 0.0
