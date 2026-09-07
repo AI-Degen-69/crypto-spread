@@ -1143,3 +1143,30 @@ def test_api_live_config_validation_error_format():
     assert "error" in data
     assert "Invalid configuration:" in data["error"]
     assert "detail" in data
+
+
+def test_api_live_config_entry_timeout_pct():
+    """Verify entry_timeout_pct is configurable and normalizes whole numbers (1-100)."""
+    engine = osc_dash.get_live_trader_engine()
+    engine.is_running = False
+    orig_pct = engine.entry_timeout_pct
+    try:
+        # Test whole number 10 -> 0.10
+        res = client.post("/api/live/config", json={"entry_timeout_pct": 10})
+        assert res.status_code == 200
+        data = res.json()
+        assert abs(data["params"]["entry_timeout_pct"] - 0.10) < 1e-4
+
+        # Test full window 100 -> 1.0
+        res_full = client.post("/api/live/config", json={"entry_timeout_pct": 100})
+        assert res_full.status_code == 200
+        data_full = res_full.json()
+        assert abs(data_full["params"]["entry_timeout_pct"] - 1.0) < 1e-4
+
+        # Test decimal 0.25 -> 0.25
+        res_dec = client.post("/api/live/config", json={"entry_timeout_pct": 0.25})
+        assert res_dec.status_code == 200
+        data_dec = res_dec.json()
+        assert abs(data_dec["params"]["entry_timeout_pct"] - 0.25) < 1e-4
+    finally:
+        engine.update_config(entry_timeout_pct=orig_pct)

@@ -474,6 +474,7 @@ class LiveTraderEngine:
         selected_markets: Optional[Sequence[str]] = None,
         tokens: Optional[Sequence[str]] = None,
         durations: Optional[Sequence[int]] = None,
+        entry_timeout_pct: Optional[float] = None,
     ):
         """Initialize the live trading engine with default parameters and selected markets."""
         _load_env_file()
@@ -490,6 +491,7 @@ class LiveTraderEngine:
         self.exit_reversal: float = 0.015
         self.shares: int = 5
         self.taker_fee_rate: float = 0.0
+        self.entry_timeout_pct: float = float(entry_timeout_pct) if entry_timeout_pct is not None else 1.0
         
         # State tracking
         self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
@@ -1645,6 +1647,7 @@ class LiveTraderEngine:
                 "exit_thresh": self.exit_thresh,
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
+                "entry_timeout_pct": self.entry_timeout_pct,
             },
             "markets": mkts_dict,
             "timeline": recent_timeline,
@@ -1678,7 +1681,8 @@ class LiveTraderEngine:
                       starting_balance: Optional[float] = None,
                       selected_markets: Optional[Iterable[str]] = None,
                       tokens: Optional[Iterable[str]] = None,
-                      durations: Optional[Iterable[int]] = None) -> Dict[str, Any]:
+                      durations: Optional[Iterable[int]] = None,
+                      entry_timeout_pct: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1717,6 +1721,8 @@ class LiveTraderEngine:
                 elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
                     param_changed = True
                 elif starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+                    param_changed = True
+                elif entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
                     param_changed = True
 
                 if param_changed:
@@ -1816,6 +1822,8 @@ class LiveTraderEngine:
                 else:
                     if starting_balance is not None and starting_balance >= 0:
                         self.starting_balance = float(starting_balance)
+                if entry_timeout_pct is not None:
+                    self.entry_timeout_pct = max(0.0, min(1.0, float(entry_timeout_pct)))
 
                 # Update per-market resting prices
                 for m in self.markets.values():
@@ -2698,15 +2706,19 @@ class LiveTraderEngine:
         # Determine window duration & elapsed time (Issue #48)
         win_duration = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else (900.0 if "15m" in slug else 300.0)
         elapsed_sec = max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else (win_duration - mstate.time_remaining_sec)
-        entry_timeout_sec = 0.10 * win_duration
-        is_late_start = (elapsed_sec >= entry_timeout_sec)
+        if self.entry_timeout_pct is not None and 0.0 < self.entry_timeout_pct < 1.0:
+            entry_timeout_sec = self.entry_timeout_pct * win_duration
+            is_late_start = (elapsed_sec >= entry_timeout_sec)
+        else:
+            entry_timeout_sec = win_duration
+            is_late_start = False
 
         # Pre-entry drift check: if mid has already drifted >= exit_thresh vs 0.50 before any fills,
         # the market is already strongly monotonic / skewed. Never enter or quote into an immediate stop.
         initial_drift = abs(mid - 0.50)
         is_adverse_open = (initial_drift >= self.exit_thresh)
 
-        # --- PRE-ENTRY DRIFT & 10% WINDOW TIMEOUT ENTRY CANCELLATION ---
+        # --- PRE-ENTRY DRIFT & ENTRY TIMEOUT CANCELLATION ---
         if (is_late_start or is_adverse_open) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
@@ -2798,8 +2810,9 @@ class LiveTraderEngine:
                         log.info("[%s] Entry skipped due to adverse open drift (drift=%.3f >= %.2f)", slug, initial_drift, self.exit_thresh)
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
-                        mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
-                        log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
+                        pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
+                        mstate.last_action = f"{pct_val}% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
+                        log.info("[%s] Entry orders cancelled due to %d%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, pct_val, elapsed_sec, entry_timeout_sec)
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         can_place_entry = (
