@@ -38,7 +38,7 @@ def test_window_rollover_cancels_stop():
 def test_window_rollover_resets_stop_paper():
     """OCO Case C in paper mode: simulated stop cleared without venue calls."""
     engine = LiveTraderEngine()
-    engine.start()
+    engine.is_running = True
     mstate = engine.markets[SLUG]
     mstate.stop_order_id = f"paper_stop_{SLUG}"
     mstate.stop_order_status = "RESTING"
@@ -52,9 +52,10 @@ def test_window_rollover_resets_stop_paper():
     assert mstate.stop_price is None
 
 
-def test_resting_stop_visible_in_open_orders():
+def test_resting_stop_visible_in_open_orders(monkeypatch):
     """The staged stop appears in get_open_orders_list() as an ENGINE_STOP SELL row."""
     engine = LiveTraderEngine()
+    monkeypatch.setattr(engine, "get_clob_client", lambda: None)
     mstate = engine.markets[SLUG]
     mstate.up_token = "tok_up"
     mstate.down_token = "tok_dn"
@@ -74,9 +75,10 @@ def test_resting_stop_visible_in_open_orders():
     assert row["size"] == 5
 
 
-def test_cancelled_stop_not_in_open_orders():
+def test_cancelled_stop_not_in_open_orders(monkeypatch):
     """A cleared/cancelled stop must not linger in the open-orders list."""
     engine = LiveTraderEngine()
+    monkeypatch.setattr(engine, "get_clob_client", lambda: None)
     mstate = engine.markets[SLUG]
     mstate.up_token = "tok_up"
     mstate.fill_price_up = 0.48
@@ -200,7 +202,7 @@ def test_paper_stop_fills_on_bid_touch():
     """Paper stop fills when the protected leg's bid reaches the stop price,
     even if synthetic-mid drift alone hasn't crossed the threshold."""
     engine = LiveTraderEngine()
-    engine.start()
+    engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
@@ -243,7 +245,7 @@ def test_rollover_deferred_when_stop_cancel_fails():
 
     engine = LiveTraderEngine()
     engine.mode = "live"
-    engine.start()
+    engine.is_running = True
     mstate = engine.markets[SLUG]
     mstate.stop_order_id = "ord_stop_resting"
     mstate.stop_order_status = "RESTING"
@@ -337,7 +339,7 @@ def test_place_stop_order_idempotent():
 def test_single_leg_fill_places_stop_paper():
     """A single UP leg fill automatically stages the stop-loss protection order."""
     engine = LiveTraderEngine()
-    engine.start()
+    engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
@@ -405,7 +407,7 @@ def test_pair_completion_cancels_stop_live():
 def test_pair_completion_clears_stop_paper():
     """OCO Case A in paper mode: simulated stop is cleared without venue calls."""
     engine = LiveTraderEngine()
-    engine.start()
+    engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
@@ -423,7 +425,7 @@ def test_pair_completion_clears_stop_paper():
 def test_stop_fill_triggers_stop_exit_paper():
     """OCO Case B (paper): bid drops to the stop -> stop fills, entry cancelled, STOP_EXIT."""
     engine = LiveTraderEngine()
-    engine.start()
+    engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
