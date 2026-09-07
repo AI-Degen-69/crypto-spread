@@ -2272,25 +2272,27 @@ class LiveTraderEngine:
             "stops_triggered": self.total_stops_triggered,
         }
 
-    def _has_outstanding_orders(self) -> bool:
-        """Return True if any market holds an order handle or retained rows.
+    @staticmethod
+    def _market_has_orders(m) -> bool:
+        """Return True if one market holds any order handle or retained rows.
 
         Covers entry legs, advance pre-quotes, the resting stop-loss, exit
         legs, and the retained `cancelled_orders` list (issue #93).
         """
-        for m in self.markets.values():
-            if (
-                m.order_id_up
-                or m.order_id_down
-                or m.next_order_id_up
-                or m.next_order_id_down
-                or m.stop_order_id
-                or m.order_id_exit_up
-                or m.order_id_exit_down
-                or m.cancelled_orders
-            ):
-                return True
-        return False
+        return bool(
+            m.order_id_up
+            or m.order_id_down
+            or m.next_order_id_up
+            or m.next_order_id_down
+            or m.stop_order_id
+            or m.order_id_exit_up
+            or m.order_id_exit_down
+            or m.cancelled_orders
+        )
+
+    def _has_outstanding_orders(self) -> bool:
+        """Return True if any market holds an order handle or retained rows."""
+        return any(self._market_has_orders(m) for m in self.markets.values())
 
     @staticmethod
     def _clear_market_order_state(m) -> None:
@@ -2427,16 +2429,7 @@ class LiveTraderEngine:
         with self._engine_lock:
             cleared_count = 0
             for m in self.markets.values():
-                if (
-                    m.order_id_up
-                    or m.order_id_down
-                    or m.next_order_id_up
-                    or m.next_order_id_down
-                    or m.stop_order_id
-                    or m.order_id_exit_up
-                    or m.order_id_exit_down
-                    or m.cancelled_orders
-                ):
+                if self._market_has_orders(m):
                     cleared_count += 1
                 self._clear_market_order_state(m)
             self._orders_cache_ts = 0.0
