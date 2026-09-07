@@ -447,3 +447,38 @@ def test_stop_fill_triggers_stop_exit_paper():
     # Reciprocal OCO: the unhedged DOWN entry must be cancelled
     assert mstate.order_status_down == "CANCELLED"
     assert mstate.order_id_down is None
+
+
+def test_stop_fill_triggers_stop_exit_down_paper():
+    """OCO Case B (paper for DOWN): DOWN fills at 0.48, down_bid of 0.47 does NOT trigger stop,
+    but dropping to <= 0.43 triggers stop exit and cancels resting UP entry."""
+    engine = LiveTraderEngine()
+    engine.is_running = True
+    now = time.time()
+    market = _fake_market(now)
+
+    # DOWN leg fills at 0.48; stop staged at 0.43 (down_ask is 0.48 so DOWN fills)
+    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now)
+    mstate = engine.markets[SLUG]
+    assert mstate.filled_down is True
+    assert mstate.stop_side == "DOWN"
+    assert mstate.stop_price == 0.43
+    assert mstate.stop_order_id == f"paper_stop_{SLUG}"
+    assert mstate.order_status_up == "RESTING"
+
+    # Next tick: down_bid is 0.47 (above 0.43). Stop must NOT trigger!
+    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now + 1)
+    assert mstate.exit_taken is False
+    assert mstate.status == "FILLED_DOWN"
+    assert mstate.order_status_up == "RESTING"
+
+    # Bid collapses to <= 0.43: stop triggers, UP entry cancelled
+    engine._update_market_strategy(SLUG, _poll(market, 0.55, 0.56, 0.43, 0.44), now + 2)
+    assert mstate.exit_taken is True
+    assert mstate.status == "STOP_EXIT"
+    assert mstate.stop_order_status == "FILLED"
+    assert round(mstate.realized_pnl_usd, 2) == -0.25
+    assert any(t.action == "STOP_EXIT_DOWN" for t in engine.trades)
+    assert mstate.order_status_up == "CANCELLED"
+    assert mstate.order_id_up is None
+

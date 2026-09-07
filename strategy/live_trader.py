@@ -378,6 +378,14 @@ class MarketLiveState:
     order_status_down: str = "NONE"
     entry_cancelled_timeout: bool = False
 
+    # Adverse-open drift gate snapshot (issue #92). Captured once per window
+    # from the first tick with a two-sided book on both legs, never re-evaluated
+    # against the live mid, and cleared on window rollover.
+    open_mid: Optional[float] = None
+    open_drift: float = 0.0
+    adverse_open: bool = False
+    open_gate_evaluated: bool = False
+
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
     next_market_slug: str = ""
@@ -474,6 +482,7 @@ class LiveTraderEngine:
         selected_markets: Optional[Sequence[str]] = None,
         tokens: Optional[Sequence[str]] = None,
         durations: Optional[Sequence[int]] = None,
+        entry_timeout_pct: Optional[float] = None,
     ):
         """Initialize the live trading engine with default parameters and selected markets."""
         _load_env_file()
@@ -490,6 +499,7 @@ class LiveTraderEngine:
         self.exit_reversal: float = 0.015
         self.shares: int = 5
         self.taker_fee_rate: float = 0.0
+        self.entry_timeout_pct: float = float(entry_timeout_pct) if entry_timeout_pct is not None else 1.0
         
         # State tracking
         self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
@@ -1645,6 +1655,7 @@ class LiveTraderEngine:
                 "exit_thresh": self.exit_thresh,
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
+                "entry_timeout_pct": self.entry_timeout_pct,
             },
             "markets": mkts_dict,
             "timeline": recent_timeline,
@@ -1678,7 +1689,8 @@ class LiveTraderEngine:
                       starting_balance: Optional[float] = None,
                       selected_markets: Optional[Iterable[str]] = None,
                       tokens: Optional[Iterable[str]] = None,
-                      durations: Optional[Iterable[int]] = None) -> Dict[str, Any]:
+                      durations: Optional[Iterable[int]] = None,
+                      entry_timeout_pct: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1703,20 +1715,26 @@ class LiveTraderEngine:
 
             # Guard against modifying scalar strategy parameters while the trading bot is running
             if self.is_running:
+                # Each parameter is checked independently. An elif chain would let an
+                # unchanged leading parameter mask a changed trailing one: the dashboard
+                # always posts `offset`, so a changed entry_timeout_pct went undetected
+                # and the "stop the bot first" guard silently failed to fire.
                 param_changed = False
                 if offset is not None:
                     norm_offset = max(0.001, min(0.490, float(offset)))
                     if abs(norm_offset - self.offset) > 1e-6:
                         param_changed = True
-                elif exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
+                if exit_thresh is not None and abs(float(exit_thresh) - self.exit_thresh) > 1e-6:
                     param_changed = True
-                elif shares is not None and int(shares) != self.shares:
+                if shares is not None and int(shares) != self.shares:
                     param_changed = True
-                elif mode is not None and mode != self.mode:
+                if mode is not None and mode != self.mode:
                     param_changed = True
-                elif wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
+                if wallet_address is not None and wallet_address.strip() != (self.wallet_address or ""):
                     param_changed = True
-                elif starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+                if starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
+                    param_changed = True
+                if entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
                     param_changed = True
 
                 if param_changed:
@@ -1816,6 +1834,8 @@ class LiveTraderEngine:
                 else:
                     if starting_balance is not None and starting_balance >= 0:
                         self.starting_balance = float(starting_balance)
+                if entry_timeout_pct is not None:
+                    self.entry_timeout_pct = max(0.0, min(1.0, float(entry_timeout_pct)))
 
                 # Update per-market resting prices
                 for m in self.markets.values():
@@ -2266,6 +2286,10 @@ class LiveTraderEngine:
             m.max_down_drift = 0.0
             m.reversal_seen_up = False
             m.reversal_seen_down = False
+            m.open_mid = None
+            m.open_drift = 0.0
+            m.adverse_open = False
+            m.open_gate_evaluated = False
             m.status = "QUOTING" if self.is_running else "IDLE"
             m.last_action = "PnL Reset"
         self._record_timeline_point(time.time())
@@ -2698,15 +2722,34 @@ class LiveTraderEngine:
         # Determine window duration & elapsed time (Issue #48)
         win_duration = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else (900.0 if "15m" in slug else 300.0)
         elapsed_sec = max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else (win_duration - mstate.time_remaining_sec)
-        entry_timeout_sec = 0.10 * win_duration
-        is_late_start = (elapsed_sec >= entry_timeout_sec)
+        if self.entry_timeout_pct is not None and 0.0 < self.entry_timeout_pct < 1.0:
+            entry_timeout_sec = self.entry_timeout_pct * win_duration
+            is_late_start = (elapsed_sec >= entry_timeout_sec)
+        else:
+            entry_timeout_sec = win_duration
+            is_late_start = False
 
-        # Pre-entry drift check: if mid has already drifted >= exit_thresh vs 0.50 before any fills,
-        # the market is already strongly monotonic / skewed. Never enter or quote into an immediate stop.
-        initial_drift = abs(mid - 0.50)
-        is_adverse_open = (initial_drift >= self.exit_thresh)
+        # Pre-entry drift check (issue #92): if the mid was already drifted >= exit_thresh
+        # vs 0.50 *when the window opened*, the market is already strongly monotonic /
+        # skewed. Never enter or quote into an immediate stop. The gate is evaluated once
+        # per window from the opening snapshot -- re-running it against the live mid on
+        # every 1s tick cancelled healthy resting bids seconds into a window.
+        # A one-sided book collapses `mid` onto whichever side exists, which reports a
+        # synthetic drift that is a book artifact rather than a real skew, so the snapshot
+        # is only taken once both legs quote two sides.
+        book_two_sided = (
+            mstate.up_bid is not None and mstate.up_ask is not None
+            and mstate.down_bid is not None and mstate.down_ask is not None
+        )
+        if not mstate.open_gate_evaluated and book_two_sided:
+            mstate.open_mid = mid
+            mstate.open_drift = abs(mid - 0.50)
+            mstate.adverse_open = (mstate.open_drift >= self.exit_thresh)
+            mstate.open_gate_evaluated = True
+        initial_drift = mstate.open_drift
+        is_adverse_open = mstate.adverse_open
 
-        # --- PRE-ENTRY DRIFT & 10% WINDOW TIMEOUT ENTRY CANCELLATION ---
+        # --- PRE-ENTRY DRIFT & ENTRY TIMEOUT CANCELLATION ---
         if (is_late_start or is_adverse_open) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
@@ -2794,12 +2837,14 @@ class LiveTraderEngine:
                 if mstate.entry_cancelled_timeout:
                     if is_adverse_open:
                         mstate.status = "DRIFT_SKIPPED"
-                        mstate.last_action = f"Adverse drift ({initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
-                        log.info("[%s] Entry skipped due to adverse open drift (drift=%.3f >= %.2f)", slug, initial_drift, self.exit_thresh)
+                        open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
+                        mstate.last_action = f"Adverse drift at open (mid {open_mid_txt}, drift {initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
+                        log.info("[%s] Entry skipped due to adverse open drift (open_mid=%s, drift=%.3f >= %.2f)", slug, open_mid_txt, initial_drift, self.exit_thresh)
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
-                        mstate.last_action = f"10% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
-                        log.info("[%s] Entry orders cancelled due to 10%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, elapsed_sec, entry_timeout_sec)
+                        pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
+                        mstate.last_action = f"{pct_val}% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
+                        log.info("[%s] Entry orders cancelled due to %d%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, pct_val, elapsed_sec, entry_timeout_sec)
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         can_place_entry = (
@@ -3059,7 +3104,7 @@ class LiveTraderEngine:
         paper_stop_hit_down = (
             self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "DOWN"
             and mstate.down_bid is not None and mstate.stop_price is not None
-            and mstate.down_bid >= mstate.stop_price
+            and mstate.down_bid <= mstate.stop_price
         )
         if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
                 or paper_stop_hit_down)
@@ -3202,6 +3247,10 @@ class LiveTraderEngine:
             mstate.pair_captured = False
             mstate.exit_taken = False
             mstate.entry_cancelled_timeout = False
+            mstate.open_mid = None
+            mstate.open_drift = 0.0
+            mstate.adverse_open = False
+            mstate.open_gate_evaluated = False
             mstate.exit_side = None
             mstate.spot_open_price = None
             mstate.spot_drift = 0.0

@@ -872,6 +872,7 @@ class LiveConfigPayload(BaseModel):
     selected_markets: Optional[list[str]] = None
     tokens: Optional[list[str]] = None
     durations: Optional[list[int]] = None
+    entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("offset", mode="before")
     @classmethod
@@ -901,6 +902,26 @@ class LiveConfigPayload(BaseModel):
                 pass
         return v
 
+    @field_validator("entry_timeout_pct", mode="before")
+    @classmethod
+    def normalize_entry_timeout_pct(cls, v: Any) -> Any:
+        """Normalize a whole-number percentage above 1 (2-100) to a decimal (0.02-1.0).
+
+        Values of 1.0 or below are passed through as decimals already in range, so
+        `1` and `1.0` both mean a full window rather than one percent. The cockpit
+        never relies on this ambiguity -- it divides its 1-100 field by 100 before
+        posting -- but API callers can send either form.
+        """
+        if v is not None:
+            try:
+                fv = float(v)
+                if 1.0 < fv <= 100.0:
+                    return fv / 100.0
+                return fv
+            except (ValueError, TypeError):
+                pass
+        return v
+
 
 @app.post("/api/live/config")
 def api_live_config(payload: LiveConfigPayload, request: Request):
@@ -918,6 +939,7 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             selected_markets=payload.selected_markets,
             tokens=payload.tokens,
             durations=payload.durations,
+            entry_timeout_pct=payload.entry_timeout_pct,
         )
         return state
     except ValueError as e:
@@ -1757,6 +1779,10 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
             <option value="paper" selected>Paper Simulation (Live Book)</option>
             <option value="live">Live Polymarket Orders</option>
           </select>
+        </div>
+        <div class="form-group">
+          <label>Entry Timeout (% of window)</label>
+          <input type="number" min="1" max="100" step="5" id="cockpitEntryTimeout" value="100" placeholder="100 = full window" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group" style="grid-column:span 2">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
@@ -3285,6 +3311,7 @@ function updateCockpitParamsLockUI(locked) {
     'cockpitExit',
     'cockpitShares',
     'cockpitMode',
+    'cockpitEntryTimeout',
     'cockpitWallet',
     'cockpitStartBal',
     'btnApplyParams',
@@ -3757,6 +3784,19 @@ function validateCockpitInputs() {
     }
   }
 
+  // 5. Entry Timeout: 1 to 100
+  const timeoutEl = $('cockpitEntryTimeout');
+  if (timeoutEl) {
+    const raw = timeoutEl.value.trim();
+    const val = parseFloat(raw);
+    if (raw === '' || isNaN(val) || val < 1 || val > 100) {
+      timeoutEl.classList.add('input-invalid');
+      allValid = false;
+    } else {
+      timeoutEl.classList.remove('input-invalid');
+    }
+  }
+
   const applyBtn = $('btnApplyParams');
   if (applyBtn && !areCockpitFiltersLocked()) {
     applyBtn.disabled = !allValid;
@@ -3803,6 +3843,14 @@ async function applyCockpitConfig() {
   const mode = $('cockpitMode').value || 'paper';
   const wallet = $('cockpitWallet').value.trim();
   const startBal = parseFloat($('cockpitStartBal').value) || 1000.0;
+  const timeoutEl = $('cockpitEntryTimeout');
+  const timeoutVal = timeoutEl ? parseFloat(timeoutEl.value) : 100;
+  // The cockpit input is always a whole percentage (min=1, max=100), so divide
+  // unconditionally. The old `timeoutVal > 1.0` guard left a typed 1 as 1.0,
+  // silently turning a 1% timeout into a full-window timeout.
+  const entry_timeout_pct = !isNaN(timeoutVal)
+    ? Math.min(1.0, Math.max(0.01, timeoutVal / 100.0))
+    : 1.0;
   const body = {
     offset,
     exit_thresh,
@@ -3810,6 +3858,7 @@ async function applyCockpitConfig() {
     mode,
     wallet_address: wallet,
     starting_balance: startBal,
+    entry_timeout_pct,
   };
   // Market selection is immutable while the bot runs; only send filters when stopped
   if (!filtersLocked) {
@@ -3898,6 +3947,7 @@ function renderCockpitUI(st) {
       if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
+      if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
     }
     if ($('cockpitWallet') && st.wallet_address != null) {
       $('cockpitWallet').value = st.wallet_address;
@@ -3909,6 +3959,12 @@ function renderCockpitUI(st) {
   if (!hasInitializedCockpitFilters && st.selected_series) {
     hasInitializedCockpitFilters = true;
     syncCockpitFiltersFromState(st);
+    if (st.params) {
+      if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
+      if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
+      if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
+      if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
+    }
   } else if (st.is_running && st.selected_series) {
     syncCockpitFiltersFromState(st);
   } else {
