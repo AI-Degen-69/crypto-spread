@@ -1753,6 +1753,9 @@ class LiveTraderEngine:
                 "shares": self.shares,
                 "entry_timeout_pct": self.entry_timeout_pct,
                 "max_start_elapsed_pct": self.max_start_elapsed_pct,
+                "reentry_drift_band": self.reentry_drift_band,
+                "min_requote_remaining_sec": self.min_requote_remaining_sec,
+                "max_reentries_per_window": self.max_reentries_per_window,
             },
             "markets": mkts_dict,
             "timeline": recent_timeline,
@@ -1787,7 +1790,8 @@ class LiveTraderEngine:
                       selected_markets: Optional[Iterable[str]] = None,
                       tokens: Optional[Iterable[str]] = None,
                       durations: Optional[Iterable[int]] = None,
-                      entry_timeout_pct: Optional[float] = None) -> Dict[str, Any]:
+                      entry_timeout_pct: Optional[float] = None,
+                      reentry_drift_band: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1832,6 +1836,8 @@ class LiveTraderEngine:
                 if starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
                     param_changed = True
                 if entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
+                    param_changed = True
+                if reentry_drift_band is not None and abs(float(reentry_drift_band) - self.reentry_drift_band) > 1e-6:
                     param_changed = True
 
                 if param_changed:
@@ -1933,6 +1939,10 @@ class LiveTraderEngine:
                         self.starting_balance = float(starting_balance)
                 if entry_timeout_pct is not None:
                     self.entry_timeout_pct = max(0.0, min(1.0, float(entry_timeout_pct)))
+                if reentry_drift_band is not None:
+                    # Clamped to the same 0..0.50 range as `exit_thresh`; 0 disables
+                    # re-entry entirely by making the band unreachable for any real mid.
+                    self.reentry_drift_band = max(0.0, min(0.50, float(reentry_drift_band)))
 
                 # Update per-market resting prices
                 for m in self.markets.values():

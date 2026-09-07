@@ -878,6 +878,7 @@ class LiveConfigPayload(BaseModel):
     tokens: Optional[list[str]] = None
     durations: Optional[list[int]] = None
     entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    reentry_drift_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
 
     @field_validator("offset", mode="before")
     @classmethod
@@ -945,6 +946,7 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             tokens=payload.tokens,
             durations=payload.durations,
             entry_timeout_pct=payload.entry_timeout_pct,
+            reentry_drift_band=payload.reentry_drift_band,
         )
         return state
     except ValueError as e:

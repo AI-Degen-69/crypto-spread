@@ -1199,3 +1199,28 @@ def test_api_live_config_entry_timeout_pct():
     finally:
         engine.update_config(entry_timeout_pct=orig_pct)
         engine.mode = orig_mode
+
+
+def test_api_live_config_reentry_drift_band():
+    """Verify reentry_drift_band (issue #95) is exposed and settable at runtime."""
+    engine = osc_dash.get_live_trader_engine()
+    engine.is_running = False
+    orig_band = engine.reentry_drift_band
+    orig_mode = engine.mode
+    engine.mode = "paper"
+    try:
+        state = client.get("/api/live/state").json()
+        assert abs(state["params"]["reentry_drift_band"] - orig_band) < 1e-9
+        assert state["params"]["min_requote_remaining_sec"] == engine.min_requote_remaining_sec
+        assert state["params"]["max_reentries_per_window"] == engine.max_reentries_per_window
+
+        res = client.post("/api/live/config", json={"reentry_drift_band": 0.02})
+        assert res.status_code == 200
+        assert abs(res.json()["params"]["reentry_drift_band"] - 0.02) < 1e-9
+        assert abs(engine.reentry_drift_band - 0.02) < 1e-9
+
+        # Out of range is rejected by the payload model, not silently clamped.
+        assert client.post("/api/live/config", json={"reentry_drift_band": 0.9}).status_code == 422
+    finally:
+        engine.update_config(reentry_drift_band=orig_band)
+        engine.mode = orig_mode
