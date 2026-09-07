@@ -1068,8 +1068,7 @@ def test_reset_pnl_clears_all_order_state_and_orders_list(monkeypatch):
     assert engine.get_open_orders_list() != []
 
     res = engine.reset_pnl()
-    if isinstance(res, dict):
-        assert res.get("ok") is True
+    assert res["ok"] is True
 
     assert engine.get_open_orders_list() == []
     assert m.cancelled_orders == []
@@ -1135,6 +1134,45 @@ def test_reset_pnl_live_stopped_cancels_venue_first(monkeypatch):
     assert res.get("venue_cancelled") is True
     fake_client.cancel_all.assert_called_once()
     assert m.order_id_up is None
+
+
+def test_reset_pnl_live_stopped_venue_failure_refuses_without_clearing(monkeypatch):
+    """Issue #93: live + stopped + cancel raises → error, nothing cleared."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    fake_client = MagicMock()
+    fake_client.cancel_all.side_effect = RuntimeError("CLOB remote error")
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is False
+    assert res.get("venue_cancelled") is False
+    assert "error" in res
+    assert m.order_id_up == "live_ord_up"
+
+
+def test_reset_pnl_live_stopped_no_client_refuses_without_clearing(monkeypatch):
+    """Issue #93: live + stopped + no CLOB client → refusal, ids preserved."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    monkeypatch.setattr(engine, "get_clob_client", lambda: None)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is False
+    assert res.get("venue_cancelled") is False
+    assert "CLOB" in res.get("error", "")
+    assert m.order_id_up == "live_ord_up"
 
 
 def test_reset_pnl_paper_makes_no_clob_calls(monkeypatch):

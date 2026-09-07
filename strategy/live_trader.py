@@ -2273,11 +2273,13 @@ class LiveTraderEngine:
         }
 
     @staticmethod
-    def _market_has_orders(m) -> bool:
+    def _market_has_orders(m: MarketLiveState) -> bool:
         """Return True if one market holds any order handle or retained rows.
 
         Covers entry legs, advance pre-quotes, the resting stop-loss, exit
         legs, and the retained `cancelled_orders` list (issue #93).
+        Deliberately conservative: any handle counts, even one the dashboard
+        would hide, so the live-running refusal errs toward safety.
         """
         return bool(
             m.order_id_up
@@ -2291,11 +2293,14 @@ class LiveTraderEngine:
         )
 
     def _has_outstanding_orders(self) -> bool:
-        """Return True if any market holds an order handle or retained rows."""
+        """Return True if any market holds an order handle or retained rows.
+
+        Caller must hold `_engine_lock`.
+        """
         return any(self._market_has_orders(m) for m in self.markets.values())
 
     @staticmethod
-    def _clear_market_order_state(m) -> None:
+    def _clear_market_order_state(m: MarketLiveState) -> None:
         """Clear every order handle on one market (issue #93).
 
         Caller must hold `_engine_lock`. Mirrors the local-handle clearing in
@@ -2325,7 +2330,7 @@ class LiveTraderEngine:
         m.order_status_exit_up = "NONE"
         m.order_status_exit_down = "NONE"
 
-    def reset_pnl(self):
+    def reset_pnl(self) -> Dict[str, Any]:
         """Reset session PnL, trade history, and outstanding order state.
 
         Cancel-and-clear (issue #93): every market's order handles are emptied
@@ -2338,7 +2343,9 @@ class LiveTraderEngine:
         no venue cancel is fired) so real-money orders are never cancelled
         behind the operator's back — Stop first, then reset. When live but
         stopped, venue-side orders are cancelled before the local handles are
-        dropped.
+        dropped; a missing CLOB client or any cancel failure also refuses
+        without clearing, so no order id is ever dropped without a cancel
+        attempt.
         """
         with self._engine_lock:
             hot = self.mode == "live" and self.is_running and self._has_outstanding_orders()
@@ -2357,40 +2364,60 @@ class LiveTraderEngine:
         venue_cancelled = False
         with self._engine_lock:
             needs_venue_cancel = self.mode == "live" and self._has_outstanding_orders()
+            if needs_venue_cancel:
+                oids = [
+                    oid
+                    for m in self.markets.values()
+                    for oid in (
+                        m.order_id_up,
+                        m.order_id_down,
+                        m.next_order_id_up,
+                        m.next_order_id_down,
+                        m.stop_order_id,
+                        m.order_id_exit_up,
+                        m.order_id_exit_down,
+                    )
+                    if oid
+                ]
         if needs_venue_cancel:
             client = self.get_clob_client()
-            if client is not None:
-                try:
-                    if hasattr(client, "cancel_all"):
-                        client.cancel_all()
-                        log.info("reset_pnl: venue cancel_all invoked on Polymarket CLOB")
-                    else:
-                        for m in self.markets.values():
-                            for oid in (
-                                m.order_id_up,
-                                m.order_id_down,
-                                m.next_order_id_up,
-                                m.next_order_id_down,
-                                m.stop_order_id,
-                                m.order_id_exit_up,
-                                m.order_id_exit_down,
-                            ):
-                                if oid:
-                                    self.cancel_live_order(oid)
-                    venue_cancelled = True
-                except Exception as e:
-                    log.error("reset_pnl: venue cancel failed: %s", e)
-                    return {
-                        "ok": False,
-                        "refused": False,
-                        "venue_cancelled": False,
-                        "markets_cleared": 0,
-                        "error": str(e),
-                    }
-        self.trades.clear()
-        self.timeline.clear()
-        self.open_positions.clear()
-        self.session_start_ts = time.time()
+            if client is None:
+                log.error("reset_pnl: live reset refused — no CLOB client available")
+                return {
+                    "ok": False,
+                    "refused": False,
+                    "venue_cancelled": False,
+                    "markets_cleared": 0,
+                    "error": "No CLOB client available — cannot cancel live orders; reset refused.",
+                }
+            try:
+                if hasattr(client, "cancel_all"):
+                    client.cancel_all()
+                    log.info("reset_pnl: venue cancel_all invoked on Polymarket CLOB")
+                else:
+                    failures = [oid for oid in oids if not self.cancel_live_order(oid)]
+                    if failures:
+                        log.error("reset_pnl: per-order venue cancel failed for %s", failures)
+                        return {
+                            "ok": False,
+                            "refused": False,
+                            "venue_cancelled": False,
+                            "markets_cleared": 0,
+                            "error": (
+                                f"Venue cancel failed for {len(failures)} order(s); "
+                                "reset refused."
+                            ),
+                        }
+                venue_cancelled = True
+            except Exception as e:
+                log.error("reset_pnl: venue cancel failed: %s", e)
+                return {
+                    "ok": False,
+                    "refused": False,
+                    "venue_cancelled": False,
+                    "markets_cleared": 0,
+                    "error": str(e),
+                }
         if TRADES_FILE.exists() and not os.getenv("PYTEST_CURRENT_TEST"):
             try:
                 TRADES_FILE.unlink()
@@ -2401,32 +2428,48 @@ class LiveTraderEngine:
                 META_FILE.unlink()
             except Exception as e:
                 log.warning("Could not delete %s: %s", META_FILE, e)
-        self.historical_realized_pnl = 0.0
-        for m in self.markets.values():
-            m.realized_pnl_usd = 0.0
-            m.unrealized_pnl_usd = 0.0
-            m.total_pnl_usd = 0.0
-            m.trades_count = 0
-            m.pairs_count = 0
-            m.stops_count = 0
-            m.filled_up = False
-            m.filled_down = False
-            m.fill_price_up = None
-            m.fill_price_down = None
-            m.pair_captured = False
-            m.exit_taken = False
-            m.exit_side = ""
-            m.max_up_drift = 0.0
-            m.max_down_drift = 0.0
-            m.reversal_seen_up = False
-            m.reversal_seen_down = False
-            m.open_mid = None
-            m.open_drift = 0.0
-            m.adverse_open = False
-            m.open_gate_evaluated = False
-            m.status = "QUOTING" if self.is_running else "IDLE"
-            m.last_action = "PnL Reset"
         with self._engine_lock:
+            if self.mode == "live" and self.is_running and self._has_outstanding_orders():
+                return {
+                    "ok": False,
+                    "refused": True,
+                    "venue_cancelled": False,
+                    "markets_cleared": 0,
+                    "message": (
+                        "Stop the engine before RESET P&L while orders are "
+                        "outstanding — press Stop first (Stop cancels live orders), "
+                        "then reset."
+                    ),
+                }
+            self.trades.clear()
+            self.timeline.clear()
+            self.open_positions.clear()
+            self.session_start_ts = time.time()
+            self.historical_realized_pnl = 0.0
+            for m in self.markets.values():
+                m.realized_pnl_usd = 0.0
+                m.unrealized_pnl_usd = 0.0
+                m.total_pnl_usd = 0.0
+                m.trades_count = 0
+                m.pairs_count = 0
+                m.stops_count = 0
+                m.filled_up = False
+                m.filled_down = False
+                m.fill_price_up = None
+                m.fill_price_down = None
+                m.pair_captured = False
+                m.exit_taken = False
+                m.exit_side = ""
+                m.max_up_drift = 0.0
+                m.max_down_drift = 0.0
+                m.reversal_seen_up = False
+                m.reversal_seen_down = False
+                m.open_mid = None
+                m.open_drift = 0.0
+                m.adverse_open = False
+                m.open_gate_evaluated = False
+                m.status = "QUOTING" if self.is_running else "IDLE"
+                m.last_action = "PnL Reset"
             cleared_count = 0
             for m in self.markets.values():
                 if self._market_has_orders(m):
