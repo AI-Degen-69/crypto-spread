@@ -2272,8 +2272,65 @@ class LiveTraderEngine:
             "stops_triggered": self.total_stops_triggered,
         }
 
+    def _has_outstanding_orders(self) -> bool:
+        """Return True if any market holds an order handle or retained rows.
+
+        Covers entry legs, advance pre-quotes, the resting stop-loss, exit
+        legs, and the retained `cancelled_orders` list (issue #93).
+        """
+        for m in self.markets.values():
+            if (
+                m.order_id_up
+                or m.order_id_down
+                or m.next_order_id_up
+                or m.next_order_id_down
+                or m.stop_order_id
+                or m.order_id_exit_up
+                or m.order_id_exit_down
+                or m.cancelled_orders
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _clear_market_order_state(m) -> None:
+        """Clear every order handle on one market (issue #93).
+
+        Caller must hold `_engine_lock`. Mirrors the local-handle clearing in
+        `cancel_all_orders()` but fully empties `cancelled_orders` and resets
+        statuses to `"NONE"` so no FILLED/RESTING row can survive a reset.
+        """
+        m.cancelled_orders = []
+        m.order_id_up = None
+        m.order_id_down = None
+        m.order_status_up = "NONE"
+        m.order_status_down = "NONE"
+        m.order_time_up = "-"
+        m.order_time_down = "-"
+        m.entry_cancelled_timeout = False
+        m.next_order_id_up = None
+        m.next_order_id_down = None
+        m.next_order_time_up = "-"
+        m.next_order_time_down = "-"
+        m.next_quoted = False
+        m.stop_order_id = None
+        m.stop_order_status = "NONE"
+        m.stop_price = None
+        m.stop_side = None
+        m.stop_order_time = "-"
+        m.order_id_exit_up = None
+        m.order_id_exit_down = None
+        m.order_status_exit_up = "NONE"
+        m.order_status_exit_down = "NONE"
+
     def reset_pnl(self):
-        """Reset session PnL and trade history."""
+        """Reset session PnL, trade history, and outstanding order state.
+
+        Cancel-and-clear (issue #93): every market's order handles are emptied
+        so `get_open_orders_list()` comes back empty, and the 5s orders cache
+        is invalidated. Returns a result dict; callers that ignore it keep
+        working as before.
+        """
         self.trades.clear()
         self.timeline.clear()
         self.open_positions.clear()
@@ -2313,7 +2370,29 @@ class LiveTraderEngine:
             m.open_gate_evaluated = False
             m.status = "QUOTING" if self.is_running else "IDLE"
             m.last_action = "PnL Reset"
+        with self._engine_lock:
+            cleared_count = 0
+            for m in self.markets.values():
+                if (
+                    m.order_id_up
+                    or m.order_id_down
+                    or m.next_order_id_up
+                    or m.next_order_id_down
+                    or m.stop_order_id
+                    or m.order_id_exit_up
+                    or m.order_id_exit_down
+                    or m.cancelled_orders
+                ):
+                    cleared_count += 1
+                self._clear_market_order_state(m)
+            self._orders_cache_ts = 0.0
         self._record_timeline_point(time.time())
+        return {
+            "ok": True,
+            "refused": False,
+            "venue_cancelled": False,
+            "markets_cleared": cleared_count,
+        }
 
     def seed_demo_data(self):
         """Populate realistic demo simulation trades, timeline curve, and market states."""
