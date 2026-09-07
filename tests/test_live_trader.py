@@ -1732,6 +1732,199 @@ def test_adverse_gate_snapshot_resets_on_window_rollover():
     assert m.open_drift == 0.0
 
 
+# ============================================================================
+# Issue #95: re-entry into a drift-skipped window when the mid reverts
+# ============================================================================
+
+# Books used by the re-entry tests. `_ADVERSE_*` opens the window at mid ~0.345
+# (drift 0.155 >= exit_thresh), `_REVERTED_*` puts it back at mid 0.50 with asks
+# above the 0.48 resting price so nothing fills, and `_PARTIAL_*` reverts only as
+# far as mid 0.45 -- a real recovery that is still outside `reentry_drift_band`.
+_ADVERSE_UP = {"best_bid": 0.33, "best_ask": 0.35}
+_ADVERSE_DN = {"best_bid": 0.64, "best_ask": 0.66}
+_REVERTED_UP = {"best_bid": 0.49, "best_ask": 0.51}
+_REVERTED_DN = {"best_bid": 0.49, "best_ask": 0.51}
+_PARTIAL_UP = {"best_bid": 0.44, "best_ask": 0.46}
+_PARTIAL_DN = {"best_bid": 0.54, "best_ask": 0.56}
+
+
+def _skip_window_on_adverse_open(engine, slug: str, now: float):
+    """Drive one tick with an adverse opening book and assert the gate latched."""
+    engine._update_market_strategy(slug, _drift_poll_data(now, _ADVERSE_UP, _ADVERSE_DN), now)
+    m = engine.markets[slug]
+    assert m.adverse_open is True
+    assert m.status == "DRIFT_SKIPPED"
+    return m
+
+
+def test_reentry_after_mid_reverts_inside_band():
+    """A drift-skipped window re-quotes once the mid comes back near 0.50."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    # 60s in: mid back at 0.50, 239s of the window still left.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.entry_cancelled_timeout is False
+    assert m.adverse_open is False
+    assert m.reentry_count == 1
+    assert m.status == "QUOTING"
+    assert m.order_status_up == "RESTING"
+    assert m.order_status_down == "RESTING"
+
+
+def test_reentry_preserves_opening_snapshot_and_reports_drift():
+    """Re-entry keeps the original open snapshot and says so in last_action."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    open_mid, open_drift = m.open_mid, m.open_drift
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.open_mid == open_mid
+    assert m.open_drift == open_drift
+    assert m.reentry_mid == pytest.approx(0.50, abs=1e-6)
+    assert m.reentry_drift == pytest.approx(0.0, abs=1e-6)
+    assert "re-enter" in m.last_action.lower()
+    assert f"{open_drift:.3f}" in m.last_action
+
+
+def test_no_reentry_while_mid_stays_outside_band():
+    """A partial recovery that is still outside the band leaves the window skipped."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _PARTIAL_UP, _PARTIAL_DN), now + 60.0)
+
+    assert m.entry_cancelled_timeout is True
+    assert m.adverse_open is True
+    assert m.reentry_count == 0
+    assert m.status == "DRIFT_SKIPPED"
+
+
+def test_no_reentry_for_entry_timeout_cancelled_window():
+    """An entry-timeout cancel is not a drift skip and is never re-entered."""
+    engine = _drift_engine()
+    engine.entry_timeout_pct = 0.10          # 30s cutoff on a 300s window
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    # Healthy open, so the adverse gate never latches.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now)
+    m = engine.markets[slug]
+    assert m.adverse_open is False
+
+    # 41s in: past the entry timeout, nothing filled -> cancelled.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 40.0)
+    assert m.status == "TIMEOUT_NO_FILL"
+    assert m.entry_cancelled_timeout is True
+
+    # Mid is squarely inside the band, but the cancel reason was the timeout.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 50.0)
+    assert m.status == "TIMEOUT_NO_FILL"
+    assert m.entry_cancelled_timeout is True
+    assert m.reentry_count == 0
+
+
+def test_no_reentry_for_late_start_skipped_window():
+    """The issue #96 late-start skip is also not a drift skip."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    # First tick the engine ever sees for this window lands 41s in (cutoff 30s).
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 40.0)
+    m = engine.markets[slug]
+    assert m.late_start_skip is True
+    assert m.status == "LATE_START_SKIPPED"
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 50.0)
+    assert m.status == "LATE_START_SKIPPED"
+    assert m.entry_cancelled_timeout is True
+    assert m.reentry_count == 0
+
+
+def test_no_reentry_when_too_little_window_remains():
+    """A fill with under min_requote_remaining_sec left has no time to pair."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    # 250s in: only 49s left, below the 60s minimum.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 250.0)
+
+    assert m.reentry_count == 0
+    assert m.status == "DRIFT_SKIPPED"
+    assert m.entry_cancelled_timeout is True
+
+
+def test_reentry_capped_per_window():
+    """max_reentries_per_window bounds how often one window can be re-entered."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert m.reentry_count == 1
+
+    # Force the window back into a drift skip, as a second adverse excursion would.
+    m.adverse_open = True
+    m.entry_cancelled_timeout = True
+    m.status = "DRIFT_SKIPPED"
+    m.order_id_up = None
+    m.order_id_down = None
+    m.order_status_up = "CANCELLED"
+    m.order_status_down = "CANCELLED"
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 120.0)
+
+    assert m.reentry_count == 1
+    assert m.status == "DRIFT_SKIPPED"
+    assert m.entry_cancelled_timeout is True
+
+
+def test_reentry_count_clears_on_rollover_and_reset():
+    """Per-window re-entry state resets with the rest of the window state."""
+    engine = _drift_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert m.reentry_count == 1
+
+    engine._handle_window_rollover(m, now + 300.0, "cid_95_next")
+    assert m.reentry_count == 0
+    assert m.reentry_mid is None
+    assert m.reentry_drift is None
+
+    m.reentry_count = 3
+    m.reentry_mid = 0.50
+    m.reentry_drift = 0.001
+    engine.is_running = False
+    engine.reset_pnl()
+    assert m.reentry_count == 0
+    assert m.reentry_mid is None
+    assert m.reentry_drift is None
+
+
 # --- Issue #97: deterministic Open Orders ranking ---
 
 def _order_lane_market(engine, slug, prefix, with_stop=True, with_advance=True, with_cancelled=True):

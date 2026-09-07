@@ -2873,6 +2873,81 @@ class LiveTraderEngine:
             log.debug("Failed polling market %s: %s", slug, e)
             return None
 
+    def _maybe_reenter_drift_skipped(
+        self,
+        mstate: MarketLiveState,
+        slug: str,
+        mid: float,
+        remaining_sec: float,
+        book_two_sided: bool,
+        is_late_start: bool,
+    ) -> bool:
+        """Re-enter a window the adverse-open gate skipped, once the mid reverts.
+
+        Issue #95. The gate (issue #92) is a one-shot decision taken from the
+        opening book, and until now it was terminal: one adverse snapshot latched
+        the market out for the whole window even when the skew closed minutes later.
+        This re-opens entry for the remainder of the window when the live mid has
+        come back within `reentry_drift_band` of 0.50 and at least
+        `min_requote_remaining_sec` is left to fill and pair both legs.
+
+        The condition is `mstate.adverse_open`, never `entry_cancelled_timeout`
+        alone: that latch is shared with the entry timeout (`is_late_start`) and
+        with the issue #96 late-start skip, and neither of those windows may be
+        resurrected here. `open_mid` / `open_drift` / `open_gate_evaluated` are left
+        untouched -- the operator keeps seeing what the window actually opened at,
+        and re-entry is itself a stricter test of the live mid than re-running the
+        gate would be (the band is well inside `exit_thresh`).
+
+        Returns True when the window was re-entered on this tick.
+        """
+        if not mstate.adverse_open or not mstate.entry_cancelled_timeout:
+            return False
+        if mstate.late_start_skip or is_late_start:
+            return False
+        if mstate.filled_up or mstate.filled_down or mstate.pair_captured or mstate.exit_taken:
+            return False
+        if self.quoting_halted or not book_two_sided:
+            return False
+        if mstate.reentry_count >= self.max_reentries_per_window:
+            return False
+        if remaining_sec < self.min_requote_remaining_sec:
+            return False
+        drift = abs(mid - 0.50)
+        if drift > self.reentry_drift_band:
+            return False
+
+        open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
+        with self._engine_lock:
+            mstate.entry_cancelled_timeout = False
+            mstate.adverse_open = False
+            mstate.reentry_count += 1
+            mstate.reentry_mid = mid
+            mstate.reentry_drift = drift
+            # Stale handles from the cancelled entry would suppress placement below;
+            # the `cancelled_orders` rows stay as history.
+            mstate.order_id_up = None
+            mstate.order_id_down = None
+            mstate.order_status_up = "NONE"
+            mstate.order_status_down = "NONE"
+            mstate.order_time_up = "-"
+            mstate.order_time_down = "-"
+            mstate.status = "QUOTING"
+            mstate.last_action = (
+                f"Re-entered after drift reverted (open {open_mid_txt}, drift "
+                f"{mstate.open_drift:.3f} -> mid {mid:.4f}, drift {drift:.3f} <= "
+                f"{self.reentry_drift_band:.3f}, {remaining_sec:.0f}s left) "
+                f"— re-entry {mstate.reentry_count}/{self.max_reentries_per_window}"
+            )
+        log.info(
+            "[%s] Re-entering drift-skipped window (open_mid=%s, open_drift=%.3f, "
+            "mid=%.4f, drift=%.3f <= %.3f, remaining=%.0fs, re-entry %d/%d)",
+            slug, open_mid_txt, mstate.open_drift, mid, drift,
+            self.reentry_drift_band, remaining_sec,
+            mstate.reentry_count, self.max_reentries_per_window,
+        )
+        return True
+
     def _update_market_strategy(self, slug: str, poll_data: Dict[str, Any], now: float):
         """Update trading state machine, advance pre-quoting, fills, stop-loss exits, and pair merges."""
         mstate = self.markets[slug]
@@ -3181,6 +3256,18 @@ class LiveTraderEngine:
                         pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
                         mstate.last_action = f"{pct_val}% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
                         log.info("[%s] Entry orders cancelled due to %d%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, pct_val, elapsed_sec, entry_timeout_sec)
+
+        # --- DRIFT-SKIP RE-ENTRY (issue #95) ---
+        # Evaluated after the cancellation block so a window skipped on an earlier
+        # tick can be re-opened on this one, and before `can_place_entry` so the
+        # cleared flags are visible to placement on the same tick.
+        remaining_sec = (
+            max(0.0, mstate.end_ts - now) if mstate.end_ts > 0
+            else max(0.0, win_duration - elapsed_sec)
+        )
+        if self._maybe_reenter_drift_skipped(
+                mstate, slug, mid, remaining_sec, book_two_sided, is_late_start):
+            is_adverse_open = mstate.adverse_open
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         can_place_entry = (
