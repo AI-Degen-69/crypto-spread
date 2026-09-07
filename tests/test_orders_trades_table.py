@@ -394,7 +394,11 @@ def test_filled_edge_cases_and_retained_cancelled():
 
 @requires_node
 def test_filled_column_renders_size_matched_dom():
-    """Verify the Filled column renders backend-supplied filled (CLOB size_matched), not 0 (Issue #90)."""
+    """Verify the Filled column renders backend-supplied filled (CLOB size_matched), not 0 (Issue #90).
+
+    Since issue #91 promotes fully-filled legs to Positions, the Orders-table
+    case that exercises the column is a partially-filled resting leg.
+    """
     import subprocess
 
     response = client.get("/")
@@ -452,7 +456,7 @@ def test_filled_column_renders_size_matched_dom():
     const mockState = {{
       is_running: true,
       open_orders: [
-        {{ order_id: 'ord-fill-1', market: 'BTC 5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 5, status: 'FILLED', time: '14:05:00' }},
+        {{ order_id: 'ord-partial-1', market: 'BTC 5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 3, status: 'OPEN', time: '14:05:00' }},
         {{ order_id: 'ord-open-1', market: 'ETH 5m', side: 'BUY (DOWN)', price: 0.47, size: 5, status: 'OPEN', time: '14:05:01' }}
       ],
       open_positions: [],
@@ -462,8 +466,8 @@ def test_filled_column_renders_size_matched_dom():
     renderCockpitUI(mockState);
 
     const ordHtml = elements['cockpitOrdersBody'].innerHTML;
-    // FILLED leg with backend-supplied filled=5 must render 5, not 0 (issue #90)
-    if (!ordHtml.includes('color:var(--dim)">5</td>')) throw new Error('Filled cell should show 5: ' + ordHtml);
+    // Partially-filled resting leg with backend-supplied filled=3 must render 3, not 0 (issue #90)
+    if (!ordHtml.includes('color:var(--dim)">3</td>')) throw new Error('Filled cell should show 3: ' + ordHtml);
     // OPEN leg without a filled key must still default to 0
     if (!ordHtml.includes('color:var(--dim)">0</td>')) throw new Error('Unfilled leg should show 0: ' + ordHtml);
 
@@ -1330,6 +1334,113 @@ def test_reconcile_cockpit_toasts():
     res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
     assert res.returncode == 0, f"Node reconcileCockpitToasts test failed: {res.stderr}\n{res.stdout}"
     assert "RECONCILE_COCKPIT_TOASTS_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_filled_orders_promoted_to_positions_dom():
+    """Verify FILLED/MATCHED legs leave Open Orders and appear in Positions (Issue #91)."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{}},
+      open_orders: [
+        {{ order_id: 'ord-open-up', market: 'BTC 5m', market_slug: 'btc-up-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'OPEN', time: '14:00:00' }},
+        {{ order_id: 'ord-filled-dn', market: 'BTC 5m', market_slug: 'btc-up-down-5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 5, status: 'FILLED', time: '14:00:01' }},
+        {{ order_id: 'ord-matched-up', market: 'ETH 5m', market_slug: 'eth-up-down-5m', side: 'BUY (UP)', price: 0.47, size: 5, filled: 5, status: 'MATCHED', time: '14:00:02' }},
+        {{ order_id: 'ord-cancel-dn', market: 'ETH 5m', market_slug: 'eth-up-down-5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 0, status: 'CANCELLED', time: '14:00:03' }}
+      ],
+      open_positions: [],
+      trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+    const posHtml = elements['cockpitPositionsBody'].innerHTML;
+
+    // FILLED / MATCHED legs must not render status rows in Open Orders.
+    // (Order ids alone prove nothing: filled legs never get Cancel buttons.)
+    if (ordHtml.includes('FILLED')) {{
+      throw new Error('FILLED status row must not render in Open Orders: ' + ordHtml);
+    }}
+    if (ordHtml.includes('MATCHED')) {{
+      throw new Error('MATCHED status row must not render in Open Orders: ' + ordHtml);
+    }}
+
+    // Resting legs still render, CANCELLED rendering unchanged.
+    if (!ordHtml.includes('data-order-id="ord-open-up"')) {{
+      throw new Error('OPEN leg ord-open-up missing from Open Orders: ' + ordHtml);
+    }}
+    if (!ordHtml.includes('CANCELED')) {{
+      throw new Error('CANCELED rendering changed in Open Orders: ' + ordHtml);
+    }}
+
+    // Promoted legs render as position rows with market label and side.
+    if (!posHtml.includes('BTC 5m')) {{
+      throw new Error('Promoted FILLED leg missing BTC 5m position row: ' + posHtml);
+    }}
+    if (!posHtml.includes('ETH 5m')) {{
+      throw new Error('Promoted MATCHED leg missing ETH 5m position row: ' + posHtml);
+    }}
+    if (!posHtml.includes('>Down<')) {{
+      throw new Error('Promoted BTC DOWN leg missing Down side badge: ' + posHtml);
+    }}
+    if (!posHtml.includes('>Up<')) {{
+      throw new Error('Promoted ETH UP leg missing Up side badge: ' + posHtml);
+    }}
+
+    // Badges: orders counts resting only (OPEN + CANCELLED), positions include promoted.
+    if (elements['otOrdersCount'].textContent !== '2') {{
+      throw new Error('otOrdersCount should be 2 (resting only), got: ' + elements['otOrdersCount'].textContent);
+    }}
+    if (elements['otPositionsCount'].textContent !== '2') {{
+      throw new Error('otPositionsCount should be 2 (promoted filled legs), got: ' + elements['otPositionsCount'].textContent);
+    }}
+
+    console.log('FILLED_TO_POSITIONS_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node filled-to-positions test failed: {res.stderr}\n{res.stdout}"
+    assert "FILLED_TO_POSITIONS_DOM_TESTS_PASSED" in res.stdout
 
 
 

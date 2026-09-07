@@ -4193,14 +4193,19 @@ function renderCockpitUI(st) {
   const ordersCountEl = $('otOrdersCount');
   const legacyOrdersCountEl = $('cockpitOrdersCount');
   const openOrders = st.open_orders || [];
-  if (ordersCountEl) ordersCountEl.textContent = String(openOrders.length);
-  if (legacyOrdersCountEl) legacyOrdersCountEl.textContent = String(openOrders.length);
+  // Issue #91: filled legs are held positions, not resting bids. They leave
+  // the Open Orders tab and are promoted into Positions (see 4b below).
+  const isFilledStatus = (s) => ['FILLED', 'MATCHED'].includes(String(s || '').toUpperCase());
+  const restingOrders = openOrders.filter(o => !isFilledStatus(o.status));
+  const filledLegs = openOrders.filter(o => isFilledStatus(o.status));
+  if (ordersCountEl) ordersCountEl.textContent = String(restingOrders.length);
+  if (legacyOrdersCountEl) legacyOrdersCountEl.textContent = String(restingOrders.length);
 
   if (ordersBodyEl) {
-    if (openOrders.length === 0) {
+    if (restingOrders.length === 0) {
       ordersBodyEl.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:18px">No orders are resting on the book.</td></tr>';
     } else {
-      const groupedOrders = groupOrdersByPair(openOrders);
+      const groupedOrders = groupOrdersByPair(restingOrders);
       let ordHtml = '';
       for (const mktKey of Object.keys(groupedOrders)) {
         const grp = groupedOrders[mktKey];
@@ -4269,7 +4274,25 @@ function renderCockpitUI(st) {
   const posBodyEl = $('cockpitPositionsBody');
   const posCountEl = $('otPositionsCount');
   const legacyPosCountEl = $('cockpitPositionsCount');
-  const openPos = st.open_positions || st.positions || [];
+  // Issue #91: FILLED / MATCHED legs filtered out of Open Orders above are
+  // promoted here as lightweight position entries (held shares at fill price;
+  // market value and PnL stay '--' until the CLOB supplies them).
+  const filledAsPositions = (typeof filledLegs !== 'undefined' ? filledLegs : []).map(o => {
+    const filledSize = o.filled != null ? Number(o.filled) : 0;
+    return {
+      title: o.market || o.label || o.token_id || 'Unknown',
+      market: o.market || o.label || o.token_id || 'Unknown',
+      market_slug: o.market_slug || '',
+      series_slug: o.series_slug || '',
+      outcome: o.side || '',
+      size: (filledSize !== 0 && !isNaN(filledSize)) ? filledSize : (o.size != null ? Number(o.size) : 0),
+      avgPrice: o.price != null ? Number(o.price) : null,
+      curPrice: null,
+      time: o.time || o.created_at || o.timestamp || '-',
+      _fromFilledOrder: true
+    };
+  });
+  const openPos = (st.open_positions || st.positions || []).concat(filledAsPositions);
   if (posCountEl) posCountEl.textContent = String(openPos.length);
   if (legacyPosCountEl) legacyPosCountEl.textContent = String(openPos.length);
 
