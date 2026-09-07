@@ -144,6 +144,9 @@ class BacktestParams:
     # 300s a 5m window can never clear the gate, so only 15m windows re-enter until
     # an operator lowers it; the tests set it explicitly to exercise the rule.
     min_requote_remaining_sec: float = 300.0
+    # How many times one window may be recovered by re-entry. 1 keeps a market
+    # oscillating across the band from thrashing the book for a whole window;
+    # 0 disables re-entry outright. Mirrors LiveTraderEngine.
     max_reentries_per_window: int = 1
 
     def __post_init__(self):
@@ -399,9 +402,17 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 else None
             )
             remaining = max(0.0, duration - elapsed) if duration > 0 else 0.0
-            if (remaining >= params.min_requote_remaining_sec
+            # Measured with `_two_sided_mid`, the same metric the gate above used --
+            # `mid` here is the up leg alone, and undoing a two-sided skip with a
+            # one-sided reading lets a leg-imbalanced book clear the band while the
+            # real drift is still past `exit_thresh`. None means one leg is
+            # one-sided, which is not evidence the skew has closed.
+            reentry_mid = _two_sided_mid(ub, db)
+            if (reentry_mid is not None
+                    and remaining >= params.min_requote_remaining_sec
                     and (entry_timeout_cutoff is None or elapsed < entry_timeout_cutoff)
-                    and abs(mid - 0.50) <= params.reentry_drift_band):
+                    and abs(reentry_mid - 0.50) <= min(params.reentry_drift_band, exit_thr)
+                    and abs(reentry_mid - 0.50) < exit_thr):
                 entry_cancelled = False
                 adverse_skipped = False
                 reentry_count += 1

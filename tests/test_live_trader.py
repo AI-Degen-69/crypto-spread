@@ -1869,6 +1869,97 @@ def test_no_reentry_for_late_start_skipped_window():
     assert m.reentry_count == 0
 
 
+def _force_drift_skip_state(m):
+    """Put a market into the exact state a drift skip leaves behind.
+
+    The natural scenarios below cannot isolate the `late_start_skip` /
+    `is_late_start` guards, because in a genuine late-start or timeout cancel
+    `adverse_open` is never latched -- so `_maybe_reenter_drift_skipped` returns on
+    its first condition and the guard under test is never reached. Forcing the
+    drift-skip state makes that first condition pass, leaving exactly one reason
+    re-entry can still be refused.
+    """
+    m.adverse_open = True
+    m.entry_cancelled_timeout = True
+    m.open_mid = 0.345
+    m.open_drift = 0.155
+    m.open_gate_evaluated = True
+    m.order_id_up = None
+    m.order_id_down = None
+    m.order_status_up = "CANCELLED"
+    m.order_status_down = "CANCELLED"
+
+
+def test_late_start_skip_blocks_reentry_even_when_the_gate_latched():
+    """Isolates the `late_start_skip` guard: every other condition is satisfied."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 40.0)
+    m = engine.markets[slug]
+    assert m.late_start_skip is True
+
+    _force_drift_skip_state(m)
+    m.status = "DRIFT_SKIPPED"
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.reentry_count == 0
+    assert m.late_start_skip is True
+
+
+def test_entry_timeout_blocks_reentry_even_when_the_gate_latched():
+    """Isolates the `is_late_start` guard: every other condition is satisfied."""
+    engine = _reentry_engine()
+    engine.entry_timeout_pct = 0.10          # 30s cutoff on a 300s window
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now)
+    m = engine.markets[slug]
+
+    _force_drift_skip_state(m)
+    m.status = "DRIFT_SKIPPED"
+    # 60s in: past the 30s entry timeout, but 239s still remain and the mid is
+    # squarely inside the band, so only `is_late_start` can refuse re-entry.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.reentry_count == 0
+
+
+def test_no_reentry_on_a_one_sided_book():
+    """A one-sided book yields a synthetic mid that is not evidence of a revert."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug,
+        _drift_poll_data(now, {"best_bid": 0.49, "best_ask": None}, _REVERTED_DN),
+        now + 60.0)
+
+    assert m.reentry_count == 0
+    assert m.status == "DRIFT_SKIPPED"
+
+
+def test_no_reentry_once_a_leg_has_filled():
+    """A window with an open leg is past entry; re-entry must not re-quote it."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    m.filled_up = True
+    m.fill_price_up = 0.48
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.reentry_count == 0
+
+
 def test_no_reentry_when_too_little_window_remains():
     """A fill with under min_requote_remaining_sec left has no time to pair."""
     engine = _reentry_engine()
@@ -1926,6 +2017,40 @@ def test_reentry_blocked_by_default_requote_gate_on_5m():
 
     assert m.reentry_count == 0
     assert m.status == "DRIFT_SKIPPED"
+
+
+def test_reentry_band_can_never_exceed_the_gate_it_undoes():
+    """A band wider than `exit_thresh` must not re-enter at the gate's own drift."""
+    engine = _reentry_engine()
+    engine.reentry_drift_band = 0.40          # far looser than exit_thresh 0.05
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    # Mid 0.44: inside the configured 0.40 band, but drift 0.06 is past exit_thresh.
+    engine._update_market_strategy(
+        slug,
+        _drift_poll_data(now, {"best_bid": 0.43, "best_ask": 0.45},
+                         {"best_bid": 0.55, "best_ask": 0.57}),
+        now + 60.0)
+
+    assert m.reentry_count == 0
+    assert m.status == "DRIFT_SKIPPED"
+
+
+def test_update_config_clamps_reentry_band_to_exit_thresh():
+    """The configured band is reported at the value that is actually enforced."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.is_running = False
+    engine.mode = "paper"
+    engine.exit_thresh = 0.05
+
+    engine.update_config(reentry_drift_band=0.40)
+    assert engine.reentry_drift_band == 0.05
+
+    # Lowering exit_thresh tightens an already-set band with it.
+    engine.update_config(exit_thresh=0.01)
+    assert engine.reentry_drift_band == 0.01
 
 
 def test_reentry_count_clears_on_rollover_and_reset():

@@ -67,7 +67,7 @@ windows are entered.
 | Name | Default | Meaning |
 |---|---|---|
 | `reentry_drift_band` | `0.015` | max `abs(mid - 0.50)` allowed for re-entry |
-| `min_requote_remaining_sec` | `60.0` | min window seconds left; the shared knob #89 adopts |
+| `min_requote_remaining_sec` | `300.0` | min window seconds left; the shared knob #89 adopts |
 | `max_reentries_per_window` | `1` | per-window re-entry cap |
 
 `reentry_drift_band` is exposed in the params payload (`live_trader.py:1749-1758`)
@@ -79,11 +79,18 @@ and settable through `update_config()` plus the `/api/live/config` payload.
   itself would change exit behavior and existing backtest expectations, which is
   out of scope; a dedicated knob defaulting to `0.015` in both engines meets the
   live/backtest parity requirement without touching exit semantics.
-- **`min_requote_remaining_sec` defaults to `60.0`, not ~300.** A 5m window is 300s
-  long, so a 300s minimum makes re-entry structurally impossible on every 5m
-  market — including two of the four reverting markets in the issue's evidence
-  table. 60s is the smallest window in which two legs can realistically pair; the
-  knob is exposed so a 15m-only run can raise it.
+- **`min_requote_remaining_sec` is issue #89's knob at its shipped `300.0`
+  default, not a new 60s one.** #89 landed this attribute for post-merge
+  re-quoting while this issue was in progress; the acceptance criteria call for
+  one shared knob, so re-entry reads #89's and does not redefine it. The
+  consequence is deliberate and tested
+  (`test_reentry_blocked_by_default_requote_gate_on_5m`): a 5m window is 300s
+  long, so at the default **no 5m market can ever re-enter** — only 15m windows,
+  and only in their first half. Two of the four reverting markets in the issue's
+  evidence table are 5m, so an operator who wants those recovered must lower the
+  knob (60s is the smallest value in which two legs can realistically pair).
+  Raising it back is the one-line `update_config(min_requote_remaining_sec=...)`
+  call, which also moves #89's post-merge re-quoting.
 - **The static `0.50 - offset` anchor stays.** #89 has not landed. The tight
   default band is the mitigation, and the limitation is documented in code.
 

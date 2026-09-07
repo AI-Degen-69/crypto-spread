@@ -1967,6 +1967,11 @@ class LiveTraderEngine:
                     # Clamped to the same 0..0.50 range as `exit_thresh`; 0 disables
                     # re-entry entirely by making the band unreachable for any real mid.
                     self.reentry_drift_band = max(0.0, min(0.50, float(reentry_drift_band)))
+                # Re-entry is a narrower test than the adverse-open gate, never a
+                # looser one: a band at or above `exit_thresh` would let a window
+                # re-enter at the very drift the gate exists to reject. Applied
+                # unconditionally so lowering `exit_thresh` tightens the band with it.
+                self.reentry_drift_band = min(self.reentry_drift_band, self.exit_thresh)
 
                 # Update per-market resting prices
                 for m in self.markets.values():
@@ -2956,7 +2961,15 @@ class LiveTraderEngine:
         if remaining_sec < self.min_requote_remaining_sec:
             return False
         drift = abs(mid - 0.50)
-        if drift > self.reentry_drift_band:
+        # Re-entry may never be looser than the gate it undoes. A band at or above
+        # `exit_thresh` would re-quote into exactly the skew the gate rejected, so
+        # the effective band is capped here as well as clamped in `update_config()`
+        # -- the attribute is also writable directly.
+        band = min(self.reentry_drift_band, self.exit_thresh)
+        # `>= exit_thresh` is what the gate rejects, so re-entry must stay strictly
+        # inside it -- otherwise a band configured at exactly `exit_thresh` would
+        # re-enter at the very drift that skipped the window.
+        if drift > band or drift >= self.exit_thresh:
             return False
 
         open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
