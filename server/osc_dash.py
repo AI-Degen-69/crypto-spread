@@ -2310,15 +2310,21 @@ function groupPositionsByPair(positions, markets) {
     g.legs.sort((a, b) => (a.isUp === b.isUp ? 0 : a.isUp ? -1 : 1));
     g.rowspan = g.legs.length;
     
-    const upSize = g.legs.filter(l => l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
-    const downSize = g.legs.filter(l => !l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
-    const upLeg = g.legs.find(l => l.isUp);
-    const downLeg = g.legs.find(l => !l.isUp);
-    
+    // Issue #91: synthetic legs promoted from filled orders have no CLOB
+    // valuation (no curPrice). Exclude them from pair valuation so the group
+    // never derives a Market Value or $0.00 unrealized from the fill price —
+    // those cells stay '--' until real position data arrives. Row rendering
+    // (side / size / base cost) still uses every leg.
+    const valLegs = g.legs.filter(l => !l._fromFilledOrder);
+    const upSize = valLegs.filter(l => l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
+    const downSize = valLegs.filter(l => !l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
+    const upLeg = valLegs.find(l => l.isUp);
+    const downLeg = valLegs.find(l => !l.isUp);
+
     let totalCost = 0;
     let totalRealized = 0;
     let hasRealized = false;
-    for (const leg of g.legs) {
+    for (const leg of valLegs) {
       if (leg.baseCost != null) totalCost += leg.sizeNum * leg.baseCost;
       const cp = leg.cashPnl != null ? Number(leg.cashPnl) : null;
       if (cp != null && !isNaN(cp)) {
@@ -4193,14 +4199,19 @@ function renderCockpitUI(st) {
   const ordersCountEl = $('otOrdersCount');
   const legacyOrdersCountEl = $('cockpitOrdersCount');
   const openOrders = st.open_orders || [];
-  if (ordersCountEl) ordersCountEl.textContent = String(openOrders.length);
-  if (legacyOrdersCountEl) legacyOrdersCountEl.textContent = String(openOrders.length);
+  // Issue #91: filled legs are held positions, not resting bids. They leave
+  // the Open Orders tab and are promoted into Positions (see 4b below).
+  const isFilledStatus = (s) => ['FILLED', 'MATCHED'].includes(String(s || '').toUpperCase());
+  const restingOrders = openOrders.filter(o => !isFilledStatus(o.status));
+  const filledLegs = openOrders.filter(o => isFilledStatus(o.status));
+  if (ordersCountEl) ordersCountEl.textContent = String(restingOrders.length);
+  if (legacyOrdersCountEl) legacyOrdersCountEl.textContent = String(restingOrders.length);
 
   if (ordersBodyEl) {
-    if (openOrders.length === 0) {
+    if (restingOrders.length === 0) {
       ordersBodyEl.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:18px">No orders are resting on the book.</td></tr>';
     } else {
-      const groupedOrders = groupOrdersByPair(openOrders);
+      const groupedOrders = groupOrdersByPair(restingOrders);
       let ordHtml = '';
       for (const mktKey of Object.keys(groupedOrders)) {
         const grp = groupedOrders[mktKey];
@@ -4231,7 +4242,7 @@ function renderCockpitUI(st) {
           const oId = leg.order_id || '-';
           const statusRaw = String(leg.status || 'OPEN').toUpperCase();
           const isCancelled = ['CANCELLED', 'CANCELED'].includes(statusRaw);
-          const isFilled = ['FILLED', 'MATCHED'].includes(statusRaw);
+          const isFilled = isFilledStatus(leg.status);
           const canCancel = oId && oId !== '-' && !isCancelled && !isFilled;
           const isUp = leg.isUp;
           const sideBadgeCls = isCancelled ? 'ot-tag-cancelled' : (isUp ? 'ot-tag-up' : 'ot-tag-down');
@@ -4269,7 +4280,27 @@ function renderCockpitUI(st) {
   const posBodyEl = $('cockpitPositionsBody');
   const posCountEl = $('otPositionsCount');
   const legacyPosCountEl = $('cockpitPositionsCount');
-  const openPos = st.open_positions || st.positions || [];
+  // Issue #91: FILLED / MATCHED legs filtered out of Open Orders above are
+  // promoted here as lightweight position entries (held shares at fill price;
+  // market value and PnL stay '--' until the CLOB supplies them).
+  const toFinite = (v) => { const n = Number(v); return (v != null && isFinite(n)) ? n : null; };
+  const filledAsPositions = filledLegs.map(o => {
+    const filledSize = toFinite(o.filled);
+    const sizeVal = toFinite(o.size);
+    return {
+      title: o.market || o.label || o.token_id || 'Unknown',
+      market: o.market || o.label || o.token_id || 'Unknown',
+      market_slug: o.market_slug || '',
+      series_slug: o.series_slug || '',
+      outcome: o.side || '',
+      size: (filledSize != null && filledSize !== 0) ? filledSize : (sizeVal != null ? sizeVal : 0),
+      avgPrice: toFinite(o.price),
+      curPrice: null,
+      time: o.time || o.created_at || o.timestamp || '-',
+      _fromFilledOrder: true
+    };
+  });
+  const openPos = (st.open_positions || st.positions || []).concat(filledAsPositions);
   if (posCountEl) posCountEl.textContent = String(openPos.length);
   if (legacyPosCountEl) legacyPosCountEl.textContent = String(openPos.length);
 
