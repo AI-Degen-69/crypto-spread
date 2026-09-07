@@ -2057,6 +2057,55 @@ def test_min_requote_remaining_sec_config():
     assert engine.min_requote_remaining_sec == 120.0
 
 
+def test_requote_boundary_time_remaining_equals_gate():
+    """remaining == gate still re-quotes (gate uses <); one second less stays terminal."""
+    # Late-start guard disabled: elapsed 599s/900s would otherwise skip entry (#96).
+    engine = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now, condition_id="0xboundary15m", start_offset=599.0)
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    m = engine.markets[slug]
+    assert m.pairs_count == 1
+    assert m.requote_round == 1  # remaining was exactly 300.0 >= gate
+
+    engine2 = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    engine2.start()
+    now2 = time.time()
+    market2 = _fifteen_minute_market(now2, condition_id="0xboundary15m_b", start_offset=600.0)
+    engine2._update_market_strategy(slug, {
+        "market": market2,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now2)
+    engine2._update_market_strategy(slug, {
+        "market": market2,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now2 + 1)
+    m2 = engine2.markets[slug]
+    assert m2.pairs_count == 1
+    assert m2.requote_round == 0  # remaining was 299.0 < gate
+    assert m2.status == "PAIR_MERGED"
+
+
+def test_negative_requote_gate_clamped_to_zero():
+    """A negative gate clamps to 0.0 in __init__, matching update_config."""
+    engine = _fifteen_minute_engine(min_requote_remaining_sec=-30.0)
+    assert engine.min_requote_remaining_sec == 0.0
+
+
 def test_min_requote_remaining_sec_zero_disables():
     """A zero gate disables re-quoting entirely, even on 15m windows."""
     engine = _fifteen_minute_engine(min_requote_remaining_sec=0.0)

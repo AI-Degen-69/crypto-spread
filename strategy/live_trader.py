@@ -561,7 +561,7 @@ class LiveTraderEngine:
         # Re-quote time gate (issue #89): a fresh round after a pair merge only
         # opens when at least this much window time remains. 0 disables it.
         self.min_requote_remaining_sec: float = (
-            float(min_requote_remaining_sec) if min_requote_remaining_sec is not None
+            max(0.0, float(min_requote_remaining_sec)) if min_requote_remaining_sec is not None
             else DEFAULT_MIN_REQUOTE_REMAINING_SEC
         )
         
@@ -1940,6 +1940,11 @@ class LiveTraderEngine:
                     m.resting_up = round(0.50 - self.offset, 3)
                     m.resting_down = round(0.50 - self.offset, 3)
                     m.order_shares = self.shares
+                    # Issue #89: a stopped config change drops any latched
+                    # re-quote round, so the next tick re-anchors from the
+                    # static base instead of a stale dynamic price.
+                    m.requote_round = 0
+                    m.last_requote_telemetry = None
 
         # Perform remote account fetch outside _engine_lock so network I/O never blocks stop()
         if fetch_live_balance:
