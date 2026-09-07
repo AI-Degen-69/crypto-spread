@@ -8,5 +8,9 @@
 - [x] T6 GREEN: `adverse_skipped` split + backtest re-entry rule — landed (backtest/engine.py:141-168, :314-315, :378, :381-401)
 - [x] T7 `python -m pytest -q` fully green, docstring gate passes — 334 passed / 18 files
 
-Verified Sep 7, 2026: four targeted gates = 189 passed; full collection = 334.
+- [x] T8 merge origin/master (#89) and share its `min_requote_remaining_sec` knob (305bceb, 9542c3b)
+
+Verified Sep 7, 2026 on a clean detached worktree at 9542c3b: `python -m pytest -q`
+= 346 passed. After the #89 merge the re-entry time gate defaults to 300s, so only
+15m windows re-enter until an operator lowers it; the tests set it explicitly.
 CONSTRAINTS.md §5 and SPEC.md Status carry the per-behavior breakdown.
