@@ -1,8 +1,9 @@
-# Todo — Issue #93
+# tasks/todo.md — Issue #95
 
-- [x] T1: Failing test first (entry+advance+stop+exit+cancelled → `reset_pnl()` → orders empty) — red confirmed
-- [x] T2: `reset_pnl` cancel-and-clear core + `_orders_cache_ts=0.0` + FILLED-flag fix
-- [x] T3: Live refuse-while-hot + cancel-when-stopped (mocked CLOB, paper = no CLOB)
-- [x] T4: `POST /api/live/control` refusal → 409 + Stop-first message
-- [x] T5: Existing `reset_pnl` tests untouched + full `python -m pytest -q` green (301 passed)
-- [ ] Ship: branch, commit, PR with CodeRabbit standards
+- [ ] T1 live state fields + three knobs + rollover/reset clearing
+- [ ] T2 RED: 8 live re-entry tests in tests/test_live_trader.py
+- [ ] T3 GREEN: `_maybe_reenter_drift_skipped()` wired before `can_place_entry`
+- [ ] T4 params payload + `update_config()` + `ConfigPayload` plumbing
+- [ ] T5 RED: 4 backtest parity tests in tests/test_entry_timeout.py
+- [ ] T6 GREEN: `adverse_skipped` split + backtest re-entry rule
+- [ ] T7 `python -m pytest -q` fully green, docstring gate passes

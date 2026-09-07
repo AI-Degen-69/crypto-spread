@@ -401,6 +401,15 @@ class MarketLiveState:
     first_tick_elapsed_sec: Optional[float] = None
     late_start_skip: bool = False
 
+    # Drift-skip re-entry (issue #95). A window skipped by the adverse-open gate may
+    # be re-entered later in the same window once the live mid has reverted to within
+    # `reentry_drift_band` of 0.50. `reentry_count` caps that per window; `reentry_mid`
+    # and `reentry_drift` record the book the re-entry was taken on, leaving the
+    # original `open_mid` / `open_drift` snapshot intact for telemetry.
+    reentry_count: int = 0
+    reentry_mid: Optional[float] = None
+    reentry_drift: Optional[float] = None
+
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
     next_market_slug: str = ""
@@ -547,6 +556,19 @@ class LiveTraderEngine:
             float(max_start_elapsed_pct) if max_start_elapsed_pct is not None
             else DEFAULT_MAX_START_ELAPSED_PCT
         )
+        # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
+        # re-entered once the live mid comes back within `reentry_drift_band` of 0.50
+        # and at least `min_requote_remaining_sec` of the window is left to pair two
+        # legs. The band is deliberately tighter than `exit_thresh`: resting prices are
+        # still anchored to a static `0.50 - offset` (issue #89 tracks mid-anchored
+        # quoting), so a wide band would re-quote 0.48/0.48 into a market trading well
+        # away from 0.50 and fill only the adverse leg. `min_requote_remaining_sec` is
+        # the shared "is there time to pair?" knob issue #89 adopts for post-merge
+        # re-quoting; it is 60s rather than a full 5m window so 5m markets can re-enter
+        # at all. Defaults are mirrored byte-for-byte in `BacktestParams`.
+        self.reentry_drift_band: float = 0.015
+        self.min_requote_remaining_sec: float = 60.0
+        self.max_reentries_per_window: int = 1
         
         # State tracking
         self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
@@ -2534,6 +2556,9 @@ class LiveTraderEngine:
                 m.first_seen_start_ts = None
                 m.first_tick_elapsed_sec = None
                 m.late_start_skip = False
+                m.reentry_count = 0
+                m.reentry_mid = None
+                m.reentry_drift = None
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
             cleared_count = 0
@@ -3566,6 +3591,9 @@ class LiveTraderEngine:
             mstate.first_seen_start_ts = None
             mstate.first_tick_elapsed_sec = None
             mstate.late_start_skip = False
+            mstate.reentry_count = 0
+            mstate.reentry_mid = None
+            mstate.reentry_drift = None
             mstate.exit_side = None
             mstate.spot_open_price = None
             mstate.spot_drift = 0.0

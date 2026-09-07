@@ -1,36 +1,55 @@
-# CONSTRAINTS.md — Issue #93 Quality & Architectural Constraints
+# CONSTRAINTS.md — Issue #95 Quality & Architectural Constraints
 
 ## 1. Testing & Zero Regressions
-- All existing tests must remain 100% passing: `python -m pytest -q` (293 tests at
-  time of filing, plus the new one).
-- New tests (TDD, red→green) must cover:
-  - Populated market (entry + advance + stop + exit + `cancelled_orders`) →
-    `reset_pnl()` → `get_open_orders_list() == []` (stopped/paper path).
-  - Every listed handle cleared + `_orders_cache_ts == 0.0` + no
-    `filled_*=False`/`order_status_*=FILLED` contradiction.
-  - Live + running + outstanding → refusal dict, no state cleared, endpoint
-    carries Stop-first message.
-  - Live + stopped → mocked CLOB cancel asserted before handles cleared.
-  - Paper → no CLOB interaction (`get_clob_client` never called / returns None).
-- Targeted gates per task: `python -m pytest tests/test_live_trader.py -q`,
+- All existing tests stay green: `python -m pytest -q` (317 tests today, plus the
+  new ones). Zero modifications to existing assertions.
+- The #92 gate tests (`tests/test_live_trader.py:1653-1733`) and the #92/#96 parity
+  tests (`tests/test_entry_timeout.py:419-455` and below) must pass unchanged —
+  the gate itself is not being weakened.
+- New tests (red -> green) required, one per behavior:
+  1. drift-skipped window whose mid reverts inside the band re-enters and rests orders
+  2. drift-skipped window whose mid stays outside the band does not re-enter (BTC 15m case)
+  3. entry-timeout-cancelled window (`is_late_start`) never re-enters, even at mid 0.50
+  4. #96 late-start-skipped window never re-enters
+  5. re-entry blocked when remaining window time < `min_requote_remaining_sec`
+  6. per-window re-entry cap enforced (second revert does not re-enter)
+  7. `open_mid` / `open_drift` still readable after re-entry; `last_action` names the drift
+  8. `reentry_count` cleared by `_handle_window_rollover()` and by `reset_pnl()`
+  9. backtest: adverse-skipped window re-enters; timeout-cancelled window does not
+- Targeted gates: `python -m pytest tests/test_live_trader.py -q`,
+  `python -m pytest tests/test_entry_timeout.py -q`,
+  `python -m pytest tests/test_backtest_engine.py -q`,
   `python -m pytest tests/test_osc_dash_integration.py -q`.
-- Existing coverage to extend, not replace: `test_live_trader_reset_pnl`
-  (`test_live_trader.py:120-130`), `test_reset_pnl_clears_open_positions`
-  (`:1017-1028`), `reset_pnl` endpoint tests (`test_osc_dash_integration.py:650-675`).
 
 ## 2. Anti-Cheating & Integrity
-- Strictly no disabling, skipping, or weakening existing tests/assertions.
-- No silent venue-side cancel in live-running state — refusal path only.
-- No dropping order ids without a cancel attempt on the live-stopped path; cancel
-  errors must surface, never be swallowed into a fake success.
-- No changes to PnL math, fill detection, rollover, or `stop()`/`cancel_all_orders()`
-  semantics; reset reuses them, does not rewrite them.
+- No disabling, skipping, weakening or deleting existing tests or assertions.
+- Re-entry is conditioned on `mstate.adverse_open`, never on
+  `entry_cancelled_timeout` alone. `is_late_start` and `late_start_skip` are never
+  cleared, bypassed or removed from `can_place_entry`.
+- The adverse-open gate threshold (`exit_thresh`) is not lowered, and
+  `open_gate_evaluated` is not used to re-run the gate against a friendlier mid.
+- No widening of the band to make a test pass; tests adapt to the documented
+  default, not the other way round.
 
-## 3. Performance & Integration Guardrails
-- No new dependencies in `requirements.txt` (stdlib + existing CLOB client only).
-- `reset_pnl()` stays synchronous and fast: O(markets), one venue cancel burst max,
-  no per-tick work; 5s orders cache path (`get_state():1647-1650`) untouched except
-  invalidation.
-- Contract change is additive/narrow: `reset_pnl()` return dict + refusal HTTP
-  status on one branch; no other endpoint shapes change.
-- Threading: all local clears under `self._engine_lock` (match `stop()`/`cancel_all_orders()`).
+## 3. Parameters & Parity
+- `reentry_drift_band`, `min_requote_remaining_sec` and `max_reentries_per_window`
+  carry byte-identical defaults in `LiveTraderEngine.__init__` and `BacktestParams`
+  (`0.015`, `60.0`, `1`). A change to one without the other is a defect.
+- `exit_reversal`, `exit_thresh`, `entry_timeout_pct`, `max_start_elapsed_pct` and
+  the `0.50 - offset` resting anchor are untouched by this issue.
+- `BacktestParams.__post_init__` validates the new fields in the existing style
+  (finite, `0.0 <= reentry_drift_band <= 0.5`, `min_requote_remaining_sec >= 0`,
+  `max_reentries_per_window >= 0`).
+- `update_config()` treats `reentry_drift_band` like the other scalar knobs: it
+  participates in the "cannot change parameters while running" guard.
+
+## 4. Performance & Integration Guardrails
+- No new dependencies in `requirements.txt`.
+- The re-entry check is O(1) per market per tick, no network calls, no extra CLOB
+  round-trips beyond the order placement that already follows `can_place_entry`.
+- All `mstate` mutations on the re-entry path happen under `self._engine_lock`,
+  matching the surrounding cancellation and rollover blocks.
+- Contract change is additive only: three new params-payload/config fields and new
+  `MarketLiveState` fields with defaults. No existing API shape changes.
+- `reentry_count` / `reentry_mid` / `reentry_drift` reset on window rollover and on
+  `reset_pnl()`, alongside the other per-window state.
