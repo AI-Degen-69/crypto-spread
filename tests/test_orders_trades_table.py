@@ -362,6 +362,36 @@ def test_cockpit_dom_rendering_with_state():
     assert "ALL_DOM_RENDER_TESTS_PASSED" in res.stdout
 
 
+def test_filled_edge_cases_and_retained_cancelled():
+    """Verify garbage size_matched coerces to 0.0 and old retained rows gain filled (Issue #90)."""
+    import sys
+    from unittest.mock import MagicMock, patch
+    from strategy.live_trader import LiveTraderEngine, MarketLiveState
+
+    engine = LiveTraderEngine()
+    m = MarketLiveState(slug="btc-5m", label="BTC 5m", color="#f7931a")
+    engine.markets["btc-5m"] = m
+    # Old retained row written before the filled key existed (no setdefault yet applied)
+    m.cancelled_orders.append({"order_id": "old_cancel_1", "market": "BTC 5m", "status": "CANCELLED"})
+
+    mock_client = MagicMock()
+    mock_client.get_orders.return_value = [
+        {"id": f"edge_{i}", "asset_id": "token_up_123", "side": "BUY",
+         "price": 0.48, "original_size": 5.0, "size_matched": sm,
+         "status": "OPEN", "created_at": "2026-09-04T14:15:30Z"}
+        for i, sm in enumerate([None, "abc", "", "nan", "inf", 10 ** 1000])
+    ]
+    engine.get_clob_client = MagicMock(return_value=mock_client)
+
+    dummy_clob_types = MagicMock()
+    with patch.dict(sys.modules, {"py_clob_client_v2.clob_types": dummy_clob_types, "py_clob_client.clob_types": dummy_clob_types}):
+        orders = engine.get_open_orders_list()
+    by_id = {o["order_id"]: o for o in orders}
+    for i in range(6):
+        assert by_id[f"edge_{i}"]["filled"] == 0.0, f"edge_{i} should coerce to 0.0"
+    assert by_id["old_cancel_1"]["filled"] == 0.0
+
+
 @requires_node
 def test_filled_column_renders_size_matched_dom():
     """Verify the Filled column renders backend-supplied filled (CLOB size_matched), not 0 (Issue #90)."""

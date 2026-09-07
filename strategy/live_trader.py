@@ -1330,10 +1330,13 @@ class LiveTraderEngine:
                             market_label = raw_asset[:10] + "..." if len(raw_asset) > 14 else (raw_asset or "Unknown")
 
                         # Issue #90: map CLOB size_matched to the filled key the
-                        # dashboard reads (o.filled). Missing/None/unparseable -> 0.0.
+                        # dashboard reads (o.filled). Missing/None/unparseable/
+                        # non-finite -> 0.0.
                         try:
                             filled_val = float(o.get("size_matched", 0.0) or 0.0)
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
+                            filled_val = 0.0
+                        if not math.isfinite(filled_val):
                             filled_val = 0.0
 
                         orders.append({
