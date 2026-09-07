@@ -473,6 +473,28 @@ class TradeEvent:
     market_slug: str = ""
 
 
+# Display rank for Open Orders rows (issue #97): current-window live orders
+# first, resting stop-loss second, next-window pre-quotes third, cancelled
+# rows last regardless of source.
+def _open_order_sort_key(order: Dict[str, Any], series_index: Dict[str, int]) -> tuple:
+    """Sort key making get_open_orders_list output deterministic for every consumer."""
+    status = str(order.get("status") or "").upper()
+    source = str(order.get("source") or "").upper()
+    if status in ("CANCELLED", "CANCELED"):
+        rank = 3
+    elif source == "ENGINE_ADVANCE" or status == "ADVANCE_PRE_QUOTE":
+        rank = 2
+    elif source == "ENGINE_STOP":
+        rank = 1
+    else:
+        # Current-window live rows: ENGINE_ACTIVE, CLOB_API, PAPER_SIMULATION.
+        rank = 0
+    series_idx = series_index.get(str(order.get("series_slug") or ""), len(series_index))
+    side = str(order.get("side") or "").upper()
+    leg = 0 if "UP" in side else (1 if "DOWN" in side else 2)
+    return (rank, series_idx, leg, str(order.get("order_id") or ""))
+
+
 class LiveTraderEngine:
     """Singleton background engine for live quoting and paper/live trading."""
 
@@ -1500,6 +1522,12 @@ class LiveTraderEngine:
                     if c_id:
                         existing_ids.add(c_id)
 
+        # Issue #97: deterministic display rank (live > stop > pre-quote >
+        # cancelled, then series order, Up before Down) so every consumer and
+        # the dashboard render see the same row order. The render groups rows
+        # in first-seen order, which now matches this ranking.
+        series_index = {slug: i for i, (slug, _dur, _label) in enumerate(SERIES)}
+        orders.sort(key=lambda o: _open_order_sort_key(o, series_index))
         return orders
 
 
