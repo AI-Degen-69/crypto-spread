@@ -67,6 +67,7 @@ windows are entered.
 | Name | Default | Meaning |
 |---|---|---|
 | `reentry_drift_band` | `0.015` | max `abs(mid - 0.50)` allowed for re-entry |
+| `reentry_min_remaining_pct` | `0.30` | re-entry needs this fraction of the window left; the effective gate is the tighter of it and the knob below (90s on 5m, 270s on 15m) |
 | `min_requote_remaining_sec` | `300.0` | min window seconds left; the shared knob #89 adopts |
 | `max_reentries_per_window` | `1` | per-window re-entry cap |
 
@@ -91,6 +92,12 @@ and settable through `update_config()` plus the `/api/live/config` payload.
   knob (60s is the smallest value in which two legs can realistically pair).
   Raising it back is the one-line `update_config(min_requote_remaining_sec=...)`
   call, which also moves #89's post-merge re-quoting.
+- **Superseded: the gate now scales with the window.** An absolute floor cannot
+  mean the same thing on a 5m and a 15m market, and at 300s it blocked exactly
+  the 5m markets the evidence table shows reverting. Re-entry requires
+  `min(min_requote_remaining_sec, reentry_min_remaining_pct * window)` -- 90s on
+  5m, 270s on 15m. The shared knob stays the ceiling, so this can only tighten
+  #89's value and never loosens the post-merge re-quoting it also governs.
 - **The static `0.50 - offset` anchor stays.** #89 has not landed. The tight
   default band is the mitigation, and the limitation is documented in code.
 

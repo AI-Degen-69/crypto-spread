@@ -588,6 +588,14 @@ class LiveTraderEngine:
         # only the adverse leg. Defaults are mirrored in `BacktestParams`.
         self.reentry_drift_band: float = 0.015
         self.max_reentries_per_window: int = 1
+        # Re-entry time gate, as a fraction of the window (issue #95). The shared
+        # `min_requote_remaining_sec` is an absolute 300s, which is a whole 5m
+        # window -- an absolute floor cannot mean the same thing on a 5m and a 15m
+        # market, and at 300s it made re-entry impossible on exactly the 5m markets
+        # the issue's evidence table shows reverting. The effective gate is the
+        # tighter of the two, so this can only ever add restriction to #89's knob
+        # and never loosens the post-merge re-quoting that knob also governs.
+        self.reentry_min_remaining_pct: float = 0.30
         
         # State tracking
         self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
@@ -1774,6 +1782,7 @@ class LiveTraderEngine:
                 "max_start_elapsed_pct": self.max_start_elapsed_pct,
                 "min_requote_remaining_sec": self.min_requote_remaining_sec,
                 "reentry_drift_band": self.reentry_drift_band,
+                "reentry_min_remaining_pct": self.reentry_min_remaining_pct,
                 "max_reentries_per_window": self.max_reentries_per_window,
             },
             "markets": mkts_dict,
@@ -1811,7 +1820,8 @@ class LiveTraderEngine:
                       durations: Optional[Iterable[int]] = None,
                       entry_timeout_pct: Optional[float] = None,
                       min_requote_remaining_sec: Optional[float] = None,
-                      reentry_drift_band: Optional[float] = None) -> Dict[str, Any]:
+                      reentry_drift_band: Optional[float] = None,
+                      reentry_min_remaining_pct: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1860,6 +1870,8 @@ class LiveTraderEngine:
                 if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
                     param_changed = True
                 if reentry_drift_band is not None and abs(float(reentry_drift_band) - self.reentry_drift_band) > 1e-6:
+                    param_changed = True
+                if reentry_min_remaining_pct is not None and abs(float(reentry_min_remaining_pct) - self.reentry_min_remaining_pct) > 1e-6:
                     param_changed = True
 
                 if param_changed:
@@ -1967,6 +1979,10 @@ class LiveTraderEngine:
                     # Clamped to the same 0..0.50 range as `exit_thresh`; 0 disables
                     # re-entry entirely by making the band unreachable for any real mid.
                     self.reentry_drift_band = max(0.0, min(0.50, float(reentry_drift_band)))
+                if reentry_min_remaining_pct is not None:
+                    # 0 or >= 1.0 falls back to the absolute knob alone: a gate of a
+                    # whole window can never be satisfied.
+                    self.reentry_min_remaining_pct = max(0.0, min(1.0, float(reentry_min_remaining_pct)))
                 # Re-entry is a narrower test than the adverse-open gate, never a
                 # looser one: a band at or above `exit_thresh` would let a window
                 # re-enter at the very drift the gate exists to reject. Applied
@@ -2920,12 +2936,25 @@ class LiveTraderEngine:
             log.debug("Failed polling market %s: %s", slug, e)
             return None
 
+    def _reentry_min_remaining_sec(self, win_duration: float) -> float:
+        """Seconds of window that must remain for a drift-skipped window to re-enter.
+
+        The tighter of issue #89's shared `min_requote_remaining_sec` and
+        `reentry_min_remaining_pct` of this window's own duration: 90s on a 5m
+        window, 270s on a 15m one, at stock settings.
+        """
+        gate = self.min_requote_remaining_sec
+        if win_duration > 0 and 0.0 < self.reentry_min_remaining_pct <= 1.0:
+            gate = min(gate, self.reentry_min_remaining_pct * win_duration)
+        return gate
+
     def _maybe_reenter_drift_skipped(
         self,
         mstate: MarketLiveState,
         slug: str,
         mid: float,
         remaining_sec: float,
+        win_duration: float,
         book_two_sided: bool,
         is_late_start: bool,
     ) -> bool:
@@ -2936,7 +2965,7 @@ class LiveTraderEngine:
         the market out for the whole window even when the skew closed minutes later.
         This re-opens entry for the remainder of the window when the live mid has
         come back within `reentry_drift_band` of 0.50 and at least
-        `min_requote_remaining_sec` is left to fill and pair both legs.
+        `_reentry_min_remaining_sec()` is left to fill and pair both legs.
 
         The condition is `mstate.adverse_open`, never `entry_cancelled_timeout`
         alone: that latch is shared with the entry timeout (`is_late_start`) and
@@ -2958,7 +2987,8 @@ class LiveTraderEngine:
             return False
         if mstate.reentry_count >= self.max_reentries_per_window:
             return False
-        if remaining_sec < self.min_requote_remaining_sec:
+        min_remaining_sec = self._reentry_min_remaining_sec(win_duration)
+        if remaining_sec < min_remaining_sec:
             return False
         drift = abs(mid - 0.50)
         # Re-entry may never be looser than the gate it undoes. A band at or above
@@ -3327,7 +3357,8 @@ class LiveTraderEngine:
             else max(0.0, win_duration - elapsed_sec)
         )
         if self._maybe_reenter_drift_skipped(
-                mstate, slug, mid, remaining_sec, book_two_sided, is_late_start):
+                mstate, slug, mid, remaining_sec, win_duration,
+                book_two_sided, is_late_start):
             is_adverse_open = mstate.adverse_open
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---

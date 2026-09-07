@@ -1749,16 +1749,13 @@ _PARTIAL_DN = {"best_bid": 0.54, "best_ask": 0.56}
 
 
 def _reentry_engine() -> LiveTraderEngine:
-    """Drift engine with a re-entry time gate a 5m window can actually clear.
+    """Drift engine at stock settings: re-entry works on 5m out of the box.
 
-    `min_requote_remaining_sec` is shared with issue #89's post-merge re-quoting and
-    defaults to 300s, which is a whole 5m window -- so at the default no 5m market
-    can ever re-enter. These tests lower it to 60s to exercise the re-entry rule
-    itself; `test_reentry_blocked_by_default_requote_gate_on_5m` covers the default.
+    The re-entry time gate is `min(min_requote_remaining_sec, 30% of the window)`,
+    so a 5m window needs 90s left and a 15m window 270s. Issue #89's shared
+    `min_requote_remaining_sec` is the absolute ceiling and is not overridden here.
     """
-    engine = _drift_engine()
-    engine.min_requote_remaining_sec = 60.0
-    return engine
+    return _drift_engine()
 
 
 def _skip_window_on_adverse_open(engine, slug: str, now: float):
@@ -1961,13 +1958,13 @@ def test_no_reentry_once_a_leg_has_filled():
 
 
 def test_no_reentry_when_too_little_window_remains():
-    """A fill with under min_requote_remaining_sec left has no time to pair."""
+    """A fill with under the effective time gate left has no time to pair."""
     engine = _reentry_engine()
     slug = "btc-up-or-down-5m"
     now = 1000.0
     m = _skip_window_on_adverse_open(engine, slug, now)
 
-    # 250s in: only 49s left, below the 60s minimum.
+    # 250s in: only 49s left, below the 90s a 5m window needs.
     engine._update_market_strategy(
         slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 250.0)
 
@@ -2004,19 +2001,60 @@ def test_reentry_capped_per_window():
     assert m.entry_cancelled_timeout is True
 
 
-def test_reentry_blocked_by_default_requote_gate_on_5m():
-    """At the shared 300s default a 5m window can never satisfy the time gate."""
+def test_reentry_works_on_5m_at_stock_settings():
+    """A 5m window re-enters with no knob changes: the gate scales to the window.
+
+    Issue #89's `min_requote_remaining_sec` is 300s -- a whole 5m window -- so an
+    absolute gate made re-entry impossible on exactly the markets the issue's
+    evidence table shows reverting. The effective gate is the tighter of that knob
+    and `reentry_min_remaining_pct` of the window, i.e. 90s on a 5m window.
+    """
     engine = _drift_engine()
     assert engine.min_requote_remaining_sec == 300.0
+    assert engine.reentry_min_remaining_pct == 0.30
     slug = "btc-up-or-down-5m"
     now = 1000.0
     m = _skip_window_on_adverse_open(engine, slug, now)
 
+    # 60s in: 239s left, far past the 90s a 5m window needs.
     engine._update_market_strategy(
         slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
 
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
+    assert m.reentry_count == 1
+    assert m.status == "QUOTING"
+
+
+def test_reentry_gate_scales_with_window_duration():
+    """The effective gate is the tighter of the shared knob and the percentage."""
+    engine = _drift_engine()
+    assert engine._reentry_min_remaining_sec(300.0) == 90.0     # 5m  -> 30%
+    assert engine._reentry_min_remaining_sec(900.0) == 270.0    # 15m -> 30%
+
+    # The shared knob stays the ceiling: it can only tighten the gate, never loosen
+    # it, so issue #89's post-merge re-quoting keeps its own 300s meaning.
+    engine.min_requote_remaining_sec = 30.0
+    assert engine._reentry_min_remaining_sec(300.0) == 30.0
+
+
+def test_reentry_refused_just_below_the_5m_gate_and_allowed_just_above():
+    """The 90s boundary on a 5m window is enforced on the tick, not approximately."""
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+
+    below = _reentry_engine()
+    m_below = _skip_window_on_adverse_open(below, slug, now)
+    # end_ts is now + 299, so a tick at +220 leaves 79s -- under the 90s gate.
+    below._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 220.0)
+    assert m_below.reentry_count == 0
+    assert m_below.status == "DRIFT_SKIPPED"
+
+    above = _reentry_engine()
+    m_above = _skip_window_on_adverse_open(above, slug, now)
+    # A tick at +200 leaves 99s -- over the gate.
+    above._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 200.0)
+    assert m_above.reentry_count == 1
 
 
 def test_reentry_band_can_never_exceed_the_gate_it_undoes():

@@ -41,7 +41,7 @@ bullets below hold. See §5, item 9.
 
 - `reentry_drift_band`, `min_requote_remaining_sec` and `max_reentries_per_window`
   carry byte-identical defaults in `LiveTraderEngine.__init__` and `BacktestParams`
-  (`0.015`, `300.0`, `1`). A change to one without the other is a defect.
+  (`0.015`, `300.0`, `0.30`, `1`). A change to one without the other is a defect.
 - `exit_reversal`, `exit_thresh`, `entry_timeout_pct`, `max_start_elapsed_pct` and
   the `0.50 - offset` resting anchor are untouched by this issue.
 - `BacktestParams.__post_init__` validates the new fields in the existing style

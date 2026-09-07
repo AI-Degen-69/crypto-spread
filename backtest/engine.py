@@ -144,6 +144,11 @@ class BacktestParams:
     # 300s a 5m window can never clear the gate, so only 15m windows re-enter until
     # an operator lowers it; the tests set it explicitly to exercise the rule.
     min_requote_remaining_sec: float = 300.0
+    # Re-entry time gate as a fraction of the window, mirroring
+    # LiveTraderEngine.reentry_min_remaining_pct. The effective gate is the tighter
+    # of this and `min_requote_remaining_sec`, so a 5m replay needs 90s left and a
+    # 15m one 270s. 0 or >= 1.0 falls back to the absolute knob alone.
+    reentry_min_remaining_pct: float = 0.30
     # How many times one window may be recovered by re-entry. 1 keeps a market
     # oscillating across the band from thrashing the book for a whole window;
     # 0 disables re-entry outright. Mirrors LiveTraderEngine.
@@ -168,6 +173,11 @@ class BacktestParams:
             if not math.isfinite(self.min_requote_remaining_sec) or self.min_requote_remaining_sec < 0:
                 raise ValueError(
                     f"min_requote_remaining_sec must be >= 0, got {self.min_requote_remaining_sec}"
+                )
+        if self.reentry_min_remaining_pct is not None:
+            if not math.isfinite(self.reentry_min_remaining_pct) or not (0.0 <= self.reentry_min_remaining_pct <= 1.0):
+                raise ValueError(
+                    f"reentry_min_remaining_pct must be between 0.0 and 1.0, got {self.reentry_min_remaining_pct}"
                 )
         if self.max_reentries_per_window is not None:
             if self.max_reentries_per_window < 0:
@@ -402,6 +412,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 else None
             )
             remaining = max(0.0, duration - elapsed) if duration > 0 else 0.0
+            min_remaining = params.min_requote_remaining_sec
+            if duration > 0 and 0.0 < params.reentry_min_remaining_pct <= 1.0:
+                min_remaining = min(min_remaining,
+                                    params.reentry_min_remaining_pct * duration)
             # Measured with `_two_sided_mid`, the same metric the gate above used --
             # `mid` here is the up leg alone, and undoing a two-sided skip with a
             # one-sided reading lets a leg-imbalanced book clear the band while the
@@ -409,7 +423,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # one-sided, which is not evidence the skew has closed.
             reentry_mid = _two_sided_mid(ub, db)
             if (reentry_mid is not None
-                    and remaining >= params.min_requote_remaining_sec
+                    and remaining >= min_remaining
                     and (entry_timeout_cutoff is None or elapsed < entry_timeout_cutoff)
                     and abs(reentry_mid - 0.50) <= min(params.reentry_drift_band, exit_thr)
                     and abs(reentry_mid - 0.50) < exit_thr):

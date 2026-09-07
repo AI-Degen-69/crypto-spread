@@ -670,8 +670,7 @@ def test_backtest_reenters_adverse_skipped_window_when_mid_reverts():
     ]
     # The shared re-entry time gate defaults to a full 5m window (issue #89), so a
     # 5m replay only re-enters once an operator lowers it.
-    res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=1.0, min_requote_remaining_sec=60.0))
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
     assert res.filled_up is True
     assert res.filled_down is True
     assert res.pair_captured is True
@@ -709,9 +708,11 @@ def test_backtest_timeout_cancelled_window_never_reenters_even_at_mid_050():
 
 
 def test_backtest_no_reentry_below_min_requote_remaining_sec():
-    """A revert with under min_requote_remaining_sec left has no time to pair.
+    """A revert with under the effective time gate left has no time to pair.
 
-    Runs at the 300s default: a 5m window that reverts 250s in has 50s left.
+    At stock settings a 5m window needs 90s -- `reentry_min_remaining_pct` of its
+    own duration, tighter than the shared 300s knob -- and reverting 250s in
+    leaves 50s.
     """
     snaps = [
         _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
@@ -737,8 +738,7 @@ def test_backtest_reentry_uses_the_two_sided_mid_not_the_up_leg():
         _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.32,
                    tape=_fill_tape()),
     ]
-    res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=1.0, min_requote_remaining_sec=60.0))
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
     assert res.reentry_count == 0
     assert res.filled_up is False
     assert res.filled_down is False
@@ -752,8 +752,7 @@ def test_backtest_reentry_band_capped_by_exit_thresh():
         _make_snap(1100.0, mid=0.45, up_ask=0.455, down_ask=0.555, tape=_fill_tape()),
     ]
     res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=1.0, min_requote_remaining_sec=60.0,
-        reentry_drift_band=0.40))
+        offset=0.02, entry_timeout_pct=1.0, reentry_drift_band=0.40))
     assert res.reentry_count == 0
     assert res.filled_up is False
 
@@ -773,8 +772,7 @@ def test_backtest_timeout_cancel_is_not_reentered_with_the_time_gate_open():
         _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
                    tape=_fill_tape()),
     ]
-    res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=0.10, min_requote_remaining_sec=60.0))
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=0.10))
     assert res.reentry_count == 0
     assert res.filled_up is False
     assert res.filled_down is False
@@ -788,8 +786,7 @@ def test_backtest_late_start_skip_is_never_reentered():
         _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
                    tape=_fill_tape()),
     ]
-    res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=1.0, min_requote_remaining_sec=60.0))
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
     assert res.reentry_count == 0
     assert res.filled_up is False
 
@@ -802,13 +799,31 @@ def test_backtest_reentry_cap_of_zero_disables_reentry():
                    tape=_fill_tape()),
     ]
     p_zero = BacktestParams(offset=0.02, entry_timeout_pct=1.0,
-                            min_requote_remaining_sec=60.0,
                             max_reentries_per_window=0)
     assert _simulate_window(snaps, p_zero).filled_up is False
     # Control: the same replay re-enters and fills at the default cap of 1.
-    p_one = BacktestParams(offset=0.02, entry_timeout_pct=1.0,
-                           min_requote_remaining_sec=60.0)
+    p_one = BacktestParams(offset=0.02, entry_timeout_pct=1.0)
     assert _simulate_window(snaps, p_one).filled_up is True
+
+
+def test_backtest_reentry_gate_scales_with_window_duration():
+    """A 15m window needs 270s left; the same elapsed point clears a 5m window."""
+    def _reentered(duration: int, revert_ts: float) -> int:
+        snaps = [
+            {**_make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
+             "duration": duration},
+            {**_make_snap(revert_ts, mid=0.50, up_ask=_BALANCED_UP,
+                          down_ask=_BALANCED_DN, tape=_fill_tape()),
+             "duration": duration},
+        ]
+        return _simulate_window(
+            snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0)).reentry_count
+
+    # 200s in: a 5m window has 100s left (gate 90), a 15m window has 700s (gate 270).
+    assert _reentered(300, 1200.0) == 1
+    assert _reentered(900, 1200.0) == 1
+    # 700s in: the 15m window has 200s left, under its 270s gate.
+    assert _reentered(900, 1700.0) == 0
 
 
 def test_backtest_reentry_params_match_live_defaults():
@@ -817,11 +832,14 @@ def test_backtest_reentry_params_match_live_defaults():
     bt = BacktestParams()
     assert bt.reentry_drift_band == live.reentry_drift_band == 0.015
     assert bt.min_requote_remaining_sec == live.min_requote_remaining_sec == 300.0
+    assert bt.reentry_min_remaining_pct == live.reentry_min_remaining_pct == 0.30
     assert bt.max_reentries_per_window == live.max_reentries_per_window == 1
 
 
 def test_backtest_rejects_out_of_range_reentry_params():
     """The three re-entry knobs validate in the existing BacktestParams style."""
+    with pytest.raises(ValueError):
+        BacktestParams(reentry_min_remaining_pct=1.5)
     with pytest.raises(ValueError):
         BacktestParams(reentry_drift_band=0.9)
     with pytest.raises(ValueError):
