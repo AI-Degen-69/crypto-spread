@@ -1384,7 +1384,8 @@ def test_filled_orders_promoted_to_positions_dom():
         {{ order_id: 'ord-open-up', market: 'BTC 5m', market_slug: 'btc-up-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'OPEN', time: '14:00:00' }},
         {{ order_id: 'ord-filled-dn', market: 'BTC 5m', market_slug: 'btc-up-down-5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 5, status: 'FILLED', time: '14:00:01' }},
         {{ order_id: 'ord-matched-up', market: 'ETH 5m', market_slug: 'eth-up-down-5m', side: 'BUY (UP)', price: 0.47, size: 5, filled: 5, status: 'MATCHED', time: '14:00:02' }},
-        {{ order_id: 'ord-cancel-dn', market: 'ETH 5m', market_slug: 'eth-up-down-5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 0, status: 'CANCELLED', time: '14:00:03' }}
+        {{ order_id: 'ord-cancel-dn', market: 'ETH 5m', market_slug: 'eth-up-down-5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 0, status: 'CANCELLED', time: '14:00:03' }},
+        {{ order_id: 'ord-garbage-px', market: 'SOL 5m', market_slug: 'sol-up-down-5m', side: 'BUY (UP)', price: 'abc', size: 'nah', filled: 'zzz', status: 'FILLED', time: '14:00:04' }}
       ],
       open_positions: [],
       trades: []
@@ -1425,13 +1426,23 @@ def test_filled_orders_promoted_to_positions_dom():
     if (!posHtml.includes('>Up<')) {{
       throw new Error('Promoted ETH UP leg missing Up side badge: ' + posHtml);
     }}
+    // Promoted size renders the fill quantity (5.00), garbage numerics never leak.
+    if (!posHtml.includes('>5.00<')) {{
+      throw new Error('Promoted leg missing fill size 5.00: ' + posHtml);
+    }}
+    if (!posHtml.includes('SOL 5m')) {{
+      throw new Error('Promoted garbage-price leg missing SOL 5m row: ' + posHtml);
+    }}
+    if (posHtml.includes('$NaN') || posHtml.includes('NaN') || posHtml.includes('Infinity')) {{
+      throw new Error('Garbage numerics leaked into Positions: ' + posHtml);
+    }}
 
     // Badges: orders counts resting only (OPEN + CANCELLED), positions include promoted.
     if (elements['otOrdersCount'].textContent !== '2') {{
       throw new Error('otOrdersCount should be 2 (resting only), got: ' + elements['otOrdersCount'].textContent);
     }}
-    if (elements['otPositionsCount'].textContent !== '2') {{
-      throw new Error('otPositionsCount should be 2 (promoted filled legs), got: ' + elements['otPositionsCount'].textContent);
+    if (elements['otPositionsCount'].textContent !== '3') {{
+      throw new Error('otPositionsCount should be 3 (promoted filled legs), got: ' + elements['otPositionsCount'].textContent);
     }}
 
     console.log('FILLED_TO_POSITIONS_DOM_TESTS_PASSED');

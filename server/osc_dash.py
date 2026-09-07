@@ -4236,7 +4236,7 @@ function renderCockpitUI(st) {
           const oId = leg.order_id || '-';
           const statusRaw = String(leg.status || 'OPEN').toUpperCase();
           const isCancelled = ['CANCELLED', 'CANCELED'].includes(statusRaw);
-          const isFilled = ['FILLED', 'MATCHED'].includes(statusRaw);
+          const isFilled = isFilledStatus(leg.status);
           const canCancel = oId && oId !== '-' && !isCancelled && !isFilled;
           const isUp = leg.isUp;
           const sideBadgeCls = isCancelled ? 'ot-tag-cancelled' : (isUp ? 'ot-tag-up' : 'ot-tag-down');
@@ -4277,16 +4277,18 @@ function renderCockpitUI(st) {
   // Issue #91: FILLED / MATCHED legs filtered out of Open Orders above are
   // promoted here as lightweight position entries (held shares at fill price;
   // market value and PnL stay '--' until the CLOB supplies them).
-  const filledAsPositions = (typeof filledLegs !== 'undefined' ? filledLegs : []).map(o => {
-    const filledSize = o.filled != null ? Number(o.filled) : 0;
+  const toFinite = (v) => { const n = Number(v); return (v != null && isFinite(n)) ? n : null; };
+  const filledAsPositions = filledLegs.map(o => {
+    const filledSize = toFinite(o.filled);
+    const sizeVal = toFinite(o.size);
     return {
       title: o.market || o.label || o.token_id || 'Unknown',
       market: o.market || o.label || o.token_id || 'Unknown',
       market_slug: o.market_slug || '',
       series_slug: o.series_slug || '',
       outcome: o.side || '',
-      size: (filledSize !== 0 && !isNaN(filledSize)) ? filledSize : (o.size != null ? Number(o.size) : 0),
-      avgPrice: o.price != null ? Number(o.price) : null,
+      size: (filledSize != null && filledSize !== 0) ? filledSize : (sizeVal != null ? sizeVal : 0),
+      avgPrice: toFinite(o.price),
       curPrice: null,
       time: o.time || o.created_at || o.timestamp || '-',
       _fromFilledOrder: true
