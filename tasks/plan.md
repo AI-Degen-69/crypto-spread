@@ -1,54 +1,69 @@
-# Plan — Issue #90: Filled column always shows 0
+# Plan — Issue #93: RESET P&L leaves stale order rows and live venue-side orders untouched
 
-Files: `strategy/live_trader.py` (`get_open_orders_list`, ~:1357-1505),
-`tests/test_orders_trades_table.py` (extend). No frontend change
-(`server/osc_dash.py:2270,4303` already reads `o.filled`).
+Files: `strategy/live_trader.py` (`reset_pnl` :2275-2316, `MarketLiveState` :373-413,
+`get_open_orders_list` :1254-1443, `cancel_live_order` :738, `cancel_all_orders` :831-916,
+`stop` :1940-1957, `get_state` cache :1647-1650), `server/osc_dash.py`
+(`POST /api/live/control` :828-860), `tests/test_live_trader.py` (extend),
+`tests/test_osc_dash_integration.py` (extend).
 
-Contract (locked before logic): every dict from `get_open_orders_list()` carries
-`"filled": float`. CLOB_API → `float(o.get("size_matched", 0.0) or 0.0)`;
-all engine-tracked sources → `0.0`; cancelled passthrough → `setdefault("filled", 0.0)`.
+Contract (locked before logic — `api-and-interface-design`):
+- `_has_outstanding_orders(self) -> bool`: True if any market holds `order_id_up/down`,
+  `next_order_id_up/down`, `stop_order_id` (status not in NONE/CANCELLED/FILLED),
+  `order_id_exit_up/down`, or non-empty `cancelled_orders`.
+- `_clear_market_order_state(m) -> None`: clears every handle in SPEC §1; statuses →
+  `"NONE"`, times → `"-"`, `next_quoted` → False, `entry_cancelled_timeout` → False,
+  `stop_price` → None, `stop_side` → None, `cancelled_orders` → `[]`. Caller holds lock.
+- `reset_pnl(self) -> dict`: success → `{"ok": True, "refused": False,
+  "venue_cancelled": bool, "markets_cleared": int}`; live-running-hot →
+  `{"ok": False, "refused": True, "message": "Stop the engine before RESET P&L …"}`.
+  Refusal clears nothing and leaves `_orders_cache_ts` untouched.
+- `POST /api/live/control` `reset_pnl`: success → `200 + get_state()`; refusal →
+  `409 {"ok": False, "error": <message>}` (message usable by `resetCockpitPnL`).
 
-## T1 — Failing tests first (TDD red)
-- **Files:** `tests/test_orders_trades_table.py`
-- **Do:** Extend `test_engine_order_resolution_and_cleanup`: give the mock CLOB order
-  `"size_matched": 5` (+ a second CLOB order with no `size_matched` key) and assert
-  `clob_order["filled"] == 5.0`, missing-key order `["filled"] == 0.0`, and
-  `engine_order["filled"] == 0.0`. Confirm RED (KeyError / assertion failure).
-- **Verify:** `python -m pytest tests/test_orders_trades_table.py::test_engine_order_resolution_and_cleanup -q` (must FAIL)
+## T1 — Failing test first (TDD red, paper/stopped path)
+- **Files:** `tests/test_live_trader.py` (new test beside `:1017`)
+- **Do:** Populate `btc-up-or-down-5m` with entry (`order_id_up/down` + RESTING),
+  advance (`next_order_id_up/down` + `next_quoted=True`), stop (`stop_order_id` +
+  RESTING), exit (`order_id_exit_up/down`), `cancelled_orders=[{…CANCELLED…}]`,
+  `_orders_cache_ts=now`. Call `reset_pnl()`, assert `get_open_orders_list()==[]`,
+  all handles cleared, `_orders_cache_ts==0.0`. Confirm RED.
+- **Verify:** `python -m pytest tests/test_live_trader.py::<new_test> -q` (must FAIL)
 
-## T2 — CLOB `size_matched` → `filled` mapping
-- **Files:** `strategy/live_trader.py` (:1357-1369 dict)
-- **Do:** Add `"filled": float(o.get("size_matched", 0.0) or 0.0)` to the CLOB_API
-  `orders.append({...})`. Wrap in try-tolerant coercion: unparseable string →
-  `0.0`, never raise out of the poll loop.
-- **Verify:** `python -m pytest tests/test_orders_trades_table.py::test_engine_order_resolution_and_cleanup -q` (CLOB asserts green)
+## T2 — `reset_pnl` cancel-and-clear core (stopped/paper)
+- **Files:** `strategy/live_trader.py` (`reset_pnl` :2275-2316 + new helpers)
+- **Do:** Add `_has_outstanding_orders()` + `_clear_market_order_state()` helpers;
+  in `reset_pnl()`, after existing PnL clears, clear every market's order state per
+  contract, set statuses to `"NONE"` (fixes FILLED-flag contradiction), clear
+  `entry_cancelled_timeout`, set `self._orders_cache_ts = 0.0`. All under
+  `self._engine_lock`. Return success dict. Paper path: no CLOB calls.
+- **Verify:** `python -m pytest tests/test_live_trader.py -q` (new test green)
 
-## T3 — Engine-tracked dicts + cancelled passthrough
-- **Files:** `strategy/live_trader.py` (:1378, :1393 ENGINE_ACTIVE; :1409 ENGINE_STOP;
-  :1424, :1439 ENGINE_ADVANCE; :1464, :1481 PAPER_SIMULATION; :1496-1505 passthrough)
-- **Do:** Add `"filled": 0.0` to each of the 7 engine-tracked dict literals.
-  On the cancelled passthrough, apply `.setdefault("filled", 0.0)` to the copied
-  dict before append so old retained rows also satisfy the contract.
-- **Verify:** `python -m pytest tests/test_orders_trades_table.py -q` (full file green)
+## T3 — Live-mode safety: refuse-while-hot + cancel-when-stopped
+- **Files:** `strategy/live_trader.py` (`reset_pnl`)
+- **Do:** At top of `reset_pnl()`: if `mode=="live"` and `is_running` and
+  `_has_outstanding_orders()` → return refusal dict, clear nothing. Else if
+  `mode=="live"` (stopped) and outstanding → venue cancel burst first (reuse
+  `cancel_all_orders()` remote leg or per-order `cancel_live_order()`; do NOT reuse
+  its `is_running/quoting_halted` side effects — reset must not stop the engine),
+  record `venue_cancelled=True`; cancel errors surface in return dict.
+- **Verify:** `python -m pytest tests/test_live_trader.py -q` (add refusal + stopped-live mock-CLOB tests green, paper test asserts no CLOB interaction)
 
-## T4 — Node render test: Filled cell shows "5"
-- **Files:** `tests/test_orders_trades_table.py` (new Node-harness test beside
-  `test_cockpit_dom_rendering_with_state`)
-- **Do:** Feed `renderCockpitUI` a mock state whose open_orders include
-  `{..., status: 'FILLED', filled: 5, ...}` and one `{..., status: 'OPEN'}` without
-  `filled`; assert Orders body HTML contains a Filled cell with `>5<` and no
-  regression on the OPEN row (`>0<`).
-- **Verify:** `python -m pytest tests/test_orders_trades_table.py -q` (all green; skip if Node absent only with evidence)
+## T4 — Endpoint surfaces refusal message
+- **Files:** `server/osc_dash.py` (`:845-846` branch)
+- **Do:** Capture `reset_pnl()` return dict; on `refused` → `409 {"ok": False,
+  "error": message}` (+ current state for dashboard continuity); on success →
+  existing `get_state()` path. Keep `resetCockpitPnL()` (:3634) compatible (success
+  shape unchanged).
+- **Verify:** `python -m pytest tests/test_osc_dash_integration.py -q` (extend reset branch: stopped → 200 empty orders; live-running-hot → 409 with Stop-first message)
 
-## T5 — Full regression + self-audit
-- **Files:** —
-- **Do:** Run the whole suite; review the diff for contract compliance (no price/size/
-  status change, additive key only), edge cases (`None`/missing/garbage
-  `size_matched`), and lock discipline around the passthrough block.
-- **Verify:** `python -m pytest -q` (all green)
+## T5 — Keep existing tests honest + full regression
+- **Files:** `tests/test_live_trader.py:120-130,1017-1028`, `tests/test_osc_dash_integration.py:650-675`
+- **Do:** Update existing `reset_pnl` tests only where behaviour deliberately changed
+  (return dict, cleared handles); assert no other behaviour drift. Run whole suite,
+  review diff (no PnL-math / rollover / stop changes, lock discipline intact).
+- **Verify:** `python -m pytest -q` (all green, 293 + new)
 
 ## Ship
-- Branch `fix/filled-column-size-matched`, conventional commit
-  `fix(live-trader): map CLOB size_matched to filled in open orders`,
-  PR titled `@coderabbitai` with `@coderabbitai summary` in the body.
-  Unblocks #91 (then #97).
+- Branch `fix/reset-pnl-clear-orders`, conventional commit
+  `fix(live-trader): reset_pnl cancels and clears outstanding orders with live-running refusal`,
+  PR with `@coderabbitai` + `@coderabbitai summary`. Independent of #90/#91/#92.
