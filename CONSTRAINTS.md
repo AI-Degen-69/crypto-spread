@@ -17,5 +17,5 @@
 
 ## 3. Performance & Integration Guardrails
 - No new dependencies in `requirements.txt` (stdlib + existing `py_clob_client` / `py_clob_client_v2` only).
-- Hot polling path: at most one extra `get_order(stop_id)` per tick per single-leg market (same pattern as existing entry-order fill checks); stop placement is one `create_and_post_order` per fill event, never per-tick.
+- Hot polling path: at most one extra `get_order(stop_id)` per tick per single-leg market (same pattern as existing entry-order fill checks). Stop *staging* touches the venue zero times (in-memory buffer); only the post-trigger monitored exit may submit one `create_and_post_order`, never per-tick.
 - All shared `MarketLiveState` mutations under `self._engine_lock`, log style `[%s] slug` prefix.

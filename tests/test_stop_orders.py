@@ -196,6 +196,91 @@ def test_user_order_event_syncs_stop_status():
     assert mstate.stop_order_status == "MATCHED"
 
 
+def test_paper_stop_fills_on_bid_touch():
+    """Paper stop fills when the protected leg's bid reaches the stop price,
+    even if synthetic-mid drift alone hasn't crossed the threshold."""
+    engine = LiveTraderEngine()
+    engine.start()
+    now = time.time()
+    market = _fake_market(now)
+
+    # UP fills at 0.48 -> stop staged at 0.43
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    mstate = engine.markets[SLUG]
+    assert mstate.stop_order_id == f"paper_stop_{SLUG}"
+
+    # Bid hits 0.43 (stop touch) while synthetic mid drift stays below threshold
+    # bid 0.43/ask 0.45 -> up_mid 0.44; down 0.55/0.57 -> down_mid 0.56;
+    # synthetic mid = (0.44 + (1-0.56))/2 = 0.44 -> drift 0.06 >= 0.05... use tighter books:
+    engine._update_market_strategy(SLUG, _poll(market, 0.43, 0.44, 0.53, 0.54), now + 1)
+
+    assert mstate.exit_taken is True
+    assert mstate.status == "STOP_EXIT"
+    assert mstate.stop_order_status == "FILLED"
+    assert mstate.order_status_down == "CANCELLED"
+
+
+def test_stream_fill_stages_stop():
+    """A fill arriving via the UserSpec stream stages protection too."""
+    engine = LiveTraderEngine()
+    mstate = engine.markets[SLUG]
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+    mstate.resting_up = 0.48
+    mstate.order_id_up = "ord_up"
+
+    engine.on_user_order_event({"id": "ord_up", "status": "MATCHED"})
+
+    assert mstate.filled_up is True
+    assert mstate.stop_order_id == f"paper_stop_{SLUG}"
+    assert mstate.stop_order_status == "RESTING"
+    assert mstate.stop_side == "UP"
+
+
+def test_rollover_deferred_when_stop_cancel_fails():
+    """Window rollover defers state reset when the stop venue-cancel fails."""
+    from unittest.mock import patch
+
+    engine = LiveTraderEngine()
+    engine.mode = "live"
+    engine.start()
+    mstate = engine.markets[SLUG]
+    mstate.stop_order_id = "ord_stop_resting"
+    mstate.stop_order_status = "RESTING"
+    mstate.filled_up = True
+    mstate.up_bid = 0.44
+
+    with patch.object(engine, "cancel_live_order", return_value=False):
+        engine._handle_window_rollover(mstate, time.time())
+
+    assert mstate.stop_order_id == "ord_stop_resting"
+    assert mstate.stop_order_status == "CANCEL_FAILED"
+    # Window state must NOT be reset while the remote stop is still live
+    assert mstate.filled_up is True
+
+
+def test_cancel_failed_stop_retried_on_next_cancel():
+    """A CANCEL_FAILED stop is retried (not silently cleared) on the next cancel."""
+    from unittest.mock import patch
+
+    engine = LiveTraderEngine()
+    engine.mode = "live"
+    mstate = engine.markets[SLUG]
+    mstate.stop_order_id = "ord_stop_resting"
+    mstate.stop_order_status = "CANCEL_FAILED"
+
+    # First retry still fails
+    with patch.object(engine, "cancel_live_order", return_value=False):
+        assert engine._cancel_stop_order(mstate, reason="pair completed") is False
+    assert mstate.stop_order_id == "ord_stop_resting"
+
+    # Retry succeeds -> handle cleared
+    with patch.object(engine, "cancel_live_order", return_value=True):
+        assert engine._cancel_stop_order(mstate, reason="pair completed") is True
+    assert mstate.stop_order_id is None
+    assert mstate.stop_order_status == "NONE"
+
+
 def _fake_market(now: float) -> LiveMarket:
     return LiveMarket(
         condition_id="0xabc123",

@@ -643,9 +643,10 @@ class LiveTraderEngine:
             stop_status = mstate.stop_order_status
         if not stop_id:
             return True
-        if self.mode == "live" and stop_status == "RESTING":
+        if self.mode == "live" and stop_status in ("RESTING", "CANCEL_FAILED"):
             # Only an order actually resting on the book needs a venue cancel;
-            # STAGED buffers exist in memory only and clear locally.
+            # STAGED buffers exist in memory only and clear locally. A previous
+            # cancel failure is retried here before the handle is cleared.
             if not self.cancel_live_order(stop_id):
                 log.warning(
                     "[%s] Failed to cancel resting stop-loss %s (%s); retaining handle as CANCEL_FAILED",
@@ -1232,6 +1233,13 @@ class LiveTraderEngine:
             elif m.stop_order_id == order_id:
                 # Keep pre-placed stop-loss status in sync for dashboard display (issue #87)
                 m.stop_order_status = status
+            if order_id in (m.order_id_up, m.order_id_down):
+                # A stream-detected entry fill must stage protection just like the
+                # polling path does (place_stop_order is idempotent) (issue #87)
+                if m.filled_up and not m.filled_down and not m.exit_taken:
+                    self.place_stop_order(m, "UP")
+                elif m.filled_down and not m.filled_up and not m.exit_taken:
+                    self.place_stop_order(m, "DOWN")
 
     def get_open_orders_list(self) -> List[Dict[str, Any]]:
         """List active open orders from CLOB and current engine state."""
@@ -3019,8 +3027,16 @@ class LiveTraderEngine:
                 return
 
         # --- STOP LOSS EXIT TRIGGER ---
-        # Holding UP alone and mid dropped adversely (max_down >= exit_thresh)
-        if (mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
+        # Holding UP alone and mid dropped adversely (max_down >= exit_thresh).
+        # In paper mode the staged stop also fills when the protected leg's bid
+        # touches the staged stop price (issue #87).
+        paper_stop_hit_up = (
+            self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "UP"
+            and mstate.up_bid is not None and mstate.stop_price is not None
+            and mstate.up_bid <= mstate.stop_price
+        )
+        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
+                or paper_stop_hit_up)
                 and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.up_bid
             if sell_bid is not None:
@@ -3038,8 +3054,15 @@ class LiveTraderEngine:
                 self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
                 return
 
-        # Holding DOWN alone and mid rallied adversely (max_up >= exit_thresh)
-        if (mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
+        # Holding DOWN alone and mid rallied adversely (max_up >= exit_thresh).
+        # Paper-mode staged stop also fills when the DOWN bid reaches its stop price.
+        paper_stop_hit_down = (
+            self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "DOWN"
+            and mstate.down_bid is not None and mstate.stop_price is not None
+            and mstate.down_bid >= mstate.stop_price
+        )
+        if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
+                or paper_stop_hit_down)
                 and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.down_bid
             if sell_bid is not None:
@@ -3093,8 +3116,15 @@ class LiveTraderEngine:
                 self.cancel_live_order(mstate.order_id_up)
             if mstate.order_id_down and not mstate.filled_down:
                 self.cancel_live_order(mstate.order_id_down)
-        # OCO Case C: cancel any resting stop-loss alongside entry orders (issue #87)
-        self._cancel_stop_order(mstate, reason="window rollover")
+        # OCO Case C: cancel any stop-loss alongside entry orders (issue #87).
+        # If the venue cancel fails, defer the window reset so the stale remote
+        # stop can't survive into the next window with a cleared local handle.
+        if not self._cancel_stop_order(mstate, reason="window rollover"):
+            log.warning(
+                "[%s] Window rollover deferred until stop-loss cancellation succeeds",
+                mstate.slug,
+            )
+            return
 
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
             resting_up = mstate.resting_up
