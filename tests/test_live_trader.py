@@ -1827,3 +1827,331 @@ def test_open_orders_rank_cancelled_any_source_last():
         "eng_btc_nxt_up", "eng_btc_nxt_dn",
         "clob_btc_cancelled",
     ]
+# --- Issue #89: multi-merge re-quoting on dynamic mid minus offset ---
+
+def _fifteen_minute_market(now, condition_id="0xmerge15m", start_offset=10.0):
+    """15m-window LiveMarket with plenty of time remaining."""
+    return LiveMarket(
+        condition_id=condition_id,
+        market_slug="btc-up-down-15m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - start_offset,
+        end_ts=now - start_offset + 900.0,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+
+def _fifteen_minute_engine(slug="btc-up-or-down-15m", **kwargs):
+    """Paper engine tracking a single 15m series (default selection is 5m-only)."""
+    return LiveTraderEngine(selected_markets=[slug], **kwargs)
+
+
+def test_requote_after_merge_when_time_remains():
+    """A 15m merge with ~890s left opens round 2 instead of going terminal."""
+    engine = _fifteen_minute_engine()
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+
+    m = engine.markets[slug]
+    # Round 0 fills at the static 0.48 / 0.48 anchor.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    assert m.filled_up is True
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    assert m.pairs_count == 1
+    assert round(m.realized_pnl_usd, 2) == 0.20
+
+    # Merge tick re-quotes immediately: per-round flags reset, round counter up.
+    assert m.pair_captured is False
+    assert m.requote_round == 1
+    assert m.status == "QUOTING"
+    assert m.filled_up is False and m.filled_down is False
+    assert m.order_status_up in ("NONE", "RESTING")
+    assert m.order_status_down in ("NONE", "RESTING")
+
+    # Round 1 completes into a second merge; PnL is cumulative.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.50},
+        "down_book": {"best_bid": 0.45, "best_ask": 0.46},
+    }, now + 2)
+    assert m.pairs_count == 2
+    assert round(m.realized_pnl_usd, 2) == 0.40
+    assert len([t for t in engine.trades if t.action == "PAIR_MERGE"]) == 2
+
+
+def test_requote_dynamic_anchor_math():
+    """Round-1 resting prices anchor to mid - offset, summing to 1 - 2*offset."""
+    engine = _fifteen_minute_engine()
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+
+    # Benign open snapshot at 0.50 so the drift gate stays out of the way.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now)
+    m = engine.markets[slug]
+    assert m.open_gate_evaluated is True
+    assert m.adverse_open is False
+
+    # Skewed books (mid 0.60) whose asks still touch the 0.48 static anchor.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.27, "best_ask": 0.28},
+    }, now + 1)
+    assert m.pairs_count == 1
+    assert m.requote_round == 1
+    assert m.resting_up == round(0.60 - engine.offset, 3) == 0.58
+    assert m.resting_down == round((1.0 - 0.60) - engine.offset, 3) == 0.38
+    assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
+
+
+def test_no_requote_when_time_short():
+    """A 5m merge with ~60s left stays terminal: no second round."""
+    # Late-start guard disabled: this test isolates the re-quote time gate,
+    # not the #96 mid-window-start behavior (240s elapsed would skip entry).
+    engine = LiveTraderEngine(max_start_elapsed_pct=0)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = LiveMarket(
+        condition_id="0xmerge5m",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - 240.0,
+        end_ts=now + 60.0,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    m = engine.markets[slug]
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    assert m.pairs_count == 1
+    assert m.pair_captured is True
+    assert m.status == "PAIR_MERGED"
+    assert m.requote_round == 0
+
+    # Touching books afterwards must not open a new round.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 2)
+    assert m.pairs_count == 1
+    assert m.requote_round == 0
+
+
+def test_no_requote_after_stop_exit():
+    """STOP_EXIT is terminal even with time remaining; only merges re-quote."""
+    engine = _fifteen_minute_engine("eth-up-or-down-15m")
+    engine.start()
+    slug = "eth-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now, condition_id="0xstop15m")
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True
+
+    # Adverse drift triggers the stop exit on the single UP leg.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.43, "best_ask": 0.45},
+        "down_book": {"best_bid": 0.55, "best_ask": 0.57},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert m.requote_round == 0
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 2)
+    assert m.requote_round == 0
+    assert m.pairs_count == 0
+
+
+def test_requote_telemetry_recorded():
+    """Each re-quote captures mid_at_calc, order prices, resting confirmation."""
+    engine = _fifteen_minute_engine()
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now, condition_id="0xtelemetry15m")
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    m = engine.markets[slug]
+    assert m.requote_round == 1
+    tel = m.last_requote_telemetry
+    assert tel is not None
+    assert tel["round"] == 1
+    assert tel["mid_at_calc"] == pytest.approx(0.52, abs=0.001)
+    assert tel["order_prices"]["up"] == m.resting_up
+    assert tel["order_prices"]["down"] == m.resting_down
+    # Resting confirmation is still pending: the new round has not quoted yet.
+    assert tel["mid_at_resting"] is None
+
+    # Next tick the new round rests both legs: confirmation is finalised.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 2)
+    tel = m.last_requote_telemetry
+    assert tel["mid_at_resting"] is not None
+    assert tel["latency_ms"] is not None and tel["latency_ms"] >= 0.0
+    assert "drift" in tel
+    assert tel["drift"] == pytest.approx(abs(tel["mid_at_resting"] - tel["mid_at_calc"]), abs=1e-9)
+
+
+def test_min_requote_remaining_sec_config():
+    """Knob defaults to 300s, is runtime-configurable while stopped, locked while running."""
+    engine = LiveTraderEngine()
+    assert engine.min_requote_remaining_sec == 300.0
+    assert engine.get_state()["params"]["min_requote_remaining_sec"] == 300.0
+
+    engine.update_config(min_requote_remaining_sec=120.0)
+    assert engine.min_requote_remaining_sec == 120.0
+
+    engine.start()
+    with pytest.raises(ValueError):
+        engine.update_config(min_requote_remaining_sec=600.0)
+    assert engine.min_requote_remaining_sec == 120.0
+
+
+def test_requote_boundary_time_remaining_equals_gate():
+    """remaining == gate still re-quotes (gate uses <); one second less stays terminal."""
+    # Late-start guard disabled: elapsed 599s/900s would otherwise skip entry (#96).
+    engine = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now, condition_id="0xboundary15m", start_offset=599.0)
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    m = engine.markets[slug]
+    assert m.pairs_count == 1
+    assert m.requote_round == 1  # remaining was exactly 300.0 >= gate
+
+    engine2 = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    engine2.start()
+    now2 = time.time()
+    market2 = _fifteen_minute_market(now2, condition_id="0xboundary15m_b", start_offset=600.0)
+    engine2._update_market_strategy(slug, {
+        "market": market2,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now2)
+    engine2._update_market_strategy(slug, {
+        "market": market2,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now2 + 1)
+    m2 = engine2.markets[slug]
+    assert m2.pairs_count == 1
+    assert m2.requote_round == 0  # remaining was 299.0 < gate
+    assert m2.status == "PAIR_MERGED"
+
+
+def test_negative_requote_gate_clamped_to_zero():
+    """A negative gate clamps to 0.0 in __init__, matching update_config."""
+    engine = _fifteen_minute_engine(min_requote_remaining_sec=-30.0)
+    assert engine.min_requote_remaining_sec == 0.0
+
+
+def test_min_requote_remaining_sec_zero_disables():
+    """A zero gate disables re-quoting entirely, even on 15m windows."""
+    engine = _fifteen_minute_engine(min_requote_remaining_sec=0.0)
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now, condition_id="0xdisabled15m")
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    m = engine.markets[slug]
+    assert m.pairs_count == 1
+    assert m.pair_captured is True
+    assert m.requote_round == 0
+
+
+def test_rollover_resets_requote_round():
+    """Window rollover clears the round counter and telemetry for the new window."""
+    engine = _fifteen_minute_engine()
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now, condition_id="0xroll15m")
+
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    m = engine.markets[slug]
+    assert m.requote_round == 1
+
+    engine._handle_window_rollover(m, now + 2, "0xroll15m_next")
+    assert m.requote_round == 0
+    assert m.last_requote_telemetry is None
+    assert m.status == "QUOTING"
