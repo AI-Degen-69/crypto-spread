@@ -3072,7 +3072,7 @@ class LiveTraderEngine:
         paper_stop_hit_down = (
             self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "DOWN"
             and mstate.down_bid is not None and mstate.stop_price is not None
-            and mstate.down_bid >= mstate.stop_price
+            and mstate.down_bid <= mstate.stop_price
         )
         if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
                 or paper_stop_hit_down)
