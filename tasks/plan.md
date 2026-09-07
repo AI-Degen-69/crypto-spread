@@ -1,80 +1,54 @@
-# Plan — Issue #87: Pre-placed Resting Stop-Loss Orders
+# Plan — Issue #90: Filled column always shows 0
 
-Files: `strategy/live_trader.py`, `server/osc_dash.py` (orders table renders the
-engine order list already — verify only), `tests/test_live_trader.py`
-(+ new `tests/test_stop_orders.py`).
+Files: `strategy/live_trader.py` (`get_open_orders_list`, ~:1357-1505),
+`tests/test_orders_trades_table.py` (extend). No frontend change
+(`server/osc_dash.py:2270,4303` already reads `o.filled`).
 
-## T1 — State fields + place_stop helper (TDD)
-- **Files:** `strategy/live_trader.py`, `tests/test_stop_orders.py`
-- **Do:** Add `MarketLiveState` fields `stop_order_id: Optional[str]`,
-  `stop_order_status: str = "NONE"`, `stop_price: Optional[float] = None`,
-  `stop_side: Optional[str] = None`, `stop_order_time: str = "-"`.
-  Add `place_stop_order(mstate, side)` helper: idempotent guard
-  (`stop_order_id` set → return), computes
-  `stop_price = clamp(fill_price - exit_thresh, 0.01, 0.99)` (round 2), submits
-  SELL via `place_live_quote` in live mode / assigns `paper_stop_{slug}` in paper
-  mode, records `stop_order_status = "RESTING"` + `stop_order_time`.
-- **Tests (write first, red):** helper creates a resting stop with correct price and
-  status; second call does not duplicate.
-- **Verify:** `python -m pytest tests/test_stop_orders.py -q`
+Contract (locked before logic): every dict from `get_open_orders_list()` carries
+`"filled": float`. CLOB_API → `float(o.get("size_matched", 0.0) or 0.0)`;
+all engine-tracked sources → `0.0`; cancelled passthrough → `setdefault("filled", 0.0)`.
 
-## T2 — Stop placement on single-leg fill
-- **Files:** `strategy/live_trader.py`
-- **Do:** In `_update_market_strategy`, immediately after each single-leg fill
-  transition (`filled_up` XOR `filled_down`, live + paper paths), call
-  `place_stop_order`. If CLOB placement fails, log WARNING and leave the existing
-  reactive `_execute_stop_exit` path as fallback.
-- **Tests (red first):** paper-mode single UP fill → `stop_order_id` set, status
-  RESTING, `stop_side == "UP"`; same for DOWN.
-- **Verify:** `python -m pytest tests/test_stop_orders.py tests/test_live_trader.py -q`
+## T1 — Failing tests first (TDD red)
+- **Files:** `tests/test_orders_trades_table.py`
+- **Do:** Extend `test_engine_order_resolution_and_cleanup`: give the mock CLOB order
+  `"size_matched": 5` (+ a second CLOB order with no `size_matched` key) and assert
+  `clob_order["filled"] == 5.0`, missing-key order `["filled"] == 0.0`, and
+  `engine_order["filled"] == 0.0`. Confirm RED (KeyError / assertion failure).
+- **Verify:** `python -m pytest tests/test_orders_trades_table.py::test_engine_order_resolution_and_cleanup -q` (must FAIL)
 
-## T3 — Pair-completion cancellation (OCO Case A)
-- **Files:** `strategy/live_trader.py`
-- **Do:** In the pair-completion block (before `PAIR_MERGED` accounting), cancel the
-  resting stop: live → `cancel_live_order(stop_order_id)`; paper → just reset.
-  Clear `stop_order_id/status/price/side` regardless of cancel result.
-- **Tests (red first):** single UP fill places stop → DOWN fills → `cancel_live_order`
-  called with the stop id (live, mocked) and stop fields cleared; `PAIR_MERGED` reached.
-- **Verify:** `python -m pytest tests/test_stop_orders.py -q`
+## T2 — CLOB `size_matched` → `filled` mapping
+- **Files:** `strategy/live_trader.py` (:1357-1369 dict)
+- **Do:** Add `"filled": float(o.get("size_matched", 0.0) or 0.0)` to the CLOB_API
+  `orders.append({...})`. Wrap in try-tolerant coercion: unparseable string →
+  `0.0`, never raise out of the poll loop.
+- **Verify:** `python -m pytest tests/test_orders_trades_table.py::test_engine_order_resolution_and_cleanup -q` (CLOB asserts green)
 
-## T4 — Stop-fill detection → entry cancel + STOP_EXIT (OCO Case B)
-- **Files:** `strategy/live_trader.py`
-- **Do:** Per-tick detection while single-leg filled and not exited:
-  live → poll `client.get_order(stop_id)` (MATCHED/FILLED or size_matched ≥ shares);
-  paper → `bid <= stop_price`. On fill: set stop status FILLED, delegate accounting
-  to `_execute_stop_exit(side, exit_price=stop_price)` which already cancels the
-  opposite entry and records the `STOP_EXIT` trade.
-- **Tests (red first):** paper mode: UP filled, stop at fill−0.05, drop bid →
-  opposite entry cancelled, trade with action `STOP_EXIT` recorded, status
-  `STOP_EXIT`; live mode: mocked `get_order` returns MATCHED → same.
-- **Verify:** `python -m pytest tests/test_stop_orders.py tests/test_live_trader.py -q`
+## T3 — Engine-tracked dicts + cancelled passthrough
+- **Files:** `strategy/live_trader.py` (:1378, :1393 ENGINE_ACTIVE; :1409 ENGINE_STOP;
+  :1424, :1439 ENGINE_ADVANCE; :1464, :1481 PAPER_SIMULATION; :1496-1505 passthrough)
+- **Do:** Add `"filled": 0.0` to each of the 7 engine-tracked dict literals.
+  On the cancelled passthrough, apply `.setdefault("filled", 0.0)` to the copied
+  dict before append so old retained rows also satisfy the contract.
+- **Verify:** `python -m pytest tests/test_orders_trades_table.py -q` (full file green)
 
-## T5 — Window rollover cleanup (OCO Case C)
-- **Files:** `strategy/live_trader.py`
-- **Do:** In `_handle_window_rollover`, cancel any resting stop (live) alongside the
-  entry-order cancels; reset all stop fields in the new-window reset block.
-- **Tests (red first):** stop resting → rollover → cancel called (live, mocked),
-  stop fields reset to defaults in both modes.
-- **Verify:** `python -m pytest tests/test_stop_orders.py tests/test_live_trader.py -q`
+## T4 — Node render test: Filled cell shows "5"
+- **Files:** `tests/test_orders_trades_table.py` (new Node-harness test beside
+  `test_cockpit_dom_rendering_with_state`)
+- **Do:** Feed `renderCockpitUI` a mock state whose open_orders include
+  `{..., status: 'FILLED', filled: 5, ...}` and one `{..., status: 'OPEN'}` without
+  `filled`; assert Orders body HTML contains a Filled cell with `>5<` and no
+  regression on the OPEN row (`>0<`).
+- **Verify:** `python -m pytest tests/test_orders_trades_table.py -q` (all green; skip if Node absent only with evidence)
 
-## T6 — Open orders + dashboard visibility
-- **Files:** `strategy/live_trader.py`, `tests/test_stop_orders.py`
-- **Do:** In `get_open_orders_list()`, merge the resting stop (when
-  `stop_order_id` and status not in CANCELLED/FILLED/NONE) as
-  `{"side": "SELL (UP|DOWN)", "status": stop_order_status, "source": "ENGINE_STOP"}`.
-  Dashboard orders table consumes this list already — verify rendering with an
-  integration check only if a schema field is missing.
-- **Tests (red first):** single-leg fill → `get_open_orders_list()` contains the
-  stop with source ENGINE_STOP and side SELL (UP).
-- **Verify:** `python -m pytest tests/test_stop_orders.py tests/test_orders_trades_table.py -q`
-
-## T7 — Full regression + self-audit
+## T5 — Full regression + self-audit
 - **Files:** —
-- **Do:** Run the whole suite, fix fallout, review the diff (correctness, edge cases,
-  lock discipline), verify no leaked orders on every path.
-- **Verify:** `python -m pytest -q` (all 186+ existing + new tests green)
+- **Do:** Run the whole suite; review the diff for contract compliance (no price/size/
+  status change, additive key only), edge cases (`None`/missing/garbage
+  `size_matched`), and lock discipline around the passthrough block.
+- **Verify:** `python -m pytest -q` (all green)
 
 ## Ship
-- Branch `feat/pre-placed-stop-orders`, conventional commit
-  `feat(live-trader): pre-place resting stop-loss orders on single-leg fill`,
+- Branch `fix/filled-column-size-matched`, conventional commit
+  `fix(live-trader): map CLOB size_matched to filled in open orders`,
   PR titled `@coderabbitai` with `@coderabbitai summary` in the body.
+  Unblocks #91 (then #97).
