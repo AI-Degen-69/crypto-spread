@@ -13,6 +13,12 @@ reentry_mid: Optional[float] = None
 reentry_drift: Optional[float] = None
 ```
 
+> **Historical contract (kept for the record).** The values below predate the
+> #89 merge: `min_requote_remaining_sec` is now `300.0`, the time gate also
+> scales with the window via `reentry_min_remaining_pct = 0.30`, and the
+> re-entry helper takes `win_duration`. The authoritative contract is SPEC.md's
+> re-entry section and `LiveTraderEngine.__init__` itself.
+
 `LiveTraderEngine.__init__` (`strategy/live_trader.py:534-548`), new attributes:
 ```python
 self.reentry_drift_band: float = 0.015

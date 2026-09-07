@@ -1,8 +1,8 @@
 # CONSTRAINTS.md — Issue #95 Quality & Architectural Constraints
 
 ## 1. Testing & Zero Regressions
-- All existing tests stay green: `python -m pytest -q` (334 tests collected on
-  this branch today — see §5). Zero modifications to existing assertions.
+- All existing tests stay green: `python -m pytest -q` (**367 passed**, latest
+  verification run on this branch — see §5). Zero modifications to existing assertions.
 - The #92 gate tests (`tests/test_live_trader.py:1653-1733`) and the #92/#96 parity
   tests (`tests/test_entry_timeout.py:419-455` and below) must pass unchanged —
   the gate itself is not being weakened.
@@ -39,9 +39,10 @@ carries the three re-entry fields with `__post_init__` validation (`:155-168`),
 byte-identical to `LiveTraderEngine` (`strategy/live_trader.py:569-571`); the
 bullets below hold. See §5, item 9.
 
-- `reentry_drift_band`, `min_requote_remaining_sec` and `max_reentries_per_window`
-  carry byte-identical defaults in `LiveTraderEngine.__init__` and `BacktestParams`
-  (`0.015`, `300.0`, `0.30`, `1`). A change to one without the other is a defect.
+- `reentry_drift_band`, `min_requote_remaining_sec`, `reentry_min_remaining_pct`
+  and `max_reentries_per_window` carry byte-identical defaults in
+  `LiveTraderEngine.__init__` and `BacktestParams` (`0.015`, `300.0`, `0.30`, `1`).
+  A change to one without the other is a defect.
 - `exit_reversal`, `exit_thresh`, `entry_timeout_pct`, `max_start_elapsed_pct` and
   the `0.50 - offset` resting anchor are untouched by this issue.
 - `BacktestParams.__post_init__` validates the new fields in the existing style
@@ -64,8 +65,9 @@ bullets below hold. See §5, item 9.
 ## 5. Verification status (checked Sep 7, 2026 · feat/issue-95-drift-reentry)
 
 Gates: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py
-tests/test_backtest_engine.py tests/test_osc_dash_integration.py -q` → **189
-passed** (re-run after T5/T6 landed). Full collection: **334 tests / 18 files**.
+tests/test_backtest_engine.py tests/test_osc_dash_integration.py -q` (re-run after
+the round-1 review fixes) — full collection: **367 tests / 18 files** via
+`python -m pytest -q`.
 
 | # | Behavior | Implementation | Test (green) |
 |---|---|---|---|

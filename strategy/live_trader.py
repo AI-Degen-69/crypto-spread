@@ -1821,7 +1821,8 @@ class LiveTraderEngine:
                       entry_timeout_pct: Optional[float] = None,
                       min_requote_remaining_sec: Optional[float] = None,
                       reentry_drift_band: Optional[float] = None,
-                      reentry_min_remaining_pct: Optional[float] = None) -> Dict[str, Any]:
+                      reentry_min_remaining_pct: Optional[float] = None,
+                      max_reentries_per_window: Optional[int] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1872,6 +1873,8 @@ class LiveTraderEngine:
                 if reentry_drift_band is not None and abs(float(reentry_drift_band) - self.reentry_drift_band) > 1e-6:
                     param_changed = True
                 if reentry_min_remaining_pct is not None and abs(float(reentry_min_remaining_pct) - self.reentry_min_remaining_pct) > 1e-6:
+                    param_changed = True
+                if max_reentries_per_window is not None and int(max_reentries_per_window) != self.max_reentries_per_window:
                     param_changed = True
 
                 if param_changed:
@@ -1983,6 +1986,9 @@ class LiveTraderEngine:
                     # 0 or >= 1.0 falls back to the absolute knob alone: a gate of a
                     # whole window can never be satisfied.
                     self.reentry_min_remaining_pct = max(0.0, min(1.0, float(reentry_min_remaining_pct)))
+                if max_reentries_per_window is not None:
+                    # Non-negative; 0 disables re-entry entirely via the per-window cap.
+                    self.max_reentries_per_window = max(0, int(max_reentries_per_window))
                 # Re-entry is a narrower test than the adverse-open gate, never a
                 # looser one: a band at or above `exit_thresh` would let a window
                 # re-enter at the very drift the gate exists to reject. Applied
@@ -2996,6 +3002,11 @@ class LiveTraderEngine:
         # the effective band is capped here as well as clamped in `update_config()`
         # -- the attribute is also writable directly.
         band = min(self.reentry_drift_band, self.exit_thresh)
+        # `reentry_drift_band == 0` is documented as "disabled". Without this guard
+        # a two-sided mid of exactly 0.50 has drift 0 and would pass the
+        # `drift > band` test below, placing orders despite the disabled setting.
+        if band <= 0:
+            return False
         # `>= exit_thresh` is what the gate rejects, so re-entry must stay strictly
         # inside it -- otherwise a band configured at exactly `exit_thresh` would
         # re-enter at the very drift that skipped the window.

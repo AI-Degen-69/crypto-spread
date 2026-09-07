@@ -284,7 +284,7 @@ def api_backtest(
     filter_partial: bool = False,
     entry_timeout_pct: float = 0.10,
     reentry_drift_band: float = 0.015,
-    min_requote_remaining_sec: float = 60.0,
+    min_requote_remaining_sec: float = 300.0,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -1651,7 +1651,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         </div>
         <div class="form-group">
           <label>Min Window Left for Re-Entry (s)</label>
-          <input type="number" min="0" step="5" id="btRequoteMin" value="60">
+          <input type="number" min="0" step="5" id="btRequoteMin" value="300">
         </div>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px">
@@ -2654,7 +2654,7 @@ async function runBacktest(fileOverride){
 
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
     const reentryBand = getVal('btReentryBand', 0.015);
-    const requoteMin = getVal('btRequoteMin', 60.0);
+    const requoteMin = getVal('btRequoteMin', 300.0);
 
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
@@ -2771,7 +2771,7 @@ function resetBtParams(){
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
   $('btReentryBand').value = "0.015";
-  $('btRequoteMin').value = "60";
+  $('btRequoteMin').value = "300";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
   runBacktest();

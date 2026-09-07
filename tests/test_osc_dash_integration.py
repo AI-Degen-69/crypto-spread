@@ -435,7 +435,7 @@ def test_api_backtest_reentry_knob_a_b(tmp_path, monkeypatch):
     on = client.get(base).json()
     assert on["overall"]["reentry_count"] == 1
     assert on["params"]["reentry_drift_band"] == 0.015
-    assert on["params"]["min_requote_remaining_sec"] == 60.0
+    assert on["params"]["min_requote_remaining_sec"] == 300.0
 
     # Band 0 (re-entry off): the same window stays skipped.
     off = client.get(base + "&reentry_drift_band=0").json()
@@ -453,7 +453,7 @@ def test_api_backtest_reentry_knob_a_b(tmp_path, monkeypatch):
     # Out-of-range band is clamped into 0..0.5 and echoed back.
     clamped = client.get(base + "&reentry_drift_band=0.9").json()
     assert clamped["params"]["reentry_drift_band"] == 0.5
-    assert clamped["params"]["min_requote_remaining_sec"] == 60.0
+    assert clamped["params"]["min_requote_remaining_sec"] == 300.0
 
 
 

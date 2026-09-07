@@ -1767,6 +1767,38 @@ def _skip_window_on_adverse_open(engine, slug: str, now: float):
     return m
 
 
+def test_reentry_zero_band_disables_reentry_even_at_exact_mid():
+    """`reentry_drift_band == 0` means disabled: a mid of exactly 0.50 must NOT re-enter.
+
+    Without the non-positive-band guard the drift-0 tick would pass `drift <= band`
+    and place orders despite the documented "0 = off" semantics.
+    """
+    engine = _reentry_engine()
+    engine.reentry_drift_band = 0.0
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.adverse_open is True
+    assert m.reentry_count == 0
+    assert m.status == "DRIFT_SKIPPED"
+
+
+def test_update_config_accepts_max_reentries_per_window():
+    """update_config exposes the per-window cap like the other re-entry knobs."""
+    engine = _drift_engine()
+    engine.is_running = False  # parameter changes are rejected while running
+    res = engine.update_config(max_reentries_per_window=3)
+    assert engine.max_reentries_per_window == 3
+    assert res["params"]["max_reentries_per_window"] == 3
+
+    engine.update_config(max_reentries_per_window=-2)
+    assert engine.max_reentries_per_window == 0
+
+
 def test_reentry_after_mid_reverts_inside_band():
     """A drift-skipped window re-quotes once the mid comes back near 0.50."""
     engine = _reentry_engine()

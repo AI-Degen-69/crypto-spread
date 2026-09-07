@@ -836,6 +836,24 @@ def test_backtest_reentry_params_match_live_defaults():
     assert bt.max_reentries_per_window == live.max_reentries_per_window == 1
 
 
+def test_backtest_zero_band_disables_reentry_even_at_exact_mid():
+    """`reentry_drift_band == 0` means disabled: a replay mid of exactly 0.50 (drift 0)
+    must not re-enter — mirrors the live engine's non-positive-band guard."""
+    snaps = [
+        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
+        # 100s in: mid back at exactly 0.50 -> drift 0 <= band 0, but a
+        # non-positive band must disable re-entry, not admit it.
+        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
+                   tape=_fill_tape()),
+    ]
+    res = _simulate_window(snaps, BacktestParams(
+        offset=0.02, entry_timeout_pct=1.0, reentry_drift_band=0.0))
+    assert res.filled_up is False
+    assert res.filled_down is False
+    assert res.pair_captured is False
+    assert res.reentry_count == 0
+
+
 def test_backtest_rejects_out_of_range_reentry_params():
     """The three re-entry knobs validate in the existing BacktestParams style."""
     with pytest.raises(ValueError):

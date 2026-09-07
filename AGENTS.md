@@ -10,7 +10,7 @@ Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP.
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 328 tests across 18 files
+pip install pytest                          # dev: 367 tests across 18 files (python -m pytest -q)
 python -m pytest -q                         # all tests
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test
@@ -32,7 +32,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `live_trader.py` (order flow & execution engine), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `docs/` — `operations.md` (runbook for capture + replay), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `rtds-clob-latency-audit.md`, `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report), `agent-skills-guide.md` + `ecc-flow-guide.md` (agent tooling).
-- `tests/` — 328 tests across 18 files: `test_live_trader.py` (73), `test_backtest_engine.py` (48), `test_osc_dash_integration.py` (40), `test_orders_trades_table.py` (22), `test_entry_timeout.py` (22), `test_streaming.py` (18), `test_stop_orders.py` (18), `test_monitor_stream_latency.py` (17), `test_verify_tick_data.py` (14), `test_live_trader_streaming.py` (11), `test_series.py` (9), `test_sweep_backtest.py` (8), `test_collect_ticks_smoke.py` (8), `test_audit_all_markets.py` (7), `test_backtest_index.py` (5), `test_rebuild_windows.py` (4), `test_crypto_spread_menu.py` (3), `test_docstrings.py` (1). Targeted gates for live-trader work: `test_live_trader.py`, `test_entry_timeout.py`, `test_backtest_engine.py`, `test_osc_dash_integration.py`.
+- `tests/` — 367 tests across 18 files (per-file counts drift; run `python -m pytest --collect-only -q` for the current split). Targeted gates for live-trader work: `test_live_trader.py`, `test_entry_timeout.py`, `test_backtest_engine.py`, `test_osc_dash_integration.py`.
 - Other dirs: `bot/paper_bot.py` (paper-trading reference bot), `ten-bankrolls/` (bankroll-farm experiments: `run_one.py`, `watcher.py`), `gan-harness/` (GAN eval harness), `tasks/plan.md` + `tasks/todo.md` (working plans).
 
 ## Data Model / Classification

@@ -14,7 +14,7 @@ import random
 import statistics
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
 
@@ -255,21 +255,10 @@ def generate_sensitivity_grid(
     reentry_bands = [0.000, 0.005, 0.010, 0.015, 0.020, 0.030, 0.050]
     for b in reentry_bands:
         if b != base.reentry_drift_band:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=base.queue_gate,
-                pair_cost_gate=base.pair_cost_gate,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                fill_model=base.fill_model,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-                reentry_drift_band=b,
-                min_requote_remaining_sec=base.min_requote_remaining_sec,
-                max_reentries_per_window=base.max_reentries_per_window,
-            )
+            # Clone the full baseline so a custom `base` keeps every other field
+            # (entry_timeout_pct, reentry_min_remaining_pct, ...) — only the knob
+            # under test changes.
+            p = replace(base, reentry_drift_band=b)
             grid.append((f"reentry_band={b:.3f}", p))
 
     # 8. Minimum window seconds left for re-entry (issue #95). 0 disables the
@@ -277,21 +266,7 @@ def generate_sensitivity_grid(
     requote_mins = [0.0, 15.0, 30.0, 60.0, 120.0, 240.0]
     for rm in requote_mins:
         if rm != base.min_requote_remaining_sec:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=base.queue_gate,
-                pair_cost_gate=base.pair_cost_gate,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                fill_model=base.fill_model,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-                reentry_drift_band=base.reentry_drift_band,
-                min_requote_remaining_sec=rm,
-                max_reentries_per_window=base.max_reentries_per_window,
-            )
+            p = replace(base, min_requote_remaining_sec=rm)
             grid.append((f"requote_min={rm:.0f}", p))
 
     return grid

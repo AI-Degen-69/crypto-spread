@@ -87,7 +87,9 @@ and settable through `update_config()` plus the `/api/live/config` payload.
   consequence is deliberate and tested
   (`test_reentry_blocked_by_default_requote_gate_on_5m`): a 5m window is 300s
   long, so at the default **no 5m market can ever re-enter** — only 15m windows,
-  and only in their first half. Two of the four reverting markets in the issue's
+  and only in their first half. *(Historical: superseded below — the gate now
+  scales with the window, so 5m markets re-enter in their first 90s.)* Two of
+  the four reverting markets in the issue's
   evidence table are 5m, so an operator who wants those recovered must lower the
   knob (60s is the smallest value in which two legs can realistically pair).
   Raising it back is the one-line `update_config(min_requote_remaining_sec=...)`
@@ -109,5 +111,5 @@ and settable through `update_config()` plus the `/api/live/config` payload.
 ## Acceptance criteria
 See issue #95; each maps to a test in `tests/test_live_trader.py` (live, landed)
 and `tests/test_entry_timeout.py` (backtest parity, landed at `:663-734`).
-`python -m pytest -q` passes (334 tests collected; the four targeted gates are
-189 passed).
+`python -m pytest -q` passes (**367 tests / 18 files**; the four targeted gates
+run green — see CONSTRAINTS.md §5 for the latest gate tally).

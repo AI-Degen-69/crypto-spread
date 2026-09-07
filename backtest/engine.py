@@ -422,7 +422,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # real drift is still past `exit_thresh`. None means one leg is
             # one-sided, which is not evidence the skew has closed.
             reentry_mid = _two_sided_mid(ub, db)
+            # `reentry_drift_band == 0` is documented as "disabled"; without the
+            # positive-band guard a two-sided mid of exactly 0.50 has drift 0 and
+            # would pass the `<= band` test below, mirroring the live engine's guard.
             if (reentry_mid is not None
+                    and params.reentry_drift_band > 0
                     and remaining >= min_remaining
                     and (entry_timeout_cutoff is None or elapsed < entry_timeout_cutoff)
                     and abs(reentry_mid - 0.50) <= min(params.reentry_drift_band, exit_thr)
