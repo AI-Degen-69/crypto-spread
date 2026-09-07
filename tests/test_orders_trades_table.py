@@ -1466,4 +1466,97 @@ def test_filled_orders_promoted_to_positions_dom():
     assert "FILLED_TO_POSITIONS_DOM_TESTS_PASSED" in res.stdout
 
 
+@requires_node
+def test_orders_render_preserves_backend_group_order_dom():
+    """Verify the render keeps backend row order: current-window groups above next-window groups (Issue #97)."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+    // Hermetic bootstrap: dashboard top-level code must never reach the host network.
+    const setInterval = () => 0;
+    const clearInterval = () => {{}};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {{}};
+    const fetch = () => Promise.resolve({{ ok: true, json: async () => ({{}}) }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
+
+    {js_code}
+
+    // Backend-sorted payload: current-window rows, then next-window pre-quotes, then cancelled.
+    const mockState = {{
+      is_running: true,
+      markets: {{}},
+      open_orders: [
+        {{ order_id: 'ord-btc-up', market: 'BTC 5m', market_slug: 'btc-up-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'OPEN', time: '14:00:00' }},
+        {{ order_id: 'ord-eth-up', market: 'ETH 5m', market_slug: 'eth-up-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'OPEN', time: '14:00:01' }},
+        {{ order_id: 'ord-btc-nxt', market: 'BTC 5m (Next Window)', market_slug: 'btc-up-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'ADVANCE_PRE_QUOTE', time: '14:00:02' }},
+        {{ order_id: 'ord-xrp-old', market: 'XRP 5m', market_slug: 'xrp-up-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'CANCELLED', time: '14:00:03' }}
+      ],
+      open_positions: [],
+      trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+
+    // Current-window BTC group must render above its next-window group.
+    const btcPos = ordHtml.indexOf('BTC 5m \\u2197');
+    const nxtPos = ordHtml.indexOf('(Next Window)');
+    if (btcPos === -1 || nxtPos === -1 || !(btcPos < nxtPos)) {{
+      throw new Error('Current-window group must precede next-window group: ' + ordHtml);
+    }}
+
+    // Cancelled group sinks below pre-quotes.
+    const cancelPos = ordHtml.indexOf('CANCELLED');
+    if (cancelPos === -1 || !(nxtPos < cancelPos)) {{
+      throw new Error('Cancelled group must follow pre-quote groups: ' + ordHtml);
+    }}
+
+    // Reordering must not change the badge: 4 resting rows in, 4 counted.
+    if (elements['otOrdersCount'].textContent !== '4') {{
+      throw new Error('otOrdersCount should be 4, got: ' + elements['otOrdersCount'].textContent);
+    }}
+
+    console.log('ORDERS_GROUP_ORDER_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node orders-group-order test failed: {res.stderr}\n{res.stdout}"
+    assert "ORDERS_GROUP_ORDER_DOM_TESTS_PASSED" in res.stdout
+
+
 

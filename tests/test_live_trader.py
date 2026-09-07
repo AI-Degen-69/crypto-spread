@@ -1543,3 +1543,100 @@ def test_adverse_gate_snapshot_resets_on_window_rollover():
     assert m.open_gate_evaluated is False
     assert m.open_mid is None
     assert m.open_drift == 0.0
+
+
+# --- Issue #97: deterministic Open Orders ranking ---
+
+def _order_lane_market(engine, slug, prefix, with_stop=True, with_advance=True, with_cancelled=True):
+    """Populate one market with a full lane of order state (active/stop/advance/cancelled)."""
+    m = engine.markets[slug]
+    m.order_id_up = f"{prefix}_up"
+    m.order_status_up = "RESTING"
+    m.order_id_down = f"{prefix}_dn"
+    m.order_status_down = "RESTING"
+    if with_stop:
+        m.stop_order_id = f"{prefix}_stop"
+        m.stop_order_status = "RESTING"
+        m.stop_price = 0.43
+        m.stop_side = "UP"
+    if with_advance:
+        m.next_order_id_up = f"{prefix}_nxt_up"
+        m.next_order_id_down = f"{prefix}_nxt_dn"
+        m.next_quoted = True
+    if with_cancelled:
+        m.cancelled_orders.append({
+            "order_id": f"{prefix}_old_cancel",
+            "market": m.label,
+            "market_slug": m.market_slug or "",
+            "series_slug": m.slug,
+            "status": "CANCELLED",
+            "source": "PAPER_SIMULATION",
+            "time": "13:59:00",
+        })
+    return m
+
+
+def test_open_orders_sorted_current_above_next_window():
+    """get_open_orders_list ranks live > stop > pre-quote > cancelled (Issue #97)."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine()
+    assert not engine.is_running  # stopped: no paper-sim rows, deterministic lanes only
+
+    _order_lane_market(engine, "btc-up-or-down-5m", "eng_btc")
+    _order_lane_market(engine, "eth-up-or-down-5m", "eng_eth")
+
+    # A venue CLOB row appends first pre-sort; it must rank with the live block by series.
+    mock_client = MagicMock()
+    mock_client.get_orders.return_value = [{
+        "id": "clob_sol_up",
+        "market": "SOL 5m",
+        "market_slug": "sol-up-down-5m",
+        "series_slug": "sol-up-or-down-5m",
+        "side": "BUY (UP)",
+        "price": 0.47,
+        "original_size": 5.0,
+        "size_matched": 0.0,
+        "status": "OPEN",
+    }]
+    engine.get_clob_client = MagicMock(return_value=mock_client)
+
+    ids = [o["order_id"] for o in engine.get_open_orders_list()]
+    assert ids == [
+        # Rank 0: current-window live, series order, Up before Down
+        "eng_btc_up", "eng_btc_dn", "eng_eth_up", "eng_eth_dn", "clob_sol_up",
+        # Rank 1: resting stop-loss
+        "eng_btc_stop", "eng_eth_stop",
+        # Rank 2: next-window pre-quotes
+        "eng_btc_nxt_up", "eng_btc_nxt_dn", "eng_eth_nxt_up", "eng_eth_nxt_dn",
+        # Rank 3: cancelled rows, any source
+        "eng_btc_old_cancel", "eng_eth_old_cancel",
+    ]
+
+
+def test_open_orders_rank_cancelled_any_source_last():
+    """A CANCELLED venue row sinks below pre-quotes even though it appended first."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine()
+    _order_lane_market(engine, "btc-up-or-down-5m", "eng_btc",
+                       with_stop=False, with_advance=True, with_cancelled=False)
+
+    mock_client = MagicMock()
+    mock_client.get_orders.return_value = [{
+        "id": "clob_btc_cancelled",
+        "market": "BTC 5m",
+        "market_slug": "btc-up-down-5m",
+        "series_slug": "btc-up-or-down-5m",
+        "side": "BUY (UP)",
+        "price": 0.48,
+        "original_size": 5.0,
+        "size_matched": 0.0,
+        "status": "CANCELLED",
+    }]
+    engine.get_clob_client = MagicMock(return_value=mock_client)
+
+    ids = [o["order_id"] for o in engine.get_open_orders_list()]
+    assert ids == [
+        "eng_btc_up", "eng_btc_dn",
+        "eng_btc_nxt_up", "eng_btc_nxt_dn",
+        "clob_btc_cancelled",
+    ]
