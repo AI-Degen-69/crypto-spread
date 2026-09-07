@@ -620,3 +620,21 @@ def test_backtest_late_start_threshold_matches_live_default():
 def test_backtest_rejects_out_of_range_max_start_elapsed_pct():
     with pytest.raises(ValueError):
         BacktestParams(max_start_elapsed_pct=1.5)
+
+
+def test_live_trader_shifting_start_ts_does_not_re_arm_a_quoted_window():
+    """A market loader with an unstable start_ts must not turn a live window late."""
+    engine = _late_start_engine(entry_timeout_pct=1.0)
+    slug = "btc-up-or-down-5m"
+
+    engine._update_market_strategy(slug, _poll(1000.0), now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_status_up == "RESTING"
+
+    # Same window, same condition id, but start_ts drifts and 200s have passed.
+    engine._update_market_strategy(slug, _poll(1000.5), now=1205.0)
+
+    assert mstate.late_start_skip is False
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.order_status_up == "RESTING"
+    assert mstate.order_status_down == "RESTING"

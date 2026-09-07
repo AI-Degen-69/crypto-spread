@@ -2969,10 +2969,20 @@ class LiveTraderEngine:
         )
         if mstate.first_seen_start_ts != mstate.start_ts:
             mstate.first_seen_start_ts = mstate.start_ts
-            mstate.first_tick_elapsed_sec = elapsed_sec
-            mstate.late_start_skip = (
-                late_start_cutoff_sec is not None and elapsed_sec >= late_start_cutoff_sec
+            # Never re-arm a window the engine is already trading. Not every market
+            # loader reports a stable `start_ts` (`strategy/markets.py:170` derives one
+            # from `time.time()`), and a shifting value must not turn a live, quoted
+            # window into a late start half way through it.
+            window_engaged = bool(
+                mstate.order_id_up or mstate.order_id_down
+                or mstate.filled_up or mstate.filled_down
+                or mstate.order_status_up == "RESTING" or mstate.order_status_down == "RESTING"
             )
+            if not window_engaged:
+                mstate.first_tick_elapsed_sec = elapsed_sec
+                mstate.late_start_skip = (
+                    late_start_cutoff_sec is not None and elapsed_sec >= late_start_cutoff_sec
+                )
         first_tick_elapsed = (
             mstate.first_tick_elapsed_sec if mstate.first_tick_elapsed_sec is not None else elapsed_sec
         )
