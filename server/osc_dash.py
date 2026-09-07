@@ -843,7 +843,12 @@ async def api_live_control(request: Request):
     elif action == "restart":
         engine.restart()
     elif action == "reset_pnl":
-        engine.reset_pnl()
+        reset_res = engine.reset_pnl()
+        if isinstance(reset_res, dict) and not reset_res.get("ok", True):
+            state = engine.get_state()
+            state["ok"] = False
+            state["error"] = reset_res.get("message") or reset_res.get("error") or "Reset refused"
+            return JSONResponse(status_code=409, content=state)
     elif action == "demo_data":
         engine.seed_demo_data()
     elif action == "sync_wallet_trades":
@@ -3640,6 +3645,9 @@ async function resetCockpitPnL() {
       body: JSON.stringify({ action: 'reset_pnl' }),
     });
     const st = await res.json();
+    if (!res.ok || st.error) {
+      alert(st.error || 'Reset refused: stop the engine before RESET P&L while orders are outstanding.');
+    }
     cockpitState = st;
     resetToastState();
     renderCockpitUI(st);
