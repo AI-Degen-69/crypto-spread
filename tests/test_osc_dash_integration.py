@@ -363,12 +363,97 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert "trades_sample" in data
     assert len(data["trades_sample"]) == 4
     assert data["n_windows"] == 4
+    # Drift-skip re-entry telemetry is present (0 here: no adverse-open skips in
+    # this healthy fixture) at both the overall and per-series levels.
+    assert "reentry_count" in data["overall"]
+    assert data["overall"]["reentry_count"] == 0
+    assert "reentry_pnl_cents" in data["overall"]
+    assert data["overall"]["reentry_pnl_cents"] == 0.0
+    btc_series = data["per_series"]["btc-up-or-down-5m"]
+    assert "reentry_count" in btc_series
+    assert "reentry_pnl_cents" in btc_series
+    assert btc_series["reentry_count"] == 0
+    assert btc_series["reentry_pnl_cents"] == 0.0
 
     # Test with fill_model=cross
     url_cross = "/api/backtest?file=fake_round.jsonl&offset=0.02&fill_model=cross"
     res_cross = client.get(url_cross)
     assert res_cross.status_code == 200
     assert res_cross.json()["params"]["fill_model"] == "cross"
+
+
+def test_api_backtest_reentry_telemetry(tmp_path, monkeypatch):
+    """A drift-skipped window that reverts reports recovered windows in the API."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_reentry.jsonl"
+    cid = "0xRE_000"
+    # t=1000: adverse open (synthetic two-sided mid ~0.43 -> drift 0.07 >= 0.05)
+    # latches the drift gate. t=1011: mid back at 0.50 (21s in, inside the 30s
+    # entry-timeout cutoff) with both legs filling at the 0.48 resting price.
+    ticks = [
+        _make_fake_tick(1000.0, cid, "btc-updown-5m-2000", "btc-up-or-down-5m", 0.35),
+        _make_fake_tick(1011.0, cid, "btc-updown-5m-2000", "btc-up-or-down-5m", 0.50,
+                        tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100},
+                              {"asset": f"{cid}_dn", "price": 0.48, "size": 100}]),
+    ]
+    with open(fake_file, "w", encoding="utf-8") as f:
+        for t in ticks:
+            f.write(json.dumps(t) + "\n")
+
+    data = client.get(
+        "/api/backtest?file=fake_reentry.jsonl&fill_model=tape"
+    ).json()
+    assert data["n_windows"] == 1
+    assert data["overall"]["reentry_count"] == 1
+    assert data["overall"]["reentry_pnl_cents"] == pytest.approx(20.0, abs=1e-6)
+    btc = data["per_series"]["btc-up-or-down-5m"]
+    assert btc["windows"] == 1
+    assert btc["reentry_count"] == 1
+    assert btc["reentry_pnl_cents"] == pytest.approx(20.0, abs=1e-6)
+
+
+def test_api_backtest_reentry_knob_a_b(tmp_path, monkeypatch):
+    """The re-entry query knobs flip behavior: band 0 or a huge requote minimum disable."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_reentry_knobs.jsonl"
+    cid = "0xRE_001"
+    ticks = [
+        _make_fake_tick(1000.0, cid, "btc-updown-5m-2001", "btc-up-or-down-5m", 0.35),
+        # Mid reverts to 0.499 (drift 0.001): inside the default 0.015 band but
+        # outside band 0, so "re-entry off" is distinguishable from "on".
+        _make_fake_tick(1011.0, cid, "btc-updown-5m-2001", "btc-up-or-down-5m", 0.499,
+                        tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100},
+                              {"asset": f"{cid}_dn", "price": 0.48, "size": 100}]),
+    ]
+    with open(fake_file, "w", encoding="utf-8") as f:
+        for t in ticks:
+            f.write(json.dumps(t) + "\n")
+
+    base = "/api/backtest?file=fake_reentry_knobs.jsonl&fill_model=tape"
+
+    # Default band 0.015 + 60s minimum: the skipped window is recovered.
+    on = client.get(base).json()
+    assert on["overall"]["reentry_count"] == 1
+    assert on["params"]["reentry_drift_band"] == 0.015
+    assert on["params"]["min_requote_remaining_sec"] == 60.0
+
+    # Band 0 (re-entry off): the same window stays skipped.
+    off = client.get(base + "&reentry_drift_band=0").json()
+    assert off["overall"]["reentry_count"] == 0
+
+    # The time gate is now the tighter of `min_requote_remaining_sec` and
+    # `reentry_min_remaining_pct` of the window (issue #95), so raising the absolute
+    # knob alone can no longer block a window that still has 30% of itself left --
+    # which is the whole point of the change for 5m markets. Blocking by time is
+    # covered against the engine directly in
+    # tests/test_entry_timeout.py::test_backtest_no_reentry_below_min_requote_remaining_sec.
+    still_on = client.get(base + "&min_requote_remaining_sec=300").json()
+    assert still_on["overall"]["reentry_count"] == 1
+
+    # Out-of-range band is clamped into 0..0.5 and echoed back.
+    clamped = client.get(base + "&reentry_drift_band=0.9").json()
+    assert clamped["params"]["reentry_drift_band"] == 0.5
+    assert clamped["params"]["min_requote_remaining_sec"] == 60.0
 
 
 

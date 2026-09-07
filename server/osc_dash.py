@@ -283,6 +283,8 @@ def api_backtest(
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
     entry_timeout_pct: float = 0.10,
+    reentry_drift_band: float = 0.015,
+    min_requote_remaining_sec: float = 60.0,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -306,6 +308,11 @@ def api_backtest(
     if filter_partial and max_start_delay <= 0:
         max_start_delay = 5.0
 
+    # Drift-skip re-entry (issue #95) query knobs, clamped like the live
+    # engine's update_config: band 0 disables re-entry, 0 <= band <= 0.50.
+    reentry_drift_band = max(0.0, min(0.50, reentry_drift_band))
+    min_requote_remaining_sec = max(0.0, min_requote_remaining_sec)
+
     params = BacktestParams(
         offset=offset,
         queue_gate=queue,
@@ -317,6 +324,8 @@ def api_backtest(
         merge_gas_usd=gas,
         max_start_delay_sec=max_start_delay,
         entry_timeout_pct=entry_timeout_pct,
+        reentry_drift_band=reentry_drift_band,
+        min_requote_remaining_sec=min_requote_remaining_sec,
     )
 
     if not TICKS_DIR.exists():
@@ -371,6 +380,8 @@ def api_backtest(
                 "fill_model": params.fill_model,
                 "gas": params.merge_gas_usd,
                 "max_start_delay": params.max_start_delay_sec,
+                "reentry_drift_band": params.reentry_drift_band,
+                "min_requote_remaining_sec": params.min_requote_remaining_sec,
             },
             "overall": {
                 "windows": 0,
@@ -442,6 +453,8 @@ def api_backtest(
             "monotonic": 0,
             "flat": 0,
             "total_pnl_cents": 0.0,
+            "reentry_count": 0,
+            "reentry_pnl_cents": 0.0,
         }
     )
 
@@ -461,6 +474,9 @@ def api_backtest(
         elif w.class_label == "flat":
             a["flat"] += 1
         a["total_pnl_cents"] += win_pnl
+        if w.reentry_count > 0:
+            a["reentry_count"] += 1
+            a["reentry_pnl_cents"] += win_pnl
 
         if len(trades_sample) < 50:
             exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
@@ -482,6 +498,8 @@ def api_backtest(
     total_pairs = sum(a["pairs"] for a in per_series_raw.values())
     total_exits = sum(a["exits"] for a in per_series_raw.values())
     total_pnl = sum(a["total_pnl_cents"] for a in per_series_raw.values())
+    total_reentry_count = sum(a["reentry_count"] for a in per_series_raw.values())
+    total_reentry_pnl = sum(a["reentry_pnl_cents"] for a in per_series_raw.values())
 
     overall = {
         "windows": total_windows,
@@ -501,6 +519,8 @@ def api_backtest(
         "win_rate": round(winning_windows / total_windows, 4)
         if total_windows
         else 0.0,
+        "reentry_count": total_reentry_count,
+        "reentry_pnl_cents": round(total_reentry_pnl, 2),
     }
 
     per_series_out = {}
@@ -515,6 +535,8 @@ def api_backtest(
                 "monotonic": 0,
                 "flat": 0,
                 "total_pnl_cents": 0.0,
+                "reentry_count": 0,
+                "reentry_pnl_cents": 0.0,
             },
         )
         n = a["windows"]
@@ -529,6 +551,8 @@ def api_backtest(
             "avg_pnl_cents": round(a["total_pnl_cents"] / n, 2) if n else 0.0,
             "oscillating": a["oscillating"],
             "monotonic": a["monotonic"],
+            "reentry_count": a["reentry_count"],
+            "reentry_pnl_cents": round(a["reentry_pnl_cents"], 2),
         }
 
     return {
@@ -545,6 +569,8 @@ def api_backtest(
             "size": size,
             "gas": gas,
             "max_start_delay_sec": max_start_delay,
+            "reentry_drift_band": round(reentry_drift_band, 4),
+            "min_requote_remaining_sec": round(min_requote_remaining_sec, 2),
         },
         "n_snaps": n_snaps,
         "n_windows": total_windows,
@@ -1619,6 +1645,14 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
             <option value="2.0">Strict Full Windows (≤2s delay)</option>
           </select>
         </div>
+        <div class="form-group">
+          <label>Drift Re-Entry Band (0 = off)</label>
+          <input type="number" min="0" max="0.5" step="0.005" id="btReentryBand" value="0.015">
+        </div>
+        <div class="form-group">
+          <label>Min Window Left for Re-Entry (s)</label>
+          <input type="number" min="0" step="5" id="btRequoteMin" value="60">
+        </div>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
@@ -1634,6 +1668,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <div class="box"><div class="lbl">Exit Stop Rate</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
         <div class="box"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
         <div class="box"><div class="lbl">Win Rate</div><div class="val" id="btWinRate">0.0%</div><div class="sub">Profitable windows</div></div>
+        <div class="box"><div class="lbl">Drift Re-Entry</div><div class="val" id="btReentry" style="color:var(--dim)">—</div><div class="sub" id="btReentryPnl">Windows recovered after drift skip</div></div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
         <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
@@ -2618,13 +2653,15 @@ async function runBacktest(fileOverride){
     const gas = getVal('btGas', 0.0);
 
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
+    const reentryBand = getVal('btReentryBand', 0.015);
+    const requoteMin = getVal('btRequoteMin', 60.0);
 
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -2642,6 +2679,11 @@ async function runBacktest(fileOverride){
     $('btExitsCount').textContent = `${ov.exits||0} exits`;
     $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
     $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
+    const reentryCount = ov.reentry_count || 0;
+    const reentryPnl = ov.reentry_pnl_cents || 0;
+    $('btReentry').textContent = reentryCount > 0 ? `${reentryCount} recovered` : '—';
+    $('btReentry').style.color = reentryCount > 0 ? 'var(--up)' : 'var(--dim)';
+    $('btReentryPnl').textContent = reentryCount > 0 ? fmtUsd(reentryPnl, true) : 'Windows recovered after drift skip';
 
     // Equity Curve Chart
     const eqData = data.equity_curve || [];
@@ -2686,9 +2728,9 @@ async function runBacktest(fileOverride){
     });
 
     // Per series table
-    let stbl = '<table class="tbl"><tr><th>Series</th><th>Windows</th><th>Pair Captured</th><th>Exits</th><th>Total P&L ($)</th><th>Avg / Window ($)</th><th>Oscillating</th><th>Monotonic</th></tr>';
+    let stbl = '<table class="tbl"><tr><th>Series</th><th>Windows</th><th>Pair Captured</th><th>Exits</th><th>Total P&L ($)</th><th>Avg / Window ($)</th><th>Recovered</th><th>Oscillating</th><th>Monotonic</th></tr>';
     for(const [k,v] of Object.entries(data.per_series||{})){
-      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td>${v.windows}</td><td style="color:var(--up);font-weight:700">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down)">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono">${fmtUsd(v.avg_pnl_cents,true)}</td><td>${v.oscillating}</td><td>${v.monotonic}</td></tr>`;
+      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td>${v.windows}</td><td style="color:var(--up);font-weight:700">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down)">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="color:${(v.reentry_count||0)>0?'var(--up)':'var(--dim)'}">${(v.reentry_count||0)>0 ? v.reentry_count + ' (' + fmtUsd(v.reentry_pnl_cents||0,true) + ')' : '—'}</td><td>${v.oscillating}</td><td>${v.monotonic}</td></tr>`;
     }
     stbl+='</table>';
     $('btSeriesTableWrap').innerHTML=stbl;
@@ -2728,6 +2770,8 @@ function resetBtParams(){
   $('btSize').value = "5";
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
+  $('btReentryBand').value = "0.015";
+  $('btRequoteMin').value = "60";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
   runBacktest();
@@ -4186,10 +4230,11 @@ function renderCockpitUI(st) {
               <span id="cockpit-spot-drift-${item.slug}" class="mono" style="font-weight:600;color:${(m.spot_drift || 0) > 0 ? 'var(--up)' : (m.spot_drift || 0) < 0 ? 'var(--down)' : 'var(--dim)'}">${(m.spot_drift || 0) >= 0 ? '+' : ''}${((m.spot_drift || 0) * 100).toFixed(2)}%</span>
             </div>
 
-            <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
+            <div class="mat-bids-box${bidsBoxDimCls}"${cancelReasonTooltip} style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-bottom:8px">
               <div style="font-size:9px;color:var(--faint);font-weight:700;text-transform:uppercase;margin-bottom:2px">Orders & Position</div>
               <div class="mono" style="font-size:11px;font-weight:600;color:var(--tx)">${posStr}</div>
               <div class="mono" style="font-size:10px;color:var(--dim)">${bidsTextHtml}</div>
+              ${cancelReason ? `<div class="mono" style="font-size:9.5px;margin-top:3px;letter-spacing:0.02em">${esc(cancelReason)}</div>` : ''}
             </div>
           </div>
 
@@ -4846,7 +4891,8 @@ function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol', 'btFillModel',
-    'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay'
+    'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
+    'btReentryBand', 'btRequoteMin'
   ];
 
   inputIds.forEach(id => {

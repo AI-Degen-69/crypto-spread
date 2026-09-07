@@ -3,21 +3,21 @@
 Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP.
 
 ## Stack
-- Python, `fastapi` + `uvicorn` + `requests` only (`requirements.txt:3`)
+- Python; deps per `requirements.txt`: `fastapi`, `uvicorn`, `requests`, `sse-starlette>=2.0.0`, `anyio>=4.0.0`
 - Data sources: `https://gamma-api.polymarket.com/events?series_slug` and `https://clob.polymarket.com/book`
 - PowerShell on Windows — join commands with `;` not `&&`
 
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 186 tests
+pip install pytest                          # dev: 328 tests across 18 files
 python -m pytest -q                         # all tests
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test
 python -m scripts.verify_tick_data run/ticks # verify tick integrity & data quality
 python -m scripts.rebuild_windows           # rebuild oscillation_windows.jsonl + summary from real run/ticks
 python -m scripts.backtest run/ticks --offset 0.02 --queue 50  # replay
-python -m scripts.sweep_backtest run/ticks --mode grid          # quant parameter sweep
+python -m scripts.sweep_backtest run/ticks --preset grid        # quant parameter sweep (1D: sensitivity; joint: grid; stochastic: random)
 python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 ```
 
@@ -28,11 +28,12 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `scripts/rebuild_windows.py` — reconstructs `run/oscillation_windows.jsonl` and `run/oscillation_summary.json` from `run/ticks/*.jsonl` full-depth data.
 - `scripts/measure_5m_oscillation.py` — legacy top-of-book collector (best_bid/ask/mid only). Kept for reference; `collect_ticks` is the source of truth for replay.
 - `backtest/` — offline replay engine. `engine.py:replay()` is pure (no venue calls), `index.py` builds per-file cid sidecars for slider-speed sweeps.
-- `server/osc_dash.py` — FastAPI dashboard on `:8802`. Routes: `/` + `/oscillation`, `/summary` + `/analysis`, `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/ticks/manifest`, `/api/ticks/verify`, `/api/backtest` (query: offset/queue/pair_cost/exit_* /fill_model), plus live execution & cockpit routes (`/api/live/account`, `/api/live/state`, `/api/live/control`, `/api/live/orders`, `/api/live/cancel_all`, `/api/live/cancel_order`, `/api/live/test_order`).
+- `server/osc_dash.py` — FastAPI dashboard on `:8802`. Pages: `/`, `/oscillation`, `/summary`, `/analysis`. APIs: `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/backtest` (query: offset/queue/pair_cost/exit_* /fill_model), `/api/ticks/manifest|verify|file|upload-chunk|upload-stream`, collector control `/api/collector/status|start|stop|poll-once`, live execution & cockpit `/api/live/account|state|control|orders|cancel_all|cancel_order|test_order|config|latency|stream`.
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `live_trader.py` (order flow & execution engine), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
-- `docs/` — `operations.md` (runbook for capture + replay), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report).
-- `tests/` — 186 tests across 14 test files: `test_backtest_engine.py` (48), `test_live_trader.py` (34), `test_osc_dash_integration.py` (23), `test_verify_tick_data.py` (14), `test_orders_trades_table.py` (8), `test_sweep_backtest.py` (8), `test_collect_ticks_smoke.py` (8), `test_entry_timeout.py` (8), `test_series.py` (9), `test_streaming.py` (9), `test_live_trader_streaming.py` (7), `test_backtest_index.py` (5), `test_rebuild_windows.py` (4), `test_docstrings.py` (1).
+- `docs/` — `operations.md` (runbook for capture + replay), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `rtds-clob-latency-audit.md`, `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report), `agent-skills-guide.md` + `ecc-flow-guide.md` (agent tooling).
+- `tests/` — 328 tests across 18 files: `test_live_trader.py` (73), `test_backtest_engine.py` (48), `test_osc_dash_integration.py` (40), `test_orders_trades_table.py` (22), `test_entry_timeout.py` (22), `test_streaming.py` (18), `test_stop_orders.py` (18), `test_monitor_stream_latency.py` (17), `test_verify_tick_data.py` (14), `test_live_trader_streaming.py` (11), `test_series.py` (9), `test_sweep_backtest.py` (8), `test_collect_ticks_smoke.py` (8), `test_audit_all_markets.py` (7), `test_backtest_index.py` (5), `test_rebuild_windows.py` (4), `test_crypto_spread_menu.py` (3), `test_docstrings.py` (1). Targeted gates for live-trader work: `test_live_trader.py`, `test_entry_timeout.py`, `test_backtest_engine.py`, `test_osc_dash_integration.py`.
+- Other dirs: `bot/paper_bot.py` (paper-trading reference bot), `ten-bankrolls/` (bankroll-farm experiments: `run_one.py`, `watcher.py`), `gan-harness/` (GAN eval harness), `tasks/plan.md` + `tasks/todo.md` (working plans).
 
 ## Data Model / Classification
 - Window classification in `scripts/measure_5m_oscillation.py:125` (`classify_window`): vs base 0.50, `max_up=max(mids)-0.50`, `max_down=0.50-min(mids)`. `oscillating` = both ≥0.02, `monotonic` = one ≥0.02, `flat` = neither. Thresholds at `OSC_THRESH_CENTS=[2.0,3.0]`.
@@ -44,7 +45,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `run/` is in `.gitignore`; missing `run/*.jsonl` means collector hasn't run — dashboard shows empty state, not an error.
 - Collector uses a pooled `requests.Session` with `(3.05, 5.0)` timeouts (connect, read) and `max_retries=0` — failed markets are skipped for that poll, not retried.
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
-- No `opencode.json` or `CLAUDE.md` exists — no hidden verification steps to run.
+- Context files: `AGENTS.md` (this file) is the canonical project rules; `CLAUDE.md` carries the Claude-facing subset; `CONSTRAINTS.md` holds the active issue's quality gates; `SPEC.md` the architecture. No `opencode.json` exists.
 - Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard.
 
 ## GBrain search guidance

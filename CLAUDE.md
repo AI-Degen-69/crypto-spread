@@ -1,5 +1,16 @@
 # crypto-spread
 
+## Rules of record
+
+- `AGENTS.md` — canonical project rules: stack, commands, repo structure, gotchas.
+  Load it first; it wins on conflict with this file.
+- `CONSTRAINTS.md` — active-issue quality & architectural gates (currently
+  issue #95 drift re-entry); treat as binding while that branch is live.
+- `SPEC.md` — architecture.
+
+This file only carries the Claude-facing additions (gbrain routing below); keep
+project facts in `AGENTS.md` so the two do not drift.
+
 ## GBrain search guidance
 
 This repo is indexed in gbrain as source `crypto-spread`, pinned by `.gbrain-source` in
