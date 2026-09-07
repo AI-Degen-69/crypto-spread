@@ -362,6 +362,90 @@ def test_cockpit_dom_rendering_with_state():
     assert "ALL_DOM_RENDER_TESTS_PASSED" in res.stdout
 
 
+@requires_node
+def test_filled_column_renders_size_matched_dom():
+    """Verify the Filled column renders backend-supplied filled (CLOB size_matched), not 0 (Issue #90)."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const setInterval = () => 0;
+    const clearInterval = () => {{}};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {{}};
+    const fetch = () => Promise.resolve({{ ok: true, json: async () => ({{}}) }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
+
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+
+    const window = {{ selectedBacktestFile: '', addEventListener: () => {{}}, location: {{ search: '' }} }};
+    globalThis.window = window;
+    const document = {{
+      getElementById: id => getOrCreate(id),
+      querySelectorAll: () => []
+    }};
+    const localStorage = {{
+      _data: {{}},
+      getItem(k) {{ return this._data[k] || null; }},
+      setItem(k, v) {{ this._data[k] = String(v); }}
+    }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      open_orders: [
+        {{ order_id: 'ord-fill-1', market: 'BTC 5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 5, status: 'FILLED', time: '14:05:00' }},
+        {{ order_id: 'ord-open-1', market: 'ETH 5m', side: 'BUY (DOWN)', price: 0.47, size: 5, status: 'OPEN', time: '14:05:01' }}
+      ],
+      open_positions: [],
+      trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+    // FILLED leg with backend-supplied filled=5 must render 5, not 0 (issue #90)
+    if (!ordHtml.includes('color:var(--dim)">5</td>')) throw new Error('Filled cell should show 5: ' + ordHtml);
+    // OPEN leg without a filled key must still default to 0
+    if (!ordHtml.includes('color:var(--dim)">0</td>')) throw new Error('Unfilled leg should show 0: ' + ordHtml);
+
+    console.log('FILLED_COLUMN_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node filled-column test failed: {res.stderr}\n{res.stdout}"
+    assert "FILLED_COLUMN_DOM_TESTS_PASSED" in res.stdout
+
+
 def test_engine_order_resolution_and_cleanup():
     """Verify get_open_orders_list resolves CLOB token IDs to markets and sides, and cancel_live_order clears state."""
     import sys
