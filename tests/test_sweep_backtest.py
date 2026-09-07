@@ -25,6 +25,7 @@ def _make_window_result(
     pair_captured: bool = True,
     exit_taken: bool = False,
     fees_cents: float = 0.0,
+    reentry_count: int = 0,
 ) -> WindowResult:
     return WindowResult(
         cid=cid,
@@ -42,6 +43,7 @@ def _make_window_result(
         exit_side="",
         pnl_cents=pnl_cents,
         fees_cents=fees_cents,
+        reentry_count=reentry_count,
     )
 
 
@@ -52,6 +54,23 @@ def test_compute_metrics_empty():
     assert res.total_pnl_cents == 0.0
     assert res.win_rate == 0.0
     assert res.param_label == "empty_test"
+
+
+def test_compute_metrics_reentry_telemetry():
+    """Recovered windows are counted and their net PnL aggregated, scaled by size."""
+    recovered_win = _make_window_result(cid="r1", pnl_cents=4.0, pair_captured=True,
+                                        reentry_count=1)
+    recovered_loss = _make_window_result(cid="r2", pnl_cents=-2.0, pair_captured=False,
+                                         exit_taken=True, fees_cents=0.5,
+                                         reentry_count=1)
+    never = _make_window_result(cid="n1", pnl_cents=4.0, pair_captured=True)
+    res = compute_metrics([recovered_win, recovered_loss, never], BacktestParams(),
+                          label="reentry_test", size=5)
+    assert res.reentered_windows == 2
+    # (4.0 * 5) + ((-2.0 - 0.5) * 5) = 20.0 - 12.5 = 7.5
+    assert res.reentered_pnl_cents == pytest.approx(7.5, abs=0.01)
+    assert res.to_dict()["reentered_windows"] == 2
+    assert res.to_dict()["reentered_pnl_cents"] == pytest.approx(7.5, abs=0.01)
 
 
 def test_compute_metrics_positive_and_drawdown():
@@ -80,6 +99,17 @@ def test_generate_sensitivity_grid():
     assert any("offset=" in label for label in labels)
     assert any("queue=" in label for label in labels)
     assert any("exit_5m=" in label for label in labels)
+    assert any("reentry_band=" in label for label in labels)
+    assert any("requote_min=" in label for label in labels)
+    # The baseline's 0.015 band / 60s requote are skipped, others carried.
+    reentry_rows = [(lbl, p) for lbl, p in grid if "reentry_band=" in lbl]
+    assert reentry_rows
+    assert all(p.min_requote_remaining_sec == base.min_requote_remaining_sec
+               for _, p in reentry_rows)
+    requote_rows = [(lbl, p) for lbl, p in grid if "requote_min=" in lbl]
+    assert requote_rows
+    assert all(p.reentry_drift_band == base.reentry_drift_band
+               for _, p in requote_rows)
 
 
 def test_generate_joint_grid():
@@ -88,12 +118,39 @@ def test_generate_joint_grid():
         queues=[0.0, 50.0],
         exit_5ms=[0.08, 0.12],
         exit_reversals=[0.02],
+        reentry_bands=[0.015],
+        requote_mins=[60.0],
     )
-    # 2 * 2 * 2 * 1 = 8 combinations
+    # 2 * 2 * 2 * 1 * 1 * 1 = 8 combinations
     assert len(grid) == 8
     label, p = grid[0]
     assert isinstance(p, BacktestParams)
     assert "off=" in label
+
+
+def test_generate_joint_grid_sweeps_reentry():
+    """The joint grid sweeps drift-skip re-entry bands and requote minimums."""
+    grid = generate_joint_grid(
+        offsets=[0.015, 0.020],
+        queues=[0.0, 50.0],
+        exit_5ms=[0.08, 0.12],
+        exit_reversals=[0.02],
+        reentry_bands=[0.0, 0.015, 0.030],
+        requote_mins=[0.0, 60.0],
+    )
+    # 2 * 2 * 2 * 1 * 3 * 2 = 48 combinations
+    assert len(grid) == 48
+    bands = sorted({p.reentry_drift_band for _, p in grid})
+    assert bands == [0.0, 0.015, 0.03]
+    requotes = sorted({p.min_requote_remaining_sec for _, p in grid})
+    assert requotes == [0.0, 60.0]
+    labels = [label for label, _ in grid]
+    assert all("_rb=" in label and "_rq=" in label for label in labels)
+
+    # The CLI grid preset defaults still vary the band (off / default / wide).
+    default_grid = generate_joint_grid()
+    assert len({p.reentry_drift_band for _, p in default_grid}) == 3
+    assert {p.min_requote_remaining_sec for _, p in default_grid} == {60.0}
 
 
 def test_run_sweep_with_grouped_windows():

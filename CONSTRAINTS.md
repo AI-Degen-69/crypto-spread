@@ -1,12 +1,13 @@
 # CONSTRAINTS.md — Issue #95 Quality & Architectural Constraints
 
 ## 1. Testing & Zero Regressions
-- All existing tests stay green: `python -m pytest -q` (317 tests today, plus the
-  new ones). Zero modifications to existing assertions.
+- All existing tests stay green: `python -m pytest -q` (334 tests collected on
+  this branch today — see §5). Zero modifications to existing assertions.
 - The #92 gate tests (`tests/test_live_trader.py:1653-1733`) and the #92/#96 parity
   tests (`tests/test_entry_timeout.py:419-455` and below) must pass unchanged —
   the gate itself is not being weakened.
-- New tests (red -> green) required, one per behavior:
+- New tests (red -> green), one per behavior — all nine have landed and are
+  green (§5):
   1. drift-skipped window whose mid reverts inside the band re-enters and rests orders
   2. drift-skipped window whose mid stays outside the band does not re-enter (BTC 15m case)
   3. entry-timeout-cancelled window (`is_late_start`) never re-enters, even at mid 0.50
@@ -32,6 +33,12 @@
   default, not the other way round.
 
 ## 3. Parameters & Parity
+
+**Backtest mirror landed.** `BacktestParams` (`backtest/engine.py:141-143`)
+carries the three re-entry fields with `__post_init__` validation (`:155-168`),
+byte-identical to `LiveTraderEngine` (`strategy/live_trader.py:569-571`); the
+bullets below hold. See §5, item 9.
+
 - `reentry_drift_band`, `min_requote_remaining_sec` and `max_reentries_per_window`
   carry byte-identical defaults in `LiveTraderEngine.__init__` and `BacktestParams`
   (`0.015`, `60.0`, `1`). A change to one without the other is a defect.
@@ -53,3 +60,28 @@
   `MarketLiveState` fields with defaults. No existing API shape changes.
 - `reentry_count` / `reentry_mid` / `reentry_drift` reset on window rollover and on
   `reset_pnl()`, alongside the other per-window state.
+
+## 5. Verification status (checked Sep 7, 2026 · feat/issue-95-drift-reentry)
+
+Gates: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py
+tests/test_backtest_engine.py tests/test_osc_dash_integration.py -q` → **189
+passed** (re-run after T5/T6 landed). Full collection: **334 tests / 18 files**.
+
+| # | Behavior | Implementation | Test (green) |
+|---|---|---|---|
+| 1 | mid reverts inside band → re-enters + rests orders | `_maybe_reenter_drift_skipped` (`strategy/live_trader.py:2886`), wired before `can_place_entry` (`:3278`, `:3283`) | `tests/test_live_trader.py:1760` |
+| 2 | mid stays outside band → no re-entry | band check `live_trader.py:2926` | `tests/test_live_trader.py:1798` |
+| 3 | entry-timeout cancel never re-enters | gated on `adverse_open` AND `entry_cancelled_timeout` (`:2914`) | `tests/test_live_trader.py:1814` |
+| 4 | #96 late-start skip never re-enters | `late_start_skip` / `is_late_start` guard (`:2916`) | `tests/test_live_trader.py:1840` |
+| 5 | remaining < `min_requote_remaining_sec` blocked | `:2924` | `tests/test_live_trader.py:1859` |
+| 6 | per-window cap enforced | `:2922` | `tests/test_live_trader.py:1875` |
+| 7 | `open_mid` / `open_drift` preserved; `last_action` names drift | opening snapshot untouched; snapshot kept for telemetry | `tests/test_live_trader.py:1779` |
+| 8 | `reentry_count` cleared by rollover and `reset_pnl()` | `:3691-3693` (rollover) and `:2569-2571` (`reset_pnl`) | `tests/test_live_trader.py:1903` |
+| 9 | backtest: adverse-skipped window re-enters; timeout-cancelled does not | ✅ `adverse_skipped` split + per-tick re-entry rule (`backtest/engine.py:381-401`; gate sets the flag at `:378`); fields `BacktestParams:141-143`, validation `:155-168` | ✅ `tests/test_entry_timeout.py:663-734` — 6 tests: revert-inside-band fills, outside-band no, timeout-cancelled never, <`min_requote_remaining_sec` no, defaults parity with live, out-of-range rejection |
+
+Additional checks: `reentry_drift_band` config API (`ConfigPayload`
+`server/osc_dash.py:881`, `update_config` running-guard `live_trader.py:1840`,
+clamp `:1942-1945`) is covered by `tests/test_osc_dash_integration.py:1204`
+(POST 0.9 → 422 at `:1223`). Anti-cheating §2 holds in code. Backtest parity
+(T5/T6, item 9) landed in the working tree. The three #95 commits and this
+change touched no dependency files.

@@ -444,6 +444,48 @@ def test_replay_returns_aggregate_and_per_window():
     assert "win_rate" in out["aggregate"]["overall"]
 
 
+def test_replay_aggregates_reentry_by_series():
+    """Aggregate reports how many windows each series recovered via re-entry."""
+    # Adverse open (mid 0.35, drift 0.15) at t=102s; the mid reverts to 0.50 at
+    # t=110s with both legs filling at the 0.48 resting price -> re-entry fires.
+    reentry_cid = "0xRE_001"
+    reentry_snaps = [
+        {**snap(102.0, 0.35, up_ask=0.355, down_ask=0.655), "cid": reentry_cid},
+        {**snap(110.0, 0.50, up_ask=0.505, down_ask=0.505,
+                tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0},
+                      {"asset": DN_TOKEN, "price": 0.48, "size": 5.0}]),
+         "cid": reentry_cid},
+    ]
+    # A plain healthy pair in another series is never re-entered.
+    healthy_snaps = [
+        {**snap(202.0, 0.50, up_ask=0.505, down_ask=0.505,
+                tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0},
+                      {"asset": DN_TOKEN, "price": 0.48, "size": 5.0}]),
+         "cid": "0xRE_002", "series": "eth-up-or-down-5m"},
+    ]
+    # min_requote_remaining_sec defaults to a whole 5m window (issue #89's shared
+    # knob), so lower it to let these 5m replays re-enter at all.
+    out = replay(reentry_snaps + healthy_snaps,
+                 BacktestParams(min_requote_remaining_sec=60.0))
+
+    btc = out["aggregate"]["per_series"][SERIES]
+    assert btc["windows"] == 1
+    assert btc["reentry_count"] == 1
+    assert btc["reentry_pnl_cents"] == pytest.approx(4.0, abs=1e-3)
+
+    eth = out["aggregate"]["per_series"]["eth-up-or-down-5m"]
+    assert eth["windows"] == 1
+    assert eth["reentry_count"] == 0
+    assert eth["reentry_pnl_cents"] == 0.0
+
+    ov = out["aggregate"]["overall"]
+    assert ov["reentry_count"] == 1
+    assert ov["reentry_pnl_cents"] == pytest.approx(4.0, abs=1e-3)
+
+    recovered = next(w for w in out["per_window"] if w["cid"] == reentry_cid)
+    assert recovered["reentry_count"] == 1
+
+
 def test_replay_is_deterministic():
     snaps = _two_window_dataset()
     a = replay(snaps, BacktestParams())

@@ -638,3 +638,107 @@ def test_live_trader_shifting_start_ts_does_not_re_arm_a_quoted_window():
     assert mstate.entry_cancelled_timeout is False
     assert mstate.order_status_up == "RESTING"
     assert mstate.order_status_down == "RESTING"
+
+
+# ============================================================================
+# Issue #95: re-entry into a drift-skipped window — backtest parity
+# ============================================================================
+
+# Books used by the re-entry tests. The adverse open sits at mid ~0.35
+# (drift 0.15 >= exit_thresh 0.05), which fires the gate; the balanced book puts
+# the mid back at 0.50 with asks above the 0.48 resting price so fills come only
+# from the tape. Mirrors the live #95 tests in tests/test_live_trader.py.
+_ADVERSE_UP = 0.355
+_ADVERSE_DN = 0.655
+_BALANCED_UP = 0.505
+_BALANCED_DN = 0.505
+
+
+def _fill_tape():
+    """Tape prints at the 0.48 resting price on both legs (offset 0.02)."""
+    return [{"asset": UP_TOKEN, "price": 0.48},
+            {"asset": DN_TOKEN, "price": 0.48}]
+
+
+def test_backtest_reenters_adverse_skipped_window_when_mid_reverts():
+    """A drift-skipped window whose mid reverts inside the band re-enters and fills."""
+    snaps = [
+        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
+        # 100s in: mid back at 0.50, 200s of the window still left.
+        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
+                   tape=_fill_tape()),
+    ]
+    # The shared re-entry time gate defaults to a full 5m window (issue #89), so a
+    # 5m replay only re-enters once an operator lowers it.
+    res = _simulate_window(snaps, BacktestParams(
+        offset=0.02, entry_timeout_pct=1.0, min_requote_remaining_sec=60.0))
+    assert res.filled_up is True
+    assert res.filled_down is True
+    assert res.pair_captured is True
+    assert res.reentry_count == 1
+
+
+def test_backtest_does_not_reenter_adverse_skipped_window_while_mid_outside_band():
+    """A recovery only to mid 0.45 (drift 0.05 > band 0.015) leaves the window skipped."""
+    snaps = [
+        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
+        _make_snap(1100.0, mid=0.45, up_ask=0.455, down_ask=0.555,
+                   tape=_fill_tape()),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
+    assert res.filled_up is False
+    assert res.filled_down is False
+    assert res.pair_captured is False
+    assert res.reentry_count == 0
+
+
+def test_backtest_timeout_cancelled_window_never_reenters_even_at_mid_050():
+    """A window cancelled by the entry timeout is not a drift skip and never re-enters."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
+        # 100s in -- far past the 30s cutoff at entry_timeout_pct=0.10 -- with the
+        # mid back inside the band. The skip reason was the timeout, not the gate.
+        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
+                   tape=_fill_tape()),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=0.10))
+    assert res.filled_up is False
+    assert res.filled_down is False
+    assert res.pair_captured is False
+    assert res.reentry_count == 0
+
+
+def test_backtest_no_reentry_below_min_requote_remaining_sec():
+    """A revert with under min_requote_remaining_sec (60s) left has no time to pair."""
+    snaps = [
+        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
+        # 250s in: only 50s of the 300s window remain.
+        _make_snap(1250.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
+                   tape=_fill_tape()),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
+    assert res.filled_up is False
+    assert res.filled_down is False
+    assert res.pair_captured is False
+    assert res.reentry_count == 0
+
+
+def test_backtest_reentry_params_match_live_defaults():
+    """Parity: the three re-entry knobs are byte-identical to LiveTraderEngine."""
+    live = LiveTraderEngine(load_persisted=False)
+    bt = BacktestParams()
+    assert bt.reentry_drift_band == live.reentry_drift_band == 0.015
+    assert bt.min_requote_remaining_sec == live.min_requote_remaining_sec == 300.0
+    assert bt.max_reentries_per_window == live.max_reentries_per_window == 1
+
+
+def test_backtest_rejects_out_of_range_reentry_params():
+    """The three re-entry knobs validate in the existing BacktestParams style."""
+    with pytest.raises(ValueError):
+        BacktestParams(reentry_drift_band=0.9)
+    with pytest.raises(ValueError):
+        BacktestParams(reentry_drift_band=-0.1)
+    with pytest.raises(ValueError):
+        BacktestParams(min_requote_remaining_sec=-1.0)
+    with pytest.raises(ValueError):
+        BacktestParams(max_reentries_per_window=-1)

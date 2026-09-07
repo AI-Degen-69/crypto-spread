@@ -132,6 +132,19 @@ class BacktestParams:
     # is neither entered nor used for the adverse-open snapshot. Mirrors
     # LiveTraderEngine.max_start_elapsed_pct. 0 disables.
     max_start_elapsed_pct: float = 0.10
+    # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
+    # re-entered once the replay mid reverts within `reentry_drift_band` of 0.50
+    # with at least `min_requote_remaining_sec` left to pair two legs. Only the
+    # gate sets `adverse_skipped` in `_simulate_window`; entry-timeout and
+    # late-start cancels are never re-entered. Defaults are byte-identical to
+    # `LiveTraderEngine.__init__`. 0 disables the respective guard.
+    reentry_drift_band: float = 0.015
+    # Mirrors LiveTraderEngine.DEFAULT_MIN_REQUOTE_REMAINING_SEC (issue #89), which
+    # issue #95 shares rather than defining a second knob with the same meaning. At
+    # 300s a 5m window can never clear the gate, so only 15m windows re-enter until
+    # an operator lowers it; the tests set it explicitly to exercise the rule.
+    min_requote_remaining_sec: float = 300.0
+    max_reentries_per_window: int = 1
 
     def __post_init__(self):
         """Validate parameter ranges and finite boundaries."""
@@ -142,6 +155,21 @@ class BacktestParams:
             if math.isnan(self.max_start_elapsed_pct) or not (0.0 <= self.max_start_elapsed_pct <= 1.0):
                 raise ValueError(
                     f"max_start_elapsed_pct must be between 0.0 and 1.0, got {self.max_start_elapsed_pct}"
+                )
+        if self.reentry_drift_band is not None:
+            if not math.isfinite(self.reentry_drift_band) or not (0.0 <= self.reentry_drift_band <= 0.5):
+                raise ValueError(
+                    f"reentry_drift_band must be between 0.0 and 0.5, got {self.reentry_drift_band}"
+                )
+        if self.min_requote_remaining_sec is not None:
+            if not math.isfinite(self.min_requote_remaining_sec) or self.min_requote_remaining_sec < 0:
+                raise ValueError(
+                    f"min_requote_remaining_sec must be >= 0, got {self.min_requote_remaining_sec}"
+                )
+        if self.max_reentries_per_window is not None:
+            if self.max_reentries_per_window < 0:
+                raise ValueError(
+                    f"max_reentries_per_window must be >= 0, got {self.max_reentries_per_window}"
                 )
 
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
@@ -187,6 +215,10 @@ class WindowResult:
     start_delay_sec: float = 0.0
     is_partial: bool = False
     err: str = ""
+    # Drift-skip re-entry (issue #95): how many times this window was recovered
+    # by the re-entry rule after the adverse-open gate skipped it. 0 = the gate
+    # never fired or the window stayed skipped. Mirrors live `reentry_count`.
+    reentry_count: int = 0
 
 
 def _mid(book: dict):
@@ -284,6 +316,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     entry_cancelled = False
     adverse_gate_evaluated = False
+    # Drift-skip re-entry (issue #95): only the adverse-open gate sets this, so a
+    # timeout or late-start cancel is never resurrected. Mirrors the live
+    # engine's `mstate.adverse_open` distinction.
+    adverse_skipped = False
+    reentry_count = 0
     # Late start (issue #96): the replay's first snapshot for this window already
     # lands past max_start_elapsed_pct, so the window's open was never observed.
     # Skip it entirely -- no entry, and no adverse-open snapshot from a mid-window
@@ -337,13 +374,37 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
         # Adverse-open gate (issue #92): evaluated once per window against the
         # first snapshot quoting two sides on both legs, so backtest and live
-        # agree on which windows are entered.
+        # agree on which windows are entered. `adverse_skipped` records that the
+        # cancel reason was the drift gate (issue #95), so it is the only cancel
+        # the re-entry rule below may undo.
         if not adverse_gate_evaluated and not late_start:
             open_mid = _two_sided_mid(ub, db)
             if open_mid is not None:
                 adverse_gate_evaluated = True
                 if abs(open_mid - 0.50) >= exit_thr:
                     entry_cancelled = True
+                    adverse_skipped = True
+
+        # Drift-skip re-entry (issue #95): a gate-skipped window is re-entered on
+        # a later tick once the mid is back within `reentry_drift_band` of 0.50.
+        # Mirrors `LiveTraderEngine._maybe_reenter_drift_skipped`: the skip must
+        # have been the gate (`adverse_skipped`), the entry-timeout cutoff must
+        # not have passed, at least `min_requote_remaining_sec` must remain to
+        # pair two legs, and the per-window cap applies.
+        if (adverse_skipped and not filled_up and not filled_down
+                and reentry_count < params.max_reentries_per_window):
+            entry_timeout_cutoff = (
+                params.entry_timeout_pct * duration
+                if (0.0 < params.entry_timeout_pct < 1.0 and duration > 0)
+                else None
+            )
+            remaining = max(0.0, duration - elapsed) if duration > 0 else 0.0
+            if (remaining >= params.min_requote_remaining_sec
+                    and (entry_timeout_cutoff is None or elapsed < entry_timeout_cutoff)
+                    and abs(mid - 0.50) <= params.reentry_drift_band):
+                entry_cancelled = False
+                adverse_skipped = False
+                reentry_count += 1
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
@@ -503,6 +564,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         start_delay_sec=start_delay_sec,
         is_partial=is_partial,
         err=err,
+        reentry_count=reentry_count,
     )
 
 
@@ -519,6 +581,9 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "overall":   {windows, pair_rate, exit_rate, total_pnl_cents, ...}
         }
       }
+      Both `per_series` and `overall` levels carry `reentry_count` /
+      `reentry_pnl_cents` (issue #95): how many windows were recovered via
+      drift-skip re-entry and their net P&L (per share, unscaled by size).
     """
     snaps_list = list(snaps)
     n_snaps = len(snaps_list)
@@ -539,6 +604,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "filled_down_only": 0, "oscillating": 0, "monotonic": 0, "flat": 0,
         "total_pnl_cents": 0.0, "total_fees_cents": 0.0,
         "wins": 0, "peak_pnl": 0.0, "cum_pnl": 0.0, "max_dd": 0.0,
+        "reentry_count": 0, "reentry_pnl_cents": 0.0,
     })
 
     cum_pnl = 0.0
@@ -600,6 +666,9 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             a["flat"] += 1
         a["total_pnl_cents"] += w.pnl_cents
         a["total_fees_cents"] += w.fees_cents
+        if w.reentry_count > 0:
+            a["reentry_count"] += 1
+            a["reentry_pnl_cents"] += w.pnl_cents - w.fees_cents
 
         if w.pnl_cents > 0:
             a["wins"] += 1
@@ -627,6 +696,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "total_fees_cents": round(d.get("total_fees_cents", 0.0), 4),
             "max_drawdown_cents": round(d.get("max_dd", 0.0), 2),
             "win_rate": round(d.get("wins", 0) / n, 4) if n else 0.0,
+            "reentry_count": d.get("reentry_count", 0),
+            "reentry_pnl_cents": round(d.get("reentry_pnl_cents", 0.0), 4),
         }
 
     overall = {
@@ -637,6 +708,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "total_fees_cents": sum(s["total_fees_cents"] for s in per_series.values()),
         "wins": wins_count,
         "max_dd": max_dd,
+        "reentry_count": sum(s["reentry_count"] for s in per_series.values()),
+        "reentry_pnl_cents": sum(s["reentry_pnl_cents"] for s in per_series.values()),
     }
     return {
         "params_hash": params.params_hash(),

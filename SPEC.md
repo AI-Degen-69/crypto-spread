@@ -8,15 +8,27 @@ window time remains to pair two legs, the engine quotes that market again. Live
 (`strategy/live_trader.py`) and backtest (`backtest/engine.py`) must agree on which
 windows are entered.
 
+## Status (verified Sep 7, 2026)
+
+- Live path (Behaviors 1-3 below) **implemented** in `c0f7264`; 8 tests in
+  `tests/test_live_trader.py:1736-1926`, all green.
+- `reentry_drift_band` params/config API **implemented** in `750fd2e`
+  (covered by `tests/test_osc_dash_integration.py:1204`).
+- Backtest parity (Behavior 4 below) **implemented** — `BacktestParams` fields
+  + `__post_init__` validation (`backtest/engine.py:141-168`), the
+  `adverse_skipped` split (`:314-315`, `:378`) and the per-tick re-entry rule
+  (`:381-401`); 6 parity tests in `tests/test_entry_timeout.py:663-734`.
+
 ## Background (current behavior)
 - The gate is a one-shot snapshot taken from the first two-sided tick
-  (`strategy/live_trader.py:3035-3041`), stored as `open_mid` / `open_drift` /
+  (`strategy/live_trader.py:3145-3150`), stored as `open_mid` / `open_drift` /
   `adverse_open` / `open_gate_evaluated`.
-- On `adverse_open`, the cancellation block (`live_trader.py:3059-3159`) sets the
+- On `adverse_open`, the cancellation block (`live_trader.py:3168-3267`) sets the
   shared latch `entry_cancelled_timeout = True` and `status = "DRIFT_SKIPPED"`.
-- `can_place_entry` (`live_trader.py:3161-3169`) then fails on two independent
+- `can_place_entry` (`live_trader.py:3283-3290`) then fails on two independent
   terms — `entry_cancelled_timeout` and `is_adverse_open` — until
-  `_handle_window_rollover()` clears them (`live_trader.py:3556-3568`).
+  `_handle_window_rollover()` clears them (`live_trader.py:3577`; re-entry fields
+  reset at `:3691-3693`).
 - The same latch is shared with the entry-timeout cancel (`is_late_start`) and with
   the issue #96 late-start skip (`late_start_skip`). Only `mstate.adverse_open`
   distinguishes a drift skip from the other two.
@@ -43,7 +55,7 @@ windows are entered.
    reverted drift. Existing `cancelled_orders` rows are kept as history.
 3. **Snapshot preservation.** `open_mid` / `open_drift` / `open_gate_evaluated` are
    **not** reset. Re-entry is itself the new, stricter evaluation of the live mid
-   (band <= 0.02 vs `exit_thresh` 0.05); re-snapshotting would clobber the
+   (band 0.015 vs `exit_thresh` 0.05); re-snapshotting would clobber the
    telemetry the acceptance criteria require to stay visible, and the gate is by
    design an *open* gate — post-entry protection is the exit/stop path.
 4. **Backtest parity.** `_simulate_window()` gains a separate `adverse_skipped`
@@ -58,7 +70,7 @@ windows are entered.
 | `min_requote_remaining_sec` | `60.0` | min window seconds left; the shared knob #89 adopts |
 | `max_reentries_per_window` | `1` | per-window re-entry cap |
 
-`reentry_drift_band` is exposed in the params payload (`live_trader.py:1727-1734`)
+`reentry_drift_band` is exposed in the params payload (`live_trader.py:1749-1758`)
 and settable through `update_config()` plus the `/api/live/config` payload.
 
 ### Assumptions (deviations from the issue text, deliberate)
@@ -81,6 +93,7 @@ and settable through `update_config()` plus the `/api/live/config` payload.
 - Re-entering windows cancelled by the entry timeout or the #96 late-start guard.
 
 ## Acceptance criteria
-See issue #95; each maps to a test in `tests/test_live_trader.py` (live) and
-`tests/test_entry_timeout.py` (backtest parity). `python -m pytest -q` must pass
-(317 tests today, plus the new ones).
+See issue #95; each maps to a test in `tests/test_live_trader.py` (live, landed)
+and `tests/test_entry_timeout.py` (backtest parity, landed at `:663-734`).
+`python -m pytest -q` passes (334 tests collected; the four targeted gates are
+189 passed).

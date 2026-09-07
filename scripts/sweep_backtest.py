@@ -45,6 +45,10 @@ class SweepRunResult:
     profit_factor: float
     sharpe_proxy: float
     per_series_pnl: dict[str, float]
+    # Drift-skip re-entry (issue #95) telemetry: windows the re-entry rule
+    # recovered after the adverse-open gate skipped them, and their net PnL.
+    reentered_windows: int
+    reentered_pnl_cents: float
 
     def to_dict(self) -> dict:
         """Serialize run result to dictionary."""
@@ -77,6 +81,8 @@ def compute_metrics(
             profit_factor=0.0,
             sharpe_proxy=0.0,
             per_series_pnl={},
+            reentered_windows=0,
+            reentered_pnl_cents=0.0,
         )
 
     pairs = sum(1 for w in window_results if w.pair_captured)
@@ -94,6 +100,14 @@ def compute_metrics(
     gross_gains = sum(p for p in pnls if p > 0)
     gross_losses = abs(sum(p for p in pnls if p < 0))
     profit_factor = (gross_gains / gross_losses) if gross_losses > 0 else (999.0 if gross_gains > 0 else 0.0)
+
+    # Drift-skip re-entry (issue #95) telemetry: how many windows the re-entry
+    # rule recovered and what they contributed net of fees, scaled by size.
+    reentered = [w for w in window_results if w.reentry_count > 0]
+    reentered_windows = len(reentered)
+    reentered_pnl_cents = sum(
+        (w.pnl_cents - w.fees_cents) * size for w in reentered
+    )
 
     for p in pnls:
         cum_pnl += p
@@ -126,6 +140,8 @@ def compute_metrics(
         profit_factor=round(profit_factor, 2),
         sharpe_proxy=round(sharpe_proxy, 2),
         per_series_pnl=per_series_pnl,
+        reentered_windows=reentered_windows,
+        reentered_pnl_cents=round(reentered_pnl_cents, 2),
     )
 
 
@@ -234,6 +250,50 @@ def generate_sensitivity_grid(
             )
             grid.append((f"pair_cost={pc:.2f}", p))
 
+    # 7. Drift-skip re-entry band (issue #95). 0 disables re-entry; values span
+    # tighter and wider than the 0.015 default (all inside exit_thresh 0.05).
+    reentry_bands = [0.000, 0.005, 0.010, 0.015, 0.020, 0.030, 0.050]
+    for b in reentry_bands:
+        if b != base.reentry_drift_band:
+            p = BacktestParams(
+                offset=base.offset,
+                queue_gate=base.queue_gate,
+                pair_cost_gate=base.pair_cost_gate,
+                exit_thresh_by_slug=base.exit_thresh_by_slug,
+                exit_reversal=base.exit_reversal,
+                quote_shares=base.quote_shares,
+                fill_model=base.fill_model,
+                merge_gas_usd=base.merge_gas_usd,
+                taker_fee_rate=base.taker_fee_rate,
+                max_start_delay_sec=base.max_start_delay_sec,
+                reentry_drift_band=b,
+                min_requote_remaining_sec=base.min_requote_remaining_sec,
+                max_reentries_per_window=base.max_reentries_per_window,
+            )
+            grid.append((f"reentry_band={b:.3f}", p))
+
+    # 8. Minimum window seconds left for re-entry (issue #95). 0 disables the
+    # time guard; larger values restrict re-entry to earlier reverts.
+    requote_mins = [0.0, 15.0, 30.0, 60.0, 120.0, 240.0]
+    for rm in requote_mins:
+        if rm != base.min_requote_remaining_sec:
+            p = BacktestParams(
+                offset=base.offset,
+                queue_gate=base.queue_gate,
+                pair_cost_gate=base.pair_cost_gate,
+                exit_thresh_by_slug=base.exit_thresh_by_slug,
+                exit_reversal=base.exit_reversal,
+                quote_shares=base.quote_shares,
+                fill_model=base.fill_model,
+                merge_gas_usd=base.merge_gas_usd,
+                taker_fee_rate=base.taker_fee_rate,
+                max_start_delay_sec=base.max_start_delay_sec,
+                reentry_drift_band=base.reentry_drift_band,
+                min_requote_remaining_sec=rm,
+                max_reentries_per_window=base.max_reentries_per_window,
+            )
+            grid.append((f"requote_min={rm:.0f}", p))
+
     return grid
 
 
@@ -242,14 +302,23 @@ def generate_joint_grid(
     queues: Sequence[float] = (0.0, 25.0, 50.0, 100.0),
     exit_5ms: Sequence[float] = (0.08, 0.10, 0.12, 0.14),
     exit_reversals: Sequence[float] = (0.015, 0.020),
+    reentry_bands: Sequence[float] = (0.0, 0.015, 0.030),
+    requote_mins: Sequence[float] = (60.0,),
     fill_model: str = "tape",
     max_start_delay: float = 0.0,
     size: int = 5,
 ) -> list[tuple[str, BacktestParams]]:
-    """Generate multi-dimensional Cartesian grid across controllable parameters."""
+    """Generate multi-dimensional Cartesian grid across controllable parameters.
+
+    `reentry_bands` / `requote_mins` (issue #95) sweep the drift-skip re-entry
+    knobs; band 0 disables re-entry, requote 0 disables the time guard. Defaults
+    keep re-entry on/off at a tight and a wide band against the fixed 60s
+    requote minimum so the CLI grid quantifies re-entry value by default.
+    """
     size = max(5, int(size))
     grid: list[tuple[str, BacktestParams]] = []
-    for off, q, e5, rev in itertools.product(offsets, queues, exit_5ms, exit_reversals):
+    for off, q, e5, rev, rb, rm in itertools.product(
+            offsets, queues, exit_5ms, exit_reversals, reentry_bands, requote_mins):
         ex_dict = {
             "default_5m": e5,
             "default_15m": round(e5 + 0.01, 2),
@@ -258,7 +327,7 @@ def generate_joint_grid(
             "btc-up-or-down-15m": round(e5 + 0.01, 2),
             "sol-up-or-down-15m": round(e5 + 0.01, 2),
         }
-        label = f"off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}"
+        label = f"off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_rb={rb:.3f}_rq={rm:.0f}"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
@@ -270,6 +339,9 @@ def generate_joint_grid(
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             max_start_delay_sec=max_start_delay,
+            reentry_drift_band=rb,
+            min_requote_remaining_sec=rm,
+            max_reentries_per_window=1,
         )
         grid.append((label, p))
     return grid
@@ -290,9 +362,11 @@ def generate_random_grid(
     exit_5ms = [0.06, 0.08, 0.09, 0.10, 0.11, 0.12, 0.14, 0.16]
     exit_reversals = [0.010, 0.015, 0.020, 0.030]
     pair_costs = [1.01, 1.02, 1.03, 1.05, 1.10]
+    reentry_bands = [0.000, 0.005, 0.010, 0.015, 0.020, 0.030, 0.050]
+    requote_mins = [0.0, 15.0, 30.0, 60.0, 120.0, 240.0]
 
     grid: list[tuple[str, BacktestParams]] = []
-    seen: set[tuple[float, float, float, float, float]] = set()
+    seen: set[tuple[float, float, float, float, float, float, float]] = set()
     for _ in range(count * 5):
         if len(grid) >= count:
             break
@@ -301,7 +375,9 @@ def generate_random_grid(
         e5 = rng.choice(exit_5ms)
         rev = rng.choice(exit_reversals)
         pc = rng.choice(pair_costs)
-        key = (off, q, e5, rev, pc)
+        rb = rng.choice(reentry_bands)
+        rm = rng.choice(requote_mins)
+        key = (off, q, e5, rev, pc, rb, rm)
         if key in seen:
             continue
         seen.add(key)
@@ -314,7 +390,7 @@ def generate_random_grid(
             "btc-up-or-down-15m": round(e5 + 0.01, 2),
             "sol-up-or-down-15m": round(e5 + 0.01, 2),
         }
-        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}"
+        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_rb={rb:.3f}_rq={rm:.0f}"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
@@ -326,6 +402,9 @@ def generate_random_grid(
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             max_start_delay_sec=max_start_delay,
+            reentry_drift_band=rb,
+            min_requote_remaining_sec=rm,
+            max_reentries_per_window=1,
         )
         grid.append((label, p))
     return grid
@@ -373,14 +452,15 @@ def format_markdown_table(results: list[SweepRunResult], top_n: int = 15) -> str
     """Format top sweep results as a clean Markdown table."""
     sorted_res = sorted(results, key=lambda r: r.total_pnl_cents, reverse=True)[:top_n]
     lines: list[str] = [
-        "| Rank | Configuration | PnL (cents) | Avg PnL | Win Rate | Pair Rate | Exit Rate | Max DD | Profit Factor | Sharpe |",
-        "|:---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Rank | Configuration | PnL (cents) | Avg PnL | Win Rate | Pair Rate | Exit Rate | Re-Entry (#, PnL) | Max DD | Profit Factor | Sharpe |",
+        "|:---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for i, r in enumerate(sorted_res, 1):
         lines.append(
             f"| {i} | `{r.param_label}` | {r.total_pnl_cents:+.2f}c | "
             f"{r.avg_pnl_cents:+.2f}c | {r.win_rate * 100:.1f}% | "
             f"{r.pair_rate * 100:.1f}% | {r.exit_rate * 100:.1f}% | "
+            f"{r.reentered_windows} ({r.reentered_pnl_cents:+.1f}c) | "
             f"{r.max_drawdown_cents:.2f}c | {r.profit_factor:.2f} | {r.sharpe_proxy:.2f} |"
         )
     return "\n".join(lines)
