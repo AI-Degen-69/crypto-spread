@@ -1,79 +1,115 @@
-# SPEC — Issue #93: RESET P&L leaves stale order rows and live venue-side orders untouched
+# SPEC — Issue #95: re-entry into a drift-skipped window when the mid reverts
 
 ## Goal
-`reset_pnl()` (`strategy/live_trader.py:2275`) clears PnL/trades/timeline but never
-touches order state, so Open Orders still shows stale rows (CANCELLED,
-ADVANCE_PRE_QUOTE, FILLED, stop) and in `live` mode real orders stay resting on
-the CLOB. Implement cancel-and-clear with a live-running safety refusal so the
-button visibly empties everything the operator expects.
+A window skipped by the adverse-open drift gate (`status = "DRIFT_SKIPPED"`) is
+currently dead for its whole duration. Allow one bounded re-entry per window: when
+the live mid has reverted to within a tight configurable band of 0.50 and enough
+window time remains to pair two legs, the engine quotes that market again. Live
+(`strategy/live_trader.py`) and backtest (`backtest/engine.py`) must agree on which
+windows are entered.
+
+## Status (verified Sep 7, 2026)
+
+- Live path (Behaviors 1-3 below) **implemented** in `c0f7264`; 8 tests in
+  `tests/test_live_trader.py:1736-1926`, all green.
+- `reentry_drift_band` params/config API **implemented** in `750fd2e`
+  (covered by `tests/test_osc_dash_integration.py:1204`).
+- Backtest parity (Behavior 4 below) **implemented** — `BacktestParams` fields
+  + `__post_init__` validation (`backtest/engine.py:141-168`), the
+  `adverse_skipped` split (`:314-315`, `:378`) and the per-tick re-entry rule
+  (`:381-401`); 6 parity tests in `tests/test_entry_timeout.py:663-734`.
 
 ## Background (current behavior)
-- `reset_pnl()` clears per-market PnL/fill flags/drift trackers + engine-wide
-  `trades`, `timeline`, `open_positions`, `historical_realized_pnl`, deletes
-  `TRADES_FILE`/`META_FILE`. Does NOT clear any order handle.
-- `get_open_orders_list()` (`live_trader.py:1254-1437`) rebuilds rows from:
-  `cancelled_orders` (:445 → :1428-1437 passthrough), `order_id_up/down` +
-  `order_status_up/down` (:373-378 → :1363-1394 ENGINE_ACTIVE),
-  `next_order_id_up/down` + `next_quoted` (:396-400 → :1412-1443 ENGINE_ADVANCE),
-  `stop_order_id/status/price/side` (:403-406 → :1396-1411 ENGINE_STOP),
-  exit handles (:410-413, kept alive but not rendered).
-- 5s orders cache `_orders_cache_ts` (`:540`, `:1647-1650`) not invalidated, so a
-  fix would still serve stale rows for up to 5s. `seed_demo_data()` already resets
-  it (`:2325`); `reset_pnl()` does not.
-- State inconsistency: `filled_up=False` is set while `order_status_up=="FILLED"`
-  survives → engine flags and dashboard status disagree.
-- Live risk: ids left in `order_id_up/down`, `next_order_id_*`, `stop_order_id`
-  still rest on the CLOB. Neither `cancel_live_order()` (:738) nor
-  `cancel_all_orders()` (:831) is called. Reference: `stop()` (:1940-1957) cancels
-  venue-side in live mode; `_handle_window_rollover()` (:3139-3167) cancels
-  unfilled legs + stop before clearing handles.
+- The gate is a one-shot snapshot taken from the first two-sided tick
+  (`strategy/live_trader.py:3145-3150`), stored as `open_mid` / `open_drift` /
+  `adverse_open` / `open_gate_evaluated`.
+- On `adverse_open`, the cancellation block (`live_trader.py:3168-3267`) sets the
+  shared latch `entry_cancelled_timeout = True` and `status = "DRIFT_SKIPPED"`.
+- `can_place_entry` (`live_trader.py:3283-3290`) then fails on two independent
+  terms — `entry_cancelled_timeout` and `is_adverse_open` — until
+  `_handle_window_rollover()` clears them (`live_trader.py:3577`; re-entry fields
+  reset at `:3691-3693`).
+- The same latch is shared with the entry-timeout cancel (`is_late_start`) and with
+  the issue #96 late-start skip (`late_start_skip`). Only `mstate.adverse_open`
+  distinguishes a drift skip from the other two.
+- The backtest (`backtest/engine.py:344-346`) sets the *same* `entry_cancelled`
+  flag for the adverse-open gate, the entry timeout and the late start, so it
+  cannot currently tell the three reasons apart at all.
 
-## New behavior (recommendation (a) + (b) as live safety net)
-1. **Stopped / paper → cancel-and-clear (a).** Clear on every market:
-   `cancelled_orders`, `order_id_up/down`, `order_status_up/down` (→ `"NONE"`),
-   `order_time_up/down` (→ `"-"`), `next_order_id_up/down`, `next_order_time_up/down`,
-   `next_quoted` (→ False), `next_*` descriptors optional, `stop_order_id/status/price/side/time`
-   (status → `"NONE"`), `order_id_exit_up/down`, `order_status_exit_up/down`
-   (→ `"NONE"`), `entry_cancelled_timeout` (→ False). Set
-   `self._orders_cache_ts = 0.0` so next `get_state()` rebuilds.
-2. **Live + running + outstanding → refuse (b).** If `mode == "live"` and
-   `is_running` is True and any order handle outstanding, do NOT clear anything;
-   return refusal dict with operator message ("Stop first"). Venue-side cancel is
-   never fired behind the operator's back on this path.
-3. **Live + stopped → cancel venue-side first.** Call the CLOB cancel path
-   (reuse `cancel_all_orders()` remote leg WITHOUT its `is_running` side effects,
-   or per-order `cancel_live_order()`) before clearing locals, so no id is
-   dropped without a cancel attempt. Paper mode → no CLOB interaction.
-4. **Endpoint surfaces refusal.** `POST /api/live/control` `reset_pnl` branch
-   (`server/osc_dash.py:845-846`) returns refusal as a distinguishable response
-   (non-200 + message) instead of a normal state payload.
+## Behavior to implement
+1. **Re-entry condition (live).** On a tick where all of the following hold, the
+   window is re-entered:
+   - `mstate.adverse_open is True` (drift skip, never a timeout/late-start cancel)
+   - `mstate.entry_cancelled_timeout is True` (the skip already applied)
+   - `mstate.late_start_skip is False` and `is_late_start is False`
+   - no fills yet, not `pair_captured`, not `exit_taken`
+   - both legs quote two sides (same `book_two_sided` precondition as the gate)
+   - `abs(mid - 0.50) <= self.reentry_drift_band`
+   - `remaining_sec >= self.min_requote_remaining_sec`
+   - `mstate.reentry_count < self.max_reentries_per_window`
+2. **Re-entry effect.** Under `_engine_lock`: clear `entry_cancelled_timeout`,
+   clear `adverse_open`, reset `order_status_up` / `order_status_down` to `"NONE"`,
+   clear `order_id_up` / `order_id_down` and their times, increment
+   `reentry_count`, record `reentry_mid` / `reentry_drift`, set
+   `status = "QUOTING"` and a `last_action` naming the original open and the
+   reverted drift. Existing `cancelled_orders` rows are kept as history.
+3. **Snapshot preservation.** `open_mid` / `open_drift` / `open_gate_evaluated` are
+   **not** reset. Re-entry is itself the new, stricter evaluation of the live mid
+   (band 0.015 vs `exit_thresh` 0.05); re-snapshotting would clobber the
+   telemetry the acceptance criteria require to stay visible, and the gate is by
+   design an *open* gate — post-entry protection is the exit/stop path.
+4. **Backtest parity.** `_simulate_window()` gains a separate `adverse_skipped`
+   flag alongside `entry_cancelled`, set only by the adverse-open gate, and applies
+   the same re-entry rule per tick (`remaining = duration - elapsed`). Timeout and
+   late-start cancels never set it, so they are never re-entered.
 
-## Acceptance criteria (mirrors issue #93)
-- [ ] Stopped engine: after `reset_pnl()`, `get_open_orders_list()` returns no rows
-  for previously-ordered markets (no CANCELLED / ADVANCE_PRE_QUOTE / FILLED / stop).
-- [ ] All listed fields in §1 cleared on every market; `_orders_cache_ts == 0.0`.
-- [ ] No market left with `filled_up/down == False` while `order_status_up/down == "FILLED"`.
-- [ ] Live + running + outstanding → refusal, endpoint response carries Stop-first
-  message, no local state cleared on that path.
-- [ ] Live + stopped → venue cancel attempted (mocked CLOB asserts cancel call)
-  before local handles cleared.
-- [ ] Paper → clears everything, zero CLOB interaction.
-- [ ] New unit test populates entry + advance + stop + exit + cancelled rows, calls
-  `reset_pnl()`, asserts orders list empty.
-- [ ] Existing `reset_pnl` tests still pass (or deliberately updated).
-- [ ] `python -m pytest -q` fully green.
+## New parameters (live + backtest, identical defaults)
+| Name | Default | Meaning |
+|---|---|---|
+| `reentry_drift_band` | `0.015` | max `abs(mid - 0.50)` allowed for re-entry |
+| `reentry_min_remaining_pct` | `0.30` | re-entry needs this fraction of the window left; the effective gate is the tighter of it and the knob below (90s on 5m, 270s on 15m) |
+| `min_requote_remaining_sec` | `300.0` | min window seconds left; the shared knob #89 adopts |
+| `max_reentries_per_window` | `1` | per-window re-entry cap |
+
+`reentry_drift_band` is exposed in the params payload (`live_trader.py:1749-1758`)
+and settable through `update_config()` plus the `/api/live/config` payload.
+
+### Assumptions (deviations from the issue text, deliberate)
+- **`reentry_drift_band` is a new knob, not a reuse of `exit_reversal`.** The issue
+  notes live `exit_reversal = 0.015` vs backtest `0.02`. Unifying `exit_reversal`
+  itself would change exit behavior and existing backtest expectations, which is
+  out of scope; a dedicated knob defaulting to `0.015` in both engines meets the
+  live/backtest parity requirement without touching exit semantics.
+- **`min_requote_remaining_sec` is issue #89's knob at its shipped `300.0`
+  default, not a new 60s one.** #89 landed this attribute for post-merge
+  re-quoting while this issue was in progress; the acceptance criteria call for
+  one shared knob, so re-entry reads #89's and does not redefine it. The
+  consequence is deliberate and tested
+  (`test_reentry_blocked_by_default_requote_gate_on_5m`): a 5m window is 300s
+  long, so at the default **no 5m market can ever re-enter** — only 15m windows,
+  and only in their first half. *(Historical: superseded below — the gate now
+  scales with the window, so 5m markets re-enter in their first 90s.)* Two of
+  the four reverting markets in the issue's
+  evidence table are 5m, so an operator who wants those recovered must lower the
+  knob (60s is the smallest value in which two legs can realistically pair).
+  Raising it back is the one-line `update_config(min_requote_remaining_sec=...)`
+  call, which also moves #89's post-merge re-quoting.
+- **Superseded: the gate now scales with the window.** An absolute floor cannot
+  mean the same thing on a 5m and a 15m market, and at 300s it blocked exactly
+  the 5m markets the evidence table shows reverting. Re-entry requires
+  `min(min_requote_remaining_sec, reentry_min_remaining_pct * window)` -- 90s on
+  5m, 270s on 15m. The shared knob stays the ceiling, so this can only tighten
+  #89's value and never loosens the post-merge re-quoting it also governs.
+- **The static `0.50 - offset` anchor stays.** #89 has not landed. The tight
+  default band is the mitigation, and the limitation is documented in code.
 
 ## Out of scope
-- Adverse-drift entry gate (#92).
-- `Filled` column rendering `0` (#90 — already landed, do not touch).
-- Moving FILLED rows to Positions tab (#91 — lands separately).
-- Changing `stop()` / `cancel_all_orders()` semantics; they are the reference,
-  not the target.
+- #89 dynamic mid-anchored quoting and post-merge re-quoting.
+- Changing `exit_reversal`, `exit_thresh`, PnL math, fill detection or rollover.
+- Re-entering windows cancelled by the entry timeout or the #96 late-start guard.
 
-## Edge cases
-- Empty engine (no orders): reset behaves as today, still invalidates cache.
-- `cancelled_orders` already long: full clear, not truncate.
-- Live stopped but CLOB client missing / cancel raises: surface error, do not
-  silently drop ids; locals cleared only after cancel attempt per §3.
-- Cache: refusal path must NOT invalidate `_orders_cache_ts` (nothing changed).
-- `entry_cancelled_timeout` latch cleared so paper resting rows reappear normally.
+## Acceptance criteria
+See issue #95; each maps to a test in `tests/test_live_trader.py` (live, landed)
+and `tests/test_entry_timeout.py` (backtest parity, landed at `:663-734`).
+`python -m pytest -q` passes (**367 tests / 18 files**; the four targeted gates
+run green — see CONSTRAINTS.md §5 for the latest gate tally).

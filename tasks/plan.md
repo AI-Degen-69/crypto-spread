@@ -1,69 +1,117 @@
-# Plan — Issue #93: RESET P&L leaves stale order rows and live venue-side orders untouched
+# tasks/plan.md — Issue #95: re-entry into a drift-skipped window
 
-Files: `strategy/live_trader.py` (`reset_pnl` :2275-2316, `MarketLiveState` :373-413,
-`get_open_orders_list` :1254-1443, `cancel_live_order` :738, `cancel_all_orders` :831-916,
-`stop` :1940-1957, `get_state` cache :1647-1650), `server/osc_dash.py`
-(`POST /api/live/control` :828-860), `tests/test_live_trader.py` (extend),
-`tests/test_osc_dash_integration.py` (extend).
+Branch: `feat/issue-95-drift-reentry` (off `master`)
+Spec: `SPEC.md` · Constraints: `CONSTRAINTS.md`
+Baseline: 317 tests green.
 
-Contract (locked before logic — `api-and-interface-design`):
-- `_has_outstanding_orders(self) -> bool`: True if any market holds `order_id_up/down`,
-  `next_order_id_up/down`, `stop_order_id` (status not in NONE/CANCELLED/FILLED),
-  `order_id_exit_up/down`, or non-empty `cancelled_orders`.
-- `_clear_market_order_state(m) -> None`: clears every handle in SPEC §1; statuses →
-  `"NONE"`, times → `"-"`, `next_quoted` → False, `entry_cancelled_timeout` → False,
-  `stop_price` → None, `stop_side` → None, `cancelled_orders` → `[]`. Caller holds lock.
-- `reset_pnl(self) -> dict`: success → `{"ok": True, "refused": False,
-  "venue_cancelled": bool, "markets_cleared": int}`; live-running-hot →
-  `{"ok": False, "refused": True, "message": "Stop the engine before RESET P&L …"}`.
-  Refusal clears nothing and leaves `_orders_cache_ts` untouched.
-- `POST /api/live/control` `reset_pnl`: success → `200 + get_state()`; refusal →
-  `409 {"ok": False, "error": <message>}` (message usable by `resetCockpitPnL`).
+## Interfaces locked before coding
 
-## T1 — Failing test first (TDD red, paper/stopped path)
-- **Files:** `tests/test_live_trader.py` (new test beside `:1017`)
-- **Do:** Populate `btc-up-or-down-5m` with entry (`order_id_up/down` + RESTING),
-  advance (`next_order_id_up/down` + `next_quoted=True`), stop (`stop_order_id` +
-  RESTING), exit (`order_id_exit_up/down`), `cancelled_orders=[{…CANCELLED…}]`,
-  `_orders_cache_ts=now`. Call `reset_pnl()`, assert `get_open_orders_list()==[]`,
-  all handles cleared, `_orders_cache_ts==0.0`. Confirm RED.
-- **Verify:** `python -m pytest tests/test_live_trader.py::<new_test> -q` (must FAIL)
+`MarketLiveState` (`strategy/live_trader.py:385-402`), new fields:
+```python
+reentry_count: int = 0
+reentry_mid: Optional[float] = None
+reentry_drift: Optional[float] = None
+```
 
-## T2 — `reset_pnl` cancel-and-clear core (stopped/paper)
-- **Files:** `strategy/live_trader.py` (`reset_pnl` :2275-2316 + new helpers)
-- **Do:** Add `_has_outstanding_orders()` + `_clear_market_order_state()` helpers;
-  in `reset_pnl()`, after existing PnL clears, clear every market's order state per
-  contract, set statuses to `"NONE"` (fixes FILLED-flag contradiction), clear
-  `entry_cancelled_timeout`, set `self._orders_cache_ts = 0.0`. All under
-  `self._engine_lock`. Return success dict. Paper path: no CLOB calls.
-- **Verify:** `python -m pytest tests/test_live_trader.py -q` (new test green)
+> **Historical contract (kept for the record).** The values below predate the
+> #89 merge: `min_requote_remaining_sec` is now `300.0`, the time gate also
+> scales with the window via `reentry_min_remaining_pct = 0.30`, and the
+> re-entry helper takes `win_duration`. The authoritative contract is SPEC.md's
+> re-entry section and `LiveTraderEngine.__init__` itself.
 
-## T3 — Live-mode safety: refuse-while-hot + cancel-when-stopped
-- **Files:** `strategy/live_trader.py` (`reset_pnl`)
-- **Do:** At top of `reset_pnl()`: if `mode=="live"` and `is_running` and
-  `_has_outstanding_orders()` → return refusal dict, clear nothing. Else if
-  `mode=="live"` (stopped) and outstanding → venue cancel burst first (reuse
-  `cancel_all_orders()` remote leg or per-order `cancel_live_order()`; do NOT reuse
-  its `is_running/quoting_halted` side effects — reset must not stop the engine),
-  record `venue_cancelled=True`; cancel errors surface in return dict.
-- **Verify:** `python -m pytest tests/test_live_trader.py -q` (add refusal + stopped-live mock-CLOB tests green, paper test asserts no CLOB interaction)
+`LiveTraderEngine.__init__` (`strategy/live_trader.py:534-548`), new attributes:
+```python
+self.reentry_drift_band: float = 0.015
+self.min_requote_remaining_sec: float = 60.0   # shared knob, issue #89 adopts it
+self.max_reentries_per_window: int = 1
+```
 
-## T4 — Endpoint surfaces refusal message
-- **Files:** `server/osc_dash.py` (`:845-846` branch)
-- **Do:** Capture `reset_pnl()` return dict; on `refused` → `409 {"ok": False,
-  "error": message}` (+ current state for dashboard continuity); on success →
-  existing `get_state()` path. Keep `resetCockpitPnL()` (:3634) compatible (success
-  shape unchanged).
-- **Verify:** `python -m pytest tests/test_osc_dash_integration.py -q` (extend reset branch: stopped → 200 empty orders; live-running-hot → 409 with Stop-first message)
+New private helper on `LiveTraderEngine`:
+```python
+def _maybe_reenter_drift_skipped(
+    self,
+    mstate: MarketLiveState,
+    slug: str,
+    mid: float,
+    remaining_sec: float,
+    book_two_sided: bool,
+    is_late_start: bool,
+) -> bool:
+    """Return True when a DRIFT_SKIPPED window was re-entered on this tick."""
+```
 
-## T5 — Keep existing tests honest + full regression
-- **Files:** `tests/test_live_trader.py:120-130,1017-1028`, `tests/test_osc_dash_integration.py:650-675`
-- **Do:** Update existing `reset_pnl` tests only where behaviour deliberately changed
-  (return dict, cleared handles); assert no other behaviour drift. Run whole suite,
-  review diff (no PnL-math / rollover / stop changes, lock discipline intact).
-- **Verify:** `python -m pytest -q` (all green, 293 + new)
+`BacktestParams` (`backtest/engine.py:121-134`), new fields with identical defaults:
+```python
+reentry_drift_band: float = 0.015
+min_requote_remaining_sec: float = 60.0
+max_reentries_per_window: int = 1
+```
 
-## Ship
-- Branch `fix/reset-pnl-clear-orders`, conventional commit
-  `fix(live-trader): reset_pnl cancels and clears outstanding orders with live-running refusal`,
-  PR with `@coderabbitai` + `@coderabbitai summary`. Independent of #90/#91/#92.
+`update_config()` signature gains `reentry_drift_band: Optional[float] = None`;
+`params` payload gains `"reentry_drift_band": self.reentry_drift_band`;
+`ConfigPayload` (`server/osc_dash.py:880`) gains
+`reentry_drift_band: Optional[float] = Field(default=None, ge=0.0, le=0.5)`.
+
+---
+
+## Tasks
+
+### T1 — live state + knobs (no behavior change yet)
+Files: `strategy/live_trader.py`
+Add the three `MarketLiveState` fields and the three engine attributes with the
+comment block explaining the shared `min_requote_remaining_sec` knob and the
+static-anchor caveat. Clear the three new state fields in
+`_handle_window_rollover()` (`:3556-3568`), in `reset_pnl()` (`:2530-2536`) and in
+`_clear_market_order_state()` if it already clears window state.
+Accept: `python -m pytest tests/test_live_trader.py -q` still green.
+
+### T2 — RED: live re-entry tests
+Files: `tests/test_live_trader.py` (extend the issue #92 block after `:1733`)
+Reuse `_drift_engine()` / `_drift_poll_data()`. Build every payload anchored at the
+base `now` and vary only the tick time passed to `_update_market_strategy`, so
+`start_ts` / `end_ts` stay fixed and `remaining_sec` is controllable.
+Tests: revert-inside-band re-enters; stays-outside-band does not; timeout-cancelled
+never re-enters; #96 late-start-skip never re-enters; below
+`min_requote_remaining_sec` does not; cap enforced on second revert; snapshot +
+`last_action` telemetry after re-entry; rollover and `reset_pnl` clear
+`reentry_count`.
+Accept: the new tests fail for the right reason (`status` still `DRIFT_SKIPPED`).
+
+### T3 — GREEN: live re-entry path
+Files: `strategy/live_trader.py`
+Add `_maybe_reenter_drift_skipped()` and call it in `_update_market_strategy`
+immediately after the cancellation block (`:3159`) and before `can_place_entry`
+(`:3161`), then re-read `is_adverse_open = mstate.adverse_open` so placement sees
+the cleared flag on the same tick. Compute
+`remaining_sec = max(0.0, mstate.end_ts - now)` falling back to
+`max(0.0, win_duration - elapsed_sec)`. All mutations under `_engine_lock`; log at
+`info` mirroring the DRIFT_SKIPPED log line.
+Accept: `python -m pytest tests/test_live_trader.py -q` fully green.
+
+### T4 — params payload + runtime setter + dashboard config
+Files: `strategy/live_trader.py`, `server/osc_dash.py`
+Expose `reentry_drift_band` in the params payload, add it to `update_config()`
+(including the running-engine `param_changed` guard), and pass it through from
+`ConfigPayload`.
+Accept: `python -m pytest tests/test_osc_dash_integration.py -q` green; a config
+POST with `reentry_drift_band` while stopped changes `state["params"]`.
+
+### T5 — RED: backtest parity tests
+Files: `tests/test_entry_timeout.py` (append after the #92 parity block, `:455`)
+Tests: adverse-skipped window whose later snapshot mid returns inside the band
+fills; the same window with the mid staying outside does not; a
+timeout-cancelled window with mid 0.50 never fills; re-entry below
+`min_requote_remaining_sec` does not fill.
+Accept: new tests fail (`filled_up is False` where True is expected).
+
+### T6 — GREEN: backtest split flag + re-entry
+Files: `backtest/engine.py`
+Add the three `BacktestParams` fields plus `__post_init__` validation. In
+`_simulate_window()` add `adverse_skipped = False`, set it only where the gate
+fires (`:344-346`), add a `reentry_count` local, and apply the re-entry rule per
+tick after `mid` is computed using `remaining = duration - elapsed`.
+Accept: `python -m pytest tests/test_entry_timeout.py tests/test_backtest_engine.py -q` green.
+
+### T7 — full suite + docstring gate
+Accept: `python -m pytest -q` green (317 + new). `tests/test_docstrings.py` passes
+(every new public/dataclass member documented).
