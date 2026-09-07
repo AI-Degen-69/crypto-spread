@@ -4118,13 +4118,14 @@ function renderCockpitUI(st) {
       else if (m.status === 'STOP_EXIT_PENDING') { statusBadgeCls = 'pill-mono'; statusText = 'STOP EXITING'; }
       else if (m.status === 'TIMEOUT_NO_FILL') { statusBadgeCls = 'pill-flat'; statusText = 'TIMEOUT NO FILL'; }
       else if (m.status === 'DRIFT_SKIPPED') { statusBadgeCls = 'pill-flat'; statusText = 'DRIFT SKIPPED'; }
+      else if (m.status === 'LATE_START_SKIPPED') { statusBadgeCls = 'pill-flat'; statusText = 'LATE START SKIPPED'; }
 
       let posStr = 'FLAT';
       const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
       const actualDown = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
       if (m.status === 'STOP_EXIT' || m.exit_taken) {
         posStr = 'FLAT (STOPPED OUT)';
-      } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.entry_cancelled_timeout) {
+      } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.status === 'LATE_START_SKIPPED' || m.entry_cancelled_timeout) {
         posStr = 'FLAT';
       } else if (m.filled_up && m.filled_down) {
         posStr = `MERGED PAIR (${m.order_shares || 5}) @ $${actualUp.toFixed(2)} + $${actualDown.toFixed(2)}`;
@@ -4147,6 +4148,8 @@ function renderCockpitUI(st) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (10% TIMEOUT)</span>`;
       } else if (m.status === 'DRIFT_SKIPPED') {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (ADVERSE DRIFT)</span>`;
+      } else if (m.status === 'LATE_START_SKIPPED') {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">NOT QUOTED (STARTED MID-WINDOW)</span>`;
       } else if (m.status === 'PAIR_MERGED' || m.pair_captured) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">MERGED / COMPLETE</span>${fillsSub}`;
       } else if (!st.is_running) {

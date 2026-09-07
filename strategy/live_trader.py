@@ -342,6 +342,12 @@ def _resolve_series_selection(
 
 
 
+# Fraction of a window that may already have elapsed when the engine observes its
+# first tick for that window and still count as "started at the open" (issue #96).
+# 30s of a 5m window, 90s of a 15m window.
+DEFAULT_MAX_START_ELAPSED_PCT = 0.10
+
+
 @dataclass
 class MarketLiveState:
     """Real-time trading state for a single 5m series."""
@@ -385,6 +391,15 @@ class MarketLiveState:
     open_drift: float = 0.0
     adverse_open: bool = False
     open_gate_evaluated: bool = False
+
+    # Late-start guard (issue #96). `first_seen_start_ts` records which window the
+    # latch belongs to, `first_tick_elapsed_sec` how far into that window the
+    # engine's first observed tick landed, and `late_start_skip` whether that is
+    # past `max_start_elapsed_pct` -- in which case the engine never witnessed the
+    # open, so it neither quotes the window nor snapshots its mid.
+    first_seen_start_ts: Optional[float] = None
+    first_tick_elapsed_sec: Optional[float] = None
+    late_start_skip: bool = False
 
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
@@ -483,6 +498,7 @@ class LiveTraderEngine:
         tokens: Optional[Sequence[str]] = None,
         durations: Optional[Sequence[int]] = None,
         entry_timeout_pct: Optional[float] = None,
+        max_start_elapsed_pct: Optional[float] = None,
     ):
         """Initialize the live trading engine with default parameters and selected markets."""
         _load_env_file()
@@ -500,6 +516,15 @@ class LiveTraderEngine:
         self.shares: int = 5
         self.taker_fee_rate: float = 0.0
         self.entry_timeout_pct: float = float(entry_timeout_pct) if entry_timeout_pct is not None else 1.0
+        # Late-start guard (issue #96), independent of `entry_timeout_pct`: the
+        # fraction of a window that may already have elapsed when the engine sees
+        # its first tick for that window. Past it the window is left alone, so a
+        # restart mid-window neither rests unhedgeable legs nor latches an
+        # adverse-drift snapshot from a mid-window mid. 0 or >= 1.0 disables.
+        self.max_start_elapsed_pct: float = (
+            float(max_start_elapsed_pct) if max_start_elapsed_pct is not None
+            else DEFAULT_MAX_START_ELAPSED_PCT
+        )
         
         # State tracking
         self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
@@ -1677,6 +1702,7 @@ class LiveTraderEngine:
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
                 "entry_timeout_pct": self.entry_timeout_pct,
+                "max_start_elapsed_pct": self.max_start_elapsed_pct,
             },
             "markets": mkts_dict,
             "timeline": recent_timeline,
@@ -2477,6 +2503,9 @@ class LiveTraderEngine:
                 m.open_drift = 0.0
                 m.adverse_open = False
                 m.open_gate_evaluated = False
+                m.first_seen_start_ts = None
+                m.first_tick_elapsed_sec = None
+                m.late_start_skip = False
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
             cleared_count = 0
@@ -2928,6 +2957,31 @@ class LiveTraderEngine:
             entry_timeout_sec = win_duration
             is_late_start = False
 
+        # Late-start latch (issue #96). Evaluated once per window from the first
+        # tick the engine observes for it, keyed on `start_ts` so it re-arms on every
+        # rollover. Gating on the latched value rather than on the live `elapsed_sec`
+        # is what keeps a normally-started window quoting for its whole duration at
+        # `entry_timeout_pct = 1.0`.
+        late_start_cutoff_sec = (
+            self.max_start_elapsed_pct * win_duration
+            if (self.max_start_elapsed_pct is not None and 0.0 < self.max_start_elapsed_pct < 1.0)
+            else None
+        )
+        if mstate.first_seen_start_ts != mstate.start_ts:
+            mstate.first_seen_start_ts = mstate.start_ts
+            mstate.first_tick_elapsed_sec = elapsed_sec
+            mstate.late_start_skip = (
+                late_start_cutoff_sec is not None and elapsed_sec >= late_start_cutoff_sec
+            )
+        first_tick_elapsed = (
+            mstate.first_tick_elapsed_sec if mstate.first_tick_elapsed_sec is not None else elapsed_sec
+        )
+        late_cutoff_txt = f"{late_start_cutoff_sec:.0f}s" if late_start_cutoff_sec is not None else "n/a"
+        late_start_action = (
+            f"Engine started {first_tick_elapsed:.0f}s into window (>= {late_cutoff_txt}) "
+            f"— waiting for next window"
+        )
+
         # Pre-entry drift check (issue #92): if the mid was already drifted >= exit_thresh
         # vs 0.50 *when the window opened*, the market is already strongly monotonic /
         # skewed. Never enter or quote into an immediate stop. The gate is evaluated once
@@ -2940,7 +2994,7 @@ class LiveTraderEngine:
             mstate.up_bid is not None and mstate.up_ask is not None
             and mstate.down_bid is not None and mstate.down_ask is not None
         )
-        if not mstate.open_gate_evaluated and book_two_sided:
+        if not mstate.open_gate_evaluated and book_two_sided and not mstate.late_start_skip:
             mstate.open_mid = mid
             mstate.open_drift = abs(mid - 0.50)
             mstate.adverse_open = (mstate.open_drift >= self.exit_thresh)
@@ -2948,8 +3002,23 @@ class LiveTraderEngine:
         initial_drift = mstate.open_drift
         is_adverse_open = mstate.adverse_open
 
+        # --- LATE-START SKIP (issue #96) ---
+        # The engine attached to this window after `max_start_elapsed_pct` elapsed,
+        # so there is nothing to cancel: no entry was ever placed for it. Mark the
+        # window skipped and wait for the next rollover, which takes a genuine
+        # opening snapshot.
+        if (mstate.late_start_skip and not mstate.entry_cancelled_timeout
+                and not mstate.filled_up and not mstate.filled_down
+                and not mstate.order_id_up and not mstate.order_id_down):
+            with self._engine_lock:
+                mstate.entry_cancelled_timeout = True
+                mstate.status = "LATE_START_SKIPPED"
+                mstate.last_action = late_start_action
+            log.info("[%s] Window skipped: engine started %.1fs in (cutoff=%s)",
+                     slug, first_tick_elapsed, late_cutoff_txt)
+
         # --- PRE-ENTRY DRIFT & ENTRY TIMEOUT CANCELLATION ---
-        if (is_late_start or is_adverse_open) and not mstate.entry_cancelled_timeout:
+        if (is_late_start or is_adverse_open or mstate.late_start_skip) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
                 if self.mode == "live":
@@ -3034,7 +3103,12 @@ class LiveTraderEngine:
                         mstate.entry_cancelled_timeout = True
 
                 if mstate.entry_cancelled_timeout:
-                    if is_adverse_open:
+                    if mstate.late_start_skip:
+                        mstate.status = "LATE_START_SKIPPED"
+                        mstate.last_action = late_start_action
+                        log.info("[%s] Window skipped: engine started %.1fs in (cutoff=%s)",
+                                 slug, first_tick_elapsed, late_cutoff_txt)
+                    elif is_adverse_open:
                         mstate.status = "DRIFT_SKIPPED"
                         open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
                         mstate.last_action = f"Adverse drift at open (mid {open_mid_txt}, drift {initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
@@ -3053,6 +3127,7 @@ class LiveTraderEngine:
             and not mstate.entry_cancelled_timeout
             and not is_late_start
             and not is_adverse_open
+            and not mstate.late_start_skip
         )
         if can_place_entry:
             if self.mode == "live":
@@ -3450,6 +3525,9 @@ class LiveTraderEngine:
             mstate.open_drift = 0.0
             mstate.adverse_open = False
             mstate.open_gate_evaluated = False
+            mstate.first_seen_start_ts = None
+            mstate.first_tick_elapsed_sec = None
+            mstate.late_start_skip = False
             mstate.exit_side = None
             mstate.spot_open_price = None
             mstate.spot_drift = 0.0
