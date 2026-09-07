@@ -127,12 +127,22 @@ class BacktestParams:
     min_quote_shares: int = 5
     max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
     entry_timeout_pct: float = 0.10   # 0 disables; e.g. 0.10 cancels unfilled entry quotes once 10% elapsed
+    # Late-start guard (issue #96), independent of entry_timeout_pct: a window whose
+    # first snapshot already lands this far in was never observed at its open, so it
+    # is neither entered nor used for the adverse-open snapshot. Mirrors
+    # LiveTraderEngine.max_start_elapsed_pct. 0 disables.
+    max_start_elapsed_pct: float = 0.10
 
     def __post_init__(self):
         """Validate parameter ranges and finite boundaries."""
         if self.entry_timeout_pct is not None:
             if math.isnan(self.entry_timeout_pct) or not (0.0 <= self.entry_timeout_pct <= 1.0):
                 raise ValueError(f"entry_timeout_pct must be between 0.0 and 1.0, got {self.entry_timeout_pct}")
+        if self.max_start_elapsed_pct is not None:
+            if math.isnan(self.max_start_elapsed_pct) or not (0.0 <= self.max_start_elapsed_pct <= 1.0):
+                raise ValueError(
+                    f"max_start_elapsed_pct must be between 0.0 and 1.0, got {self.max_start_elapsed_pct}"
+                )
 
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
         """Return the exit threshold for a given market slug, series, and window duration."""
@@ -274,6 +284,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     entry_cancelled = False
     adverse_gate_evaluated = False
+    # Late start (issue #96): the replay's first snapshot for this window already
+    # lands past max_start_elapsed_pct, so the window's open was never observed.
+    # Skip it entirely -- no entry, and no adverse-open snapshot from a mid-window
+    # mid -- matching LiveTraderEngine's late_start_skip.
+    late_start = bool(
+        params.max_start_elapsed_pct
+        and params.max_start_elapsed_pct > 0
+        and duration > 0
+        and raw_start_delay_sec >= params.max_start_elapsed_pct * duration
+    )
+    if late_start:
+        entry_cancelled = True
     if params.entry_timeout_pct > 0 and duration > 0:
         cutoff_sec = params.entry_timeout_pct * duration
         if raw_start_delay_sec >= cutoff_sec:
@@ -316,7 +338,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Adverse-open gate (issue #92): evaluated once per window against the
         # first snapshot quoting two sides on both legs, so backtest and live
         # agree on which windows are entered.
-        if not adverse_gate_evaluated:
+        if not adverse_gate_evaluated and not late_start:
             open_mid = _two_sided_mid(ub, db)
             if open_mid is not None:
                 adverse_gate_evaluated = True

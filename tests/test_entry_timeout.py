@@ -14,7 +14,7 @@ import time
 from unittest.mock import MagicMock
 import pytest
 
-from strategy.live_trader import LiveTraderEngine
+from strategy.live_trader import LiveTraderEngine, DEFAULT_MAX_START_ELAPSED_PCT
 from backtest import BacktestParams
 from backtest.engine import _simulate_window
 
@@ -262,7 +262,7 @@ def test_live_trader_skips_orders_on_late_start_window():
     assert mstate.order_id_up is None
     assert mstate.order_id_down is None
     assert engine.place_live_quote.call_count == 0
-    assert mstate.status == "TIMEOUT_NO_FILL"
+    assert mstate.status == "LATE_START_SKIPPED"
 
 
 def test_live_trader_keeps_opposite_leg_open_if_one_filled_before_timeout():
@@ -453,3 +453,188 @@ def test_backtest_one_sided_open_book_does_not_cancel_entry():
     p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
     res = _simulate_window(snaps, p)
     assert res.filled_up is True
+
+
+# ============================================================================
+# ISSUE #96 — LATE-START GUARD (independent of entry_timeout_pct)
+# ============================================================================
+
+def _late_start_engine(entry_timeout_pct=1.0, **kwargs):
+    """LiveTraderEngine in live mode with the CLOB calls mocked out."""
+    engine = LiveTraderEngine(entry_timeout_pct=entry_timeout_pct, **kwargs)
+    engine.mode = "live"
+    engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
+    engine.place_live_quote = MagicMock(
+        side_effect=lambda token_id, price, size, side: {
+            "order_id": f"ord_{token_id}_{side}", "status": "RESTING"}
+    )
+    engine.cancel_live_order = MagicMock(return_value=True)
+    return engine
+
+
+def _poll(start_ts, cid="0xwin_a", slug="btc-updown-a", mid=0.50):
+    """poll_data whose two-sided books yield `mid` in the engine's mid formula."""
+    half_spread = 0.01
+    up_mid = mid
+    down_mid = 1.0 - mid
+    return {
+        "market": {
+            "conditionId": cid,
+            "slug": slug,
+            "up_token": f"tok_up_{cid}",
+            "down_token": f"tok_dn_{cid}",
+            "start_ts": start_ts,
+            "end_ts": start_ts + 300.0,
+        },
+        "up_book": {"best_bid": round(up_mid - half_spread, 4), "best_ask": round(up_mid + half_spread, 4)},
+        "down_book": {"best_bid": round(down_mid - half_spread, 4), "best_ask": round(down_mid + half_spread, 4)},
+    }
+
+
+def test_live_trader_mid_window_start_places_no_entry_at_full_window_timeout():
+    """entry_timeout_pct=1.0 must still not enter a window the engine joined 270s in."""
+    engine = _late_start_engine(entry_timeout_pct=1.0)
+    slug = "btc-up-or-down-5m"
+
+    # First tick 270s into a 300s window -- 30s of window left.
+    engine._update_market_strategy(slug, _poll(1000.0), now=1270.0)
+
+    mstate = engine.markets[slug]
+    assert mstate.late_start_skip is True
+    assert engine.place_live_quote.call_count == 0
+    assert mstate.order_id_up is None
+    assert mstate.order_id_down is None
+    assert mstate.status == "LATE_START_SKIPPED"
+    assert "waiting for next window" in mstate.last_action
+
+
+def test_live_trader_mid_window_start_does_not_latch_adverse_open():
+    """A skewed mid observed mid-window is not an opening mid, so no snapshot is taken."""
+    engine = _late_start_engine(entry_timeout_pct=1.0)
+    slug = "btc-up-or-down-5m"
+
+    # mid 0.44 -> drift 0.06 >= exit_thresh 0.05; pre-#96 this latched adverse_open.
+    engine._update_market_strategy(slug, _poll(1000.0, mid=0.44), now=1270.0)
+
+    mstate = engine.markets[slug]
+    assert mstate.open_gate_evaluated is False
+    assert mstate.open_mid is None
+    assert mstate.adverse_open is False
+    assert mstate.status == "LATE_START_SKIPPED"
+    assert mstate.status != "DRIFT_SKIPPED"
+
+
+def test_live_trader_window_after_late_start_quotes_normally():
+    """The rollover following a late start takes a genuine snapshot and quotes."""
+    engine = _late_start_engine(entry_timeout_pct=1.0)
+    slug = "btc-up-or-down-5m"
+
+    engine._update_market_strategy(slug, _poll(1000.0, mid=0.44), now=1270.0)
+    mstate = engine.markets[slug]
+    assert mstate.late_start_skip is True
+
+    # New window opens at 1300.0; first tick 1s later.
+    engine._update_market_strategy(
+        slug, _poll(1300.0, cid="0xwin_b", slug="btc-updown-b", mid=0.50), now=1301.0)
+
+    assert mstate.late_start_skip is False
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.open_gate_evaluated is True
+    assert mstate.open_mid == 0.50
+    assert mstate.adverse_open is False
+    assert mstate.order_status_up == "RESTING"
+    assert mstate.order_status_down == "RESTING"
+
+
+def test_live_trader_start_at_open_still_quotes_whole_window():
+    """The latch is per-window, not per-tick: a normal start keeps quoting to expiry."""
+    engine = _late_start_engine(entry_timeout_pct=1.0)
+    slug = "btc-up-or-down-5m"
+    poll = _poll(1000.0)
+
+    engine._update_market_strategy(slug, poll, now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.late_start_skip is False
+    assert mstate.order_status_up == "RESTING"
+
+    # 280s in -- far past the 30s late-start cutoff, but this engine saw the open.
+    engine._update_market_strategy(slug, poll, now=1280.0)
+    assert mstate.late_start_skip is False
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.order_status_up == "RESTING"
+    assert mstate.order_status_down == "RESTING"
+    assert engine.cancel_live_order.call_count == 0
+
+
+def test_live_trader_late_start_guard_can_be_disabled():
+    """max_start_elapsed_pct=0.0 restores the pre-#96 behaviour for operators who want it."""
+    engine = _late_start_engine(entry_timeout_pct=1.0, max_start_elapsed_pct=0.0)
+    slug = "btc-up-or-down-5m"
+
+    engine._update_market_strategy(slug, _poll(1000.0), now=1270.0)
+
+    mstate = engine.markets[slug]
+    assert mstate.late_start_skip is False
+    assert mstate.order_status_up == "RESTING"
+
+
+def test_backtest_late_start_cancels_entry_at_full_entry_timeout():
+    """Backtest parity: a 270s-late first snapshot is skipped even at entry_timeout_pct=1.0."""
+    snaps = [
+        _make_snap(1270.0, mid=0.50, up_ask=0.48, down_ask=0.48,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48},
+                         {"asset": DN_TOKEN, "price": 0.48}]),
+    ]
+
+    guarded = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
+    assert guarded.filled_up is False
+    assert guarded.filled_down is False
+    assert guarded.pair_captured is False
+
+    # Guard disabled -> the same window enters, proving the guard is what blocked it.
+    unguarded = _simulate_window(
+        snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0, max_start_elapsed_pct=0.0))
+    assert unguarded.filled_up is True
+
+
+def test_backtest_start_within_threshold_still_enters_at_full_entry_timeout():
+    """A 5s start delay is inside the 30s cutoff, so the window is entered normally."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.51, down_ask=0.51),
+        _make_snap(1240.0, mid=0.50, up_ask=0.48, down_ask=0.48,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48},
+                         {"asset": DN_TOKEN, "price": 0.48}]),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
+    assert res.filled_up is True
+    assert res.filled_down is True
+
+
+def test_backtest_late_start_threshold_matches_live_default():
+    """The two engines must agree on which windows are entered."""
+    assert BacktestParams().max_start_elapsed_pct == DEFAULT_MAX_START_ELAPSED_PCT
+    assert LiveTraderEngine(load_persisted=False).max_start_elapsed_pct == DEFAULT_MAX_START_ELAPSED_PCT
+
+
+def test_backtest_rejects_out_of_range_max_start_elapsed_pct():
+    with pytest.raises(ValueError):
+        BacktestParams(max_start_elapsed_pct=1.5)
+
+
+def test_live_trader_shifting_start_ts_does_not_re_arm_a_quoted_window():
+    """A market loader with an unstable start_ts must not turn a live window late."""
+    engine = _late_start_engine(entry_timeout_pct=1.0)
+    slug = "btc-up-or-down-5m"
+
+    engine._update_market_strategy(slug, _poll(1000.0), now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_status_up == "RESTING"
+
+    # Same window, same condition id, but start_ts drifts and 200s have passed.
+    engine._update_market_strategy(slug, _poll(1000.5), now=1205.0)
+
+    assert mstate.late_start_skip is False
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.order_status_up == "RESTING"
+    assert mstate.order_status_down == "RESTING"
