@@ -674,31 +674,24 @@ def test_api_live_cockpit_endpoints(monkeypatch):
 def test_reset_pnl_endpoint_refuses_while_live_running(monkeypatch):
     """Issue #93: reset_pnl on a live running engine → 409 + Stop-first message."""
     from unittest.mock import MagicMock
-    from strategy.live_trader import get_live_trader_engine
-    engine = get_live_trader_engine()
+    import server.osc_dash as osc_dash
+    from strategy.live_trader import LiveTraderEngine
+    # Isolated engine: the endpoint resolves it via server.osc_dash, so the
+    # process-global singleton is never mutated by this test.
+    engine = LiveTraderEngine(load_persisted=False)
     monkeypatch.setattr(engine, "get_clob_client", lambda: MagicMock())
-    prev_mode = engine.mode
-    try:
-        engine.mode = "live"
-        engine.is_running = True
-        m = engine.markets["btc-up-or-down-5m"]
-        m.order_id_up = "endpoint_live_ord"
-        m.order_status_up = "RESTING"
-        res = client.post("/api/live/control", json={"action": "reset_pnl"})
-        assert res.status_code == 409
-        body = res.json()
-        assert body.get("ok") is False
-        assert "Stop" in body.get("error", "")
-        assert m.order_id_up == "endpoint_live_ord"
-    finally:
-        engine.is_running = False
-        engine.mode = "paper"
-        m = engine.markets["btc-up-or-down-5m"]
-        m.order_id_up = None
-        m.order_status_up = "NONE"
-        res_ok = client.post("/api/live/control", json={"action": "reset_pnl"})
-        assert res_ok.status_code == 200
-        engine.mode = prev_mode
+    monkeypatch.setattr(osc_dash, "get_live_trader_engine", lambda: engine)
+    engine.mode = "live"
+    engine.is_running = True
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "endpoint_live_ord"
+    m.order_status_up = "RESTING"
+    res = client.post("/api/live/control", json={"action": "reset_pnl"})
+    assert res.status_code == 409
+    body = res.json()
+    assert body.get("ok") is False
+    assert "Stop" in body.get("error", "")
+    assert m.order_id_up == "endpoint_live_ord"
 
 
 def test_osc_dash_live_execution_endpoints(monkeypatch):

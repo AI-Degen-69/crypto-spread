@@ -1157,6 +1157,26 @@ def test_reset_pnl_live_stopped_venue_failure_refuses_without_clearing(monkeypat
     assert m.order_id_up == "live_ord_up"
 
 
+def test_reset_pnl_live_stopped_cancel_all_failure_refuses_without_clearing(monkeypatch):
+    """Issue #93: live + stopped + cancel_all reports failure → refusal, ids kept."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    fake_client = MagicMock()
+    fake_client.cancel_all.return_value = {"success": False}
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is False
+    assert res.get("venue_cancelled") is False
+    assert m.order_id_up == "live_ord_up"
+
+
 def test_reset_pnl_live_stopped_no_client_refuses_without_clearing(monkeypatch):
     """Issue #93: live + stopped + no CLOB client → refusal, ids preserved."""
     engine = LiveTraderEngine(load_persisted=False)

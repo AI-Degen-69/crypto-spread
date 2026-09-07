@@ -2392,8 +2392,17 @@ class LiveTraderEngine:
                 }
             try:
                 if hasattr(client, "cancel_all"):
-                    client.cancel_all()
+                    cancel_res = client.cancel_all()
                     log.info("reset_pnl: venue cancel_all invoked on Polymarket CLOB")
+                    if not self._cancel_succeeded(cancel_res):
+                        log.error("reset_pnl: venue cancel_all reported failure: %s", cancel_res)
+                        return {
+                            "ok": False,
+                            "refused": False,
+                            "venue_cancelled": False,
+                            "markets_cleared": 0,
+                            "error": "Venue cancel reported failure; reset refused.",
+                        }
                 else:
                     failures = [oid for oid in oids if not self.cancel_live_order(oid)]
                     if failures:
