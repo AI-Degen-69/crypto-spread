@@ -2330,7 +2330,61 @@ class LiveTraderEngine:
         so `get_open_orders_list()` comes back empty, and the 5s orders cache
         is invalidated. Returns a result dict; callers that ignore it keep
         working as before.
+
+        Live-mode safety net: when `mode == "live"` and the engine is running
+        with outstanding orders, the reset is REFUSED (nothing is cleared and
+        no venue cancel is fired) so real-money orders are never cancelled
+        behind the operator's back — Stop first, then reset. When live but
+        stopped, venue-side orders are cancelled before the local handles are
+        dropped.
         """
+        with self._engine_lock:
+            hot = self.mode == "live" and self.is_running and self._has_outstanding_orders()
+        if hot:
+            return {
+                "ok": False,
+                "refused": True,
+                "venue_cancelled": False,
+                "markets_cleared": 0,
+                "message": (
+                    "Stop the engine before RESET P&L while orders are "
+                    "outstanding — press Stop first (Stop cancels live orders), "
+                    "then reset."
+                ),
+            }
+        venue_cancelled = False
+        with self._engine_lock:
+            needs_venue_cancel = self.mode == "live" and self._has_outstanding_orders()
+        if needs_venue_cancel:
+            client = self.get_clob_client()
+            if client is not None:
+                try:
+                    if hasattr(client, "cancel_all"):
+                        client.cancel_all()
+                        log.info("reset_pnl: venue cancel_all invoked on Polymarket CLOB")
+                    else:
+                        for m in self.markets.values():
+                            for oid in (
+                                m.order_id_up,
+                                m.order_id_down,
+                                m.next_order_id_up,
+                                m.next_order_id_down,
+                                m.stop_order_id,
+                                m.order_id_exit_up,
+                                m.order_id_exit_down,
+                            ):
+                                if oid:
+                                    self.cancel_live_order(oid)
+                    venue_cancelled = True
+                except Exception as e:
+                    log.error("reset_pnl: venue cancel failed: %s", e)
+                    return {
+                        "ok": False,
+                        "refused": False,
+                        "venue_cancelled": False,
+                        "markets_cleared": 0,
+                        "error": str(e),
+                    }
         self.trades.clear()
         self.timeline.clear()
         self.open_positions.clear()
@@ -2390,7 +2444,7 @@ class LiveTraderEngine:
         return {
             "ok": True,
             "refused": False,
-            "venue_cancelled": False,
+            "venue_cancelled": venue_cancelled,
             "markets_cleared": cleared_count,
         }
 
