@@ -1374,6 +1374,13 @@ def test_filled_orders_promoted_to_positions_dom():
     globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
     const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
     const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+    // Hermetic bootstrap: dashboard top-level code must never reach the host network.
+    const setInterval = () => 0;
+    const clearInterval = () => {{}};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {{}};
+    const fetch = () => Promise.resolve({{ ok: true, json: async () => ({{}}) }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
 
     {js_code}
 
@@ -1435,6 +1442,11 @@ def test_filled_orders_promoted_to_positions_dom():
     }}
     if (posHtml.includes('$NaN') || posHtml.includes('NaN') || posHtml.includes('Infinity')) {{
       throw new Error('Garbage numerics leaked into Positions: ' + posHtml);
+    }}
+    // Synthetic-only groups carry no CLOB valuation: no derived $0.00 PnL.
+    // (Market Value / Unrealized / Realized stay '--' until real data arrives.)
+    if (posHtml.includes('$0.00')) {{
+      throw new Error('Synthetic positions must not derive a $0.00 valuation: ' + posHtml);
     }}
 
     // Badges: orders counts resting only (OPEN + CANCELLED), positions include promoted.

@@ -2310,15 +2310,21 @@ function groupPositionsByPair(positions, markets) {
     g.legs.sort((a, b) => (a.isUp === b.isUp ? 0 : a.isUp ? -1 : 1));
     g.rowspan = g.legs.length;
     
-    const upSize = g.legs.filter(l => l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
-    const downSize = g.legs.filter(l => !l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
-    const upLeg = g.legs.find(l => l.isUp);
-    const downLeg = g.legs.find(l => !l.isUp);
-    
+    // Issue #91: synthetic legs promoted from filled orders have no CLOB
+    // valuation (no curPrice). Exclude them from pair valuation so the group
+    // never derives a Market Value or $0.00 unrealized from the fill price —
+    // those cells stay '--' until real position data arrives. Row rendering
+    // (side / size / base cost) still uses every leg.
+    const valLegs = g.legs.filter(l => !l._fromFilledOrder);
+    const upSize = valLegs.filter(l => l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
+    const downSize = valLegs.filter(l => !l.isUp).reduce((sum, l) => sum + (l.sizeNum || 0), 0);
+    const upLeg = valLegs.find(l => l.isUp);
+    const downLeg = valLegs.find(l => !l.isUp);
+
     let totalCost = 0;
     let totalRealized = 0;
     let hasRealized = false;
-    for (const leg of g.legs) {
+    for (const leg of valLegs) {
       if (leg.baseCost != null) totalCost += leg.sizeNum * leg.baseCost;
       const cp = leg.cashPnl != null ? Number(leg.cashPnl) : null;
       if (cp != null && !isNaN(cp)) {
