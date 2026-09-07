@@ -346,6 +346,10 @@ def _resolve_series_selection(
 # first tick for that window and still count as "started at the open" (issue #96).
 # 30s of a 5m window, 90s of a 15m window.
 DEFAULT_MAX_START_ELAPSED_PCT = 0.10
+# Minimum window time remaining that still justifies opening a fresh quoting
+# round after a pair merge (issue #89). 300s keeps 5m windows single-round
+# while letting 15m windows recycle; 0 disables re-quoting entirely.
+DEFAULT_MIN_REQUOTE_REMAINING_SEC = 300.0
 
 
 @dataclass
@@ -447,6 +451,12 @@ class MarketLiveState:
     pair_captured: bool = False
     exit_taken: bool = False
     exit_side: Optional[str] = None
+
+    # Multi-merge re-quoting (issue #89): completed merges in the current
+    # window. Round 0 is the initial static-anchor quote; each re-quote opens
+    # the next round anchored to the live mid minus offset. Reset on rollover.
+    requote_round: int = 0
+    last_requote_telemetry: Optional[Dict[str, Any]] = None
     
     # Adverse drift tracking
     max_up_drift: float = 0.0
@@ -530,6 +540,7 @@ class LiveTraderEngine:
         durations: Optional[Sequence[int]] = None,
         entry_timeout_pct: Optional[float] = None,
         max_start_elapsed_pct: Optional[float] = None,
+        min_requote_remaining_sec: Optional[float] = None,
     ):
         """Initialize the live trading engine with default parameters and selected markets."""
         _load_env_file()
@@ -556,18 +567,26 @@ class LiveTraderEngine:
             float(max_start_elapsed_pct) if max_start_elapsed_pct is not None
             else DEFAULT_MAX_START_ELAPSED_PCT
         )
+        # Re-quote time gate (issue #89): a fresh round after a pair merge only
+        # opens when at least this much window time remains. 0 disables it.
+        # Issue #95 shares this knob for drift-skip re-entry: both answer the same
+        # question -- "is there enough window left to open a fresh two-leg position
+        # and have it pair?" -- and the answer does not depend on why the market is
+        # currently flat. At the 300s default a 5m window can never re-enter; lower
+        # it to re-enter 5m markets.
+        self.min_requote_remaining_sec: float = (
+            max(0.0, float(min_requote_remaining_sec)) if min_requote_remaining_sec is not None
+            else DEFAULT_MIN_REQUOTE_REMAINING_SEC
+        )
         # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
         # re-entered once the live mid comes back within `reentry_drift_band` of 0.50
-        # and at least `min_requote_remaining_sec` of the window is left to pair two
-        # legs. The band is deliberately tighter than `exit_thresh`: resting prices are
-        # still anchored to a static `0.50 - offset` (issue #89 tracks mid-anchored
-        # quoting), so a wide band would re-quote 0.48/0.48 into a market trading well
-        # away from 0.50 and fill only the adverse leg. `min_requote_remaining_sec` is
-        # the shared "is there time to pair?" knob issue #89 adopts for post-merge
-        # re-quoting; it is 60s rather than a full 5m window so 5m markets can re-enter
-        # at all. Defaults are mirrored byte-for-byte in `BacktestParams`.
+        # and `min_requote_remaining_sec` of the window is left. The band is
+        # deliberately far tighter than `exit_thresh`: issue #89's mid-anchored
+        # quoting only applies to post-merge re-quote rounds, so the *entry* (and
+        # therefore the re-entry) still rests at a static `0.50 - offset`. A wide band
+        # would re-quote 0.48/0.48 into a market trading well away from 0.50 and fill
+        # only the adverse leg. Defaults are mirrored in `BacktestParams`.
         self.reentry_drift_band: float = 0.015
-        self.min_requote_remaining_sec: float = 60.0
         self.max_reentries_per_window: int = 1
         
         # State tracking
@@ -1753,8 +1772,8 @@ class LiveTraderEngine:
                 "shares": self.shares,
                 "entry_timeout_pct": self.entry_timeout_pct,
                 "max_start_elapsed_pct": self.max_start_elapsed_pct,
-                "reentry_drift_band": self.reentry_drift_band,
                 "min_requote_remaining_sec": self.min_requote_remaining_sec,
+                "reentry_drift_band": self.reentry_drift_band,
                 "max_reentries_per_window": self.max_reentries_per_window,
             },
             "markets": mkts_dict,
@@ -1791,6 +1810,7 @@ class LiveTraderEngine:
                       tokens: Optional[Iterable[str]] = None,
                       durations: Optional[Iterable[int]] = None,
                       entry_timeout_pct: Optional[float] = None,
+                      min_requote_remaining_sec: Optional[float] = None,
                       reentry_drift_band: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
@@ -1836,6 +1856,8 @@ class LiveTraderEngine:
                 if starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
                     param_changed = True
                 if entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
+                    param_changed = True
+                if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
                     param_changed = True
                 if reentry_drift_band is not None and abs(float(reentry_drift_band) - self.reentry_drift_band) > 1e-6:
                     param_changed = True
@@ -1939,6 +1961,8 @@ class LiveTraderEngine:
                         self.starting_balance = float(starting_balance)
                 if entry_timeout_pct is not None:
                     self.entry_timeout_pct = max(0.0, min(1.0, float(entry_timeout_pct)))
+                if min_requote_remaining_sec is not None:
+                    self.min_requote_remaining_sec = max(0.0, float(min_requote_remaining_sec))
                 if reentry_drift_band is not None:
                     # Clamped to the same 0..0.50 range as `exit_thresh`; 0 disables
                     # re-entry entirely by making the band unreachable for any real mid.
@@ -1949,6 +1973,11 @@ class LiveTraderEngine:
                     m.resting_up = round(0.50 - self.offset, 3)
                     m.resting_down = round(0.50 - self.offset, 3)
                     m.order_shares = self.shares
+                    # Issue #89: a stopped config change drops any latched
+                    # re-quote round, so the next tick re-anchors from the
+                    # static base instead of a stale dynamic price.
+                    m.requote_round = 0
+                    m.last_requote_telemetry = None
 
         # Perform remote account fetch outside _engine_lock so network I/O never blocks stop()
         if fetch_live_balance:
@@ -2415,6 +2444,9 @@ class LiveTraderEngine:
         m.order_id_exit_down = None
         m.order_status_exit_up = "NONE"
         m.order_status_exit_down = "NONE"
+        # Issue #89: a reset market restarts at round 0 with no stale telemetry.
+        m.requote_round = 0
+        m.last_requote_telemetry = None
 
     def reset_pnl(self) -> Dict[str, Any]:
         """Reset session PnL, trade history, and outstanding order state.
@@ -3065,11 +3097,17 @@ class LiveTraderEngine:
                 mstate.status = "IDLE"
             return
 
-        # Target resting prices
-        resting_up = round(0.50 - self.offset, 3)
-        resting_down = round(0.50 - self.offset, 3)
-        mstate.resting_up = resting_up
-        mstate.resting_down = resting_down
+        # Target resting prices. Round 0 anchors to the static 0.50 base; once a
+        # window has merged and re-quoted (issue #89), that round's dynamic
+        # mid-anchored prices latch and must not be overwritten every tick.
+        if mstate.requote_round <= 0:
+            resting_up = round(0.50 - self.offset, 3)
+            resting_down = round(0.50 - self.offset, 3)
+            mstate.resting_up = resting_up
+            mstate.resting_down = resting_down
+        else:
+            resting_up = mstate.resting_up
+            resting_down = mstate.resting_down
         mstate.order_shares = self.shares
 
         # --- DRIFT TRACKING (vs 0.50 base) ---
@@ -3303,6 +3341,8 @@ class LiveTraderEngine:
                         mstate.order_id_down = res_dn["order_id"]
                         mstate.order_time_down = time.strftime("%H:%M:%S")
                         mstate.order_status_down = "RESTING"
+                if mstate.requote_round > 0:
+                    self._finalize_requote_telemetry(mstate, slug, mid)
             else:
                 if not mstate.filled_up and mstate.order_status_up != "RESTING":
                     mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
@@ -3312,6 +3352,8 @@ class LiveTraderEngine:
                     mstate.order_id_down = mstate.order_id_down or f"paper_dn_{slug}"
                     mstate.order_status_down = "RESTING"
                     mstate.order_time_down = mstate.order_time_down if mstate.order_time_down != "-" else time.strftime("%H:%M:%S")
+                if mstate.requote_round > 0:
+                    self._finalize_requote_telemetry(mstate, slug, mid)
 
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
@@ -3456,6 +3498,9 @@ class LiveTraderEngine:
                         market_slug=mstate.market_slug or "",
                     ))
                     self._save_persisted_trades()
+                # Issue #89: recycle into a fresh quoting round when the window
+                # has enough life left; otherwise stay terminal until rollover.
+                self._maybe_requote_after_merge(mstate, slug, mid, now)
                 return
 
         # --- RECONCILE STAGED STOP-LOSS (issue #87) ---
@@ -3574,6 +3619,107 @@ class LiveTraderEngine:
 
         mstate.total_pnl_usd = round(mstate.realized_pnl_usd + mstate.unrealized_pnl_usd, 3)
 
+    def _maybe_requote_after_merge(self, mstate: MarketLiveState, slug: str, mid: float, now: float) -> bool:
+        """Open a fresh quoting round after a pair merge when time allows (issue #89).
+
+        Only PAIR_MERGED windows qualify — stop-loss exits stay terminal for the
+        window. The new round anchors resting bids to the live mid minus offset
+        (`target_up = mid - offset`, `target_down = (1 - mid) - offset`, so the
+        pair still sums to `1 - 2 * offset`) instead of the static 0.50 base,
+        resets per-round fill/order/drift state while keeping cumulative PnL,
+        trade history, and pair counts, and records decision-time telemetry that
+        `_finalize_requote_telemetry` completes once the round reaches the book.
+
+        Returns True when a new round opened.
+        """
+        gate = self.min_requote_remaining_sec
+        if gate is None or gate <= 0:
+            return False
+        if mstate.time_remaining_sec < gate:
+            return False
+        anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)
+        anchor_down = round(min(0.99, max(0.01, (1.0 - mid) - self.offset)), 3)
+        with self._engine_lock:
+            mstate.requote_round += 1
+            mstate.filled_up = False
+            mstate.filled_down = False
+            mstate.fill_price_up = None
+            mstate.fill_price_down = None
+            mstate.order_id_up = None
+            mstate.order_id_down = None
+            mstate.order_time_up = "-"
+            mstate.order_time_down = "-"
+            mstate.order_status_up = "NONE"
+            mstate.order_status_down = "NONE"
+            mstate.pair_captured = False
+            mstate.status = "QUOTING"
+            mstate.max_up_drift = 0.0
+            mstate.max_down_drift = 0.0
+            mstate.reversal_seen_up = False
+            mstate.reversal_seen_down = False
+            mstate.resting_up = anchor_up
+            mstate.resting_down = anchor_down
+            mstate.last_requote_telemetry = {
+                "round": mstate.requote_round,
+                "mid_at_calc": round(mid, 4),
+                "order_prices": {"up": anchor_up, "down": anchor_down},
+                "mid_at_submit": round(mid, 4),
+                "submitted_at": datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                "perf_start": time.perf_counter(),
+                "mid_at_resting": None,
+                "latency_ms": None,
+                "drift": None,
+            }
+            mstate.last_action = (
+                f"Re-quoting round {mstate.requote_round} @ {anchor_up:.2f}/{anchor_down:.2f} "
+                f"(mid {mid:.3f}, {mstate.time_remaining_sec:.0f}s left)"
+            )
+        log.info(
+            "[%s] Re-quote round %d @ %.3f/%.3f (mid=%.4f, %.0fs left)",
+            slug, mstate.requote_round, anchor_up, anchor_down, mid, mstate.time_remaining_sec,
+        )
+        return True
+
+    def _finalize_requote_telemetry(self, mstate: MarketLiveState, slug: str, mid: float) -> None:
+        """Complete the re-quote resting snapshot once the new round reaches the book.
+
+        No-op for round 0, for already-finalised telemetry, and until both legs
+        are confirmed RESTING or FILLED. Logs a warning when the mid escaped
+        beyond the offset between the re-quote decision and the resting
+        confirmation, so operators can see adverse slippage on entry.
+        """
+        tel = mstate.last_requote_telemetry
+        if not isinstance(tel, dict) or tel.get("mid_at_resting") is not None:
+            return
+        if mstate.order_status_up not in ("RESTING", "FILLED"):
+            return
+        if mstate.order_status_down not in ("RESTING", "FILLED"):
+            return
+        try:
+            perf_start = float(tel.get("perf_start") or time.perf_counter())
+        except (TypeError, ValueError):
+            perf_start = time.perf_counter()
+        latency_ms = round((time.perf_counter() - perf_start) * 1000.0, 2)
+        try:
+            mid_at_calc = float(tel.get("mid_at_calc") if tel.get("mid_at_calc") is not None else mid)
+        except (TypeError, ValueError):
+            mid_at_calc = mid
+        drift = round(abs(mid - mid_at_calc), 4)
+        with self._engine_lock:
+            tel["mid_at_resting"] = round(mid, 4)
+            tel["latency_ms"] = latency_ms
+            tel["drift"] = drift
+        if drift > self.offset:
+            log.warning(
+                "[%s] Re-quote round %s: mid drifted %.3f between decision and resting (offset %.3f)",
+                slug, tel.get("round"), drift, self.offset,
+            )
+        else:
+            log.info(
+                "[%s] Re-quote round %s resting confirmed (mid=%.4f, latency=%.1fms, drift=%.4f)",
+                slug, tel.get("round"), mid, latency_ms, drift,
+            )
+
     def _handle_window_rollover(self, mstate: MarketLiveState, now: float, new_cid: str = ""):
         """Cleanly settle unresolved positions when window expires and roll to next."""
         # Reconcile any pending stop-exit order before rollover
@@ -3681,6 +3827,8 @@ class LiveTraderEngine:
             mstate.pair_captured = False
             mstate.exit_taken = False
             mstate.entry_cancelled_timeout = False
+            mstate.requote_round = 0
+            mstate.last_requote_telemetry = None
             mstate.open_mid = None
             mstate.open_drift = 0.0
             mstate.adverse_open = False
