@@ -1028,6 +1028,193 @@ def test_reset_pnl_clears_open_positions():
     assert m.filled_up is False
 
 
+def test_reset_pnl_clears_all_order_state_and_orders_list(monkeypatch):
+    """Issue #93: reset_pnl on a stopped engine empties every order row."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    monkeypatch.setattr(engine, "get_clob_client", lambda: None)
+    m = engine.markets["btc-up-or-down-5m"]
+    # Entry legs (one FILLED to prove FILLED rows are cleared too).
+    m.order_id_up = "ord_up_1"
+    m.order_status_up = "FILLED"
+    m.order_time_up = "12:00:01"
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    m.order_id_down = "ord_dn_1"
+    m.order_status_down = "RESTING"
+    m.order_time_down = "12:00:02"
+    # Advance pre-quotes for the next window.
+    m.next_order_id_up = "nxt_up_1"
+    m.next_order_time_up = "12:00:03"
+    m.next_order_id_down = "nxt_dn_1"
+    m.next_order_time_down = "12:00:04"
+    m.next_quoted = True
+    # Resting stop-loss + exit handles.
+    m.stop_order_id = "stop_1"
+    m.stop_order_status = "RESTING"
+    m.stop_price = 0.40
+    m.stop_side = "UP"
+    m.order_id_exit_up = "exit_up_1"
+    m.order_status_exit_up = "RESTING"
+    m.order_id_exit_down = "exit_dn_1"
+    m.order_status_exit_down = "RESTING"
+    # Retained cancelled rows + timeout latch + warm orders cache.
+    m.cancelled_orders = [{
+        "order_id": "old_cancelled_1", "market": m.label, "status": "CANCELLED",
+    }]
+    m.entry_cancelled_timeout = True
+    engine._orders_cache_ts = time.time()
+
+    assert engine.get_open_orders_list() != []
+
+    res = engine.reset_pnl()
+    assert res["ok"] is True
+
+    assert engine.get_open_orders_list() == []
+    assert m.cancelled_orders == []
+    assert m.order_id_up is None and m.order_id_down is None
+    assert m.order_status_up == "NONE" and m.order_status_down == "NONE"
+    assert m.next_order_id_up is None and m.next_order_id_down is None
+    assert m.next_quoted is False
+    assert m.stop_order_id is None and m.stop_order_status == "NONE"
+    assert m.stop_price is None and m.stop_side is None
+    assert m.order_id_exit_up is None and m.order_id_exit_down is None
+    assert m.order_status_exit_up == "NONE" and m.order_status_exit_down == "NONE"
+    assert m.entry_cancelled_timeout is False
+    assert engine._orders_cache_ts == 0.0
+    # No FILLED-status / fill-flag contradiction may survive the reset.
+    assert not (m.filled_up is False and m.order_status_up == "FILLED")
+    assert not (m.filled_down is False and m.order_status_down == "FILLED")
+
+
+def test_reset_pnl_refuses_while_live_and_running(monkeypatch):
+    """Issue #93: live + running + outstanding → refusal, nothing cleared."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = True
+    fake_client = MagicMock()
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+    m.cancelled_orders = [{"order_id": "old", "status": "CANCELLED"}]
+    engine._orders_cache_ts = 1234.0
+
+    res = engine.reset_pnl()
+
+    assert isinstance(res, dict) and res.get("refused") is True
+    assert res.get("ok") is False
+    assert "Stop" in res.get("message", "")
+    # Nothing cleared on the refusal path, venue untouched.
+    assert m.order_id_up == "live_ord_up"
+    assert m.cancelled_orders != []
+    assert engine._orders_cache_ts == 1234.0
+    fake_client.cancel_all.assert_not_called()
+    fake_client.cancel.assert_not_called()
+    engine.is_running = False
+
+
+def test_reset_pnl_live_stopped_cancels_venue_first(monkeypatch):
+    """Issue #93: live + stopped → venue cancel attempted before local clear."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    fake_client = MagicMock()
+    fake_client.cancel_all.return_value = {"success": True}
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is True
+    assert res.get("venue_cancelled") is True
+    fake_client.cancel_all.assert_called_once()
+    assert m.order_id_up is None
+
+
+def test_reset_pnl_live_stopped_venue_failure_refuses_without_clearing(monkeypatch):
+    """Issue #93: live + stopped + cancel raises → error, nothing cleared."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    fake_client = MagicMock()
+    fake_client.cancel_all.side_effect = RuntimeError("CLOB remote error")
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is False
+    assert res.get("venue_cancelled") is False
+    assert "error" in res
+    assert m.order_id_up == "live_ord_up"
+
+
+def test_reset_pnl_live_stopped_cancel_all_failure_refuses_without_clearing(monkeypatch):
+    """Issue #93: live + stopped + cancel_all reports failure → refusal, ids kept."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    fake_client = MagicMock()
+    fake_client.cancel_all.return_value = {"success": False}
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is False
+    assert res.get("venue_cancelled") is False
+    assert m.order_id_up == "live_ord_up"
+
+
+def test_reset_pnl_live_stopped_no_client_refuses_without_clearing(monkeypatch):
+    """Issue #93: live + stopped + no CLOB client → refusal, ids preserved."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = False
+    monkeypatch.setattr(engine, "get_clob_client", lambda: None)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "live_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is False
+    assert res.get("venue_cancelled") is False
+    assert "CLOB" in res.get("error", "")
+    assert m.order_id_up == "live_ord_up"
+
+
+def test_reset_pnl_paper_makes_no_clob_calls(monkeypatch):
+    """Issue #93: paper reset clears everything with zero CLOB interaction."""
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    fake_client = MagicMock()
+    monkeypatch.setattr(engine, "get_clob_client", lambda: fake_client)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.order_id_up = "paper_ord_up"
+    m.order_status_up = "RESTING"
+
+    res = engine.reset_pnl()
+
+    assert res.get("ok") is True
+    assert res.get("venue_cancelled") is False
+    fake_client.cancel_all.assert_not_called()
+    fake_client.cancel.assert_not_called()
+    assert m.order_id_up is None
+
+
 def test_cannot_switch_live_to_paper_with_open_exposure():
     """Verify switching from live to paper mode raises ValueError if unresolved live fills exist."""
     import pytest
