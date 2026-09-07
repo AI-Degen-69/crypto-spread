@@ -12,14 +12,18 @@ explicit OCO lifecycle.
   marketable SELL crossing the spread: taker fees, slippage, 100–500ms dispatch latency.
 
 ## New behavior
-1. **Stop placement (post single-leg fill)**
-   - Immediately after `filled_up` or `filled_down` is set (live AND paper), place a
-     resting SELL limit for the filled leg's token at
+1. **Stop staging (post single-leg fill)**
+   - Immediately after `filled_up` or `filled_down` is set (live AND paper), stage
+     stop-loss protection for the filled leg at
      `stop_price = clamp(fill_price - exit_thresh, 0.01, 0.99)` (round 2).
    - Venue capability: Polymarket binary CLOB accepts standard limit orders only
-     (no `tr.tpsl` triggers via py_clob_client) → resting maker SELL at the stop
-     threshold. If the bid has already fallen to/below the stop price, the resting
-     order crosses and fills immediately as taker — identical protective semantics.
+     (no `tr.tpsl` triggers via py_clob_client), and a SELL priced at the stop
+     threshold would cross the bid immediately — instantly exiting the freshly
+     filled leg. Therefore the stop is maintained as a pre-signed zero-latency
+     buffer in memory (status `STAGED`), submitted only when the adverse-drift
+     trigger fires via the existing `_execute_stop_exit` monitored exit
+     (cancels opposite entry + records `STOP_EXIT`). Paper mode simulates the
+     stop filling when the bid touches the stop price.
 2. **OCO lifecycle**
    - **Case A — pair completes:** cancel the resting stop BEFORE pair merge
      (`PAIR_MERGED`). Stop must never survive a hedged pair.
@@ -55,8 +59,14 @@ explicit OCO lifecycle.
 - Anything beyond the 5m/15m binary universe.
 
 ## Edge cases
-- Stop placement fails (CLOB error) → log warning, fall back to existing reactive
-  `_execute_stop_exit` path (never leave a position unprotected silently).
+- Pair merge is blocked (deferred, retried next tick) if a venue-side stop
+  cancellation fails (`CANCEL_FAILED`); the stop handle is retained.
+- Buffer cancel failure never silently clears the handle.
+- Opposite leg fills and stop trigger in the same tick → pair-completion cancellation
+  wins if pair already complete; otherwise stop path proceeds.
+- Stop already staged → do not duplicate (idempotent placement guard).
+- Rollover while stop staged → cancel stop, settle via existing
+  `WINDOW_SETTLE` accounting.
 - Opposite leg fills and stop fills in the same tick → pair-completion cancellation
   wins if pair already complete; otherwise stop path proceeds.
 - Stop already placed → do not duplicate (idempotent placement guard).

@@ -631,35 +631,52 @@ class LiveTraderEngine:
             log.error("Failed placing live quote for %s: %s", token_id, e)
             return {"error": str(e), "order_id": None}
 
-    def _cancel_stop_order(self, mstate: MarketLiveState, reason: str) -> None:
-        """Cancel and clear the staged resting stop-loss order (OCO reciprocal leg)."""
+    def _cancel_stop_order(self, mstate: MarketLiveState, reason: str) -> bool:
+        """Cancel and clear the staged stop-loss order (OCO reciprocal leg).
+
+        Returns True when no stop remains outstanding. A venue-side cancel
+        failure keeps the handle (status CANCEL_FAILED) so callers can block
+        dependent transitions — e.g. pair merge — and retry on the next tick.
+        """
         with self._engine_lock:
             stop_id = mstate.stop_order_id
+            stop_status = mstate.stop_order_status
         if not stop_id:
-            return
-        if self.mode == "live":
+            return True
+        if self.mode == "live" and stop_status == "RESTING":
+            # Only an order actually resting on the book needs a venue cancel;
+            # STAGED buffers exist in memory only and clear locally.
             if not self.cancel_live_order(stop_id):
                 log.warning(
-                    "[%s] Failed to cancel resting stop-loss %s (%s); clearing handle anyway",
+                    "[%s] Failed to cancel resting stop-loss %s (%s); retaining handle as CANCEL_FAILED",
                     mstate.slug,
                     stop_id,
                     reason,
                 )
+                with self._engine_lock:
+                    mstate.stop_order_status = "CANCEL_FAILED"
+                return False
         with self._engine_lock:
             mstate.stop_order_id = None
             mstate.stop_order_status = "NONE"
             mstate.stop_price = None
             mstate.stop_side = None
             mstate.stop_order_time = "-"
-        log.info("[%s] Resting stop-loss cancelled and cleared (%s)", mstate.slug, reason)
+        log.info("[%s] Stop-loss order cancelled and cleared (%s)", mstate.slug, reason)
+        return True
 
     def place_stop_order(self, mstate: MarketLiveState, side: str) -> None:
-        """Stage a resting stop-loss SELL order for a single-leg filled position.
+        """Stage stop-loss protection for a single-leg filled position.
 
         Idempotent: a no-op when a stop is already staged for this window.
-        Live mode submits a limit SELL at the stop threshold (crosses and fills
-        immediately as taker if the bid is already at/below the threshold);
-        paper mode stages a simulated order.
+        Venue evaluation (issue #87): the binary CLOB accepts standard limit
+        orders only, and a SELL priced at the stop threshold would cross the
+        bid immediately — instantly exiting the freshly filled leg. So the
+        stop is maintained as a pre-signed zero-latency buffer in memory
+        (status STAGED) and is submitted bounded at
+        min(best_bid, stop_price) the moment the trigger fires, via the
+        existing _execute_stop_exit path. Paper mode stages a simulated
+        order that fills when the bid touches the stop price.
         """
         is_up = (side.upper() == "UP")
         with self._engine_lock:
@@ -671,21 +688,9 @@ class LiveTraderEngine:
                 return
             stop_price = round(min(0.99, max(0.01, fill_price - self.exit_thresh)), 2)
 
-        stop_order_id: Optional[str] = None
-        stop_status = "NONE"
         if self.mode == "live":
-            res = self.place_live_quote(token, stop_price, self.shares, "SELL")
-            if res and res.get("order_id"):
-                stop_order_id = res["order_id"]
-                stop_status = res.get("status") or "RESTING"
-            else:
-                log.warning(
-                    "[%s] Failed to place resting stop-loss order for %s leg; "
-                    "falling back to reactive stop exit",
-                    mstate.slug,
-                    side.upper(),
-                )
-                return
+            stop_order_id = f"buffer_stop_{mstate.slug}"
+            stop_status = "STAGED"
         else:
             stop_order_id = f"paper_stop_{mstate.slug}"
             stop_status = "RESTING"
@@ -697,7 +702,7 @@ class LiveTraderEngine:
             mstate.stop_side = side.upper()
             mstate.stop_order_time = time.strftime("%H:%M:%S")
             log.info(
-                "[%s] Resting stop-loss %s SELL %s shares @ %.2f staged (%s)",
+                "[%s] Stop-loss %s buffered: SELL %s shares @ %.2f on trigger (%s)",
                 mstate.slug,
                 mstate.stop_side,
                 self.shares,
@@ -2920,9 +2925,16 @@ class LiveTraderEngine:
 
             # --- PAIR COMPLETION & MERGE ---
             if mstate.filled_up and mstate.filled_down:
-                # OCO Case A: cancel the resting stop-loss before the merge — a hedged
-                # pair must never keep protection resting against one leg (issue #87)
-                self._cancel_stop_order(mstate, reason="pair completed")
+                # OCO Case A: cancel the stop-loss before the merge — a hedged
+                # pair must never keep protection working against one leg (issue #87).
+                # If a venue-side cancellation fails, block the merge and retry next tick.
+                if not self._cancel_stop_order(mstate, reason="pair completed"):
+                    mstate.last_action = "Pair merge deferred: stop-loss cancellation failed"
+                    log.warning(
+                        "[%s] Pair merge deferred until stop-loss cancellation succeeds",
+                        slug,
+                    )
+                    return
                 mstate.pair_captured = True
                 mstate.status = "PAIR_MERGED"
                 fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
@@ -2959,57 +2971,91 @@ class LiveTraderEngine:
                     self._save_persisted_trades()
                 return
 
-            # --- RECONCILE PENDING STOP EXIT ---
-            if mstate.status == "STOP_EXIT_PENDING" and not mstate.exit_taken:
-                pending_side = "UP" if (mstate.order_id_exit_up or mstate.filled_up) else "DOWN"
-                exit_px = mstate.exit_price_up if pending_side == "UP" else mstate.exit_price_down
+        # --- RECONCILE STAGED STOP-LOSS (issue #87) ---
+        if mstate.stop_order_id and not mstate.exit_taken:
+            # Live: poll the venue for a stop resting on the book (engine-wide
+            # UserSpec events keep stop_order_status in sync meanwhile).
+            stop_fill_confirmed = False
+            if self.mode == "live" and mstate.stop_order_status == "RESTING" and self.get_clob_client():
+                try:
+                    ord_stop = self.get_clob_client().get_order(mstate.stop_order_id)
+                    st_stop = (ord_stop.get("status") or "").upper()
+                    sz_stop = float(ord_stop.get("size_matched", 0.0) or 0.0)
+                    if st_stop in ("MATCHED", "FILLED") or sz_stop >= self.shares:
+                        stop_fill_confirmed = True
+                except Exception as e:
+                    log.debug("[%s] Error checking stop-loss order %s: %s", slug, mstate.stop_order_id, e)
+            if stop_fill_confirmed:
+                # OCO Case B from venue confirmation: cancel opposite entry, STOP_EXIT
+                side_confirmed = mstate.stop_side or "UP"
+                confirmed_price = mstate.stop_price
+                mstate.stop_order_status = "FILLED"
+                mstate.stop_order_id = None
+                mstate.stop_price = None
+                mstate.stop_side = None
                 self._execute_stop_exit(
                     slug,
                     mstate,
-                    pending_side,
-                    exit_px,
-                    f"Reconciled pending stop exit ({pending_side})",
+                    side_confirmed,
+                    confirmed_price,
+                    "Confirmed stop-loss fill (venue)",
                     now,
                 )
-                if mstate.exit_taken:
-                    return
+                return
 
-            # --- STOP LOSS EXIT TRIGGER ---
-            # Holding UP alone and mid dropped adversely (max_down >= exit_thresh)
-            if (mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
-                    and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
-                sell_bid = mstate.up_bid
-                if sell_bid is not None:
-                    with self._engine_lock:
-                        mstate.status = "STOP_EXIT_PENDING"
-                    if mstate.stop_order_id:
-                        # Resting stop is already working at/below this level — mark it
-                        # FILLED and let _execute_stop_exit cancel the opposite leg
-                        mstate.stop_order_status = "FILLED"
-                        mstate.stop_order_id = None
-                        mstate.stop_price = None
-                        mstate.stop_side = None
-                    trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
-                    self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
-                    return
+        # --- RECONCILE PENDING STOP EXIT ---
+        if mstate.status == "STOP_EXIT_PENDING" and not mstate.exit_taken:
+            pending_side = "UP" if (mstate.order_id_exit_up or mstate.filled_up) else "DOWN"
+            exit_px = mstate.exit_price_up if pending_side == "UP" else mstate.exit_price_down
+            self._execute_stop_exit(
+                slug,
+                mstate,
+                pending_side,
+                exit_px,
+                f"Reconciled pending stop exit ({pending_side})",
+                now,
+            )
+            if mstate.exit_taken:
+                return
 
-            # Holding DOWN alone and mid rallied adversely (max_up >= exit_thresh)
-            if (mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
-                    and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
-                sell_bid = mstate.down_bid
-                if sell_bid is not None:
-                    with self._engine_lock:
-                        mstate.status = "STOP_EXIT_PENDING"
-                    if mstate.stop_order_id:
-                        # Resting stop is already working at/above this level — mark it
-                        # FILLED and let _execute_stop_exit cancel the opposite leg
-                        mstate.stop_order_status = "FILLED"
-                        mstate.stop_order_id = None
-                        mstate.stop_price = None
-                        mstate.stop_side = None
-                    trigger_note = f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}"
-                    self._execute_stop_exit(slug, mstate, "DOWN", sell_bid, trigger_note, now)
-                    return
+        # --- STOP LOSS EXIT TRIGGER ---
+        # Holding UP alone and mid dropped adversely (max_down >= exit_thresh)
+        if (mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
+                and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
+            sell_bid = mstate.up_bid
+            if sell_bid is not None:
+                with self._engine_lock:
+                    mstate.status = "STOP_EXIT_PENDING"
+                if mstate.stop_order_id:
+                    # Buffered stop: protection was staged in memory at fill time
+                    # (zero venue exposure). The monitored exit submits the SELL
+                    # only now, at the live bid, via _execute_stop_exit.
+                    mstate.stop_order_status = "FILLED"
+                    mstate.stop_order_id = None
+                    mstate.stop_price = None
+                    mstate.stop_side = None
+                trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
+                self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
+                return
+
+        # Holding DOWN alone and mid rallied adversely (max_up >= exit_thresh)
+        if (mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
+                and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
+            sell_bid = mstate.down_bid
+            if sell_bid is not None:
+                with self._engine_lock:
+                    mstate.status = "STOP_EXIT_PENDING"
+                if mstate.stop_order_id:
+                    # Buffered stop: protection was staged in memory at fill time
+                    # (zero venue exposure). The monitored exit submits the SELL
+                    # only now, at the live bid, via _execute_stop_exit.
+                    mstate.stop_order_status = "FILLED"
+                    mstate.stop_order_id = None
+                    mstate.stop_price = None
+                    mstate.stop_side = None
+                trigger_note = f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}"
+                self._execute_stop_exit(slug, mstate, "DOWN", sell_bid, trigger_note, now)
+                return
 
         # --- UNREALIZED PnL CALCULATION ---
         if mstate.pair_captured or mstate.exit_taken:
