@@ -389,23 +389,39 @@ def test_engine_order_resolution_and_cleanup():
             "side": "BUY",
             "price": 0.48,
             "original_size": 5.0,
-            "status": "OPEN",
+            "size_matched": 5,
+            "status": "FILLED",
             "created_at": "2026-09-04T14:15:30Z",
-        }
+        },
+        {
+            "id": "clob_2",
+            "asset_id": "token_down_456",
+            "side": "BUY",
+            "price": 0.48,
+            "original_size": 5.0,
+            "status": "OPEN",
+            "created_at": "2026-09-04T14:15:31Z",
+        },
     ]
     engine.get_clob_client = MagicMock(return_value=mock_client)
 
     dummy_clob_types = MagicMock()
     with patch.dict(sys.modules, {"py_clob_client_v2.clob_types": dummy_clob_types, "py_clob_client.clob_types": dummy_clob_types}):
         orders = engine.get_open_orders_list()
-    assert len(orders) == 2  # clob_1 and ord_up_999
+    assert len(orders) == 3  # clob_1, clob_2 and ord_up_999
     clob_order = next(o for o in orders if o["order_id"] == "clob_1")
     assert clob_order["market"] == "BTC 5m"
     assert "UP" in clob_order["side"]
     assert len(clob_order["time"]) == 8 and ":" in clob_order["time"]
+    # Issue #90: CLOB size_matched must map to the filled key the dashboard reads
+    assert clob_order["filled"] == 5.0
+    clob_nomatch = next(o for o in orders if o["order_id"] == "clob_2")
+    assert clob_nomatch["filled"] == 0.0
 
     engine_order = next(o for o in orders if o["order_id"] == "ord_up_999")
     assert engine_order["time"] == "14:10:00"
+    # Issue #90: engine-tracked orders carry filled == 0.0 (unknown without CLOB round-trip)
+    assert engine_order["filled"] == 0.0
 
     # Test single-order cancellation cleans up state in self.markets
     mock_client.cancel.return_value = True

@@ -1329,6 +1329,13 @@ class LiveTraderEngine:
                         if not market_label:
                             market_label = raw_asset[:10] + "..." if len(raw_asset) > 14 else (raw_asset or "Unknown")
 
+                        # Issue #90: map CLOB size_matched to the filled key the
+                        # dashboard reads (o.filled). Missing/None/unparseable -> 0.0.
+                        try:
+                            filled_val = float(o.get("size_matched", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            filled_val = 0.0
+
                         orders.append({
                             "order_id": o.get("id") or o.get("order_id", ""),
                             "market": market_label,
@@ -1338,6 +1345,7 @@ class LiveTraderEngine:
                             "side": side_val,
                             "price": float(o.get("price", 0.0)),
                             "size": float(o.get("original_size", 0.0)),
+                            "filled": filled_val,
                             "status": o.get("status", "OPEN"),
                             "source": "CLOB_API",
                             "time": time_str,
@@ -1359,6 +1367,7 @@ class LiveTraderEngine:
                     "side": "BUY (UP)",
                     "price": m.resting_up,
                     "size": m.order_shares,
+                    "filled": 0.0,
                     "status": m.order_status_up,
                     "source": "ENGINE_ACTIVE",
                     "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
@@ -1374,6 +1383,7 @@ class LiveTraderEngine:
                     "side": "BUY (DOWN)",
                     "price": m.resting_down,
                     "size": m.order_shares,
+                    "filled": 0.0,
                     "status": m.order_status_down,
                     "source": "ENGINE_ACTIVE",
                     "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
@@ -1390,6 +1400,7 @@ class LiveTraderEngine:
                     "side": f"SELL ({m.stop_side})" if m.stop_side else "SELL",
                     "price": m.stop_price,
                     "size": m.order_shares,
+                    "filled": 0.0,
                     "status": m.stop_order_status,
                     "source": "ENGINE_STOP",
                     "time": m.stop_order_time if m.stop_order_time != "-" else now_time_str,
@@ -1405,6 +1416,7 @@ class LiveTraderEngine:
                     "side": "BUY (UP)",
                     "price": m.resting_up,
                     "size": m.order_shares,
+                    "filled": 0.0,
                     "status": "ADVANCE_PRE_QUOTE",
                     "source": "ENGINE_ADVANCE",
                     "time": m.next_order_time_up if m.next_order_time_up != "-" else now_time_str,
@@ -1420,6 +1432,7 @@ class LiveTraderEngine:
                     "side": "BUY (DOWN)",
                     "price": m.resting_down,
                     "size": m.order_shares,
+                    "filled": 0.0,
                     "status": "ADVANCE_PRE_QUOTE",
                     "source": "ENGINE_ADVANCE",
                     "time": m.next_order_time_down if m.next_order_time_down != "-" else now_time_str,
@@ -1445,6 +1458,7 @@ class LiveTraderEngine:
                                 "side": "BUY (UP)",
                                 "price": m.resting_up,
                                 "size": m.order_shares,
+                                "filled": 0.0,
                                 "status": "RESTING",
                                 "source": "PAPER_SIMULATION",
                                 "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
@@ -1462,6 +1476,7 @@ class LiveTraderEngine:
                                 "side": "BUY (DOWN)",
                                 "price": m.resting_down,
                                 "size": m.order_shares,
+                                "filled": 0.0,
                                 "status": "RESTING",
                                 "source": "PAPER_SIMULATION",
                                 "time": m.order_time_down if m.order_time_down != "-" else now_time_str,
@@ -1475,7 +1490,10 @@ class LiveTraderEngine:
                     c_id = c_ord.get("order_id")
                     if c_id and c_id in existing_ids:
                         continue
-                    orders.append(c_ord.copy())
+                    # Issue #90: guarantee the filled key on old retained rows too.
+                    retained = c_ord.copy()
+                    retained.setdefault("filled", 0.0)
+                    orders.append(retained)
                     if c_id:
                         existing_ids.add(c_id)
 
