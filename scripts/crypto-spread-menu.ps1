@@ -194,9 +194,14 @@ function Test-DashboardServer {
 }
 
 function Adopt-DashboardInstance {
-    <# Record running dashboard process on port 8802 as owned by this menu. #>
+    param([int]$ExpectedPid)
+    <# Record running dashboard process on port 8802 as owned by this menu.
+       $ExpectedPid is the port owner observed BEFORE the HTTP probe; adoption
+       is refused if the port changed hands since (TOCTOU guard), so a foreign
+       process can never be recorded (and later force-killed) as ours. #>
     $portPid = Get-PortPid
     if (-not $portPid) { return $false }
+    if ($ExpectedPid -gt 0 -and $portPid -ne $ExpectedPid) { return $false }
     try {
         $proc = Get-Process -Id $portPid -ErrorAction Stop
         Save-DashInstance -DashProcess $proc
@@ -311,7 +316,7 @@ function Host-Dashboard {
             # Any terminal from anywhere can adopt a verified dashboard.
             # Auto-adopt (same as crypto-spread-isolated.ps1) so a stale/missing
             # run/dash.pids.json never orphans a live dashboard.
-            if (Adopt-DashboardInstance) {
+            if (Adopt-DashboardInstance -ExpectedPid $portPid) {
                 $inst = Get-DashInstance
                 Csm-Ok "Adopted dashboard (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
                 return $true
@@ -372,12 +377,22 @@ function Stop-DashboardProcess {
     if ($targetPid) {
         if ($null -eq $inst) {
             if (Test-DashboardServer) {
-                Adopt-DashboardInstance | Out-Null
+                Adopt-DashboardInstance -ExpectedPid $portPid | Out-Null
                 $inst = Get-DashInstance
                 $targetPid = if ($inst) { $inst.pid } else { $portPid }
                 Csm-Step "Adopted orphaned dashboard PID $targetPid (no registry record)..."
             } else {
                 Csm-Fail "Port $Port occupied by PID $portPid which does NOT answer as a crypto-spread dashboard. Refusing to kill a foreign process."
+                return $false
+            }
+        }
+        # TOCTOU guard: before a force-kill of the port owner, the port must
+        # still belong to the PID we validated (registry path is already
+        # start-ticks verified; this protects the port-owner fallback).
+        if ($null -eq $inst -or $targetPid -eq $portPid) {
+            $currentPortPid = Get-PortPid
+            if ($currentPortPid -and $currentPortPid -ne $targetPid) {
+                Csm-Fail "Port $Port changed hands (PID $targetPid -> $currentPortPid) since validation. Refusing to kill a different process."
                 return $false
             }
         }

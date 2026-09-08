@@ -1428,6 +1428,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-pane.active{display:block}
 .ot-pane .tbl thead th{position:sticky;top:0;z-index:3;background:var(--panel);box-shadow:0 1px 0 var(--line)}
 .ot-row-cancelled td{color:var(--dim)!important}
+.ot-cell-cancelled{color:var(--dim)!important}
 .ot-row-cancelled td a{color:var(--dim)!important}
 .ot-row-cancelled td .ot-tag,.ot-row-cancelled td .pill{color:var(--faint)!important;background:rgba(120,135,155,0.08);border-color:rgba(120,135,155,0.22)}
 /* Cancelled-bid matrix cards (stopped out / timeout / drift skipped) render
@@ -4362,17 +4363,22 @@ function renderCockpitUI(st) {
           // row; the leading (rowspan) row of a Partial group keeps its shared
           // market/time cells at full strength while the live leg is present.
           const cancelledRowCls = (isCancelled && (grp.status === 'Cancelled' || idx > 0)) ? ' ot-row-cancelled' : '';
+          // A cancelled leg whose row class would also dim the shared
+          // market/time cells (lead row of a Partial group) is dimmed per-cell
+          // instead, so only its own leg-specific cells lose strength.
+          const cancelledCellCls = (isCancelled && !cancelledRowCls && grp.status === 'Partial') ? ' ot-cell-cancelled' : '';
+          const cellClsAttr = cancelledCellCls ? ` class="${cancelledCellCls}"` : '';
 
           ordHtml += `
             <tr class="${(idx === 0 ? 'ot-pair-lead' : '') + cancelledRowCls}">
               ${idx === 0 ? (timeCell + mktCell) : ''}
-              <td><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
-              <td class="mono" style="font-weight:600">${priceStr}</td>
-              <td class="mono">${sizeStr}</td>
-              <td class="mono" style="color:var(--dim)">${filledStr}</td>
-              <td class="mono" style="color:var(--tx)">${totalCostStr}</td>
-              <td><span class="${statusBadgePill}" style="font-size:9px;padding:2px 6px">${esc(otStatusLabel(statusStr))}</span></td>
-              <td>
+              <td${cellClsAttr}><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
+              <td class="mono${cancelledCellCls}" style="font-weight:600">${priceStr}</td>
+              <td class="mono${cancelledCellCls}">${sizeStr}</td>
+              <td class="mono${cancelledCellCls}" style="color:var(--dim)">${filledStr}</td>
+              <td class="mono${cancelledCellCls}" style="color:var(--tx)">${totalCostStr}</td>
+              <td${cellClsAttr}><span class="${statusBadgePill}" style="font-size:9px;padding:2px 6px">${esc(otStatusLabel(statusStr))}</span></td>
+              <td${cellClsAttr}>
                 ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
               </td>
             </tr>
