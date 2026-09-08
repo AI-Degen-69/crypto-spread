@@ -2123,6 +2123,124 @@ def test_update_config_clamps_reentry_band_to_exit_thresh():
     assert engine.reentry_drift_band == 0.01
 
 
+# --- Issue #95 milestone 1: re-entry observability ---
+
+def test_reentry_seeds_a_telemetry_record():
+    """Re-entry records what it decided on, keeping the original open snapshot."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    tel = m.reentry_telemetry
+    assert isinstance(tel, dict)
+    assert tel["reentry_index"] == 1
+    assert tel["open_mid"] == m.open_mid
+    assert tel["open_drift"] == pytest.approx(m.open_drift, abs=1e-4)
+    assert tel["reentry_mid"] == pytest.approx(0.50, abs=1e-4)
+    assert tel["quoted"] == {"up": m.resting_up, "down": m.resting_down}
+    assert tel["remaining_sec"] >= tel["min_remaining_sec"]
+    assert tel["outcome"] is None
+
+
+def test_reentry_telemetry_finalises_once_both_legs_rest():
+    """The record captures the mid and latency at the moment the quotes rest."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    assert m.order_status_up == "RESTING"
+    assert m.order_status_down == "RESTING"
+    tel = m.reentry_telemetry
+    assert tel["mid_at_resting"] == pytest.approx(0.50, abs=1e-4)
+    assert tel["latency_ms"] is not None and tel["latency_ms"] >= 0
+    assert tel["resting_drift"] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_no_telemetry_when_the_window_never_reenters():
+    """A window that stays skipped writes nothing."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _PARTIAL_UP, _PARTIAL_DN), now + 60.0)
+
+    assert m.reentry_count == 0
+    assert m.reentry_telemetry is None
+    assert engine._flush_reentry_event(m) is None
+    assert engine.reentry_stats["reentries"] == 0
+
+
+def test_rollover_stamps_the_outcome_and_clears_the_record():
+    """The outcome is captured before the rollover reset wipes the fill flags."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    # One leg filled, the other never did -- the case the milestone exists to count.
+    m.filled_up = True
+    m.fill_price_up = 0.48
+
+    engine._handle_window_rollover(m, now + 300.0, "cid_95_obs")
+
+    assert m.reentry_telemetry is None
+    assert engine.reentry_stats["reentries"] == 1
+    assert engine.reentry_stats["reached_book"] == 1
+    assert engine.reentry_stats["single_leg"] == 1
+    assert engine.reentry_stats["paired"] == 0
+
+
+def test_reentry_stats_appear_in_get_state_and_reset_with_pnl():
+    """The operator can read the tally from the state payload, and RESET clears it."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    engine._handle_window_rollover(m, now + 300.0, "cid_95_obs")
+
+    stats = engine.get_state()["reentry_stats"]
+    assert stats["reentries"] == 1
+
+    engine.is_running = False
+    engine.reset_pnl()
+    assert engine.get_state()["reentry_stats"]["reentries"] == 0
+    assert engine.markets[slug].reentry_telemetry is None
+
+
+def test_reentry_flush_writes_no_file_under_pytest():
+    """The suite must never append to the operator's run/ directory."""
+    from strategy.live_trader import REENTRY_FILE
+
+    existed = REENTRY_FILE.exists()
+    before = REENTRY_FILE.stat().st_mtime_ns if existed else None
+
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    record = engine._flush_reentry_event(m)
+
+    assert record is not None
+    assert REENTRY_FILE.exists() is existed
+    if existed:
+        assert REENTRY_FILE.stat().st_mtime_ns == before
+
+
 def test_reentry_count_clears_on_rollover_and_reset():
     """Per-window re-entry state resets with the rest of the window state."""
     engine = _reentry_engine()
