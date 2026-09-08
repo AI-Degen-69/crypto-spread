@@ -194,9 +194,14 @@ function Test-DashboardServer {
 }
 
 function Adopt-DashboardInstance {
-    <# Record running dashboard process on port 8802 as owned by this menu. #>
+    param([int]$ExpectedPid)
+    <# Record running dashboard process on port 8802 as owned by this menu.
+       $ExpectedPid is the port owner observed BEFORE the HTTP probe; adoption
+       is refused if the port changed hands since (TOCTOU guard), so a foreign
+       process can never be recorded (and later force-killed) as ours. #>
     $portPid = Get-PortPid
     if (-not $portPid) { return $false }
+    if ($ExpectedPid -gt 0 -and $portPid -ne $ExpectedPid) { return $false }
     try {
         $proc = Get-Process -Id $portPid -ErrorAction Stop
         Save-DashInstance -DashProcess $proc
@@ -308,21 +313,16 @@ function Host-Dashboard {
     if (Test-Port) {
         $portPid = Get-PortPid
         if (Test-DashboardServer) {
-            $adopt = $false
-            if ($Action -ne "") {
-                $adopt = $true
-            } else {
-                $resp = Read-Host "  A dashboard is already serving on :$Port (PID $portPid). Adopt it so stop/status own it? [y/N]"
-                $adopt = ($resp -match '^[yY]')
-            }
-            if ($adopt -and (Adopt-DashboardInstance)) {
+            # Any terminal from anywhere can adopt a verified dashboard.
+            # Auto-adopt (same as crypto-spread-isolated.ps1) so a stale/missing
+            # run/dash.pids.json never orphans a live dashboard.
+            if (Adopt-DashboardInstance -ExpectedPid $portPid) {
                 $inst = Get-DashInstance
                 Csm-Ok "Adopted dashboard (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
                 return $true
-            } else {
-                Csm-Warn "Adoption skipped for PID $portPid."
-                return $true
             }
+            Csm-Ok "Dashboard is serving on ${DashUrl} (PID $portPid, adoption record write failed but port is verified)."
+            return $true
         }
         Csm-Fail "Port $Port occupied: PID $portPid does NOT answer as a crypto-spread dashboard. Free the port manually first."
         return $false
@@ -366,22 +366,54 @@ function Wait-ProcessGone {
 }
 
 function Stop-DashboardProcess {
+    # Any terminal from anywhere can stop the dashboard: prefer the registry
+    # PID, but fall back to the port owner when the registry is stale/missing
+    # (orphaned dashboard, cleaned run/, different shell). Only kill the port
+    # owner after it verifies as our dashboard to avoid killing foreign services.
     $inst = Get-DashInstance
-    $stopped = $false
-    if ($null -ne $inst) {
-        Csm-Step "Stopping dashboard PID $($inst.pid)..."
-        taskkill /F /T /PID $inst.pid 2>$null | Out-Null
-        if (Wait-ProcessGone -ProcessId $inst.pid) {
+    $portPid = Get-PortPid
+    $targetPid = if ($inst) { $inst.pid } else { $portPid }
+
+    if ($targetPid) {
+        if ($null -eq $inst) {
+            if (Test-DashboardServer) {
+                Adopt-DashboardInstance -ExpectedPid $portPid | Out-Null
+                $inst = Get-DashInstance
+                $targetPid = if ($inst) { $inst.pid } else { $portPid }
+                Csm-Step "Adopted orphaned dashboard PID $targetPid (no registry record)..."
+            } else {
+                Csm-Fail "Port $Port occupied by PID $portPid which does NOT answer as a crypto-spread dashboard. Refusing to kill a foreign process."
+                return $false
+            }
+        }
+        # TOCTOU guard: before a force-kill of the port owner, the port must
+        # still belong to the PID we validated (registry path is already
+        # start-ticks verified; this protects the port-owner fallback).
+        if ($null -eq $inst -or $targetPid -eq $portPid) {
+            $currentPortPid = Get-PortPid
+            if ($currentPortPid -and $currentPortPid -ne $targetPid) {
+                Csm-Fail "Port $Port changed hands (PID $targetPid -> $currentPortPid) since validation. Refusing to kill a different process."
+                return $false
+            }
+        }
+        Csm-Step "Stopping dashboard PID $targetPid..."
+        taskkill /F /T /PID $targetPid 2>$null | Out-Null
+        if (Wait-ProcessGone -ProcessId $targetPid) {
             Csm-Ok "Dashboard process tree stopped."
-            $stopped = $true
             Remove-Item $DashPidFile -ErrorAction SilentlyContinue
         } else {
-            Csm-Warn "Dashboard PID $($inst.pid) did not exit cleanly; PID record kept."
+            Csm-Warn "Dashboard PID $targetPid did not exit cleanly; PID record kept."
         }
+    } else {
+        Remove-Item $DashPidFile -ErrorAction SilentlyContinue
     }
-    if ($null -eq $inst) { Remove-Item $DashPidFile -ErrorAction SilentlyContinue }
     if (Test-Port) {
-        Csm-Warn "Port $Port still LISTENING (PID $(Get-PortPid)) — not owned by menu registry, left running."
+        $stillPid = Get-PortPid
+        if (Test-DashboardServer) {
+            Csm-Warn "Port $Port still LISTENING (PID $stillPid) — stop retried but process survived."
+        } else {
+            Csm-Warn "Port $Port still LISTENING (PID $stillPid) — now owned by a foreign process, left running."
+        }
         return $false
     }
     Csm-Ok "Port $Port free."

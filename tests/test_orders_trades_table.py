@@ -928,6 +928,39 @@ def test_stopped_market_matrix_and_bids_cancelled_dom():
       throw new Error('Matrix card missing CANCELLED (ADVERSE DRIFT) bids text: ' + matrixHtml);
     }}
 
+    // All three terminal states dim their Orders & Position box (stopped out,
+    // timeout, drift skipped): exactly 3 mat-bids-cancelled boxes rendered.
+    const dimBoxes = matrixHtml.split('mat-bids-cancelled').length - 1;
+    if (dimBoxes !== 3) {{
+      throw new Error('Expected 3 dimmed cancelled-bid boxes, got ' + dimBoxes + ': ' + matrixHtml);
+    }}
+
+    // Human-readable cause line renders on each dimmed box (no hover required)
+    // and is mirrored as a title tooltip on the box itself.
+    if (!matrixHtml.includes('Bids cancelled — stop-loss exit')) {{
+      throw new Error('Stopped-out card missing stop-loss reason: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('Bids cancelled — 10% entry timeout')) {{
+      throw new Error('Timeout card missing entry-timeout reason: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('Bids cancelled — adverse drift')) {{
+      throw new Error('Drift card missing adverse-drift reason: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('title="Bids cancelled — stop-loss exit"')) {{
+      throw new Error('Stopped-out card missing title tooltip: ' + matrixHtml);
+    }}
+
+    // Status badge text is humanized through the shared label mapping.
+    if (!matrixHtml.includes('>Stopped Out<')) {{
+      throw new Error('Matrix badge should read Stopped Out: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('>Timed Out<')) {{
+      throw new Error('Matrix badge should read Timed Out: ' + matrixHtml);
+    }}
+    if (!matrixHtml.includes('>Drift Skipped<')) {{
+      throw new Error('Matrix badge should read Drift Skipped: ' + matrixHtml);
+    }}
+
     console.log('STOPPED_MATRIX_TESTS_PASSED');
     process.exit(0);
     """
@@ -1560,6 +1593,118 @@ def test_orders_render_preserves_backend_group_order_dom():
     res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
     assert res.returncode == 0, f"Node orders-group-order test failed: {res.stderr}\n{res.stdout}"
     assert "ORDERS_GROUP_ORDER_DOM_TESTS_PASSED" in res.stdout
+
+
+def test_sticky_headers_and_cancelled_row_css():
+    """Verify Orders & Trades panes ship sticky thead CSS and a dimmed cancelled-row style."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Sticky column headers: th sticks to the top of each scrollable .ot-pane
+    assert ".ot-pane .tbl thead th" in html
+    assert "position:sticky" in html
+    assert "background:var(--panel)" in html
+
+    # Cancelled orders render dimmed: dedicated row class present in CSS
+    assert ".ot-row-cancelled td" in html
+
+
+@requires_node
+def test_pre_quote_label_and_cancelled_row_dim_dom():
+    """Verify ADVANCE_PRE_QUOTE renders as 'Pre-Quote' and cancelled legs get the dimmed row class."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id,
+          textContent: '',
+          innerHTML: '',
+          className: '',
+          classList: {{
+            classes: new Set(),
+            add(c) {{ this.classes.add(c); }},
+            remove(c) {{ this.classes.delete(c); }},
+            toggle(c, val) {{ if (val) this.classes.add(c); else this.classes.delete(c); }}
+          }},
+          querySelectorAll: () => [],
+          addEventListener: () => {{}},
+          style: {{}}
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+    const setInterval = () => 0;
+    const clearInterval = () => {{}};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {{}};
+    const fetch = () => Promise.resolve({{ ok: true, json: async () => ({{}}) }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{}},
+      open_orders: [
+        // BTC next-window pre-quotes must render human-readable 'Pre-Quote'
+        {{ order_id: 'ord-pq-up', market: 'BTC 5m (Next Window)', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'ADVANCE_PRE_QUOTE', time: '14:00:00' }},
+        {{ order_id: 'ord-pq-dn', market: 'BTC 5m (Next Window)', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 0, status: 'ADVANCE_PRE_QUOTE', time: '14:00:01' }},
+        // ETH fully-cancelled group keeps CANCELED pills and dimmed rows
+        {{ order_id: 'ord-cx-up', market: 'ETH 5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'CANCELLED', time: '14:00:02' }},
+        {{ order_id: 'ord-cx-dn', market: 'ETH 5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 0, status: 'CANCELED', time: '14:00:03' }}
+      ],
+      open_positions: [],
+      trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+
+    // ADVANCE_PRE_QUOTE renamed to human-readable 'Pre-Quote'
+    if (ordHtml.includes('ADVANCE_PRE_QUOTE')) {{
+      throw new Error('Raw ADVANCE_PRE_QUOTE leaked into Orders table: ' + ordHtml);
+    }}
+    if (!ordHtml.includes('Pre-Quote')) {{
+      throw new Error('Pre-Quote label missing from Orders table: ' + ordHtml);
+    }}
+
+    // Fully-cancelled group rows are dimmed via ot-row-cancelled
+    if (!ordHtml.includes('ot-row-cancelled')) {{
+      throw new Error('Cancelled rows missing ot-row-cancelled class: ' + ordHtml);
+    }}
+    // Pre-quote rows must stay full strength (no dim class); only the two
+    // cancelled ETH rows are dimmed.
+    const dimCount = ordHtml.split('ot-row-cancelled').length - 1;
+    if (dimCount !== 2) {{
+      throw new Error('Expected exactly 2 dimmed cancelled rows, got ' + dimCount + ': ' + ordHtml);
+    }}
+    if (ordHtml.indexOf('(Next Window)') >= ordHtml.indexOf('ot-row-cancelled')) {{
+      throw new Error('BTC pre-quote rows must not be dimmed: ' + ordHtml);
+    }}
+
+    console.log('PRE_QUOTE_LABEL_AND_DIM_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node pre-quote label / dim test failed: {res.stderr}\n{res.stdout}"
+    assert "PRE_QUOTE_LABEL_AND_DIM_DOM_TESTS_PASSED" in res.stdout
 
 
 
