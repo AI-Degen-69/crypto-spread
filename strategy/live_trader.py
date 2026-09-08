@@ -37,6 +37,29 @@ _EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 RUN_DIR = Path(__file__).resolve().parent.parent / "run"
 TRADES_FILE = RUN_DIR / "live_trades.jsonl"
 META_FILE = RUN_DIR / "live_trades_meta.json"
+# One line per drift-skip re-entry (issue #95 observability): what was quoted,
+# whether each leg reached the book and filled, and how the window ended. Written
+# at window rollover, which is the first moment the outcome is known.
+REENTRY_FILE = RUN_DIR / "reentry_events.jsonl"
+
+
+def _empty_reentry_stats() -> Dict[str, int]:
+    """A zeroed re-entry tally, one counter per outcome plus the reached-book count."""
+    return {"reentries": 0, "reached_book": 0, "paired": 0, "single_leg": 0,
+            "exited": 0, "both_no_merge": 0, "no_fill": 0}
+
+
+def _reentry_outcome(m: "MarketLiveState") -> str:
+    """Name the end state of a re-entered window, for the observability record."""
+    if m.pair_captured:
+        return "paired"
+    if m.exit_taken:
+        return "exited"
+    if m.filled_up != m.filled_down:
+        return "single_leg"
+    if m.filled_up and m.filled_down:
+        return "both_no_merge"
+    return "no_fill"
 
 
 def _load_env_file() -> None:
@@ -413,6 +436,10 @@ class MarketLiveState:
     reentry_count: int = 0
     reentry_mid: Optional[float] = None
     reentry_drift: Optional[float] = None
+    # Observability record for the re-entry currently in flight. Seeded when
+    # re-entry is granted, completed once both legs reach the book, stamped with
+    # the window outcome and flushed to `REENTRY_FILE` at rollover.
+    reentry_telemetry: Optional[Dict[str, Any]] = None
 
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
@@ -588,6 +615,10 @@ class LiveTraderEngine:
         # only the adverse leg. Defaults are mirrored in `BacktestParams`.
         self.reentry_drift_band: float = 0.015
         self.max_reentries_per_window: int = 1
+        # Session tally of drift-skip re-entries and how they ended (issue #95
+        # observability). Counted as each re-entered window closes, so it answers
+        # "did re-entry actually fill anything today?" without reading the file.
+        self.reentry_stats: Dict[str, int] = _empty_reentry_stats()
         # Re-entry time gate, as a fraction of the window (issue #95). The shared
         # `min_requote_remaining_sec` is an absolute 300s, which is a whole 5m
         # window -- an absolute floor cannot mean the same thing on a 5m and a 15m
@@ -1738,6 +1769,10 @@ class LiveTraderEngine:
         
         # Convert markets to dict
         mkts_dict = {slug: asdict(state) for slug, state in self.markets.items()}
+        # Copied under the lock its writer holds, so the dashboard can never read a
+        # tally mid-update with `reentries` bumped but the outcome bucket not yet.
+        with self._engine_lock:
+            reentry_stats_snapshot = dict(self.reentry_stats)
         
         # Format timeline for chart
         recent_timeline = self.timeline[-300:] if len(self.timeline) > 300 else self.timeline
@@ -1785,6 +1820,7 @@ class LiveTraderEngine:
                 "reentry_min_remaining_pct": self.reentry_min_remaining_pct,
                 "max_reentries_per_window": self.max_reentries_per_window,
             },
+            "reentry_stats": reentry_stats_snapshot,
             "markets": mkts_dict,
             "timeline": recent_timeline,
             "trades": recent_trades,
@@ -2096,6 +2132,13 @@ class LiveTraderEngine:
                 if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                     m.status = "IDLE"
                     m.last_action = "Stopped"
+        # Deliberately NOT flushing `reentry_telemetry` here. `start()` resumes the
+        # same in-flight window without resetting per-window state, and the re-entry
+        # gate cannot reseed a record mid-window (`adverse_open` is already cleared),
+        # so flushing on stop would write a premature "no_fill" and then swallow the
+        # real outcome at rollover. The record survives a stop/start and is flushed
+        # by `_handle_window_rollover()` when the window actually ends. A record is
+        # only lost if the process dies mid-window, which no in-process hook can fix.
         log.info("LiveTraderEngine stopped (streams_active=%s)", self.stream_bridge.is_running)
 
     def restart(self) -> None:
@@ -2582,6 +2625,11 @@ class LiveTraderEngine:
                 META_FILE.unlink()
             except Exception as e:
                 log.warning("Could not delete %s: %s", META_FILE, e)
+        if REENTRY_FILE.exists() and not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                REENTRY_FILE.unlink()
+            except Exception as e:
+                log.warning("Could not delete %s: %s", REENTRY_FILE, e)
         with self._engine_lock:
             if self.mode == "live" and self.is_running and self._has_outstanding_orders():
                 return {
@@ -2628,8 +2676,10 @@ class LiveTraderEngine:
                 m.reentry_count = 0
                 m.reentry_mid = None
                 m.reentry_drift = None
+                m.reentry_telemetry = None
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
+            self.reentry_stats = _empty_reentry_stats()
             cleared_count = 0
             for m in self.markets.values():
                 if self._market_has_orders(m):
@@ -2963,6 +3013,9 @@ class LiveTraderEngine:
         win_duration: float,
         book_two_sided: bool,
         is_late_start: bool,
+        now: float,
+        resting_up: float,
+        resting_down: float,
     ) -> bool:
         """Re-enter a window the adverse-open gate skipped, once the mid reverts.
 
@@ -3029,6 +3082,31 @@ class LiveTraderEngine:
             mstate.order_time_up = "-"
             mstate.order_time_down = "-"
             mstate.status = "QUOTING"
+            mstate.reentry_telemetry = {
+                "reentry_index": mstate.reentry_count,
+                "slug": mstate.slug,
+                "series_label": mstate.label,
+                "window_start_ts": mstate.start_ts,
+                "window_duration_sec": round(win_duration, 1),
+                "open_mid": mstate.open_mid,
+                "open_drift": round(mstate.open_drift, 4),
+                "reentry_mid": round(mid, 4),
+                "reentry_drift": round(drift, 4),
+                "effective_band": round(band, 4),
+                "remaining_sec": round(remaining_sec, 1),
+                "min_remaining_sec": round(min_remaining_sec, 1),
+                "quoted": {"up": resting_up, "down": resting_down},
+                "decided_at": datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                "perf_start": time.perf_counter(),
+                "mid_at_resting": None,
+                "latency_ms": None,
+                "resting_drift": None,
+                "filled_up": None,
+                "filled_down": None,
+                "pair_captured": None,
+                "exit_taken": None,
+                "outcome": None,
+            }
             mstate.last_action = (
                 f"Re-entered after drift reverted (open {open_mid_txt}, drift "
                 f"{mstate.open_drift:.3f} -> mid {mid:.4f}, drift {drift:.3f} <= "
@@ -3369,7 +3447,7 @@ class LiveTraderEngine:
         )
         if self._maybe_reenter_drift_skipped(
                 mstate, slug, mid, remaining_sec, win_duration,
-                book_two_sided, is_late_start):
+                book_two_sided, is_late_start, now, resting_up, resting_down):
             is_adverse_open = mstate.adverse_open
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
@@ -3398,6 +3476,7 @@ class LiveTraderEngine:
                         mstate.order_status_down = "RESTING"
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
+                self._finalize_reentry_telemetry(mstate, slug, mid)
             else:
                 if not mstate.filled_up and mstate.order_status_up != "RESTING":
                     mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
@@ -3409,6 +3488,7 @@ class LiveTraderEngine:
                     mstate.order_time_down = mstate.order_time_down if mstate.order_time_down != "-" else time.strftime("%H:%M:%S")
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
+                self._finalize_reentry_telemetry(mstate, slug, mid)
 
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
@@ -3694,6 +3774,11 @@ class LiveTraderEngine:
             return False
         anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)
         anchor_down = round(min(0.99, max(0.01, (1.0 - mid) - self.offset)), 3)
+        # A re-entered window that pairs and then opens a fresh re-quote round would
+        # otherwise be classified at rollover from the LATER round's state, recording
+        # a paired re-entry as `no_fill` or `single_leg`. Freeze the re-entry's own
+        # terminal state here, while it is still the current one.
+        self._lock_reentry_outcome(mstate)
         with self._engine_lock:
             mstate.requote_round += 1
             mstate.filled_up = False
@@ -3734,6 +3819,109 @@ class LiveTraderEngine:
             slug, mstate.requote_round, anchor_up, anchor_down, mid, mstate.time_remaining_sec,
         )
         return True
+
+    def _finalize_reentry_telemetry(self, mstate: MarketLiveState, slug: str, mid: float) -> None:
+        """Complete the re-entry record once both legs reach the book.
+
+        No-op when no re-entry is in flight, when the record is already finalised,
+        and until both legs are confirmed RESTING or FILLED. Mirrors
+        `_finalize_requote_telemetry`: the point is to capture how far the mid
+        travelled between the decision and the quote actually resting, which is the
+        slippage a re-entry pays before it can fill.
+        """
+        tel = mstate.reentry_telemetry
+        if not isinstance(tel, dict) or tel.get("mid_at_resting") is not None:
+            return
+        if mstate.order_status_up not in ("RESTING", "FILLED"):
+            return
+        if mstate.order_status_down not in ("RESTING", "FILLED"):
+            return
+        try:
+            perf_start = float(tel.get("perf_start") or time.perf_counter())
+        except (TypeError, ValueError):
+            perf_start = time.perf_counter()
+        latency_ms = round((time.perf_counter() - perf_start) * 1000.0, 2)
+        try:
+            mid_at_calc = float(tel.get("reentry_mid") if tel.get("reentry_mid") is not None else mid)
+        except (TypeError, ValueError):
+            mid_at_calc = mid
+        resting_drift = round(abs(mid - mid_at_calc), 4)
+        with self._engine_lock:
+            tel["mid_at_resting"] = round(mid, 4)
+            tel["latency_ms"] = latency_ms
+            tel["resting_drift"] = resting_drift
+        if resting_drift > self.offset:
+            log.warning(
+                "[%s] Re-entry mid moved %.4f (> offset %.3f) between decision and resting "
+                "(decided %.4f, resting %.4f, %.0fms)",
+                slug, resting_drift, self.offset, mid_at_calc, mid, latency_ms,
+            )
+        else:
+            log.info(
+                "[%s] Re-entry quotes resting @ %.3f/%.3f (mid %.4f, drift %.4f, %.0fms)",
+                slug, mstate.resting_up, mstate.resting_down, mid, resting_drift, latency_ms,
+            )
+
+    def _lock_reentry_outcome(self, mstate: MarketLiveState) -> None:
+        """Freeze the re-entry's terminal state before something resets the flags.
+
+        `_maybe_requote_after_merge()` (issue #89) clears `filled_up`, `filled_down`
+        and `pair_captured` to open a new round. The re-entry record is flushed later,
+        at rollover, so without this it would report whatever the last round happened
+        to leave behind. No-op when no re-entry is in flight or the state is already
+        frozen -- the first freeze wins, since that is the one the re-entry produced.
+        """
+        tel = mstate.reentry_telemetry
+        if not isinstance(tel, dict) or tel.get("outcome") is not None:
+            return
+        with self._engine_lock:
+            tel["filled_up"] = mstate.filled_up
+            tel["filled_down"] = mstate.filled_down
+            tel["pair_captured"] = mstate.pair_captured
+            tel["exit_taken"] = mstate.exit_taken
+            tel["exit_side"] = mstate.exit_side or ""
+            tel["realized_pnl_usd"] = round(mstate.realized_pnl_usd, 4)
+            tel["final_status"] = mstate.status
+            tel["outcome"] = _reentry_outcome(mstate)
+            tel["outcome_locked_at_round"] = mstate.requote_round
+
+    def _flush_reentry_event(self, mstate: MarketLiveState) -> Optional[Dict[str, Any]]:
+        """Stamp the in-flight re-entry record with the window outcome and persist it.
+
+        Called from `_handle_window_rollover()` before the per-window reset clears
+        the fill flags, since the outcome is only knowable once the window is over.
+        Returns the completed record, or None when the window never re-entered.
+        The write is skipped under pytest so the suite never touches `run/`,
+        mirroring the file handling in `reset_pnl()`.
+        """
+        tel = mstate.reentry_telemetry
+        if not isinstance(tel, dict):
+            return None
+        # `_lock_reentry_outcome()` may already have frozen the terminal state, if a
+        # re-quote round opened after the re-entry paired. That frozen state is the
+        # re-entry's own; the live flags now describe a later round.
+        self._lock_reentry_outcome(mstate)
+        with self._engine_lock:
+            tel.pop("perf_start", None)
+            record = dict(tel)
+            mstate.reentry_telemetry = None
+            self.reentry_stats["reentries"] += 1
+            if record.get("mid_at_resting") is not None:
+                self.reentry_stats["reached_book"] += 1
+            self.reentry_stats[record["outcome"]] = self.reentry_stats.get(record["outcome"], 0) + 1
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                RUN_DIR.mkdir(parents=True, exist_ok=True)
+                with open(REENTRY_FILE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+            except Exception as e:
+                log.warning("Could not append to %s: %s", REENTRY_FILE, e)
+        log.info(
+            "[%s] Re-entry window closed: outcome=%s filled=%s/%s pnl=%.4f",
+            mstate.slug, record["outcome"], record["filled_up"], record["filled_down"],
+            record["realized_pnl_usd"],
+        )
+        return record
 
     def _finalize_requote_telemetry(self, mstate: MarketLiveState, slug: str, mid: float) -> None:
         """Complete the re-quote resting snapshot once the new round reaches the book.
@@ -3872,6 +4060,11 @@ class LiveTraderEngine:
             mstate.order_status_up = "NONE"
             mstate.order_status_down = "NONE"
 
+        # Persist the re-entry record before the reset below clears the fill flags
+        # it reports (issue #95 observability). No-op when the window never
+        # re-entered.
+        self._flush_reentry_event(mstate)
+
         # Reset window execution state for the new 5m period
         with self._engine_lock:
             mstate.cancelled_orders.clear()
@@ -3884,6 +4077,7 @@ class LiveTraderEngine:
             mstate.entry_cancelled_timeout = False
             mstate.requote_round = 0
             mstate.last_requote_telemetry = None
+            mstate.reentry_telemetry = None
             mstate.open_mid = None
             mstate.open_drift = 0.0
             mstate.adverse_open = False
