@@ -1424,8 +1424,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .ot-tab-btn.active{background:var(--panel);color:var(--tx);box-shadow:0 1px 3px rgba(0,0,0,0.3);border:1px solid var(--line-hi)}
 .ot-count{font:700 10px var(--mono);background:var(--line);color:var(--tx);padding:1px 6px;border-radius:99px}
 .ot-tab-btn.active .ot-count{background:rgba(51,201,181,0.2);color:var(--up)}
-.ot-pane{display:none}
+.ot-pane{display:none;position:relative}
 .ot-pane.active{display:block}
+.ot-pane .tbl thead th{position:sticky;top:0;z-index:3;background:var(--panel);box-shadow:0 1px 0 var(--line)}
+.ot-row-cancelled td{color:var(--dim)!important}
+.ot-row-cancelled td a{color:var(--dim)!important}
+.ot-row-cancelled td .ot-tag,.ot-row-cancelled td .pill{color:var(--faint)!important;background:rgba(120,135,155,0.08);border-color:rgba(120,135,155,0.22)}
+/* Cancelled-bid matrix cards (stopped out / timeout / drift skipped) render
+   their Orders & Position box dimmed so a dead market reads as inactive. */
+.mat-bids-cancelled{border-color:rgba(120,135,155,0.3)!important;background:rgba(120,135,155,0.05)!important}
+.mat-bids-cancelled .mono{color:var(--dim)!important}
+.mat-bids-cancelled .mono b{color:var(--dim)!important}
 .ot-pair-lead{border-top:1px solid var(--line-hi)}
 .ot-tag{font:700 9px var(--disp);letter-spacing:.04em;padding:2px 6px;border-radius:4px;white-space:nowrap;display:inline-block}
 .ot-tag-up{background:rgba(51,201,181,0.15);color:var(--up);border:1px solid rgba(51,201,181,0.3)}
@@ -2049,6 +2058,31 @@ const fmtPrice=(p)=>{
 };
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
 function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating'):c==='monotonic'?pill('pill-mono','monotonic'):c==='flat'?pill('pill-flat','flat'):pill('pill-flat',esc(c));}
+// Engine statuses are machine names; map the ones shown in Orders & Trades and
+// on the Live Matrix badges to human-readable labels so e.g. next-window
+// pre-quotes never display raw ADVANCE_PRE_QUOTE and matrix cards read
+// "Stopped Out" / "Timed Out" instead of STOP_EXIT-style tokens. Unknown
+// statuses render unchanged (still raw).
+const OT_STATUS_LABELS = {
+  // order / venue statuses (Open Orders Status column)
+  'ADVANCE_PRE_QUOTE': 'Pre-Quote',
+  'PRE_QUOTE': 'Pre-Quote',
+  // market-state statuses (Live Matrix badge)
+  'IDLE': 'Idle',
+  'QUOTING': 'Quoting Bids',
+  'FILLED_UP': 'Filled Up',
+  'FILLED_DOWN': 'Filled Down',
+  'PAIR_MERGED': 'Pair Merged',
+  'STOP_EXIT': 'Stopped Out',
+  'STOP_EXIT_PENDING': 'Stop Exiting',
+  'TIMEOUT_NO_FILL': 'Timed Out',
+  'DRIFT_SKIPPED': 'Drift Skipped',
+  'LATE_START_SKIPPED': 'Late Start Skipped'
+};
+function otStatusLabel(s){
+  const raw = String(s || '').toUpperCase();
+  return Object.prototype.hasOwnProperty.call(OT_STATUS_LABELS, raw) ? OT_STATUS_LABELS[raw] : s;
+}
 
 // Floating Side Toast Notifications (Issue #81)
 function showToast({ type = 'filled', title = '', message = '', durationMs = 5000 } = {}) {
@@ -4155,16 +4189,14 @@ function renderCockpitUI(st) {
       const pnlColor = mktPnl > 0 ? 'var(--up)' : mktPnl < 0 ? 'var(--down)' : 'var(--tx)';
 
       let statusBadgeCls = 'pill-flat';
-      let statusText = m.status || 'IDLE';
-      if (m.status === 'QUOTING') { statusBadgeCls = 'pill-flat'; statusText = 'QUOTING BIDS'; }
-      else if (m.status === 'FILLED_UP') { statusBadgeCls = 'pill-mono'; statusText = 'FILLED UP'; }
-      else if (m.status === 'FILLED_DOWN') { statusBadgeCls = 'pill-mono'; statusText = 'FILLED DOWN'; }
-      else if (m.status === 'PAIR_MERGED') { statusBadgeCls = 'pill-osc'; statusText = 'PAIR MERGED'; }
-      else if (m.status === 'STOP_EXIT') { statusBadgeCls = 'pill-mono'; statusText = 'STOPPED OUT'; }
-      else if (m.status === 'STOP_EXIT_PENDING') { statusBadgeCls = 'pill-mono'; statusText = 'STOP EXITING'; }
-      else if (m.status === 'TIMEOUT_NO_FILL') { statusBadgeCls = 'pill-flat'; statusText = 'TIMEOUT NO FILL'; }
-      else if (m.status === 'DRIFT_SKIPPED') { statusBadgeCls = 'pill-flat'; statusText = 'DRIFT SKIPPED'; }
-      else if (m.status === 'LATE_START_SKIPPED') { statusBadgeCls = 'pill-flat'; statusText = 'LATE START SKIPPED'; }
+      const marketStatusRaw = m.status || 'IDLE';
+      if (marketStatusRaw === 'FILLED_UP' || marketStatusRaw === 'FILLED_DOWN'
+          || marketStatusRaw === 'STOP_EXIT' || marketStatusRaw === 'STOP_EXIT_PENDING') {
+        statusBadgeCls = 'pill-mono';
+      } else if (marketStatusRaw === 'PAIR_MERGED') {
+        statusBadgeCls = 'pill-osc';
+      }
+      const statusText = otStatusLabel(marketStatusRaw);
 
       let posStr = 'FLAT';
       const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
@@ -4184,6 +4216,22 @@ function renderCockpitUI(st) {
       const fillsSub = (m.fill_price_up != null || m.fill_price_down != null)
         ? ` · Fills: $${(m.fill_price_up != null ? m.fill_price_up.toFixed(2) : '-')} / $${(m.fill_price_down != null ? m.fill_price_down.toFixed(2) : '-')}`
         : '';
+
+      // No live bids remain for these terminal states: dim the Orders & Position
+      // box exactly like cancelled rows in the Open Orders table.
+      const bidsCancelled = m.status === 'STOP_EXIT' || m.status === 'STOP_EXIT_PENDING'
+        || m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED'
+        || m.status === 'LATE_START_SKIPPED' || m.exit_taken || m.entry_cancelled_timeout;
+      const bidsBoxDimCls = bidsCancelled ? ' mat-bids-cancelled' : '';
+      // Human-readable cause shown inside the dimmed box (visible without
+      // hovering) and mirrored as a native title tooltip on the box itself.
+      let cancelReason = '';
+      if (m.status === 'STOP_EXIT' || m.exit_taken) cancelReason = 'Bids cancelled — stop-loss exit';
+      else if (m.status === 'STOP_EXIT_PENDING') cancelReason = 'Bids cancelling — stop-loss exit';
+      else if (m.status === 'TIMEOUT_NO_FILL' || m.entry_cancelled_timeout) cancelReason = 'Bids cancelled — 10% entry timeout';
+      else if (m.status === 'DRIFT_SKIPPED') cancelReason = 'Bids cancelled — adverse drift';
+      else if (m.status === 'LATE_START_SKIPPED') cancelReason = 'Skipped — window started mid-way';
+      const cancelReasonTooltip = cancelReason ? ` title="${esc(cancelReason)}"` : '';
 
       let bidsTextHtml = '';
       if (m.status === 'STOP_EXIT' || m.exit_taken) {
@@ -4287,7 +4335,7 @@ function renderCockpitUI(st) {
           </td>
         `;
         const mktCell = `
-          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:middle;padding-left:10px">
             <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
@@ -4310,16 +4358,20 @@ function renderCockpitUI(st) {
           const totalCostStr = (leg.priceNum != null && leg.sizeNum) ? `$${(leg.priceNum * leg.sizeNum).toFixed(2)}` : '-';
           const statusStr = isCancelled ? 'CANCELED' : (leg.status || 'OPEN');
           const statusBadgePill = isCancelled ? 'pill pill-mono ot-tag-cancelled' : (isFilled ? 'pill pill-osc' : 'pill pill-mono');
+          // Fully-cancelled groups and non-leading cancelled legs get a dimmed
+          // row; the leading (rowspan) row of a Partial group keeps its shared
+          // market/time cells at full strength while the live leg is present.
+          const cancelledRowCls = (isCancelled && (grp.status === 'Cancelled' || idx > 0)) ? ' ot-row-cancelled' : '';
 
           ordHtml += `
-            <tr class="${idx === 0 ? 'ot-pair-lead' : ''}">
+            <tr class="${(idx === 0 ? 'ot-pair-lead' : '') + cancelledRowCls}">
               ${idx === 0 ? (timeCell + mktCell) : ''}
               <td><span class="ot-tag ${sideBadgeCls}">${esc(leg.side)}</span></td>
               <td class="mono" style="font-weight:600">${priceStr}</td>
               <td class="mono">${sizeStr}</td>
               <td class="mono" style="color:var(--dim)">${filledStr}</td>
               <td class="mono" style="color:var(--tx)">${totalCostStr}</td>
-              <td><span class="${statusBadgePill}" style="font-size:9px;padding:2px 6px">${esc(statusStr)}</span></td>
+              <td><span class="${statusBadgePill}" style="font-size:9px;padding:2px 6px">${esc(otStatusLabel(statusStr))}</span></td>
               <td>
                 ${canCancel ? `<button class="btn btn-danger cancel-order-btn" style="font-size:10px;padding:2px 7px" data-order-id="${esc(oId)}">✖ Cancel</button>` : '-'}
               </td>
@@ -4385,7 +4437,7 @@ function renderCockpitUI(st) {
           </td>
         `;
         const mktCell = `
-          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:top;padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:middle;padding-left:10px">
             <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>
