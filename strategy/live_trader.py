@@ -2128,6 +2128,11 @@ class LiveTraderEngine:
                 if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                     m.status = "IDLE"
                     m.last_action = "Stopped"
+        # A window re-entered but not yet rolled over would otherwise lose its
+        # record (issue #95 observability). The engine is no longer trading, so the
+        # state captured here is the window's final one.
+        for m in self.markets.values():
+            self._flush_reentry_event(m)
         log.info("LiveTraderEngine stopped (streams_active=%s)", self.stream_bridge.is_running)
 
     def restart(self) -> None:
