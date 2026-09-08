@@ -3774,6 +3774,11 @@ class LiveTraderEngine:
             return False
         anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)
         anchor_down = round(min(0.99, max(0.01, (1.0 - mid) - self.offset)), 3)
+        # A re-entered window that pairs and then opens a fresh re-quote round would
+        # otherwise be classified at rollover from the LATER round's state, recording
+        # a paired re-entry as `no_fill` or `single_leg`. Freeze the re-entry's own
+        # terminal state here, while it is still the current one.
+        self._lock_reentry_outcome(mstate)
         with self._engine_lock:
             mstate.requote_round += 1
             mstate.filled_up = False
@@ -3857,6 +3862,29 @@ class LiveTraderEngine:
                 slug, mstate.resting_up, mstate.resting_down, mid, resting_drift, latency_ms,
             )
 
+    def _lock_reentry_outcome(self, mstate: MarketLiveState) -> None:
+        """Freeze the re-entry's terminal state before something resets the flags.
+
+        `_maybe_requote_after_merge()` (issue #89) clears `filled_up`, `filled_down`
+        and `pair_captured` to open a new round. The re-entry record is flushed later,
+        at rollover, so without this it would report whatever the last round happened
+        to leave behind. No-op when no re-entry is in flight or the state is already
+        frozen -- the first freeze wins, since that is the one the re-entry produced.
+        """
+        tel = mstate.reentry_telemetry
+        if not isinstance(tel, dict) or tel.get("outcome") is not None:
+            return
+        with self._engine_lock:
+            tel["filled_up"] = mstate.filled_up
+            tel["filled_down"] = mstate.filled_down
+            tel["pair_captured"] = mstate.pair_captured
+            tel["exit_taken"] = mstate.exit_taken
+            tel["exit_side"] = mstate.exit_side or ""
+            tel["realized_pnl_usd"] = round(mstate.realized_pnl_usd, 4)
+            tel["final_status"] = mstate.status
+            tel["outcome"] = _reentry_outcome(mstate)
+            tel["outcome_locked_at_round"] = mstate.requote_round
+
     def _flush_reentry_event(self, mstate: MarketLiveState) -> Optional[Dict[str, Any]]:
         """Stamp the in-flight re-entry record with the window outcome and persist it.
 
@@ -3869,15 +3897,11 @@ class LiveTraderEngine:
         tel = mstate.reentry_telemetry
         if not isinstance(tel, dict):
             return None
+        # `_lock_reentry_outcome()` may already have frozen the terminal state, if a
+        # re-quote round opened after the re-entry paired. That frozen state is the
+        # re-entry's own; the live flags now describe a later round.
+        self._lock_reentry_outcome(mstate)
         with self._engine_lock:
-            tel["filled_up"] = mstate.filled_up
-            tel["filled_down"] = mstate.filled_down
-            tel["pair_captured"] = mstate.pair_captured
-            tel["exit_taken"] = mstate.exit_taken
-            tel["exit_side"] = mstate.exit_side or ""
-            tel["realized_pnl_usd"] = round(mstate.realized_pnl_usd, 4)
-            tel["final_status"] = mstate.status
-            tel["outcome"] = _reentry_outcome(mstate)
             tel.pop("perf_start", None)
             record = dict(tel)
             mstate.reentry_telemetry = None

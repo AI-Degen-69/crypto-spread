@@ -2418,6 +2418,40 @@ def test_flush_writes_one_json_line_and_survives_a_write_failure(tmp_path, monke
     assert engine2.reentry_stats["reentries"] == 1
 
 
+def test_paired_reentry_survives_a_later_requote_round():
+    """A re-quote round must not overwrite the re-entry's own outcome.
+
+    `_maybe_requote_after_merge()` (issue #89) clears `filled_up`, `filled_down`
+    and `pair_captured` to open the next round. The re-entry record is flushed at
+    rollover, so without freezing the terminal state a paired re-entry would be
+    recorded as `no_fill`.
+    """
+    engine = _reentry_engine()
+    engine.min_requote_remaining_sec = 60.0
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert m.reentry_count == 1
+
+    # The re-entry pairs.
+    m.filled_up = True
+    m.filled_down = True
+    m.pair_captured = True
+
+    # Enough window left, so a fresh re-quote round opens and wipes the flags.
+    m.time_remaining_sec = 200.0
+    assert engine._maybe_requote_after_merge(m, slug, 0.50, now + 90.0) is True
+    assert m.pair_captured is False
+    assert m.filled_up is False
+
+    engine._handle_window_rollover(m, now + 300.0, "cid_95_requote")
+
+    assert engine.reentry_stats["paired"] == 1
+    assert engine.reentry_stats["no_fill"] == 0
+
+
 def test_reentry_count_clears_on_rollover_and_reset():
     """Per-window re-entry state resets with the rest of the window state."""
     engine = _reentry_engine()
