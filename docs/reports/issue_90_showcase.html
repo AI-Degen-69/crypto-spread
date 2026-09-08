@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issue #90 — עמודת Filled תמיד הראתה 0 | דוח סגירה</title>
+<style>
+  :root{
+    --bg:#0f141b; --card:#182029; --card2:#1f2933; --line:#2b3642;
+    --tx:#e8eef4; --dim:#9aa7b4; --up:#3fb97f; --down:#e5605e;
+    --gold:#d9a441; --accent:#5aa9ff; --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font-family:"Segoe UI",Arial,sans-serif;line-height:1.7}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 20px 60px}
+  header.hero{background:linear-gradient(135deg,#14324a,#0f141b 60%);border:1px solid var(--line);border-radius:16px;padding:26px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:3px 12px;border-radius:999px;margin:2px}
+  .pill-green{background:rgba(63,185,127,.15);color:var(--up);border:1px solid var(--up)}
+  .pill-blue{background:rgba(90,169,255,.12);color:var(--accent);border:1px solid var(--accent)}
+  .pill-gold{background:rgba(217,164,65,.12);color:var(--gold);border:1px solid var(--gold)}
+  h1{margin:10px 0 6px;font-size:26px}
+  h2{font-size:20px;margin:34px 0 12px;border-bottom:2px solid var(--line);padding-bottom:6px}
+  .sub{color:var(--dim)}
+  .btn{display:inline-block;margin-top:12px;background:var(--accent);color:#06121f;font-weight:700;text-decoration:none;padding:9px 20px;border-radius:10px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:16px 0}
+  .eli5{background:linear-gradient(135deg,#1c2b1f,#182029);border:1px solid var(--up)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:700px){.cols{grid-template-columns:1fr}}
+  .before{border:1px solid var(--down);background:#221a1a}
+  .after{border:1px solid var(--up);background:#16241c}
+  table.mock{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px;direction:ltr}
+  table.mock th,table.mock td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+  table.mock th{background:var(--card2)}
+  .zero{color:var(--down);font-weight:700}
+  .five{color:var(--up);font-weight:700}
+  .flow{display:flex;flex-direction:column;gap:0;align-items:stretch}
+  .node{background:var(--card2);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;text-align:center}
+  .node small{color:var(--dim)}
+  .arrow{text-align:center;color:var(--accent);font-size:20px;line-height:1.2}
+  code,.ltr{direction:ltr;text-align:left;unicode-bidi:embed}
+  pre{background:#0b0f14;border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto;font-family:var(--mono);font-size:13px;direction:ltr;text-align:left}
+  .step{position:relative}
+  .copy{position:absolute;top:10px;left:10px;background:var(--card2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:4px 12px;cursor:pointer;font-size:12px}
+  .copy:hover{border-color:var(--accent)}
+  .expect{background:#12202e;border:1px dashed var(--accent);border-radius:10px;padding:12px 16px;margin-top:10px}
+  table.files{width:100%;border-collapse:collapse;font-size:14px}
+  table.files th,table.files td{border:1px solid var(--line);padding:8px 12px}
+  table.files th{background:var(--card2)}
+  footer{color:var(--dim);font-size:12px;text-align:center;margin-top:40px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="pill pill-green">✅ מוזג ל-master</span>
+    <span class="pill pill-blue">Issue #90</span>
+    <span class="pill pill-gold">PR #98</span>
+    <h1>עמודת Filled תמיד הראתה 0 — גם כשהאורדר כבר התמלא</h1>
+    <div class="sub">הדשבורד קרא <span class="ltr">o.filled</span>, אבל הבקאנד אף פעם לא שלח את המפתח הזה — אז התא נפל תמיד לברירת המחדל 0. התיקון ממפה את שדה ה-CLOB <span class="ltr">size_matched</span> ל-<span class="ltr">filled</span> בכל נקודת בנייה של רשימת האורדרים.</div>
+    <a class="btn" href="https://github.com/AI-Degen-69/crypto-spread/pull/98" target="_blank" rel="noopener">צפה ב-Pull Request #98 ↗</a>
+    <div class="sub" style="margin-top:10px">ענף: <span class="ltr">fix/filled-column-size-matched</span> · squash: <span class="ltr">22dd7fd</span> · נחתם: 2026-09-07 · סוויטה: 301 ירוקים</div>
+  </header>
+
+  <h2>🍎 במילים פשוטות (ELI5)</h2>
+  <div class="card eli5">
+    דמיינו טופס הזמנה שבו יש עמודה של <b>"כמה כבר התקבל"</b> — אבל מי שממלא את הטופס פשוט <b>שכח להוסיף את השורה הזאת</b>, אז העמודה תמיד הראתה 0, גם כשהסחורה כבר הגיעה. 🛒<br>
+    הבורסה (CLOB) כן יודעת כמה התמלא — היא קוראת לזה <span class="ltr">size_matched</span>. התיקון פשוט <b>מעתיק את המספר הזה למקום שהדשבורד כבר יודע לקרוא</b> (<span class="ltr">filled</span>). לא שינינו עיצוב, לא הוספנו ספריות — רק חיברנו צינור שהיה חסר. 🔧
+  </div>
+
+  <h2>⚖️ לפני מול אחרי</h2>
+  <div class="cols">
+    <div class="card before">
+      <b>🔴 לפני — <span class="ltr">get_open_orders_list()</span> בלי המפתח</b>
+      <table class="mock">
+        <tr><th>Market</th><th>Status</th><th>Filled</th></tr>
+        <tr><td>BTC 5m</td><td>FILLED</td><td class="zero">0 😡</td></tr>
+        <tr><td>ETH 5m</td><td>OPEN</td><td class="zero">0</td></tr>
+      </table>
+      <div class="sub">האורדר מלא — העמודה משקרת.</div>
+    </div>
+    <div class="card after">
+      <b>🟢 אחרי — <span class="ltr">size_matched → filled</span></b>
+      <table class="mock">
+        <tr><th>Market</th><th>Status</th><th>Filled</th></tr>
+        <tr><td>BTC 5m</td><td>FILLED</td><td class="five">5 🎉</td></tr>
+        <tr><td>ETH 5m</td><td>OPEN</td><td>0</td></tr>
+      </table>
+      <div class="sub">מלא מציג את הכמות האמיתית; פתוח נשאר 0.</div>
+    </div>
+  </div>
+
+  <h2>🔀 איך הצינור עובד עכשיו</h2>
+  <div class="card"><div class="flow">
+    <div class="node">🏛️ בורסת CLOB מחזירה אורדר<br><small class="ltr">size_matched: 5</small></div>
+    <div class="arrow">⬇</div>
+    <div class="node">🐍 <span class="ltr">live_trader.py</span> ממיר למספר בטוח<br><small class="ltr">float(...) or 0.0 · NaN/Inf → 0.0</small></div>
+    <div class="arrow">⬇</div>
+    <div class="node">📦 כל dict מקבל מפתח <span class="ltr">filled</span><br><small>CLOB · מנוע (×7) · שורות cancelled ישנות</small></div>
+    <div class="arrow">⬇</div>
+    <div class="node">🖥️ הדשבורד קורא ומרנדר<br><small class="ltr">filledNum → Filled cell</small></div>
+  </div></div>
+
+  <h2>🧪 מדריך בדיקה ידנית — 3 צעדים</h2>
+
+  <div class="card step">
+    <b>צעד 1 — טסטי הקצוות (לוגיקה טהורה)</b>
+    <button class="copy" onclick="copyIt(this)">העתק</button>
+<pre>python -m pytest tests/test_orders_trades_table.py::test_filled_edge_cases_and_retained_cancelled -v</pre>
+    <div class="expect"><b>מה אמורים לראות:</b> <span class="ltr">1 passed</span> — ערכי <span class="ltr">None / "abc" / "" / NaN / Inf / 10**1000</span> כולם מתכנסים ל-<span class="ltr">0.0</span>, ושורת cancelled ישנה מקבלת <span class="ltr">filled</span> אוטומטית.</div>
+  </div>
+
+  <div class="card step">
+    <b>צעד 2 — טסט הרינדור (המספר מגיע לתא בדשבורד)</b>
+    <button class="copy" onclick="copyIt(this)">העתק</button>
+<pre>python -m pytest tests/test_orders_trades_table.py -q</pre>
+    <div class="expect"><b>מה אמורים לראות:</b> <span class="ltr">18 passed</span> — כולל <span class="ltr">test_filled_column_renders_size_matched_dom</span> שמוודא שתא ה-Filled מציג <span class="ltr">5</span> ולא <span class="ltr">0</span>.</div>
+  </div>
+
+  <div class="card step">
+    <b>צעד 3 — בדיקה חיה בדשבורד</b>
+    <button class="copy" onclick="copyIt(this)">העתק</button>
+<pre>python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</pre>
+    <div class="expect"><b>מה אמורים לראות:</b> פותחים <span class="ltr">http://127.0.0.1:8802</span> → לשונית <b>Open Orders</b> → עמודת <b>Filled</b> מציגה כמויות אמיתיות לאורדרים עם סטטוס FILLED (במצב paper רגלי סימולציה מציגים 0.0 — תקין, כי אין מילוי בורסאי אמיתי).</div>
+  </div>
+
+  <h2>📁 קבצים שנגענו בהם</h2>
+  <div class="card"><table class="files">
+    <tr><th>קובץ</th><th>מה השתנה</th></tr>
+    <tr><td class="ltr">strategy/live_trader.py</td><td>מפתח <span class="ltr">filled</span> ב-9 נקודות בנייה + המרה בטוחה למספר סופי</td></tr>
+    <tr><td class="ltr">tests/test_orders_trades_table.py</td><td>הרחבת טסט בקאנד + 2 טסטים חדשים (קצוות, רינדור)</td></tr>
+    <tr><td class="ltr">SPEC.md / CONSTRAINTS.md / tasks/</td><td>מסמכי תכנון ומגבלות של Issue #90</td></tr>
+    <tr><td class="ltr">server/osc_dash.py</td><td>ללא שינוי — כבר ידע לקרוא <span class="ltr">o.filled</span> ✅</td></tr>
+  </table></div>
+
+  <footer>נוצר אוטומטית בתחנה 4 (Explain) · Issue #90 · PR #98 · 2026-09-07</footer>
+</div>
+<script>
+function copyIt(btn){
+  const pre = btn.parentElement.querySelector('pre').innerText;
+  navigator.clipboard.writeText(pre).then(()=>{btn.textContent='הועתק ✓';setTimeout(()=>btn.textContent='העתק',1500);});
+}
+</script>
+</body>
+</html>

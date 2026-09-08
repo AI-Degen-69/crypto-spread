@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>דוח ויזואלי והדרכה: Issue #78 - הצגת מחיר שוק בורסה חי מול מחיר RTDS ופער מחירים בזמן אמת</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #111827;
+      --panel-hover: #162032;
+      --card: #151d30;
+      --line: #222f49;
+      --tx: #f3f4f6;
+      --tx-dim: #9ca3af;
+      --tx-faint: #6b7280;
+      --gold: #f59e0b;
+      --gold-glow: rgba(245, 158, 11, 0.15);
+      --green: #10b981;
+      --green-glow: rgba(16, 185, 129, 0.15);
+      --blue: #3b82f6;
+      --blue-glow: rgba(59, 130, 246, 0.15);
+      --red: #ef4444;
+      --red-glow: rgba(239, 68, 68, 0.15);
+      --purple: #8b5cf6;
+      --purple-glow: rgba(139, 92, 246, 0.15);
+      --cyan: #06b6d4;
+      --cyan-glow: rgba(6, 182, 212, 0.15);
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--tx);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.6;
+      padding: 30px 20px;
+      direction: rtl;
+      text-align: right;
+    }
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+    }
+
+    /* Header & Badges */
+    .header-card {
+      background: linear-gradient(135deg, #111827 0%, #151f33 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 28px;
+      margin-bottom: 28px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .badge-merged { background: var(--green-glow); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-issue { background: var(--gold-glow); color: var(--gold); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-branch { background: var(--blue-glow); color: var(--blue); border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-check { background: var(--purple-glow); color: var(--purple); border: 1px solid rgba(139, 92, 246, 0.3); }
+
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      color: #ffffff;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+    .subtitle {
+      color: var(--tx-dim);
+      font-size: 15px;
+      margin-bottom: 20px;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .meta-item {
+      font-size: 13px;
+    }
+    .meta-label { color: var(--tx-faint); margin-bottom: 2px; font-size: 11px; font-weight: 600; }
+    .meta-val { font-weight: 600; color: var(--tx); }
+    .meta-val a { color: var(--gold); text-decoration: none; }
+    .meta-val a:hover { text-decoration: underline; }
+
+    /* ELI5 Callout */
+    .eli5-card {
+      background: rgba(245, 158, 11, 0.06);
+      border-right: 4px solid var(--gold);
+      border-radius: 8px;
+      padding: 18px 22px;
+      margin-bottom: 28px;
+    }
+    .eli5-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--gold);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .eli5-body {
+      font-size: 14.5px;
+      color: var(--tx-dim);
+      line-height: 1.7;
+    }
+
+    /* Comparison Section */
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #ffffff;
+    }
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 28px;
+    }
+    @media (max-width: 800px) {
+      .comparison-grid { grid-template-columns: 1fr; }
+    }
+    .comp-card {
+      border-radius: 12px;
+      padding: 22px;
+      border: 1px solid var(--line);
+    }
+    .comp-card.before {
+      background: rgba(239, 68, 68, 0.04);
+      border-color: rgba(239, 68, 68, 0.25);
+    }
+    .comp-card.after {
+      background: rgba(16, 185, 129, 0.04);
+      border-color: rgba(16, 185, 129, 0.3);
+    }
+    .comp-header {
+      font-size: 14.5px;
+      font-weight: 700;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .comp-header.before { color: var(--red); }
+    .comp-header.after { color: var(--green); }
+
+    .feature-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 13.5px;
+      color: var(--tx-dim);
+    }
+    .feature-list li {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .feature-list li strong {
+      color: var(--tx);
+    }
+
+    /* UI Previews / Mockups */
+    .preview-box {
+      background: #0d131f;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin-top: 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      direction: ltr;
+      text-align: left;
+    }
+    .mock-telemetry {
+      background: #111827;
+      border: 1px solid #28354f;
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .mock-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+    }
+    .mock-lbl { color: var(--tx-dim); }
+    .mock-val { font-weight: 700; color: #fff; }
+    .diff-pill {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--green);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      font-weight: bold;
+    }
+    .diff-pill.neg {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--red);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    /* Architecture Flow */
+    .flow-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 28px;
+    }
+    .flow-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .flow-step {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 16px;
+      position: relative;
+    }
+    .step-num {
+      background: var(--gold-glow);
+      color: var(--gold);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 13px;
+      margin-bottom: 10px;
+    }
+    .flow-step h4 { font-size: 14px; margin-bottom: 6px; color: #ffffff; }
+    .flow-step p { font-size: 12.5px; color: var(--tx-dim); line-height: 1.5; }
+
+    /* Verification Steps */
+    .guide-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 28px;
+    }
+    .code-block {
+      background: #090d16;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin: 10px 0;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      color: #38bdf8;
+      overflow-x: auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      direction: ltr;
+      text-align: left;
+    }
+    .copy-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--line);
+      color: var(--tx-dim);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: system-ui, sans-serif;
+      transition: all 0.2s;
+    }
+    .copy-btn:hover {
+      background: rgba(255, 255, 255, 0.2);
+      color: var(--tx);
+    }
+    .expected-box {
+      background: rgba(16, 185, 129, 0.06);
+      border-right: 3px solid var(--green);
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--tx-dim);
+      border-radius: 6px 0 0 6px;
+      margin-bottom: 18px;
+      direction: rtl;
+      text-align: right;
+    }
+
+    /* File Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: right;
+    }
+    th { color: var(--tx-faint); font-size: 11px; font-weight: 700; }
+    td.file-name { font-family: var(--font-mono); color: var(--gold); direction: ltr; text-align: left; }
+    
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- כרטיסיית כותרת ונתונים יבשים -->
+    <div class="header-card">
+      <div class="badge-row">
+        <span class="badge badge-merged">✓ מוזג בהצלחה ל-Master</span>
+        <span class="badge badge-issue">Issue #78</span>
+        <span class="badge badge-branch">PR #84</span>
+        <span class="badge badge-check">CodeRabbit Passed (2/2)</span>
+      </div>
+      <h1>הצגת מחיר שוק בורסה חי מול מחיר RTDS ופער מחירים בזמן אמת</h1>
+      <p class="subtitle">קליטה מקבילית וסימולטנית של מחיר הבורסה (Binance Spot) ומחיר הייחוס (Polymarket RTDS), חישוב פער המחירים ($ ו-%) בזמן אמת, והצגה שקופה בקוקפיט ובסקריפטי הניטור.</p>
+      
+      <div class="meta-grid">
+        <div class="meta-item">
+          <div class="meta-label">משימה ב-GitHub</div>
+          <div class="meta-val"><a href="https://github.com/AI-Degen-69/crypto-spread/issues/78" target="_blank" rel="noopener">Issue #78 (נסגר)</a></div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Pull Request שמוזג</div>
+          <div class="meta-val"><a href="https://github.com/AI-Degen-69/crypto-spread/pull/84" target="_blank" rel="noopener">PR #84 (Merged)</a></div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">ענף מקור</div>
+          <div class="meta-val" style="font-family:var(--font-mono); font-size:12px;">feat/78-live-spot-vs-rtds</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">סוויטת בדיקות</div>
+          <div class="meta-val" style="color:var(--green);">265 passed (100% ירוק)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- כרטיסיית ELI5 - במילים פשוטות תכל'ס -->
+    <div class="eli5-card">
+      <div class="eli5-title">
+        <span>💡</span> תכל'ס במילים פשוטות (ELI5 - Explain Like I'm 5):
+      </div>
+      <div class="eli5-body">
+        <strong>למה זה היה קריטי?</strong> פולימרקט מיישבת שווקי ספוט (5 דקות / 15 דקות) לפי מחיר הספוט בפיד ה-RTDS שלה (שנגזר מ-Binance ו-Chainlink). עד היום, כשזרמו טיקים מ-Binance ישירות, הם דרסו את הטיקים של RTDS (או להפך) — ולא היה שום מושג מה הפער (Divergence) ביניהם ברגע נתון! אם בינאנס כבר זזה ב-20$ אבל הפיד של פולימרקט מפגר ב-2 שניות, עושה השוק מסתכן בציטוט מחירים לא מעודכנים ובביצוע עסקאות במחיר שגוי.<br><br>
+        <strong>איך פתרנו את זה?</strong> יצרנו גשר כפול ב-<code>UnifiedStreamBridge</code>: שני הפידים זורמים במקביל ללא דריסה. המערכת מחשבת באופן רציף את הפער הדולרי והאחוזי המדויק (<code>Diff = Actual - RTDS</code>), מזרימה אותו ב-SSE ל-Cockpit, ומציגה אותו בצורה ויזואלית ברורה עם צבעים דינמיים גם בדשבורד וגם בטרמינל.
+      </div>
+    </div>
+
+    <!-- השוואת לפני מול אחרי -->
+    <h2 class="section-title"><span>⚖️</span> השוואה ויזואלית: לפני מול אחרי</h2>
+    <div class="comparison-grid">
+      
+      <!-- לפני -->
+      <div class="comp-card before">
+        <div class="comp-header before">
+          <span>❌ לפני התיקון (דורס הדדי / חוסר שקיפות)</span>
+          <span style="font-size:12px;">Legacy</span>
+        </div>
+        <ul class="feature-list">
+          <li>
+            <span>⚠️</span>
+            <div><strong>דריסת טיקים הדדית:</strong> חיבור WebSocket ישיר מ-Binance דרס את נתוני ה-RTDS והפך את פיד ה-RTDS לעיוור.</div>
+          </li>
+          <li>
+            <span>⚠️</span>
+            <div><strong>אפס מודעות לפער (Spread Blindness):</strong> לא הייתה דרך לדעת האם פולימרקט מפגרת או מובילה ביחס לבורסה.</div>
+          </li>
+          <li>
+            <span>⚠️</span>
+            <div><strong>טלמטריה חד-ערוצית:</strong> ב-Cockpit הוצג רק שדה ספוט יחיד עם מקור בודד (כמו <code>binance_ws</code>), ללא השוואה.</div>
+          </li>
+          <li>
+            <span>⚠️</span>
+            <div><strong>סקריפט ניטור מוגבל:</strong> הציג מחיר יחיד בטרמינל ולא איפשר ניתוח פערי זמן או דלתת מחיר.</div>
+          </li>
+        </ul>
+        <div class="preview-box">
+          <div style="color:var(--tx-faint); margin-bottom:6px;">// תצוגת טלמטריה ישנה ב-Cockpit:</div>
+          <div class="mock-telemetry">
+            <div class="mock-row"><span class="mock-lbl">Spot Price:</span><span class="mock-val">$88,412.50</span></div>
+            <div class="mock-row"><span class="mock-lbl">Spot Source:</span><span class="mock-val">binance_ws</span></div>
+            <div class="mock-row"><span class="mock-lbl">RTDS Spot:</span><span style="color:var(--tx-faint);">N/A (Overwritten)</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- אחרי -->
+      <div class="comp-card after">
+        <div class="comp-header after">
+          <span>✅ אחרי התיקון (סנכרון מקבילי + הצגת פער מלאה)</span>
+          <span style="font-size:12px;">v2.0 Stream</span>
+        </div>
+        <ul class="feature-list">
+          <li>
+            <span>✨</span>
+            <div><strong>קליטה מקבילית סימולטנית:</strong> <code>UnifiedStreamBridge</code> שומר ומעדכן בו-זמנית גם <code>actual_price</code> וגם <code>rtds_price</code>.</div>
+          </li>
+          <li>
+            <span>✨</span>
+            <div><strong>חישוב פער מיידי:</strong> חישוב מדויק של <code>price_diff</code> ($) ו-<code>price_diff_pct</code> (%) עם הגנה מלאה מחלוקה באפס.</div>
+          </li>
+          <li>
+            <span>✨</span>
+            <div><strong>תצוגת Telemetry חיה בקוקפיט:</strong> מחוון תלת-ראשי המציג Actual Spot, RTDS Spot ופער בצבעים דינמיים (ירוק/אדום).</div>
+          </li>
+          <li>
+            <span>✨</span>
+            <div><strong>ניטור טרמינל מתקדם:</strong> סקריפט <code>monitor_stream_latency</code> תומך ב-<code>--stream</code> ומציג טבלת השוואה חיה.</div>
+          </li>
+        </ul>
+        <div class="preview-box">
+          <div style="color:var(--green); margin-bottom:6px;">// תצוגת טלמטריה חדשה בזמן אמת:</div>
+          <div class="mock-telemetry">
+            <div class="mock-row"><span class="mock-lbl">Actual Spot (Binance):</span><span class="mock-val" style="color:#38bdf8;">$88,415.20</span></div>
+            <div class="mock-row"><span class="mock-lbl">RTDS Spot (Polymarket):</span><span class="mock-val" style="color:#a78bfa;">$88,411.80</span></div>
+            <div class="mock-row"><span class="mock-lbl">Price Divergence:</span><span class="diff-pill">+$3.40 (+0.004%)</span></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- תרשים זרימה ארכיטקטוני -->
+    <div class="flow-card">
+      <h2 class="section-title"><span>🏗️</span> תרשים זרימה: איך המידע זורם מקצה לקצה</h2>
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="step-num">1</div>
+          <h4>Binance WebSocket</h4>
+          <p>הזרמת טיקים מבורסת בינאנס ישירות (<code>btcusdt@trade</code>) המייצגים את מחיר השוק העולמי המיידי (<code>actual_price</code>).</p>
+        </div>
+        <div class="flow-step">
+          <div class="step-num">2</div>
+          <h4>Polymarket RTDS</h4>
+          <p>הזרמת טיקים מפיד ה-RTDS הרשמי (<code>prices.crypto.binance</code>) לפיו פולימרקט קובעת את תוצאת השוק (<code>rtds_price</code>).</p>
+        </div>
+        <div class="flow-step">
+          <div class="step-num">3</div>
+          <h4>UnifiedStreamBridge</h4>
+          <p>קליטה של שני הפידים במקביל, סנכרון תמידי, וחישוב פער המחירים הדולרי והאחוזי ללא עיכוב.</p>
+        </div>
+        <div class="flow-step">
+          <div class="step-num">4</div>
+          <h4>LiveTrader & SSE</h4>
+          <p>שמירה בתוך <code>MarketLiveState</code>, הפצה דרך <code>/api/live/latency</code> ושידור מיידי ב-SSE ל-Cockpit ולטרמינל.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- מדריך בדיקה ידנית שלב אחרי שלב -->
+    <div class="guide-card">
+      <h2 class="section-title"><span>🧪</span> מדריך בדיקה ידנית (נסה זאת בעצמך)</h2>
+      <p style="color:var(--tx-dim); font-size:13.5px; margin-bottom:16px;">הרץ את הפקודות הבאות ב-PowerShell כדי לוודא את השינויים במו עיניך:</p>
+
+      <!-- שלב 1 -->
+      <h3 style="font-size:14.5px; margin-bottom:4px;">שלב 1: הרצת בדיקות יחידה ממוקדות לפידים המקביליים וה-Divergence</h3>
+      <p style="color:var(--tx-dim); font-size:13px;">בדיקת קליטה סימולטנית, חישוב פער מחירים, מקרי קצה והזרמת טלמטריה:</p>
+      <div class="code-block">
+        <span>rtk python -m pytest tests/test_streaming.py tests/test_live_trader.py tests/test_osc_dash_integration.py -k "rtds or divergence or spot" -q</span>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('rtk python -m pytest tests/test_streaming.py tests/test_live_trader.py tests/test_osc_dash_integration.py -k &quot;rtds or divergence or spot&quot; -q')">העתק</button>
+      </div>
+      <div class="expected-box">
+        <strong>מה אמורים לראות בפלט:</strong> <code>30+ passed</code> תוך שניות בודדות, ללא שום כשל או אזהרה (כל בדיקות ההפרדה והחישוב עוברות ירוק).
+      </div>
+
+      <!-- שלב 2 -->
+      <h3 style="font-size:14.5px; margin-bottom:4px;">שלב 2: הרצת כלל בדיקות המערכת (Full Test Suite)</h3>
+      <p style="color:var(--tx-dim); font-size:13px;">אימות שכל 265 הבדיקות בפרויקט עוברות בהצלחה מלאה:</p>
+      <div class="code-block">
+        <span>rtk python -m pytest -q</span>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('rtk python -m pytest -q')">העתק</button>
+      </div>
+      <div class="expected-box">
+        <strong>מה אמורים לראות בפלט:</strong> <code>265 passed in ~22s</code>. אפס שגיאות, 100% כיסוי תקין.
+      </div>
+
+      <!-- שלב 3 -->
+      <h3 style="font-size:14.5px; margin-bottom:4px;">שלב 3: הפעלת סקריפט הניטור החי מהטרמינל עם דגימות פער המחיר</h3>
+      <p style="color:var(--tx-dim); font-size:13px;">דגימה מהירה של ה-Divergence בזמן אמת עבור ביטקוין ישירות מהקונסולה:</p>
+      <div class="code-block">
+        <span>python -m scripts.monitor_stream_latency --symbol btc --samples 5 --stream</span>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('python -m scripts.monitor_stream_latency --symbol btc --samples 5 --stream')">העתק</button>
+      </div>
+      <div class="expected-box">
+        <strong>מה אמורים לראות בפלט:</strong> טבלת דגימות המציגה עמודות: <code>Actual Spot</code>, <code>RTDS Spot</code>, <code>Diff ($)</code>, ו-<code>Diff (%)</code> עם ערכים חדים ומדויקים.
+      </div>
+
+      <!-- שלב 4 -->
+      <h3 style="font-size:14.5px; margin-bottom:4px;">שלב 4: הפעלת שרת הקוקפיט ובדיקת נקודת הקצה של הטלמטריה</h3>
+      <p style="color:var(--tx-dim); font-size:13px;">הפעל את השרת המקומי ובדוק את נקודת הקצה <code>/api/live/latency</code>:</p>
+      <div class="code-block">
+        <span>python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</span>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802')">העתק</button>
+      </div>
+      <p style="color:var(--tx-dim); font-size:13px; margin-top:10px;">ובטרמינל נפרד בדוק את נתוני ה-API:</p>
+      <div class="code-block">
+        <span>curl http://127.0.0.1:8802/api/live/latency</span>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl http://127.0.0.1:8802/api/live/latency')">העתק</button>
+      </div>
+      <div class="expected-box">
+        <strong>מה אמורים לראות בפלט:</strong> תשובת JSON המכילה מפתחות: <code>actual_price</code>, <code>rtds_price</code>, <code>price_diff</code>, <code>price_diff_pct</code> יחד עם מונים עבור שני הפידים.
+      </div>
+
+    </div>
+
+    <!-- טבלת קבצים ששונו -->
+    <div class="guide-card">
+      <h2 class="section-title"><span>📁</span> קבצים מרכזיים ששונו ונבדקו במשימה</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>שם הקובץ</th>
+            <th>מהות השינוי</th>
+            <th>סטטוס</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="file-name">strategy/streaming.py</td>
+            <td>הוספת שדות <code>actual_price</code>, <code>rtds_price</code>, <code>price_diff</code>, קליטה מקבילית ב-<code>UnifiedStreamBridge</code></td>
+            <td><span class="status-badge" style="background:var(--green-glow); color:var(--green);">עודכן</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">strategy/live_trader.py</td>
+            <td>שמירת שני המחירים ב-<code>MarketLiveState</code>, עדכון <code>on_spot_tick</code> לפי מקור, וחישוב מחמיר של ה-Divergence</td>
+            <td><span class="status-badge" style="background:var(--green-glow); color:var(--green);">עודכן</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">server/osc_dash.py</td>
+            <td>חשיפת שדות ה-Divergence ב-<code>/api/live/latency</code>, הזרמה ב-SSE, ועיצוב תצוגת Telemetry בקוקפיט</td>
+            <td><span class="status-badge" style="background:var(--green-glow); color:var(--green);">עודכן</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">scripts/monitor_stream_latency.py</td>
+            <td>הוספת עמודות Actual ו-RTDS לטבלת הניטור, חישוב פער המחיר, ותמיכה בהזרמת RTDS חיה (<code>--stream</code>)</td>
+            <td><span class="status-badge" style="background:var(--green-glow); color:var(--green);">עודכן</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">tests/test_streaming.py</td>
+            <td>בדיקות יחידה לקליטה סימולטנית ולחישוב הפער בין הפידים</td>
+            <td><span class="status-badge" style="background:var(--purple-glow); color:var(--purple);">נוסף / הורחב</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">tests/test_live_trader.py</td>
+            <td>בדיקות שמירת מצב ומחזור חיים עבור <code>actual_price</code> ו-<code>rtds_price</code></td>
+            <td><span class="status-badge" style="background:var(--purple-glow); color:var(--purple);">נוסף / הורחב</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">tests/test_osc_dash_integration.py</td>
+            <td>בדיקות אינטגרציה לתשובות ה-API, כרטיסיית ה-Telemetry ואיטום בדיקות מפני WebSockets חיצוניים</td>
+            <td><span class="status-badge" style="background:var(--purple-glow); color:var(--purple);">נוסף / הורחב</span></td>
+          </tr>
+          <tr>
+            <td class="file-name">tests/test_monitor_stream_latency.py</td>
+            <td>בדיקות כיסוי עבור סנכרון ודגימת ה-Divergence בטרמינל</td>
+            <td><span class="status-badge" style="background:var(--purple-glow); color:var(--purple);">נוסף / הורחב</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+</body>
+</html>

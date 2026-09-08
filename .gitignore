@@ -21,5 +21,8 @@ Thumbs.db
 .claude/
 bot/
 ten-bankrolls/
-# local scratch generator (not part of repo)
-# scripts/gen_fake.py is kept under scripts/ intentionally
+# agent harness config (machine-local skill library, hooks, rules)
+.agents/
+.dev-port
+*.patch
+diff.diff
