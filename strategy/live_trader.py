@@ -1769,6 +1769,10 @@ class LiveTraderEngine:
         
         # Convert markets to dict
         mkts_dict = {slug: asdict(state) for slug, state in self.markets.items()}
+        # Copied under the lock its writer holds, so the dashboard can never read a
+        # tally mid-update with `reentries` bumped but the outcome bucket not yet.
+        with self._engine_lock:
+            reentry_stats_snapshot = dict(self.reentry_stats)
         
         # Format timeline for chart
         recent_timeline = self.timeline[-300:] if len(self.timeline) > 300 else self.timeline
@@ -1816,7 +1820,7 @@ class LiveTraderEngine:
                 "reentry_min_remaining_pct": self.reentry_min_remaining_pct,
                 "max_reentries_per_window": self.max_reentries_per_window,
             },
-            "reentry_stats": dict(self.reentry_stats),
+            "reentry_stats": reentry_stats_snapshot,
             "markets": mkts_dict,
             "timeline": recent_timeline,
             "trades": recent_trades,
@@ -2128,11 +2132,13 @@ class LiveTraderEngine:
                 if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                     m.status = "IDLE"
                     m.last_action = "Stopped"
-        # A window re-entered but not yet rolled over would otherwise lose its
-        # record (issue #95 observability). The engine is no longer trading, so the
-        # state captured here is the window's final one.
-        for m in self.markets.values():
-            self._flush_reentry_event(m)
+        # Deliberately NOT flushing `reentry_telemetry` here. `start()` resumes the
+        # same in-flight window without resetting per-window state, and the re-entry
+        # gate cannot reseed a record mid-window (`adverse_open` is already cleared),
+        # so flushing on stop would write a premature "no_fill" and then swallow the
+        # real outcome at rollover. The record survives a stop/start and is flushed
+        # by `_handle_window_rollover()` when the window actually ends. A record is
+        # only lost if the process dies mid-window, which no in-process hook can fix.
         log.info("LiveTraderEngine stopped (streams_active=%s)", self.stream_bridge.is_running)
 
     def restart(self) -> None:

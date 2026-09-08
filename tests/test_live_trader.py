@@ -2241,6 +2241,183 @@ def test_reentry_flush_writes_no_file_under_pytest():
         assert REENTRY_FILE.stat().st_mtime_ns == before
 
 
+def _live_reentry_engine(up_ok=True, down_ok=True):
+    """Live-mode drift engine whose leg placement can be made to fail per side.
+
+    Paper mode rests both legs on the same tick, so the finalizer's "not yet on the
+    book" arms and its slippage warning are only reachable in live mode with one
+    leg unplaced.
+    """
+    engine = _reentry_engine()
+    engine.mode = "live"
+    placed = {"up": up_ok, "down": down_ok}
+
+    def _place(token, price, shares, side):
+        ok = placed["up"] if token == "tok_up" else placed["down"]
+        return {"order_id": f"live_{token}"} if ok else None
+
+    engine.place_live_quote = _place
+    engine.get_clob_client = lambda: None
+    engine._placed = placed
+    return engine
+
+
+def test_finalizer_waits_until_both_legs_are_on_the_book():
+    """One leg unplaced leaves the record open; it completes when the other lands."""
+    engine = _live_reentry_engine(up_ok=True, down_ok=False)
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert m.reentry_count == 1
+    assert m.order_status_down != "RESTING"
+    assert m.reentry_telemetry["mid_at_resting"] is None
+
+    # DOWN can be placed now, and the mid has run to ~0.44 in the meantime.
+    engine._placed["down"] = True
+    engine._update_market_strategy(
+        slug,
+        _drift_poll_data(now, {"best_bid": 0.43, "best_ask": 0.45},
+                         {"best_bid": 0.55, "best_ask": 0.57}),
+        now + 70.0)
+
+    tel = m.reentry_telemetry
+    assert tel["mid_at_resting"] == pytest.approx(0.44, abs=1e-4)
+    assert tel["resting_drift"] == pytest.approx(0.06, abs=1e-4)
+    assert tel["resting_drift"] > engine.offset
+
+
+def test_flush_counts_a_record_that_never_reached_the_book():
+    """reached_book stays 0 when neither leg was ever placed."""
+    engine = _live_reentry_engine(up_ok=False, down_ok=False)
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert m.reentry_telemetry["mid_at_resting"] is None
+
+    engine._handle_window_rollover(m, now + 300.0, "cid_95_nobook")
+
+    assert engine.reentry_stats["reentries"] == 1
+    assert engine.reentry_stats["reached_book"] == 0
+    assert engine.reentry_stats["no_fill"] == 1
+
+
+@pytest.mark.parametrize("mutate,expected,exit_side", [
+    (lambda m: setattr(m, "pair_captured", True), "paired", ""),
+    (lambda m: (setattr(m, "exit_taken", True), setattr(m, "exit_side", "UP")), "exited", "UP"),
+    (lambda m: (setattr(m, "filled_up", True), setattr(m, "filled_down", True)),
+     "both_no_merge", ""),
+])
+def test_flush_records_every_outcome(mutate, expected, exit_side):
+    """Each outcome name maps to its own counter and lands in the record."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    mutate(m)
+
+    record = engine._flush_reentry_event(m)
+
+    assert record["outcome"] == expected
+    assert record["exit_side"] == exit_side
+    assert engine.reentry_stats[expected] == 1
+    assert engine.reentry_stats["reentries"] == 1
+
+
+def test_finalizer_is_idempotent_across_later_ticks():
+    """A later tick must not re-stamp a record that already reached the book."""
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    first = dict(m.reentry_telemetry)
+
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _PARTIAL_UP, _PARTIAL_DN), now + 70.0)
+
+    tel = m.reentry_telemetry
+    assert tel["mid_at_resting"] == first["mid_at_resting"]
+    assert tel["latency_ms"] == first["latency_ms"]
+    assert tel["resting_drift"] == first["resting_drift"]
+
+
+def test_stop_then_start_keeps_the_record_for_the_real_outcome():
+    """Stopping mid-window must not write a premature outcome.
+
+    `start()` resumes the same window without resetting per-window state, and the
+    re-entry gate cannot reseed the record (`adverse_open` is already cleared), so
+    a flush on stop would record "no_fill" and swallow the pair that follows.
+    """
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+
+    engine.stop()
+    assert m.reentry_telemetry is not None
+    assert engine.reentry_stats["reentries"] == 0
+
+    # Same window resumes and pairs.
+    engine.is_running = True
+    m.filled_up = True
+    m.filled_down = True
+    m.pair_captured = True
+    engine._handle_window_rollover(m, now + 300.0, "cid_95_resume")
+
+    assert engine.reentry_stats["reentries"] == 1
+    assert engine.reentry_stats["paired"] == 1
+    assert engine.reentry_stats["no_fill"] == 0
+
+
+def test_flush_writes_one_json_line_and_survives_a_write_failure(tmp_path, monkeypatch):
+    """The real JSONL path: valid JSON, no perf_start, and a failure cannot crash it."""
+    import json
+
+    import strategy.live_trader as lt
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(lt, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(lt, "REENTRY_FILE", tmp_path / "reentry_events.jsonl")
+
+    engine = _reentry_engine()
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+    m = _skip_window_on_adverse_open(engine, slug, now)
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    engine._flush_reentry_event(m)
+
+    lines = (tmp_path / "reentry_events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert "perf_start" not in row
+    assert row["outcome"] == "no_fill"
+    assert row["filled_up"] is False
+    assert "realized_pnl_usd" in row
+
+    # A directory where the file should be makes the append raise; the flush must
+    # still return the record and still count it.
+    blocked = tmp_path / "blocked.jsonl"
+    blocked.mkdir()
+    monkeypatch.setattr(lt, "REENTRY_FILE", blocked)
+    engine2 = _reentry_engine()
+    m2 = _skip_window_on_adverse_open(engine2, slug, now)
+    engine2._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert engine2._flush_reentry_event(m2) is not None
+    assert engine2.reentry_stats["reentries"] == 1
+
+
 def test_reentry_count_clears_on_rollover_and_reset():
     """Per-window re-entry state resets with the rest of the window state."""
     engine = _reentry_engine()
