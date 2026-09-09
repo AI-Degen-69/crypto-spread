@@ -108,7 +108,7 @@ change touched no dependency files.
   lives under gitignored `run/sweeps/`.
 - **Tests:** `python -m pytest tests/test_sweep_backtest.py -q` green (extended
   with `--only` filter + `0.025` grid tests); full suite `python -m pytest -q`
-  stays at **367 passed**, zero modifications to existing assertions.
+  stays at **386 passed**, zero modifications to existing assertions.
 
 ## 6. Verification status (checked Sep 9, 2026 · sweep/issue-110-exit-reversal)
 

@@ -323,3 +323,23 @@ def test_cli_only_exit_rev_end_to_end(tmp_path: Path):
     data = json.loads(out_json.read_text(encoding="utf-8"))
     assert data["only"] == "exit_rev"
     assert len(data["runs"]) == 5
+
+
+def test_cli_only_rejected_with_non_sensitivity_preset(tmp_path: Path):
+    """CodeRabbit on #112: --only must not label a grid/random run as isolated."""
+    dummy_tick_file = tmp_path / "ticks_test.jsonl"
+    snap = {
+        "cid": "0x1",
+        "series": "btc-up-or-down-5m",
+        "slug": "btc-up-or-down-5m",
+        "duration": 300,
+        "ts": 100.0,
+        "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    dummy_tick_file.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+    for preset in ("grid", "random", "assets"):
+        with pytest.raises(SystemExit) as exc:
+            main([str(dummy_tick_file), "--preset", preset, "--only", "exit_rev"])
+        assert exc.value.code == 2

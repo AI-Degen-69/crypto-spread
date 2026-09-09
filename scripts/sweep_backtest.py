@@ -490,7 +490,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional JSON output file path")
     args = ap.parse_args(argv)
-
+    if args.only is not None and args.preset != "sensitivity":
+        ap.error("--only requires --preset sensitivity")
     size = max(5, args.size)
     max_delay = args.max_start_delay
     if args.filter_partial and max_delay <= 0:
