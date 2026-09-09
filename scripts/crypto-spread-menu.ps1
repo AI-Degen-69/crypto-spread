@@ -328,9 +328,9 @@ function Host-Dashboard {
         return $false
     }
     
-    Csm-Step "Launching dashboard (python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port $Port)..."
+    Csm-Step "Launching dashboard (python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port $Port --reload)..."
     $dash = Start-Process -FilePath "python" `
-        -ArgumentList "-m", "uvicorn", "server.osc_dash:app", "--host", "127.0.0.1", "--port", "$Port" `
+        -ArgumentList "-m", "uvicorn", "server.osc_dash:app", "--host", "127.0.0.1", "--port", "$Port", "--reload" `
         -WorkingDirectory $ProjectPath -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $OutLog `
         -RedirectStandardError  $ErrLog
