@@ -188,6 +188,35 @@ def test_verify_tick_file_clean_and_corrupt(tmp_path: Path):
     assert rep_corrupt["valid_ticks"] == 2
 
 
+def test_verify_tick_file_market_breakdown(tmp_path: Path):
+    """Issue #109: per-market (series x duration) windows + tape trade counts."""
+    f = tmp_path / "ticks_2026-09-01.jsonl"
+    ticks = []
+    # btc 5m: 2 windows, 3 trades total
+    for cid, n_trades in (("w1", 2), ("w2", 1)):
+        for i in range(3):
+            t = make_sample_tick(cid=cid, ts=1725000000.0 + i)
+            t["tape_delta"] = [{"price": 0.5, "size": 10}] * n_trades if i == 0 else []
+            ticks.append(t)
+    # eth 15m: 1 window, 5 trades
+    for i in range(3):
+        t = make_sample_tick(cid="w3", series="eth-up-or-down-15m", duration=900, ts=1725000000.0 + i)
+        t["tape_delta"] = [{"price": 0.5, "size": 1}] * 5 if i == 0 else []
+        ticks.append(t)
+    f.write_text("\n".join(json.dumps(t) for t in ticks) + "\n", encoding="utf-8")
+
+    rep = verify_tick_file(f)
+    bd = {(b["series"], b["duration"]): b for b in rep["market_breakdown"]}
+    btc = bd[("btc-up-or-down-5m", 300)]
+    eth = bd[("eth-up-or-down-15m", 900)]
+    assert btc["windows"] == 2
+    assert btc["trades"] == 3
+    assert btc["trades_per_window"] == 1.5
+    assert eth["windows"] == 1
+    assert eth["trades"] == 5
+    assert eth["trades_per_window"] == 5.0
+
+
 def test_verify_ticks_dir_aggregation(tmp_path: Path):
     f1 = tmp_path / "ticks_2026-08-31.jsonl"
     f2 = tmp_path / "ticks_2026-09-01.jsonl"

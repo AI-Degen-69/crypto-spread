@@ -290,6 +290,9 @@ def verify_tick_file(
     # Lightweight streaming window tracker: cid -> dict
     windows_tracker: dict[str, dict[str, Any]] = {}
     series_counts: dict[str, int] = defaultdict(int)
+    # Issue #109: per-market (series x duration) breakdown — windows + tape
+    market_windows: dict[tuple[str, int], set[str]] = defaultdict(set)
+    market_trades: dict[tuple[str, int], int] = defaultdict(int)
     sample_issues: list[dict[str, Any]] = []
 
     try:
@@ -337,6 +340,12 @@ def verify_tick_file(
                 series = record.get("series")
                 if series:
                     series_counts[series] += 1
+                duration = record.get("duration")
+                if series and isinstance(duration, int):
+                    market_windows[(series, duration)].add(cid)
+                    tape = record.get("tape_delta")
+                    if isinstance(tape, list):
+                        market_trades[(series, duration)] += len(tape)
 
                 if cid and isinstance(ts, (int, float)):
                     if cid not in windows_tracker:
@@ -428,6 +437,20 @@ def verify_tick_file(
         "valid_ticks": valid_ticks,
         "windows_count": len(windows_tracker),
         "series_counts": dict(series_counts),
+        "market_breakdown": [
+            {
+                "series": s,
+                "duration": du,
+                "windows": len(market_windows[(s, du)]),
+                "trades": market_trades[(s, du)],
+                "trades_per_window": (
+                    round(market_trades[(s, du)] / len(market_windows[(s, du)]), 1)
+                    if market_windows[(s, du)]
+                    else 0.0
+                ),
+            }
+            for (s, du) in sorted(market_windows)
+        ],
         "schema_errors": schema_errors,
         "crossed_books": crossed_books,
         "book_anomalies": book_anomalies,
