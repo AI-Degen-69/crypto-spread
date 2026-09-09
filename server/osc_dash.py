@@ -365,6 +365,7 @@ def api_backtest(
 
     grouped = group_by_cid(snaps)
     if not grouped:
+        gp = params.grouped_params()
         return {
             "params_hash": params.params_hash(),
             "params": {
@@ -383,6 +384,7 @@ def api_backtest(
                 "reentry_drift_band": params.reentry_drift_band,
                 "min_requote_remaining_sec": params.min_requote_remaining_sec,
             },
+            "params_groups": gp,
             "overall": {
                 "windows": 0,
                 "pairs": 0,
@@ -555,6 +557,7 @@ def api_backtest(
             "reentry_pnl_cents": round(a["reentry_pnl_cents"], 2),
         }
 
+    gp = params.grouped_params()
     return {
         "params_hash": params.params_hash(),
         "params": {
@@ -572,6 +575,7 @@ def api_backtest(
             "reentry_drift_band": round(reentry_drift_band, 4),
             "min_requote_remaining_sec": round(min_requote_remaining_sec, 2),
         },
+        "params_groups": gp,
         "n_snaps": n_snaps,
         "n_windows": total_windows,
         "overall": overall,
@@ -1471,6 +1475,15 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .toast-msg{font:11px var(--mono);color:var(--dim);word-break:break-word}
 .toast-close{background:none;border:none;color:var(--faint);font-size:16px;line-height:1;cursor:pointer;padding:0 2px;transition:color .15s ease}
 .toast-close:hover{color:var(--tx)}
+/* ── Backtest parameter sections (operator vs assumption vs policy) ───────── */
+.bt-section{margin-top:14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.bt-section:first-child{margin-top:0}
+.bt-section-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;font:700 11px var(--disp);letter-spacing:.05em;text-transform:uppercase;color:var(--tx)}
+.bt-section-desc{font:500 10px var(--mono);color:var(--faint);margin:0 0 8px;line-height:1.5}
+.bt-section-dot{display:inline-block;width:8px;height:8px;border-radius:50%}
+.bt-section-dot-green{background:var(--up)}
+.bt-section-dot-amber{background:var(--gold)}
+.bt-section-dot-blue{background:var(--proj)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -1587,81 +1600,126 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
     <div class="card" style="border-top:2px solid var(--up)">
       <h3>⚡ Backtest Parameters <span class="mono" id="btHash" style="font-size:11px;color:var(--dim)"></span></h3>
       <div class="form-grid" style="margin-top:12px">
-        <div class="form-group">
-          <label>Tick File Dataset</label>
-          <select id="btFileSelect">
-            <option value="">All Files / 2,820 Windows (Default)</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Offset from Mid ($0.02 = 0.02 spread)</label>
-          <input type="number" step="0.005" id="btOffset" value="0.02">
-        </div>
-        <div class="form-group">
-          <label>Queue Depth Ahead (0 = no filter)</label>
-          <input type="number" step="5" id="btQueue" value="0">
-        </div>
-        <div class="form-group">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <label for="btPairCost">Max Pair Cost ($)</label>
-            <label class="toggle-wrap" title="Enable or disable max pair cost filter">
-              <span id="btPairCostToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--dim)">OFF</span>
-              <div class="toggle-switch">
-                <input type="checkbox" id="btPairCostEnabled" onchange="togglePairCostInput()">
-                <span class="toggle-slider"></span>
-              </div>
-            </label>
+        <!-- ── 1. OPERATOR CONTROLS (live-replicable) ─────────────────────── -->
+        <div class="bt-section">
+          <div class="bt-section-head">
+            <span class="bt-section-dot bt-section-dot-green"></span>
+            <span>Operator Controls — set these live on the book</span>
           </div>
-          <input type="number" step="0.005" id="btPairCost" value="1.05" disabled style="opacity:0.45">
+          <div class="bt-section-desc">
+            These are the parameters you actually control when trading live:
+            where you rest, how much book you clear through, your cost ceiling,
+            your stop placement, your sizing, and which windows you allow.
+          </div>
+          <div class="form-grid" style="margin-top:6px">
+            <div class="form-group">
+              <label>Tick File Dataset</label>
+              <select id="btFileSelect">
+                <option value="">All Files / 2,820 Windows (Default)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Offset from Mid ($0.02 = 0.02 spread)</label>
+              <input type="number" step="0.005" id="btOffset" value="0.02">
+            </div>
+            <div class="form-group">
+              <label>Queue Depth Ahead (0 = no filter)</label>
+              <input type="number" step="5" id="btQueue" value="0">
+            </div>
+            <div class="form-group">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <label for="btPairCost">Max Pair Cost ($)</label>
+                <label class="toggle-wrap" title="Enable or disable max pair cost filter">
+                  <span id="btPairCostToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--dim)">OFF</span>
+                  <div class="toggle-switch">
+                    <input type="checkbox" id="btPairCostEnabled" onchange="togglePairCostInput()">
+                    <span class="toggle-slider"></span>
+                  </div>
+                </label>
+              </div>
+              <input type="number" step="0.005" id="btPairCost" value="1.05" disabled style="opacity:0.45">
+            </div>
+            <div class="form-group">
+              <label>Exit Stop Loss 5m ($)</label>
+              <input type="number" step="0.01" id="btExit5m" value="0.05">
+            </div>
+            <div class="form-group">
+              <label>Exit Stop Loss 15m ($)</label>
+              <input type="number" step="0.01" id="btExit15m" value="0.05">
+            </div>
+            <div class="form-group">
+              <label>BTC 5m Stop Loss ($)</label>
+              <input type="number" step="0.01" id="btExitBtc" value="0.05">
+            </div>
+            <div class="form-group">
+              <label>SOL 5m Stop Loss ($)</label>
+              <input type="number" step="0.01" id="btExitSol" value="0.05">
+            </div>
+            <div class="form-group">
+              <label>Order Shares per Leg (Min 5)</label>
+              <input type="number" min="5" step="1" id="btSize" value="5">
+            </div>
+            <div class="form-group">
+              <label>Partial Windows Filter</label>
+              <select id="btMaxStartDelay">
+                <option value="0" selected>All (No filter)</option>
+                <option value="5.0">Full Windows Only (≤5s delay)</option>
+                <option value="2.0">Strict Full Windows (≤2s delay)</option>
+              </select>
+            </div>
+          </div>
         </div>
-        <div class="form-group">
-          <label>Exit Stop Loss 5m ($)</label>
-          <input type="number" step="0.01" id="btExit5m" value="0.05">
+
+        <!-- ── 2. EXECUTION / FILLS (assumption — not live-settable) ──────── -->
+        <div class="bt-section">
+          <div class="bt-section-head">
+            <span class="bt-section-dot bt-section-dot-amber"></span>
+            <span>Execution Assumptions — model-side, not directly settable live</span>
+          </div>
+          <div class="bt-section-desc">
+            These describe how we assume the book fills you. In live trading the
+            venue decides fills — you cannot set a fill model on an order. They
+            are tuning knobs for the replay, not operator controls.
+          </div>
+          <div class="form-grid" style="margin-top:6px">
+            <div class="form-group">
+              <label>Fill Model</label>
+              <select id="btFillModel">
+                <option value="cross" selected>Cross (Guaranteed if crossing ≤47¢)</option>
+                <option value="tape">Tape (Conservative - executed trades)</option>
+                <option value="book">Book (Optimistic - Ask crossing)</option>
+                <option value="both">Both</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Gas Merge Cost (USD)</label>
+              <input type="number" step="0.01" id="btGas" value="0.00">
+            </div>
+          </div>
         </div>
-        <div class="form-group">
-          <label>Exit Stop Loss 15m ($)</label>
-          <input type="number" step="0.01" id="btExit15m" value="0.05">
-        </div>
-        <div class="form-group">
-          <label>BTC 5m Stop Loss ($)</label>
-          <input type="number" step="0.01" id="btExitBtc" value="0.05">
-        </div>
-        <div class="form-group">
-          <label>SOL 5m Stop Loss ($)</label>
-          <input type="number" step="0.01" id="btExitSol" value="0.05">
-        </div>
-        <div class="form-group">
-          <label>Fill Model</label>
-          <select id="btFillModel">
-            <option value="cross" selected>Cross (Guaranteed if crossing ≤47¢)</option>
-            <option value="tape">Tape (Conservative - executed trades)</option>
-            <option value="book">Book (Optimistic - Ask crossing)</option>
-            <option value="both">Both</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Order Shares per Leg (Min 5)</label>
-          <input type="number" min="5" step="1" id="btSize" value="5">
-        </div>
-        <div class="form-group">
-          <label>Gas Merge Cost (USD)</label>
-          <input type="number" step="0.01" id="btGas" value="0.00">
-        </div>
-        <div class="form-group">
-          <label>Partial Windows Filter</label>
-          <select id="btMaxStartDelay">
-            <option value="0" selected>All (No filter)</option>
-            <option value="5.0">Full Windows Only (≤5s delay)</option>
-            <option value="2.0">Strict Full Windows (≤2s delay)</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Drift Re-Entry Band (0 = off)</label>
-          <input type="number" min="0" max="0.5" step="0.005" id="btReentryBand" value="0.015">
-        </div>
-        <div class="form-group">
-          <label>Min Window Left for Re-Entry (s)</label>
-          <input type="number" min="0" step="5" id="btRequoteMin" value="300">
+
+        <!-- ── 3. WINDOW POLICY (research knobs) ─────────────────────────── -->
+        <div class="bt-section">
+          <div class="bt-section-head">
+            <span class="bt-section-dot bt-section-dot-blue"></span>
+            <span>Window Policy — internal engine policy, mirrors live config</span>
+          </div>
+          <div class="bt-section-desc">
+            These are engine policy knobs. They have a live counterpart in the
+            trader config, but tuning them here is research work — for example
+            how long a window must have left before you allow a re-entry, or how
+            wide a drift band you tolerate.
+          </div>
+          <div class="form-grid" style="margin-top:6px">
+            <div class="form-group">
+              <label>Drift Re-Entry Band (0 = off)</label>
+              <input type="number" min="0" max="0.5" step="0.005" id="btReentryBand" value="0.015">
+            </div>
+            <div class="form-group">
+              <label>Min Window Left for Re-Entry (s)</label>
+              <input type="number" min="0" step="5" id="btRequoteMin" value="300">
+            </div>
+          </div>
         </div>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px">
@@ -2047,6 +2105,48 @@ const $=s=>document.getElementById(s);
 const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const pct=(a,b)=> b?Math.round(a/b*100):0;
 const hms=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`;};
+// Issue #100: seeker-bar math for the market cards. Returns the fill percent
+// (0-100) of a depleting time bar and its urgency colour — normal while plenty
+// of window remains, gold in the final 60s or final 10% (whichever is larger),
+// red in the final 10s. Always clamps to [0,100] so an expired window renders
+// an empty bar, never a negative or over-full width.
+const timeBarFraction=(rem, dur)=>{
+  const r = Number(rem);
+  const d = Number(dur);
+  if (!isFinite(r) || !isFinite(d) || d <= 0) return { fillPct: 0, barColor: 'var(--dim)' };
+  const frac = Math.max(0, Math.min(1, r / d));
+  const remainSec = Math.max(0, r);
+  let barColor = 'var(--up)';
+  if (remainSec <= 10) barColor = 'var(--down)';
+  else if (remainSec <= 60 || frac <= 0.10) barColor = 'var(--gold)';
+  return { fillPct: Math.round(frac * 1000) / 10, barColor };
+};
+// Issue #100: two-way visual link. Hovering/selecting a market card highlights
+// its Open Orders group (and vice versa) via the shared data-market key.
+const MAT_HL_CARD='box-shadow:0 0 0 2px var(--gold);border-color:var(--gold)';
+function wireMarketCardHighlight(gridEl){
+  if(!gridEl) return;
+  const doc=document;
+  const setHL=(key,on)=>{
+    doc.querySelectorAll('[data-market]').forEach(el=>{
+      if(el.getAttribute('data-market')!==key) return;
+      if(on){
+        if(el.classList.contains('mat-market-card')){el.style.boxShadow='0 0 0 2px var(--gold)';el.style.borderColor='var(--gold)';}
+        else if(el.classList.contains('mat-orders-group')){el.style.background='rgba(240,183,77,0.10)';}
+      }else{
+        el.style.boxShadow='';el.style.borderColor='';el.style.background='';
+      }
+    });
+  };
+  const markets=new Set();
+  gridEl.querySelectorAll('.mat-market-card').forEach(c=>{const k=c.getAttribute('data-market');if(k)markets.add(k);});
+  markets.forEach(key=>{
+    gridEl.querySelectorAll(`.mat-market-card[data-market="${key}"]`).forEach(card=>{
+      card.addEventListener('mouseenter',()=>setHL(key,true));
+      card.addEventListener('mouseleave',()=>setHL(key,false));
+    });
+  });
+}
 const fmtUsd=(cents, showPlus=true)=>{
   if(cents===null || cents===undefined || isNaN(Number(cents))) return '$0.00';
   const val = Number(cents) / 100;
@@ -4186,6 +4286,9 @@ function renderCockpitUI(st) {
       const midStr = m.mid != null ? `$${m.mid.toFixed(3)}` : '-';
       const spreadStr = m.spread != null ? `touch ${m.spread.toFixed(3)}` : 'touch -';
       const remStr = m.time_remaining_sec != null ? hms(m.time_remaining_sec) : '-';
+      // Issue #100: depleting seeker bar. Fraction of window left, clamped to
+      // [0,1]; an expired/overrun window renders an empty bar, never negative.
+      const { fillPct, barColor } = timeBarFraction(m.time_remaining_sec, m.win_duration_sec);
       const mktPnl = m.total_pnl_usd || 0.0;
       const pnlColor = mktPnl > 0 ? 'var(--up)' : mktPnl < 0 ? 'var(--down)' : 'var(--tx)';
 
@@ -4254,7 +4357,7 @@ function renderCockpitUI(st) {
       }
 
       gridHtml += `
-        <div class="card" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin:0;display:flex;flex-direction:column;justify-content:space-between">
+        <div class="card mat-market-card" data-market="${esc(item.slug)}" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin:0;display:flex;flex-direction:column;justify-content:space-between;transition:box-shadow 0.15s,border-color 0.15s">
           <div>
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
               <div style="display:flex;align-items:center;gap:6px">
@@ -4262,6 +4365,9 @@ function renderCockpitUI(st) {
                 <a href="https://polymarket.com/market/${encodeURIComponent(m.market_slug || item.slug)}" target="_blank" rel="noopener" style="font:700 13px var(--disp);letter-spacing:0.04em;color:var(--tx);text-decoration:none;transition:color 0.15s" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--tx)'" title="View ${esc(item.label)} on Polymarket">${esc(item.label)} ↗</a>
               </div>
               <span class="mono" style="font-size:11px;color:var(--gold);font-weight:600">⏱ ${remStr}</span>
+            </div>
+            <div class="mat-timebar-track" style="height:4px;border-radius:2px;background:rgba(255,255,255,0.08);margin-bottom:8px;overflow:hidden" title="${remStr} remaining">
+              <div class="mat-timebar-fill" data-market="${esc(item.slug)}" style="height:100%;width:${fillPct}%;background:${barColor};transition:width 1s linear,background 0.3s"></div>
             </div>
 
             <div style="display:flex;justify-content:space-between;align-items:baseline;margin:6px 0">
@@ -4299,6 +4405,7 @@ function renderCockpitUI(st) {
       `;
     }
     gridEl.innerHTML = gridHtml;
+    wireMarketCardHighlight(gridEl);
   }
 
   // 4. Tab 1: Render Live Open Orders & Pre-Quotes Table (9 columns, grouped by pair)
@@ -4322,6 +4429,10 @@ function renderCockpitUI(st) {
       let ordHtml = '';
       for (const mktKey of Object.keys(groupedOrders)) {
         const grp = groupedOrders[mktKey];
+        // Issue #100: two-way link with the matrix card — shared data-market
+        // key on both ends lets hover/select highlight card and orders group
+        // together.
+        const grpMarketKey = grp.market_slug || grp.series_slug || '';
         const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : (grp.status === 'Cancelled' ? 'ot-tag-cancelled' : 'ot-tag-unpaired'));
         const statusBorderColor = grp.status === 'Paired' ? 'var(--up)' : (grp.status === 'Partial' ? 'var(--gold)' : (grp.status === 'Cancelled' ? 'var(--dim)' : 'var(--line)'));
         const mktSlug = grp.market_slug || grp.series_slug || '';
@@ -4331,12 +4442,12 @@ function renderCockpitUI(st) {
           : esc(grp.market);
         const groupTime = (grp.legs.length > 0 && grp.legs[0].time && grp.legs[0].time !== '-') ? grp.legs[0].time : '-';
         const timeCell = `
-          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid ${statusBorderColor};padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="mono ot-pair-lead mat-orders-group" data-market="${esc(grpMarketKey)}" style="font-size:11px;color:var(--faint);vertical-align:top;border-left:2px solid ${statusBorderColor};padding-left:10px">
             ${esc(groupTime)}
           </td>
         `;
         const mktCell = `
-          <td rowspan="${grp.rowspan}" class="ot-pair-lead" style="vertical-align:middle;padding-left:10px">
+          <td rowspan="${grp.rowspan}" class="ot-pair-lead mat-orders-group" data-market="${esc(grpMarketKey)}" style="vertical-align:middle;padding-left:10px">
             <div style="font-weight:700;font-size:12.5px;color:var(--tx)" title="${esc(grp.market)}">${mktLinkHtml}</div>
             <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
               <span class="ot-tag ${statusBadgeCls}">${esc(grp.status.toUpperCase())}</span>

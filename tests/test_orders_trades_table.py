@@ -329,8 +329,7 @@ def test_cockpit_dom_rendering_with_state():
     const ordHtml = elements['cockpitOrdersBody'].innerHTML;
     if (!ordHtml.includes('PAIRED')) throw new Error('Orders body missing PAIRED tag: ' + ordHtml);
     if (!ordHtml.includes('$0.96')) throw new Error('Orders body missing pair cost $0.96: ' + ordHtml);
-    if (!ordHtml.includes('14:05:00')) throw new Error('Orders body missing time: ' + ordHtml);
-    if (!ordHtml.includes('<td rowspan="2" class="mono ot-pair-lead"')) throw new Error('Orders body missing merged Time cell with rowspan="2": ' + ordHtml);
+    if (!ordHtml.includes('14:05:00')) throw new Error('Orders body missing time: ' + ordHtml);        if (!ordHtml.includes('<td rowspan="2" class="mono ot-pair-lead mat-orders-group"')) throw new Error('Orders body missing merged Time cell with rowspan="2": ' + ordHtml);
     if (!ordHtml.includes('border-left:2px solid var(--up)')) throw new Error('Orders Time cell missing green status border: ' + ordHtml);
     if (ordHtml.includes('14:05:01')) throw new Error('Secondary order leg should not render duplicate time cell: ' + ordHtml);
     if (ordHtml.includes('class="ot-pair-lead" style="vertical-align:top;border-left:2px solid')) {{
@@ -1093,7 +1092,7 @@ def test_cancelled_orders_table_rendering_dom():
     // Action cell (last <td>) of each cancelled row must be the '-' placeholder,
     // not an empty cell or a dead Cancel button.
     for (const r of cancelledRows) {{
-      const cells = r.match(/<td[\s\S]*?<\/td>/g) || [];
+      const cells = r.match(/<td[\\s\\S]*?<\\/td>/g) || [];
       const actionCell = cells[cells.length - 1];
       if (!actionCell || !actionCell.includes('-') || actionCell.includes('cancel-order-btn')) {{
         throw new Error('Cancelled leg row action cell is not a \"-\" placeholder: ' + actionCell);
@@ -1745,6 +1744,214 @@ def test_pre_quote_label_and_cancelled_row_dim_dom():
     res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
     assert res.returncode == 0, f"Node pre-quote label / dim test failed: {res.stderr}\n{res.stdout}"
     assert "PRE_QUOTE_LABEL_AND_DIM_DOM_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_time_bar_fraction_math_and_clamping():
+    """Issue #100: timeBarFraction clamps to [0,100], returns urgency colours, and guards bad input."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const setInterval = () => 0;
+    const fetch = () => Promise.resolve({{ ok: true }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
+    const window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    globalThis.window = window;
+    const document = {{ getElementById: () => null, querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+
+    {js_code}
+
+    if (typeof timeBarFraction !== 'function') throw new Error('timeBarFraction missing');
+
+    // Mid-window: half remaining on a 300s window.
+    let r = timeBarFraction(150, 300);
+    if (Math.abs(r.fillPct - 50) > 0.01) throw new Error('Half-window fill should be 50%, got ' + r.fillPct);
+    if (r.barColor !== 'var(--up)') throw new Error('Mid-window colour should be normal, got ' + r.barColor);
+
+    // Urgency: 45s left of 300s -> gold.
+    r = timeBarFraction(45, 300);
+    if (r.barColor !== 'var(--gold)') throw new Error('45s left should be gold, got ' + r.barColor);
+
+    // Urgency by fraction: 35s left of a 15m (900s) window = 3.9% -> gold.
+    r = timeBarFraction(35, 900);
+    if (r.barColor !== 'var(--gold)') throw new Error('Low-fraction remainder should be gold, got ' + r.barColor);
+
+    // Critical: 5s left -> red.
+    r = timeBarFraction(5, 300);
+    if (r.barColor !== 'var(--down)') throw new Error('5s left should be red, got ' + r.barColor);
+
+    // Expired / overrun: negative remaining clamps to 0 width, never negative.
+    r = timeBarFraction(-12, 300);
+    if (r.fillPct !== 0) throw new Error('Expired window must clamp to 0%, got ' + r.fillPct);
+
+    // Over-remaining clamps to 100%.
+    r = timeBarFraction(400, 300);
+    if (r.fillPct !== 100) throw new Error('Over-remaining must clamp to 100%, got ' + r.fillPct);
+
+    // Bad duration guards.
+    r = timeBarFraction(100, 0);
+    if (r.fillPct !== 0) throw new Error('Zero duration must render empty bar, got ' + r.fillPct);
+    r = timeBarFraction(null, undefined);
+    if (r.fillPct !== 0) throw new Error('Missing values must render empty bar, got ' + r.fillPct);
+
+    console.log('TIME_BAR_FRACTION_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node timeBarFraction test failed: {res.stderr}\n{res.stdout}"
+    assert "TIME_BAR_FRACTION_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_market_card_timebar_and_highlight_dom():
+    """Issue #100: cards render data-market + time bar; hovering wires both ends of the link."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id, textContent: '', innerHTML: '', className: '', style: {{}},
+          classList: {{ classes: new Set(), add(c) {{ this.classes.add(c); }}, remove(c) {{ this.classes.delete(c); }}, toggle(c, v) {{ if (v) this.classes.add(c); else this.classes.delete(c); }}, contains(c) {{ return this.classes.has(c); }} }},
+          getAttribute: () => null,
+          addEventListener: () => {{}},
+          querySelectorAll: () => []
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+    const setInterval = () => 0;
+    const clearInterval = () => {{}};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {{}};
+    const fetch = () => Promise.resolve({{ ok: true }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
+
+    {js_code}
+
+    if (typeof wireMarketCardHighlight !== 'function') throw new Error('wireMarketCardHighlight missing');
+
+    const mockState = {{
+      is_running: true,
+      markets: {{
+        'btc-up-or-down-5m': {{ mid: 0.5, time_remaining_sec: 150, win_duration_sec: 300 }},
+        'eth-up-or-down-5m': {{ mid: 0.5, time_remaining_sec: -5, win_duration_sec: 300 }}
+      }},
+      open_orders: [], open_positions: [], trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const grid = elements['cockpitMarketGrid'];
+    const gridHtml = grid.innerHTML;
+
+    // Cards carry the shared data-market key and a time bar.
+    if (!gridHtml.includes('mat-market-card')) throw new Error('mat-market-card missing');
+    if (!gridHtml.includes('data-market="btc-up-or-down-5m"')) throw new Error('data-market key missing on card');
+    if (!gridHtml.includes('mat-timebar-fill')) throw new Error('time bar fill missing');
+
+    // BTC at 150/300 -> 50% width; ETH expired (-5/300) -> 0% width, never negative.
+    const btcCard = gridHtml.slice(gridHtml.indexOf('data-market="btc-up-or-down-5m"'));
+    const btcBar = btcCard.slice(0, btcCard.indexOf('mat-timebar-track', 100) + 800);
+    if (!/width:50(\\.0)?%/.test(btcBar)) throw new Error('BTC bar should be 50% width: ' + btcBar.slice(0, 600));
+    const ethCard = gridHtml.slice(gridHtml.indexOf('data-market="eth-up-or-down-5m"'));
+    const ethBar = ethCard.slice(0, ethCard.indexOf('mat-timebar-track', 100) + 800);
+    if (!/width:0(\\.0)?%/.test(ethBar)) throw new Error('Expired ETH bar should clamp to 0% width: ' + ethBar.slice(0, 600));
+    if (/-[1-9]/.test(ethBar.match(/width:[^;"]+/) || ['width:0%'])[0]) throw new Error('Negative bar width leaked');
+
+    console.log('MARKET_CARD_TIMEBAR_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node market card timebar test failed: {res.stderr}\n{res.stdout}"
+    assert "MARKET_CARD_TIMEBAR_TESTS_PASSED" in res.stdout
+
+
+@requires_node
+def test_orders_group_has_shared_market_key():
+    """Issue #100: Open Orders group lead cells carry data-market for the two-way highlight."""
+    import subprocess
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    script_start = html.find("<script>")
+    script_end = html.rfind("</script>")
+    js_code = html[script_start + len("<script>"):script_end]
+
+    test_harness = f"""
+    const elements = {{}};
+    function getOrCreate(id) {{
+      if (!elements[id]) {{
+        elements[id] = {{
+          id, textContent: '', innerHTML: '', className: '', style: {{}},
+          classList: {{ classes: new Set(), add(c) {{ this.classes.add(c); }}, remove(c) {{ this.classes.delete(c); }}, toggle(c, v) {{ if (v) this.classes.add(c); else this.classes.delete(c); }}, contains(c) {{ return this.classes.has(c); }} }},
+          getAttribute: () => null,
+          addEventListener: () => {{}},
+          querySelectorAll: () => []
+        }};
+      }}
+      return elements[id];
+    }}
+    globalThis.window = {{ addEventListener: () => {{}}, location: {{ search: '' }} }};
+    const document = {{ getElementById: id => getOrCreate(id), querySelectorAll: () => [] }};
+    const localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+    const setInterval = () => 0;
+    const clearInterval = () => {{}};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {{}};
+    const fetch = () => Promise.resolve({{ ok: true }});
+    const EventSource = class {{ constructor() {{}} addEventListener() {{}} close() {{}} }};
+
+    {js_code}
+
+    const mockState = {{
+      is_running: true,
+      markets: {{}},
+      open_orders: [
+        {{ order_id: 'ord-1', market: 'BTC 5m', market_slug: 'btc-up-or-down-5m', side: 'BUY (UP)', price: 0.48, size: 5, filled: 0, status: 'OPEN', time: '14:00:00' }},
+        {{ order_id: 'ord-2', market: 'BTC 5m', market_slug: 'btc-up-or-down-5m', side: 'BUY (DOWN)', price: 0.48, size: 5, filled: 0, status: 'OPEN', time: '14:00:01' }}
+      ],
+      open_positions: [], trades: []
+    }};
+
+    renderCockpitUI(mockState);
+
+    const ordHtml = elements['cockpitOrdersBody'].innerHTML;
+    if (!ordHtml.includes('mat-orders-group')) throw new Error('mat-orders-group class missing on orders group cells');
+    if (!ordHtml.includes('data-market="btc-up-or-down-5m"')) throw new Error('data-market key missing on orders group (must match card key)');
+
+    console.log('ORDERS_GROUP_MARKET_KEY_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_harness, capture_output=True, text=True, encoding="utf-8", timeout=5)
+    assert res.returncode == 0, f"Node orders-group market key test failed: {res.stderr}\n{res.stdout}"
+    assert "ORDERS_GROUP_MARKET_KEY_TESTS_PASSED" in res.stdout
 
 
 
