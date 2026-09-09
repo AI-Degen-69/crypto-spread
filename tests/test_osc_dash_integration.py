@@ -1309,3 +1309,37 @@ def test_api_live_config_reentry_drift_band():
     finally:
         engine.update_config(reentry_drift_band=orig_band)
         engine.mode = orig_mode
+
+
+def test_api_live_config_exit_reversal():
+    """Issue #111: exit_reversal is exposed in /api/live/config and settable.
+
+    Cents-to-decimal normalization matches exit_thresh: whole numbers 1-50 are
+    treated as cents (e.g. 2 -> 0.02); decimals pass through. Out of range is
+    rejected by the payload model with 422.
+    """
+    engine = osc_dash.get_live_trader_engine()
+    engine.is_running = False
+    orig_rev = engine.exit_reversal
+    orig_mode = engine.mode
+    engine.mode = "paper"
+    try:
+        state = client.get("/api/live/state").json()
+        assert abs(state["params"]["exit_reversal"] - engine.exit_reversal) < 1e-9
+
+        # Decimal pass-through
+        res = client.post("/api/live/config", json={"exit_reversal": 0.03})
+        assert res.status_code == 200
+        assert abs(res.json()["params"]["exit_reversal"] - 0.03) < 1e-9
+        assert abs(engine.exit_reversal - 0.03) < 1e-9
+
+        # Cents normalization: 2 -> 0.02
+        res_cents = client.post("/api/live/config", json={"exit_reversal": 2})
+        assert res_cents.status_code == 200
+        assert abs(res_cents.json()["params"]["exit_reversal"] - 0.02) < 1e-9
+
+        # Out of range is rejected by the payload model, not silently clamped.
+        assert client.post("/api/live/config", json={"exit_reversal": 0.9}).status_code == 422
+    finally:
+        engine.update_config(exit_reversal=orig_rev)
+        engine.mode = orig_mode

@@ -2900,3 +2900,34 @@ def test_rollover_resets_requote_round():
     assert m.requote_round == 0
     assert m.last_requote_telemetry is None
     assert m.status == "QUOTING"
+
+
+def test_exit_reversal_default_matches_backtest():
+    """Issue #111: live and backtest share the same exit_reversal default (0.02)."""
+    from backtest.engine import BacktestParams
+
+    engine = LiveTraderEngine(load_persisted=False)
+    assert engine.exit_reversal == BacktestParams().exit_reversal == 0.02
+
+
+def test_update_config_exit_reversal():
+    """Issue #111: update_config accepts and clamps exit_reversal."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.update_config(exit_reversal=0.03)
+    assert engine.exit_reversal == 0.03
+
+    # Clamped into [0.001, 0.50] like the payload model range
+    engine.update_config(exit_reversal=5.0)
+    assert engine.exit_reversal == 0.50
+    engine.update_config(exit_reversal=0.0)
+    assert engine.exit_reversal == 0.001
+
+
+def test_update_config_rejects_exit_reversal_change_while_running():
+    """Issue #111: exit_reversal is guarded while the bot runs, like exit_thresh."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.is_running = True
+    engine.exit_reversal = 0.02
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(exit_reversal=0.03)
+    assert engine.exit_reversal == 0.02

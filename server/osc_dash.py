@@ -908,6 +908,7 @@ class LiveConfigPayload(BaseModel):
     tokens: Optional[list[str]] = None
     durations: Optional[list[int]] = None
     entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    exit_reversal: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     reentry_drift_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
 
     @field_validator("offset", mode="before")
@@ -928,6 +929,20 @@ class LiveConfigPayload(BaseModel):
     @classmethod
     def normalize_exit_thresh(cls, v: Any) -> Any:
         """Normalize whole-number exit threshold values (1-50) entered as cents to decimal dollars."""
+        if v is not None:
+            try:
+                fv = float(v)
+                if fv.is_integer() and 1.0 <= fv <= 50.0:
+                    return fv / 100.0
+                return fv
+            except (ValueError, TypeError):
+                pass
+        return v
+
+    @field_validator("exit_reversal", mode="before")
+    @classmethod
+    def normalize_exit_reversal(cls, v: Any) -> Any:
+        """Normalize whole-number exit_reversal values (1-50) entered as cents to decimals."""
         if v is not None:
             try:
                 fv = float(v)
@@ -976,6 +991,7 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             tokens=payload.tokens,
             durations=payload.durations,
             entry_timeout_pct=payload.entry_timeout_pct,
+            exit_reversal=payload.exit_reversal,
             reentry_drift_band=payload.reentry_drift_band,
         )
         return state
@@ -1878,6 +1894,10 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <div class="form-group">
           <label>Exit Stop Loss Threshold ($)</label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label>Exit Reversal Buffer ($)</label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitReversal" value="0.02" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label>Share Size (per leg)</label>
@@ -3510,6 +3530,7 @@ function updateCockpitParamsLockUI(locked) {
   const paramIds = [
     'cockpitOffset',
     'cockpitExit',
+    'cockpitExitReversal',
     'cockpitShares',
     'cockpitMode',
     'cockpitEntryTimeout',
@@ -4043,6 +4064,7 @@ async function applyCockpitConfig() {
   isApplyingCockpitConfig = true;
   const offset = parseFloat($('cockpitOffset').value) || 0.02;
   const exit_thresh = parseFloat($('cockpitExit').value) || 0.05;
+  const exit_reversal = parseFloat($('cockpitExitReversal').value) || 0.02;
   const shares = parseInt($('cockpitShares').value, 10) || 5;
   const mode = $('cockpitMode').value || 'paper';
   const wallet = $('cockpitWallet').value.trim();
@@ -4058,6 +4080,7 @@ async function applyCockpitConfig() {
   const body = {
     offset,
     exit_thresh,
+    exit_reversal,
     shares,
     mode,
     wallet_address: wallet,
@@ -4150,6 +4173,7 @@ function renderCockpitUI(st) {
     if (st.params) {
       if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
+      if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
     }
@@ -4166,6 +4190,7 @@ function renderCockpitUI(st) {
     if (st.params) {
       if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
+      if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
     }

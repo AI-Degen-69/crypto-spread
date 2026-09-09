@@ -581,7 +581,7 @@ class LiveTraderEngine:
         self.offset: float = 0.02
         self.exit_thresh: float = 0.05
         self.spot_exit_drift: float = 0.003
-        self.exit_reversal: float = 0.015
+        self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
         self.shares: int = 5
         self.taker_fee_rate: float = 0.0
         self.entry_timeout_pct: float = float(entry_timeout_pct) if entry_timeout_pct is not None else 1.0
@@ -1860,6 +1860,7 @@ class LiveTraderEngine:
                       tokens: Optional[Iterable[str]] = None,
                       durations: Optional[Iterable[int]] = None,
                       entry_timeout_pct: Optional[float] = None,
+                      exit_reversal: Optional[float] = None,
                       min_requote_remaining_sec: Optional[float] = None,
                       reentry_drift_band: Optional[float] = None,
                       reentry_min_remaining_pct: Optional[float] = None,
@@ -1908,6 +1909,8 @@ class LiveTraderEngine:
                 if starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
                     param_changed = True
                 if entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
+                    param_changed = True
+                if exit_reversal is not None and abs(float(exit_reversal) - self.exit_reversal) > 1e-6:
                     param_changed = True
                 if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
                     param_changed = True
@@ -2017,6 +2020,9 @@ class LiveTraderEngine:
                         self.starting_balance = float(starting_balance)
                 if entry_timeout_pct is not None:
                     self.entry_timeout_pct = max(0.0, min(1.0, float(entry_timeout_pct)))
+                if exit_reversal is not None:
+                    # Mercy-rule disarm distance; unified with BacktestParams (issue #111).
+                    self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
                 if min_requote_remaining_sec is not None:
                     self.min_requote_remaining_sec = max(0.0, float(min_requote_remaining_sec))
                 if reentry_drift_band is not None:
