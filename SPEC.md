@@ -75,11 +75,11 @@ windows are entered.
 and settable through `update_config()` plus the `/api/live/config` payload.
 
 ### Assumptions (deviations from the issue text, deliberate)
-- **`reentry_drift_band` is a new knob, not a reuse of `exit_reversal`.** The issue
-  notes live `exit_reversal = 0.015` vs backtest `0.02`. Unifying `exit_reversal`
-  itself would change exit behavior and existing backtest expectations, which is
-  out of scope; a dedicated knob defaulting to `0.015` in both engines meets the
-  live/backtest parity requirement without touching exit semantics.
+- **`reentry_drift_band` is a new knob, not a reuse of `exit_reversal`.** Issue
+  #111 has since unified `exit_reversal` at `0.02` in both engines (the #110
+  isolated sweep showed the 0.015 vs 0.020 choice is immaterial), so parity now
+  holds there too; the dedicated `reentry_drift_band` knob remains separate by
+  design.
 - **`min_requote_remaining_sec` is issue #89's knob at its shipped `300.0`
   default, not a new 60s one.** #89 landed this attribute for post-merge
   re-quoting while this issue was in progress; the acceptance criteria call for
