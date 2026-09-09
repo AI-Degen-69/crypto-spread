@@ -1767,8 +1767,13 @@ class LiveTraderEngine:
         total_trades = len(self.trades)
         win_rate = (win_trades / total_trades * 100.0) if total_trades > 0 else 0.0
         
-        # Convert markets to dict
+        # Convert markets to dict. Issue #100: expose win_duration_sec per market
+        # so the dashboard can render a time-remaining seeker bar without
+        # re-deriving window length client-side.
         mkts_dict = {slug: asdict(state) for slug, state in self.markets.items()}
+        for slug, d in mkts_dict.items():
+            dur = (d["end_ts"] - d["start_ts"]) if d["end_ts"] > d["start_ts"] else (900.0 if "15m" in slug else 300.0)
+            d["win_duration_sec"] = round(dur, 3)
         # Copied under the lock its writer holds, so the dashboard can never read a
         # tally mid-update with `reentries` bumped but the outcome bucket not yet.
         with self._engine_lock:

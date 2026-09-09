@@ -27,7 +27,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, ClassVar, Iterable, Iterator
 
 # --- loaders ----------------------------------------------------------------
 
@@ -153,6 +153,68 @@ class BacktestParams:
     # oscillating across the band from thrashing the book for a whole window;
     # 0 disables re-entry outright. Mirrors LiveTraderEngine.
     max_reentries_per_window: int = 1
+
+    # ── param grouping metadata ──────────────────────────────────────────────
+    # Separates operator-controlled (live-replicable) knobs from execution
+    # assumptions and internal window policy so the UI and API can render them
+    # in distinct sections without touching any field names or the hash contract.
+    # Each group lists (field_name, label, why). Unknown keys silently drop so new
+    # fields don't break the grouping on a missing-entry error.
+    _PARAM_GROUPS: ClassVar[dict[str, list[tuple[str, str, str]]]] = {
+        "trading_knobs": [
+            ("offset", "Spread Offset — where you rest", "You set this live on the book"),
+            ("queue_gate", "Queue Depth — book depth filter", "You choose how many orders ahead to clear through"),
+            ("pair_cost_gate", "Max Pair Cost ($) — cost ceiling", "Your cost threshold before walking away"),
+            ("quote_shares", "Order Shares per Leg — position size", "Your sizing decision"),
+            ("max_start_delay_sec", "Max Start Delay (s) — window filter", "You decide which windows are fresh enough to enter"),
+            ("exit_thresh_by_slug", "Exit Stop Loss Thresholds ($)", "Your stop placement — per series / duration"),
+        ],
+        "execution_assumptions": [
+            ("fill_model", "Fill Model — execution assumption", "Not directly settable live: the book decides fills"),
+            ("merge_gas_usd", "Gas Merge Cost (USD)", "Real cost, not a tuning knob"),
+            ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption"),
+            ("tick_size", "Tick Size", "Price granularity assumption"),
+            ("min_quote_shares", "Min Quote Shares", "Minimum order size floor"),
+        ],
+        "window_policy": [
+            ("entry_timeout_pct", "Entry Timeout (% of window)", "Engine policy — mirrors live config, tuned in research"),
+            ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live"),
+            ("reentry_drift_band", "Drift Re-Entry Band", "Re-entry discipline — policy knob"),
+            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy"),
+            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy"),
+            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy"),
+        ],
+    }
+
+    def grouped_params(self) -> dict[str, dict[str, Any]]:
+        """Return params grouped by control category for UI/API rendering.
+
+        Trading knobs are operator-controlled (live-replicable). Execution
+        assumptions are model-side — not directly settable on a live order.
+        Window policy mirrors live config but is tuned in research, not at the
+        book. Field names and the flat hash contract are untouched.
+        """
+        flat = asdict(self)
+        out: dict[str, dict[str, Any]] = {}
+        for group_name, fields in self._PARAM_GROUPS.items():
+            grp: dict[str, Any] = {}
+            for fname, _label, _why in fields:
+                if fname in flat:
+                    grp[fname] = flat[fname]
+            out[group_name] = grp
+        # exit_thresh_by_slug is a dict; flatten into per-key entries for the UI
+        if "exit_thresh_by_slug" in flat:
+            et = flat["exit_thresh_by_slug"]
+            out["trading_knobs"]["exit_default_5m"] = et.get("default_5m", 0.05)
+            out["trading_knobs"]["exit_default_15m"] = et.get("default_15m", 0.05)
+            out["trading_knobs"]["exit_btc_5m"] = et.get("btc-up-or-down-5m", 0.05)
+            out["trading_knobs"]["exit_btc_15m"] = et.get("btc-up-or-down-15m", 0.05)
+            out["trading_knobs"]["exit_sol_5m"] = et.get("sol-up-or-down-5m", 0.05)
+            out["trading_knobs"]["exit_sol_15m"] = et.get("sol-up-or-down-15m", 0.05)
+            # keep the raw dict out of the grouped view but preserve it in the
+            # trading_knobs section for consumers that want the whole map
+            out["trading_knobs"]["_exit_thresh_by_slug"] = et
+        return out
 
     def __post_init__(self):
         """Validate parameter ranges and finite boundaries."""
