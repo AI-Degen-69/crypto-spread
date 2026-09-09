@@ -329,7 +329,8 @@ def test_cockpit_dom_rendering_with_state():
     const ordHtml = elements['cockpitOrdersBody'].innerHTML;
     if (!ordHtml.includes('PAIRED')) throw new Error('Orders body missing PAIRED tag: ' + ordHtml);
     if (!ordHtml.includes('$0.96')) throw new Error('Orders body missing pair cost $0.96: ' + ordHtml);
-    if (!ordHtml.includes('14:05:00')) throw new Error('Orders body missing time: ' + ordHtml);        if (!ordHtml.includes('<td rowspan="2" class="mono ot-pair-lead mat-orders-group"')) throw new Error('Orders body missing merged Time cell with rowspan="2": ' + ordHtml);
+    if (!ordHtml.includes('14:05:00')) throw new Error('Orders body missing time: ' + ordHtml);
+    if (!ordHtml.includes('<td rowspan="2" class="mono ot-pair-lead mat-orders-group"')) throw new Error('Orders body missing merged Time cell with rowspan="2": ' + ordHtml);
     if (!ordHtml.includes('border-left:2px solid var(--up)')) throw new Error('Orders Time cell missing green status border: ' + ordHtml);
     if (ordHtml.includes('14:05:01')) throw new Error('Secondary order leg should not render duplicate time cell: ' + ordHtml);
     if (ordHtml.includes('class="ot-pair-lead" style="vertical-align:top;border-left:2px solid')) {{
@@ -1092,7 +1093,7 @@ def test_cancelled_orders_table_rendering_dom():
     // Action cell (last <td>) of each cancelled row must be the '-' placeholder,
     // not an empty cell or a dead Cancel button.
     for (const r of cancelledRows) {{
-      const cells = r.match(/<td[\\s\\S]*?<\\/td>/g) || [];
+      const cells = r.match(/<td[\s\S]*?<\/td>/g) || [];
       const actionCell = cells[cells.length - 1];
       if (!actionCell || !actionCell.includes('-') || actionCell.includes('cancel-order-btn')) {{
         throw new Error('Cancelled leg row action cell is not a \"-\" placeholder: ' + actionCell);

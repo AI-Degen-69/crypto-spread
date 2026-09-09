@@ -2121,30 +2121,39 @@ const timeBarFraction=(rem, dur)=>{
   else if (remainSec <= 60 || frac <= 0.10) barColor = 'var(--gold)';
   return { fillPct: Math.round(frac * 1000) / 10, barColor };
 };
-// Issue #100: two-way visual link. Hovering/selecting a market card highlights
-// its Open Orders group (and vice versa) via the shared data-market key.
-const MAT_HL_CARD='box-shadow:0 0 0 2px var(--gold);border-color:var(--gold)';
+// Issue #100: two-way visual link. Hovering a market card highlights its Open
+// Orders group and vice versa, via the shared data-market key.
+function setMarketHighlight(key,on){
+  document.querySelectorAll('[data-market]').forEach(el=>{
+    if(el.getAttribute('data-market')!==key) return;
+    if(el.classList.contains('mat-market-card')){
+      el.style.boxShadow=on?'0 0 0 2px var(--gold)':'';
+      el.style.borderColor=on?'var(--gold)':'';
+    }else if(el.classList.contains('mat-orders-group')){
+      el.style.background=on?'rgba(240,183,77,0.10)':'';
+    }
+  });
+}
 function wireMarketCardHighlight(gridEl){
   if(!gridEl) return;
-  const doc=document;
-  const setHL=(key,on)=>{
-    doc.querySelectorAll('[data-market]').forEach(el=>{
-      if(el.getAttribute('data-market')!==key) return;
-      if(on){
-        if(el.classList.contains('mat-market-card')){el.style.boxShadow='0 0 0 2px var(--gold)';el.style.borderColor='var(--gold)';}
-        else if(el.classList.contains('mat-orders-group')){el.style.background='rgba(240,183,77,0.10)';}
-      }else{
-        el.style.boxShadow='';el.style.borderColor='';el.style.background='';
-      }
-    });
-  };
+  const ordersBody=document.getElementById('cockpitOrdersBody');
+  const ordersWrap=(ordersBody && typeof ordersBody.closest==='function')?ordersBody.closest('table'):null;
   const markets=new Set();
   gridEl.querySelectorAll('.mat-market-card').forEach(c=>{const k=c.getAttribute('data-market');if(k)markets.add(k);});
+  if(ordersBody){
+    ordersBody.querySelectorAll('.mat-orders-group[data-market]').forEach(c=>{const k=c.getAttribute('data-market');if(k)markets.add(k);});
+  }
   markets.forEach(key=>{
     gridEl.querySelectorAll(`.mat-market-card[data-market="${key}"]`).forEach(card=>{
-      card.addEventListener('mouseenter',()=>setHL(key,true));
-      card.addEventListener('mouseleave',()=>setHL(key,false));
+      card.addEventListener('mouseenter',()=>setMarketHighlight(key,true));
+      card.addEventListener('mouseleave',()=>setMarketHighlight(key,false));
     });
+    if(ordersWrap){
+      ordersWrap.querySelectorAll(`.mat-orders-group[data-market="${key}"]`).forEach(cell=>{
+        cell.addEventListener('mouseenter',()=>setMarketHighlight(key,true));
+        cell.addEventListener('mouseleave',()=>setMarketHighlight(key,false));
+      });
+    }
   });
 }
 const fmtUsd=(cents, showPlus=true)=>{
