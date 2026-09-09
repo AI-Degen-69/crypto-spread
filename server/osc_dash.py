@@ -1943,6 +1943,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       </div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">The collector writes full book depth and tape data to <code>run/ticks/ticks_YYYY-MM-DD.jsonl</code>. Additional tick files can be uploaded for analysis.</div>
       <div id="manifestNotice" style="display:none;padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:12px;font-weight:600"></div>
+      <div id="manifestAggregateWrap"></div>
       <div id="manifestTableWrap">Loading files...</div>
     </div>
 
@@ -3233,6 +3234,48 @@ async function loadManifest(){
     const wrap = $('manifestTableWrap');
     if(!wrap) return;
     wrap.innerHTML = '';
+
+    // Aggregate rollup card (Issue #109)
+    const aggWrap = $('manifestAggregateWrap');
+    if(aggWrap){
+      aggWrap.innerHTML = '';
+      const a = d.aggregate;
+      if(a && a.total_files > 0){
+        const mb = (a.total_bytes/(1024*1024)).toFixed(1)+' MB';
+        const lineFmt = (a.total_lines||0).toLocaleString();
+        const linesHtml = a.total_lines_estimated ? `~${lineFmt}` : lineFmt;
+        const winFmt = (a.total_windows||0).toLocaleString();
+        const winHtml = a.windows_source === 'partial' ? `≥${winFmt}` : winFmt;
+        const winLabel = a.windows_source === 'partial' ? ' (partial — verify files for exact)' : '';
+        const card = document.createElement('div');
+        card.style.cssText = 'border:1px solid var(--line-hi);border-radius:8px;padding:12px 16px;margin-bottom:12px;background:var(--panel2)';
+        let seriesHtml = '';
+        if(a.series_counts && Object.keys(a.series_counts).length > 0){
+          const base = ['btc','eth','bnb','sol','xrp'];
+          const durs = ['5m','15m'];
+          const cells = base.map(b => durs.map(du => {
+            const key = `${b}-up-or-down-${du}`;
+            const v = a.series_counts[key];
+            return `<td style="padding:4px 10px;text-align:right" class="mono">${v != null ? v.toLocaleString() : '<span style="color:var(--faint)">—</span>'}</td>`;
+          }).join('')).join('</tr><tr>');
+          seriesHtml = `<table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:11px"><thead><tr><th style="text-align:left;color:var(--dim);font-weight:600;padding:4px 10px">Series</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:4px 10px">5m</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:4px 10px">15m</th></tr></thead><tbody><tr>${cells}</tr></tbody><tfoot><tr><td colspan="3" style="color:var(--faint);padding:4px 10px;font-size:10px">samples per series · source: ${esc(a.series_counts_source||'none')}</td></tr></tfoot></table>`;
+        }
+        card.innerHTML = `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="width:8px;height:8px;border-radius:50%;background:var(--gold);display:inline-block"></span>
+            <span style="font:700 12px var(--disp);color:var(--tx)">Repository Totals</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:12px">
+            <div><span style="color:var(--dim)">Files:</span> <span class="mono" style="font-weight:700">${a.total_files}</span></div>
+            <div><span style="color:var(--dim)">Total Size:</span> <span class="mono" style="font-weight:700">${mb}</span></div>
+            <div><span style="color:var(--dim)">Samples:</span> <span class="mono" style="font-weight:700">${linesHtml}</span></div>
+            <div><span style="color:var(--dim)">Windows:</span> <span class="mono" style="font-weight:700">${winHtml}</span><span style="color:var(--faint);font-size:10px">${winLabel}</span></div>
+            <div><span style="color:var(--dim)">Tape Entries:</span> <span class="mono" style="font-weight:700">${(a.tape_entries_total||0).toLocaleString()}</span></div>
+          </div>
+          ${seriesHtml}`;
+        aggWrap.appendChild(card);
+      }
+    }
 
     if(d.manifest && d.manifest.tape_empty_rate !== undefined){
       const m = d.manifest;
