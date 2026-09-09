@@ -1060,6 +1060,46 @@ def test_cancelled_orders_table_rendering_dom():
       throw new Error('Orders table missing ot-tag-cancelled class for cancelled orders: ' + ordHtml);
     }}
 
+    // Issue #99: cancelled leg rows must be dimmed, OPEN leg row must stay bright.
+    const rows = ordHtml.split('<tr').slice(1).map(r => '<tr' + r);
+    const cancelledRows = rows.filter(r => r.includes('ot-tag-cancelled'));
+    if (cancelledRows.length !== 3) {{
+      throw new Error('Expected 3 cancelled leg rows, got ' + cancelledRows.length + ': ' + ordHtml);
+    }}
+    // Every cancelled leg row carries a dim class (row or per-cell)
+    for (const r of cancelledRows) {{
+      if (!r.includes('ot-row-cancelled') && !r.includes('ot-cell-cancelled')) {{
+        throw new Error('Cancelled leg row missing dim styling: ' + r);
+      }}
+      // No bright Up/Down side badge leaks through on a cancelled leg
+      if (r.includes('ot-tag-up') || r.includes('ot-tag-down')) {{
+        throw new Error('Bright side badge on cancelled leg row: ' + r);
+      }}
+    }}
+    // The OPEN (BTC UP) leg row is full strength: no dim classes, bright badge
+    const openRow = rows.find(r => r.includes('ord-btc-up'));
+    if (!openRow) throw new Error('OPEN leg row not found: ' + ordHtml);
+    if (openRow.includes('ot-row-cancelled') || openRow.includes('ot-cell-cancelled')) {{
+      throw new Error('OPEN leg row must not be dimmed: ' + openRow);
+    }}
+    if (!openRow.includes('ot-tag-up')) {{
+      throw new Error('OPEN leg row missing bright side badge: ' + openRow);
+    }}
+    // Cancelled legs keep the '-' placeholder in the action column (no buttons,
+    // verified above); each cancelled row still shows its CANCELED pill.
+    if (!cancelledRows.every(r => r.includes('CANCELED'))) {{
+      throw new Error('Cancelled leg row missing CANCELED pill: ' + ordHtml);
+    }}
+    // Action cell (last <td>) of each cancelled row must be the '-' placeholder,
+    // not an empty cell or a dead Cancel button.
+    for (const r of cancelledRows) {{
+      const cells = r.match(/<td[\s\S]*?<\/td>/g) || [];
+      const actionCell = cells[cells.length - 1];
+      if (!actionCell || !actionCell.includes('-') || actionCell.includes('cancel-order-btn')) {{
+        throw new Error('Cancelled leg row action cell is not a \"-\" placeholder: ' + actionCell);
+      }}
+    }}
+
     // Verify leading Time cell has gold border for Partial (BTC 5m) and dim border for Cancelled (ETH 5m)
     if (!ordHtml.includes('border-left:2px solid var(--gold)')) {{
       throw new Error('Partial order group missing gold border on Time cell: ' + ordHtml);
