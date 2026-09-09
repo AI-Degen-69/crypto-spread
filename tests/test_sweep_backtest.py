@@ -5,10 +5,12 @@ import json
 from pathlib import Path
 
 import pytest
+from dataclasses import replace
 from backtest.engine import BacktestParams, WindowResult
 from scripts.sweep_backtest import (
     SweepRunResult,
     compute_metrics,
+    filter_sensitivity_grid,
     format_markdown_table,
     generate_joint_grid,
     generate_random_grid,
@@ -240,3 +242,83 @@ def test_cli_smoke(tmp_path: Path):
     assert data_rand["count"] == 5
     assert data_rand["seed"] == 99
     assert len(data_rand["runs"]) == 5
+
+
+def test_sensitivity_grid_has_0025_exit_reversal():
+    """Issue #110: the 1D exit_reversal axis uses 0.005 steps incl. 0.025."""
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base)
+    rev_rows = {lbl: p for lbl, p in grid if lbl.startswith("exit_rev=")}
+    assert sorted(rev_rows) == [
+        "exit_rev=0.010",
+        "exit_rev=0.015",
+        "exit_rev=0.025",
+        "exit_rev=0.030",
+    ]
+    assert rev_rows["exit_rev=0.025"] == replace(base, exit_reversal=0.025)
+
+
+def test_filter_sensitivity_grid_only_exit_rev():
+    """Issue #110: --only exit_rev keeps Baseline + the 4 reversal rows.
+
+    The 0.020 point is the Baseline row itself (the grid loop skips the
+    value equal to base), so the filter covers all five mercy distances.
+    """
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base)
+    filtered = filter_sensitivity_grid(grid, "exit_rev")
+    labels = [lbl for lbl, _ in filtered]
+    assert labels[0] == "Baseline"
+    assert len(filtered) == 5
+    assert all(lbl == "Baseline" or lbl.startswith("exit_rev=")
+              for lbl in labels)
+    covered = sorted({base.exit_reversal}
+                     | {p.exit_reversal for _, p in filtered})
+    assert covered == pytest.approx([0.010, 0.015, 0.020, 0.025, 0.030])
+
+
+def test_cli_only_rejects_unknown_axis(tmp_path: Path):
+    """Issue #110: an unknown --only axis fails fast with exit code 2."""
+    dummy_tick_file = tmp_path / "ticks_test.jsonl"
+    snap = {
+        "cid": "0x1",
+        "series": "btc-up-or-down-5m",
+        "slug": "btc-up-or-down-5m",
+        "duration": 300,
+        "ts": 100.0,
+        "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    dummy_tick_file.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main([str(dummy_tick_file), "--preset", "sensitivity",
+              "--only", "bogus"])
+    assert exc.value.code == 2
+
+
+def test_cli_only_exit_rev_end_to_end(tmp_path: Path):
+    """Issue #110: --only exit_rev runs Baseline + 4 reversal configs."""
+    out_json = tmp_path / "sweep_only.json"
+    dummy_tick_file = tmp_path / "ticks_test.jsonl"
+    snap = {
+        "cid": "0x1",
+        "series": "btc-up-or-down-5m",
+        "slug": "btc-up-or-down-5m",
+        "duration": 300,
+        "ts": 100.0,
+        "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    dummy_tick_file.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+    code = main([
+        str(dummy_tick_file),
+        "--preset", "sensitivity",
+        "--only", "exit_rev",
+        "--out", str(out_json),
+    ])
+    assert code == 0
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    assert data["only"] == "exit_rev"
+    assert len(data["runs"]) == 5

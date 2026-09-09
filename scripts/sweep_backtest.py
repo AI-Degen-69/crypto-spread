@@ -214,8 +214,8 @@ def generate_sensitivity_grid(
         )
         grid.append((f"exit_5m={e:.2f}", p))
 
-    # 5. Exit reversal variations
-    reversals = [0.010, 0.015, 0.020, 0.030]
+    # 5. Exit reversal variations (issue #110: 0.005 steps over 0.010-0.030)
+    reversals = [0.010, 0.015, 0.020, 0.025, 0.030]
     for r in reversals:
         if r != base.exit_reversal:
             p = BacktestParams(
@@ -270,6 +270,27 @@ def generate_sensitivity_grid(
             grid.append((f"requote_min={rm:.0f}", p))
 
     return grid
+
+
+#: Label prefixes of the 1D sensitivity axes; the `--only` CLI flag keeps the
+#: "Baseline" row plus rows whose label starts with one of these prefixes.
+SENSITIVITY_AXES = (
+    "offset", "queue", "exit_5m", "exit_rev", "pair_cost",
+    "reentry_band", "requote_min",
+)
+
+
+def filter_sensitivity_grid(
+    grid: list[tuple[str, BacktestParams]],
+    only: str,
+) -> list[tuple[str, BacktestParams]]:
+    """Keep the Baseline row plus rows of a single 1D sensitivity axis.
+
+    The value equal to the baseline is covered by the "Baseline" row itself
+    (each axis loop skips it), so the filtered grid still spans the full axis.
+    """
+    prefix = only + "="
+    return [row for row in grid if row[0] == "Baseline" or row[0].startswith(prefix)]
 
 
 def generate_joint_grid(
@@ -448,6 +469,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="ticks directory or .jsonl[.gz] file")
     ap.add_argument("--preset", choices=["sensitivity", "grid", "assets", "random"], default="sensitivity",
                     help="Sweep preset: sensitivity (1D), grid (joint), assets (universe), random (stochastic)")
+    ap.add_argument("--only", choices=list(SENSITIVITY_AXES), default=None,
+                    help="Sensitivity preset only: run Baseline plus a single 1D axis "
+                         "(e.g. --only exit_rev for the issue #110 mercy-distance sweep)")
     ap.add_argument("--count", type=int, default=50,
                     help="Sample count for random sweep (default: 50)")
     ap.add_argument("--seed", type=int, default=42,
@@ -491,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.preset == "sensitivity":
         grid = generate_sensitivity_grid(base, size=size)
+        if args.only is not None:
+            grid = filter_sensitivity_grid(grid, args.only)
     elif args.preset == "grid":
         grid = generate_joint_grid(fill_model=args.fill_model, max_start_delay=max_delay, size=size)
     elif args.preset == "random":
@@ -543,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
         out_payload = {
             "source": str(args.source),
             "preset": args.preset,
+            "only": args.only,
             "fill_model": args.fill_model,
             "size": size,
             "count": args.count if args.preset == "random" else None,
