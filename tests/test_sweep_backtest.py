@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from dataclasses import replace
+
 from backtest.engine import BacktestParams, WindowResult
 from scripts.sweep_backtest import (
     SweepRunResult,
