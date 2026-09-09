@@ -109,3 +109,13 @@ change touched no dependency files.
 - **Tests:** `python -m pytest tests/test_sweep_backtest.py -q` green (extended
   with `--only` filter + `0.025` grid tests); full suite `python -m pytest -q`
   stays at **367 passed**, zero modifications to existing assertions.
+
+## 6. Verification status (checked Sep 9, 2026 · sweep/issue-110-exit-reversal)
+
+- `python -m pytest tests/test_sweep_backtest.py -q` → **14 passed** (10 existing
+  + 4 new: 0.025 grid entry, `--only` filter, bad-axis rejection, e2e).
+- `python -m pytest -q` → **386 passed**, zero failures, zero edits to existing
+  assertions.
+- Sweep artifact `run/sweeps/exit_reversal_110.json` (gitignored): 5 runs,
+  distinct `exit_reversal` params confirmed; verdict + table in
+  `docs/backtest-optimization-results.md §6` and as issue #110 comment.
