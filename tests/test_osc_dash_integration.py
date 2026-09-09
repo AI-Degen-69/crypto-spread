@@ -215,6 +215,78 @@ def test_api_ticks_manifest(tmp_path, monkeypatch):
     assert data["files"][0]["lines_estimated"] is False
 
 
+def test_api_ticks_manifest_aggregate(tmp_path, monkeypatch):
+    """Issue #109: /api/ticks/manifest exposes an additive `aggregate` rollup."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    f1 = tmp_path / "ticks_2026-09-07.jsonl"
+    f1.write_text('{"a": 1}\n{"a": 2}\n', encoding="utf-8")
+    f2 = tmp_path / "ticks_2026-09-08.jsonl"
+    f2.write_text('{"a": 3}\n', encoding="utf-8")
+
+    response = client.get("/api/ticks/manifest")
+    assert response.status_code == 200
+    data = response.json()
+    agg = data["aggregate"]
+    assert agg["total_files"] == 2
+    assert agg["total_lines"] == sum(f["lines"] for f in data["files"])
+    assert agg["total_bytes"] == sum(f["bytes"] for f in data["files"])
+    assert agg["total_lines_estimated"] is False
+    assert agg["tape_entries_total"] == 0
+    assert agg["series_counts_source"] in ("none", "verify_cache", "scan_cache")
+
+
+def test_api_ticks_manifest_aggregate_empty_dir(tmp_path, monkeypatch):
+    """Issue #109: missing run/ticks/ yields a zeroed aggregate, not an error."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    response = client.get("/api/ticks/manifest")
+    assert response.status_code == 200
+    agg = response.json()["aggregate"]
+    assert agg["total_files"] == 0
+    assert agg["total_bytes"] == 0
+    assert agg["total_lines"] == 0
+    assert agg["series_counts"] == {}
+    assert agg["series_counts_source"] == "none"
+
+
+def test_api_ticks_manifest_aggregate_tape_from_manifest(tmp_path, monkeypatch):
+    """Issue #109: collector manifest.json tape_entries_total is surfaced."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    f1 = tmp_path / "ticks_2026-09-08.jsonl"
+    f1.write_text('{"a": 1}\n', encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"tape_entries_total": 235, "lines": 500}),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/ticks/manifest")
+    assert response.status_code == 200
+    agg = response.json()["aggregate"]
+    assert agg["tape_entries_total"] == 235
+
+
+def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
+    """Issue #109: /api/ticks/verify persists a counts sidecar that the
+    manifest aggregate consumes (series_counts_source == verify_cache)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    f1 = tmp_path / "ticks_2026-09-08.jsonl"
+    f1.write_text(
+        json.dumps({"series": "btc-up-or-down-5m", "cid": "w1", "ts": 1.0}) + "\n"
+        + json.dumps({"series": "btc-up-or-down-5m", "cid": "w1", "ts": 2.0}) + "\n"
+        + json.dumps({"series": "eth-up-or-down-5m", "cid": "w2", "ts": 1.0}) + "\n",
+        encoding="utf-8",
+    )
+
+    res = client.get("/api/ticks/verify", params={"file": f1.name})
+    assert res.status_code == 200
+
+    agg = client.get("/api/ticks/manifest").json()["aggregate"]
+    assert agg["series_counts_source"] == "verify_cache"
+    assert agg["series_counts"]["btc-up-or-down-5m"] == 2
+    assert agg["series_counts"]["eth-up-or-down-5m"] == 1
+    assert agg["total_windows"] == 2
+    assert agg["windows_source"] == "cache"
+
+
 def test_api_collector_lifecycle_and_status(monkeypatch):
     """Verify collector start, status, and stop workflow with mocked process."""
     class DummyProc:

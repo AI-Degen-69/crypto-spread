@@ -233,6 +233,103 @@ def _count_lines_fast(path: Path) -> int:
         return 0
 
 
+# --- Tick aggregate rollup (Issue #109) ---
+# Per-series counts must come from cheap sources: cached verify reports
+# (.verify_cache/<file>.json) or a TTL-capped one-time scan — never an
+# unbounded full-file scan on every request (files reach 1GB+).
+_VERIFY_CACHE_DIRNAME = ".verify_cache"
+_SCAN_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
+_SCAN_TTL_SEC = 600.0
+
+
+def _read_verify_cache(path: Path) -> dict[str, Any] | None:
+    """Read a cached verify report sidecar if fresh (within _SCAN_TTL_SEC)."""
+    try:
+        if time.time() - path.stat().st_mtime > _SCAN_TTL_SEC:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and "series_counts" in data:
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _scan_series_counts(path: Path) -> dict[str, int]:
+    """One-time streaming scan of a tick file for per-series counts (TTL-cached)."""
+    key = str(path)
+    cached = _SCAN_CACHE.get(key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    counts: dict[str, int] = {}
+    try:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rb") as f:  # type: ignore[operator]
+            for line in f:
+                try:
+                    series = json.loads(line).get("series")
+                    if series:
+                        counts[series] = counts.get(series, 0) + 1
+                except Exception:
+                    continue
+    except Exception:
+        return {}
+    _SCAN_CACHE[key] = (time.time() + _SCAN_TTL_SEC, counts)
+    return counts
+
+
+def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict[str, Any]:
+    """Sum cheap totals across tick files; per-series counts from cache sources only."""
+    total_bytes = 0
+    total_lines = 0
+    any_estimated = False
+    entries: list[tuple[Path, int]] = []
+    for f in files:
+        size = f.stat().st_size
+        total_bytes += size
+        is_est = size >= 20_000_000
+        lines = int(size / 950) if is_est else _count_lines_fast(f)
+        any_estimated = any_estimated or is_est
+        total_lines += lines
+        entries.append((f, lines))
+
+    series_counts: dict[str, int] = {}
+    total_windows = 0
+    windows_known = True
+    source = "none"
+    cache_dir = files[0].parent / _VERIFY_CACHE_DIRNAME if files else None
+    for f, _lines in entries:
+        cached = _read_verify_cache(cache_dir / f"{f.name}.json") if cache_dir else None
+        if cached is None:
+            windows_known = False
+            continue
+        source = "verify_cache"
+        for s, c in cached.get("series_counts", {}).items():
+            series_counts[s] = series_counts.get(s, 0) + int(c)
+        total_windows += int(cached.get("windows_count", 0))
+
+    if not series_counts and entries:
+        # No fresh verify sidecars: fall back to a TTL-capped one-time scan.
+        for f, _lines in entries:
+            counts = _scan_series_counts(f)
+            if counts:
+                source = "scan_cache"
+                for s, c in counts.items():
+                    series_counts[s] = series_counts.get(s, 0) + int(c)
+
+    return {
+        "total_files": len(entries),
+        "total_bytes": total_bytes,
+        "total_lines": total_lines,
+        "total_lines_estimated": any_estimated,
+        "total_windows": total_windows,
+        "windows_source": "cache" if (windows_known and entries) else ("partial" if entries else "none"),
+        "tape_entries_total": int((manifest or {}).get("tape_entries_total", 0)),
+        "series_counts": series_counts,
+        "series_counts_source": source if series_counts else "none",
+    }
+
+
 @app.get("/api/ticks/manifest")
 def api_ticks_manifest():
     """List available tick files + manifest stats for the slider UI."""
@@ -263,6 +360,22 @@ def api_ticks_manifest():
                 "lines_estimated": is_est,
                 "mtime": f.stat().st_mtime,
             })
+    try:
+        out["aggregate"] = _aggregate_ticks(
+            [TICKS_DIR / f["name"] for f in out["files"]], out["manifest"]
+        )
+    except Exception:
+        out["aggregate"] = {
+            "total_files": 0,
+            "total_bytes": 0,
+            "total_lines": 0,
+            "total_lines_estimated": False,
+            "total_windows": 0,
+            "windows_source": "none",
+            "tape_entries_total": 0,
+            "series_counts": {},
+            "series_counts_source": "none",
+        }
     return out
 
 
@@ -1315,6 +1428,22 @@ async def api_ticks_verify(
             max_gap_sec=max_gap,
             max_start_delay=max_start_delay,
         )
+        # Persist a cheap counts sidecar so /api/ticks/manifest's aggregate can
+        # surface per-series totals without rescanning (best-effort, Issue #109).
+        try:
+            cache_dir = TICKS_DIR / _VERIFY_CACHE_DIRNAME
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / f"{target.name}.json").write_text(
+                json.dumps({
+                    "series_counts": rep.get("series_counts", {}),
+                    "windows_count": rep.get("windows_count", 0),
+                    "valid_ticks": rep.get("valid_ticks", 0),
+                    "ts": time.time(),
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
     else:
         rep = await asyncio.to_thread(
             verify_ticks_dir,
