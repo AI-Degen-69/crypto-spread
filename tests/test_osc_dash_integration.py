@@ -1319,6 +1319,7 @@ def test_api_live_config_exit_reversal():
     rejected by the payload model with 422.
     """
     engine = osc_dash.get_live_trader_engine()
+    orig_running = engine.is_running
     engine.is_running = False
     orig_rev = engine.exit_reversal
     orig_mode = engine.mode
@@ -1343,3 +1344,4 @@ def test_api_live_config_exit_reversal():
     finally:
         engine.update_config(exit_reversal=orig_rev)
         engine.mode = orig_mode
+        engine.is_running = orig_running

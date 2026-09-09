@@ -3983,6 +3983,19 @@ function validateCockpitInputs() {
     }
   }
 
+  // 2b. Exit Reversal: 0.001 to 0.500 (same range as exit threshold)
+  const exitRevEl = $('cockpitExitReversal');
+  if (exitRevEl) {
+    const raw = exitRevEl.value.trim();
+    const val = parseFloat(raw);
+    if (raw === '' || isNaN(val) || val < 0.001 || val > 0.500) {
+      exitRevEl.classList.add('input-invalid');
+      allValid = false;
+    } else {
+      exitRevEl.classList.remove('input-invalid');
+    }
+  }
+
   // 3. Shares: 5 to 10000
   const sharesEl = $('cockpitShares');
   if (sharesEl) {
@@ -4053,6 +4066,13 @@ async function applyCockpitConfig() {
     let ev = parseFloat(exitEl.value);
     if (!isNaN(ev) && Number.isInteger(ev) && ev >= 1.0 && ev <= 50.0) {
       exitEl.value = (ev / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    }
+  }
+  const exitRevEl = $('cockpitExitReversal');
+  if (exitRevEl) {
+    let rv = parseFloat(exitRevEl.value);
+    if (!isNaN(rv) && Number.isInteger(rv) && rv >= 1.0 && rv <= 50.0) {
+      exitRevEl.value = (rv / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
     }
   }
 
