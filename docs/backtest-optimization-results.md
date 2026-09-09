@@ -80,3 +80,33 @@
    - 15m default: `0.09`.
 4. **Mean-Reversion Buffer:** `exit_reversal = 0.015`.
 5. **Pair Cost Filter:** `pair_cost_gate = 1.05`.
+
+---
+
+## 6. Issue #110 — exit_reversal isolated sweep (Sep 9, 2026)
+
+Dedicated 1D sweep of the mercy-rule disarm distance at 0.005 steps, holding
+all other params at baseline (`offset=0.02, queue_gate=0, exit_5m=0.08,
+fill_model=tape`, size 5). Dataset: `run/ticks/ticks_2026-09-08.jsonl`
+(48,766 snaps, 515 windows). Full artifact: `run/sweeps/exit_reversal_110.json`
+(gitignored); driver: `run/sweeps/run_exit_rev_110.py`.
+
+| exit_reversal | exit_rate | pair_rate | total_pnl | avg_pnl | win_rate | max_dd | profit_factor | sharpe |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.010 | 4.27% | 2.14% | -1113.31c | -2.16c | 2.5% | 1144.08c | 0.32 | -2.50 |
+| 0.015 | 4.27% | 2.14% | -1113.31c | -2.16c | 2.5% | 1144.08c | 0.32 | -2.50 |
+| 0.020 | 4.27% | 2.14% | -1113.31c | -2.16c | 2.5% | 1144.08c | 0.32 | -2.50 |
+| 0.025 | 4.27% | 2.14% | -1113.31c | -2.16c | 2.5% | 1144.08c | 0.32 | -2.50 |
+| 0.030 | 4.08% | 2.14% | -1089.65c | -2.12c | 2.5% | 1120.42c | 0.32 | -2.45 |
+
+**Reading.** The response is flat across 0.010–0.025 (bit-identical results:
+the mercy rule disarms the same windows at every distance in this range) with
+a marginal +23.66c edge at 0.030 (one fewer exit: 4.08% vs 4.27%). Exits are
+rare to begin with (~4% of windows), so the disarm distance is second-order at
+this baseline. This corroborates §2.4 ("consistent performance across both")
+with finer granularity on fresh data.
+
+**Recommendation for #111.** Unify live to the backtest default `0.02` — the
+0.015 vs 0.020 choice is literally immaterial on this dataset, so there is no
+PnL reason to keep the divergence. Do not adopt 0.030 on a +24c single-window
+difference; re-test it only if exits become a larger PnL share.

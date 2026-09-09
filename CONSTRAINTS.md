@@ -87,3 +87,35 @@ clamp `:1942-1945`) is covered by `tests/test_osc_dash_integration.py:1204`
 (POST 0.9 → 422 at `:1223`). Anti-cheating §2 holds in code. Backtest parity
 (T5/T6, item 9) landed in the working tree. The three #95 commits and this
 change touched no dependency files.
+
+## 6. Issue #110 — exit_reversal isolated sweep (tooling only, no strategy change)
+
+- **Zero production behavior change.** `backtest/engine.py`, `strategy/live_trader.py`
+  and `server/osc_dash.py` are untouched; `BacktestParams` defaults
+  (`exit_reversal = 0.02`) stay as-is until #111 decides otherwise on the basis
+  of this sweep's results.
+- **Scope lock:** only the 1D sensitivity list gains `0.025`
+  (`scripts/sweep_backtest.py:218`) plus an `--only` axis filter for the
+  `sensitivity` preset. Joint (`generate_joint_grid`) and random
+  (`generate_random_grid`) value sets are deliberately unchanged (out of scope
+  per the issue).
+- **Determinism:** the sweep replays a fixed tick file
+  (`run/ticks/ticks_2026-09-08.jsonl`) with all non-target params pinned to the
+  documented baseline (`offset=0.02, queue_gate=0, exit_5m=0.08,
+  fill_model=tape`); results are saved with `--out` JSON so the table is
+  reproducible from the artifact.
+- **No new dependencies.** No changes under `run/` format; sweep output JSON
+  lives under gitignored `run/sweeps/`.
+- **Tests:** `python -m pytest tests/test_sweep_backtest.py -q` green (extended
+  with `--only` filter + `0.025` grid tests); full suite `python -m pytest -q`
+  stays at **386 passed**, zero modifications to existing assertions.
+
+## 6. Verification status (checked Sep 9, 2026 · sweep/issue-110-exit-reversal)
+
+- `python -m pytest tests/test_sweep_backtest.py -q` → **14 passed** (10 existing
+  + 4 new: 0.025 grid entry, `--only` filter, bad-axis rejection, e2e).
+- `python -m pytest -q` → **386 passed**, zero failures, zero edits to existing
+  assertions.
+- Sweep artifact `run/sweeps/exit_reversal_110.json` (gitignored): 5 runs,
+  distinct `exit_reversal` params confirmed; verdict + table in
+  `docs/backtest-optimization-results.md §6` and as issue #110 comment.
