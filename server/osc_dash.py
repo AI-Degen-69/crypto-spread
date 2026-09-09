@@ -3273,6 +3273,20 @@ async function loadManifest(){
           + tile('Tape Entries', (a.tape_entries_total||0).toLocaleString())
           + tile('Tape Empty' + (m.day ? ' · ' + esc(m.day) : ''), tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--up)' : 'var(--dim)'));
         aggWrap.appendChild(tiles);
+        // Aggregate per-market sample counts (verify-cache/scan sourced).
+        if(a.series_counts && Object.keys(a.series_counts).length > 0){
+          const base = ['btc','eth','bnb','sol','xrp'];
+          const durs = ['5m','15m'];
+          const cells = base.map(b => durs.map(du => {
+            const v = a.series_counts[`${b}-up-or-down-${du}`];
+            return `<td style="padding:3px 10px;text-align:right" class="mono">${v != null ? v.toLocaleString() : '<span style="color:var(--faint)">—</span>'}</td>`;
+          }).join('</tr><tr>'));
+          const st = document.createElement('div');
+          st.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:12px;background:var(--panel2)';
+          st.innerHTML = `<div style="font:700 11px var(--disp);color:var(--tx);margin-bottom:4px">Samples per Market <span style="color:var(--faint);font-weight:400">· source: ${esc(a.series_counts_source||'none')}</span></div>`
+            + `<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="text-align:left;color:var(--dim);font-weight:600;padding:3px 10px">Asset</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">5m</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">15m</th></tr></thead><tbody><tr>${cells}</tr></tbody></table>`;
+          aggWrap.appendChild(st);
+        }
       }
     }
 
@@ -3287,7 +3301,9 @@ async function loadManifest(){
       tr.innerHTML = '<td colspan="5" style="text-align:center;color:var(--faint);padding:18px">No files found in run/ticks/</td>';
       tbl.appendChild(tr);
     } else {
+      let fileIdx = 0;
       for(const f of d.files){
+        fileIdx++;
         const tr = document.createElement('tr');
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
         const linesFormatted = (f.lines||0).toLocaleString();
@@ -3349,19 +3365,21 @@ async function loadManifest(){
         // Per-file market breakdown (Issue #109): collapsible row, populated
         // after a Verify run. Click the trigger row to expand/collapse.
         if(f.market_breakdown && f.market_breakdown.length > 0){
-          const brkId = 'brk_' + f.name.replace(/[^a-zA-Z0-9]/g, '_');
+          const brkId = `brk_${fileIdx}`;
           const trig = document.createElement('tr');
-          trig.style.cursor = 'pointer';
           const tdT = document.createElement('td');
           tdT.colSpan = 5;
           tdT.style.cssText = 'background:var(--panel2);padding:6px 14px;font:600 11px var(--disp);color:var(--gold);border-top:1px solid var(--line)';
-          tdT.innerHTML = `<span id="${brkId}_arrow" style="display:inline-block;width:14px">▶</span> 📊 Market Breakdown — ${f.market_breakdown.length} markets (click to expand)`;
+          tdT.innerHTML = `<button type="button" aria-expanded="false" aria-controls="${brkId}" data-brk="${brkId}" style="all:unset;cursor:pointer;font:inherit;color:inherit"><span id="${brkId}_arrow" style="display:inline-block;width:14px">▶</span> 📊 Market Breakdown — ${f.market_breakdown.length} markets (click to expand)</button>`;
+          trig.appendChild(tdT);
           trig.addEventListener('click', () => {
             const row = document.getElementById(brkId);
             const arrow = document.getElementById(brkId + '_arrow');
+            const btn = tdT.querySelector('button');
             const open = row.style.display !== 'none';
             row.style.display = open ? 'none' : '';
             arrow.textContent = open ? '▶' : '▼';
+            btn.setAttribute('aria-expanded', String(!open));
           });
           const brk = document.createElement('tr');
           brk.id = brkId;
