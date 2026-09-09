@@ -364,6 +364,14 @@ def api_ticks_manifest():
         out["aggregate"] = _aggregate_ticks(
             [TICKS_DIR / f["name"] for f in out["files"]], out["manifest"]
         )
+        # Per-file market breakdown, when a cached verify report exists.
+        for entry in out["files"]:
+            cached = _read_verify_cache(
+                TICKS_DIR / _VERIFY_CACHE_DIRNAME / f"{entry['name']}.json"
+            )
+            entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
+            if cached:
+                entry["windows_count"] = int(cached.get("windows_count", 0))
     except Exception:
         out["aggregate"] = {
             "total_files": 0,
@@ -1436,6 +1444,7 @@ async def api_ticks_verify(
             (cache_dir / f"{target.name}.json").write_text(
                 json.dumps({
                     "series_counts": rep.get("series_counts", {}),
+                    "market_breakdown": rep.get("market_breakdown", []),
                     "windows_count": rep.get("windows_count", 0),
                     "valid_ticks": rep.get("valid_ticks", 0),
                     "ts": time.time(),
@@ -3356,6 +3365,37 @@ async function loadManifest(){
         tr.appendChild(tdMtime);
         tr.appendChild(tdActions);
         tbl.appendChild(tr);
+
+        // Per-file market breakdown (Issue #109): populated after a Verify run.
+        if(f.market_breakdown && f.market_breakdown.length > 0){
+          const brk = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 5;
+          td.style.cssText = 'background:var(--panel2);padding:10px 14px';
+          const dur5 = f.market_breakdown.filter(b => b.duration === 300);
+          const dur15 = f.market_breakdown.filter(b => b.duration === 900);
+          const durLabel = {300:'5m', 900:'15m'};
+          let inner = `<div style="font:700 11px var(--disp);color:var(--gold);margin-bottom:6px">📊 Market Breakdown — ${esc(f.name)}</div>`;
+          inner += '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>'
+            + '<th style="text-align:left;color:var(--dim);font-weight:600;padding:3px 10px">Market</th>'
+            + ['300','900'].map(du => `<th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">${durLabel[du]}</th>`).join('')
+            + '</tr></thead><tbody>';
+          const base = ['btc','eth','bnb','sol','xrp'];
+          for(const b of base){
+            inner += `<tr><td style="padding:3px 10px;font-weight:600;text-transform:uppercase">${b}</td>`;
+            for(const du of ['300','900']){
+              const cell = (du === '300' ? dur5 : dur15).find(x => x.series.startsWith(b + '-'));
+              inner += cell
+                ? `<td style="padding:3px 10px;text-align:right" class="mono" title="${cell.trades} trades · avg ${cell.trades_per_window}/window">${cell.windows} w · ${cell.trades.toLocaleString()} tr (${cell.trades_per_window}/w)</td>`
+                : '<td style="padding:3px 10px;text-align:right;color:var(--faint)" class="mono">—</td>';
+            }
+            inner += '</tr>';
+          }
+          inner += '</tbody></table>';
+          td.innerHTML = inner;
+          brk.appendChild(td);
+          tbl.appendChild(brk);
+        }
       }
     }
     wrap.appendChild(tbl);
@@ -3426,6 +3466,13 @@ async function verifyTickData(filename){
       for(const fr of d.files){
         const fCol = fr.status === 'PASS' ? 'var(--up)' : fr.status === 'WARN' ? 'var(--gold)' : 'var(--down)';
         html += `<tr><td class="mono" style="font-weight:600">${esc(fr.file)}</td><td style="color:${fCol};font-weight:700">${esc(fr.status)}</td><td class="mono">${(fr.valid_ticks||0).toLocaleString()}</td><td class="mono" style="color:${fr.corrupt_lines>0?'var(--down)':'inherit'}">${fr.corrupt_lines||0}</td><td class="mono">${fr.windows_count||0}</td><td class="mono">${fr.sampling_gaps_count||0}</td></tr>`;
+        // Market breakdown rows (Issue #109)
+        if(fr.market_breakdown && fr.market_breakdown.length > 0){
+          const durLabel = {300:'5m', 900:'15m'};
+          for(const mb of fr.market_breakdown){
+            html += `<tr><td style="padding-left:22px;color:var(--dim);text-transform:uppercase;font-size:10px">${esc(mb.series)} ${durLabel[mb.duration]||mb.duration}</td><td colspan="5" class="mono" style="text-align:right">${mb.windows} windows · ${mb.trades.toLocaleString()} trades · avg ${mb.trades_per_window}/window</td></tr>`;
+          }
+        }
       }
       html += '</table>';
     }

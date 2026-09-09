@@ -270,9 +270,9 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     f1 = tmp_path / "ticks_2026-09-08.jsonl"
     f1.write_text(
-        json.dumps({"series": "btc-up-or-down-5m", "cid": "w1", "ts": 1.0}) + "\n"
-        + json.dumps({"series": "btc-up-or-down-5m", "cid": "w1", "ts": 2.0}) + "\n"
-        + json.dumps({"series": "eth-up-or-down-5m", "cid": "w2", "ts": 1.0}) + "\n",
+        json.dumps({"series": "btc-up-or-down-5m", "duration": 300, "cid": "w1", "ts": 1.0, "tape_delta": [{"price": 0.5, "size": 1}]}) + "\n"
+        + json.dumps({"series": "btc-up-or-down-5m", "duration": 300, "cid": "w1", "ts": 2.0, "tape_delta": []}) + "\n"
+        + json.dumps({"series": "eth-up-or-down-5m", "duration": 300, "cid": "w2", "ts": 1.0, "tape_delta": []}) + "\n",
         encoding="utf-8",
     )
 
@@ -285,6 +285,13 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert agg["series_counts"]["eth-up-or-down-5m"] == 1
     assert agg["total_windows"] == 2
     assert agg["windows_source"] == "cache"
+
+    # Per-file market breakdown surfaces from the cache too.
+    files = client.get("/api/ticks/manifest").json()["files"]
+    assert files[0]["market_breakdown"][0]["series"] == "btc-up-or-down-5m"
+    assert files[0]["market_breakdown"][0]["windows"] == 1
+    assert files[0]["market_breakdown"][0]["trades"] == 1
+    assert files[0]["market_breakdown"][0]["trades_per_window"] == 1.0
 
 
 def test_api_collector_lifecycle_and_status(monkeypatch):
