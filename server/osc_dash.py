@@ -3244,56 +3244,50 @@ async function loadManifest(){
     if(!wrap) return;
     wrap.innerHTML = '';
 
-    // Aggregate rollup card (Issue #109)
+    // KPI tiles (Issue #109) — replaces the old totals card + tape banner.
     const aggWrap = $('manifestAggregateWrap');
     if(aggWrap){
       aggWrap.innerHTML = '';
-      const a = d.aggregate;
-      if(a && a.total_files > 0){
-        const mb = (a.total_bytes/(1024*1024)).toFixed(1)+' MB';
+      const a = d.aggregate || {};
+      const m = d.manifest || {};
+      if((a.total_files||0) > 0){
+        const mb = ((a.total_bytes||0)/(1024*1024)).toFixed(1)+' MB';
         const lineFmt = (a.total_lines||0).toLocaleString();
-        const linesHtml = a.total_lines_estimated ? `~${lineFmt}` : lineFmt;
+        const linesVal = (a.total_lines_estimated ? '~' : '') + lineFmt;
         const winFmt = (a.total_windows||0).toLocaleString();
-        const winHtml = a.windows_source === 'partial' ? `≥${winFmt}` : winFmt;
-        const winLabel = a.windows_source === 'partial' ? ' (partial — verify files for exact)' : '';
-        const card = document.createElement('div');
-        card.style.cssText = 'border:1px solid var(--line-hi);border-radius:8px;padding:12px 16px;margin-bottom:12px;background:var(--panel2)';
-        let seriesHtml = '';
+        const winVal = (a.windows_source === 'partial' ? '≥' : '') + winFmt;
+        const tapeRate = m.tape_empty_rate !== undefined ? (m.tape_empty_rate * 100).toFixed(1) + '%' : '—';
+        const tapeCrit = m.tape_empty_rate !== undefined && m.tape_empty_rate > 0.99;
+        const tile = (label, val, color) => `
+          <div style="flex:1;min-width:110px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;text-align:center">
+            <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em">${label}</div>
+            <div class="mono" style="font-size:15px;font-weight:700;color:${color||'var(--tx)'};margin-top:3px">${val}</div>
+          </div>`;
+        const tiles = document.createElement('div');
+        tiles.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px';
+        tiles.innerHTML =
+          tile('Files', a.total_files||0)
+          + tile('Total Size', mb)
+          + tile('Samples', linesVal, 'var(--up)')
+          + tile('Windows', winVal, 'var(--gold)')
+          + tile('Tape Entries', (a.tape_entries_total||0).toLocaleString())
+          + tile('Tape Empty' + (m.day ? ' · ' + esc(m.day) : ''), tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--up)' : 'var(--dim)'));
+        aggWrap.appendChild(tiles);
+        // Aggregate per-market sample counts (verify-cache/scan sourced).
         if(a.series_counts && Object.keys(a.series_counts).length > 0){
           const base = ['btc','eth','bnb','sol','xrp'];
           const durs = ['5m','15m'];
           const cells = base.map(b => durs.map(du => {
-            const key = `${b}-up-or-down-${du}`;
-            const v = a.series_counts[key];
-            return `<td style="padding:4px 10px;text-align:right" class="mono">${v != null ? v.toLocaleString() : '<span style="color:var(--faint)">—</span>'}</td>`;
-          }).join('')).join('</tr><tr>');
-          seriesHtml = `<table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:11px"><thead><tr><th style="text-align:left;color:var(--dim);font-weight:600;padding:4px 10px">Series</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:4px 10px">5m</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:4px 10px">15m</th></tr></thead><tbody><tr>${cells}</tr></tbody><tfoot><tr><td colspan="3" style="color:var(--faint);padding:4px 10px;font-size:10px">samples per series · source: ${esc(a.series_counts_source||'none')}</td></tr></tfoot></table>`;
+            const v = a.series_counts[`${b}-up-or-down-${du}`];
+            return `<td style="padding:3px 10px;text-align:right" class="mono">${v != null ? v.toLocaleString() : '<span style="color:var(--faint)">—</span>'}</td>`;
+          }).join('</tr><tr>'));
+          const st = document.createElement('div');
+          st.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:12px;background:var(--panel2)';
+          st.innerHTML = `<div style="font:700 11px var(--disp);color:var(--tx);margin-bottom:4px">Samples per Market <span style="color:var(--faint);font-weight:400">· source: ${esc(a.series_counts_source||'none')}</span></div>`
+            + `<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="text-align:left;color:var(--dim);font-weight:600;padding:3px 10px">Asset</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">5m</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">15m</th></tr></thead><tbody><tr>${cells}</tr></tbody></table>`;
+          aggWrap.appendChild(st);
         }
-        card.innerHTML = `
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-            <span style="width:8px;height:8px;border-radius:50%;background:var(--gold);display:inline-block"></span>
-            <span style="font:700 12px var(--disp);color:var(--tx)">Repository Totals</span>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:12px">
-            <div><span style="color:var(--dim)">Files:</span> <span class="mono" style="font-weight:700">${a.total_files}</span></div>
-            <div><span style="color:var(--dim)">Total Size:</span> <span class="mono" style="font-weight:700">${mb}</span></div>
-            <div><span style="color:var(--dim)">Samples:</span> <span class="mono" style="font-weight:700">${linesHtml}</span></div>
-            <div><span style="color:var(--dim)">Windows:</span> <span class="mono" style="font-weight:700">${winHtml}</span><span style="color:var(--faint);font-size:10px">${winLabel}</span></div>
-            <div><span style="color:var(--dim)">Tape Entries:</span> <span class="mono" style="font-weight:700">${(a.tape_entries_total||0).toLocaleString()}</span></div>
-          </div>
-          ${seriesHtml}`;
-        aggWrap.appendChild(card);
       }
-    }
-
-    if(d.manifest && d.manifest.tape_empty_rate !== undefined){
-      const m = d.manifest;
-      const ratePct = (m.tape_empty_rate * 100).toFixed(1) + '%';
-      const isCrit = m.tape_empty_rate > 0.99;
-      const noticeDiv = document.createElement('div');
-      noticeDiv.style.cssText = `padding:10px 14px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;background:${isCrit?'rgba(240,104,77,0.15)':'var(--panel2)'};border:1px solid ${isCrit?'rgba(240,104,77,0.4)':'var(--line)'}`;
-      noticeDiv.innerHTML = `<div style="font-size:12px;color:${isCrit?'var(--down)':'var(--tx)'};font-weight:600">${isCrit?'⚠️ Alert: Empty trade rate high (>99%) — check CLOB trade stream health':'📊 Tape Status (CLOB Trade Feed)'}</div><div class="mono" style="font-size:12px;color:${isCrit?'var(--down)':'var(--up)'}">Empty: ${ratePct} · Trades: ${(m.tape_entries_total||0).toLocaleString()} · Day: ${esc(m.day||'-')}</div>`;
-      wrap.appendChild(noticeDiv);
     }
 
     const tbl = document.createElement('table');
@@ -3307,7 +3301,9 @@ async function loadManifest(){
       tr.innerHTML = '<td colspan="5" style="text-align:center;color:var(--faint);padding:18px">No files found in run/ticks/</td>';
       tbl.appendChild(tr);
     } else {
+      let fileIdx = 0;
       for(const f of d.files){
+        fileIdx++;
         const tr = document.createElement('tr');
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
         const linesFormatted = (f.lines||0).toLocaleString();
@@ -3366,17 +3362,35 @@ async function loadManifest(){
         tr.appendChild(tdActions);
         tbl.appendChild(tr);
 
-        // Per-file market breakdown (Issue #109): populated after a Verify run.
+        // Per-file market breakdown (Issue #109): collapsible row, populated
+        // after a Verify run. Click the trigger row to expand/collapse.
         if(f.market_breakdown && f.market_breakdown.length > 0){
+          const brkId = `brk_${fileIdx}`;
+          const trig = document.createElement('tr');
+          const tdT = document.createElement('td');
+          tdT.colSpan = 5;
+          tdT.style.cssText = 'background:var(--panel2);padding:6px 14px;font:600 11px var(--disp);color:var(--gold);border-top:1px solid var(--line)';
+          tdT.innerHTML = `<button type="button" aria-expanded="false" aria-controls="${brkId}" data-brk="${brkId}" style="all:unset;cursor:pointer;font:inherit;color:inherit"><span id="${brkId}_arrow" style="display:inline-block;width:14px">▶</span> 📊 Market Breakdown — ${f.market_breakdown.length} markets (click to expand)</button>`;
+          trig.appendChild(tdT);
+          trig.addEventListener('click', () => {
+            const row = document.getElementById(brkId);
+            const arrow = document.getElementById(brkId + '_arrow');
+            const btn = tdT.querySelector('button');
+            const open = row.style.display !== 'none';
+            row.style.display = open ? 'none' : '';
+            arrow.textContent = open ? '▶' : '▼';
+            btn.setAttribute('aria-expanded', String(!open));
+          });
           const brk = document.createElement('tr');
+          brk.id = brkId;
+          brk.style.display = 'none';
           const td = document.createElement('td');
           td.colSpan = 5;
           td.style.cssText = 'background:var(--panel2);padding:10px 14px';
           const dur5 = f.market_breakdown.filter(b => b.duration === 300);
           const dur15 = f.market_breakdown.filter(b => b.duration === 900);
           const durLabel = {300:'5m', 900:'15m'};
-          let inner = `<div style="font:700 11px var(--disp);color:var(--gold);margin-bottom:6px">📊 Market Breakdown — ${esc(f.name)}</div>`;
-          inner += '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>'
+          let inner = '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>'
             + '<th style="text-align:left;color:var(--dim);font-weight:600;padding:3px 10px">Market</th>'
             + ['300','900'].map(du => `<th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">${durLabel[du]}</th>`).join('')
             + '</tr></thead><tbody>';
@@ -3394,6 +3408,7 @@ async function loadManifest(){
           inner += '</tbody></table>';
           td.innerHTML = inner;
           brk.appendChild(td);
+          tbl.appendChild(trig);
           tbl.appendChild(brk);
         }
       }
