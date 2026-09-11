@@ -67,5 +67,5 @@ Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trade
 - **Description**:
   1. New tests: delay suppresses quoting before 60s and allows after; band failure skips without placing orders; no stop staged when disabled; chase still capped at 0.98 under the preset; defaults preserve behavior.
   2. Run targeted gate, then the full suite.
-- **Status**: [ ]
-- **Verification**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q` then `python -m pytest -q`
+- **Status**: [x]
+- **Verification**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q` then `python -m pytest -q` (440 passed)

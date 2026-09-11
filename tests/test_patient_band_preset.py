@@ -355,3 +355,31 @@ def test_issue137_matching_manual_set_keeps_active_preset():
     engine.update_config(preset="patient_band_maker")
     engine.update_config(offset=0.03)
     assert engine.active_preset == "patient_band_maker"
+
+
+# ============================================================================
+# TASK 6: chase cap under the preset
+# ============================================================================
+
+def test_issue137_leg_chase_capped_at_preset_pair_cost():
+    """Under the preset, the chased leg never pushes pair cost past 0.98."""
+    engine = LiveTraderEngine()
+    engine.update_config(preset="patient_band_maker")
+    engine.is_running = True
+    slug = "eth-up-or-down-5m"  # preset universe, 300s window
+    # Early tick latches a healthy first-seen time; the 60s delay holds.
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.49, 0.51, 0.49, 0.51), now=1005.0)
+    # Tick 2 (past the 60s delay): healthy mid 0.50, resting latches at 0.47.
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.49, 0.51, 0.49, 0.51), now=1061.0)
+    mstate = engine.markets[slug]
+    assert mstate.band_skip is False
+    # Tick 2: UP ask collapses onto the resting bid -> UP fills at 0.47.
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.44, 0.46, 0.58, 0.60), now=1062.0)
+    assert mstate.filled_up is True
+    assert mstate.filled_down is False
+    assert mstate.chased_leg == "DOWN"
+    assert mstate.fill_price_up + mstate.resting_down <= 0.98 + 1e-9
+    assert mstate.resting_down == 0.51  # floor((0.98 - 0.47) * 100) / 100

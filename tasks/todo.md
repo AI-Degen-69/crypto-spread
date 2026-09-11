@@ -5,4 +5,4 @@
 - [x] Task 3: Post-delay entry-band gate, re-entry exempt (`strategy/live_trader.py`)
 - [x] Task 4: stop_loss_enabled gate on stop paths, timeout/settlement intact (`strategy/live_trader.py`)
 - [x] Task 5: Preset + API wiring — `POST /api/live/config`, `GET /api/live/state` (`server/osc_dash.py`)
-- [ ] Task 6: New tests + regression gate (`python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`, then `python -m pytest -q`)
+- [x] Task 6: New tests + regression gate (`python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`, then `python -m pytest -q`)
