@@ -81,6 +81,21 @@ def _empty_band_skip_stats() -> Dict[str, int]:
     return {"band_skips": 0}
 
 
+def _safe_pair_cost(up: Any, dn: Any) -> Optional[float]:
+    """resting_up + resting_down, or None when either side is unknown.
+
+    Issue #138: guards the telemetry snapshot against a None leg price (a
+    stream fill can predate any quote), so the builder never raises after
+    the exactly-once flag is claimed.
+    """
+    try:
+        if up is None or dn is None:
+            return None
+        return round(float(up) + float(dn), 4)
+    except (TypeError, ValueError):
+        return None
+
+
 def _queue_ahead(bids: Optional[Dict[float, float]], price: float) -> Optional[float]:
     """Shares resting at or above `price` — our queue position at rest.
 
@@ -162,9 +177,12 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
         if ts is None or ts < since_ts:
             continue
         try:
-            total += float(t.get("size") or 0)
+            size = float(t.get("size") or 0)
         except (TypeError, ValueError):
             continue
+        if size < 0:
+            continue
+        total += size
     return total
 
 
@@ -172,7 +190,9 @@ def _fetch_price_prints(condition_id: str, limit: int = 500) -> Optional[list[di
     """Timestamped tape rows for one market, or None on any failure.
 
     Issue #138: `markets.recent_trades` aggregates volume without timestamps,
-    so the fill join fetches rows directly. Best-effort by contract.
+    so the fill join fetches rows directly. Best-effort by contract. Newest
+    first with a fixed ceiling: windows printing more than `limit` rows
+    between rest and fill undercount (ratio skews toward tape).
     """
     if not condition_id:
         return None
@@ -224,7 +244,13 @@ def _build_fill_record(*, ts: float, slug: str, market_slug: str,
 
 
 def _append_fill_telemetry(record: Dict[str, Any], path: Any = None) -> bool:
-    """Append one telemetry line; failure warns and returns False, never raises."""
+    """Append one telemetry line; failure warns and returns False, never raises.
+
+    Venue-supplied strings are stored raw: consumers must sanitize before any
+    HTML/DB use (repo convention), including the future dashboard reader.
+    Daemon workers are fire-and-forget at process exit — the sidecar is a
+    best-effort sample, not a complete ledger.
+    """
     try:
         target = Path(path) if path is not None else FILL_TELEMETRY_FILE
         if target.parent and str(target.parent) not in ("", "."):
@@ -1102,51 +1128,58 @@ class LiveTraderEngine:
         Issue #138, observation only. The claim (exactly-once flag) is taken
         synchronously under the engine lock; the tape join and file append run
         in a daemon worker (or inline when `fill_telemetry_async` is False),
-        so a slow venue response never stalls the tick/stream hot path. Any
-        failure degrades to a lost line, never into the fill path.
+        so a slow venue response never stalls the tick/stream hot path. `now`
+        is tick time on the poll path and wall time on the stream path (both
+        wall-clock in production). Any failure degrades to a lost line, never
+        into the fill path.
         """
         try:
+            if not isinstance(side, str):
+                log.warning("[%s] fill-telemetry skipped: non-string side", mstate.slug)
+                return
             leg = side.upper()
             if leg not in ("UP", "DOWN"):
                 log.warning("[%s] fill-telemetry skipped: unknown side %r", mstate.slug, side)
                 return
             done_attr = "fill_telemetry_done_up" if leg == "UP" else "fill_telemetry_done_down"
+            is_up = (leg == "UP")
+            # The whole snapshot is copied under the lock: rollover/reset on
+            # another thread must not interleave a torn read (mixed windows).
             with self._engine_lock:
                 if getattr(mstate, done_attr, False):
                     return
                 setattr(mstate, done_attr, True)
-            if isinstance(filled_size, bool) or not isinstance(filled_size, (int, float)) or filled_size <= 0:
-                size = float(self.shares)
-            else:
-                size = float(filled_size)
-            is_up = (leg == "UP")
-            rest_price = mstate.rest_up_price if is_up else mstate.rest_dn_price
-            rest_queue = mstate.rest_up_queue if is_up else mstate.rest_dn_queue
-            rest_ts = mstate.rest_up_ts if is_up else mstate.rest_dn_ts
-            if rest_price is None:
-                # Stream fills may predate any placement tick: fall back to
-                # the latched resting price and the stashed books (no rest
-                # timestamp, so no tape join — printed stays null).
-                rest_price = mstate.resting_up if is_up else mstate.resting_down
-                stash = mstate.last_bids_up if is_up else mstate.last_bids_down
-                rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
-            snapshot = {
-                "slug": mstate.slug,
-                "market_slug": mstate.market_slug or "",
-                "condition_id": mstate.condition_id or "",
-                "leg": leg,
-                "chased": (mstate.chased_leg == leg),
-                "resting_price": rest_price,
-                "rest_queue": rest_queue,
-                "rest_ts": rest_ts,
-                "token": mstate.up_token if is_up else mstate.down_token,
-                "fill_price": fill_price,
-                "filled_size": size,
-                "window_elapsed_sec": max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else 0.0,
-                "mid_at_fill": mstate.mid,
-                "resting_pair_cost": round(mstate.resting_up + mstate.resting_down, 4),
-                "ts": now,
-            }
+                if isinstance(filled_size, bool) or not isinstance(filled_size, (int, float)) or filled_size <= 0:
+                    size = float(self.shares)
+                else:
+                    size = float(filled_size)
+                rest_price = mstate.rest_up_price if is_up else mstate.rest_dn_price
+                rest_queue = mstate.rest_up_queue if is_up else mstate.rest_dn_queue
+                rest_ts = mstate.rest_up_ts if is_up else mstate.rest_dn_ts
+                if rest_price is None:
+                    # Stream fills may predate any placement tick: fall back to
+                    # the latched resting price and the stashed books (no rest
+                    # timestamp, so no tape join — printed stays null).
+                    rest_price = mstate.resting_up if is_up else mstate.resting_down
+                    stash = mstate.last_bids_up if is_up else mstate.last_bids_down
+                    rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
+                snapshot = {
+                    "slug": mstate.slug,
+                    "market_slug": mstate.market_slug or "",
+                    "condition_id": mstate.condition_id or "",
+                    "leg": leg,
+                    "chased": (mstate.chased_leg == leg),
+                    "resting_price": rest_price,
+                    "rest_queue": rest_queue,
+                    "rest_ts": rest_ts,
+                    "token": mstate.up_token if is_up else mstate.down_token,
+                    "fill_price": fill_price,
+                    "filled_size": size,
+                    "window_elapsed_sec": max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else 0.0,
+                    "mid_at_fill": mstate.mid,
+                    "resting_pair_cost": _safe_pair_cost(mstate.resting_up, mstate.resting_down),
+                    "ts": now,
+                }
             if self.fill_telemetry_async:
                 thread = threading.Thread(
                     target=self._fill_telemetry_worker,

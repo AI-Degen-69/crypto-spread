@@ -170,8 +170,6 @@ def test_issue138_tape_fetch_failure_returns_none(monkeypatch):
 # TASK 3: CLOB + paper fill-path hooks
 # ============================================================================
 
-import strategy.live_trader as lt
-
 _CANNED_TAPE = [
     {"asset": "tok_up_138", "price": 0.48, "size": 30.0, "timestamp": 1006},
     {"asset": "tok_up_138", "price": 0.48, "size": 30.0, "timestamp": 1008},
@@ -464,3 +462,113 @@ def test_issue138_settlement_join_uses_last_window(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "+0.10" in out
     assert "100.00" not in out
+
+
+# ============================================================================
+# FALLBACK REVIEW (agent, PR #141): blocker regression + gap tests
+# ============================================================================
+
+def test_issue138_none_pair_cost_never_burns_claim(monkeypatch, tmp_path):
+    """Blocker: stream fill before any quote must still record a line."""
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = LiveTraderEngine()
+    engine.fill_telemetry_async = False
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+    m.order_id_up = "oid_pre_quote"
+    m.resting_up = None
+    m.resting_down = None
+    m.last_bids_up = {}
+    engine.on_user_order_event(
+        {"order_id": "oid_pre_quote", "status": "FILLED", "price": 0.48})
+    assert m.filled_up is True
+    lines = _fill_lines(path)
+    assert len(lines) == 1
+    assert lines[0]["resting_pair_cost"] is None
+    assert lines[0]["fill_ratio"] is None
+
+
+def test_issue138_unknown_side_claims_no_flag():
+    engine = LiveTraderEngine()
+    engine.fill_telemetry_async = False
+    m = engine.markets["btc-up-or-down-5m"]
+    engine._record_fill_telemetry(m, "SIDEWAYS", 0.5, 5, 1000.0)
+    assert m.fill_telemetry_done_up is False
+    assert m.fill_telemetry_done_down is False
+
+
+def test_issue138_cross_path_dedup_stream_then_poll(monkeypatch, tmp_path):
+    """A stream-claimed leg is not re-recorded by the later poll fill."""
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    engine.on_user_order_event(
+        {"order_id": m.order_id_up, "status": "FILLED", "price": 0.48})
+    assert m.filled_up is True
+    assert len(_fill_lines(path)) == 1
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0})
+    tick2["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+    assert len(_fill_lines(path)) == 1
+
+
+def test_issue138_rollover_clears_telemetry_state():
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    m.fill_telemetry_done_up = True
+    engine._handle_window_rollover(m, 1300.0, "cid_next_138")
+    assert m.rest_up_price is None
+    assert m.rest_up_queue is None
+    assert m.last_bids_up == {}
+    assert m.fill_telemetry_done_up is False
+    assert m.fill_telemetry_done_down is False
+
+
+def test_issue138_print_ts_units():
+    from strategy.live_trader import _parse_print_ts
+    assert _parse_print_ts(1006) == 1006.0
+    assert _parse_print_ts(1757000000000) == 1757000000.0  # millis
+    assert _parse_print_ts(1757000000000000) == 1757000000.0  # micros
+    assert _parse_print_ts("2026-09-11T12:00:00Z") is not None
+    for bad in ("junk", "", None, True, -5):
+        assert _parse_print_ts(bad) is None
+
+
+def test_issue138_join_skips_negative_sizes():
+    rows = [
+        {"asset": "t", "price": 0.48, "size": 30.0, "timestamp": 1006},
+        {"asset": "t", "price": 0.48, "size": -999.0, "timestamp": 1007},
+    ]
+    assert _sum_prints_at_price(rows, "t", 0.48, 1000.0) == 30.0
+
+
+def test_issue138_bucket_boundaries_and_exclusions():
+    from scripts.bucket_fills import bucketize
+    fills = [{"fill_ratio": r, "market_slug": "w"} for r in
+             (0.0, 0.25, 0.5, 1.0, 5.0, -1.0, None, float("nan"), float("inf"))]
+    table = {row["bucket"]: row["count"] for row in bucketize(fills, {})}
+    assert table == {"0.00-0.25": 1, "0.25-0.50": 1, "0.50-1.00": 1, "1.00+": 2}
+
+
+def test_issue138_filled_size_fallback_to_shares(monkeypatch, tmp_path):
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = LiveTraderEngine()
+    engine.fill_telemetry_async = False
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+    m.order_id_up = "oid_sz"
+    m.resting_up = 0.48
+    m.last_bids_up = {0.48: 10.0}
+    for bad_size in (0, -3, None, True):
+        m.fill_telemetry_done_up = False
+        engine.on_user_order_event(
+            {"order_id": "oid_sz", "status": "FILLED", "price": 0.48, "size": bad_size})
+    lines = _fill_lines(path)
+    assert len(lines) == 4
+    assert all(r["filled_size"] == engine.shares for r in lines)
