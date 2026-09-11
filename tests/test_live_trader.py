@@ -173,6 +173,9 @@ def test_fetch_polymarket_account_value_mocked(monkeypatch):
         "py_clob_client_v2": MagicMock(),
         "py_clob_client_v2.client": dummy_clob_client_mod,
         "py_clob_client_v2.clob_types": dummy_clob_types_mod,
+        "py_clob_client": MagicMock(),
+        "py_clob_client.client": dummy_clob_client_mod,
+        "py_clob_client.clob_types": dummy_clob_types_mod,
     }):
         res = fetch_polymarket_account_value(wallet_address="0xee3b778a783510bc833384919f709e3d2fee1624", session=fake_sess)
     assert res["success"] is True

@@ -794,7 +794,10 @@ class LiveTraderEngine:
                     from py_clob_client.clob_types import OrderArgs
                 except ImportError:
                     class OrderArgs:  # type: ignore[no-redef]
+                        """Fallback OrderArgs stub when py_clob_client is not installed."""
+
                         def __init__(self, token_id: str = "", price: float = 0.0, size: float = 0.0, side: str = "BUY"):
+                            """Initialize OrderArgs fallback instance."""
                             self.token_id = token_id
                             self.price = price
                             self.size = size
