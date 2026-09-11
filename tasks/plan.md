@@ -24,7 +24,7 @@ Target Files: strategy/live_trader.py, scripts/bucket_fills.py (new), tests/test
   2. Adopted improvement: also record `resting_pair_cost` (resting_up + resting_down at fill) enabling future pair-cost × queue analysis at zero re-collection cost.
   2. Tape join: timestamped variant of the data-api /trades fetch (same endpoint/schema as `markets.recent_trades`, keeping per-row ts); sum sizes at ≈ resting price with ts ≥ rest_ts; any failure → nulls.
   3. Writer appends one JSON line, wrapped so failure logs a warning and never raises; path injectable for tests.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_fill_telemetry.py -q -k "join or writer or ratio"`
 
 ### Task 3: Hook CLOB-confirmed + paper-simulated fill paths
