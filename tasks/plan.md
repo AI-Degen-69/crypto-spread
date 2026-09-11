@@ -43,5 +43,5 @@ Target Files: server/osc_dash.py, tests/test_osc_dash_integration.py
   1. Endpoint math on synthetic telemetry (buckets, chased separation, verdict transitions, empty-file state).
   2. Cockpit HTML assertions (panel/histogram IDs, fallback elements, empty-state strings).
   3. Targeted gate then full suite.
-- **Status**: [ ]
-- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` then `python -m pytest -q`
+- **Status**: [x]
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` then `python -m pytest -q` (479 passed)
