@@ -278,7 +278,7 @@ def test_simulate_cross_model_pair_capture():
 def test_simulate_cross_model_exit_on_drift():
     # UP leg crosses to 0.47 on tape and fills; DOWN ask stays at 0.53 (above 0.48 resting, no fill).
     # Mid drifts to 0.40 (max_down = 0.10 >= 0.08 exit threshold) -> Safety exit triggered on UP.
-    snap1 = snap(1.0, 0.48, up_ask=0.49, down_ask=0.53,
+    snap1 = snap(1.0, 0.50, up_ask=0.49, down_ask=0.53,
                  tape=[{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}])
     snap2 = snap(2.0, 0.40, up_ask=0.41, down_ask=0.61,
                  up_bids={"0.39": 100.0})
@@ -565,4 +565,46 @@ def test_replay_max_start_delay_filtering():
     assert out_filtered["n_windows"] == 1
     assert out_filtered["trades_sample"][0]["slug"] == w2_snap["slug"]
     assert out_filtered["trades_sample"][0]["is_partial"] is False
+
+
+def test_backtest_dynamic_symmetric_quoting_off_center_open():
+    """Verify that backtest replay dynamically anchors resting quotes to initial leg mids
+
+    instead of hardcoding to 0.48 / 0.50 - offset.
+    For an off-center open where UP mid is 0.35 and DOWN mid is 0.65:
+    resting_up should be 0.35 - 0.02 = 0.33
+    resting_down should be 0.65 - 0.02 = 0.63
+    """
+    # snap with UP mid=0.35 (ba=0.355, bb=0.345) and DOWN mid=0.65 (ba=0.655, bb=0.645)
+    s1 = snap(1.0, 0.35, up_ask=0.355, down_ask=0.655)
+    # Ensure down_book mid is 0.65:
+    s1["down_book"]["best_bid"] = 0.645
+    s1["down_book"]["best_ask"] = 0.655
+
+    params = BacktestParams(offset=0.02, fill_model="cross", exit_thresh_by_slug={"default_5m": 0.20})
+
+    # Case A: Trade on DOWN leg at 0.62. Under dynamic quoting (resting_down=0.63),
+    # 0.62 is <= resting_down - 1c, so it fills in cross model.
+    # Under old static 0.48, 0.62 would NEVER fill (0.62 > 0.48).
+    s_down_fill = {**s1, "tape_delta": [{"asset": DN_TOKEN, "price": 0.62, "size": 5.0}]}
+    w_down = _simulate_window([s_down_fill], params)
+    assert w_down.filled_down is True, "DOWN leg should fill at 0.62 when resting_down is 0.63"
+
+    # Case B: Trade on UP leg at 0.47. Under static 0.48 quoting, 0.47 would fill (0.47 <= 0.48 - 1c).
+    # But under dynamic quoting (resting_up=0.33), 0.47 is far above 0.33 and should NOT fill.
+    s_up_nofill = {**s1, "tape_delta": [{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}]}
+    w_up_nofill = _simulate_window([s_up_nofill], params)
+    assert w_up_nofill.filled_up is False, "UP leg should NOT fill at 0.47 when resting_up is 0.33"
+
+    # Case C: Both legs cross through dynamic quotes (UP at 0.32, DOWN at 0.62).
+    # Pair should be captured with pnl_cents = (1.00 - (0.33 + 0.63)) * 100 = 4.0c
+    s_pair = {**s1, "tape_delta": [
+        {"asset": UP_TOKEN, "price": 0.32, "size": 5.0},
+        {"asset": DN_TOKEN, "price": 0.62, "size": 5.0},
+    ]}
+    w_pair = _simulate_window([s_pair], params)
+    assert w_pair.filled_up is True
+    assert w_pair.filled_down is True
+    assert w_pair.pair_captured is True
+    assert round(w_pair.pnl_cents, 2) == 4.0
 
