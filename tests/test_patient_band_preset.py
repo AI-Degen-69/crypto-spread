@@ -313,3 +313,45 @@ def test_issue137_drift_stop_still_fires_when_enabled():
     engine._update_market_strategy(
         slug, _side_books(1000.0, 0.36, 0.38, 0.60, 0.62), now=1002.0)
     assert mstate.exit_taken is True
+
+
+# ============================================================================
+# TASK 5: preset application (engine side)
+# ============================================================================
+
+PATIENT_UNIVERSE = {"xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"}
+
+
+def test_issue137_preset_applies_all_fields_atomically():
+    """preset= selects every research-winning value plus the pilot universe."""
+    engine = LiveTraderEngine()
+    engine.update_config(preset="patient_band_maker")
+    assert engine.offset == 0.03
+    assert engine.entry_band == 0.04
+    assert engine.entry_delay_sec == 60.0
+    assert engine.stop_loss_enabled is False
+    assert engine.max_pair_cost == 0.98
+    assert {s[0] for s in engine.selected_series} == PATIENT_UNIVERSE
+    assert set(engine.markets.keys()) == PATIENT_UNIVERSE
+    assert engine.active_preset == "patient_band_maker"
+    state = engine.get_state()
+    assert state["active_preset"] == "patient_band_maker"
+    assert state["params"]["entry_delay_sec"] == 60.0
+
+
+def test_issue137_manual_divergence_clears_active_preset():
+    """A manual knob change away from the table drops the preset latch."""
+    engine = LiveTraderEngine()
+    engine.update_config(preset="patient_band_maker")
+    assert engine.active_preset == "patient_band_maker"
+    engine.update_config(offset=0.02)
+    assert engine.active_preset is None
+    assert engine.offset == 0.02
+
+
+def test_issue137_matching_manual_set_keeps_active_preset():
+    """Re-asserting a preset value keeps the latch (no false invalidation)."""
+    engine = LiveTraderEngine()
+    engine.update_config(preset="patient_band_maker")
+    engine.update_config(offset=0.03)
+    assert engine.active_preset == "patient_band_maker"

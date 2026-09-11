@@ -1576,3 +1576,63 @@ def test_api_live_config_naked_leg_knobs():
         )
         engine.mode = orig_mode
         engine.is_running = orig_running
+
+
+def test_api_live_config_patient_band_preset():
+    """Issue #137: patient_band_maker preset is selectable and echoed in state.
+
+    Applies offset 0.03, band 0.04, delay 60s, no stop, chase cap 0.98, and
+    the pilot universe; unknown presets are rejected with 400.
+    """
+    engine = osc_dash.get_live_trader_engine()
+    orig_running = engine.is_running
+    engine.is_running = False
+    orig_mode = engine.mode
+    engine.mode = "paper"
+    orig_params = dict(engine.get_state()["params"])
+    orig_markets = [s[0] for s in engine.selected_series]
+    try:
+        res = client.post("/api/live/config", json={"preset": "patient_band_maker"})
+        assert res.status_code == 200
+        body = res.json()
+        params = body["params"]
+        assert abs(params["offset"] - 0.03) < 1e-9
+        assert abs(params["entry_band"] - 0.04) < 1e-9
+        assert abs(params["entry_delay_sec"] - 60.0) < 1e-9
+        assert params["stop_loss_enabled"] is False
+        assert abs(params["max_pair_cost"] - 0.98) < 1e-9
+        assert body["active_preset"] == "patient_band_maker"
+        assert set(body["selected_series"]) == {
+            "xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"}
+
+        state = client.get("/api/live/state").json()
+        assert state["active_preset"] == "patient_band_maker"
+
+        # Individual knobs stay settable without a preset.
+        res_knobs = client.post("/api/live/config", json={
+            "entry_delay_sec": 30,
+            "entry_band": 0.03,
+            "stop_loss_enabled": True,
+        })
+        assert res_knobs.status_code == 200
+        params = res_knobs.json()["params"]
+        assert abs(params["entry_delay_sec"] - 30.0) < 1e-9
+        assert abs(params["entry_band"] - 0.03) < 1e-9
+        assert params["stop_loss_enabled"] is True
+
+        # Unknown preset rejected, config untouched.
+        res_bad = client.post("/api/live/config", json={"preset": "nope"})
+        assert res_bad.status_code == 400
+    finally:
+        engine.update_config(
+            offset=orig_params["offset"],
+            exit_thresh=orig_params["exit_thresh"],
+            shares=orig_params["shares"],
+            entry_delay_sec=orig_params["entry_delay_sec"],
+            entry_band=orig_params["entry_band"],
+            stop_loss_enabled=orig_params["stop_loss_enabled"],
+            max_pair_cost=orig_params["max_pair_cost"],
+            selected_markets=orig_markets,
+        )
+        engine.mode = orig_mode
+        engine.is_running = orig_running

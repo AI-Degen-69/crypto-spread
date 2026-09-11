@@ -58,7 +58,7 @@ Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trade
   2. `LiveConfigPayload`: add optional `preset`, `entry_delay_sec`, `entry_band`, `stop_loss_enabled`, `enable_leg_chase`, `max_pair_cost` fields with matching validators/ranges.
   3. `POST /api/live/config`: `preset="patient_band_maker"` atomically applies all six fields (or returns 400 leaving config untouched, per existing contract); individual knobs remain settable without a preset.
   4. `GET /api/live/state`: echo `active_preset` + knob values.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` + new preset API tests
 
 ### Task 6: Tests + regression gate
