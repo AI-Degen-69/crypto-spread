@@ -1,50 +1,51 @@
-# tasks/plan.md — Issue #123: Chase the second leg after a one-sided fill
+# tasks/plan.md — Issue #116: Standardize naming and deploy 7-skill issue workflow family
 
-Branch: `feat/issue-123-leg-chase` (off `master`)
+Branch: `feat/issue-116-standardize-skill-family` (off `master`)
 Constraints: `CONSTRAINTS.md`
-Baseline: full suite green on master (409+ tests).
+Baseline: full suite green on master (414+ tests).
 
 ## Concise Spec (spec-driven-development, Standard tier)
 
-**Goal:** When one leg fills, step up the opposite leg's quote towards the best ask (bounded by `max_pair_cost`, default 0.98) instead of resting passively, converting stop-outs into pair merges.
+**Goal:** Standardize names and directory structures across the 7-skill issue workflow family:
+`create-issue`, `plan-issue`, `build-issue`, `ship-issue`, `explain-issue`, `work-issue`, `review-babysitter`. Deploy all 7 via directory junctions/symlinks to Claude, Gemini, and Hermes. Provide a robust deploy script and generalized `reference.md` in each skill folder.
 
-1. **Trigger Condition:** Exactly one leg is filled (`filled_up XOR filled_down`), not paired, not stopped, and `enable_leg_chase` is True.
-2. **Quote Logic:**
-   - For unfilled DOWN: `target = min(down_ask, max_pair_cost - fill_price_up)`. Quote steps up to `max(resting_down, target)`.
-   - For unfilled UP: `target = min(up_ask, max_pair_cost - fill_price_down)`. Quote steps up to `max(resting_up, target)`.
-   - If stepped up above initial base resting quote, flag `chased_leg`.
-3. **Fill & Telemetry:**
-   - If opposite leg fills while chased, set `chased_fill = True`.
-   - Telemetry and re-entry stats record chased fills vs passive fills.
-   - When pair completes or window exits, chase state clears and quotes normalize.
-4. **Config:**
-   - `enable_leg_chase: bool = True`
-   - `max_pair_cost: float = 0.98`
-   - Clamped in `update_config` (0.50..1.00).
+---
 
 ## Tasks
 
-### T1 — Config and State attributes
-Files: `strategy/config.py`, `strategy/live_trader.py`
-- Add `enable_leg_chase: bool = True` and `max_pair_cost: float = 0.98` to `LiveTraderEngine.__init__`.
-- Add `chased_leg` and `chased_fill` to `MarketLiveState`.
-- Add `enable_leg_chase` and `max_pair_cost` to `update_config` and `get_state()["params"]`.
+### T1 — Rename directories and update SKILL.md headers
+- Rename `C:\Users\Tiger\.agents\skills\issue-create` to `create-issue`.
+- Rename `C:\Users\Tiger\.agents\skills\pr-babysitter` to `review-babysitter`.
+- Update `name:` in `create-issue/SKILL.md` to `create-issue`.
+- Update `name:` in `review-babysitter/SKILL.md` to `review-babysitter`.
 
-### T2 — Quoting & Fill Logic in `update_market`
-Files: `strategy/live_trader.py`
-- When one leg is filled, calculate opposite leg chase bid respecting `max_pair_cost`.
-- If chased quote is placed and fills, record `chased_fill = True`.
-- Normalize quotes on merge or window exit.
-- Integrate into re-entry telemetry events (`tel["chased_fill"]`) and `self.reentry_stats`.
+### T2 — Update cross-references in SKILL.md files & docs
+- Audit and update all references to `issue-create` and `pr-babysitter` across:
+  - `create-issue/SKILL.md`
+  - `plan-issue/SKILL.md`
+  - `build-issue/SKILL.md`
+  - `ship-issue/SKILL.md`
+  - `explain-issue/SKILL.md`
+  - `work-issue/SKILL.md`
+  - `review-babysitter/SKILL.md`
+  - `docs/ecc-flow-guide.md:80`
 
-### T3 — Unit Tests (TDD)
-Files: `tests/test_live_trader.py`
-- Test 1: Single fill triggers chase up to opposite ask when under cap.
-- Test 2: When opposite ask exceeds `max_pair_cost - fill_price`, bid is clamped to cap.
-- Test 3: When both legs filled, chase does not trigger.
-- Test 4: Chased fill is distinguished from passive fill in telemetry and state.
-- Test 5: `update_config` updates `max_pair_cost` and `enable_leg_chase` with validation.
+### T3 — Global Deployment Script (`deploy_family_skills.py`)
+- Create `scripts/deploy_family_skills.py` (and/or update `create-issue/scripts/sync_skill.py`) that:
+  - Defines the 7 canonical skills and their target roots (`~/.claude/skills/`, `~/.gemini/config/skills/`, `AppData/Local/hermes/skills/`).
+  - Cleans up legacy junctions/symlinks (`issue-create`, `pr-babysitter`).
+  - Creates or verifies Directory Junctions for all 7 skills in all targets.
+  - Verifies resolution of each target to live files.
 
-### T4 — Verification & Regression Suite
-- Run `pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`.
-- Run full suite: `pytest -q`.
+### T4 — Generalized Reference Documentation
+- Add a concise, non-repo-specific `reference.md` in each of the 7 skill directories covering:
+  - Core intent & one-paragraph summary.
+  - When to invoke.
+  - Expected inputs and produced outputs.
+  - Canonical trigger commands.
+  - Scope boundaries.
+
+### T5 — Verification & Gate Check
+- Run deploy script and verify all junctions exist and resolve.
+- Run `python -m pytest -q` to confirm zero regressions in repository test suite.
+- Record deployment verification status in `tasks/plan.md` and walkthrough.

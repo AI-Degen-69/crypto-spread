@@ -77,7 +77,7 @@
 | **3** | **מימוש ב-TDD** | `tdd-guide`, `/build-fix` | כתיבת בדיקות תחילה (Red), מימוש הקוד (Green), ריפקטורינג נקי, תיקון כשלים. |
 | **4** | **ביקורת רב-סוכנית** | `code-reviewer`, `python-reviewer`, `security-reviewer` | ביקורת עמידה בדרישות, בדיקת איכות Python (PEP 8, asyncio, טיפוסים) ואבטחה. |
 | **5** | **שילוח ו-PR** | `/pr` (או `/prp-commit`) | **🛑 GATE 2**: אישור קומיט. יצירת Conventional Commit ופתיחת PR מקושר ב-GitHub. |
-| **6** | **בקרת איכות סופית** | `pr-babysitter` / CI Gate | מעקב אחרי בדיקות ה-CI וביקורת CodeRabbit האוטומטית עד מצב ירוק למיזוג. |
+| **6** | **בקרת איכות סופית** | `review-babysitter` / CI Gate | מעקב אחרי בדיקות ה-CI וביקורת CodeRabbit האוטומטית עד מצב ירוק למיזוג. |
 
 ---
 
