@@ -1,4 +1,5 @@
 """Tests for LiveTraderEngine."""
+from typing import Any
 import pytest
 import time
 from strategy.live_trader import LiveTraderEngine, get_live_trader_engine, MarketLiveState
@@ -30,8 +31,18 @@ def test_live_trader_config_update():
     assert state["portfolio_value"] == 2500.0
 
 
+def _open_50_50_quotes(engine: LiveTraderEngine, slug: str, market: Any, now: float) -> None:
+    """Helper to open initial round 0 quotes on a 50/50 centered book (resting bids 0.48/0.48)."""
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now)
+
+
 def test_live_trader_pair_merge_execution():
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -46,6 +57,9 @@ def test_live_trader_pair_merge_execution():
         tick_size=0.01,
         neg_risk=False,
     )
+
+    # Initial round 0 quoting at 0.50 mid -> resting bids 0.48 / 0.48
+    _open_50_50_quotes(engine, slug, fake_market, now - 1)
 
     # First poll: resting bids 0.48 / 0.48, ask touches 0.48 on UP
     poll1 = {
@@ -92,6 +106,9 @@ def test_live_trader_stop_loss_exit():
         neg_risk=False,
     )
 
+    # Initial round 0 quoting at 0.50 mid -> resting bids 0.48 / 0.48
+    _open_50_50_quotes(engine, slug, fake_market, now - 1)
+
     # Fill UP at 0.48
     poll1 = {
         "market": fake_market,
@@ -134,6 +151,12 @@ def test_fetch_polymarket_account_value_mocked(monkeypatch):
     from strategy.live_trader import fetch_polymarket_account_value
     from unittest.mock import patch
 
+    monkeypatch.setenv("POLY_FUNDER", "0xee3b778a783510bc833384919f709e3d2fee1624")
+    monkeypatch.setenv("POLY_PRIVATE_KEY", "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+    monkeypatch.setenv("POLY_API_KEY", "test_key")
+    monkeypatch.setenv("POLY_API_SECRET", "test_secret")
+    monkeypatch.setenv("POLY_API_PASSPHRASE", "test_passphrase")
+
     fake_client = MagicMock()
     fake_client.get_balance_allowance.return_value = {"balance": "81218581"}
     fake_clob_cls = MagicMock(return_value=fake_client)
@@ -148,7 +171,18 @@ def test_fetch_polymarket_account_value_mocked(monkeypatch):
     ]
     fake_sess.get.return_value = fake_pos_resp
 
-    with patch("py_clob_client_v2.client.ClobClient", fake_clob_cls):
+    import sys
+    dummy_clob_client_mod = MagicMock()
+    dummy_clob_client_mod.ClobClient = fake_clob_cls
+    dummy_clob_types_mod = MagicMock()
+    with patch.dict(sys.modules, {
+        "py_clob_client_v2": MagicMock(),
+        "py_clob_client_v2.client": dummy_clob_client_mod,
+        "py_clob_client_v2.clob_types": dummy_clob_types_mod,
+        "py_clob_client": MagicMock(),
+        "py_clob_client.client": dummy_clob_client_mod,
+        "py_clob_client.clob_types": dummy_clob_types_mod,
+    }):
         res = fetch_polymarket_account_value(wallet_address="0xee3b778a783510bc833384919f709e3d2fee1624", session=fake_sess)
     assert res["success"] is True
     assert res["wallet_address"] == "0xee3b778a783510bc833384919f709e3d2fee1624"
@@ -2607,11 +2641,13 @@ def _fifteen_minute_engine(slug="btc-up-or-down-15m", **kwargs):
 def test_requote_after_merge_when_time_remains():
     """A 15m merge with ~890s left opens round 2 instead of going terminal."""
     engine = _fifteen_minute_engine()
+    engine.enable_leg_chase = False
     engine.start()
     slug = "btc-up-or-down-15m"
     now = time.time()
     market = _fifteen_minute_market(now)
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     m = engine.markets[slug]
     # Round 0 fills at the static 0.48 / 0.48 anchor.
     engine._update_market_strategy(slug, {
@@ -2696,6 +2732,7 @@ def test_no_requote_when_time_short():
         tick_size=0.01,
         neg_risk=False,
     )
+    _open_50_50_quotes(engine, slug, market, now - 1)
     m = engine.markets[slug]
     engine._update_market_strategy(slug, {
         "market": market,
@@ -2730,6 +2767,7 @@ def test_no_requote_after_stop_exit():
     now = time.time()
     market = _fifteen_minute_market(now, condition_id="0xstop15m")
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -2764,6 +2802,7 @@ def test_requote_telemetry_recorded():
     now = time.time()
     market = _fifteen_minute_market(now, condition_id="0xtelemetry15m")
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -2822,6 +2861,7 @@ def test_requote_boundary_time_remaining_equals_gate():
     now = time.time()
     market = _fifteen_minute_market(now, condition_id="0xboundary15m", start_offset=599.0)
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -2840,6 +2880,7 @@ def test_requote_boundary_time_remaining_equals_gate():
     engine2.start()
     now2 = time.time()
     market2 = _fifteen_minute_market(now2, condition_id="0xboundary15m_b", start_offset=600.0)
+    _open_50_50_quotes(engine2, slug, market2, now2 - 1)
     engine2._update_market_strategy(slug, {
         "market": market2,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -2870,6 +2911,7 @@ def test_min_requote_remaining_sec_zero_disables():
     now = time.time()
     market = _fifteen_minute_market(now, condition_id="0xdisabled15m")
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -2894,6 +2936,7 @@ def test_rollover_resets_requote_round():
     now = time.time()
     market = _fifteen_minute_market(now, condition_id="0xroll15m")
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -2966,11 +3009,13 @@ def _naked_market(now, elapsed=10.0, duration=300.0):
 def test_naked_leg_stops_at_exit_thresh_naked():
     """A naked UP leg exits at drift 0.04 (naked 0.03), not at 0.05."""
     engine = LiveTraderEngine(load_persisted=False)
+    engine.exit_thresh_naked = 0.03
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
     market = _naked_market(now)
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     # Fill UP at 0.48
     engine._update_market_strategy(slug, {
         "market": market,
@@ -2994,11 +3039,13 @@ def test_naked_leg_stops_at_exit_thresh_naked():
 def test_paired_position_not_stopped_by_naked_threshold():
     """Drift 0.04 does NOT exit a position once both legs are filled (pair path)."""
     engine = LiveTraderEngine(load_persisted=False)
+    engine.exit_thresh_naked = 0.03
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
     market = _naked_market(now)
 
+    _open_50_50_quotes(engine, slug, market, now - 1)
     # Fill UP, then DOWN -> PAIR_MERGED immediately (0.48 + 0.48)
     engine._update_market_strategy(slug, {
         "market": market,
@@ -3025,6 +3072,7 @@ def test_naked_timeout_force_exits_unpaired_leg():
     now = time.time()
     # Window opened 10s ago; fill UP at t=now -> naked clock starts here.
     market = _naked_market(now, elapsed=10.0)
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -3052,6 +3100,7 @@ def test_naked_timeout_not_fired_before_horizon_or_disabled():
     slug = "btc-up-or-down-5m"
     now = time.time()
     market = _naked_market(now)
+    _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},
@@ -3169,6 +3218,7 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
         neg_risk=False,
     )
 
+    _open_50_50_quotes(engine, slug, fake_market, now - 1)
     # Initial resting bids: 0.48 / 0.48.
     # Poll 1: UP ask is 0.48 -> UP fills at 0.48.
     # DOWN ask is 0.51.
@@ -3223,6 +3273,7 @@ def test_leg_chase_symmetric_down_first(monkeypatch):
         neg_risk=False,
     )
 
+    _open_50_50_quotes(engine, slug, fake_market, now - 1)
     # DOWN fills at 0.48. UP ask is 0.49.
     # Allowed UP quote: 0.98 - 0.48 = 0.50.
     # UP ask is 0.49 <= 0.50, so UP immediately chases and fills at 0.49.
@@ -3262,6 +3313,7 @@ def test_leg_chase_disabled_or_both_filled(monkeypatch):
         neg_risk=False,
     )
 
+    _open_50_50_quotes(engine, slug, fake_market, now - 1)
     poll1 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.48},

@@ -29,7 +29,7 @@ The `create-issue` skill transforms raw, unstructured operator ideas, thoughts, 
 
 ## Scope Boundaries
 - **In Scope**: Researching repo files to ground the issue, structuring requirements, splitting compound work items into linked siblings, and publishing to GitHub.
-- **Out of Scope**: Planning detailed execution steps or task breakdown (handled by `plan-issue`), code implementation (handled by `build-issue`), or branch creation.
+- **Out of Scope**: Planning detailed execution steps or task breakdown (handled by `plan-issue`), code implementation (handled by `build-plan`), or branch creation.
 """,
 
     "plan-issue": """# plan-issue Reference Guide
@@ -50,7 +50,7 @@ The `plan-issue` skill serves as the Station 1 Planning Orchestrator. It takes a
 - `CONSTRAINTS.md` updated with strict quality gates and performance baselines.
 - `tasks/plan.md` containing an ordered, bite-sized task plan.
 - `tasks/todo.md` checklist for tracking task progression.
-- Clear recommendation for execution mode (`build-issue auto` vs `build-issue`).
+- Clear recommendation for execution mode (`build-plan auto` vs `build-plan`).
 
 ## Canonical Trigger Commands
 - `/plan-issue`
@@ -58,17 +58,17 @@ The `plan-issue` skill serves as the Station 1 Planning Orchestrator. It takes a
 
 ## Scope Boundaries
 - **In Scope**: Requirements extraction, technical research, architecture design, constraint locking, and task planning.
-- **Out of Scope**: Writing production code or tests (handled by `build-issue`), pushing branches, opening PRs, or merging.
+- **Out of Scope**: Writing production code or tests (handled by `build-plan`), pushing branches, opening PRs, or merging.
 """,
 
-    "build-issue": """# build-issue Reference Guide
+    "build-plan": """# build-plan Reference Guide
 
 ## Summary
-The `build-issue` skill acts as the Station 2 Execution Orchestrator. It executes the tasks laid out in `tasks/plan.md` through disciplined Test-Driven Development (TDD), source-driven documentation grounding, atomic commits, and automated error resolution.
+The `build-plan` skill acts as the Station 2 Execution Orchestrator. It executes the tasks laid out in `tasks/plan.md` through disciplined Test-Driven Development (TDD), source-driven documentation grounding, atomic commits, and automated error resolution.
 
 ## When to Invoke
 - An approved `tasks/plan.md` exists and is ready for implementation.
-- The operator wants either step-by-step verified execution (`/build-issue`) or end-to-end autonomous implementation (`/build-issue auto`).
+- The operator wants either step-by-step verified execution (`/build-plan`) or end-to-end autonomous implementation (`/build-plan auto`).
 
 ## Inputs
 - `tasks/plan.md` task list and `CONSTRAINTS.md` guardrails.
@@ -81,21 +81,21 @@ The `build-issue` skill acts as the Station 2 Execution Orchestrator. It execute
 - Passing test suite with zero regressions.
 
 ## Canonical Trigger Commands
-- `/build-issue` (single task mode)
-- `/build-issue auto` (or `/build-issue all` for autonomous batch mode)
+- `/build-plan` (single task mode)
+- `/build-plan auto` (or `/build-plan all` for autonomous batch mode)
 
 ## Scope Boundaries
 - **In Scope**: Writing failing tests (RED), implementing minimal green code (GREEN), refactoring, code simplification, fixing build/type errors, and creating local git commits.
-- **Out of Scope**: High-level planning (handled by `plan-issue`), pushing to remote, opening pull requests, or code review babysitting (handled by `ship-issue` and `review-babysitter`).
+- **Out of Scope**: High-level planning (handled by `plan-issue`), pushing to remote, opening pull requests, or code review babysitting (handled by `review-build-and-pr` and `babysit-pr-and-merge`).
 """,
 
-    "ship-issue": """# ship-issue Reference Guide
+    "review-build-and-pr": """# review-build-and-pr Reference Guide
 
 ## Summary
-The `ship-issue` skill serves as the Station 3 Review & Ship Orchestrator. It subjects implemented code to a 4-axis parallel review, verifies test suite pass rates, pushes the feature branch, opens a GitHub Pull Request, and hands off to review babysitting.
+The `review-build-and-pr` skill serves as the Station 3 Review & Ship Orchestrator. It subjects implemented code to a 4-axis parallel review, verifies test suite pass rates, pushes the feature branch, opens a GitHub Pull Request, and hands off to review babysitting.
 
 ## When to Invoke
-- All tasks in `tasks/plan.md` are completed and verified by `build-issue`.
+- All tasks in `tasks/plan.md` are completed and verified by `build-plan`.
 - Code is ready for pre-push review, git sync, PR creation, and automated CI/AI review.
 
 ## Inputs
@@ -107,14 +107,14 @@ The `ship-issue` skill serves as the Station 3 Review & Ship Orchestrator. It su
 - 4-axis review results (code quality, security, test engineer, language specialist).
 - Remote git branch pushed to origin.
 - Published GitHub Pull Request linked to the issue.
-- Activation of `review-babysitter` for automated review tracking and merging.
+- Activation of `babysit-pr-and-merge` for automated review tracking and merging.
 
 ## Canonical Trigger Commands
-- `/ship-issue`
+- `/review-build-and-pr`
 
 ## Scope Boundaries
 - **In Scope**: Pre-push review gates, test verification, pushing branch, opening PRs, and handing off to babysitting.
-- **Out of Scope**: Authoring task plans (handled by `plan-issue`), writing initial feature implementation (handled by `build-issue`), or generating end-user visual verification reports (handled by `explain-issue`).
+- **Out of Scope**: Authoring task plans (handled by `plan-issue`), writing initial feature implementation (handled by `build-plan`), or generating end-user visual verification reports (handled by `explain-issue`).
 """,
 
     "explain-issue": """# explain-issue Reference Guide
@@ -143,10 +143,10 @@ The `explain-issue` skill serves as the Station 4 Visual Showcase & Verification
 - **Out of Scope**: Writing code changes, running TDD cycles, or opening pull requests.
 """,
 
-    "work-issue": """# work-issue Reference Guide
+    "workflow-issue": """# workflow-issue Reference Guide
 
 ## Summary
-The `work-issue` skill is the master top-level lifecycle orchestrator. It guides an issue through the entire journey from discovery, planning (Station 1), implementation (Station 2), shipping (Station 3), through to visual explanation (Station 4).
+The `workflow-issue` skill is the master top-level lifecycle orchestrator. It guides an issue through the entire journey from discovery, planning (Station 1), implementation (Station 2), shipping (Station 3), through to visual explanation (Station 4).
 
 ## When to Invoke
 - When picking up a new task from scratch and desiring end-to-end guidance across all stations.
@@ -160,21 +160,21 @@ The `work-issue` skill is the master top-level lifecycle orchestrator. It guides
 - Prioritized backlog recommendations or complete transition across Stations 1 through 4.
 
 ## Canonical Trigger Commands
-- `/work-issue` (lists open backlog and recommends next issue)
-- `/work-issue <issue-number>` (orchestrates full issue lifecycle)
+- `/workflow-issue` (lists open backlog and recommends next issue)
+- `/workflow-issue <issue-number>` (orchestrates full issue lifecycle)
 
 ## Scope Boundaries
-- **In Scope**: Backlog triage, delegating to Station 1 (`plan-issue`), Station 2 (`build-issue`), Station 3 (`ship-issue`), and Station 4 (`explain-issue`).
+- **In Scope**: Backlog triage, delegating to Station 1 (`plan-issue`), Station 2 (`build-plan`), Station 3 (`review-build-and-pr`), and Station 4 (`explain-issue`).
 - **Out of Scope**: Direct implementation of low-level code without delegating to station workflows.
 """,
 
-    "review-babysitter": """# review-babysitter Reference Guide
+    "babysit-pr-and-merge": """# babysit-pr-and-merge Reference Guide
 
 ## Summary
-The `review-babysitter` skill manages pull requests post-creation through automated review, CI tracking, comment triage, bot discussions, and safe merging with zero required human intervention.
+The `babysit-pr-and-merge` skill manages pull requests post-creation through automated review, CI tracking, comment triage, bot discussions, and safe merging with zero required human intervention.
 
 ## When to Invoke
-- Immediately following PR creation in `/ship-issue` or `/ship`.
+- Immediately following PR creation in `/review-build-and-pr` or `/ship`.
 - When review comments (e.g. from CodeRabbit) arrive on an open pull request.
 - When unhandled review feedback needs resolution before a PR can merge.
 
@@ -188,8 +188,8 @@ The `review-babysitter` skill manages pull requests post-creation through automa
 - Automated squash-merge of the PR once all gates and checks pass.
 
 ## Canonical Trigger Commands
-- `/review-babysitter`
-- `/review-babysitter <pr-number>`
+- `/babysit-pr-and-merge`
+- `/babysit-pr-and-merge <pr-number>`
 
 ## Scope Boundaries
 - **In Scope**: Review comment extraction, triage, applying surgical fixes, pushing updates, and executing PR merges.

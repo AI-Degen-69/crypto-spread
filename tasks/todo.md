@@ -1,7 +1,4 @@
-# tasks/todo.md — Issue #116
-
-- [x] T1 — Rename directories (`create-issue`, `review-babysitter`) and update SKILL.md headers
-- [x] T2 — Update cross-references in all 7 SKILL.md files & docs/ecc-flow-guide.md
-- [x] T3 — Global Deployment Script (`deploy_family_skills.py`) provisioning junctions in Claude, Gemini, Hermes
-- [x] T4 — Add generalized `reference.md` to each of the 7 skill directories
-- [x] T5 — Verification & Gate Check (test suite & symlink integrity)
+- [ ] Task 1: Update UI Label to "Stop Loss Trigger ($)" and Default Threshold to 0.05 (`server/osc_dash.py`, `strategy/live_trader.py`)
+- [ ] Task 2: Implement Dynamic Symmetric Mid-Offset Calculation for Round 0 (`strategy/live_trader.py`)
+- [ ] Task 3: Add Unit Tests for Dynamic Symmetric Quoting & Cancellation (`tests/test_live_trader.py`)
+- [ ] Task 4: Full Suite Verification & Regression Gate (`python -m pytest -q`)

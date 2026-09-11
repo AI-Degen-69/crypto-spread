@@ -268,6 +268,7 @@ def test_live_trader_skips_orders_on_late_start_window():
 def test_live_trader_keeps_opposite_leg_open_if_one_filled_before_timeout():
     """If 1 leg filled before timeout, the other leg stays open hoping to complete pair merge."""
     engine = LiveTraderEngine(entry_timeout_pct=0.10)
+    engine.enable_leg_chase = False
     engine.mode = "paper"
     engine.is_running = True
     slug = "btc-up-or-down-5m"
@@ -281,6 +282,13 @@ def test_live_trader_keeps_opposite_leg_open_if_one_filled_before_timeout():
         "start_ts": start_time,
         "end_ts": start_time + 300.0,
     }
+
+    # Open quotes at 50/50 mid (resting bids 0.48/0.48)
+    engine._update_market_strategy(slug, {
+        "market": mkt,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now=1005.0)
 
     # Tick 1: at t=1010s, UP ask drops to 0.48 -> UP fills!
     poll_1 = {

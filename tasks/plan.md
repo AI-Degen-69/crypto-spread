@@ -1,51 +1,30 @@
-# tasks/plan.md — Issue #116: Standardize naming and deploy 7-skill issue workflow family
+# Plan: Dynamic Symmetric Mid-Anchored Quoting & Stop Loss Trigger (0.05$)
 
-Branch: `feat/issue-116-standardize-skill-family` (off `master`)
-Constraints: `CONSTRAINTS.md`
-Baseline: full suite green on master (414+ tests).
+Task Type: Code
+Size Tier: Standard
+Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trader.py
 
-## Concise Spec (spec-driven-development, Standard tier)
+## Task Breakdown
 
-**Goal:** Standardize names and directory structures across the 7-skill issue workflow family:
-`create-issue`, `plan-issue`, `build-issue`, `ship-issue`, `explain-issue`, `work-issue`, `review-babysitter`. Deploy all 7 via directory junctions/symlinks to Claude, Gemini, and Hermes. Provide a robust deploy script and generalized `reference.md` in each skill folder.
+### Task 1: Update UI Label to "Stop Loss Trigger ($)" and Default Threshold to 0.05
+- **Files**: `server/osc_dash.py`, `strategy/live_trader.py`
+- **Description**: Update UI form label in `server/osc_dash.py:2307` to `Stop Loss Trigger ($)` and set default `exit_thresh_naked` to `0.05`.
+- **Verification**: Run `python -m pytest tests/test_osc_dash_integration.py`
 
----
+### Task 2: Implement Dynamic Symmetric Mid-Offset Calculation for Round 0
+- **Files**: `strategy/live_trader.py`
+- **Description**: Update initial quote calculation in `_evaluate_monitored_window` to compute `resting_up` and `resting_down` dynamically from `up_mid - self.offset` and `down_mid - self.offset`.
+- **Verification**: Run `python -m pytest tests/test_live_trader.py`
 
-## Tasks
+### Task 3: Add Unit Tests for Dynamic Symmetric Quoting & Cancellation
+- **Files**: `tests/test_live_trader.py`
+- **Description**: Add explicit unit tests verifying:
+  1. 50/51 market produces 0.49 UP and 0.48 DOWN limit orders.
+  2. 30/71 market produces 0.28 UP and 0.69 DOWN limit orders.
+  3. Single leg stop exit cancels opposite resting order.
+- **Verification**: Run `python -m pytest tests/test_live_trader.py`
 
-### T1 — Rename directories and update SKILL.md headers
-- Rename `C:\Users\Tiger\.agents\skills\issue-create` to `create-issue`.
-- Rename `C:\Users\Tiger\.agents\skills\pr-babysitter` to `review-babysitter`.
-- Update `name:` in `create-issue/SKILL.md` to `create-issue`.
-- Update `name:` in `review-babysitter/SKILL.md` to `review-babysitter`.
-
-### T2 — Update cross-references in SKILL.md files & docs
-- Audit and update all references to `issue-create` and `pr-babysitter` across:
-  - `create-issue/SKILL.md`
-  - `plan-issue/SKILL.md`
-  - `build-issue/SKILL.md`
-  - `ship-issue/SKILL.md`
-  - `explain-issue/SKILL.md`
-  - `work-issue/SKILL.md`
-  - `review-babysitter/SKILL.md`
-  - `docs/ecc-flow-guide.md:80`
-
-### T3 — Global Deployment Script (`deploy_family_skills.py`)
-- Create `scripts/deploy_family_skills.py` (and/or update `create-issue/scripts/sync_skill.py`) that:
-  - Defines the 7 canonical skills and their target roots (`~/.claude/skills/`, `~/.gemini/config/skills/`, `AppData/Local/hermes/skills/`).
-  - Cleans up legacy junctions/symlinks (`issue-create`, `pr-babysitter`).
-  - Creates or verifies Directory Junctions for all 7 skills in all targets.
-  - Verifies resolution of each target to live files.
-
-### T4 — Generalized Reference Documentation
-- Add a concise, non-repo-specific `reference.md` in each of the 7 skill directories covering:
-  - Core intent & one-paragraph summary.
-  - When to invoke.
-  - Expected inputs and produced outputs.
-  - Canonical trigger commands.
-  - Scope boundaries.
-
-### T5 — Verification & Gate Check
-- Run deploy script and verify all junctions exist and resolve.
-- Run `python -m pytest -q` to confirm zero regressions in repository test suite.
-- Record deployment verification status in `tasks/plan.md` and walkthrough.
+### Task 4: Full Suite Verification & Regression Gate
+- **Files**: All test files
+- **Description**: Execute complete pytest suite across all test files.
+- **Verification**: Run `python -m pytest -q` (Expect: 414 passed).

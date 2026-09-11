@@ -1,10 +1,20 @@
 """Tests for pre-placed resting stop-loss orders (issue #87)."""
+from typing import Any
 import time
 
 from strategy.live_trader import LiveTraderEngine
 from strategy.markets import LiveMarket
 
 SLUG = "btc-up-or-down-5m"
+
+
+def _open_50_50_quotes(engine: LiveTraderEngine, slug: str, market: Any, now: float) -> None:
+    """Helper to open initial round 0 quotes on a 50/50 centered book (resting bids 0.48/0.48)."""
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now)
 
 
 def test_window_rollover_cancels_stop():
@@ -71,7 +81,7 @@ def test_resting_stop_visible_in_open_orders(monkeypatch):
     assert row["order_id"] == f"paper_stop_{SLUG}"
     assert row["side"] == "SELL (UP)"
     assert row["status"] == "RESTING"
-    assert row["price"] == 0.45  # 0.48 - 0.03 naked threshold (issue #124)
+    assert row["price"] == 0.43  # 0.48 - 0.05 default stop loss trigger
     assert row["size"] == 5
 
 
@@ -202,10 +212,12 @@ def test_paper_stop_fills_on_bid_touch():
     """Paper stop fills when the protected leg's bid reaches the stop price,
     even if synthetic-mid drift alone hasn't crossed the threshold."""
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False
     engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
+    _open_50_50_quotes(engine, SLUG, market, now - 1)
     # UP fills at 0.48 -> stop staged at 0.43
     engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
@@ -307,8 +319,7 @@ def _poll(market, up_bid, up_ask, dn_bid, dn_ask) -> dict:
 def test_place_stop_order_resting_paper():
     """place_stop_order stages an idempotent resting stop at fill - exit_thresh_naked.
 
-    Issue #124: a single (naked) leg uses the tighter naked threshold 0.03, not
-    the paired exit_thresh 0.05.
+    Issue #124: default exit_thresh_naked is 0.05 (Stop Loss Trigger ($)).
     """
     engine = LiveTraderEngine()
     mstate = engine.markets[SLUG]
@@ -319,7 +330,7 @@ def test_place_stop_order_resting_paper():
 
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
     assert mstate.stop_order_status == "RESTING"
-    assert mstate.stop_price == 0.45  # 0.48 - 0.03 (naked threshold, issue #124)
+    assert mstate.stop_price == 0.43  # 0.48 - 0.05 (default stop loss trigger)
     assert mstate.stop_side == "UP"
     assert mstate.stop_order_time != "-"
 
@@ -343,10 +354,12 @@ def test_place_stop_order_idempotent():
 def test_single_leg_fill_places_stop_paper():
     """A single UP leg fill automatically stages the stop-loss protection order."""
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False
     engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
+    _open_50_50_quotes(engine, SLUG, market, now - 1)
     engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
 
@@ -355,7 +368,7 @@ def test_single_leg_fill_places_stop_paper():
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
     assert mstate.stop_order_status == "RESTING"
     assert mstate.stop_side == "UP"
-    assert mstate.stop_price == 0.45  # 0.48 - 0.03 naked threshold
+    assert mstate.stop_price == 0.43  # 0.48 - 0.05 default stop loss trigger
 
 
 def test_pair_completion_cancels_stop_live():
@@ -363,6 +376,7 @@ def test_pair_completion_cancels_stop_live():
     from unittest.mock import MagicMock
 
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False
     engine.mode = "live"
     engine.is_running = True
     now = time.time()
@@ -411,10 +425,12 @@ def test_pair_completion_cancels_stop_live():
 def test_pair_completion_clears_stop_paper():
     """OCO Case A in paper mode: simulated stop is cleared without venue calls."""
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False
     engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
+    _open_50_50_quotes(engine, SLUG, market, now - 1)
     engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
@@ -429,11 +445,13 @@ def test_pair_completion_clears_stop_paper():
 def test_stop_fill_triggers_stop_exit_paper():
     """OCO Case B (paper): bid drops to the stop -> stop fills, entry cancelled, STOP_EXIT."""
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False
     engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
     # UP leg fills at 0.48; stop staged at 0.43
+    _open_50_50_quotes(engine, SLUG, market, now - 1)
     engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
@@ -458,11 +476,14 @@ def test_stop_fill_triggers_stop_exit_down_paper():
     (naked threshold, issue #124); down_bid of 0.47 does NOT trigger stop,
     but dropping to <= 0.45 triggers stop exit and cancels resting UP entry."""
     engine = LiveTraderEngine()
+    engine.exit_thresh_naked = 0.03
+    engine.enable_leg_chase = False
     engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
     # DOWN leg fills at 0.48; stop staged at 0.45 (down_ask is 0.48 so DOWN fills)
+    _open_50_50_quotes(engine, SLUG, market, now - 1)
     engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now)
     mstate = engine.markets[SLUG]
     assert mstate.filled_down is True

@@ -768,6 +768,7 @@ def test_api_ticks_verify_endpoint(tmp_path, monkeypatch):
 def test_api_live_cockpit_endpoints(monkeypatch):
     """Verify live trading cockpit endpoints for state, control, and config."""
     from strategy.live_trader import LiveTraderEngine
+    engine = osc_dash.get_live_trader_engine()
     monkeypatch.setattr(LiveTraderEngine, "_poll_single_market", lambda self, slug: None)
     mock_acct = {
         "success": True,
@@ -856,12 +857,15 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         assert len(d_demo["open_positions"]) > 0
         assert d_demo["markets"]["eth-up-or-down-5m"]["fill_price_up"] == 0.485
 
+        # Switch back to paper mode for clean reset without CLOB network calls
+        engine.mode = "paper"
         res_reset = client.post("/api/live/control", json={"action": "reset_pnl"})
         assert res_reset.status_code == 200
         assert res_reset.json()["total_trades"] == 0
     finally:
         # Restore default engine state
         client.post("/api/live/control", json={"action": "stop"})
+        engine.mode = "paper"
         client.post("/api/live/config", json={
             "offset": 0.02,
             "exit_thresh": 0.05,

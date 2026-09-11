@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -98,6 +100,31 @@ def _iso_to_unix(s: str) -> float:
     return datetime.fromisoformat(s).timestamp()
 
 
+_MARKET_CLOCK_OFFSET = 0.0
+_LAST_MARKET_SYNC = 0.0
+
+
+def get_real_utc_time() -> float:
+    """Return epoch timestamp calibrated against Polymarket server time if local clock drifts."""
+    global _MARKET_CLOCK_OFFSET, _LAST_MARKET_SYNC
+    now = time.time()
+    if now - _LAST_MARKET_SYNC > 60.0:
+        try:
+            r = _SESSION.get("https://gamma-api.polymarket.com/events", params={"limit": 1}, timeout=(2.0, 3.0))
+            if r.ok and "Date" in r.headers:
+                from email.utils import parsedate_to_datetime
+                server_ts = parsedate_to_datetime(r.headers["Date"]).timestamp()
+                diff = server_ts - now
+                if 2.0 < abs(diff) < 86400.0:
+                    _MARKET_CLOCK_OFFSET = diff
+                else:
+                    _MARKET_CLOCK_OFFSET = 0.0
+                _LAST_MARKET_SYNC = now
+        except Exception:
+            pass
+    return now + _MARKET_CLOCK_OFFSET
+
+
 def fetch_live_market(gamma_host: str, series_slug: str) -> Optional[LiveMarket]:
     """Return the single 5-min BTC market that's currently live, or None."""
     url = f"{gamma_host}/events"
@@ -106,7 +133,7 @@ def fetch_live_market(gamma_host: str, series_slug: str) -> Optional[LiveMarket]
     r.raise_for_status()
     events = r.json()
 
-    now = time.time()
+    now = get_real_utc_time()
     candidates: list[LiveMarket] = []
     for ev in events:
         markets = ev.get("markets") or []
