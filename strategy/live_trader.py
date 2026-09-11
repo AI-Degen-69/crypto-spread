@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import sys
 from pathlib import Path
 import re
 import threading
@@ -31,8 +32,33 @@ CLOB_HOST = "https://clob.polymarket.com"
 
 _local = threading.local()
 log = logging.getLogger("live_trader")
+_SERVER_CLOCK_OFFSET = 0.0
+_LAST_OFFSET_SYNC = 0.0
 
-_ENV_LOADED = False
+
+def get_real_utc_time() -> float:
+    """Return epoch timestamp calibrated against Polymarket server time if local clock drifts."""
+    global _SERVER_CLOCK_OFFSET, _LAST_OFFSET_SYNC
+    now = time.time()
+    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+        return now
+    if now - _LAST_OFFSET_SYNC > 60.0:  # check offset every 60s
+        try:
+            r = requests.get(f"{GAMMA_HOST}/events", params={"limit": 1}, timeout=(2.0, 3.0))
+            if r.ok and "Date" in r.headers:
+                from email.utils import parsedate_to_datetime
+                server_ts = parsedate_to_datetime(r.headers["Date"]).timestamp()
+                diff = server_ts - now
+                if 2.0 < abs(diff) < 86400.0:  # ignore frozen test timestamps > 24h away
+                    _SERVER_CLOCK_OFFSET = diff
+                    log.warning("Detected system clock drift of %+.1f seconds vs Polymarket server. Applying auto-offset calibration.", diff)
+                else:
+                    _SERVER_CLOCK_OFFSET = 0.0
+                _LAST_OFFSET_SYNC = now
+        except Exception:
+            pass
+    return now + _SERVER_CLOCK_OFFSET
+
 _EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 RUN_DIR = Path(__file__).resolve().parent.parent / "run"
 TRADES_FILE = RUN_DIR / "live_trades.jsonl"
@@ -61,6 +87,9 @@ def _reentry_outcome(m: "MarketLiveState") -> str:
     if m.filled_up and m.filled_down:
         return "both_no_merge"
     return "no_fill"
+
+
+_ENV_LOADED = False
 
 
 def _load_env_file() -> None:
@@ -267,7 +296,7 @@ def fetch_live_and_upcoming_markets(series_slug: str, session: Optional[requests
         log.debug("Gamma API error for %s: %s", series_slug, e)
         return {"current": None, "next": None}
 
-    now = time.time()
+    now = get_real_utc_time()
     active_candidates = []
     upcoming_candidates = []
 
@@ -593,7 +622,7 @@ class LiveTraderEngine:
         # bleed far more per stop than paired positions earn, so they get their own
         # tighter stop. A leg is "naked" whenever exactly one side is filled; a
         # paired position (both filled) keeps the standard `exit_thresh`.
-        self.exit_thresh_naked: float = 0.03
+        self.exit_thresh_naked: float = 0.05
         # Issue #124: force-exit a leg still unpaired after this fraction of the
         # window has elapsed, regardless of drift. 0 disables the timeout. This
         # bounds the worst case where the mid hovers just inside the stop so the
@@ -3028,7 +3057,7 @@ class LiveTraderEngine:
 
     async def _tick_all_markets(self):
         """Process one tick cycle across the configured active markets."""
-        now = time.time()
+        now = get_real_utc_time()
         loop = asyncio.get_running_loop()
 
         # Single snapshot taken at top of tick for dispatch and results
@@ -3371,14 +3400,20 @@ class LiveTraderEngine:
                 mstate.status = "IDLE"
             return
 
-        # Target resting prices. Round 0 anchors to the static 0.50 base; once a
-        # window has merged and re-quoted (issue #89), that round's dynamic
-        # mid-anchored prices latch and must not be overwritten every tick.
+        # Target resting prices. Anchor initial quotes dynamically and symmetrically to
+        # each leg's live mid minus offset (up_mid - offset, down_mid - offset).
+        # Once orders are placed or a window has merged and re-quoted, prices latch.
         if mstate.requote_round <= 0:
-            resting_up = round(0.50 - self.offset, 3)
-            resting_down = round(0.50 - self.offset, 3)
-            mstate.resting_up = resting_up
-            mstate.resting_down = resting_down
+            if not mstate.order_id_up and not mstate.order_id_down and not mstate.filled_up and not mstate.filled_down:
+                u_m = up_mid if 'up_mid' in locals() and up_mid is not None else 0.50
+                d_m = down_mid if 'down_mid' in locals() and down_mid is not None else 0.50
+                resting_up = round(min(0.99, max(0.01, u_m - self.offset)), 3)
+                resting_down = round(min(0.99, max(0.01, d_m - self.offset)), 3)
+                mstate.resting_up = resting_up
+                mstate.resting_down = resting_down
+            else:
+                resting_up = mstate.resting_up
+                resting_down = mstate.resting_down
         else:
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down

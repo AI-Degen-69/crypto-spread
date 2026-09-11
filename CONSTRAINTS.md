@@ -1,16 +1,15 @@
-# CONSTRAINTS.md — Issue #116 Quality & Execution Constraints
+# CONSTRAINTS.md — Dynamic Symmetric Mid-Anchored Quoting Quality Gates
 
-## 1. Zero Broken References & Zero Regressions
-- All existing tests stay green: `python -m pytest -q` full suite (409+ tests).
-- All skill junctions must resolve to valid paths on disk containing valid `SKILL.md` files.
-- Zero dangling references to `issue-create` or `pr-babysitter` across the 7 skills and `docs/ecc-flow-guide.md`.
+## Quality Gates & Hard Thresholds
 
-## 2. Integrity & Non-Destructive Operations
-- Master source remains in `~/.agents/skills/`.
-- Junctions in `~/.claude/skills/`, `~/.gemini/config/skills/`, and `AppData/Local/hermes/skills/` must be safely managed without deleting canonical source code.
-- Idempotent execution for sync/deploy scripts.
+### 1. Test Suite Integrity
+- **Pass Rate**: 100% (414/414 passing tests in `pytest`).
+- **No Test Swallowing**: Strictly forbidden to skip, comment out, or mock-pass failing assertions.
 
-## 3. Scope Boundaries
-- Scope is strictly bounded to the 7 issue-workflow skills (`create-issue`, `plan-issue`, `build-plan`, `review-build-and-pr`, `explain-issue`, `workflow-issue`, `babysit-pr-and-merge`).
-- No editing of `docs/issue-workflow.md` (formerly `agent-skills-guide.md`; renamed by Issue #117).
-- No modifications to trading strategies or dashboard logic.
+### 2. Risk & Pair Cost Boundaries
+- **Pair Cost Ceiling**: Initial pair cost ($\text{resting\_up} + \text{resting\_down}$) must strictly satisfy $\text{pair\_cost} < 1.00$ for all quoted windows.
+- **Symmetric Distance**: Distance from `up_mid` to `resting_up` and `down_mid` to `resting_down` must both equal `offset` (0.02).
+
+### 3. Execution & Safety Guards
+- **Opposite Cancellation**: Stop exit on one leg must immediately issue a cancel request for the opposite leg and set its status to `CANCELLED`.
+- **Paired Position Immunity**: Paired positions (`filled_up` and `filled_down`) must never be stop-lossed; they must proceed to `PAIR_MERGE` redemption for $1.00.

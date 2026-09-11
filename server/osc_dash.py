@@ -2300,12 +2300,12 @@ textarea:focus-visible,
           <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" value="0.02" placeholder="0.001 – 0.490" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Exit Stop Loss Threshold ($)</label>
+          <label>Safety Exit Cap ($)</label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Naked Exit Stop ($ — single leg)</label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" value="0.03" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+          <label>Stop Loss Trigger ($)</label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label>Naked Timeout (% of window)</label>
