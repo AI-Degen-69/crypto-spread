@@ -32,9 +32,15 @@ FAMILY_SKILLS = [
     "babysit-pr-and-merge",
 ]
 
+# Every retired skill name across the family's history. Each entry is removed
+# from all harness roots on every run so stale/dangling links never linger.
 LEGACY_NAMES = [
-    "issue-create",
-    "pr-babysitter",
+    "issue-create",       # original name of create-issue
+    "pr-babysitter",      # original name of review-babysitter
+    "work-issue",         # pre-rename name of workflow-issue
+    "build-issue",        # pre-rename name of build-plan
+    "ship-issue",         # pre-rename name of review-build-and-pr
+    "review-babysitter",  # pre-rename name of babysit-pr-and-merge
 ]
 
 HARNESS_ROOTS = [
@@ -51,7 +57,10 @@ def clean_legacy_junctions() -> None:
             continue
         for legacy in LEGACY_NAMES:
             target = root / legacy
-            if target.exists() or target.is_symlink():
+            # exists() is False for a dangling junction/symlink, so also check
+            # is_symlink() and the raw lexists on the path entry itself.
+            entry_exists = target.exists() or target.is_symlink() or os.path.lexists(target)
+            if entry_exists:
                 print(f"[CLEAN] Removing legacy entry: {target}")
                 try:
                     # If directory junction, rmdir works; if real directory, shutil.rmtree
