@@ -29,6 +29,7 @@ BUCKETS: tuple[tuple[str, float, float], ...] = (
 
 
 def _read_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file into dicts, skipping blanks and bad lines."""
     rows: list[dict] = []
     try:
         text = Path(path).read_text(encoding="utf-8")
@@ -92,6 +93,7 @@ def bucketize(fills: list[dict], settle: dict[str, float]) -> list[dict[str, Any
 
 
 def format_table(table: list[dict[str, Any]]) -> str:
+    """Render bucket rows as an aligned text table."""
     lines = ["bucket    fills  mean_settle_pnl_usd"]
     for row in table:
         mean = row["mean_settle_pnl_usd"]
@@ -101,6 +103,7 @@ def format_table(table: list[dict[str, Any]]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry: bucket fills, print the verdict table, exit 0 (even if empty)."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("fills", nargs="?", default=str(DEFAULT_FILLS),
                     help="fill telemetry JSONL (default: run/live_fill_telemetry.jsonl)")

@@ -62,5 +62,5 @@ Target Files: strategy/live_trader.py, scripts/bucket_fills.py (new), tests/test
 - **Description**:
   1. Cover: queue-ahead math incl. empty book; tape-join sum/window/filtering; one line per fill path (paper, CLOB-mocked with associate_trades, stream); degenerate nulls; writer failure tolerance (unwritable path); bucket table on fixture.
   2. Run targeted gate, then the full suite.
-- **Status**: [ ]
-- **Verification**: `python -m pytest tests/test_live_trader.py -q` then `python -m pytest -q`
+- **Status**: [x]
+- **Verification**: `python -m pytest tests/test_live_trader.py -q` then `python -m pytest -q` (462 passed)

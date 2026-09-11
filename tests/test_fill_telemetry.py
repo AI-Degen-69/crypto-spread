@@ -349,3 +349,36 @@ def test_issue138_bucket_helper_empty_input(tmp_path, capsys):
     fills.write_text("", encoding="utf-8")
     assert main([str(fills)]) == 0
     assert "no fill" in capsys.readouterr().out.lower()
+
+
+# ============================================================================
+# TASK 6: degenerate nulls
+# ============================================================================
+
+def test_issue138_empty_book_records_nulls_without_blocking(monkeypatch, tmp_path):
+    """A book without depth still fills; telemetry degrades to nulls."""
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    bare = {
+        "market": {
+            "conditionId": "0x138", "slug": "mkt-138",
+            "up_token": "tok_up_138", "down_token": "tok_dn_138",
+            "start_ts": 1000.0, "end_ts": 1300.0,
+        },
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }
+    engine._update_market_strategy(slug, bare, now=1000.0)
+    m = engine.markets[slug]
+    assert m.rest_up_queue is None
+    import copy
+    fill_tick = copy.deepcopy(bare)
+    fill_tick["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, fill_tick, now=1001.0)
+    assert m.filled_up is True
+    lines = _fill_lines(path)
+    assert len(lines) == 1
+    assert lines[0]["queue_ahead_at_rest"] is None
+    assert lines[0]["fill_ratio"] is None
+    assert lines[0]["ratio_flagged"] is False
