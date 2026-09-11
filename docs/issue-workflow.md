@@ -28,13 +28,13 @@ stations delegate to at specific moments.
 
 | Skill | Trigger | One-line purpose | SKILL.md path | Deployed in |
 |---|---|---|---|---|
-| `create-issue` | "issue create" | Raw idea → researched, published GitHub issue labeled `ready-for-agent`. | `~/.agents/skills/create-issue/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
-| `workflow-issue` | "workflow issue" | Orchestrator: lists open issues, picks one, runs the stations, babysits the PR. | `~/.agents/skills/workflow-issue/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
-| `plan-issue` | "plan" / `/plan-issue <n>` | Station 1: read issue, right-size, detect stack, lock `CONSTRAINTS.md`, write `tasks/plan.md`. | `~/.agents/skills/plan-issue/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
-| `build-plan` | "build auto" / `/build-plan auto` | Station 2: execute `tasks/plan.md` — TDD per task, atomic commits. | `~/.agents/skills/build-plan/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
-| `review-build-and-pr` | "review build" / `/review-build-and-pr` | Station 3: 4-axis review, 100% test gate, push, open PR, hand off to babysitter. | `~/.agents/skills/review-build-and-pr/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
-| `explain-issue` | "explain" / `/explain-issue <n>` | Station 4: HTML ELI5 artifact (Hebrew, RTL) + manual verification guide. | `~/.agents/skills/explain-issue/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
-| `babysit-pr-and-merge` | "PR babysitter" | Sits on the PR through one CodeRabbit review round until mergeable. | `~/.agents/skills/babysit-pr-and-merge/SKILL.md` | Claude Code, Gemini, Hermes (junction) |
+| `create-issue` | "issue create" | Raw idea → researched, published GitHub issue labeled `ready-for-agent`. | `~/.agents/skills/create-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| `workflow-issue` | "workflow issue" | Orchestrator: lists open issues, picks one, runs the stations, babysits the PR. | `~/.agents/skills/workflow-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| `plan-issue` | "plan" / `/plan-issue <n>` | Station 1: read issue, right-size, detect stack, lock `CONSTRAINTS.md`, write `tasks/plan.md`. | `~/.agents/skills/plan-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| `build-plan` | "build auto" / `/build-plan auto` | Station 2: execute `tasks/plan.md` — TDD per task, atomic commits. | `~/.agents/skills/build-plan/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| `review-build-and-pr` | "review build" / `/review-build-and-pr` | Station 3: 4-axis review, 100% test gate, push, open PR, hand off to babysitter. | `~/.agents/skills/review-build-and-pr/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| `explain-issue` | "explain" / `/explain-issue <n>` | Station 4: HTML ELI5 artifact (Hebrew, RTL) + manual verification guide. | `~/.agents/skills/explain-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| `babysit-pr-and-merge` | "PR babysitter" | Sits on the PR through one CodeRabbit review round until mergeable. | `~/.agents/skills/babysit-pr-and-merge/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
 
 ### Helper skills (used by the stations, not stations themselves)
 
