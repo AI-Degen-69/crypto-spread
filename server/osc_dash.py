@@ -603,14 +603,27 @@ def api_backtest(
     )
 
     trades_sample = []
+    profitable_pairs = 0
+    profitable_exits = 0
+    unfilled_windows = 0
+
     for w in per_window:
         win_pnl = w.pnl_cents * size
         a = per_series_raw[w.series]
         a["windows"] += 1
         if w.pair_captured:
             a["pairs"] += 1
-        if w.exit_taken:
+            if win_pnl > 0:
+                profitable_pairs += 1
+        elif w.exit_taken:
             a["exits"] += 1
+            if win_pnl > 0:
+                profitable_exits += 1
+        elif not w.filled_up and not w.filled_down:
+            unfilled_windows += 1
+        elif win_pnl > 0:
+            profitable_exits += 1
+
         if w.class_label == "oscillating":
             a["oscillating"] += 1
         elif w.class_label == "monotonic":
@@ -622,21 +635,25 @@ def api_backtest(
             a["reentry_count"] += 1
             a["reentry_pnl_cents"] += win_pnl
 
-        if len(trades_sample) < 50:
-            exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
-            trades_sample.append({
-                "slug": w.slug,
-                "label": series_label_map.get(w.series, w.series),
-                "series": w.series,
-                "both_filled": w.pair_captured,
-                "exit_triggered": w.exit_taken,
-                "up_filled": w.filled_up,
-                "down_filled": w.filled_down,
-                "pnl_cents": round(win_pnl, 2),
-                "exit_reason": exit_info,
-                "start_delay_sec": w.start_delay_sec,
-                "is_partial": w.is_partial,
-            })
+        exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
+        trades_sample.append({
+            "slug": w.slug,
+            "label": series_label_map.get(w.series, w.series),
+            "series": w.series,
+            "both_filled": w.pair_captured,
+            "exit_triggered": w.exit_taken,
+            "up_filled": w.filled_up,
+            "down_filled": w.filled_down,
+            "entry_up": w.entry_price_up,
+            "entry_down": w.entry_price_down,
+            "exit_price": w.exit_price,
+            "exit_side": w.exit_side,
+            "settlement_mid": w.settlement_mid,
+            "pnl_cents": round(win_pnl, 2),
+            "exit_reason": exit_info,
+            "start_delay_sec": w.start_delay_sec,
+            "is_partial": w.is_partial,
+        })
 
     total_windows = len(per_window)
     total_pairs = sum(a["pairs"] for a in per_series_raw.values())
@@ -663,6 +680,11 @@ def api_backtest(
         "win_rate": round(winning_windows / total_windows, 4)
         if total_windows
         else 0.0,
+        "wins": winning_windows,
+        "profitable_windows": winning_windows,
+        "profitable_pairs": profitable_pairs,
+        "profitable_exits": profitable_exits,
+        "unfilled_windows": unfilled_windows,
         "reentry_count": total_reentry_count,
         "reentry_pnl_cents": round(total_reentry_pnl, 2),
     }
