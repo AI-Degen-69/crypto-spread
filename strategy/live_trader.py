@@ -404,6 +404,23 @@ DEFAULT_MAX_START_ELAPSED_PCT = 0.10
 # while letting 15m windows recycle; 0 disables re-quoting entirely.
 DEFAULT_MIN_REQUOTE_REMAINING_SEC = 300.0
 
+# Named live-trading presets (issue #137). `patient_band_maker` encodes the
+# EV-research-winning configuration: delay entry 60s, only enter undecided
+# markets (|mid - 0.50| <= 0.04), quote at mid - 0.03, hold naked legs to
+# settlement (no stop-loss), chase the second leg capped at pair cost 0.98,
+# on the recommended xrp-15m / bnb-15m / eth-5m universe.
+PATIENT_BAND_MAKER = "patient_band_maker"
+LIVE_PRESETS: Dict[str, Dict[str, Any]] = {
+    PATIENT_BAND_MAKER: {
+        "offset": 0.03,
+        "entry_band": 0.04,
+        "entry_delay_sec": 60.0,
+        "stop_loss_enabled": False,
+        "max_pair_cost": 0.98,
+        "selected_markets": ("xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"),
+    },
+}
+
 
 @dataclass
 class MarketLiveState:
@@ -639,6 +656,19 @@ class LiveTraderEngine:
         # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
         self.enable_leg_chase: bool = True
         self.max_pair_cost: float = 0.98
+        # Issue #137: patient undecided-band maker knobs. `entry_delay_sec`
+        # holds all quoting until that many seconds into the window (0 = off);
+        # `entry_band` only admits windows whose mid is still near 0.50 at
+        # entry time (0 = off); `stop_loss_enabled=False` holds a filled naked
+        # leg to settlement/rollover instead of staging a stop. Defaults
+        # preserve the current behavior exactly.
+        self.entry_delay_sec: float = 0.0
+        self.entry_band: float = 0.0
+        self.stop_loss_enabled: bool = True
+        # Name of the active named preset, or None for a manual/custom
+        # configuration. Set by update_config(preset=...), cleared as soon as
+        # a manual knob change diverges from the preset table.
+        self.active_preset: Optional[str] = None
         self.spot_exit_drift: float = 0.003
         self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
         self.shares: int = 5
@@ -1916,7 +1946,11 @@ class LiveTraderEngine:
                 "max_reentries_per_window": self.max_reentries_per_window,
                 "enable_leg_chase": self.enable_leg_chase,
                 "max_pair_cost": self.max_pair_cost,
+                "entry_delay_sec": self.entry_delay_sec,
+                "entry_band": self.entry_band,
+                "stop_loss_enabled": self.stop_loss_enabled,
             },
+            "active_preset": self.active_preset,
             "reentry_stats": reentry_stats_snapshot,
             "markets": mkts_dict,
             "timeline": recent_timeline,
@@ -1961,7 +1995,11 @@ class LiveTraderEngine:
                       naked_leg_timeout_pct: Optional[float] = None,
                       reentry_require_pairable: Optional[bool] = None,
                       enable_leg_chase: Optional[bool] = None,
-                      max_pair_cost: Optional[float] = None) -> Dict[str, Any]:
+                      max_pair_cost: Optional[float] = None,
+                      entry_delay_sec: Optional[float] = None,
+                      entry_band: Optional[float] = None,
+                      stop_loss_enabled: Optional[bool] = None,
+                      preset: Optional[str] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1973,6 +2011,30 @@ class LiveTraderEngine:
         live_addr = ""
 
         with self._engine_lock:
+            # Issue #137: a named preset fills any knob left unspecified, so
+            # the table flows through the same validation, clamping, and
+            # market-selection contract as explicit knobs below. Explicit
+            # arguments win over the preset table.
+            preset_name: Optional[str] = None
+            if preset is not None:
+                if preset not in LIVE_PRESETS:
+                    raise ValueError(
+                        f"Unknown preset '{preset}'. Must be one of {sorted(LIVE_PRESETS)}"
+                    )
+                preset_name = preset
+                table = LIVE_PRESETS[preset]
+                if offset is None:
+                    offset = table["offset"]
+                if entry_band is None:
+                    entry_band = table["entry_band"]
+                if entry_delay_sec is None:
+                    entry_delay_sec = table["entry_delay_sec"]
+                if stop_loss_enabled is None:
+                    stop_loss_enabled = table["stop_loss_enabled"]
+                if max_pair_cost is None:
+                    max_pair_cost = table["max_pair_cost"]
+                if selected_markets is None and tokens is None and durations is None:
+                    selected_markets = list(table["selected_markets"])
             # Market selection is resolved and checked before any scalar field is
             # assigned, so a rejected selection leaves the whole configuration untouched.
             new_series = None
@@ -2026,6 +2088,14 @@ class LiveTraderEngine:
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
                     param_changed = True
                 if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
+                    param_changed = True
+                if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
+                    param_changed = True
+                if entry_band is not None and abs(float(entry_band) - self.entry_band) > 1e-6:
+                    param_changed = True
+                if stop_loss_enabled is not None and bool(stop_loss_enabled) != self.stop_loss_enabled:
+                    param_changed = True
+                if preset is not None and preset != self.active_preset:
                     param_changed = True
 
                 if param_changed:
@@ -2158,6 +2228,24 @@ class LiveTraderEngine:
                     self.enable_leg_chase = bool(enable_leg_chase)
                 if max_pair_cost is not None:
                     self.max_pair_cost = max(0.50, min(1.00, float(max_pair_cost)))
+                if entry_delay_sec is not None:
+                    # Issue #137: seconds into the window before quoting may
+                    # start. Negative clamps to 0 (off).
+                    self.entry_delay_sec = max(0.0, float(entry_delay_sec))
+                if entry_band is not None:
+                    # Issue #137: |mid - 0.50| admission band at entry time.
+                    # Clamped to the same 0..0.50 range as `exit_thresh`; 0
+                    # disables the filter.
+                    self.entry_band = max(0.0, min(0.50, float(entry_band)))
+                if stop_loss_enabled is not None:
+                    self.stop_loss_enabled = bool(stop_loss_enabled)
+                # Issue #137: preset bookkeeping. A preset application latches
+                # the name; any manual knob change that diverges from the
+                # preset table clears it back to a custom configuration.
+                if preset_name is not None:
+                    self.active_preset = preset_name
+                elif self.active_preset is not None and not self._preset_matches(self.active_preset):
+                    self.active_preset = None
                 # Re-entry is a narrower test than the adverse-open gate, never a
                 # looser one: a band at or above `exit_thresh` would let a window
                 # re-enter at the very drift the gate exists to reject. Applied
@@ -3124,6 +3212,29 @@ class LiveTraderEngine:
         except Exception as e:
             log.debug("Failed polling market %s: %s", slug, e)
             return None
+
+    def _preset_matches(self, name: str) -> bool:
+        """True when the live knob values equal the named preset table.
+
+        Issue #137: keeps `active_preset` honest — a manual knob change that
+        diverges from the table clears the latch in update_config().
+        """
+        table = LIVE_PRESETS.get(name)
+        if table is None:
+            return False
+        if abs(self.offset - float(table["offset"])) > 1e-9:
+            return False
+        if abs(self.entry_band - float(table["entry_band"])) > 1e-9:
+            return False
+        if abs(self.entry_delay_sec - float(table["entry_delay_sec"])) > 1e-9:
+            return False
+        if self.stop_loss_enabled != bool(table["stop_loss_enabled"]):
+            return False
+        if abs(self.max_pair_cost - float(table["max_pair_cost"])) > 1e-9:
+            return False
+        if {s[0] for s in self.selected_series} != set(table["selected_markets"]):
+            return False
+        return True
 
     def _naked_exit_thresh(self) -> float:
         """Adverse-drift stop distance for a single (naked) leg — issue #124.
