@@ -24,7 +24,7 @@ Target Files: server/osc_dash.py, tests/test_osc_dash_integration.py
   1. New card/panel near the trades area: 4 SVG bucket bars + mean annotations + chased row + verdict line, dark theme, `<title>` tooltips.
   2. `<details>` table fallback with identical numbers; explicit empty message when endpoint reports empty.
   3. Fetch in `fetchCockpitState` (same 5s cadence); all strings via `esc()`.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: integration asserts panel IDs + fallback markup in cockpit HTML
 
 ### Task 3: PnL histogram UI (binning, zero bin, mean + CI-lo, fallback)

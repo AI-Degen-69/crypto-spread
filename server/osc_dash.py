@@ -2696,6 +2696,31 @@ textarea:focus-visible,
   </div>
 </div>
 
+    <!-- Issue #139: Queue Telemetry + PnL Distribution -->
+    <div class="card" id="queuePanel" style="margin-top:12px">
+      <h3 style="margin:0 0 10px">
+        <span>📊 Queue Telemetry (tape vs tapeq)</span>
+        <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fill telemetry</span>
+      </h3>
+      <div id="queueSvgWrap" style="width:100%;min-height:150px"></div>
+      <details id="queueFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
+        <summary style="cursor:pointer">Data table</summary>
+        <div id="queueFallback"></div>
+      </details>
+    </div>
+
+    <div class="card" id="pnlHistPanel" style="margin-top:12px">
+      <h3 style="margin:0 0 10px">
+        <span>📈 PnL per Position</span>
+        <span id="pnlHistStats" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">No closed trades yet</span>
+      </h3>
+      <div id="pnlHistSvgWrap" style="width:100%;min-height:150px"></div>
+      <details id="pnlHistFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
+        <summary style="cursor:pointer">Data table</summary>
+        <div id="pnlHistFallback"></div>
+      </details>
+    </div>
+
 <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
 <script>
@@ -4653,6 +4678,66 @@ async function fetchCockpitState() {
     console.error('Failed fetching cockpit state', e);
   }
   await fetchCockpitLatency();
+  await fetchQueueTelemetry();
+}
+
+// Issue #139: queue-telemetry panel (tape vs tapeq evidence as it accumulates).
+async function fetchQueueTelemetry() {
+  try {
+    const res = await fetch('/api/live/queue_telemetry', { cache: 'no-store' });
+    if (res.ok) renderQueuePanel(await res.json());
+  } catch (e) {
+    console.error('Failed fetching queue telemetry', e);
+  }
+}
+
+function renderQueuePanel(q) {
+  const wrap = $('queueSvgWrap');
+  const verdictEl = $('queueVerdict');
+  const fb = $('queueFallback');
+  if (!wrap) return;
+  const verdictTxt = (q && q.verdict) ? q.verdict : 'awaiting fills';
+  if (verdictEl) {
+    verdictEl.textContent = verdictTxt;
+    verdictEl.style.color = verdictTxt === 'tape-like' ? 'var(--up)'
+      : verdictTxt === 'queue-toxic' ? 'var(--down)' : '';
+  }
+  if (!q || q.empty || !Array.isArray(q.buckets) || q.total_fills === 0) {
+    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">awaiting fill telemetry — lines appear in run/live_fill_telemetry.jsonl after the first live fills.</div>';
+    if (fb) fb.innerHTML = '';
+    return;
+  }
+  const buckets = q.buckets;
+  const maxCount = Math.max(1, ...buckets.map(b => b.count || 0));
+  const w = 560, rowH = 34, padL = 86, padR = 110, h = buckets.length * rowH + 46;
+  let rows = '';
+  buckets.forEach((b, i) => {
+    const y = 8 + i * rowH;
+    const bw = Math.max(2, ((b.count || 0) / maxCount) * (w - padL - padR));
+    const mean = b.mean_settle_pnl_usd;
+    const meanTxt = (mean === null || mean === undefined) ? 'n/a' : (mean >= 0 ? '+' : '') + '$' + mean.toFixed(2);
+    const meanCol = (mean === null || mean === undefined) ? 'var(--dim)' : (mean >= 0 ? 'var(--up)' : 'var(--down)');
+    const tip = `${b.bucket}: ${b.count} fills, mean settle ${meanTxt}`;
+    rows += `
+      <text x="${padL - 8}" y="${y + 15}" fill="var(--dim)" font-size="11" font-family="var(--mono)" text-anchor="end">${esc(b.bucket)}</text>
+      <rect x="${padL}" y="${y}" width="${bw.toFixed(1)}" height="18" rx="3" fill="var(--gold)" fill-opacity="0.75"><title>${esc(tip)}</title></rect>
+      <text x="${(padL + bw + 6).toFixed(1)}" y="${y + 14}" fill="var(--tx)" font-size="11" font-family="var(--mono)">${b.count} fills</text>
+      <text x="${(w - padR + 10).toFixed(1)}" y="${y + 14}" fill="${meanCol}" font-size="11" font-family="var(--mono)">${esc(meanTxt)}</text>`;
+  });
+  const ch = q.chased || { count: 0, mean_settle_pnl_usd: null };
+  const chMean = ch.mean_settle_pnl_usd;
+  const chMeanTxt = (chMean === null || chMean === undefined) ? 'n/a' : (chMean >= 0 ? '+' : '') + '$' + chMean.toFixed(2);
+  const chY = 8 + buckets.length * rowH;
+  rows += `<text x="${padL - 8}" y="${chY + 15}" fill="var(--dim)" font-size="11" font-family="var(--mono)" text-anchor="end">chased</text>
+    <text x="${padL}" y="${chY + 14}" fill="var(--tx)" font-size="11" font-family="var(--mono)">${ch.count} fills × ${esc(chMeanTxt)} (kept separate)</text>`;
+  wrap.innerHTML = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="display:block" role="img" aria-label="fill ratio buckets"><title>Fill-ratio buckets with mean settlement PnL</title>${rows}</svg>`;
+  if (fb) {
+    let trows = buckets.map(b => {
+      const mean = b.mean_settle_pnl_usd;
+      return `<tr><td class="mono">${esc(b.bucket)}</td><td class="mono">${b.count}</td><td class="mono">${esc(mean === null || mean === undefined ? 'n/a' : mean.toFixed(2))}</td></tr>`;
+    }).join('');
+    fb.innerHTML = `<table class="tbl"><thead><tr><th>Bucket</th><th>Fills</th><th>Mean settle $</th></tr></thead><tbody>${trows}</tbody></table>`;
+  }
 }
 
 async function pollCockpit() {

@@ -1746,3 +1746,24 @@ def test_api_live_queue_telemetry_empty_state(tmp_path, monkeypatch):
     assert body["empty"] is True
     assert body["total_fills"] == 0
     assert body["verdict"] == "awaiting fills"
+
+
+def test_cockpit_queue_and_pnl_panels_in_html():
+    """Cockpit page carries the queue-telemetry panel and histogram shells."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    # Queue panel: verdict, SVG wrap, table fallback, fetch + render hooks.
+    assert "queuePanel" in html
+    assert "queueVerdict" in html
+    assert "queueSvgWrap" in html
+    assert "queueFallback" in html
+    assert "fetchQueueTelemetry" in html
+    assert "renderQueuePanel" in html
+    # Histogram shells (render hook lands in Task 3).
+    assert "pnlHistSvgWrap" in html
+    assert "pnlHistStats" in html
+    assert "pnlHistFallback" in html
+    # Explicit empty states, never a blank box.
+    assert "awaiting fill telemetry" in html
+    assert "No closed trades yet" in html
