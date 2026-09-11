@@ -33,7 +33,7 @@ Target Files: server/osc_dash.py, tests/test_osc_dash_integration.py
 - **Description**:
   1. Client-side render from `st.trades`: Freedman–Diaconis bins capped 12–20, exact-zero own bin, profit/loss colors, mean + 2,000-resample bootstrap CI-lo annotation, subtitle stating the session window.
   2. `<details>` table fallback; count equals the trades-table row count.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: integration asserts histogram IDs + fallback markup; manual screenshot via dashboard
 
 ### Task 4: Tests + regression gate

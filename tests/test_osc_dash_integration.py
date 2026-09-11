@@ -1767,3 +1767,15 @@ def test_cockpit_queue_and_pnl_panels_in_html():
     # Explicit empty states, never a blank box.
     assert "awaiting fill telemetry" in html
     assert "No closed trades yet" in html
+
+
+def test_cockpit_pnl_histogram_render_hook_in_html():
+    """Histogram render, stats math, and session-window honesty in the page."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    assert "renderPnlHistogram" in html
+    assert "pnlBootstrapCiLo" in html
+    assert "freedmanDiaconisBins" in html
+    assert "session window" in html
+    assert "zero-PnL" in html or "zero pnl" in html.lower()

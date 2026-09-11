@@ -4666,6 +4666,100 @@ async function fetchCockpitLatency() {
   }
 }
 
+// Issue #139: PnL-per-position histogram from st.trades (session window).
+// Mean + CI-lo use the study's bootstrap statistic (2,000 resamples).
+function pnlBootstrapCiLo(values, resamples) {
+  const n = values.length;
+  const R = resamples || 2000;
+  let sum = 0;
+  for (const v of values) sum += v;
+  const mean = sum / n;
+  const means = new Array(R);
+  for (let r = 0; r < R; r++) {
+    let s = 0;
+    for (let i = 0; i < n; i++) s += values[(Math.random() * n) | 0];
+    means[r] = s / n;
+  }
+  means.sort((a, b) => a - b);
+  return { mean: mean, lo: means[Math.floor(0.025 * R)] };
+}
+function freedmanDiaconisBins(values) {
+  const n = values.length;
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = p => sorted[Math.min(n - 1, Math.floor(p * (n - 1)))];
+  const iqr = at(0.75) - at(0.25);
+  const min = sorted[0], max = sorted[n - 1];
+  let nb = 12;
+  if (iqr > 0 && max > min) {
+    const w = 2 * iqr / Math.cbrt(n);
+    if (w > 0) nb = Math.ceil((max - min) / w);
+  }
+  nb = Math.max(12, Math.min(20, nb));
+  const edges = [];
+  for (let i = 0; i <= nb; i++) edges.push(min + (max - min) * i / nb);
+  return { edges: edges, nbins: nb };
+}
+function renderPnlHistogram(trades) {
+  const wrap = $('pnlHistSvgWrap');
+  const statsEl = $('pnlHistStats');
+  const fb = $('pnlHistFallback');
+  if (!wrap) return;
+  const pnls = (trades || []).map(t => Number(t.pnl_usd)).filter(v => isFinite(v));
+  if (pnls.length === 0) {
+    if (statsEl) statsEl.textContent = 'No closed trades yet';
+    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">No closed trades yet — the distribution appears after the first settlements.</div>';
+    if (fb) fb.innerHTML = '';
+    return;
+  }
+  const stats = pnlBootstrapCiLo(pnls);
+  const meanTxt = (stats.mean >= 0 ? '+' : '') + '$' + stats.mean.toFixed(2);
+  const loTxt = (stats.lo >= 0 ? '+' : '') + '$' + stats.lo.toFixed(2);
+  if (statsEl) statsEl.textContent = `n=${pnls.length} · mean ${meanTxt} · CI-lo ${loTxt}`;
+  const zeros = pnls.filter(v => v === 0).length;
+  const nz = pnls.filter(v => v !== 0);
+  let bars = [];  // {label, count, color}
+  if (nz.length === 0) {
+    bars = [{ label: '0', count: zeros, color: 'var(--dim)' }];
+  } else {
+    const { edges } = freedmanDiaconisBins(nz);
+    const counts = new Array(edges.length - 1).fill(0);
+    for (const v of nz) {
+      let bi = 0;
+      while (bi < counts.length - 1 && v >= edges[bi + 1]) bi++;
+      counts[bi]++;
+    }
+    for (let i = 0; i < counts.length; i++) {
+      if (counts[i] === 0) continue;
+      const mid = (edges[i] + edges[i + 1]) / 2;
+      bars.push({ label: edges[i].toFixed(2) + '–' + edges[i + 1].toFixed(2), count: counts[i], color: mid >= 0 ? 'var(--up)' : 'var(--down)' });
+    }
+    if (zeros > 0) bars.unshift({ label: 'zero-PnL', count: zeros, color: 'var(--dim)' });
+  }
+  const w = 560, padL = 70, padR = 14, padT = 8, padB = 30;
+  const maxC = Math.max(1, ...bars.map(b => b.count));
+  const bw = (w - padL - padR) / bars.length;
+  const maxH = 130;
+  let rects = '';
+  bars.forEach((b, i) => {
+    const bh = Math.max(2, (b.count / maxC) * maxH);
+    const x = padL + i * bw + 2;
+    const y = padT + (maxH - bh);
+    const tip = `${b.label}: ${b.count} positions`;
+    rects += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(2, bw - 4).toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="${b.color}" fill-opacity="0.8"><title>${esc(tip)}</title></rect>
+      <text x="${(x + bw / 2).toFixed(1)}" y="${(padT + maxH + 14).toFixed(1)}" fill="var(--faint)" font-size="9" font-family="var(--mono)" text-anchor="middle">${esc(b.label.length > 12 ? b.count + '×' : b.label)}</text>`;
+  });
+  const h = padT + maxH + padB;
+  wrap.innerHTML = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="display:block" role="img" aria-label="PnL per position histogram"><title>PnL distribution over closed positions</title>
+      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + maxH}" stroke="var(--line)" stroke-width="1"/>
+      <line x1="${padL}" y1="${padT + maxH}" x2="${w - padR}" y2="${padT + maxH}" stroke="var(--line)" stroke-width="1"/>
+      ${rects}</svg>
+    <div style="font-size:10px;color:var(--faint);margin-top:4px" class="mono">session window: last ${pnls.length} closed trades (matches the table); zero-PnL bin shown separately</div>`;
+  if (fb) {
+    const trows = bars.map(b => `<tr><td class="mono">${esc(b.label)}</td><td class="mono">${b.count}</td></tr>`).join('');
+    fb.innerHTML = `<table class="tbl"><thead><tr><th>Bin</th><th>Positions</th></tr></thead><tbody>${trows}</tbody></table>`;
+  }
+}
+
 async function fetchCockpitState() {
   try {
     const res = await fetch('/api/live/state', { cache: 'no-store' });
@@ -5694,7 +5788,10 @@ function renderCockpitUI(st) {
     }
   }
 
-  // 6. Render Chart
+  // 6. Issue #139: PnL-per-position histogram from the same trades.
+  renderPnlHistogram(st.trades || []);
+
+  // 7. Render Chart
   renderCockpitChart(st.timeline, activeCockpitChartMode, st.starting_balance);
 }
 
