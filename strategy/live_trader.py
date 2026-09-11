@@ -76,6 +76,11 @@ def _empty_reentry_stats() -> Dict[str, int]:
             "chased_fills": 0, "passive_fills": 0}
 
 
+def _empty_band_skip_stats() -> Dict[str, int]:
+    """A zeroed entry-band skip tally (issue #137 observability)."""
+    return {"band_skips": 0}
+
+
 def _reentry_outcome(m: "MarketLiveState") -> str:
     """Name the end state of a re-entered window, for the observability record."""
     if m.pair_captured:
@@ -466,6 +471,12 @@ class MarketLiveState:
     adverse_open: bool = False
     open_gate_evaluated: bool = False
 
+    # Entry-band gate (issue #137). Evaluated once per window after
+    # `entry_delay_sec` expires, against the then-current mid — never
+    # re-evaluated, never applied to re-entry, and cleared on rollover.
+    band_gate_evaluated: bool = False
+    band_skip: bool = False
+
     # Late-start guard (issue #96). `first_seen_start_ts` records which window the
     # latch belongs to, `first_tick_elapsed_sec` how far into that window the
     # engine's first observed tick landed, and `late_start_skip` whether that is
@@ -708,6 +719,10 @@ class LiveTraderEngine:
         # observability). Counted as each re-entered window closes, so it answers
         # "did re-entry actually fill anything today?" without reading the file.
         self.reentry_stats: Dict[str, int] = _empty_reentry_stats()
+        # Entry-band skip tally (issue #137 observability). Counts windows the
+        # post-delay band filter rejected, so the pilot can tell band skips
+        # apart from adverse-open skips without reading the log.
+        self.band_skip_stats: Dict[str, int] = _empty_band_skip_stats()
         # Re-entry time gate, as a fraction of the window (issue #95). The shared
         # `min_requote_remaining_sec` is an absolute 300s, which is a whole 5m
         # window -- an absolute floor cannot mean the same thing on a 5m and a 15m
@@ -1895,6 +1910,7 @@ class LiveTraderEngine:
         # tally mid-update with `reentries` bumped but the outcome bucket not yet.
         with self._engine_lock:
             reentry_stats_snapshot = dict(self.reentry_stats)
+            band_skip_stats_snapshot = dict(self.band_skip_stats)
         
         # Format timeline for chart
         recent_timeline = self.timeline[-300:] if len(self.timeline) > 300 else self.timeline
@@ -1952,6 +1968,7 @@ class LiveTraderEngine:
             },
             "active_preset": self.active_preset,
             "reentry_stats": reentry_stats_snapshot,
+            "band_skip_stats": band_skip_stats_snapshot,
             "markets": mkts_dict,
             "timeline": recent_timeline,
             "trades": recent_trades,
@@ -3672,6 +3689,54 @@ class LiveTraderEngine:
         initial_drift = mstate.open_drift
         is_adverse_open = mstate.adverse_open
 
+        # --- POST-DELAY ENTRY BAND (issue #137) ---
+        # Admit only undecided markets: once the entry delay has expired, the
+        # first tick with a two-sided book checks |mid - 0.50| against
+        # `entry_band` (0 = off). A failure latches the window skipped through
+        # the same `entry_cancelled_timeout` family the other pre-entry gates
+        # use, plus a distinct `band_skip` flag and session counter. The
+        # adverse gate owns windows it already claimed, and re-entry (#95)
+        # keeps its own `reentry_drift_band` — neither path reaches this check.
+        delay_expired = self.entry_delay_sec <= 0 or elapsed_sec >= self.entry_delay_sec
+        if (self.entry_band > 0 and not mstate.band_gate_evaluated
+                and not mstate.entry_cancelled_timeout and not is_adverse_open
+                and not mstate.filled_up and not mstate.filled_down
+                and not mstate.order_id_up and not mstate.order_id_down
+                and book_two_sided and not mstate.late_start_skip
+                and delay_expired):
+            mstate.band_gate_evaluated = True
+            band_drift = abs(mid - 0.50)
+            if band_drift > self.entry_band:
+                with self._engine_lock:
+                    mstate.entry_cancelled_timeout = True
+                    mstate.band_skip = True
+                    self.band_skip_stats["band_skips"] += 1
+                mstate.status = "BAND_SKIPPED"
+                mstate.last_action = (
+                    f"Entry band skip (mid {mid:.4f}, drift {band_drift:.3f} > {self.entry_band:.2f})"
+                    " — entry skipped"
+                )
+                log.info("[%s] Entry skipped by entry band (mid=%.4f, drift=%.3f > %.2f)",
+                         slug, mid, band_drift, self.entry_band)
+
+        # While the band filter is armed but has not seen a two-sided book
+        # yet, hold placement too: "entry waits for the first two-sided tick"
+        # covers the quotes as well as the decision. Once evaluated (pass or
+        # fail) this clears by itself; re-entry bypasses the band entirely
+        # (marked evaluated when granted below).
+        band_hold = (
+            self.entry_band > 0
+            and not mstate.band_gate_evaluated
+            and not mstate.entry_cancelled_timeout
+            and not is_adverse_open
+            and not mstate.late_start_skip
+            and not mstate.filled_up
+            and not mstate.filled_down
+            and not mstate.order_id_up
+            and not mstate.order_id_down
+            and delay_expired
+        )
+
         # --- LATE-START SKIP (issue #96) ---
         # The engine attached to this window after `max_start_elapsed_pct` elapsed,
         # so there is nothing to cancel: no entry was ever placed for it. Mark the
@@ -3783,6 +3848,10 @@ class LiveTraderEngine:
                         open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
                         mstate.last_action = f"Adverse drift at open (mid {open_mid_txt}, drift {initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
                         log.info("[%s] Entry skipped due to adverse open drift (open_mid=%s, drift=%.3f >= %.2f)", slug, open_mid_txt, initial_drift, self.exit_thresh)
+                    elif mstate.band_skip:
+                        # Issue #137: the latch above already recorded the
+                        # mid/drift numbers in last_action; keep them.
+                        mstate.status = "BAND_SKIPPED"
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
                         pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
@@ -3801,6 +3870,9 @@ class LiveTraderEngine:
                 mstate, slug, mid, remaining_sec, win_duration,
                 book_two_sided, is_late_start, now, resting_up, resting_down):
             is_adverse_open = mstate.adverse_open
+            # Issue #137: the entry band never gates re-entry; mark it
+            # evaluated so the hold below cannot block the re-opened window.
+            mstate.band_gate_evaluated = True
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         can_place_entry = (
@@ -3812,11 +3884,16 @@ class LiveTraderEngine:
             and not is_adverse_open
             and not mstate.late_start_skip
             and not entry_delay_pending
+            and not band_hold
         )
         if entry_delay_pending and not mstate.entry_cancelled_timeout:
             mstate.last_action = (
                 f"Entry delayed ({elapsed_sec:.0f}s/{self.entry_delay_sec:.0f}s into window)"
                 " — quoting after delay"
+            )
+        elif band_hold:
+            mstate.last_action = (
+                "Entry band check waiting for two-sided book — quoting held"
             )
         if can_place_entry:
             if self.mode == "live":
@@ -4536,6 +4613,8 @@ class LiveTraderEngine:
             mstate.open_drift = 0.0
             mstate.adverse_open = False
             mstate.open_gate_evaluated = False
+            mstate.band_gate_evaluated = False
+            mstate.band_skip = False
             mstate.first_seen_start_ts = None
             mstate.first_tick_elapsed_sec = None
             mstate.late_start_skip = False

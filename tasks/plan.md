@@ -36,7 +36,8 @@ Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trade
   2. One-sided book at expiry: wait for the first two-sided tick instead of failing the window (same `book_two_sided` guard as the open gate).
   3. Explicitly NOT applied to re-entry (#95): re-entry keeps `reentry_drift_band` only.
   4. Distinct telemetry (adopted improvement): per-window `band_skip` flag + session-level `band_skip_stats` counter (follows the `reentry_stats` precedent), echoed in `get_state()`, so the pilot can tell band-filter skips apart from adverse-open skips.
-- **Status**: [ ]
+  5. Placement is additionally held while the armed band awaits its first two-sided book (`band_hold`); re-entry marks the band evaluated (band never gates re-entry).
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q` + new band tests
 
 ### Task 4: stop_loss_enabled gate on stop paths
