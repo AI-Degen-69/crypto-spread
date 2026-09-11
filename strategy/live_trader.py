@@ -76,6 +76,11 @@ def _empty_reentry_stats() -> Dict[str, int]:
             "chased_fills": 0, "passive_fills": 0}
 
 
+def _empty_band_skip_stats() -> Dict[str, int]:
+    """A zeroed entry-band skip tally (issue #137 observability)."""
+    return {"band_skips": 0}
+
+
 def _reentry_outcome(m: "MarketLiveState") -> str:
     """Name the end state of a re-entered window, for the observability record."""
     if m.pair_captured:
@@ -404,6 +409,23 @@ DEFAULT_MAX_START_ELAPSED_PCT = 0.10
 # while letting 15m windows recycle; 0 disables re-quoting entirely.
 DEFAULT_MIN_REQUOTE_REMAINING_SEC = 300.0
 
+# Named live-trading presets (issue #137). `patient_band_maker` encodes the
+# EV-research-winning configuration: delay entry 60s, only enter undecided
+# markets (|mid - 0.50| <= 0.04), quote at mid - 0.03, hold naked legs to
+# settlement (no stop-loss), chase the second leg capped at pair cost 0.98,
+# on the recommended xrp-15m / bnb-15m / eth-5m universe.
+PATIENT_BAND_MAKER = "patient_band_maker"
+LIVE_PRESETS: Dict[str, Dict[str, Any]] = {
+    PATIENT_BAND_MAKER: {
+        "offset": 0.03,
+        "entry_band": 0.04,
+        "entry_delay_sec": 60.0,
+        "stop_loss_enabled": False,
+        "max_pair_cost": 0.98,
+        "selected_markets": ("xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"),
+    },
+}
+
 
 @dataclass
 class MarketLiveState:
@@ -448,6 +470,12 @@ class MarketLiveState:
     open_drift: float = 0.0
     adverse_open: bool = False
     open_gate_evaluated: bool = False
+
+    # Entry-band gate (issue #137). Evaluated once per window after
+    # `entry_delay_sec` expires, against the then-current mid — never
+    # re-evaluated, never applied to re-entry, and cleared on rollover.
+    band_gate_evaluated: bool = False
+    band_skip: bool = False
 
     # Late-start guard (issue #96). `first_seen_start_ts` records which window the
     # latch belongs to, `first_tick_elapsed_sec` how far into that window the
@@ -639,6 +667,19 @@ class LiveTraderEngine:
         # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
         self.enable_leg_chase: bool = True
         self.max_pair_cost: float = 0.98
+        # Issue #137: patient undecided-band maker knobs. `entry_delay_sec`
+        # holds all quoting until that many seconds into the window (0 = off);
+        # `entry_band` only admits windows whose mid is still near 0.50 at
+        # entry time (0 = off); `stop_loss_enabled=False` holds a filled naked
+        # leg to settlement/rollover instead of staging a stop. Defaults
+        # preserve the current behavior exactly.
+        self.entry_delay_sec: float = 0.0
+        self.entry_band: float = 0.0
+        self.stop_loss_enabled: bool = True
+        # Name of the active named preset, or None for a manual/custom
+        # configuration. Set by update_config(preset=...), cleared as soon as
+        # a manual change to a preset-table knob diverges from the table.
+        self.active_preset: Optional[str] = None
         self.spot_exit_drift: float = 0.003
         self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
         self.shares: int = 5
@@ -678,6 +719,10 @@ class LiveTraderEngine:
         # observability). Counted as each re-entered window closes, so it answers
         # "did re-entry actually fill anything today?" without reading the file.
         self.reentry_stats: Dict[str, int] = _empty_reentry_stats()
+        # Entry-band skip tally (issue #137 observability). Counts windows the
+        # post-delay band filter rejected, so the pilot can tell band skips
+        # apart from adverse-open skips without reading the log.
+        self.band_skip_stats: Dict[str, int] = _empty_band_skip_stats()
         # Re-entry time gate, as a fraction of the window (issue #95). The shared
         # `min_requote_remaining_sec` is an absolute 300s, which is a whole 5m
         # window -- an absolute floor cannot mean the same thing on a 5m and a 15m
@@ -886,6 +931,13 @@ class LiveTraderEngine:
         existing _execute_stop_exit path. Paper mode stages a simulated
         order that fills when the bid touches the stop price.
         """
+        # Issue #137: with the stop-loss disabled the preset holds naked legs
+        # to settlement/rollover instead, so no protection is ever staged.
+        # Staging choke point covering the live-buffered, paper-simulated, and
+        # polling fill paths; the drift-stop triggers are gated separately
+        # below (naked-timeout and rollover stay authoritative).
+        if not self.stop_loss_enabled:
+            return
         is_up = (side.upper() == "UP")
         with self._engine_lock:
             if mstate.stop_order_id:
@@ -1180,7 +1232,10 @@ class LiveTraderEngine:
                 if m.spot_open_price and m.spot_open_price > 0:
                     m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
 
-                if self.is_running and not self.quoting_halted:
+                # Issue #137: the streaming fast-stop path honors
+                # stop_loss_enabled like every other stop trigger — a disabled
+                # stop holds naked legs through spot drift too.
+                if self.is_running and not self.quoting_halted and self.stop_loss_enabled:
                     # Fast stop loss execution on adverse leading spot drift
                     if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
                         if m.spot_drift <= -self.spot_exit_drift:
@@ -1865,6 +1920,7 @@ class LiveTraderEngine:
         # tally mid-update with `reentries` bumped but the outcome bucket not yet.
         with self._engine_lock:
             reentry_stats_snapshot = dict(self.reentry_stats)
+            band_skip_stats_snapshot = dict(self.band_skip_stats)
         
         # Format timeline for chart
         recent_timeline = self.timeline[-300:] if len(self.timeline) > 300 else self.timeline
@@ -1916,8 +1972,13 @@ class LiveTraderEngine:
                 "max_reentries_per_window": self.max_reentries_per_window,
                 "enable_leg_chase": self.enable_leg_chase,
                 "max_pair_cost": self.max_pair_cost,
+                "entry_delay_sec": self.entry_delay_sec,
+                "entry_band": self.entry_band,
+                "stop_loss_enabled": self.stop_loss_enabled,
             },
+            "active_preset": self.active_preset,
             "reentry_stats": reentry_stats_snapshot,
+            "band_skip_stats": band_skip_stats_snapshot,
             "markets": mkts_dict,
             "timeline": recent_timeline,
             "trades": recent_trades,
@@ -1961,7 +2022,11 @@ class LiveTraderEngine:
                       naked_leg_timeout_pct: Optional[float] = None,
                       reentry_require_pairable: Optional[bool] = None,
                       enable_leg_chase: Optional[bool] = None,
-                      max_pair_cost: Optional[float] = None) -> Dict[str, Any]:
+                      max_pair_cost: Optional[float] = None,
+                      entry_delay_sec: Optional[float] = None,
+                      entry_band: Optional[float] = None,
+                      stop_loss_enabled: Optional[bool] = None,
+                      preset: Optional[str] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1973,6 +2038,30 @@ class LiveTraderEngine:
         live_addr = ""
 
         with self._engine_lock:
+            # Issue #137: a named preset fills any knob left unspecified, so
+            # the table flows through the same validation, clamping, and
+            # market-selection contract as explicit knobs below. Explicit
+            # arguments win over the preset table.
+            preset_name: Optional[str] = None
+            if preset is not None:
+                if preset not in LIVE_PRESETS:
+                    raise ValueError(
+                        f"Unknown preset '{preset}'. Must be one of {sorted(LIVE_PRESETS)}"
+                    )
+                preset_name = preset
+                table = LIVE_PRESETS[preset]
+                if offset is None:
+                    offset = table["offset"]
+                if entry_band is None:
+                    entry_band = table["entry_band"]
+                if entry_delay_sec is None:
+                    entry_delay_sec = table["entry_delay_sec"]
+                if stop_loss_enabled is None:
+                    stop_loss_enabled = table["stop_loss_enabled"]
+                if max_pair_cost is None:
+                    max_pair_cost = table["max_pair_cost"]
+                if selected_markets is None and tokens is None and durations is None:
+                    selected_markets = list(table["selected_markets"])
             # Market selection is resolved and checked before any scalar field is
             # assigned, so a rejected selection leaves the whole configuration untouched.
             new_series = None
@@ -2026,6 +2115,14 @@ class LiveTraderEngine:
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
                     param_changed = True
                 if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
+                    param_changed = True
+                if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
+                    param_changed = True
+                if entry_band is not None and abs(float(entry_band) - self.entry_band) > 1e-6:
+                    param_changed = True
+                if stop_loss_enabled is not None and bool(stop_loss_enabled) != self.stop_loss_enabled:
+                    param_changed = True
+                if preset is not None and preset != self.active_preset:
                     param_changed = True
 
                 if param_changed:
@@ -2158,6 +2255,27 @@ class LiveTraderEngine:
                     self.enable_leg_chase = bool(enable_leg_chase)
                 if max_pair_cost is not None:
                     self.max_pair_cost = max(0.50, min(1.00, float(max_pair_cost)))
+                if entry_delay_sec is not None:
+                    # Issue #137: seconds into the window before quoting may
+                    # start. Negative clamps to 0 (off).
+                    self.entry_delay_sec = max(0.0, float(entry_delay_sec))
+                if entry_band is not None:
+                    # Issue #137: |mid - 0.50| admission band at entry time.
+                    # Clamped to the same 0..0.50 range as `exit_thresh`; 0
+                    # disables the filter.
+                    self.entry_band = max(0.0, min(0.50, float(entry_band)))
+                if stop_loss_enabled is not None:
+                    self.stop_loss_enabled = bool(stop_loss_enabled)
+                # Issue #137: latch only a preset the resulting configuration
+                # still matches. An explicit override — or a partially failed
+                # market removal that leaves a hybrid universe — yields a
+                # custom configuration instead of a misleading preset label.
+                if preset_name is not None:
+                    self.active_preset = (
+                        preset_name if self._preset_matches(preset_name) else None
+                    )
+                elif self.active_preset is not None and not self._preset_matches(self.active_preset):
+                    self.active_preset = None
                 # Re-entry is a narrower test than the adverse-open gate, never a
                 # looser one: a band at or above `exit_thresh` would let a window
                 # re-enter at the very drift the gate exists to reject. Applied
@@ -2803,6 +2921,10 @@ class LiveTraderEngine:
                 m.open_drift = 0.0
                 m.adverse_open = False
                 m.open_gate_evaluated = False
+                # Issue #137: the entry-band gate resets with the other
+                # per-window gates so the next window re-evaluates it.
+                m.band_gate_evaluated = False
+                m.band_skip = False
                 m.first_seen_start_ts = None
                 m.first_tick_elapsed_sec = None
                 m.late_start_skip = False
@@ -2813,6 +2935,8 @@ class LiveTraderEngine:
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
             self.reentry_stats = _empty_reentry_stats()
+            # Issue #137: band-skip telemetry resets with the re-entry tally.
+            self.band_skip_stats = _empty_band_skip_stats()
             cleared_count = 0
             for m in self.markets.values():
                 if self._market_has_orders(m):
@@ -3125,6 +3249,29 @@ class LiveTraderEngine:
             log.debug("Failed polling market %s: %s", slug, e)
             return None
 
+    def _preset_matches(self, name: str) -> bool:
+        """True when the live knob values equal the named preset table.
+
+        Issue #137: keeps `active_preset` honest — a manual knob change that
+        diverges from the table clears the latch in update_config().
+        """
+        table = LIVE_PRESETS.get(name)
+        if table is None:
+            return False
+        if abs(self.offset - float(table["offset"])) > 1e-9:
+            return False
+        if abs(self.entry_band - float(table["entry_band"])) > 1e-9:
+            return False
+        if abs(self.entry_delay_sec - float(table["entry_delay_sec"])) > 1e-9:
+            return False
+        if self.stop_loss_enabled != bool(table["stop_loss_enabled"]):
+            return False
+        if abs(self.max_pair_cost - float(table["max_pair_cost"])) > 1e-9:
+            return False
+        if {s[0] for s in self.selected_series} != set(table["selected_markets"]):
+            return False
+        return True
+
     def _naked_exit_thresh(self) -> float:
         """Adverse-drift stop distance for a single (naked) leg — issue #124.
 
@@ -3327,7 +3474,12 @@ class LiveTraderEngine:
                 mstate.next_quoted = False
 
         # 2. Advance Pre-Quoting on Next Window (T+1) (live CLOB or paper simulation)
-        if self.is_running and not self.quoting_halted and mstate.next_condition_id and not mstate.next_quoted:
+        # Issue #137: suspended while the entry controls are armed — a
+        # pre-quoted T+1 window would otherwise roll over with order IDs set,
+        # bypassing both the entry delay and the band evaluation.
+        entry_controls_armed = self.entry_delay_sec > 0 or self.entry_band > 0
+        if (self.is_running and not self.quoting_halted and not entry_controls_armed
+                and mstate.next_condition_id and not mstate.next_quoted):
             resting_up = round(0.50 - self.offset, 3)
             resting_down = round(0.50 - self.offset, 3)
             if self.mode == "live":
@@ -3492,6 +3644,20 @@ class LiveTraderEngine:
             entry_timeout_sec = win_duration
             is_late_start = False
 
+        # --- ENTRY DELAY (issue #137) ---
+        # While the window is younger than `entry_delay_sec`, no quotes are
+        # placed at all. Transient by design: no skip flag is latched, so the
+        # adverse-open, band, and timeout gates below still evaluate normally
+        # after expiry. Stateless (a pure function of `elapsed_sec`), so there
+        # is nothing to reset on rollover. Windows with a fill already are
+        # unaffected.
+        entry_delay_pending = (
+            self.entry_delay_sec > 0
+            and elapsed_sec < self.entry_delay_sec
+            and not mstate.filled_up
+            and not mstate.filled_down
+        )
+
         # Late-start latch (issue #96). Evaluated once per window from the first
         # tick the engine observes for it, keyed on `start_ts` so it re-arms on every
         # rollover. Gating on the latched value rather than on the live `elapsed_sec`
@@ -3546,6 +3712,54 @@ class LiveTraderEngine:
             mstate.open_gate_evaluated = True
         initial_drift = mstate.open_drift
         is_adverse_open = mstate.adverse_open
+
+        # --- POST-DELAY ENTRY BAND (issue #137) ---
+        # Admit only undecided markets: once the entry delay has expired, the
+        # first tick with a two-sided book checks |mid - 0.50| against
+        # `entry_band` (0 = off). A failure latches the window skipped through
+        # the same `entry_cancelled_timeout` family the other pre-entry gates
+        # use, plus a distinct `band_skip` flag and session counter. The
+        # adverse gate owns windows it already claimed, and re-entry (#95)
+        # keeps its own `reentry_drift_band` — neither path reaches this check.
+        delay_expired = self.entry_delay_sec <= 0 or elapsed_sec >= self.entry_delay_sec
+        if (self.entry_band > 0 and not mstate.band_gate_evaluated
+                and not mstate.entry_cancelled_timeout and not is_adverse_open
+                and not mstate.filled_up and not mstate.filled_down
+                and not mstate.order_id_up and not mstate.order_id_down
+                and book_two_sided and not mstate.late_start_skip
+                and delay_expired):
+            mstate.band_gate_evaluated = True
+            band_drift = abs(mid - 0.50)
+            if band_drift > self.entry_band:
+                with self._engine_lock:
+                    mstate.entry_cancelled_timeout = True
+                    mstate.band_skip = True
+                    self.band_skip_stats["band_skips"] += 1
+                mstate.status = "BAND_SKIPPED"
+                mstate.last_action = (
+                    f"Entry band skip (mid {mid:.4f}, drift {band_drift:.3f} > {self.entry_band:.2f})"
+                    " — entry skipped"
+                )
+                log.info("[%s] Entry skipped by entry band (mid=%.4f, drift=%.3f > %.2f)",
+                         slug, mid, band_drift, self.entry_band)
+
+        # While the band filter is armed but has not seen a two-sided book
+        # yet, hold placement too: "entry waits for the first two-sided tick"
+        # covers the quotes as well as the decision. Once evaluated (pass or
+        # fail) this clears by itself; re-entry bypasses the band entirely
+        # (marked evaluated when granted below).
+        band_hold = (
+            self.entry_band > 0
+            and not mstate.band_gate_evaluated
+            and not mstate.entry_cancelled_timeout
+            and not is_adverse_open
+            and not mstate.late_start_skip
+            and not mstate.filled_up
+            and not mstate.filled_down
+            and not mstate.order_id_up
+            and not mstate.order_id_down
+            and delay_expired
+        )
 
         # --- LATE-START SKIP (issue #96) ---
         # The engine attached to this window after `max_start_elapsed_pct` elapsed,
@@ -3658,6 +3872,10 @@ class LiveTraderEngine:
                         open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
                         mstate.last_action = f"Adverse drift at open (mid {open_mid_txt}, drift {initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
                         log.info("[%s] Entry skipped due to adverse open drift (open_mid=%s, drift=%.3f >= %.2f)", slug, open_mid_txt, initial_drift, self.exit_thresh)
+                    elif mstate.band_skip:
+                        # Issue #137: the latch above already recorded the
+                        # mid/drift numbers in last_action; keep them.
+                        mstate.status = "BAND_SKIPPED"
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
                         pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
@@ -3676,6 +3894,9 @@ class LiveTraderEngine:
                 mstate, slug, mid, remaining_sec, win_duration,
                 book_two_sided, is_late_start, now, resting_up, resting_down):
             is_adverse_open = mstate.adverse_open
+            # Issue #137: the entry band never gates re-entry; mark it
+            # evaluated so the hold below cannot block the re-opened window.
+            mstate.band_gate_evaluated = True
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         can_place_entry = (
@@ -3686,7 +3907,18 @@ class LiveTraderEngine:
             and not is_late_start
             and not is_adverse_open
             and not mstate.late_start_skip
+            and not entry_delay_pending
+            and not band_hold
         )
+        if entry_delay_pending and not mstate.entry_cancelled_timeout:
+            mstate.last_action = (
+                f"Entry delayed ({elapsed_sec:.0f}s/{self.entry_delay_sec:.0f}s into window)"
+                " — quoting after delay"
+            )
+        elif band_hold:
+            mstate.last_action = (
+                "Entry band check waiting for two-sided book — quoting held"
+            )
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
@@ -4005,12 +4237,14 @@ class LiveTraderEngine:
         # Holding UP alone and mid dropped adversely (max_down >= exit_thresh).
         # In paper mode the staged stop also fills when the protected leg's bid
         # touches the staged stop price (issue #87).
+        # Issue #137: the whole trigger is gated on `stop_loss_enabled` — with
+        # the stop off, naked-timeout and rollover below stay authoritative.
         paper_stop_hit_up = (
             self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "UP"
             and mstate.up_bid is not None and mstate.stop_price is not None
             and mstate.up_bid <= mstate.stop_price
         )
-        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
+        if self.stop_loss_enabled and ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
                 or paper_stop_hit_up)
                 and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.up_bid
@@ -4036,7 +4270,7 @@ class LiveTraderEngine:
             and mstate.down_bid is not None and mstate.stop_price is not None
             and mstate.down_bid <= mstate.stop_price
         )
-        if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
+        if self.stop_loss_enabled and ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
                 or paper_stop_hit_down)
                 and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.down_bid
@@ -4405,6 +4639,8 @@ class LiveTraderEngine:
             mstate.open_drift = 0.0
             mstate.adverse_open = False
             mstate.open_gate_evaluated = False
+            mstate.band_gate_evaluated = False
+            mstate.band_skip = False
             mstate.first_seen_start_ts = None
             mstate.first_tick_elapsed_sec = None
             mstate.late_start_skip = False

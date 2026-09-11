@@ -1077,6 +1077,18 @@ class LiveConfigPayload(BaseModel):
     exit_thresh_naked: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     naked_leg_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     reentry_require_pairable: Optional[bool] = None
+    # Issue #137: patient undecided-band maker knobs. entry_delay_sec has no
+    # upper bound (a delay past the window simply never quotes); entry_band
+    # matches the engine's 0..0.50 clamp; max_pair_cost matches 0.50..1.00.
+    preset: Optional[str] = None
+    # No upper bound would let a typo (or inf) silently never quote, since a
+    # delay past the window end never expires. 3600s is 4x the longest 900s
+    # window — anything larger is rejected at the boundary instead.
+    entry_delay_sec: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
+    entry_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
+    stop_loss_enabled: Optional[bool] = None
+    enable_leg_chase: Optional[bool] = None
+    max_pair_cost: Optional[float] = Field(default=None, ge=0.50, le=1.00)
 
     @field_validator("offset", mode="before")
     @classmethod
@@ -1191,6 +1203,12 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             exit_thresh_naked=payload.exit_thresh_naked,
             naked_leg_timeout_pct=payload.naked_leg_timeout_pct,
             reentry_require_pairable=payload.reentry_require_pairable,
+            enable_leg_chase=payload.enable_leg_chase,
+            max_pair_cost=payload.max_pair_cost,
+            entry_delay_sec=payload.entry_delay_sec,
+            entry_band=payload.entry_band,
+            stop_loss_enabled=payload.stop_loss_enabled,
+            preset=payload.preset,
         )
         return state
     except ValueError as e:
