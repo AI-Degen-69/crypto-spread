@@ -2025,7 +2025,7 @@ textarea:focus-visible,
       <div class="bt-accordion" style="margin-top:12px">
         <!-- ── 1. OPERATOR CONTROLS (live-replicable) ─────────────────────── -->
         <div class="bt-section" id="btSecOperator">
-          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperator')">
+          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperatorBody')">
             <span class="bt-section-dot bt-section-dot-green"></span>
             <span>Operator Controls — set these live on the book</span>
             <span class="bt-section-chevron" aria-hidden="true">▾</span>
@@ -2098,7 +2098,7 @@ textarea:focus-visible,
 
         <!-- ── 2. EXECUTION / FILLS (assumption — not live-settable) ──────── -->
         <div class="bt-section">
-          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecExecutionBody" onclick="toggleBtSection(this,'btSecExecution')">
+          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecExecutionBody" onclick="toggleBtSection(this,'btSecExecutionBody')">
             <span class="bt-section-dot bt-section-dot-amber"></span>
             <span>Execution Assumptions — model-side, not directly settable live</span>
             <span class="bt-section-chevron" aria-hidden="true">▾</span>
@@ -2129,7 +2129,7 @@ textarea:focus-visible,
 
         <!-- ── 3. WINDOW POLICY (research knobs) ─────────────────────────── -->
         <div class="bt-section">
-          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecPolicyBody" onclick="toggleBtSection(this,'btSecPolicy')">
+          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecPolicyBody" onclick="toggleBtSection(this,'btSecPolicyBody')">
             <span class="bt-section-dot bt-section-dot-blue"></span>
             <span>Window Policy — internal engine policy, mirrors live config</span>
             <span class="bt-section-chevron" aria-hidden="true">▾</span>
