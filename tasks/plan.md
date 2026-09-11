@@ -1,84 +1,50 @@
-# tasks/plan.md — Issue #124: Naked-leg risk controls (asymmetric stop, naked timeout, reentry gate)
+# tasks/plan.md — Issue #123: Chase the second leg after a one-sided fill
 
-Branch: `feat/issue-124-naked-leg-risk` (off `master`)
-Constraints: `CONSTRAINTS.md` (this issue's gates)
-Baseline: full suite green on master (367+ tests).
-Status: **implementation ~70% done in working tree** (live_trader changes +
-config plumbing landed; dashboard plumbing and tests remain).
+Branch: `feat/issue-123-leg-chase` (off `master`)
+Constraints: `CONSTRAINTS.md`
+Baseline: full suite green on master (409+ tests).
 
-## Concise spec (spec-driven-development, Standard tier — no SPEC.md change)
+## Concise Spec (spec-driven-development, Standard tier)
 
-**Goal.** Reduce single-leg stop bleed (−$117.96 across 305 stops in the
-2026-09-11 run) with three controls:
-1. **Asymmetric stop** — a naked (single-leg) position exits at
-   `exit_thresh_naked` (default 0.03) instead of the paired `exit_thresh`
-   (0.05). Single read path: `_naked_exit_thresh()`; a knob at/above the
-   paired stop or ≤ 0 falls back to `exit_thresh` (can only tighten).
-2. **Naked timeout** — a leg still unpaired after `naked_leg_timeout_pct`
-   (default 0.70) of its window force-exits at the live bid via the existing
-   `_execute_stop_exit` path, with a WINDOW_SETTLE-style note. 0 disables.
-3. **Reentry gate** — `reentry_require_pairable` (default True) extends
-   `_reentry_min_remaining_sec()` so drift-skip re-entry only fires when the
-   window has enough life left for a fresh entry to pair before the naked
-   timeout horizon. Additive restriction only.
+**Goal:** When one leg fills, step up the opposite leg's quote towards the best ask (bounded by `max_pair_cost`, default 0.98) instead of resting passively, converting stop-outs into pair merges.
 
-**Out of scope.** Leg-chase (#123), paired-position offset/exit tuning,
-per-series overrides, BacktestParams/replay parity.
-
-## Interfaces (api-and-interface-design) — locked
-
-- Engine attrs: `exit_thresh_naked=0.03`, `naked_leg_timeout_pct=0.70`,
-  `reentry_require_pairable=True`; helpers `_naked_exit_thresh()`,
-  `_naked_timeout_elapsed(...)`.
-- `update_config(..., exit_thresh_naked=, naked_leg_timeout_pct=,
-  reentry_require_pairable=)` — joins the param_changed guard and all-or-
-  nothing ValueError contract; clamping per CONSTRAINTS §5.
-- `get_state()["params"]` + `LiveConfigPayload` + cockpit UI fields
-  `exitThreshNaked` / `nakedLegTimeoutPct` / `reentryRequirePairable`.
+1. **Trigger Condition:** Exactly one leg is filled (`filled_up XOR filled_down`), not paired, not stopped, and `enable_leg_chase` is True.
+2. **Quote Logic:**
+   - For unfilled DOWN: `target = min(down_ask, max_pair_cost - fill_price_up)`. Quote steps up to `max(resting_down, target)`.
+   - For unfilled UP: `target = min(up_ask, max_pair_cost - fill_price_down)`. Quote steps up to `max(resting_up, target)`.
+   - If stepped up above initial base resting quote, flag `chased_leg`.
+3. **Fill & Telemetry:**
+   - If opposite leg fills while chased, set `chased_fill = True`.
+   - Telemetry and re-entry stats record chased fills vs passive fills.
+   - When pair completes or window exits, chase state clears and quotes normalize.
+4. **Config:**
+   - `enable_leg_chase: bool = True`
+   - `max_pair_cost: float = 0.98`
+   - Clamped in `update_config` (0.50..1.00).
 
 ## Tasks
 
-### T1 — Engine: asymmetric stop + timeout + reentry gate (DONE)
+### T1 — Config and State attributes
+Files: `strategy/config.py`, `strategy/live_trader.py`
+- Add `enable_leg_chase: bool = True` and `max_pair_cost: float = 0.98` to `LiveTraderEngine.__init__`.
+- Add `chased_leg` and `chased_fill` to `MarketLiveState`.
+- Add `enable_leg_chase` and `max_pair_cost` to `update_config` and `get_state()["params"]`.
+
+### T2 — Quoting & Fill Logic in `update_market`
 Files: `strategy/live_trader.py`
-- `_naked_exit_thresh`, `_naked_timeout_elapsed`, stop trigger + stop-staging
-  price use the naked threshold, naked-timeout block before the stop-loss
-  trigger in `_update_market_strategy`, `_reentry_min_remaining_sec` gate.
-Verify: targeted `pytest tests/test_live_trader.py tests/test_stop_orders.py
-tests/test_entry_timeout.py -q` — existing tests still green (they pin
-`exit_thresh` 0.05 behavior on naked legs only where the naked threshold is
-looser; adjust only if a test pins the old single-threshold trigger, see T3).
+- When one leg is filled, calculate opposite leg chase bid respecting `max_pair_cost`.
+- If chased quote is placed and fills, record `chased_fill = True`.
+- Normalize quotes on merge or window exit.
+- Integrate into re-entry telemetry events (`tel["chased_fill"]`) and `self.reentry_stats`.
 
-### T2 — Config plumbing (DONE)
-Files: `strategy/live_trader.py`
-- `update_config` kwargs + clamping + param_changed guard; `get_state` params.
+### T3 — Unit Tests (TDD)
+Files: `tests/test_live_trader.py`
+- Test 1: Single fill triggers chase up to opposite ask when under cap.
+- Test 2: When opposite ask exceeds `max_pair_cost - fill_price`, bid is clamped to cap.
+- Test 3: When both legs filled, chase does not trigger.
+- Test 4: Chased fill is distinguished from passive fill in telemetry and state.
+- Test 5: `update_config` updates `max_pair_cost` and `enable_leg_chase` with validation.
 
-### T3 — RED→GREEN: engine tests
-Files: `tests/test_live_trader.py`, `tests/test_stop_orders.py` (append)
-- Naked stop at 0.03 while paired keeps 0.05 (drift 0.04 exits a naked leg,
-  not a paired one).
-- Naked timeout: fill UP at t, advance clock past 70% of a 300s window →
-  stop exit taken, note contains "Naked-leg timeout", exit at live bid.
-- Timeout disabled at 0; timeout ignored when both legs filled.
-- Reentry gate: adverse-open window reverts inside band but remaining_sec <
-  naked timeout horizon → no re-entry when `reentry_require_pairable=True`;
-  re-entry happens with the flag False.
-- update_config clamps (`exit_thresh_naked=0.10` with exit_thresh 0.05 →
-  `_naked_exit_thresh()==0.05`; timeout 1.5 → 1.0) and round-trips state.
-Verify: `python -m pytest tests/test_live_trader.py tests/test_stop_orders.py -q`.
-
-### T4 — Dashboard: payload + cockpit UI
-Files: `server/osc_dash.py`
-- `LiveConfigPayload`: `exit_thresh_naked` (0..0.50, cents-normalized like
-  exit_thresh), `naked_leg_timeout_pct` (0..1, whole >1 → /100), 
-  `reentry_require_pairable: bool`; forward to `update_config`.
-- Cockpit markup: inputs next to Exit Stop Loss Threshold; JS
-  `applyCockpitConfig()` posts them; `renderCockpitUI()` syncs from
-  `st.params` while running and on first receipt.
-Verify: `python -m pytest tests/test_osc_dash_integration.py -q` + manual
-uvicorn smoke on :8802 (params round-trip through APPLY PARAMETERS).
-
-### T5 — Dashboard tests + full gate
-Files: `tests/test_osc_dash_integration.py` (append)
-- POST /api/live/config with the new knobs → state params reflect them;
-  cents normalization (3 → 0.03) for `exit_thresh_naked`.
-- `python -m pytest -q` full suite green; update CONSTRAINTS.md §5 numbers.
+### T4 — Verification & Regression Suite
+- Run `pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`.
+- Run full suite: `pytest -q`.

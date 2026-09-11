@@ -672,6 +672,9 @@ class MakerConfig:
     # Switchable like every other behavioural change here, so the rule can
     # be measured on its own.
     enable_pairs_rule: bool = True
+    # Issue #123: actively chase second leg after a one-sided fill by stepping
+    # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
+    enable_leg_chase: bool = True
     # How long after a one-sided fill the rule may still act. 15 minutes is
     # where the measured drift is still ~0 (+0.09c/share at the 5m horizon)
     # and long before the 1h mark where it is -18.5c.
