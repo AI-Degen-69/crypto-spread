@@ -387,15 +387,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     # Dynamic symmetric mid-anchored resting quotes for the window (mid - offset).
     # Inspect initial valid snapshot to anchor quotes to initial window midpoint.
-    init_mid = 0.50
+    init_mid = None
     for s_init in window_snaps:
+        if s_init.get("mid") is not None:
+            init_mid = float(s_init["mid"])
+            break
         ub_init = s_init.get("up_book") or {}
         u_m = _mid(ub_init)
-        if u_m is None:
-            u_m = s_init.get("mid")
         if u_m is not None:
-            init_mid = u_m
+            init_mid = float(u_m)
             break
+    if init_mid is None:
+        init_mid = 0.50
 
     resting_up = round(min(0.99, max(0.01, init_mid - params.offset)), 3)
     resting_down = round(min(0.99, max(0.01, (1.0 - init_mid) - params.offset)), 3)
@@ -507,10 +510,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 entry_cancelled = False
                 adverse_skipped = False
                 reentry_count += 1
-                if not filled_up:
-                    resting_up = round(min(0.99, max(0.01, reentry_mid - params.offset)), 3)
-                if not filled_down:
-                    resting_down = round(min(0.99, max(0.01, (1.0 - reentry_mid) - params.offset)), 3)
+                if not filled_up or not filled_down:
+                    r_mid = s.get("mid")
+                    if r_mid is None:
+                        r_mid = reentry_mid
+                    r_mid = float(r_mid)
+                    if not filled_up:
+                        resting_up = round(min(0.99, max(0.01, r_mid - params.offset)), 3)
+                    if not filled_down:
+                        resting_down = round(min(0.99, max(0.01, (1.0 - r_mid) - params.offset)), 3)
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
