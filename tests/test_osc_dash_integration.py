@@ -276,7 +276,7 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    res = client.get("/api/ticks/verify", params={"file": f1.name})
+    res = client.get("/api/ticks/verify", params={"file": f1.name, "wait": 1})
     assert res.status_code == 200
 
     agg = client.get("/api/ticks/manifest").json()["aggregate"]
@@ -292,6 +292,43 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert files[0]["market_breakdown"][0]["windows"] == 1
     assert files[0]["market_breakdown"][0]["trades"] == 1
     assert files[0]["market_breakdown"][0]["trades_per_window"] == 1.0
+
+
+def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
+    """Startup pre-warm loads fingerprint-matching sidecars into memory so the
+    first /api/ticks/verify after a restart is instant."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    osc_dash._VERIFY_REPORT_CACHE.clear()
+    f1 = tmp_path / "ticks_2026-09-08.jsonl"
+    f1.write_text('{"series": "btc-up-or-down-5m", "cid": "w1", "ts": 1.0}' + "\n", encoding="utf-8")
+    fp = osc_dash._file_fingerprint(f1)
+    cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
+    cache_dir.mkdir()
+    (cache_dir / "ticks_2026-09-08.jsonl.json").write_text(json.dumps({
+        "file": f1.name, "status": "PASS", "valid_ticks": 1,
+        "series_counts": {"btc-up-or-down-5m": 1},
+        "fingerprint": fp, "ts": 12345.0,
+    }), encoding="utf-8")
+
+    osc_dash._prewarm_verify_cache()
+    assert f1.name in osc_dash._VERIFY_REPORT_CACHE
+    assert osc_dash._VERIFY_REPORT_CACHE[f1.name]["fingerprint"] == fp
+
+    # Endpoint serves the pre-warmed report instantly (no PENDING, no wait).
+    res = client.get("/api/ticks/verify", params={"file": f1.name})
+    assert res.status_code == 200
+    d = res.json()
+    assert d["status"] == "PASS"
+    assert d.get("cached") is True
+
+    # Stale sidecar (fingerprint mismatch) is not pre-warmed.
+    (cache_dir / "ticks_2026-09-08.jsonl.json").write_text(json.dumps({
+        "file": f1.name, "status": "PASS", "fingerprint": "0:0", "ts": 1.0,
+    }), encoding="utf-8")
+    osc_dash._VERIFY_REPORT_CACHE.clear()
+    osc_dash._prewarm_verify_cache()
+    assert f1.name not in osc_dash._VERIFY_REPORT_CACHE
+    osc_dash._VERIFY_REPORT_CACHE.clear()
 
 
 def test_api_collector_lifecycle_and_status(monkeypatch):
@@ -712,8 +749,8 @@ def test_api_ticks_verify_endpoint(tmp_path, monkeypatch):
     assert d_dir["total_valid_ticks"] == 1
     assert d_dir["total_corrupt_lines"] == 0
 
-    # Single file verification
-    res_file = client.get("/api/ticks/verify?file=ticks_2026-09-01.jsonl")
+    # Single file verification (wait=1: synchronous scan, cold cache would return PENDING)
+    res_file = client.get("/api/ticks/verify?file=ticks_2026-09-01.jsonl&wait=1")
     assert res_file.status_code == 200
     d_file = res_file.json()
     assert d_file["valid_ticks"] == 1
@@ -1422,5 +1459,59 @@ def test_api_live_config_exit_reversal():
         assert client.post("/api/live/config", json={"exit_reversal": 0.9}).status_code == 422
     finally:
         engine.update_config(exit_reversal=orig_rev)
+        engine.mode = orig_mode
+        engine.is_running = orig_running
+
+
+def test_api_live_config_naked_leg_knobs():
+    """Issue #124: naked-leg risk knobs are exposed in /api/live/config.
+
+    exit_thresh_naked normalizes whole cents like exit_thresh (3 -> 0.03);
+    naked_leg_timeout_pct normalizes whole percentages above 1 to fractions
+    (70 -> 0.70); reentry_require_pairable round-trips as a bool. All three
+    appear in /api/live/state params.
+    """
+    engine = osc_dash.get_live_trader_engine()
+    orig_running = engine.is_running
+    engine.is_running = False
+    orig_naked = engine.exit_thresh_naked
+    orig_timeout = engine.naked_leg_timeout_pct
+    orig_pairable = engine.reentry_require_pairable
+    orig_mode = engine.mode
+    engine.mode = "paper"
+    try:
+        # Decimals pass through and appear in state params.
+        res = client.post("/api/live/config", json={
+            "exit_thresh_naked": 0.04,
+            "naked_leg_timeout_pct": 0.8,
+            "reentry_require_pairable": False,
+        })
+        assert res.status_code == 200
+        params = res.json()["params"]
+        assert abs(params["exit_thresh_naked"] - 0.04) < 1e-9
+        assert abs(params["naked_leg_timeout_pct"] - 0.8) < 1e-9
+        assert params["reentry_require_pairable"] is False
+
+        # Cents normalization: 3 -> 0.03; percentage: 70 -> 0.70.
+        res_norm = client.post("/api/live/config", json={
+            "exit_thresh_naked": 3,
+            "naked_leg_timeout_pct": 70,
+        })
+        assert res_norm.status_code == 200
+        params = res_norm.json()["params"]
+        assert abs(params["exit_thresh_naked"] - 0.03) < 1e-9
+        assert abs(params["naked_leg_timeout_pct"] - 0.70) < 1e-9
+
+        # Out of range rejected by the payload model.
+        assert client.post("/api/live/config", json={"exit_thresh_naked": 0.9}).status_code == 422
+        # Above 100 percent: the before-validator only divides values <= 100,
+        # so 150 stays out of the field's le=1.0 range and is rejected.
+        assert client.post("/api/live/config", json={"naked_leg_timeout_pct": 150}).status_code == 422
+    finally:
+        engine.update_config(
+            exit_thresh_naked=orig_naked,
+            naked_leg_timeout_pct=orig_timeout,
+            reentry_require_pairable=orig_pairable,
+        )
         engine.mode = orig_mode
         engine.is_running = orig_running

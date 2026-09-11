@@ -268,3 +268,33 @@ def test_format_report_text():
     txt = format_report_text(report)
     assert "TICK DATA INTEGRITY REPORT" in txt
     assert "Status: PASS" in txt
+
+
+def test_verify_tick_file_progress_cb(tmp_path):
+    """progress_cb fires periodically during scan with (lines_done, est_total)."""
+    from scripts.verify_tick_data import verify_tick_file as vtf
+
+    # 60k lines so the 50k throttle fires at least once.
+    p = tmp_path / "ticks_test.jsonl"
+    with p.open("w", encoding="utf-8") as f:
+        for i in range(60_000):
+            f.write(json.dumps({"series": "s", "cid": "w", "ts": float(i)}) + "\n")
+
+    calls: list[tuple[int, int]] = []
+    vtf(p, progress_cb=lambda n, t: calls.append((n, t)))
+    assert calls, "progress_cb never fired"
+    assert calls[0][0] == 50_000
+    assert all(t >= n for n, t in calls)
+
+
+def test_est_total_lines(tmp_path):
+    """est_total_lines counts small files exactly, estimates large ones."""
+    from scripts.verify_tick_data import est_total_lines
+
+    p = tmp_path / "small.jsonl"
+    p.write_text("\n".join(["{}"] * 100) + "\n", encoding="utf-8")
+    assert est_total_lines(p) == 100
+
+    big = tmp_path / "big.jsonl"
+    big.write_bytes(b"x" * 21_000_000)
+    assert est_total_lines(big) == 21_000_000 // 950

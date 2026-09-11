@@ -242,14 +242,27 @@ _SCAN_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
 _SCAN_TTL_SEC = 600.0
 
 
-def _read_verify_cache(path: Path) -> dict[str, Any] | None:
-    """Read a cached verify report sidecar if fresh (within _SCAN_TTL_SEC)."""
+def _read_verify_cache(path: Path, expected_fingerprint: str | None = None) -> dict[str, Any] | None:
+    """Read a cached verify report sidecar.
+
+    Without expected_fingerprint: accept only if fresh (within _SCAN_TTL_SEC).
+    With expected_fingerprint: a sidecar whose stored fingerprint matches the
+    current file is accepted at any age (the file is byte-identical to what
+    was scanned); otherwise the usual TTL applies.
+    """
     try:
-        if time.time() - path.stat().st_mtime > _SCAN_TTL_SEC:
-            return None
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and "series_counts" in data:
-            return data
+        if not (isinstance(data, dict) and "series_counts" in data):
+            return None
+        try:
+            age = time.time() - float(data.get("ts", path.stat().st_mtime))
+        except Exception:
+            age = time.time() - path.stat().st_mtime
+        if expected_fingerprint is not None:
+            fp = data.get("fingerprint")
+            if fp and fp == expected_fingerprint:
+                return data
+        return data if age <= _SCAN_TTL_SEC else None
     except Exception:
         pass
     return None
@@ -299,7 +312,14 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
     source = "none"
     cache_dir = files[0].parent / _VERIFY_CACHE_DIRNAME if files else None
     for f, _lines in entries:
-        cached = _read_verify_cache(cache_dir / f"{f.name}.json") if cache_dir else None
+        cached = (
+            _read_verify_cache(
+                cache_dir / f"{f.name}.json",
+                expected_fingerprint=_file_fingerprint(f),
+            )
+            if cache_dir
+            else None
+        )
         if cached is None:
             windows_known = False
             continue
@@ -367,7 +387,8 @@ def api_ticks_manifest():
         # Per-file market breakdown, when a cached verify report exists.
         for entry in out["files"]:
             cached = _read_verify_cache(
-                TICKS_DIR / _VERIFY_CACHE_DIRNAME / f"{entry['name']}.json"
+                TICKS_DIR / _VERIFY_CACHE_DIRNAME / f"{entry['name']}.json",
+                expected_fingerprint=_file_fingerprint(TICKS_DIR / entry["name"]),
             )
             entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
             if cached:
@@ -1031,6 +1052,9 @@ class LiveConfigPayload(BaseModel):
     entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     exit_reversal: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     reentry_drift_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
+    exit_thresh_naked: Optional[float] = Field(default=None, ge=0.001, le=0.50)
+    naked_leg_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    reentry_require_pairable: Optional[bool] = None
 
     @field_validator("offset", mode="before")
     @classmethod
@@ -1068,6 +1092,34 @@ class LiveConfigPayload(BaseModel):
             try:
                 fv = float(v)
                 if fv.is_integer() and 1.0 <= fv <= 50.0:
+                    return fv / 100.0
+                return fv
+            except (ValueError, TypeError):
+                pass
+        return v
+
+    @field_validator("exit_thresh_naked", mode="before")
+    @classmethod
+    def normalize_exit_thresh_naked(cls, v: Any) -> Any:
+        """Normalize whole-number naked stop values (1-50) entered as cents to decimals."""
+        if v is not None:
+            try:
+                fv = float(v)
+                if fv.is_integer() and 1.0 <= fv <= 50.0:
+                    return fv / 100.0
+                return fv
+            except (ValueError, TypeError):
+                pass
+        return v
+
+    @field_validator("naked_leg_timeout_pct", mode="before")
+    @classmethod
+    def normalize_naked_leg_timeout_pct(cls, v: Any) -> Any:
+        """Normalize a whole-number percentage above 1 (2-100) to a decimal fraction."""
+        if v is not None:
+            try:
+                fv = float(v)
+                if 1.0 < fv <= 100.0:
                     return fv / 100.0
                 return fv
             except (ValueError, TypeError):
@@ -1114,6 +1166,9 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             entry_timeout_pct=payload.entry_timeout_pct,
             exit_reversal=payload.exit_reversal,
             reentry_drift_band=payload.reentry_drift_band,
+            exit_thresh_naked=payload.exit_thresh_naked,
+            naked_leg_timeout_pct=payload.naked_leg_timeout_pct,
+            reentry_require_pairable=payload.reentry_require_pairable,
         )
         return state
     except ValueError as e:
@@ -1409,59 +1464,249 @@ async def api_upload_stream(
     }
 
 
+# --- Full verify-report cache ---------------------------------------------
+# /api/ticks/verify used to re-stream the entire file on every dashboard load
+# (500MB+ files take minutes, so the inline report never populated). Reports
+# are now cached in memory and persisted to the .verify_cache sidecar, keyed
+# by a (size, mtime_ns) fingerprint. Cache misses return status=PENDING while
+# a background scan (serialized by a semaphore) runs; the frontend polls until
+# the report lands. `?wait=1` forces the legacy synchronous scan (tests).
+_VERIFY_REPORT_CACHE: dict[str, dict[str, Any]] = {}
+_VERIFY_SCAN_INFLIGHT: set[str] = set()
+_VERIFY_SCAN_SEM = asyncio.Semaphore(1)
+_VERIFY_RESCAN_COOLDOWN_SEC = 120.0
+# Live scan progress: filename -> {"lines": int, "est_total": int, "started_at": float}
+_VERIFY_SCAN_PROGRESS: dict[str, dict[str, Any]] = {}
+
+
+def _file_fingerprint(path: Path) -> str:
+    """Cheap identity for a tick file: size + mtime_ns."""
+    st = path.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _verify_sidecar_path(filename: str) -> Path:
+    """Path of the verify-report sidecar JSON for a tick file."""
+    return TICKS_DIR / _VERIFY_CACHE_DIRNAME / f"{filename}.json"
+
+
+def _write_verify_sidecar(target: Path, rep: dict[str, Any]) -> None:
+    """Persist the full report (superset of the old counts sidecar), best-effort."""
+    try:
+        cache_dir = TICKS_DIR / _VERIFY_CACHE_DIRNAME
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = dict(rep)
+        payload["ts"] = time.time()
+        (cache_dir / f"{target.name}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _prewarm_verify_cache() -> None:
+    """Load verify sidecars whose fingerprint still matches the tick file.
+
+    Runs at startup so the first dashboard load after a restart serves cached
+    reports instantly instead of re-streaming 500MB+ files. Sidecars are small
+    JSON files, so this is cheap; mismatches are simply skipped (the normal
+    on-demand path rescans them in the background).
+    """
+    loaded = 0
+    try:
+        cache_dir = TICKS_DIR / _VERIFY_CACHE_DIRNAME
+        if not cache_dir.is_dir():
+            return
+        for f in TICKS_DIR.iterdir():
+            if f.suffix not in (".jsonl", ".gz") or not f.is_file():
+                continue
+            try:
+                side = _read_verify_cache(
+                    cache_dir / f"{f.name}.json",
+                    expected_fingerprint=_file_fingerprint(f),
+                )
+            except OSError:
+                continue
+            if side and "status" in side:
+                rep = {k: v for k, v in side.items() if k != "ts"}
+                _VERIFY_REPORT_CACHE[f.name] = {
+                    "fingerprint": side["fingerprint"],
+                    "report": rep,
+                    "scanned_at": float(side.get("ts") or 0),
+                }
+                loaded += 1
+    except Exception:
+        return
+    if loaded:
+        print(f"[osc_dash] pre-warmed verify cache: {loaded} report(s) from sidecars")
+
+
+@app.on_event("startup")
+def _startup_prewarm() -> None:
+    """Load verify sidecars into memory at startup for instant first reports."""
+    _prewarm_verify_cache()
+
+
+def _ensure_bg_verify_scan(filename: str, target: Path) -> None:
+    """Kick off a background verify scan for the file if none is running."""
+    if filename in _VERIFY_SCAN_INFLIGHT:
+        return
+    _VERIFY_SCAN_INFLIGHT.add(filename)
+    asyncio.ensure_future(_bg_verify_scan(filename, target))
+
+
+async def _bg_verify_scan(filename: str, target: Path) -> None:
+    """Scan one tick file off the event loop; cache + persist the full report."""
+    try:
+        from scripts.verify_tick_data import verify_tick_file
+
+        def _on_progress(lines_done: int, est_total: int) -> None:
+            """Record latest scan progress for the polling endpoint."""
+            _VERIFY_SCAN_PROGRESS[filename] = {
+                "lines": lines_done,
+                "est_total": est_total,
+                "started_at": _VERIFY_SCAN_PROGRESS.get(filename, {}).get(
+                    "started_at", time.time()
+                ),
+            }
+
+        _VERIFY_SCAN_PROGRESS[filename] = {
+            "lines": 0,
+            "est_total": 0,
+            "started_at": time.time(),
+        }
+        async with _VERIFY_SCAN_SEM:
+            rep = await asyncio.to_thread(
+                verify_tick_file,
+                target,
+                max_gap_sec=6.0,
+                max_start_delay=5.0,
+                progress_cb=_on_progress,
+            )
+        fp = _file_fingerprint(target)
+        rep["fingerprint"] = fp
+        _VERIFY_REPORT_CACHE[filename] = {
+            "fingerprint": fp,
+            "report": rep,
+            "scanned_at": time.time(),
+        }
+        _write_verify_sidecar(target, rep)
+    except Exception:
+        pass
+    finally:
+        _VERIFY_SCAN_INFLIGHT.discard(filename)
+        _VERIFY_SCAN_PROGRESS.pop(filename, None)
+
+
 @app.get("/api/ticks/verify")
 async def api_ticks_verify(
     request: Request,
     file: str | None = None,
     max_gap: float = 6.0,
     max_start_delay: float = 5.0,
+    refresh: int = 0,
+    wait: int = 0,
 ):
-    """Verify data integrity and quality of tick file(s) in run/ticks/."""
+    """Verify data integrity and quality of tick file(s) in run/ticks/.
+
+    Per-file requests are served from a fingerprint-validated cache; a cache
+    miss kicks off a background scan and returns status=PENDING (the dashboard
+    polls). Pass wait=1 to scan synchronously, refresh=1 to ignore the cache.
+    """
     _verify_safe_origin(request)
     from scripts.verify_tick_data import verify_tick_file, verify_ticks_dir
 
-    if file:
-        if "/" in file or "\\" in file or ".." in file:
-            return JSONResponse(status_code=400, content={"error": "invalid file param"})
-        target = (TICKS_DIR / file).resolve()
-        try:
-            target.relative_to(TICKS_DIR.resolve())
-        except ValueError:
-            return JSONResponse(status_code=400, content={"error": "invalid file path"})
-        if not target.exists() or not target.is_file():
-            return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
-        rep = await asyncio.to_thread(
-            verify_tick_file,
-            target,
-            max_gap_sec=max_gap,
-            max_start_delay=max_start_delay,
-        )
-        # Persist a cheap counts sidecar so /api/ticks/manifest's aggregate can
-        # surface per-series totals without rescanning (best-effort, Issue #109).
-        try:
-            cache_dir = TICKS_DIR / _VERIFY_CACHE_DIRNAME
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            (cache_dir / f"{target.name}.json").write_text(
-                json.dumps({
-                    "series_counts": rep.get("series_counts", {}),
-                    "market_breakdown": rep.get("market_breakdown", []),
-                    "windows_count": rep.get("windows_count", 0),
-                    "valid_ticks": rep.get("valid_ticks", 0),
-                    "ts": time.time(),
-                }),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-    else:
-        rep = await asyncio.to_thread(
+    if not file:
+        return await asyncio.to_thread(
             verify_ticks_dir,
             TICKS_DIR,
             max_gap_sec=max_gap,
             max_start_delay=max_start_delay,
         )
 
-    return rep
+    if "/" in file or "\\" in file or ".." in file:
+        return JSONResponse(status_code=400, content={"error": "invalid file param"})
+    target = (TICKS_DIR / file).resolve()
+    try:
+        target.relative_to(TICKS_DIR.resolve())
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid file path"})
+    if not target.exists() or not target.is_file():
+        return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
+
+    fp = _file_fingerprint(target)
+    entry = _VERIFY_REPORT_CACHE.get(file)
+
+    # Fresh in-memory report for the exact current file: serve instantly.
+    if not refresh and entry and entry.get("fingerprint") == fp:
+        out = dict(entry["report"])
+        out["cached"] = True
+        return out
+
+    # Stale-but-recent snapshot (e.g. today's file the collector is still
+    # appending to): serve it immediately and rescan in the background.
+    stale_rep: dict[str, Any] | None = None
+    if not refresh and entry and (
+        time.time() - float(entry.get("scanned_at") or 0) <= _VERIFY_RESCAN_COOLDOWN_SEC
+    ):
+        stale_rep = dict(entry["report"])
+    else:
+        side = _read_verify_cache(_verify_sidecar_path(file), expected_fingerprint=fp)
+        if side and not refresh and "status" in side:
+            if side.get("fingerprint") == fp:
+                # Cold start (server restart): exact sidecar for this file.
+                rep = {k: v for k, v in side.items() if k != "ts"}
+                _VERIFY_REPORT_CACHE[file] = {
+                    "fingerprint": fp,
+                    "report": rep,
+                    "scanned_at": float(side.get("ts") or 0),
+                }
+                out = dict(rep)
+                out["cached"] = True
+                return out
+            if time.time() - float(side.get("ts") or 0) <= _VERIFY_RESCAN_COOLDOWN_SEC:
+                stale_rep = {k: v for k, v in side.items() if k != "ts"}
+
+    if stale_rep is not None:
+        _ensure_bg_verify_scan(file, target)
+        out = dict(stale_rep)
+        out["cached"] = True
+        out["stale"] = True
+        out["rescanning"] = True
+        return out
+
+    # wait=1: legacy synchronous scan (also populates the cache).
+    if wait:
+        async with _VERIFY_SCAN_SEM:
+            rep = await asyncio.to_thread(
+                verify_tick_file,
+                target,
+                max_gap_sec=max_gap,
+                max_start_delay=max_start_delay,
+            )
+        rep["fingerprint"] = fp
+        _VERIFY_REPORT_CACHE[file] = {
+            "fingerprint": fp,
+            "report": rep,
+            "scanned_at": time.time(),
+        }
+        _write_verify_sidecar(target, rep)
+        return rep
+
+    # Nothing usable cached: start a background scan and let the client poll.
+    _ensure_bg_verify_scan(file, target)
+    prog = _VERIFY_SCAN_PROGRESS.get(file) or {}
+    return {
+        "file": file,
+        "status": "PENDING",
+        "pending": True,
+        "rescanning": True,
+        "progress": {
+            "lines": int(prog.get("lines") or 0),
+            "est_total": int(prog.get("est_total") or 0),
+            "elapsed_sec": round(time.time() - float(prog.get("started_at") or time.time()), 1),
+        },
+    }
 
 
 # --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
@@ -1501,6 +1746,24 @@ body.sidebar-pinned{padding-left:var(--sidebar-w-expanded)}
 .status-indicator-text{font:700 10px var(--mono);color:var(--dim);opacity:0;transition:opacity .2s ease}
 .cui-sidebar:hover .status-indicator-text,.cui-sidebar.pinned .status-indicator-text{opacity:1}
 a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
+/* Visible keyboard focus (guidelines: never remove outlines without a
+   replacement). :focus-visible avoids rings on mouse clicks. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible{
+  outline:2px solid var(--up);
+  outline-offset:2px;
+  border-radius:6px;
+}
+.filter-chip:focus-visible,
+.tab-btn:focus-visible,
+.btn:focus-visible{outline-offset:2px;border-radius:8px}
+.sidebar-tab-btn:focus-visible,.sidebar-link-btn:focus-visible,.sidebar-toggle-btn:focus-visible{
+  outline:2px solid var(--up);outline-offset:-2px;border-radius:6px;
+}
 .mono{font-family:var(--mono)}
 .hdr{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hdr h1{margin:0;font:700 16px var(--disp);display:flex;align-items:center;gap:8px}
@@ -1630,9 +1893,15 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .toast-close{background:none;border:none;color:var(--faint);font-size:16px;line-height:1;cursor:pointer;padding:0 2px;transition:color .15s ease}
 .toast-close:hover{color:var(--tx)}
 /* ── Backtest parameter sections (operator vs assumption vs policy) ───────── */
-.bt-section{margin-top:14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
-.bt-section:first-child{margin-top:0}
-.bt-section-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;font:700 11px var(--disp);letter-spacing:.05em;text-transform:uppercase;color:var(--tx)}
+.bt-accordion{display:flex;flex-direction:column;gap:14px}
+.bt-section{margin-top:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.bt-section-head{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:none;border:0;padding:2px 0;margin:0;cursor:pointer;font:700 11px var(--disp);letter-spacing:.05em;text-transform:uppercase;color:var(--tx)}
+.bt-section-head:hover{color:var(--gold)}
+.bt-section-head:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:4px}
+.bt-section-chevron{margin-left:auto;transition:transform .15s ease;color:var(--faint)}
+.bt-section-head[aria-expanded="false"] .bt-section-chevron{transform:rotate(-90deg)}
+.bt-section-body{min-width:0}
+.bt-section-body[hidden]{display:none}
 .bt-section-desc{font:500 10px var(--mono);color:var(--faint);margin:0 0 8px;line-height:1.5}
 .bt-section-dot{display:inline-block;width:8px;height:8px;border-radius:50%}
 .bt-section-dot-green{background:var(--up)}
@@ -1753,13 +2022,15 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <div id="tab-backtest" class="tab-content">
     <div class="card" style="border-top:2px solid var(--up)">
       <h3>⚡ Backtest Parameters <span class="mono" id="btHash" style="font-size:11px;color:var(--dim)"></span></h3>
-      <div class="form-grid" style="margin-top:12px">
+      <div class="bt-accordion" style="margin-top:12px">
         <!-- ── 1. OPERATOR CONTROLS (live-replicable) ─────────────────────── -->
-        <div class="bt-section">
-          <div class="bt-section-head">
+        <div class="bt-section" id="btSecOperator">
+          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperator')">
             <span class="bt-section-dot bt-section-dot-green"></span>
             <span>Operator Controls — set these live on the book</span>
-          </div>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecOperatorBody">
           <div class="bt-section-desc">
             These are the parameters you actually control when trading live:
             where you rest, how much book you clear through, your cost ceiling,
@@ -1822,14 +2093,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
               </select>
             </div>
           </div>
+          </div>
         </div>
 
         <!-- ── 2. EXECUTION / FILLS (assumption — not live-settable) ──────── -->
         <div class="bt-section">
-          <div class="bt-section-head">
+          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecExecutionBody" onclick="toggleBtSection(this,'btSecExecution')">
             <span class="bt-section-dot bt-section-dot-amber"></span>
             <span>Execution Assumptions — model-side, not directly settable live</span>
-          </div>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecExecutionBody">
           <div class="bt-section-desc">
             These describe how we assume the book fills you. In live trading the
             venue decides fills — you cannot set a fill model on an order. They
@@ -1850,14 +2124,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
               <input type="number" step="0.01" id="btGas" value="0.00">
             </div>
           </div>
+          </div>
         </div>
 
         <!-- ── 3. WINDOW POLICY (research knobs) ─────────────────────────── -->
         <div class="bt-section">
-          <div class="bt-section-head">
+          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecPolicyBody" onclick="toggleBtSection(this,'btSecPolicy')">
             <span class="bt-section-dot bt-section-dot-blue"></span>
             <span>Window Policy — internal engine policy, mirrors live config</span>
-          </div>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecPolicyBody">
           <div class="bt-section-desc">
             These are engine policy knobs. They have a live counterpart in the
             trader config, but tuning them here is research work — for example
@@ -1873,6 +2150,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
               <label>Min Window Left for Re-Entry (s)</label>
               <input type="number" min="0" step="5" id="btRequoteMin" value="300">
             </div>
+          </div>
           </div>
         </div>
       </div>
@@ -1946,7 +2224,6 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <h3 style="margin:0">💾 Tick Data Files (JSONL Repository)</h3>
         <div style="display:flex;gap:8px">
-          <button class="btn" style="font-size:11px;padding:4px 10px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3)" onclick="verifyTickData()">🔍 Verify All Files</button>
           <button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadManifest()">🔄 Refresh List</button>
         </div>
       </div>
@@ -1956,16 +2233,8 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
       <div id="manifestTableWrap">Loading files...</div>
     </div>
 
-    <!-- Integrity Verification Results Modal -->
-    <div id="verifyModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center">
-      <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;max-width:680px;width:95%;max-height:85vh;overflow-y:auto;box-shadow:0 12px 36px rgba(0,0,0,0.7)">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h3 style="margin:0;font-size:16px;display:flex;align-items:center;gap:8px"><span>🔍</span> Tick Data Integrity Report</h3>
-          <button class="btn" style="padding:2px 8px;font-size:11px" onclick="closeVerifyModal()">✖ Close</button>
-        </div>
-        <div id="verifyModalContent">Loading data and verifying integrity...</div>
-      </div>
-    </div>
+    <!-- Per-file integrity verify results are rendered inline as accordion
+         rows directly under each file in the files table (no modal). -->
 
     <!-- Custom Delete Confirmation Modal -->
     <div id="deleteModalOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center">
@@ -2033,6 +2302,21 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
         <div class="form-group">
           <label>Exit Stop Loss Threshold ($)</label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label>Naked Exit Stop ($ — single leg)</label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" value="0.03" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label>Naked Timeout (% of window)</label>
+          <input type="number" min="0" max="100" step="5" id="cockpitNakedTimeout" value="70" placeholder="0 = off" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label>Re-entry must be pairable</label>
+          <select id="cockpitReentryPairable">
+            <option value="true" selected>Yes — gate late re-entry</option>
+            <option value="false">No — issue #95 behavior</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Exit Reversal Buffer ($)</label>
@@ -2752,6 +3036,14 @@ function switchTab(name){
 }
 
 let isCollectorActive = false;
+
+// Friendly market label from a series slug: "btc-up-or-down-5m" -> "BTC 5m".
+const ASSET_LABELS = {btc:'BTC', eth:'ETH', bnb:'BNB', sol:'SOL', xrp:'XRP'};
+function marketName(series){
+  const m = /^([a-z]{3})-up-or-down-(\d+m)$/.exec(String(series||''));
+  return m ? `${ASSET_LABELS[m[1]]||m[1].toUpperCase()} ${m[2]}` : String(series||'');
+}
+
 async function refreshCollectorStatus(){
   try{
     const res = await fetch('/api/collector/status');
@@ -2825,12 +3117,12 @@ async function tick(){
   const order=['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'];
   for(const k of order){
     const s=live[k];
-    if(!s){ liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div style="color:var(--dim);font-size:11px">Loading...</div></div>`; continue; }
+    if(!s){ liveHtml+=`<div class="liveBox"><div style="font:700 12px var(--disp);color:var(--tx)">${esc(marketName(k))}</div><div style="color:var(--dim);font-size:12px">Loading…</div></div>`; continue; }
     const mid=s.mid==null?'-':fmtPrice(s.mid);
     const tp=s.touch_pair==null?'-':s.touch_pair.toFixed(3);
     const rem=s.t_rem==null?'-':hms(s.t_rem);
     const q=s.queue_up==null?'-':Math.round(s.queue_up);
-    liveHtml+=`<div class="liveBox"><div style="font:700 10px var(--disp);color:var(--faint)">${k}</div><div class="mono" style="font-size:12px">mid ${mid} · touch ${tp}</div><div class="mono" style="font-size:10px;color:var(--dim)">queue @rest ${q} · rem ${rem}</div><div style="font-size:10px"><a href="https://polymarket.com/market/${s.slug}" target="_blank" rel="noopener">${esc(s.slug.slice(0,28))} ↗</a></div></div>`;
+    liveHtml+=`<div class="liveBox"><div style="font:700 12px var(--disp);color:var(--tx)">${esc(marketName(k))}</div><div class="mono" style="font-size:12.5px;font-variant-numeric:tabular-nums">mid ${mid} · touch ${tp}</div><div class="mono" style="font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums">queue @rest ${q} · rem ${rem}</div><div style="font-size:11px"><a href="https://polymarket.com/market/${s.slug}" target="_blank" rel="noopener">Polymarket ↗</a></div></div>`;
   }
   liveHtml+='</div>';
   $('liveBar').innerHTML=liveHtml;
@@ -2850,13 +3142,13 @@ async function tick(){
         <div class="box"><div class="lbl">oscillating</div><div class="val" style="color:var(--up)">${osc}/${n}</div><div class="sub">${po}%</div><div class="bar"><div class="fill up" style="width:${po}%"></div></div></div>
         <div class="box"><div class="lbl">monotonic</div><div class="val" style="color:var(--down)">${mono}/${n}</div><div class="sub">${pm}%</div><div class="bar"><div class="fill down" style="width:${pm}%"></div></div></div>
       </div>
-      <div class="mono" style="font-size:10px;color:var(--dim)">Median touch pair: ${s.pair_cost_median==null?'-':s.pair_cost_median.toFixed(3)} · flat ${flat}/${n}</div>
+      <div class="mono" style="font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums">Median touch pair: ${s.pair_cost_median==null?'-':s.pair_cost_median.toFixed(3)} · flat ${flat}/${n}</div>
     </div>`;
   }
   $('seriesGrid').innerHTML=grid;
 
   // Recent windows table
-  let tbl='<div class="card"><h3 style="font-size:13px">Recent Windows — 50/50 Open (Click for Polymarket)</h3><table class="tbl"><tr><th>Series</th><th>Window</th><th>Open UP / DOWN</th><th style="color:var(--up)">Max UP</th><th style="color:var(--down)">Max DOWN</th><th>Candle</th><th>Class</th><th>Link</th></tr>';
+  let tbl='<div class="card"><h3 style="font-size:13px">Recent Windows — 50/50 Open (Click for Polymarket)</h3><table class="tbl"><thead><tr><th>Series</th><th>Window</th><th>Open UP / DOWN</th><th style="color:var(--up)">Max UP</th><th style="color:var(--down)">Max DOWN</th><th>Candle</th><th>Class</th><th>Link</th></tr></thead><tbody>';
   for(const w of wins.slice(0,60)){
     const sm = w.start_mid, cm=w.close_mid, mx=w.max_mid, mn=w.min_mid;
     const openUp = sm==null?'-':fmtPrice(sm);
@@ -2869,13 +3161,13 @@ async function tick(){
     const bodyLeft = Math.min(o,c), bodyW = Math.abs(c-o);
     const wickLeft = l, wickW = h-l;
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
-    const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div><div style="font-size:9px;color:var(--dim);margin-top:1px">Range ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · Close ${fmtPrice(cm)}</div></div>`;
+    const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div>    <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Range ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · Close ${fmtPrice(cm)}</div></div>`;
     const labelStr = esc(String(w.label||''));
     const slugStr = esc(String(w.slug||'').slice(-14));
     const startTs = w.start_ts ? new Date(w.start_ts*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '-';
-    tbl+=`<tr><td style="font-weight:700">${labelStr}</td><td class="mono" style="font-size:12px">${slugStr}<div style="font-size:10px;color:var(--faint)">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td><span class="price-up">${upHigh}</span> (+${upExc})</td><td><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">Open ↗</a></td></tr>`;
+    tbl+=`<tr><td style="font-weight:700">${esc(marketName(w.series||w.label||''))}</td><td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${slugStr}<div style="font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (+${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">Open ↗</a></td></tr>`;
   }
-  tbl+='</table></div>';
+  tbl+='</tbody></table></div>';
   $('windowsTableWrap').innerHTML=tbl;
 }
 
@@ -2931,6 +3223,34 @@ function togglePairCostInput(){
     lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
   }
 }
+
+function toggleBtSection(btn, bodyId){
+  const body = document.getElementById(bodyId);
+  if(!btn || !body) return;
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  body.hidden = open;
+  try {
+    const state = JSON.parse(localStorage.getItem('btSectionsOpen') || '{}');
+    state[bodyId] = !open;
+    localStorage.setItem('btSectionsOpen', JSON.stringify(state));
+  } catch(e) { /* localStorage unavailable */ }
+}
+
+(function initBtSections(){
+  if(typeof document === 'undefined' || !document.getElementById || !document.querySelector) return;
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem('btSectionsOpen') || '{}'); } catch(e) {}
+  const defaults = { btSecOperatorBody: true, btSecExecutionBody: false, btSecPolicyBody: false };
+  Object.keys(defaults).forEach(function(id){
+    const body = document.getElementById(id);
+    const btn = body ? document.querySelector('.bt-section-head[aria-controls="' + id + '"]') : null;
+    if(!body || !btn) return;
+    const open = (id in state) ? !!state[id] : defaults[id];
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    body.hidden = !open;
+  });
+})();
 
 async function runBacktest(fileOverride){
   setBacktestLoadingState(true);
@@ -3031,24 +3351,24 @@ async function runBacktest(fileOverride){
     });
 
     // Per series table
-    let stbl = '<table class="tbl"><tr><th>Series</th><th>Windows</th><th>Pair Captured</th><th>Exits</th><th>Total P&L ($)</th><th>Avg / Window ($)</th><th>Recovered</th><th>Oscillating</th><th>Monotonic</th></tr>';
+    let stbl = '<table class="tbl"><thead><tr><th>Series</th><th>Windows</th><th>Pair Captured</th><th>Exits</th><th>Total P&L ($)</th><th>Avg / Window ($)</th><th>Recovered</th><th>Oscillating</th><th>Monotonic</th></tr></thead><tbody>';
     for(const [k,v] of Object.entries(data.per_series||{})){
-      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td>${v.windows}</td><td style="color:var(--up);font-weight:700">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down)">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="color:${(v.reentry_count||0)>0?'var(--up)':'var(--dim)'}">${(v.reentry_count||0)>0 ? v.reentry_count + ' (' + fmtUsd(v.reentry_pnl_cents||0,true) + ')' : '—'}</td><td>${v.oscillating}</td><td>${v.monotonic}</td></tr>`;
+      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums;color:${(v.reentry_count||0)>0?'var(--up)':'var(--dim)'}">${(v.reentry_count||0)>0 ? v.reentry_count + ' (' + fmtUsd(v.reentry_pnl_cents||0,true) + ')' : '—'}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
     }
-    stbl+='</table>';
+    stbl+='</tbody></table>';
     $('btSeriesTableWrap').innerHTML=stbl;
 
     // Trades sample table
-    let ttbl = '<table class="tbl"><tr><th>Window</th><th>Series</th><th>Result</th><th>Fill Status</th><th>PnL / Window ($)</th><th>Delay / Partial</th><th>Exit Reason</th></tr>';
+    let ttbl = '<table class="tbl"><thead><tr><th>Window</th><th>Series</th><th>Result</th><th>Fill Status</th><th>PnL / Window ($)</th><th>Delay / Partial</th><th>Exit Reason</th></tr></thead><tbody>';
     for(const t of (data.trades_sample||[]).slice(0,30)){
       const pnlUsd = fmtUsd(t.pnl_cents, true);
       const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED ${pnlUsd}`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
       const delayTag = t.is_partial
-        ? `<span class="pill pill-mono" style="font-size:10px;color:var(--down)">Half (${t.start_delay_sec}s)</span>`
-        : `<span class="mono" style="font-size:11px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
-      ttbl+=`<tr><td class="mono" style="font-size:11px">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:11px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td><td>${delayTag}</td><td style="font-size:11px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
+        ? `<span class="pill pill-mono" style="font-size:11px;color:var(--down)">Half (${t.start_delay_sec}s)</span>`
+        : `<span class="mono" style="font-size:12px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
+      ttbl+=`<tr><td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:12px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td><td>${delayTag}</td><td style="font-size:12px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
     }
-    ttbl+='</table>';
+    ttbl+='</tbody></table>';
     $('btTradesTableWrap').innerHTML=ttbl;
   } catch(err) {
     console.error('Error running backtest:', err);
@@ -3273,20 +3593,6 @@ async function loadManifest(){
           + tile('Tape Entries', (a.tape_entries_total||0).toLocaleString())
           + tile('Tape Empty' + (m.day ? ' · ' + esc(m.day) : ''), tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--up)' : 'var(--dim)'));
         aggWrap.appendChild(tiles);
-        // Aggregate per-market sample counts (verify-cache/scan sourced).
-        if(a.series_counts && Object.keys(a.series_counts).length > 0){
-          const base = ['btc','eth','bnb','sol','xrp'];
-          const durs = ['5m','15m'];
-          const cells = base.map(b => durs.map(du => {
-            const v = a.series_counts[`${b}-up-or-down-${du}`];
-            return `<td style="padding:3px 10px;text-align:right" class="mono">${v != null ? v.toLocaleString() : '<span style="color:var(--faint)">—</span>'}</td>`;
-          }).join('</tr><tr>'));
-          const st = document.createElement('div');
-          st.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:12px;background:var(--panel2)';
-          st.innerHTML = `<div style="font:700 11px var(--disp);color:var(--tx);margin-bottom:4px">Samples per Market <span style="color:var(--faint);font-weight:400">· source: ${esc(a.series_counts_source||'none')}</span></div>`
-            + `<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="text-align:left;color:var(--dim);font-weight:600;padding:3px 10px">Asset</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">5m</th><th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">15m</th></tr></thead><tbody><tr>${cells}</tr></tbody></table>`;
-          aggWrap.appendChild(st);
-        }
       }
     }
 
@@ -3313,8 +3619,19 @@ async function loadManifest(){
 
         const tdName = document.createElement('td');
         tdName.className = 'mono';
-        tdName.style.fontWeight = '700';
-        tdName.textContent = f.name;
+        const btnName = document.createElement('button');
+        btnName.type = 'button';
+        btnName.style.cssText = 'background:transparent;border:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left;display:inline-flex;align-items:center;gap:2px';
+        btnName.title = 'Toggle integrity report';
+        btnName.setAttribute('aria-label', `Toggle integrity report for ${f.name}`);
+        btnName.setAttribute('aria-expanded', 'false');
+        btnName.innerHTML = `<span id="verify_arrow_${f.name}" style="display:inline-block;width:16px;color:var(--gold)" aria-hidden="true">▶</span>${esc(f.name)}`;
+        btnName.addEventListener('click', () => {
+          const expanded = btnName.getAttribute('aria-expanded') === 'true';
+          btnName.setAttribute('aria-expanded', String(!expanded));
+          toggleFileVerify(f.name);
+        });
+        tdName.appendChild(btnName);
 
         const tdSize = document.createElement('td');
         tdSize.className = 'mono';
@@ -3333,11 +3650,10 @@ async function loadManifest(){
         tdActions.style.gap = '6px';
         tdActions.style.alignItems = 'center';
 
-        const btnVerify = document.createElement('button');
-        btnVerify.className = 'btn';
-        btnVerify.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(51,201,181,0.12);color:var(--up);border-color:rgba(51,201,181,0.3);cursor:pointer';
-        btnVerify.textContent = '🔍 Verify';
-        btnVerify.addEventListener('click', () => verifyTickData(f.name));
+        const verifyBadge = document.createElement('span');
+        verifyBadge.id = 'verify_badge_' + f.name;
+        verifyBadge.style.cssText = 'font:700 10px var(--disp);color:var(--faint);white-space:nowrap';
+        verifyBadge.textContent = '…';
 
         const btnRun = document.createElement('button');
         btnRun.className = 'btn';
@@ -3351,7 +3667,7 @@ async function loadManifest(){
         btnDel.textContent = '🗑️ Delete';
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
 
-        tdActions.appendChild(btnVerify);
+        tdActions.appendChild(verifyBadge);
         tdActions.appendChild(btnRun);
         tdActions.appendChild(btnDel);
 
@@ -3362,153 +3678,196 @@ async function loadManifest(){
         tr.appendChild(tdActions);
         tbl.appendChild(tr);
 
-        // Per-file market breakdown (Issue #109): collapsible row, populated
-        // after a Verify run. Click the trigger row to expand/collapse.
-        if(f.market_breakdown && f.market_breakdown.length > 0){
-          const brkId = `brk_${fileIdx}`;
-          const trig = document.createElement('tr');
-          const tdT = document.createElement('td');
-          tdT.colSpan = 5;
-          tdT.style.cssText = 'background:var(--panel2);padding:6px 14px;font:600 11px var(--disp);color:var(--gold);border-top:1px solid var(--line)';
-          tdT.innerHTML = `<button type="button" aria-expanded="false" aria-controls="${brkId}" data-brk="${brkId}" style="all:unset;cursor:pointer;font:inherit;color:inherit"><span id="${brkId}_arrow" style="display:inline-block;width:14px">▶</span> 📊 Market Breakdown — ${f.market_breakdown.length} markets (click to expand)</button>`;
-          trig.appendChild(tdT);
-          trig.addEventListener('click', () => {
-            const row = document.getElementById(brkId);
-            const arrow = document.getElementById(brkId + '_arrow');
-            const btn = tdT.querySelector('button');
-            const open = row.style.display !== 'none';
-            row.style.display = open ? 'none' : '';
-            arrow.textContent = open ? '▶' : '▼';
-            btn.setAttribute('aria-expanded', String(!open));
-          });
-          const brk = document.createElement('tr');
-          brk.id = brkId;
-          brk.style.display = 'none';
-          const td = document.createElement('td');
-          td.colSpan = 5;
-          td.style.cssText = 'background:var(--panel2);padding:10px 14px';
-          const dur5 = f.market_breakdown.filter(b => b.duration === 300);
-          const dur15 = f.market_breakdown.filter(b => b.duration === 900);
-          const durLabel = {300:'5m', 900:'15m'};
-          let inner = '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>'
-            + '<th style="text-align:left;color:var(--dim);font-weight:600;padding:3px 10px">Market</th>'
-            + ['300','900'].map(du => `<th style="text-align:right;color:var(--gold);font-weight:700;padding:3px 10px">${durLabel[du]}</th>`).join('')
-            + '</tr></thead><tbody>';
-          const base = ['btc','eth','bnb','sol','xrp'];
-          for(const b of base){
-            inner += `<tr><td style="padding:3px 10px;font-weight:600;text-transform:uppercase">${b}</td>`;
-            for(const du of ['300','900']){
-              const cell = (du === '300' ? dur5 : dur15).find(x => x.series.startsWith(b + '-'));
-              inner += cell
-                ? `<td style="padding:3px 10px;text-align:right" class="mono" title="${cell.trades} trades · avg ${cell.trades_per_window}/window">${cell.windows} w · ${cell.trades.toLocaleString()} tr (${cell.trades_per_window}/w)</td>`
-                : '<td style="padding:3px 10px;text-align:right;color:var(--faint)" class="mono">—</td>';
-            }
-            inner += '</tr>';
-          }
-          inner += '</tbody></table>';
-          td.innerHTML = inner;
-          brk.appendChild(td);
-          tbl.appendChild(trig);
-          tbl.appendChild(brk);
-        }
+        // Inline integrity accordion row: sits directly under the file row,
+        // filled by verifyTickData() on load (no modal, no Verify button).
+        const vRow = document.createElement('tr');
+        vRow.id = 'verify_row_' + f.name;
+        vRow.style.display = 'none';
+        const vTd = document.createElement('td');
+        vTd.colSpan = 5;
+        vTd.id = 'verify_cell_' + f.name;
+        vTd.style.cssText = 'background:var(--panel2);padding:12px 16px;border-top:1px solid var(--line)';
+        vTd.innerHTML = '<div style="text-align:center;color:var(--faint);font-size:11px">Integrity report will load here…</div>';
+        vRow.appendChild(vTd);
+        tbl.appendChild(vRow);
+
+        // Queue the integrity check for this file — runs sequentially after
+        // the table is built so earlier files populate first (verify runs on
+        // every load but is served from the fingerprint cache when unchanged).
+        _verifyQueue.push(f.name);
       }
     }
     wrap.appendChild(tbl);
+    runVerifyQueue(); // integrity checks, one file at a time
   }catch(err){
     $('manifestTableWrap').innerHTML = '<div style="color:var(--down);padding:12px">Error loading files list</div>';
   }
 }
 
-async function verifyTickData(filename){
-  const modal = $('verifyModalOverlay');
-  const content = $('verifyModalContent');
-  if(!modal || !content) return;
+// Sequential verify queue: files are checked one at a time so earlier rows
+// populate first; each check resolves from the server-side report cache and
+// polls while the backend reports PENDING (background scan in progress).
+const _verifyQueue = [];
+let _verifyRunning = false;
+function runVerifyQueue(){
+  if(_verifyRunning) return;
+  _verifyRunning = true;
+  (async () => {
+    while(_verifyQueue.length){
+      const name = _verifyQueue.shift();
+      try{ await verifyTickData(name); }catch(e){ /* row shows the error */ }
+    }
+    _verifyRunning = false;
+  })();
+}
 
-  modal.style.display = 'flex';
-  content.innerHTML = '<div style="text-align:center;padding:24px;color:var(--dim);font-size:14px">Running comprehensive integrity check... <span class="spinner"></span></div>';
+function fileVerifyStatusBits(st){
+  const s = st || 'UNKNOWN';
+  const color = s === 'PASS' ? 'var(--up)' : s === 'WARN' ? 'var(--gold)' : 'var(--down)';
+  const label = s === 'PASS' ? '✅ PASS' : s === 'WARN' ? '⚠️ WARN' : '❌ FAIL';
+  return {color, label};
+}
 
+// Inline per-file integrity report — rendered under the file's row in the
+// files table (accordion body). No modal.
+function renderFileVerifyHtml(filename, d){
+  const {color: statusColor, label: statusLabel} = fileVerifyStatusBits(d.status);
+
+  let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div>
+        <div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em">Overall Integrity Status</div>
+        <div style="font:700 17px var(--disp);color:${statusColor};margin-top:2px">${statusLabel}</div>
+      </div>
+      <div class="mono" style="font-size:12px;color:var(--dim)">🔍 Integrity Report · ${esc(filename)}</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+        <div style="font:500 11px var(--body);color:var(--dim)">Valid Samples</div>
+        <div class="mono" style="font-size:15px;font-weight:700;color:var(--up);margin-top:2px">${(d.valid_ticks||0).toLocaleString()}</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+        <div style="font:500 11px var(--body);color:var(--dim)">Corrupt Rows</div>
+        <div class="mono" style="font-size:15px;font-weight:700;color:${(d.corrupt_lines||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.corrupt_lines||0).toLocaleString()}</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+        <div style="font:500 11px var(--body);color:var(--dim)">Identified Windows</div>
+        <div class="mono" style="font-size:15px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums">${(d.windows_count||0).toLocaleString()}</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+        <div style="font:500 11px var(--body);color:var(--dim)">Crossed Books</div>
+        <div class="mono" style="font-size:15px;font-weight:700;color:${(d.crossed_books||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.crossed_books||0).toLocaleString()}</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+        <div style="font:500 11px var(--body);color:var(--dim)">Timestamp Gaps (&gt;6s)</div>
+        <div class="mono" style="font-size:15px;font-weight:700;color:${(d.sampling_gaps_count||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.sampling_gaps_count||0).toLocaleString()}</div>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
+        <div style="font:500 11px var(--body);color:var(--dim)">Collector Errors (err)</div>
+        <div class="mono" style="font-size:15px;font-weight:700;color:${(d.collector_errors||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.collector_errors||0).toLocaleString()}</div>
+      </div>
+    </div>
+  `;
+
+  if(d.market_breakdown && d.market_breakdown.length > 0){
+    const durLabel = {300:'5m', 900:'15m'};
+    const assetLabel = {btc:'BTC', eth:'ETH', bnb:'BNB', sol:'SOL', xrp:'XRP'};
+    const marketName = (s) => {
+      const m = /^([a-z]{3})-up-or-down-(\d+m)$/.exec(String(s||''));
+      return m ? `${assetLabel[m[1]]||m[1].toUpperCase()} ${m[2]}` : String(s||'');
+    };
+    html += '<div style="font:700 12px var(--disp);color:var(--tx);letter-spacing:.05em;text-transform:uppercase;margin:12px 0 6px">Per-Market Breakdown</div>'
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<thead><tr>'
+      + '<th scope="col" style="text-align:left;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Market</th>'
+      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Windows</th>'
+      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Trades</th>'
+      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Avg / Window</th>'
+      + '</tr></thead><tbody>';
+    for(const mb of d.market_breakdown){
+      const alt = (d.market_breakdown.indexOf(mb) % 2) ? ' background:var(--panel);' : '';
+      html += `<tr style="${alt}">`
+        + `<td style="padding:6px 8px;font-weight:600;color:var(--tx)">${esc(marketName(mb.series))}</td>`
+        + `<td class="mono" style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${(mb.windows||0).toLocaleString()}</td>`
+        + `<td class="mono" style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${(mb.trades||0).toLocaleString()}</td>`
+        + `<td class="mono" style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;color:var(--dim)">${mb.trades_per_window}</td>`
+        + '</tr>';
+    }
+    html += '</table>';
+  }
+
+  if(d.sample_issues && d.sample_issues.length > 0){
+    html += '<div style="margin:12px 0 6px;font:700 12px var(--disp);color:var(--down);letter-spacing:.05em;text-transform:uppercase">Sample Discrepancies</div><div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-height:140px;overflow-y:auto;font-size:12px" class="mono">';
+    for(const is of d.sample_issues.slice(0, 10)){
+      html += `<div style="margin-bottom:4px;color:var(--dim)">• Row ${is.line}: <span style="color:var(--tx)">${esc(is.detail)}</span></div>`;
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+// Verify one tick file and render the result inline into its accordion row.
+// Server-side report cache makes this instant for unchanged files; a first
+// pass (or a file the collector is still appending to) polls until the
+// background scan lands. refresh=true bypasses the cache (manual rescan).
+async function verifyTickData(filename, refresh){
+  const cell = document.getElementById('verify_cell_' + filename);
+  if(cell && !cell.dataset.loaded){
+    cell.innerHTML = '<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">Running integrity check on ' + esc(filename) + '… <span class="spinner"></span></div>';
+  }
   try{
-    let url = '/api/ticks/verify';
-    if(filename) url += '?file=' + encodeURIComponent(filename);
-    const res = await fetch(url);
-    const d = await res.json();
-
-    const st = d.status || 'UNKNOWN';
-    const statusColor = st === 'PASS' ? 'var(--up)' : st === 'WARN' ? 'var(--gold)' : 'var(--down)';
-    const statusLabel = st === 'PASS' ? '✅ PASS' : st === 'WARN' ? '⚠️ WARN' : '❌ FAIL';
-
-    let html = `
-      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between">
-        <div>
-          <div style="font-size:11px;color:var(--dim);text-transform:uppercase">Overall Integrity Status</div>
-          <div style="font-size:16px;font-weight:700;color:${statusColor};margin-top:2px">${statusLabel}</div>
-        </div>
-        <div class="mono" style="font-size:12px;color:var(--dim)">
-          ${filename ? 'File: ' + esc(filename) : 'All directory files (' + (d.files_checked||0) + ')'}
-        </div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
-        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">Valid Samples</div>
-          <div class="mono" style="font-size:15px;font-weight:700;color:var(--up);margin-top:2px">${(d.total_valid_ticks||d.valid_ticks||0).toLocaleString()}</div>
-        </div>
-        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">Corrupt Rows</div>
-          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_corrupt_lines||d.corrupt_lines||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.total_corrupt_lines||d.corrupt_lines||0).toLocaleString()}</div>
-        </div>
-        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">Identified Windows</div>
-          <div class="mono" style="font-size:15px;font-weight:700;margin-top:2px">${(d.total_windows||d.windows_count||0).toLocaleString()}</div>
-        </div>
-        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">Crossed Books</div>
-          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_crossed_books||d.crossed_books||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.total_crossed_books||d.crossed_books||0).toLocaleString()}</div>
-        </div>
-        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">Timestamp Gaps (>6s)</div>
-          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_sampling_gaps||d.sampling_gaps_count||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.total_sampling_gaps||d.sampling_gaps_count||0).toLocaleString()}</div>
-        </div>
-        <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-          <div style="font-size:10px;color:var(--dim)">Collector Errors (err)</div>
-          <div class="mono" style="font-size:15px;font-weight:700;color:${(d.total_collector_errors||d.collector_errors||0)>0?'var(--gold)':'var(--tx)'};margin-top:2px">${(d.total_collector_errors||d.collector_errors||0).toLocaleString()}</div>
-        </div>
-      </div>
-    `;
-
-    if(d.files && d.files.length > 0){
-      html += '<h4 style="margin:12px 0 6px;font-size:12px">Per-File Breakdown:</h4><table class="tbl" style="margin-top:4px"><tr><th>File</th><th>Status</th><th>Samples</th><th>Corrupt</th><th>Windows</th><th>Gaps</th></tr>';
-      for(const fr of d.files){
-        const fCol = fr.status === 'PASS' ? 'var(--up)' : fr.status === 'WARN' ? 'var(--gold)' : 'var(--down)';
-        html += `<tr><td class="mono" style="font-weight:600">${esc(fr.file)}</td><td style="color:${fCol};font-weight:700">${esc(fr.status)}</td><td class="mono">${(fr.valid_ticks||0).toLocaleString()}</td><td class="mono" style="color:${fr.corrupt_lines>0?'var(--down)':'inherit'}">${fr.corrupt_lines||0}</td><td class="mono">${fr.windows_count||0}</td><td class="mono">${fr.sampling_gaps_count||0}</td></tr>`;
-        // Market breakdown rows (Issue #109)
-        if(fr.market_breakdown && fr.market_breakdown.length > 0){
-          const durLabel = {300:'5m', 900:'15m'};
-          for(const mb of fr.market_breakdown){
-            html += `<tr><td style="padding-left:22px;color:var(--dim);text-transform:uppercase;font-size:10px">${esc(mb.series)} ${durLabel[mb.duration]||mb.duration}</td><td colspan="5" class="mono" style="text-align:right">${mb.windows} windows · ${mb.trades.toLocaleString()} trades · avg ${mb.trades_per_window}/window</td></tr>`;
-          }
-        }
+    let d;
+    for(;;){
+      const res = await fetch('/api/ticks/verify?file=' + encodeURIComponent(filename) + (refresh ? '&refresh=1' : ''));
+      d = await res.json();
+      if(d.error){ throw new Error(d.error); }
+      if(!d.pending){ break; }
+      // Backend is scanning in the background — poll until the report lands.
+      if(cell){
+        const p = d.progress || {};
+        const lines = (p.lines || 0).toLocaleString();
+        const est = p.est_total || 0;
+        const pct = est > 0 ? Math.min(99, Math.round((p.lines || 0) / est * 100)) : null;
+        const elapsed = p.elapsed_sec != null ? p.elapsed_sec + 's' : '';
+        const progHtml = est > 0
+          ? `${lines} / ${est.toLocaleString()} lines · ${pct}% · ${elapsed}`
+          : `${lines} lines processed · ${elapsed}`;
+        cell.innerHTML = `<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">Scanning ${esc(filename)} in background… <span class="spinner"></span><div class="mono" style="margin-top:6px;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums">${progHtml}</div></div>`;
       }
-      html += '</table>';
+      const badgeP = document.getElementById('verify_badge_' + filename);
+      if(badgeP){ badgeP.textContent = '⏳'; badgeP.style.color = 'var(--dim)'; }
+      await new Promise(r => setTimeout(r, 2000));
     }
-
-    if(d.sample_issues && d.sample_issues.length > 0){
-      html += '<h4 style="margin:14px 0 6px;font-size:12px;color:var(--down)">Sample Discrepancies Found:</h4><div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-height:140px;overflow-y:auto;font-size:11px" class="mono">';
-      for(const is of d.sample_issues.slice(0, 10)){
-        html += `<div style="margin-bottom:4px;color:var(--dim)">• Row ${is.line}: <span style="color:var(--tx)">${esc(is.detail)}</span></div>`;
-      }
-      html += '</div>';
+    if(cell){
+      cell.dataset.loaded = '1';
+      cell.innerHTML = renderFileVerifyHtml(filename, d) + (d.stale
+        ? '<div style="text-align:center;color:var(--faint);font-size:10px;margin-top:6px">Snapshot of a file still being written — rescanning in background.</div>'
+        : '')
+        + `<div style="text-align:center;margin-top:6px"><button type="button" class="btn" style="font-size:10px;padding:3px 10px" aria-label="Rescan integrity report for ${esc(filename)}" onclick="verifyTickData('${esc(filename)}', true)">↻ Rescan</button></div>`;
     }
-
-    content.innerHTML = html;
+    // Refresh the status badge on the file row.
+    const badge = document.getElementById('verify_badge_' + filename);
+    if(badge){
+      const {color, label} = fileVerifyStatusBits(d.status);
+      badge.textContent = label;
+      badge.style.color = color;
+    }
   }catch(e){
-    content.innerHTML = `<div style="color:var(--down);padding:16px;text-align:center">Error running integrity verification: ${esc(e.message)}</div>`;
+    if(cell){
+      cell.innerHTML = `<div style="color:var(--down);padding:10px;text-align:center;font-size:12px">Error verifying ${esc(filename)}: ${esc(e.message)}</div>`;
+    }
   }
 }
 
-function closeVerifyModal(){
-  const modal = $('verifyModalOverlay');
-  if(modal) modal.style.display = 'none';
+// Expand/collapse the inline verify accordion under a file row.
+function toggleFileVerify(filename){
+  const row = document.getElementById('verify_row_' + filename);
+  const arrow = document.getElementById('verify_arrow_' + filename);
+  if(!row) return;
+  const open = row.style.display !== 'none';
+  row.style.display = open ? 'none' : '';
+  if(arrow) arrow.textContent = open ? '▶' : '▼';
 }
 
 function deleteTickFile(filename){
@@ -4341,6 +4700,21 @@ async function applyCockpitConfig() {
     starting_balance: startBal,
     entry_timeout_pct,
   };
+  // Issue #124: naked-leg risk knobs. Naked stop is entered like exit_thresh
+  // (whole numbers normalized to decimals server-side); timeout as a whole
+  // percentage normalized to a fraction server-side.
+  const nakedEl = $('cockpitExitNaked');
+  const nakedTimeoutEl = $('cockpitNakedTimeout');
+  const pairableEl = $('cockpitReentryPairable');
+  if (nakedEl && nakedEl.value) {
+    body.exit_thresh_naked = parseFloat(nakedEl.value);
+  }
+  if (nakedTimeoutEl && nakedTimeoutEl.value !== '' && !isNaN(parseFloat(nakedTimeoutEl.value))) {
+    body.naked_leg_timeout_pct = Math.min(100, Math.max(0, parseFloat(nakedTimeoutEl.value))) / 100.0;
+  }
+  if (pairableEl) {
+    body.reentry_require_pairable = pairableEl.value === 'true';
+  }
   // Market selection is immutable while the bot runs; only send filters when stopped
   if (!filtersLocked) {
     if (cockpitExactSelection) {
@@ -4430,6 +4804,9 @@ function renderCockpitUI(st) {
       if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
+      if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
+      if ($('cockpitNakedTimeout') && st.params.naked_leg_timeout_pct != null) $('cockpitNakedTimeout').value = Math.round(st.params.naked_leg_timeout_pct * 100);
+      if ($('cockpitReentryPairable') && st.params.reentry_require_pairable != null) $('cockpitReentryPairable').value = String(!!st.params.reentry_require_pairable);
     }
     if ($('cockpitWallet') && st.wallet_address != null) {
       $('cockpitWallet').value = st.wallet_address;
@@ -4447,6 +4824,9 @@ function renderCockpitUI(st) {
       if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
+      if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
+      if ($('cockpitNakedTimeout') && st.params.naked_leg_timeout_pct != null) $('cockpitNakedTimeout').value = Math.round(st.params.naked_leg_timeout_pct * 100);
+      if ($('cockpitReentryPairable') && st.params.reentry_require_pairable != null) $('cockpitReentryPairable').value = String(!!st.params.reentry_require_pairable);
     }
   } else if (st.is_running && st.selected_series) {
     syncCockpitFiltersFromState(st);
@@ -5498,6 +5878,7 @@ initLiveCockpitStream();
 ensureCockpitPolling();
 tick();
 setInterval(tick, 3000);
+loadManifest();   // tick files tab: load file list + run integrity verify on every dashboard load
 </script></body></html>
 """
 

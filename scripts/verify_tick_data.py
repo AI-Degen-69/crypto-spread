@@ -23,7 +23,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TICKS_DIR = ROOT / "run" / "ticks"
@@ -45,6 +45,27 @@ def _open_tick_file(path: Path):
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
     return open(path, "r", encoding="utf-8", errors="replace")
+
+
+def est_total_lines(path: Path) -> int:
+    """Cheap line-count estimate (bytes / avg-record-size), matching the dashboard.
+
+    Same heuristic as osc_dash's manifest aggregate: files >= 20MB are estimated
+    at ~950 bytes/line; smaller files are counted exactly (they're cheap).
+    """
+    path = Path(path)
+    size = path.stat().st_size
+    if size >= 20_000_000:
+        return max(1, int(size / 950))
+    try:
+        opener = gzip.open if path.suffix == ".gz" else open
+        n = 0
+        with opener(path, "rb") as f:  # type: ignore[operator]
+            for _ in f:
+                n += 1
+        return max(1, n)
+    except Exception:
+        return max(1, int(size / 950))
 
 
 def verify_book(book: Any, label: str = "book") -> list[str]:
@@ -261,10 +282,14 @@ def verify_tick_file(
     max_gap_sec: float = 6.0,
     max_start_delay: float = 5.0,
     max_sample_issues: int = 20,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Verify integrity of a single .jsonl or .jsonl.gz file using streaming memory-efficient tracking.
     
     Returns structured verification report dict.
+
+    progress_cb: optional callable(lines_done, est_total) invoked periodically
+    (roughly every 50k lines) so callers can surface scan progress.
     """
     path = Path(file_path)
     if not path.is_file():
@@ -299,6 +324,11 @@ def verify_tick_file(
         with _open_tick_file(path) as f:
             for line_no, line in enumerate(f, start=1):
                 raw_lines += 1
+                if progress_cb is not None and raw_lines % 50_000 == 0:
+                    try:
+                        progress_cb(raw_lines, est_total_lines(path))
+                    except Exception:
+                        pass
                 stripped = line.strip()
                 if not stripped:
                     empty_lines += 1
