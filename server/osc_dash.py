@@ -85,12 +85,12 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
     chased_pnls = [settle[str(f.get("market_slug") or "")]
                    for f in chased]
     chased_pnls = [p for p in chased_pnls if p is not None]
-    low = [settle.get(str(f.get("market_slug") or ""))
-           for f in passive if f["fill_ratio"] < 0.5]
-    high = [settle.get(str(f.get("market_slug") or ""))
-            for f in passive if f["fill_ratio"] >= 0.5]
-    low = [p for p in low if p is not None]
-    high = [p for p in high if p is not None]
+    low_raw = [settle.get(str(f.get("market_slug") or ""))
+               for f in passive if f["fill_ratio"] < 0.5]
+    high_raw = [settle.get(str(f.get("market_slug") or ""))
+                for f in passive if f["fill_ratio"] >= 0.5]
+    low = [p for p in low_raw if p is not None]
+    high = [p for p in high_raw if p is not None]
     low_mean = sum(low) / len(low) if low else None
     high_mean = sum(high) / len(high) if high else None
     return {
@@ -2700,7 +2700,7 @@ textarea:focus-visible,
     <div class="card" id="queuePanel" style="margin-top:12px">
       <h3 style="margin:0 0 10px">
         <span>📊 Queue Telemetry (tape vs tapeq)</span>
-        <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fill telemetry</span>
+        <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fills</span>
       </h3>
       <div id="queueSvgWrap" style="width:100%;min-height:150px"></div>
       <details id="queueFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
@@ -4697,7 +4697,7 @@ function freedmanDiaconisBins(values) {
   nb = Math.max(12, Math.min(20, nb));
   const edges = [];
   for (let i = 0; i <= nb; i++) edges.push(min + (max - min) * i / nb);
-  return { edges: edges, nbins: nb };
+  return edges;
 }
 function renderPnlHistogram(trades) {
   const wrap = $('pnlHistSvgWrap');
@@ -4709,6 +4709,8 @@ function renderPnlHistogram(trades) {
     if (statsEl) statsEl.textContent = 'No closed trades yet';
     wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">No closed trades yet — the distribution appears after the first settlements.</div>';
     if (fb) fb.innerHTML = '';
+    const fbWrap = $('pnlHistFallbackWrap');
+    if (fbWrap) fbWrap.style.display = 'none';
     return;
   }
   const stats = pnlBootstrapCiLo(pnls);
@@ -4721,7 +4723,7 @@ function renderPnlHistogram(trades) {
   if (nz.length === 0) {
     bars = [{ label: '0', count: zeros, color: 'var(--dim)' }];
   } else {
-    const { edges } = freedmanDiaconisBins(nz);
+    const edges = freedmanDiaconisBins(nz);
     const counts = new Array(edges.length - 1).fill(0);
     for (const v of nz) {
       let bi = 0;
@@ -4755,8 +4757,10 @@ function renderPnlHistogram(trades) {
       ${rects}</svg>
     <div style="font-size:10px;color:var(--faint);margin-top:4px" class="mono">session window: last ${pnls.length} closed trades (matches the table); zero-PnL bin shown separately</div>`;
   if (fb) {
-    const trows = bars.map(b => `<tr><td class="mono">${esc(b.label)}</td><td class="mono">${b.count}</td></tr>`).join('');
+    const trows = bars.map(b => `<tr><td class="mono">${esc(b.label)}</td><td class="mono">${esc(b.count)}</td></tr>`).join('');
     fb.innerHTML = `<table class="tbl"><thead><tr><th>Bin</th><th>Positions</th></tr></thead><tbody>${trows}</tbody></table>`;
+    const fbWrapShow = $('pnlHistFallbackWrap');
+    if (fbWrapShow) fbWrapShow.style.display = '';
   }
 }
 
@@ -4794,13 +4798,18 @@ function renderQueuePanel(q) {
   if (verdictEl) {
     verdictEl.textContent = verdictTxt;
     verdictEl.style.color = verdictTxt === 'tape-like' ? 'var(--up)'
-      : verdictTxt === 'queue-toxic' ? 'var(--down)' : '';
+      : verdictTxt === 'queue-toxic' ? 'var(--down)'
+      : verdictTxt === 'mixed/unclear' ? 'var(--gold)' : '';
   }
   if (!q || q.empty || !Array.isArray(q.buckets) || q.total_fills === 0) {
-    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">awaiting fill telemetry — lines appear in run/live_fill_telemetry.jsonl after the first live fills.</div>';
+    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">awaiting fills — lines appear in run/live_fill_telemetry.jsonl after the first live fills.</div>';
     if (fb) fb.innerHTML = '';
+    const fbWrap = $('queueFallbackWrap');
+    if (fbWrap) fbWrap.style.display = 'none';
     return;
   }
+  const fbWrapShow = $('queueFallbackWrap');
+  if (fbWrapShow) fbWrapShow.style.display = '';
   const buckets = q.buckets;
   const maxCount = Math.max(1, ...buckets.map(b => b.count || 0));
   const w = 560, rowH = 34, padL = 86, padR = 110, h = buckets.length * rowH + 46;
@@ -4828,8 +4837,9 @@ function renderQueuePanel(q) {
   if (fb) {
     let trows = buckets.map(b => {
       const mean = b.mean_settle_pnl_usd;
-      return `<tr><td class="mono">${esc(b.bucket)}</td><td class="mono">${b.count}</td><td class="mono">${esc(mean === null || mean === undefined ? 'n/a' : mean.toFixed(2))}</td></tr>`;
+      return `<tr><td class="mono">${esc(b.bucket)}</td><td class="mono">${esc(b.count)}</td><td class="mono">${esc(mean === null || mean === undefined ? 'n/a' : mean.toFixed(2))}</td></tr>`;
     }).join('');
+    trows += `<tr><td class="mono">chased</td><td class="mono">${esc(ch.count)}</td><td class="mono">${esc(chMeanTxt)}</td></tr>`;
     fb.innerHTML = `<table class="tbl"><thead><tr><th>Bucket</th><th>Fills</th><th>Mean settle $</th></tr></thead><tbody>${trows}</tbody></table>`;
   }
 }

@@ -1718,7 +1718,7 @@ def test_api_live_queue_telemetry_aggregation(tmp_path, monkeypatch):
 
 
 def test_api_live_queue_telemetry_verdict_transitions(tmp_path, monkeypatch):
-    """queue-toxic and mixed verdicts follow the bucket means."""
+    """queue-toxic and mixed/unclear verdicts follow the bucket means."""
     fills = tmp_path / "fills.jsonl"
     trades = tmp_path / "trades.jsonl"
     rows = [dict(r, market_slug="wx", fill_ratio=2.0,
@@ -1730,8 +1730,21 @@ def test_api_live_queue_telemetry_verdict_transitions(tmp_path, monkeypatch):
     monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
     monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
                         {"ts": 0.0, "payload": None})
-    body = client.get("/api/live/queue_telemetry").json()
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
     assert body["verdict"] == "queue-toxic"
+
+    # Mixed: high buckets positive but low buckets positive too.
+    mixed_rows = [dict(r, market_slug="wm", fill_ratio=0.1,
+                       printed_size_at_price_since_rest=10.0) for r in _telemetry_rows()]
+    mixed_rows = [r for r in mixed_rows if not r["chased"]]
+    mixed_rows.append(dict(_telemetry_rows()[3], market_slug="wm"))
+    _write_fills(fills, mixed_rows)
+    _write_fills(trades, [{"action": "WINDOW_SETTLE", "market_slug": "wm", "pnl_usd": 0.20}])
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    assert client.get("/api/live/queue_telemetry").json()["verdict"] == "mixed/unclear"
 
 
 def test_api_live_queue_telemetry_empty_state(tmp_path, monkeypatch):
@@ -1745,6 +1758,8 @@ def test_api_live_queue_telemetry_empty_state(tmp_path, monkeypatch):
     body = res.json()
     assert body["empty"] is True
     assert body["total_fills"] == 0
+    assert body["buckets"] == []
+    assert body["chased"] == {"count": 0, "mean_settle_pnl_usd": None}
     assert body["verdict"] == "awaiting fills"
 
 
@@ -1760,13 +1775,6 @@ def test_cockpit_queue_and_pnl_panels_in_html():
     assert "queueFallback" in html
     assert "fetchQueueTelemetry" in html
     assert "renderQueuePanel" in html
-    # Histogram shells (render hook lands in Task 3).
-    assert "pnlHistSvgWrap" in html
-    assert "pnlHistStats" in html
-    assert "pnlHistFallback" in html
-    # Explicit empty states, never a blank box.
-    assert "awaiting fill telemetry" in html
-    assert "No closed trades yet" in html
 
 
 def test_cockpit_pnl_histogram_render_hook_in_html():
@@ -1774,8 +1782,14 @@ def test_cockpit_pnl_histogram_render_hook_in_html():
     res = client.get("/")
     assert res.status_code == 200
     html = res.text
+    assert "pnlHistSvgWrap" in html
+    assert "pnlHistStats" in html
+    assert "pnlHistFallback" in html
     assert "renderPnlHistogram" in html
     assert "pnlBootstrapCiLo" in html
     assert "freedmanDiaconisBins" in html
     assert "session window" in html
     assert "zero-PnL" in html or "zero pnl" in html.lower()
+    # Explicit empty states, never a blank box.
+    assert "awaiting fills" in html
+    assert "No closed trades yet" in html
