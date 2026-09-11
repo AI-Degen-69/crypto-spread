@@ -45,6 +45,7 @@ HARNESS_ROOTS = [
 
 
 def clean_legacy_junctions() -> None:
+    """Remove legacy junction points or directories from all harness skill roots."""
     for root in HARNESS_ROOTS:
         if not root.exists():
             continue
@@ -65,6 +66,7 @@ def clean_legacy_junctions() -> None:
 
 
 def create_junction(src: Path, dst: Path) -> bool:
+    """Create a Windows directory junction from src to dst via mklink /J."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
         try:
@@ -93,6 +95,7 @@ def create_junction(src: Path, dst: Path) -> bool:
 
 
 def deploy_family() -> int:
+    """Deploy the 7-skill issue workflow family across all harnesses and verify integrity."""
     print("==================================================")
     print(" Deploying 7-Skill Issue Workflow Family")
     print(f" Canonical Root: {CANONICAL_ROOT}")
@@ -128,10 +131,14 @@ def deploy_family() -> int:
     for root in HARNESS_ROOTS:
         for skill in FAMILY_SKILLS:
             check_md = root / skill / "SKILL.md"
-            if check_md.is_file():
-                print(f"  [VERIFIED] {check_md} ({check_md.stat().st_size} bytes)")
+            check_ref = root / skill / "reference.md"
+            if check_md.is_file() and check_ref.is_file():
+                print(f"  [VERIFIED] {skill} in {root.name}: SKILL.md ({check_md.stat().st_size}b), reference.md ({check_ref.stat().st_size}b)")
             else:
-                print(f"  [BROKEN] {check_md}")
+                if not check_md.is_file():
+                    print(f"  [BROKEN] Missing {check_md}")
+                if not check_ref.is_file():
+                    print(f"  [BROKEN] Missing {check_ref}")
                 errors += 1
 
     if errors == 0:
