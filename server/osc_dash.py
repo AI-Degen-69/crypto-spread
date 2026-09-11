@@ -1630,9 +1630,15 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 .toast-close{background:none;border:none;color:var(--faint);font-size:16px;line-height:1;cursor:pointer;padding:0 2px;transition:color .15s ease}
 .toast-close:hover{color:var(--tx)}
 /* ── Backtest parameter sections (operator vs assumption vs policy) ───────── */
-.bt-section{margin-top:14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
-.bt-section:first-child{margin-top:0}
-.bt-section-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;font:700 11px var(--disp);letter-spacing:.05em;text-transform:uppercase;color:var(--tx)}
+.bt-accordion{display:flex;flex-direction:column;gap:14px}
+.bt-section{margin-top:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.bt-section-head{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:none;border:0;padding:2px 0;margin:0;cursor:pointer;font:700 11px var(--disp);letter-spacing:.05em;text-transform:uppercase;color:var(--tx)}
+.bt-section-head:hover{color:var(--gold)}
+.bt-section-head:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:4px}
+.bt-section-chevron{margin-left:auto;transition:transform .15s ease;color:var(--faint)}
+.bt-section-head[aria-expanded="false"] .bt-section-chevron{transform:rotate(-90deg)}
+.bt-section-body{min-width:0}
+.bt-section-body[hidden]{display:none}
 .bt-section-desc{font:500 10px var(--mono);color:var(--faint);margin:0 0 8px;line-height:1.5}
 .bt-section-dot{display:inline-block;width:8px;height:8px;border-radius:50%}
 .bt-section-dot-green{background:var(--up)}
@@ -1753,13 +1759,15 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
   <div id="tab-backtest" class="tab-content">
     <div class="card" style="border-top:2px solid var(--up)">
       <h3>⚡ Backtest Parameters <span class="mono" id="btHash" style="font-size:11px;color:var(--dim)"></span></h3>
-      <div class="form-grid" style="margin-top:12px">
+      <div class="bt-accordion" style="margin-top:12px">
         <!-- ── 1. OPERATOR CONTROLS (live-replicable) ─────────────────────── -->
-        <div class="bt-section">
-          <div class="bt-section-head">
+        <div class="bt-section" id="btSecOperator">
+          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperator')">
             <span class="bt-section-dot bt-section-dot-green"></span>
             <span>Operator Controls — set these live on the book</span>
-          </div>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecOperatorBody">
           <div class="bt-section-desc">
             These are the parameters you actually control when trading live:
             where you rest, how much book you clear through, your cost ceiling,
@@ -1826,10 +1834,12 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
 
         <!-- ── 2. EXECUTION / FILLS (assumption — not live-settable) ──────── -->
         <div class="bt-section">
-          <div class="bt-section-head">
+          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecExecutionBody" onclick="toggleBtSection(this,'btSecExecution')">
             <span class="bt-section-dot bt-section-dot-amber"></span>
             <span>Execution Assumptions — model-side, not directly settable live</span>
-          </div>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecExecutionBody">
           <div class="bt-section-desc">
             These describe how we assume the book fills you. In live trading the
             venue decides fills — you cannot set a fill model on an order. They
@@ -1850,14 +1860,17 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
               <input type="number" step="0.01" id="btGas" value="0.00">
             </div>
           </div>
+          </div>
         </div>
 
         <!-- ── 3. WINDOW POLICY (research knobs) ─────────────────────────── -->
         <div class="bt-section">
-          <div class="bt-section-head">
+          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecPolicyBody" onclick="toggleBtSection(this,'btSecPolicy')">
             <span class="bt-section-dot bt-section-dot-blue"></span>
             <span>Window Policy — internal engine policy, mirrors live config</span>
-          </div>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecPolicyBody">
           <div class="bt-section-desc">
             These are engine policy knobs. They have a live counterpart in the
             trader config, but tuning them here is research work — for example
@@ -1873,6 +1886,7 @@ a{color:var(--proj);text-decoration:none} a:hover{text-decoration:underline}
               <label>Min Window Left for Re-Entry (s)</label>
               <input type="number" min="0" step="5" id="btRequoteMin" value="300">
             </div>
+          </div>
           </div>
         </div>
       </div>
@@ -2931,6 +2945,34 @@ function togglePairCostInput(){
     lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
   }
 }
+
+function toggleBtSection(btn, bodyId){
+  const body = document.getElementById(bodyId);
+  if(!btn || !body) return;
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  body.hidden = open;
+  try {
+    const state = JSON.parse(localStorage.getItem('btSectionsOpen') || '{}');
+    state[bodyId] = !open;
+    localStorage.setItem('btSectionsOpen', JSON.stringify(state));
+  } catch(e) { /* localStorage unavailable */ }
+}
+
+(function initBtSections(){
+  if(typeof document === 'undefined' || !document.getElementById || !document.querySelector) return;
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem('btSectionsOpen') || '{}'); } catch(e) {}
+  const defaults = { btSecOperatorBody: true, btSecExecutionBody: false, btSecPolicyBody: false };
+  Object.keys(defaults).forEach(function(id){
+    const body = document.getElementById(id);
+    const btn = body ? document.querySelector('.bt-section-head[aria-controls="' + id + '"]') : null;
+    if(!body || !btn) return;
+    const open = (id in state) ? !!state[id] : defaults[id];
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    body.hidden = !open;
+  });
+})();
 
 async function runBacktest(fileOverride){
   setBacktestLoadingState(true);
