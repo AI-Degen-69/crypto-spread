@@ -790,7 +790,15 @@ class LiveTraderEngine:
             try:
                 from py_clob_client_v2.clob_types import OrderArgs
             except ImportError:
-                from py_clob_client.clob_types import OrderArgs
+                try:
+                    from py_clob_client.clob_types import OrderArgs
+                except ImportError:
+                    class OrderArgs:  # type: ignore[no-redef]
+                        def __init__(self, token_id: str = "", price: float = 0.0, size: float = 0.0, side: str = "BUY"):
+                            self.token_id = token_id
+                            self.price = price
+                            self.size = size
+                            self.side = side
 
             norm_price = round(float(price), 2)
             order_args = OrderArgs(
