@@ -32,24 +32,29 @@ def _read_jsonl(path: Path) -> list[dict]:
     """Read a JSONL file into dicts, skipping blanks and bad lines."""
     rows: list[dict] = []
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        fh = open(path, "r", encoding="utf-8")
     except OSError:
         return rows
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(obj, dict):
-            rows.append(obj)
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
     return rows
 
 
 def _settlement_pnl_by_market(trades_path: Path) -> dict[str, float]:
-    """market_slug -> summed WINDOW_SETTLE pnl_usd (one window may settle once)."""
+    """market_slug -> that window's settlement PnL (last WINDOW_SETTLE wins).
+
+    market_slug is unique per window, so the normal case has exactly one
+    settle line; last-wins keeps a duplicated settle from inflating the join.
+    """
     pnl: dict[str, float] = {}
     for t in _read_jsonl(trades_path):
         if t.get("action") != "WINDOW_SETTLE":
@@ -58,14 +63,18 @@ def _settlement_pnl_by_market(trades_path: Path) -> dict[str, float]:
         if not slug:
             continue
         try:
-            pnl[slug] = pnl.get(slug, 0.0) + float(t.get("pnl_usd") or 0)
+            pnl[slug] = float(t.get("pnl_usd") or 0)
         except (TypeError, ValueError):
             continue
     return pnl
 
 
 def bucketize(fills: list[dict], settle: dict[str, float]) -> list[dict[str, Any]]:
-    """Group fills with a usable ratio into buckets with mean subsequent PnL."""
+    """Group fills with a finite, non-negative ratio into buckets.
+
+    Each fill is attributed its own window's settlement PnL (joined on
+    market_slug); fills without a matching settle still count.
+    """
     table: list[dict[str, Any]] = [
         {"bucket": name, "count": 0, "pnl_sum": 0.0, "pnl_n": 0}
         for name, _, _ in BUCKETS
@@ -74,10 +83,10 @@ def bucketize(fills: list[dict], settle: dict[str, float]) -> list[dict[str, Any
         ratio = f.get("fill_ratio")
         if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
             continue
-        if ratio < 0:
+        if not math.isfinite(ratio) or ratio < 0:
             continue
         for i, (_, lo, hi) in enumerate(BUCKETS):
-            if lo <= ratio < hi or (hi == math.inf and ratio >= lo):
+            if lo <= ratio < hi:
                 table[i]["count"] += 1
                 pnl = settle.get(str(f.get("market_slug") or ""))
                 if pnl is not None:

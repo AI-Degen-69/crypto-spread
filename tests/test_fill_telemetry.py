@@ -13,6 +13,12 @@ from strategy.live_trader import (
     _append_fill_telemetry,
     _fetch_price_prints,
 )
+import copy
+import json
+import time
+from unittest.mock import MagicMock
+
+import strategy.live_trader as lt
 
 
 def _books_poll(start_ts: float, up_bids: dict, dn_bids: dict,
@@ -46,6 +52,8 @@ def _paper_engine(**config) -> LiveTraderEngine:
     if config:
         engine.update_config(**config)
     engine.is_running = True
+    # Deterministic: join tape and append inline instead of the worker thread.
+    engine.fill_telemetry_async = False
     return engine
 
 
@@ -135,7 +143,6 @@ def test_issue138_record_nulls_when_inputs_missing():
 
 
 def test_issue138_writer_appends_valid_json_line(tmp_path):
-    import json
     path = tmp_path / "fills.jsonl"
     rec = {"ts": 1.0, "leg": "UP"}
     assert _append_fill_telemetry(rec, path) is True
@@ -152,8 +159,6 @@ def test_issue138_writer_failure_never_raises(tmp_path):
 
 
 def test_issue138_tape_fetch_failure_returns_none(monkeypatch):
-    import strategy.live_trader as lt
-
     def boom(*a, **k):
         raise ConnectionError("down")
 
@@ -164,9 +169,6 @@ def test_issue138_tape_fetch_failure_returns_none(monkeypatch):
 # ============================================================================
 # TASK 3: CLOB + paper fill-path hooks
 # ============================================================================
-
-import json
-from unittest.mock import MagicMock
 
 import strategy.live_trader as lt
 
@@ -224,6 +226,7 @@ def test_issue138_paper_fill_appends_exactly_one_line(monkeypatch, tmp_path):
 def test_issue138_clob_fill_appends_line_with_venue_price(monkeypatch, tmp_path):
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.fill_telemetry_async = False
     engine.mode = "live"
     engine.is_running = True
     engine.place_live_quote = MagicMock(
@@ -288,6 +291,7 @@ def test_issue138_stream_fill_uses_stashed_book(monkeypatch, tmp_path):
     """Stream fills (no book in the event) join the last stashed books."""
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.fill_telemetry_async = False
     slug = "btc-up-or-down-5m"
     m = engine.markets[slug]
     m.order_id_up = "oid_stream_up"
@@ -372,7 +376,6 @@ def test_issue138_empty_book_records_nulls_without_blocking(monkeypatch, tmp_pat
     engine._update_market_strategy(slug, bare, now=1000.0)
     m = engine.markets[slug]
     assert m.rest_up_queue is None
-    import copy
     fill_tick = copy.deepcopy(bare)
     fill_tick["up_book"]["best_ask"] = 0.47
     engine._update_market_strategy(slug, fill_tick, now=1001.0)
@@ -382,3 +385,82 @@ def test_issue138_empty_book_records_nulls_without_blocking(monkeypatch, tmp_pat
     assert lines[0]["queue_ahead_at_rest"] is None
     assert lines[0]["fill_ratio"] is None
     assert lines[0]["ratio_flagged"] is False
+
+
+# ============================================================================
+# REVIEW FIXES (Station 3, self-review round)
+# ============================================================================
+
+def _base_record(**over):
+    kw = dict(ts=1010.0, slug="s", market_slug="m", condition_id="c", leg="UP",
+              chased=False, resting_price=0.48, fill_price=0.48,
+              queue_ahead=120.0, printed_size=60.0, filled_size=5,
+              window_elapsed_sec=10.0, mid_at_fill=0.50, resting_pair_cost=0.96)
+    kw.update(over)
+    return _build_fill_record(**kw)
+
+
+def test_issue138_ratio_boundary_and_zero_queue():
+    assert _base_record(queue_ahead=100.0, printed_size=1000.0)["ratio_flagged"] is False
+    assert _base_record(queue_ahead=100.0, printed_size=1000.0)["fill_ratio"] == 10.0
+    rec = _base_record(queue_ahead=0.0, printed_size=5.0)
+    assert rec["fill_ratio"] == 5.0  # max(queue, 1) guard, no ZeroDivision
+    assert rec["ratio_flagged"] is False
+
+
+def test_issue138_async_worker_appends_line(monkeypatch, tmp_path):
+    """Default async mode joins and appends off-thread; the line lands."""
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = LiveTraderEngine()
+    engine.is_running = True
+    assert engine.fill_telemetry_async is True  # production default
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0})
+    tick2["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+    deadline = time.time() + 5.0
+    lines: list = []
+    while time.time() < deadline:
+        lines = _fill_lines(path)
+        if lines:
+            break
+        time.sleep(0.05)
+    assert len(lines) == 1
+    assert lines[0]["leg"] == "UP"
+    assert lines[0]["fill_ratio"] == 0.5
+
+
+def test_issue138_reset_pnl_clears_telemetry_state():
+    """reset_pnl clears rest context, stash, and done flags like rollover."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    m.fill_telemetry_done_up = True
+    assert m.rest_up_price == 0.48
+    engine.reset_pnl()
+    assert m.rest_up_price is None
+    assert m.rest_up_queue is None
+    assert m.rest_up_ts is None
+    assert m.last_bids_up == {}
+    assert m.fill_telemetry_done_up is False
+
+
+def test_issue138_settlement_join_uses_last_window(tmp_path, capsys):
+    """A duplicated settle must not inflate the bucket mean (last wins)."""
+    from scripts.bucket_fills import main
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    fills.write_text(
+        json.dumps({"fill_ratio": 0.1, "market_slug": "w1"}) + "\n", encoding="utf-8")
+    trades.write_text("\n".join([
+        json.dumps({"action": "WINDOW_SETTLE", "market_slug": "w1", "pnl_usd": 100.0}),
+        json.dumps({"action": "WINDOW_SETTLE", "market_slug": "w1", "pnl_usd": 0.10}),
+    ]) + "\n", encoding="utf-8")
+    assert main([str(fills), "--trades", str(trades)]) == 0
+    out = capsys.readouterr().out
+    assert "+0.10" in out
+    assert "100.00" not in out

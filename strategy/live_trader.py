@@ -111,7 +111,9 @@ def _parse_print_ts(raw: Any) -> Optional[float]:
             return None
         if isinstance(raw, (int, float)):
             v = float(raw)
-            if v > 1e12:  # millis
+            if v > 1e15:  # micros
+                v /= 1e6
+            elif v > 1e12:  # millis
                 v /= 1000.0
             return v if v > 0 else None
         if isinstance(raw, str):
@@ -122,9 +124,12 @@ def _parse_print_ts(raw: Any) -> Optional[float]:
                 return _parse_print_ts(float(s))
             except (TypeError, ValueError):
                 pass
-            iso = s.replace("Z", "+00:00")
+            iso = s[:-1] + "+00:00" if s[-1:] in ("Z", "z") else s
             try:
-                return datetime.datetime.fromisoformat(iso).timestamp()
+                dt = datetime.datetime.fromisoformat(iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                return dt.timestamp()
             except (ValueError, OverflowError, OSError):
                 return None
     except (TypeError, ValueError, OverflowError, OSError):
@@ -163,12 +168,18 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
     return total
 
 
-def _fetch_price_prints(condition_id: str, limit: int = 500) -> Optional[list]:
+def _fetch_price_prints(condition_id: str, limit: int = 500) -> Optional[list[dict[str, Any]]]:
     """Timestamped tape rows for one market, or None on any failure.
 
     Issue #138: `markets.recent_trades` aggregates volume without timestamps,
     so the fill join fetches rows directly. Best-effort by contract.
     """
+    if not condition_id:
+        return None
+    try:
+        limit = max(1, min(int(limit), 2000))
+    except (TypeError, ValueError):
+        limit = 500
     try:
         r = requests.get("https://data-api.polymarket.com/trades",
                          params={"market": condition_id, "limit": limit},
@@ -883,6 +894,10 @@ class LiveTraderEngine:
         # post-delay band filter rejected, so the pilot can tell band skips
         # apart from adverse-open skips without reading the log.
         self.band_skip_stats: Dict[str, int] = _empty_band_skip_stats()
+        # Issue #138: fill-telemetry worker mode. True (default) joins tape
+        # and appends off the hot path in a daemon thread; False runs inline
+        # (deterministic, for tests and debugging).
+        self.fill_telemetry_async: bool = True
         # Re-entry time gate, as a fraction of the window (issue #95). The shared
         # `min_requote_remaining_sec` is an absolute 300s, which is a whole 5m
         # window -- an absolute floor cannot mean the same thing on a 5m and a 15m
@@ -1082,17 +1097,28 @@ class LiveTraderEngine:
                                  fill_price: Optional[float],
                                  filled_size: Optional[float],
                                  now: float) -> None:
-        """Append one queue-position telemetry line for an entry fill.
+        """Claim one queue-position telemetry line for an entry fill.
 
-        Issue #138, observation only: best-effort wrapper around the pure
-        builder — any failure degrades to nulls or a skipped line, and never
-        raises into the fill path. Exactly once per leg per window.
+        Issue #138, observation only. The claim (exactly-once flag) is taken
+        synchronously under the engine lock; the tape join and file append run
+        in a daemon worker (or inline when `fill_telemetry_async` is False),
+        so a slow venue response never stalls the tick/stream hot path. Any
+        failure degrades to a lost line, never into the fill path.
         """
         try:
             leg = side.upper()
-            done_attr = "fill_telemetry_done_up" if leg == "UP" else "fill_telemetry_done_down"
-            if getattr(mstate, done_attr, False):
+            if leg not in ("UP", "DOWN"):
+                log.warning("[%s] fill-telemetry skipped: unknown side %r", mstate.slug, side)
                 return
+            done_attr = "fill_telemetry_done_up" if leg == "UP" else "fill_telemetry_done_down"
+            with self._engine_lock:
+                if getattr(mstate, done_attr, False):
+                    return
+                setattr(mstate, done_attr, True)
+            if isinstance(filled_size, bool) or not isinstance(filled_size, (int, float)) or filled_size <= 0:
+                size = float(self.shares)
+            else:
+                size = float(filled_size)
             is_up = (leg == "UP")
             rest_price = mstate.rest_up_price if is_up else mstate.rest_dn_price
             rest_queue = mstate.rest_up_queue if is_up else mstate.rest_dn_queue
@@ -1104,33 +1130,73 @@ class LiveTraderEngine:
                 rest_price = mstate.resting_up if is_up else mstate.resting_down
                 stash = mstate.last_bids_up if is_up else mstate.last_bids_down
                 rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
-            token = mstate.up_token if is_up else mstate.down_token
+            snapshot = {
+                "slug": mstate.slug,
+                "market_slug": mstate.market_slug or "",
+                "condition_id": mstate.condition_id or "",
+                "leg": leg,
+                "chased": (mstate.chased_leg == leg),
+                "resting_price": rest_price,
+                "rest_queue": rest_queue,
+                "rest_ts": rest_ts,
+                "token": mstate.up_token if is_up else mstate.down_token,
+                "fill_price": fill_price,
+                "filled_size": size,
+                "window_elapsed_sec": max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else 0.0,
+                "mid_at_fill": mstate.mid,
+                "resting_pair_cost": round(mstate.resting_up + mstate.resting_down, 4),
+                "ts": now,
+            }
+            if self.fill_telemetry_async:
+                thread = threading.Thread(
+                    target=self._fill_telemetry_worker,
+                    kwargs=snapshot, daemon=True,
+                    name=f"fill-telemetry-{mstate.slug}-{leg}",
+                )
+                thread.start()
+            else:
+                self._fill_telemetry_worker(**snapshot)
+        except Exception as e:
+            log.warning("[%s] fill-telemetry record failed: %s", mstate.slug, e)
+
+    def _fill_telemetry_worker(self, *, slug: str, market_slug: str,
+                               condition_id: str, leg: str, chased: bool,
+                               resting_price: Optional[float],
+                               fill_price: Optional[float],
+                               rest_queue: Optional[float],
+                               rest_ts: Optional[float], token: str,
+                               filled_size: float, window_elapsed_sec: float,
+                               mid_at_fill: Optional[float],
+                               resting_pair_cost: Optional[float],
+                               ts: float) -> None:
+        """Fetch tape, build the record, append it. Exceptions never propagate."""
+        try:
             printed: Optional[float] = None
-            if (rest_price is not None and rest_ts is not None
-                    and token and mstate.condition_id):
-                rows = _fetch_price_prints(mstate.condition_id)
+            if (resting_price is not None and rest_ts is not None
+                    and token and condition_id):
+                rows = _fetch_price_prints(condition_id)
                 if rows is not None:
-                    printed = _sum_prints_at_price(rows, token, rest_price, rest_ts)
+                    printed = _sum_prints_at_price(rows, token, resting_price, rest_ts)
             record = _build_fill_record(
-                ts=now,
-                slug=mstate.slug,
-                market_slug=mstate.market_slug or "",
-                condition_id=mstate.condition_id or "",
+                ts=ts,
+                slug=slug,
+                market_slug=market_slug,
+                condition_id=condition_id,
                 leg=leg,
-                chased=(mstate.chased_leg == leg),
-                resting_price=rest_price,
+                chased=chased,
+                resting_price=resting_price,
                 fill_price=fill_price,
                 queue_ahead=rest_queue,
                 printed_size=printed,
-                filled_size=float(filled_size if filled_size else self.shares),
-                window_elapsed_sec=max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else 0.0,
-                mid_at_fill=mstate.mid,
-                resting_pair_cost=round(mstate.resting_up + mstate.resting_down, 4),
+                filled_size=filled_size,
+                window_elapsed_sec=window_elapsed_sec,
+                mid_at_fill=mid_at_fill,
+                resting_pair_cost=resting_pair_cost,
             )
-            if _append_fill_telemetry(record):
-                setattr(mstate, done_attr, True)
+            if not _append_fill_telemetry(record):
+                log.warning("[%s] fill-telemetry append failed (line lost)", slug)
         except Exception as e:
-            log.warning("[%s] fill-telemetry record failed: %s", mstate.slug, e)
+            log.warning("[%s] fill-telemetry worker failed: %s", slug, e)
 
     def place_stop_order(self, mstate: MarketLiveState, side: str) -> None:
         """Stage stop-loss protection for a single-leg filled position.
@@ -3143,6 +3209,18 @@ class LiveTraderEngine:
                 m.open_drift = 0.0
                 m.adverse_open = False
                 m.open_gate_evaluated = False
+                # Issue #138: fill-telemetry rest context resets with the
+                # other per-window gate state (mirrors the rollover block).
+                m.rest_up_price = None
+                m.rest_up_queue = None
+                m.rest_up_ts = None
+                m.rest_dn_price = None
+                m.rest_dn_queue = None
+                m.rest_dn_ts = None
+                m.last_bids_up = {}
+                m.last_bids_down = {}
+                m.fill_telemetry_done_up = False
+                m.fill_telemetry_done_down = False
                 # Issue #137: the entry-band gate resets with the other
                 # per-window gates so the next window re-evaluates it.
                 m.band_gate_evaluated = False
@@ -4184,12 +4262,17 @@ class LiveTraderEngine:
         # and snapshot per-leg rest context the first tick a leg is active.
         # Snapshot-once semantics mirror sim2 (queue at quotable time); the
         # context persists until rollover so fills on later ticks join it.
-        if isinstance(ubook.get("bids"), dict) and ubook["bids"]:
-            mstate.last_bids_up = dict(ubook["bids"])
-        if isinstance(dbook.get("bids"), dict) and dbook["bids"]:
-            mstate.last_bids_down = dict(dbook["bids"])
+        # Stash copies are skipped once both legs are recorded: nothing left
+        # to join.
         up_active = bool(mstate.order_id_up) or mstate.order_status_up == "RESTING"
         dn_active = bool(mstate.order_id_down) or mstate.order_status_down == "RESTING"
+        need_stash = ((up_active and (mstate.rest_up_price is None or not mstate.fill_telemetry_done_up))
+                      or (dn_active and (mstate.rest_dn_price is None or not mstate.fill_telemetry_done_down)))
+        if need_stash:
+            if isinstance(ubook.get("bids"), dict) and ubook["bids"]:
+                mstate.last_bids_up = dict(ubook["bids"])
+            if isinstance(dbook.get("bids"), dict) and dbook["bids"]:
+                mstate.last_bids_down = dict(dbook["bids"])
         if up_active and mstate.rest_up_price is None:
             mstate.rest_up_price = resting_up
             mstate.rest_up_queue = _queue_ahead(mstate.last_bids_up, resting_up)
