@@ -2113,7 +2113,7 @@ textarea:focus-visible,
             <div class="form-group">
               <label>Fill Model</label>
               <select id="btFillModel">
-                <option value="cross" selected>Cross (Guaranteed if crossing ≤47¢)</option>
+                <option value="cross" selected>Cross (Strict Through-Price Fill — Ask ≤ Resting Bid - 1¢)</option>
                 <option value="tape">Tape (Conservative - executed trades)</option>
                 <option value="book">Book (Optimistic - Ask crossing)</option>
                 <option value="both">Both</option>
@@ -2194,7 +2194,7 @@ textarea:focus-visible,
         <h3>Research Conclusion — SPREAD-2</h3>
         <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0">74% of Windows Are Oscillating</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
-          Across 2,820+ empirical windows measured in 5m and 15m: on 5m <b>73% oscillating</b> — both sides quoted at $0.48 ($0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b>80% oscillating</b>.
+          Across 2,820+ empirical windows measured in 5m and 15m: on 5m <b>73% oscillating</b> — both sides quoted dynamically at <code>mid - offset</code> (e.g. $0.48 on 50¢ mid, $0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b>80% oscillating</b>.
         </div>
       </div>
       <div class="card" style="border-top:2px solid var(--gold)">
@@ -2768,7 +2768,7 @@ function reconcileCockpitToasts(st) {
 
       // Check UP leg fill transition
       if (!prev.filled_up && m.filled_up) {
-        const price = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
+        const price = m.fill_price_up != null ? m.fill_price_up : (m.resting_up != null ? m.resting_up : (m.up_mid != null ? Math.max(0.01, +(m.up_mid - 0.02).toFixed(2)) : 0.48));
         showToast({
           type: 'filled',
           title: 'Order Filled',
@@ -2778,7 +2778,7 @@ function reconcileCockpitToasts(st) {
 
       // Check DOWN leg fill transition
       if (!prev.filled_down && m.filled_down) {
-        const price = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
+        const price = m.fill_price_down != null ? m.fill_price_down : (m.resting_down != null ? m.resting_down : (m.down_mid != null ? Math.max(0.01, +(m.down_mid - 0.02).toFixed(2)) : 0.48));
         showToast({
           type: 'filled',
           title: 'Order Filled',
@@ -4971,8 +4971,8 @@ function renderCockpitUI(st) {
       const statusText = otStatusLabel(marketStatusRaw);
 
       let posStr = 'FLAT';
-      const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up || 0.48);
-      const actualDown = m.fill_price_down != null ? m.fill_price_down : (m.resting_down || 0.48);
+      const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up != null ? m.resting_up : (m.up_mid != null ? Math.max(0.01, +(m.up_mid - 0.02).toFixed(2)) : 0.48));
+      const actualDown = m.fill_price_down != null ? m.fill_price_down : (m.resting_down != null ? m.resting_down : (m.down_mid != null ? Math.max(0.01, +(m.down_mid - 0.02).toFixed(2)) : 0.48));
       if (m.status === 'STOP_EXIT' || m.exit_taken) {
         posStr = 'FLAT (STOPPED OUT)';
       } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.status === 'LATE_START_SKIPPED' || m.entry_cancelled_timeout) {
@@ -5021,7 +5021,9 @@ function renderCockpitUI(st) {
       } else if (!st.is_running) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">INACTIVE (BOT STOPPED)</span>`;
       } else {
-        bidsTextHtml = `Bids: $${(m.resting_up || 0.48).toFixed(2)} / $${(m.resting_down || 0.48).toFixed(2)}${fillsSub}`;
+        const restingUpDisp = m.resting_up != null ? m.resting_up : (m.up_mid != null ? Math.max(0.01, +(m.up_mid - 0.02).toFixed(2)) : 0.48);
+        const restingDownDisp = m.resting_down != null ? m.resting_down : (m.down_mid != null ? Math.max(0.01, +(m.down_mid - 0.02).toFixed(2)) : 0.48);
+        bidsTextHtml = `Bids: $${restingUpDisp.toFixed(2)} / $${restingDownDisp.toFixed(2)}${fillsSub}`;
       }
 
       gridHtml += `
