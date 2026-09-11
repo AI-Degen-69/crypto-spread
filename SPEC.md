@@ -4,11 +4,11 @@
 Standardize naming, directories, and trigger commands across Robert's 7-skill issue workflow family:
 1. `create-issue` (renamed from `issue-create`)
 2. `plan-issue`
-3. `build-issue`
-4. `ship-issue`
+3. `build-plan`
+4. `review-build-and-pr`
 5. `explain-issue`
-6. `work-issue`
-7. `review-babysitter` (renamed from `pr-babysitter`)
+6. `workflow-issue`
+7. `babysit-pr-and-merge` (renamed from `pr-babysitter`)
 
 Ensure canonical directory sources in `~/.agents/skills/` are deployed via Directory Junctions / Symlinks across all agent harnesses (`~/.claude/skills/`, `~/.gemini/config/skills/`, `AppData/Local/hermes/skills/`), update all cross-references, create a family-level deploy script (`deploy_skills.py`), and add generalized reference documentation to each skill folder.
 
@@ -17,13 +17,13 @@ Ensure canonical directory sources in `~/.agents/skills/` are deployed via Direc
 ## 2. In Scope
 1. **Renames under `C:\Users\Tiger\.agents\skills\`**:
    - `issue-create/` -> `create-issue/`
-   - `pr-babysitter/` -> `review-babysitter/`
+   - `pr-babysitter/` -> `babysit-pr-and-merge/`
 2. **SKILL.md `name:` field updates**:
    - `create-issue/SKILL.md` -> `name: create-issue`
-   - `review-babysitter/SKILL.md` -> `name: review-babysitter`
+   - `babysit-pr-and-merge/SKILL.md` -> `name: babysit-pr-and-merge`
 3. **Cross-reference updates**:
-   - Inside all 7 family `SKILL.md` files: replace mentions of `issue-create` with `create-issue`, and `pr-babysitter` with `review-babysitter`.
-   - In `docs/ecc-flow-guide.md:80`: update `pr-babysitter / CI Gate` to `review-babysitter / CI Gate`.
+   - Inside all 7 family `SKILL.md` files: replace mentions of `issue-create` with `create-issue`, and `pr-babysitter` with `babysit-pr-and-merge`.
+   - In `docs/ecc-flow-guide.md:80`: update `pr-babysitter / CI Gate` to `babysit-pr-and-merge / CI Gate`.
 4. **Global Deployment (Junctions / Symlinks)**:
    - For all 7 skills, ensure target folders in:
      - `~/.claude/skills/<skill-name>`
@@ -46,7 +46,7 @@ Ensure canonical directory sources in `~/.agents/skills/` are deployed via Direc
 ---
 
 ## 4. Acceptance Criteria
-- [ ] `create-issue` and `review-babysitter` directories exist in `~/.agents/skills/`; old names removed.
+- [ ] `create-issue` and `babysit-pr-and-merge` directories exist in `~/.agents/skills/`; old names removed.
 - [ ] `SKILL.md` `name:` headers match directory names.
 - [ ] No dangling references to `issue-create` or `pr-babysitter` in `~/.agents/skills/` family skills or `docs/ecc-flow-guide.md`.
 - [ ] All 7 skills resolve via directory junction/symlink in Claude, Gemini, and Hermes skill roots.

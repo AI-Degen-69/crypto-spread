@@ -7,7 +7,7 @@ Baseline: full suite green on master (414+ tests).
 ## Concise Spec (spec-driven-development, Standard tier)
 
 **Goal:** Standardize names and directory structures across the 7-skill issue workflow family:
-`create-issue`, `plan-issue`, `build-issue`, `ship-issue`, `explain-issue`, `work-issue`, `review-babysitter`. Deploy all 7 via directory junctions/symlinks to Claude, Gemini, and Hermes. Provide a robust deploy script and generalized `reference.md` in each skill folder.
+`create-issue`, `plan-issue`, `build-plan`, `review-build-and-pr`, `explain-issue`, `workflow-issue`, `babysit-pr-and-merge`. Deploy all 7 via directory junctions/symlinks to Claude, Gemini, and Hermes. Provide a robust deploy script and generalized `reference.md` in each skill folder.
 
 ---
 
@@ -15,19 +15,19 @@ Baseline: full suite green on master (414+ tests).
 
 ### T1 — Rename directories and update SKILL.md headers
 - Rename `C:\Users\Tiger\.agents\skills\issue-create` to `create-issue`.
-- Rename `C:\Users\Tiger\.agents\skills\pr-babysitter` to `review-babysitter`.
+- Rename `C:\Users\Tiger\.agents\skills\pr-babysitter` to `babysit-pr-and-merge`.
 - Update `name:` in `create-issue/SKILL.md` to `create-issue`.
-- Update `name:` in `review-babysitter/SKILL.md` to `review-babysitter`.
+- Update `name:` in `babysit-pr-and-merge/SKILL.md` to `babysit-pr-and-merge`.
 
 ### T2 — Update cross-references in SKILL.md files & docs
 - Audit and update all references to `issue-create` and `pr-babysitter` across:
   - `create-issue/SKILL.md`
   - `plan-issue/SKILL.md`
-  - `build-issue/SKILL.md`
-  - `ship-issue/SKILL.md`
+  - `build-plan/SKILL.md`
+  - `review-build-and-pr/SKILL.md`
   - `explain-issue/SKILL.md`
-  - `work-issue/SKILL.md`
-  - `review-babysitter/SKILL.md`
+  - `workflow-issue/SKILL.md`
+  - `babysit-pr-and-merge/SKILL.md`
   - `docs/ecc-flow-guide.md:80`
 
 ### T3 — Global Deployment Script (`deploy_family_skills.py`)

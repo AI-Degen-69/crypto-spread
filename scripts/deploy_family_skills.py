@@ -25,11 +25,11 @@ CANONICAL_ROOT = HOME / ".agents" / "skills"
 FAMILY_SKILLS = [
     "create-issue",
     "plan-issue",
-    "build-issue",
-    "ship-issue",
+    "build-plan",
+    "review-build-and-pr",
     "explain-issue",
-    "work-issue",
-    "review-babysitter",
+    "workflow-issue",
+    "babysit-pr-and-merge",
 ]
 
 LEGACY_NAMES = [

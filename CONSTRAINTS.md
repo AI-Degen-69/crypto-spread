@@ -11,6 +11,6 @@
 - Idempotent execution for sync/deploy scripts.
 
 ## 3. Scope Boundaries
-- Scope is strictly bounded to the 7 issue-workflow skills (`create-issue`, `plan-issue`, `build-issue`, `ship-issue`, `explain-issue`, `work-issue`, `review-babysitter`).
+- Scope is strictly bounded to the 7 issue-workflow skills (`create-issue`, `plan-issue`, `build-plan`, `review-build-and-pr`, `explain-issue`, `workflow-issue`, `babysit-pr-and-merge`).
 - No editing of `docs/issue-workflow.md` (formerly `agent-skills-guide.md`; renamed by Issue #117).
 - No modifications to trading strategies or dashboard logic.
