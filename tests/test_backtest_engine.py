@@ -608,3 +608,53 @@ def test_backtest_dynamic_symmetric_quoting_off_center_open():
     assert w_pair.pair_captured is True
     assert round(w_pair.pnl_cents, 2) == 4.0
 
+
+def test_window_result_execution_prices_pair_captured():
+    """Verify WindowResult tracks entry prices on both legs when pair is captured."""
+    s1 = snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=[
+        {"asset": UP_TOKEN, "price": 0.47, "size": 5.0},
+        {"asset": DN_TOKEN, "price": 0.47, "size": 5.0},
+    ])
+    params = BacktestParams(offset=0.02, fill_model="cross")
+    w = _simulate_window([s1], params)
+    assert w.pair_captured is True
+    assert w.entry_price_up == 0.48
+    assert w.entry_price_down == 0.48
+    assert w.exit_price is None
+
+
+def test_window_result_execution_prices_stop_exit():
+    """Verify WindowResult tracks entry and exit prices on stop-loss exit."""
+    snap1 = snap(1.0, 0.50, up_ask=0.49, down_ask=0.53,
+                 tape=[{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}])
+    snap2 = snap(2.0, 0.40, up_ask=0.41, down_ask=0.61,
+                 up_bids={"0.39": 100.0})
+    w = _simulate_window([snap1, snap2], BacktestParams(
+        offset=0.02,
+        fill_model="cross",
+        exit_thresh_by_slug={"btc-up-or-down-5m": 0.08, "default_5m": 0.08},
+    ))
+    assert w.filled_up is True
+    assert w.exit_taken is True
+    assert w.exit_side == "up"
+    assert w.entry_price_up == 0.48
+    assert w.entry_price_down is None
+    assert w.exit_price == 0.39  # snap2 up_ask=0.41, mid=0.40 -> bb_up = 0.40 - (0.41 - 0.40) = 0.39
+
+
+def test_replay_trades_sample_untruncated_with_prices():
+    """Verify replay returns all windows in trades_sample (not capped at 50) and includes prices."""
+    snaps = []
+    for i in range(55):
+        cid = f"0xCID_{i:03d}"
+        s = {**snap(100.0 + i * 500, 0.50), "cid": cid}
+        snaps.append(s)
+    out = replay(snaps, BacktestParams())
+    assert out["n_windows"] == 55
+    assert len(out["trades_sample"]) == 55
+    sample0 = out["trades_sample"][0]
+    assert "entry_up" in sample0
+    assert "entry_down" in sample0
+    assert "exit_price" in sample0
+    assert "exit_side" in sample0
+

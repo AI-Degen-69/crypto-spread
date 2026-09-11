@@ -1,40 +1,49 @@
-# Plan: Dynamic Symmetric Quoting Alignment Across Both Pages and Backtest Engine
+# Plan: Issue #131 — Improve Backtest Execution Diagnostics, Pagination, Trade Transparency, and Metric Semantics
 
-Task Type: Code
+Task Type: Code + Design
 Size Tier: Standard
-Target Files: server/osc_dash.py, backtest/engine.py, tests/test_backtest_engine.py, eli5_backtest_params.html
+Target Files: backtest/engine.py, server/osc_dash.py, tests/test_backtest_engine.py, tests/test_osc_dash_integration.py
 
 ## Task Breakdown
 
-### Task 1: Update Dashboard UI Across Both Pages and Documentation
-- **Files**: `server/osc_dash.py`, `eli5_backtest_params.html`
+### Task 1: Extend WindowResult & Track Execution Prices in Backtest Engine
+- **Files**: `backtest/engine.py`, `tests/test_backtest_engine.py`
+- **Type**: Code
 - **Description**:
-  1. On the Backtest Replay page (`server/osc_dash.py`), update the Fill Model option label from `Cross (Guaranteed if crossing ≤47¢)` to `Cross (Strict Through-Price Fill — Ask ≤ Resting Bid - 1¢)`.
-  2. Update empirical explanation text in `server/osc_dash.py` to clarify quotes are at `mid - offset` (e.g. 48¢ when mid is 50¢).
-  3. On the Live Cockpit page (`server/osc_dash.py`), remove hardcoded `0.48` fallbacks in toast alerts, market cards, and bid text strings.
-  4. In `eli5_backtest_params.html`, update text to explain initial quotes at `mid - offset`.
+  1. Add fields to `WindowResult`: `entry_price_up`, `entry_price_down`, `exit_price`, `settlement_mid` (optional floats with `None` default for backwards compatibility).
+  2. In `_simulate_window`, record `entry_price_up` and `entry_price_down` when each leg fills.
+  3. Record `exit_price` upon stop-loss exit or settlement mark.
+  4. In `replay()`, populate `trades_sample` with all simulated windows (remove `< 50` ceiling) and include entry/exit price fields.
+  5. Write TDD tests verifying trade entry/exit price recording and complete window capture in `tests/test_backtest_engine.py`.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_osc_dash_integration.py` (49 passed)
+- **Verification**: `python -m pytest tests/test_backtest_engine.py -q` (53 passed)
 
-### Task 2: Implement Dynamic Mid-Anchored Quoting in Backtest Engine
-- **Files**: `backtest/engine.py`
+### Task 2: Update Server /api/backtest Metrics & Semantics
+- **Files**: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
+- **Type**: Code
 - **Description**:
-  1. In `_simulate_window`, dynamically read initial `up_mid` and `down_mid` from the first valid snapshot with orderbook data.
-  2. Compute `resting_up = round(min(0.99, max(0.01, init_mid - params.offset)), 3)` and `resting_down = round(min(0.99, max(0.01, (1.0 - init_mid) - params.offset)), 3)`.
-  3. On drift-skip re-entry (`reentry_mid`), re-anchor resting quotes to current snapshot mids if orders have not yet been filled.
+  1. In `/api/backtest`, remove `< 50` truncation on `trades_sample` and include `entry_up`, `entry_down`, `exit_price`, `exit_side`, `settlement_mid`.
+  2. Disaggregate and enrich `overall` metrics: `pair_rate` (merged pairs count and rate), `win_rate` (profitable windows count and rate, with profitable exits + merged pairs breakdown).
+  3. Ensure `winning_windows` counts windows with `pnl_cents > 0`.
+  4. Write integration tests in `tests/test_osc_dash_integration.py` verifying API response shape and disaggregated metrics.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_backtest_engine.py` (50 passed)
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` (51 passed)
 
-### Task 3: Add Unit Tests for Dynamic Backtest Quoting
-- **Files**: `tests/test_backtest_engine.py`
-- **Description**: Add unit tests verifying:
-  1. Off-center window (e.g. up_mid=0.35, down_mid=0.65) quotes `resting_up = 0.33` and `resting_down = 0.63` in replay instead of static 0.48.
-  2. Replay fill logic strictly tests against these dynamic quotes.
+### Task 3: Dashboard UI Enhancements — KPI Cards, Equity Warning, Tooltips & Executed Log Pagination
+- **Files**: `server/osc_dash.py`
+- **Type**: Design + Code
+- **Description**:
+  1. Update KPI cards: explicitly show `Pair Capture Rate` (`pairs / total` merged) and `Win Rate` (`profitable / total`).
+  2. Cumulative Equity Curve: add warning state/banner when 0 fills occurred in the selected dataset/model.
+  3. Per-Series table: add tooltips/headers explaining why oscillating windows may not fill limit orders or may stop-loss exit.
+  4. Executed Windows Log: implement client-side pagination controller with page navigation (Prev/Next, Page X of Y), Page Size (25, 50, 100, All), Series filter, Result filter (All, Merged Pairs, Exits, Unresolved), and new columns: `Entry Up`, `Entry Down`, `Exit Price`, `Exit Type`.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_backtest_engine.py -k test_backtest_dynamic_symmetric_quoting_off_center_open` (passed)
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -k test_backtest_ui_pagination_and_tooltips_elements` (passed)
 
 ### Task 4: Regression Gate & Verification
 - **Files**: All test files
-- **Description**: Execute complete pytest suite across all test files.
+- **Type**: Code
+- **Description**: Run full test suite across the entire repository to ensure 100% pass rate.
 - **Status**: [x]
-- **Verification**: `python -m pytest -q` (415 passed in 39.35s)
+- **Verification**: `python -m pytest -q` (420 passed)
+

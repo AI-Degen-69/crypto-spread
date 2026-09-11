@@ -294,6 +294,10 @@ class WindowResult:
     # by the re-entry rule after the adverse-open gate skipped it. 0 = the gate
     # never fired or the window stayed skipped. Mirrors live `reentry_count`.
     reentry_count: int = 0
+    entry_price_up: float | None = None
+    entry_price_down: float | None = None
+    exit_price: float | None = None
+    settlement_mid: float | None = None
 
 
 def _mid(book: dict):
@@ -371,6 +375,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     filled_up = False
     filled_down = False
+    entry_price_up = None
+    entry_price_down = None
+    exit_price = None
+    settlement_mid = None
     exit_taken = False
     exit_side = ""
     pair_captured = False
@@ -552,6 +560,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if bb_up is not None:
                     exit_taken = True
                     exit_side = "up"
+                    exit_price = bb_up
                     pnl_cents += (bb_up - resting_up) * 100.0
                     fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                     break
@@ -561,6 +570,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if bb_dn is not None:
                     exit_taken = True
                     exit_side = "down"
+                    exit_price = bb_dn
                     pnl_cents += (bb_dn - resting_down) * 100.0
                     fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                     break
@@ -628,6 +638,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             if bb_up is not None:
                 exit_taken = True
                 exit_side = "up"
+                exit_price = bb_up
                 pnl_cents += (bb_up - resting_up) * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
@@ -637,6 +648,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             if bb_dn is not None:
                 exit_taken = True
                 exit_side = "down"
+                exit_price = bb_dn
                 pnl_cents += (bb_dn - resting_down) * 100.0
                 fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                 break
@@ -647,6 +659,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             if elapsed >= (params.entry_timeout_pct * duration):
                 if not filled_up and not filled_down:
                     entry_cancelled = True
+
+    if filled_up:
+        entry_price_up = resting_up
+    if filled_down:
+        entry_price_down = resting_down
 
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):
@@ -660,9 +677,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             lb = (last.get("up_book") or {}).get("best_bid")
             db_bid = (last.get("down_book") or {}).get("best_bid")
             if filled_up and not filled_down and lb is not None:
+                exit_price = lb
+                settlement_mid = lb
                 pnl_cents += (lb - resting_up) * 100.0
                 fees_cents += _taker_fee(lb, params.taker_fee_rate) * 100.0
             elif filled_down and not filled_up and db_bid is not None:
+                exit_price = db_bid
+                settlement_mid = db_bid
                 pnl_cents += (db_bid - resting_down) * 100.0
                 fees_cents += _taker_fee(db_bid, params.taker_fee_rate) * 100.0
 
@@ -679,6 +700,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         is_partial=is_partial,
         err=err,
         reentry_count=reentry_count,
+        entry_price_up=entry_price_up,
+        entry_price_down=entry_price_down,
+        exit_price=exit_price,
+        settlement_mid=settlement_mid,
     )
 
 
@@ -746,20 +771,24 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "series": w.series,
         })
 
-        if len(trades_sample) < 50:
-            exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
-            trades_sample.append({
-                "slug": w.slug,
-                "series": w.series,
-                "both_filled": w.pair_captured,
-                "exit_triggered": w.exit_taken,
-                "up_filled": w.filled_up,
-                "down_filled": w.filled_down,
-                "pnl_cents": round(w.pnl_cents, 2),
-                "exit_reason": exit_info,
-                "start_delay_sec": w.start_delay_sec,
-                "is_partial": w.is_partial,
-            })
+        exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
+        trades_sample.append({
+            "slug": w.slug,
+            "series": w.series,
+            "both_filled": w.pair_captured,
+            "exit_triggered": w.exit_taken,
+            "up_filled": w.filled_up,
+            "down_filled": w.filled_down,
+            "entry_up": w.entry_price_up,
+            "entry_down": w.entry_price_down,
+            "exit_price": w.exit_price,
+            "exit_side": w.exit_side,
+            "settlement_mid": w.settlement_mid,
+            "pnl_cents": round(w.pnl_cents, 2),
+            "exit_reason": exit_info,
+            "start_delay_sec": w.start_delay_sec,
+            "is_partial": w.is_partial,
+        })
 
         # Per series tracking
         a = per_series[w.series]

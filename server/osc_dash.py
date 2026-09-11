@@ -603,14 +603,27 @@ def api_backtest(
     )
 
     trades_sample = []
+    profitable_pairs = 0
+    profitable_exits = 0
+    unfilled_windows = 0
+
     for w in per_window:
         win_pnl = w.pnl_cents * size
         a = per_series_raw[w.series]
         a["windows"] += 1
         if w.pair_captured:
             a["pairs"] += 1
-        if w.exit_taken:
+            if win_pnl > 0:
+                profitable_pairs += 1
+        elif w.exit_taken:
             a["exits"] += 1
+            if win_pnl > 0:
+                profitable_exits += 1
+        elif not w.filled_up and not w.filled_down:
+            unfilled_windows += 1
+        elif win_pnl > 0:
+            profitable_exits += 1
+
         if w.class_label == "oscillating":
             a["oscillating"] += 1
         elif w.class_label == "monotonic":
@@ -622,21 +635,25 @@ def api_backtest(
             a["reentry_count"] += 1
             a["reentry_pnl_cents"] += win_pnl
 
-        if len(trades_sample) < 50:
-            exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
-            trades_sample.append({
-                "slug": w.slug,
-                "label": series_label_map.get(w.series, w.series),
-                "series": w.series,
-                "both_filled": w.pair_captured,
-                "exit_triggered": w.exit_taken,
-                "up_filled": w.filled_up,
-                "down_filled": w.filled_down,
-                "pnl_cents": round(win_pnl, 2),
-                "exit_reason": exit_info,
-                "start_delay_sec": w.start_delay_sec,
-                "is_partial": w.is_partial,
-            })
+        exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
+        trades_sample.append({
+            "slug": w.slug,
+            "label": series_label_map.get(w.series, w.series),
+            "series": w.series,
+            "both_filled": w.pair_captured,
+            "exit_triggered": w.exit_taken,
+            "up_filled": w.filled_up,
+            "down_filled": w.filled_down,
+            "entry_up": w.entry_price_up,
+            "entry_down": w.entry_price_down,
+            "exit_price": w.exit_price,
+            "exit_side": w.exit_side,
+            "settlement_mid": w.settlement_mid,
+            "pnl_cents": round(win_pnl, 2),
+            "exit_reason": exit_info,
+            "start_delay_sec": w.start_delay_sec,
+            "is_partial": w.is_partial,
+        })
 
     total_windows = len(per_window)
     total_pairs = sum(a["pairs"] for a in per_series_raw.values())
@@ -663,6 +680,11 @@ def api_backtest(
         "win_rate": round(winning_windows / total_windows, 4)
         if total_windows
         else 0.0,
+        "wins": winning_windows,
+        "profitable_windows": winning_windows,
+        "profitable_pairs": profitable_pairs,
+        "profitable_exits": profitable_exits,
+        "unfilled_windows": unfilled_windows,
         "reentry_count": total_reentry_count,
         "reentry_pnl_cents": round(total_reentry_pnl, 2),
     }
@@ -2163,15 +2185,18 @@ textarea:focus-visible,
     <div class="card" id="btOverallCard">
       <h3>📈 Overall Execution Results</h3>
       <div class="kpi" id="btKpiRow">
-        <div class="box"><div class="lbl">Total P&L</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 / window</div></div>
-        <div class="box"><div class="lbl">Pair Capture Rate</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 pairs</div></div>
-        <div class="box"><div class="lbl">Exit Stop Rate</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
-        <div class="box"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
-        <div class="box"><div class="lbl">Win Rate</div><div class="val" id="btWinRate">0.0%</div><div class="sub">Profitable windows</div></div>
-        <div class="box"><div class="lbl">Drift Re-Entry</div><div class="val" id="btReentry" style="color:var(--dim)">—</div><div class="sub" id="btReentryPnl">Windows recovered after drift skip</div></div>
+        <div class="box" title="Net cumulative P&L across all executed windows"><div class="lbl">Total P&L</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 / window</div></div>
+        <div class="box" title="Proportion of windows where both legs filled and merged for profit"><div class="lbl">Pair Capture Rate ℹ️</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 / 0 pairs</div></div>
+        <div class="box" title="Proportion of windows where safety stop exit was triggered on adverse drift"><div class="lbl">Exit Stop Rate ℹ️</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
+        <div class="box" title="Maximum peak-to-trough equity drawdown"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
+        <div class="box" title="Proportion of windows with net positive P&L (merged pairs + profitable exits)"><div class="lbl">Win Rate ℹ️</div><div class="val" id="btWinRate">0.0%</div><div class="sub" id="btWinsCount">0 / 0 profitable</div></div>
+        <div class="box" title="Windows recovered by re-entry rule after initial adverse-open skip"><div class="lbl">Drift Re-Entry</div><div class="val" id="btReentry" style="color:var(--dim)">—</div><div class="sub" id="btReentryPnl">Windows recovered after drift skip</div></div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
-        <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <h4 style="margin:0;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
+          <span id="btEquityWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run. Verify fill_model or tape data density.</span>
+        </div>
         <canvas id="chartEquity" height="140"></canvas>
       </div>
     </div>
@@ -2182,8 +2207,35 @@ textarea:focus-visible,
     </div>
 
     <div class="card">
-      <h3>📝 Executed Windows Log</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+        <h3 style="margin:0">📝 Executed Windows Log</h3>
+        <div id="btLogControls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" id="btLogSearch" placeholder="Search slug/cid..." oninput="onBtLogFilterChange()" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg);width:140px">
+          <select id="btLogSeriesFilter" onchange="onBtLogFilterChange()" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
+            <option value="">All Series</option>
+          </select>
+          <select id="btLogResultFilter" onchange="onBtLogFilterChange()" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
+            <option value="">All Results</option>
+            <option value="pair">Pairs Merged</option>
+            <option value="exit">Stop Exited</option>
+            <option value="unresolved">Flat / Unresolved</option>
+          </select>
+          <select id="btLogPageSize" onchange="onBtLogPageSizeChange()" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
+            <option value="25">25 / page</option>
+            <option value="50">50 / page</option>
+            <option value="100">100 / page</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+      </div>
       <div id="btTradesTableWrap"></div>
+      <div id="btLogPagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--dim)">
+        <span id="btLogPageInfo">Showing 0-0 of 0 windows</span>
+        <div style="display:flex;gap:6px">
+          <button class="btn" id="btLogBtnPrev" onclick="onBtLogPagePrev()" style="padding:3px 10px;font-size:11.5px" disabled>◀ Prev</button>
+          <button class="btn" id="btLogBtnNext" onclick="onBtLogPageNext()" style="padding:3px 10px;font-size:11.5px" disabled>Next ▶</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -3302,6 +3354,9 @@ async function runBacktest(fileOverride){
     $('btExitsCount').textContent = `${ov.exits||0} exits`;
     $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
     $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
+    if ($('btWinsCount')) {
+      $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
+    }
     const reentryCount = ov.reentry_count || 0;
     const reentryPnl = ov.reentry_pnl_cents || 0;
     $('btReentry').textContent = reentryCount > 0 ? `${reentryCount} recovered` : '—';
@@ -3312,6 +3367,13 @@ async function runBacktest(fileOverride){
     const eqData = data.equity_curve || [];
     const labels = eqData.map(e => e.window_idx);
     const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
+
+    // Zero-fill / flatline warning diagnostic
+    const fillsCount = (ov.pairs || 0) + (ov.exits || 0);
+    const hasFills = fillsCount > 0 || (ov.total_pnl_cents || 0) !== 0;
+    if ($('btEquityWarning')) {
+      $('btEquityWarning').style.display = hasFills ? 'none' : 'inline-block';
+    }
 
     destroyChartInstance('chartEquity');
     const ctx = $('chartEquity').getContext('2d');
@@ -3350,31 +3412,157 @@ async function runBacktest(fileOverride){
       }
     });
 
-    // Per series table
-    let stbl = '<table class="tbl"><thead><tr><th>Series</th><th>Windows</th><th>Pair Captured</th><th>Exits</th><th>Total P&L ($)</th><th>Avg / Window ($)</th><th>Recovered</th><th>Oscillating</th><th>Monotonic</th></tr></thead><tbody>';
+    // Per series table with tooltips and execution vs oscillation clarity
+    let stbl = '<table class="tbl"><thead><tr>'
+      + '<th>Series</th>'
+      + '<th>Windows</th>'
+      + '<th title="Both legs filled & merged for profit. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
+      + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
+      + '<th>Total P&L ($)</th>'
+      + '<th>Avg / Window ($)</th>'
+      + '<th>Recovered</th>'
+      + '<th title="Price excursion >= 2c in both directions vs 50c mid. Market oscillation does not guarantee limit order fills.">Oscillating ℹ️</th>'
+      + '<th>Monotonic</th>'
+      + '</tr></thead><tbody>';
     for(const [k,v] of Object.entries(data.per_series||{})){
       stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums;color:${(v.reentry_count||0)>0?'var(--up)':'var(--dim)'}">${(v.reentry_count||0)>0 ? v.reentry_count + ' (' + fmtUsd(v.reentry_pnl_cents||0,true) + ')' : '—'}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
     }
     stbl+='</tbody></table>';
     $('btSeriesTableWrap').innerHTML=stbl;
 
-    // Trades sample table
-    let ttbl = '<table class="tbl"><thead><tr><th>Window</th><th>Series</th><th>Result</th><th>Fill Status</th><th>PnL / Window ($)</th><th>Delay / Partial</th><th>Exit Reason</th></tr></thead><tbody>';
-    for(const t of (data.trades_sample||[]).slice(0,30)){
-      const pnlUsd = fmtUsd(t.pnl_cents, true);
-      const resPill = t.both_filled ? pill('pill-osc',`PAIR CAPTURED ${pnlUsd}`) : t.exit_triggered ? pill('pill-mono','EXIT TRIGGERED') : pill('pill-flat','FLAT / UNRESOLVED');
-      const delayTag = t.is_partial
-        ? `<span class="pill pill-mono" style="font-size:11px;color:var(--down)">Half (${t.start_delay_sec}s)</span>`
-        : `<span class="mono" style="font-size:12px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
-      ttbl+=`<tr><td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${esc(t.slug.slice(-14))}</td><td style="font-weight:600">${esc(t.label)}</td><td>${resPill}</td><td class="mono" style="font-size:12px">${t.both_filled?'UP+DOWN':t.up_filled?'UP only':t.down_filled?'DOWN only':'-'}</td><td class="mono" style="font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td><td>${delayTag}</td><td style="font-size:12px;color:var(--dim)">${esc(t.exit_reason||'-')}</td></tr>`;
+    // Populate Series Filter dropdown for Executed Windows Log
+    window.allBacktestTrades = data.trades_sample || [];
+    window.btLogCurrentPage = 1;
+    if ($('btLogSeriesFilter')) {
+      const currentVal = $('btLogSeriesFilter').value;
+      const seriesLabels = new Map();
+      for (const t of window.allBacktestTrades) {
+        if (t.series && t.label) seriesLabels.set(t.series, t.label);
+      }
+      let opts = '<option value="">All Series</option>';
+      for (const [slug, label] of seriesLabels.entries()) {
+        opts += `<option value="${esc(slug)}"${currentVal === slug ? ' selected' : ''}>${esc(label)}</option>`;
+      }
+      $('btLogSeriesFilter').innerHTML = opts;
     }
-    ttbl+='</tbody></table>';
-    $('btTradesTableWrap').innerHTML=ttbl;
+
+    renderBacktestTradesPage();
   } catch(err) {
     console.error('Error running backtest:', err);
   } finally {
     setBacktestLoadingState(false);
   }
+}
+
+// Client-side interactive pagination & filtering for Executed Windows Log
+function onBtLogFilterChange() {
+  window.btLogCurrentPage = 1;
+  renderBacktestTradesPage();
+}
+
+function onBtLogPageSizeChange() {
+  window.btLogCurrentPage = 1;
+  renderBacktestTradesPage();
+}
+
+function onBtLogPagePrev() {
+  if (window.btLogCurrentPage > 1) {
+    window.btLogCurrentPage--;
+    renderBacktestTradesPage();
+  }
+}
+
+function onBtLogPageNext() {
+  window.btLogCurrentPage++;
+  renderBacktestTradesPage();
+}
+
+function renderBacktestTradesPage() {
+  const allTrades = window.allBacktestTrades || [];
+  const search = ($('btLogSearch') ? $('btLogSearch').value.trim().toLowerCase() : '');
+  const seriesFilter = ($('btLogSeriesFilter') ? $('btLogSeriesFilter').value : '');
+  const resultFilter = ($('btLogResultFilter') ? $('btLogResultFilter').value : '');
+  const pageSizeVal = ($('btLogPageSize') ? $('btLogPageSize').value : '25');
+
+  const filtered = allTrades.filter(t => {
+    if (seriesFilter && t.series !== seriesFilter) return false;
+    if (resultFilter === 'pair' && !t.both_filled) return false;
+    if (resultFilter === 'exit' && !t.exit_triggered) return false;
+    if (resultFilter === 'unresolved' && (t.both_filled || t.exit_triggered)) return false;
+    if (search) {
+      const matchSlug = (t.slug || '').toLowerCase().includes(search);
+      const matchSeries = (t.series || '').toLowerCase().includes(search);
+      const matchLabel = (t.label || '').toLowerCase().includes(search);
+      if (!matchSlug && !matchSeries && !matchLabel) return false;
+    }
+    return true;
+  });
+
+  const total = filtered.length;
+  const pageSize = pageSizeVal === 'all' ? Math.max(1, total) : parseInt(pageSizeVal, 10);
+  const maxPage = Math.max(1, Math.ceil(total / pageSize));
+  if (window.btLogCurrentPage > maxPage) window.btLogCurrentPage = maxPage;
+  const page = window.btLogCurrentPage || 1;
+
+  const startIdx = total === 0 ? 0 : (page - 1) * pageSize;
+  const endIdx = Math.min(startIdx + pageSize, total);
+  const pageTrades = filtered.slice(startIdx, endIdx);
+
+  if ($('btLogPageInfo')) {
+    $('btLogPageInfo').textContent = total === 0
+      ? 'No matching windows found'
+      : `Showing ${startIdx + 1}–${endIdx} of ${total} windows (Page ${page} of ${maxPage})`;
+  }
+  if ($('btLogBtnPrev')) $('btLogBtnPrev').disabled = (page <= 1);
+  if ($('btLogBtnNext')) $('btLogBtnNext').disabled = (page >= maxPage || total === 0);
+
+  let ttbl = '<table class="tbl"><thead><tr>'
+    + '<th>Window</th>'
+    + '<th>Series</th>'
+    + '<th>Result</th>'
+    + '<th>Entry Up</th>'
+    + '<th>Entry Down</th>'
+    + '<th>Exit Price</th>'
+    + '<th>Exit Type</th>'
+    + '<th>PnL / Window ($)</th>'
+    + '<th>Delay / Partial</th>'
+    + '</tr></thead><tbody>';
+
+  if (pageTrades.length === 0) {
+    ttbl += '<tr><td colspan="9" style="text-align:center;padding:18px;color:var(--dim)">No executed windows match the selected criteria.</td></tr>';
+  } else {
+    for (const t of pageTrades) {
+      const pnlUsd = fmtUsd(t.pnl_cents, true);
+      const resPill = t.both_filled
+        ? pill('pill-osc', `PAIR CAPTURED ${pnlUsd}`)
+        : t.exit_triggered
+        ? pill('pill-mono', 'EXIT TRIGGERED')
+        : pill('pill-flat', 'FLAT / UNRESOLVED');
+
+      const entryUpStr = t.entry_up != null ? '$' + Number(t.entry_up).toFixed(3) : '—';
+      const entryDnStr = t.entry_down != null ? '$' + Number(t.entry_down).toFixed(3) : '—';
+      const exitPriceStr = t.exit_price != null ? '$' + Number(t.exit_price).toFixed(3) : '—';
+      const exitTypeStr = t.exit_reason ? esc(t.exit_reason) : '—';
+
+      const delayTag = t.is_partial
+        ? `<span class="pill pill-mono" style="font-size:11px;color:var(--down)">Half (${t.start_delay_sec}s)</span>`
+        : `<span class="mono" style="font-size:12px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
+
+      ttbl += `<tr>`
+        + `<td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${esc(t.slug.slice(-14))}</td>`
+        + `<td style="font-weight:600">${esc(t.label || t.series)}</td>`
+        + `<td>${resPill}</td>`
+        + `<td class="mono" style="font-size:12px">${entryUpStr}</td>`
+        + `<td class="mono" style="font-size:12px">${entryDnStr}</td>`
+        + `<td class="mono" style="font-size:12px">${exitPriceStr}</td>`
+        + `<td class="mono" style="font-size:12px;color:var(--dim)">${exitTypeStr}</td>`
+        + `<td class="mono" style="font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td>`
+        + `<td>${delayTag}</td>`
+        + `</tr>`;
+    }
+  }
+  ttbl += '</tbody></table>';
+  $('btTradesTableWrap').innerHTML = ttbl;
 }
 
 function resetBtParams(){

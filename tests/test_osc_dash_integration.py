@@ -572,6 +572,63 @@ def test_api_backtest_reentry_knob_a_b(tmp_path, monkeypatch):
     assert clamped["params"]["min_requote_remaining_sec"] == 300.0
 
 
+def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monkeypatch):
+    """Verify /api/backtest returns trade execution prices, unconstrained trades_sample, and disaggregated metrics."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_prices.jsonl"
+    cid = "0xPRICES_01"
+    slug = "btc-updown-5m-5000"
+    ticks = [
+        _make_fake_tick(1000.0, cid, slug, "btc-up-or-down-5m", 0.50, tape=[
+            {"asset": f"{cid}_up", "price": 0.48, "size": 10},
+            {"asset": f"{cid}_dn", "price": 0.48, "size": 10},
+        ]),
+        _make_fake_tick(1001.0, cid, slug, "btc-up-or-down-5m", 0.50),
+    ]
+    with open(fake_file, "w", encoding="utf-8") as f:
+        for t in ticks:
+            f.write(json.dumps(t) + "\n")
+
+    res = client.get(f"/api/backtest?file=fake_prices.jsonl&fill_model=tape")
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data["trades_sample"]) == 1
+    trade = data["trades_sample"][0]
+    assert "entry_up" in trade
+    assert "entry_down" in trade
+    assert "exit_price" in trade
+    assert "exit_side" in trade
+    assert trade["entry_up"] == 0.48
+    assert trade["entry_down"] == 0.48
+    assert trade["both_filled"] is True
+    assert trade["exit_reason"] == "pair_merged"
+
+    ov = data["overall"]
+    assert "pair_rate" in ov
+    assert "win_rate" in ov
+    assert "profitable_windows" in ov
+    assert "profitable_pairs" in ov
+    assert "profitable_exits" in ov
+
+
+def test_backtest_ui_pagination_and_tooltips_elements():
+    """Verify that root SPA contains backtest log pagination controls, filters, and tooltips."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert "btEquityWarning" in html
+    assert "btLogSearch" in html
+    assert "btLogSeriesFilter" in html
+    assert "btLogResultFilter" in html
+    assert "btLogPageSize" in html
+    assert "btLogBtnPrev" in html
+    assert "btLogBtnNext" in html
+    assert "btLogPageInfo" in html
+    assert "Pair Capture Rate ℹ️" in html
+    assert "Exit Stop Rate ℹ️" in html
+    assert "Win Rate ℹ️" in html
+    assert "renderBacktestTradesPage" in html
+
 
 def test_api_upload_stream_ingest(tmp_path, monkeypatch):
     """Verify single direct stream upload of JSONL payload with index creation."""
