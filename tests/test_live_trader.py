@@ -151,6 +151,12 @@ def test_fetch_polymarket_account_value_mocked(monkeypatch):
     from strategy.live_trader import fetch_polymarket_account_value
     from unittest.mock import patch
 
+    monkeypatch.setenv("POLY_FUNDER", "0xee3b778a783510bc833384919f709e3d2fee1624")
+    monkeypatch.setenv("POLY_PRIVATE_KEY", "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+    monkeypatch.setenv("POLY_API_KEY", "test_key")
+    monkeypatch.setenv("POLY_API_SECRET", "test_secret")
+    monkeypatch.setenv("POLY_API_PASSPHRASE", "test_passphrase")
+
     fake_client = MagicMock()
     fake_client.get_balance_allowance.return_value = {"balance": "81218581"}
     fake_clob_cls = MagicMock(return_value=fake_client)
