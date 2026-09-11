@@ -278,3 +278,33 @@ def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
     assert set(by_leg) == {"UP", "DOWN"}
     assert by_leg["UP"]["chased"] is False
     assert by_leg["DOWN"]["chased"] is True
+
+
+# ============================================================================
+# TASK 4: stream fill-path hook
+# ============================================================================
+
+def test_issue138_stream_fill_uses_stashed_book(monkeypatch, tmp_path):
+    """Stream fills (no book in the event) join the last stashed books."""
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = LiveTraderEngine()
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+    m.order_id_up = "oid_stream_up"
+    m.resting_up = 0.48
+    m.resting_down = 0.48
+    m.last_bids_up = {0.48: 60.0, 0.47: 10.0}
+    engine.on_user_order_event(
+        {"order_id": "oid_stream_up", "status": "FILLED", "price": 0.48})
+    assert m.filled_up is True
+    lines = _fill_lines(path)
+    assert len(lines) == 1
+    rec = lines[0]
+    assert rec["leg"] == "UP"
+    assert rec["fill_price"] == 0.48
+    assert rec["queue_ahead_at_rest"] == 60.0
+    assert rec["printed_size_at_price_since_rest"] is None
+    # Duplicate stream event for the same fill records nothing more.
+    engine.on_user_order_event(
+        {"order_id": "oid_stream_up", "status": "FILLED", "price": 0.48})
+    assert len(_fill_lines(path)) == 1

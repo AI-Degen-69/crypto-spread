@@ -44,7 +44,7 @@ Target Files: strategy/live_trader.py, scripts/bucket_fills.py (new), tests/test
 - **Description**:
   1. Call the same helper on stream UP/DOWN fills, using the stashed last-seen books for queue-ahead (null when stash empty).
   2. Same exactly-once guard as Task 3.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_fill_telemetry.py -q -k stream`
 
 ### Task 5: Bucketing helper script

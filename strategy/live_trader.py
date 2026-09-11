@@ -1097,6 +1097,13 @@ class LiveTraderEngine:
             rest_price = mstate.rest_up_price if is_up else mstate.rest_dn_price
             rest_queue = mstate.rest_up_queue if is_up else mstate.rest_dn_queue
             rest_ts = mstate.rest_up_ts if is_up else mstate.rest_dn_ts
+            if rest_price is None:
+                # Stream fills may predate any placement tick: fall back to
+                # the latched resting price and the stashed books (no rest
+                # timestamp, so no tape join — printed stays null).
+                rest_price = mstate.resting_up if is_up else mstate.resting_down
+                stash = mstate.last_bids_up if is_up else mstate.last_bids_down
+                rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
             token = mstate.up_token if is_up else mstate.down_token
             printed: Optional[float] = None
             if (rest_price is not None and rest_ts is not None
@@ -1691,6 +1698,10 @@ class LiveTraderEngine:
                         m.chased_fill = True
                     m.fill_price_up = float(payload.get("price") or m.resting_up)
                     m.status = "FILLED_UP"
+                    # Issue #138: queue-position telemetry, stashed books
+                    # (the stream event carries no book).
+                    self._record_fill_telemetry(
+                        m, "UP", m.fill_price_up, payload.get("size"), time.time())
             elif m.order_id_down == order_id:
                 m.order_status_down = status
                 if status in ("MATCHED", "FILLED"):
@@ -1699,6 +1710,10 @@ class LiveTraderEngine:
                         m.chased_fill = True
                     m.fill_price_down = float(payload.get("price") or m.resting_down)
                     m.status = "FILLED_DOWN"
+                    # Issue #138: queue-position telemetry, stashed books
+                    # (the stream event carries no book).
+                    self._record_fill_telemetry(
+                        m, "DOWN", m.fill_price_down, payload.get("size"), time.time())
             elif m.order_id_exit_up == order_id:
                 m.order_status_exit_up = status
             elif m.order_id_exit_down == order_id:
