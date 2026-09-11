@@ -47,7 +47,7 @@ Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trade
   1. `place_stop_order()` early-returns (no-op, no id/staged status) when `stop_loss_enabled` is False — single choke point covering live-buffered and paper-RESTING paths.
   2. Drift-stop trigger evaluation skips when disabled; naked-timeout (`_naked_timeout_elapsed`) and rollover settlement paths stay authoritative.
   3. Defaults (`True`) leave every existing stop test green unchanged.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_live_trader.py -q` + new no-stop tests
 
 ### Task 5: Preset + API wiring (config + state)

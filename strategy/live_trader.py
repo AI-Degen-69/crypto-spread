@@ -931,6 +931,12 @@ class LiveTraderEngine:
         existing _execute_stop_exit path. Paper mode stages a simulated
         order that fills when the bid touches the stop price.
         """
+        # Issue #137: with the stop-loss disabled the preset holds naked legs
+        # to settlement/rollover instead, so no protection is ever staged.
+        # Single choke point covering the live-buffered, paper-simulated, and
+        # polling fill paths (naked-timeout and rollover stay authoritative).
+        if not self.stop_loss_enabled:
+            return
         is_up = (side.upper() == "UP")
         with self._engine_lock:
             if mstate.stop_order_id:
@@ -4213,12 +4219,14 @@ class LiveTraderEngine:
         # Holding UP alone and mid dropped adversely (max_down >= exit_thresh).
         # In paper mode the staged stop also fills when the protected leg's bid
         # touches the staged stop price (issue #87).
+        # Issue #137: the whole trigger is gated on `stop_loss_enabled` — with
+        # the stop off, naked-timeout and rollover below stay authoritative.
         paper_stop_hit_up = (
             self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "UP"
             and mstate.up_bid is not None and mstate.stop_price is not None
             and mstate.up_bid <= mstate.stop_price
         )
-        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
+        if self.stop_loss_enabled and ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
                 or paper_stop_hit_up)
                 and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.up_bid
@@ -4244,7 +4252,7 @@ class LiveTraderEngine:
             and mstate.down_bid is not None and mstate.stop_price is not None
             and mstate.down_bid <= mstate.stop_price
         )
-        if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
+        if self.stop_loss_enabled and ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
                 or paper_stop_hit_down)
                 and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.down_bid

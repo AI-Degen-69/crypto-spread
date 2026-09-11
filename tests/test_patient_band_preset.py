@@ -50,6 +50,31 @@ def _live_engine(**config) -> LiveTraderEngine:
     return engine
 
 
+def _paper_engine(**config) -> LiveTraderEngine:
+    """Paper-mode engine (fills simulated from book asks)."""
+    engine = LiveTraderEngine()
+    if config:
+        engine.update_config(**config)
+    engine.is_running = True
+    return engine
+
+
+def _side_books(start_ts: float, up_bid: float, up_ask: float,
+                dn_bid: float, dn_ask: float, duration: float = 300.0) -> dict:
+    return {
+        "market": {
+            "conditionId": "0x137",
+            "slug": "mkt-137",
+            "up_token": "tok_up_137",
+            "down_token": "tok_dn_137",
+            "start_ts": start_ts,
+            "end_ts": start_ts + duration,
+        },
+        "up_book": {"best_bid": up_bid, "best_ask": up_ask},
+        "down_book": {"best_bid": dn_bid, "best_ask": dn_ask},
+    }
+
+
 # ============================================================================
 # TASK 1: engine knobs — init + update_config + state echo
 # ============================================================================
@@ -223,3 +248,68 @@ def test_issue137_band_skip_telemetry_echoed_in_state():
     state = engine.get_state()
     assert state["band_skip_stats"]["band_skips"] == 1
     assert state["markets"][slug]["band_skip"] is True
+
+
+# ============================================================================
+# TASK 4: stop_loss_enabled gate
+# ============================================================================
+
+def test_issue137_place_stop_order_noop_when_disabled():
+    """place_stop_order stages nothing when stop_loss_enabled is False."""
+    engine = LiveTraderEngine()
+    engine.update_config(stop_loss_enabled=False)
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    mstate.fill_price_up = 0.48
+    mstate.up_token = "tok_up_137"
+    engine.place_stop_order(mstate, "UP")
+    assert mstate.stop_order_id is None
+    assert mstate.stop_order_status == "NONE"
+
+    control = LiveTraderEngine()
+    cstate = control.markets[slug]
+    cstate.fill_price_up = 0.48
+    cstate.up_token = "tok_up_137"
+    control.place_stop_order(cstate, "UP")
+    assert cstate.stop_order_id is not None
+
+
+def _fill_up_naked(engine: LiveTraderEngine, slug: str):
+    """Fill UP naked across two paper ticks.
+
+    Tick 1 quotes into a healthy book (resting UP latches at 0.48); tick 2
+    shifts the UP book down so its ask (0.47) lifts the resting bid.
+    """
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.49, 0.51, 0.49, 0.51), now=1000.0)
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.45, 0.47, 0.49, 0.51), now=1001.0)
+    mstate = engine.markets[slug]
+    assert mstate.filled_up is True
+    assert mstate.filled_down is False
+    return mstate
+
+
+def test_issue137_naked_leg_held_when_stop_disabled():
+    """Disabled stop: fill stages no stop and adverse drift never exits."""
+    engine = _paper_engine(stop_loss_enabled=False)
+    slug = "btc-up-or-down-5m"
+    mstate = _fill_up_naked(engine, slug)
+    assert mstate.stop_order_id is None
+    # Mid collapses to 0.38: drift 0.12, far past the 0.05 naked stop.
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.36, 0.38, 0.60, 0.62), now=1002.0)
+    assert mstate.exit_taken is False
+    assert mstate.filled_up is True
+    assert mstate.status != "STOP_EXIT_PENDING"
+
+
+def test_issue137_drift_stop_still_fires_when_enabled():
+    """Control: default engine exits the same adverse drift via stop."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    mstate = _fill_up_naked(engine, slug)
+    assert mstate.stop_order_id is not None
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.36, 0.38, 0.60, 0.62), now=1002.0)
+    assert mstate.exit_taken is True
