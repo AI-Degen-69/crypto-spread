@@ -1385,12 +1385,16 @@ class LiveTraderEngine:
                 m.order_status_up = status
                 if status in ("MATCHED", "FILLED"):
                     m.filled_up = True
+                    if m.chased_leg == "UP":
+                        m.chased_fill = True
                     m.fill_price_up = float(payload.get("price") or m.resting_up)
                     m.status = "FILLED_UP"
             elif m.order_id_down == order_id:
                 m.order_status_down = status
                 if status in ("MATCHED", "FILLED"):
                     m.filled_down = True
+                    if m.chased_leg == "DOWN":
+                        m.chased_fill = True
                     m.fill_price_down = float(payload.get("price") or m.resting_down)
                     m.status = "FILLED_DOWN"
             elif m.order_id_exit_up == order_id:
@@ -3386,7 +3390,8 @@ class LiveTraderEngine:
         if self.enable_leg_chase and not mstate.pair_captured and not mstate.exit_taken:
             if mstate.filled_up and not mstate.filled_down:
                 entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
-                max_down_bid = round(self.max_pair_cost - entry_up, 3)
+                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                max_down_bid = round(math.floor((self.max_pair_cost - entry_up + 1e-9) * 100) / 100.0, 2)
                 if mstate.down_ask is not None:
                     target_down = min(mstate.down_ask, max_down_bid)
                     if target_down > resting_down:
@@ -3400,7 +3405,8 @@ class LiveTraderEngine:
                             mstate.chased_leg = "DOWN"
             elif mstate.filled_down and not mstate.filled_up:
                 entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
-                max_up_bid = round(self.max_pair_cost - entry_dn, 3)
+                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                max_up_bid = round(math.floor((self.max_pair_cost - entry_dn + 1e-9) * 100) / 100.0, 2)
                 if mstate.up_ask is not None:
                     target_up = min(mstate.up_ask, max_up_bid)
                     if target_up > resting_up:
@@ -3637,6 +3643,14 @@ class LiveTraderEngine:
         )
         if can_place_entry:
             if self.mode == "live":
+                # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
+                if mstate.chased_leg == "DOWN" and mstate.order_id_down and mstate.order_status_down == "RESTING":
+                    if self.cancel_live_order(mstate.order_id_down):
+                        mstate.order_id_down = None
+                elif mstate.chased_leg == "UP" and mstate.order_id_up and mstate.order_status_up == "RESTING":
+                    if self.cancel_live_order(mstate.order_id_up):
+                        mstate.order_id_up = None
+
                 if not mstate.order_id_up and mstate.up_token:
                     res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
                     if res_up and res_up.get("order_id"):
@@ -3682,6 +3696,8 @@ class LiveTraderEngine:
                             sz_up = float(ord_up.get("size_matched", 0.0) or 0.0)
                             if st_up in ("MATCHED", "FILLED") or sz_up >= mstate.order_shares:
                                 mstate.filled_up = True
+                                if mstate.chased_leg == "UP":
+                                    mstate.chased_fill = True
                                 actual_px_up = None
                                 trades_up = ord_up.get("associate_trades") or ord_up.get("trades")
                                 if isinstance(trades_up, list) and trades_up:
@@ -3712,6 +3728,8 @@ class LiveTraderEngine:
                             sz_dn = float(ord_dn.get("size_matched", 0.0) or 0.0)
                             if st_dn in ("MATCHED", "FILLED") or sz_dn >= mstate.order_shares:
                                 mstate.filled_down = True
+                                if mstate.chased_leg == "DOWN":
+                                    mstate.chased_fill = True
                                 actual_px_dn = None
                                 trades_dn = ord_dn.get("associate_trades") or ord_dn.get("trades")
                                 if isinstance(trades_dn, list) and trades_dn:
@@ -3758,7 +3776,8 @@ class LiveTraderEngine:
                         # If DOWN is not yet filled, step up DOWN quote towards ask within cap
                         if not mstate.filled_down and self.enable_leg_chase:
                             entry_up = mstate.fill_price_up
-                            max_down_bid = round(self.max_pair_cost - entry_up, 3)
+                            # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                            max_down_bid = round(math.floor((self.max_pair_cost - entry_up + 1e-9) * 100) / 100.0, 2)
                             if mstate.down_ask is not None:
                                 target_down = min(mstate.down_ask, max_down_bid)
                                 if target_down > resting_down:
@@ -3789,7 +3808,8 @@ class LiveTraderEngine:
                             # If UP is not yet filled, step up UP quote towards ask within cap
                             if self.enable_leg_chase:
                                 entry_dn = mstate.fill_price_down
-                                max_up_bid = round(self.max_pair_cost - entry_dn, 3)
+                                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                                max_up_bid = round(math.floor((self.max_pair_cost - entry_dn + 1e-9) * 100) / 100.0, 2)
                                 if mstate.up_ask is not None:
                                     target_up = min(mstate.up_ask, max_up_bid)
                                     if target_up > resting_up:

@@ -3149,9 +3149,11 @@ def test_update_config_naked_knobs_roundtrip_and_clamp():
 # Issue #123: Chase the second leg after a one-sided fill (cross spread within cap)
 # ============================================================================
 
-def test_leg_chase_triggers_on_single_fill_and_respects_cap():
+def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
     """When UP fills, DOWN quote steps up to ask bounded by max_pair_cost."""
     engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -3201,9 +3203,11 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap():
     assert round(mstate.realized_pnl_usd, 2) == 0.10
 
 
-def test_leg_chase_symmetric_down_first():
+def test_leg_chase_symmetric_down_first(monkeypatch):
     """When DOWN fills first, UP quote steps up to ask bounded by max_pair_cost."""
     engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
     engine.start()
     slug = "eth-up-or-down-5m"
     now = time.time()
@@ -3236,9 +3240,12 @@ def test_leg_chase_symmetric_down_first():
     assert mstate.chased_fill is True
 
 
-def test_leg_chase_disabled_or_both_filled():
-    """When enable_leg_chase=False, quote remains passive at 0.48."""
+def test_leg_chase_disabled_or_both_filled(monkeypatch):
+    """When enable_leg_chase=False or both legs filled, quotes remain passive."""
+    # Case 1: enable_leg_chase=False
     engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
     engine.enable_leg_chase = False
     engine.start()
     slug = "btc-up-or-down-5m"
@@ -3266,6 +3273,24 @@ def test_leg_chase_disabled_or_both_filled():
     assert mstate.filled_down is False
     assert mstate.chased_leg is None
     assert mstate.resting_down == 0.48
+
+    # Case 2: When both legs are filled and enable_leg_chase=True, chase does not trigger
+    engine2 = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine2.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine2, "_schedule_wallet_balance_fetch", lambda: None)
+    engine2.start()
+    m2 = engine2.markets[slug]
+    m2.filled_up = True
+    m2.filled_down = True
+    m2.fill_price_up = 0.48
+    m2.fill_price_down = 0.48
+    m2.resting_up = 0.48
+    m2.resting_down = 0.48
+    m2.pair_captured = True
+    engine2._update_market_strategy(slug, poll1, now)
+    assert m2.chased_leg is None
+    assert m2.resting_down == 0.48
+    assert m2.resting_up == 0.48
 
 
 def test_update_config_leg_chase_knobs():
