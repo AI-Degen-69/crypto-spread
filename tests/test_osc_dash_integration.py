@@ -1591,6 +1591,7 @@ def test_api_live_config_patient_band_preset():
     engine.mode = "paper"
     orig_params = dict(engine.get_state()["params"])
     orig_markets = [s[0] for s in engine.selected_series]
+    orig_active_preset = engine.active_preset
     try:
         res = client.post("/api/live/config", json={"preset": "patient_band_maker"})
         assert res.status_code == 200
@@ -1636,6 +1637,8 @@ def test_api_live_config_patient_band_preset():
             stop_loss_enabled=orig_params["stop_loss_enabled"],
             max_pair_cost=orig_params["max_pair_cost"],
             selected_markets=orig_markets,
+            # Restore a preset latch the manual knob posts above cleared.
+            preset=orig_active_preset if orig_active_preset else None,
         )
         engine.mode = orig_mode
         engine.is_running = orig_running

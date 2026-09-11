@@ -390,6 +390,73 @@ def test_issue137_new_knobs_guarded_while_running():
 
 
 # ============================================================================
+# REVIEW ROUND 1 (CodeRabbit, PR #140): gate bypasses + latch accuracy
+# ============================================================================
+
+def test_issue137_preset_override_clears_active_preset():
+    """preset= plus an explicit override latches no preset (custom config)."""
+    engine = LiveTraderEngine()
+    engine.update_config(preset="patient_band_maker", offset=0.02)
+    assert engine.offset == 0.02
+    assert engine.active_preset is None
+
+
+def _spot_engine(**config) -> LiveTraderEngine:
+    engine = LiveTraderEngine()
+    if config:
+        engine.update_config(**config)
+    engine.is_running = True
+    return engine
+
+
+def test_issue137_spot_fast_stop_gated_when_disabled():
+    """Adverse streaming spot drift never exits while the stop is disabled."""
+    engine = _spot_engine(stop_loss_enabled=False)
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    mstate.filled_up = True
+    engine.on_spot_tick("btcusdt", 1_000_000, 50000.0)
+    engine.on_spot_tick("btcusdt", 2_000_000, 49000.0)  # -2% spot drift
+    assert mstate.exit_taken is False
+    assert mstate.status != "STOP_EXIT_PENDING"
+
+
+def test_issue137_spot_fast_stop_fires_when_enabled():
+    """Control: the same adverse spot drift exits with the stop enabled."""
+    engine = _spot_engine()
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    mstate.filled_up = True
+    engine.on_spot_tick("btcusdt", 1_000_000, 50000.0)
+    engine.on_spot_tick("btcusdt", 2_000_000, 49000.0)
+    assert mstate.exit_taken is True
+
+
+def test_issue137_advance_prequote_held_while_entry_controls_armed():
+    """Armed delay/band suspends next-window pre-quoting (no bypass)."""
+    engine = _paper_engine(entry_delay_sec=60.0)
+    slug = "btc-up-or-down-5m"
+    poll = _side_books(1000.0, 0.49, 0.51, 0.49, 0.51)
+    poll["next_market"] = {
+        "conditionId": "0x137next",
+        "slug": "mkt-137-next",
+        "up_token": "tok_up_next",
+        "down_token": "tok_dn_next",
+        "start_ts": 1300.0,
+        "end_ts": 1600.0,
+    }
+    engine._update_market_strategy(slug, poll, now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.next_quoted is False
+    assert mstate.next_order_id_up is None
+    assert mstate.next_order_id_down is None
+
+    control = _paper_engine()
+    control._update_market_strategy(slug, poll, now=1005.0)
+    assert control.markets[slug].next_quoted is True
+
+
+# ============================================================================
 # TASK 6: chase cap under the preset
 # ============================================================================
 

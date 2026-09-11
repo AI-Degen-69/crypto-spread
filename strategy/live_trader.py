@@ -1232,7 +1232,10 @@ class LiveTraderEngine:
                 if m.spot_open_price and m.spot_open_price > 0:
                     m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
 
-                if self.is_running and not self.quoting_halted:
+                # Issue #137: the streaming fast-stop path honors
+                # stop_loss_enabled like every other stop trigger — a disabled
+                # stop holds naked legs through spot drift too.
+                if self.is_running and not self.quoting_halted and self.stop_loss_enabled:
                     # Fast stop loss execution on adverse leading spot drift
                     if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
                         if m.spot_drift <= -self.spot_exit_drift:
@@ -2263,11 +2266,14 @@ class LiveTraderEngine:
                     self.entry_band = max(0.0, min(0.50, float(entry_band)))
                 if stop_loss_enabled is not None:
                     self.stop_loss_enabled = bool(stop_loss_enabled)
-                # Issue #137: preset bookkeeping. A preset application latches
-                # the name; any manual knob change that diverges from the
-                # preset table clears it back to a custom configuration.
+                # Issue #137: latch only a preset the resulting configuration
+                # still matches. An explicit override — or a partially failed
+                # market removal that leaves a hybrid universe — yields a
+                # custom configuration instead of a misleading preset label.
                 if preset_name is not None:
-                    self.active_preset = preset_name
+                    self.active_preset = (
+                        preset_name if self._preset_matches(preset_name) else None
+                    )
                 elif self.active_preset is not None and not self._preset_matches(self.active_preset):
                     self.active_preset = None
                 # Re-entry is a narrower test than the adverse-open gate, never a
@@ -2915,6 +2921,10 @@ class LiveTraderEngine:
                 m.open_drift = 0.0
                 m.adverse_open = False
                 m.open_gate_evaluated = False
+                # Issue #137: the entry-band gate resets with the other
+                # per-window gates so the next window re-evaluates it.
+                m.band_gate_evaluated = False
+                m.band_skip = False
                 m.first_seen_start_ts = None
                 m.first_tick_elapsed_sec = None
                 m.late_start_skip = False
@@ -2925,6 +2935,8 @@ class LiveTraderEngine:
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
             self.reentry_stats = _empty_reentry_stats()
+            # Issue #137: band-skip telemetry resets with the re-entry tally.
+            self.band_skip_stats = _empty_band_skip_stats()
             cleared_count = 0
             for m in self.markets.values():
                 if self._market_has_orders(m):
@@ -3462,7 +3474,12 @@ class LiveTraderEngine:
                 mstate.next_quoted = False
 
         # 2. Advance Pre-Quoting on Next Window (T+1) (live CLOB or paper simulation)
-        if self.is_running and not self.quoting_halted and mstate.next_condition_id and not mstate.next_quoted:
+        # Issue #137: suspended while the entry controls are armed — a
+        # pre-quoted T+1 window would otherwise roll over with order IDs set,
+        # bypassing both the entry delay and the band evaluation.
+        entry_controls_armed = self.entry_delay_sec > 0 or self.entry_band > 0
+        if (self.is_running and not self.quoting_halted and not entry_controls_armed
+                and mstate.next_condition_id and not mstate.next_quoted):
             resting_up = round(0.50 - self.offset, 3)
             resting_down = round(0.50 - self.offset, 3)
             if self.mode == "live":
