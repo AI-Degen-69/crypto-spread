@@ -611,6 +611,25 @@ def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monk
     assert "profitable_exits" in ov
 
 
+def test_backtest_ui_pagination_and_tooltips_elements():
+    """Verify that root SPA contains backtest log pagination controls, filters, and tooltips."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert "btEquityWarning" in html
+    assert "btLogSearch" in html
+    assert "btLogSeriesFilter" in html
+    assert "btLogResultFilter" in html
+    assert "btLogPageSize" in html
+    assert "btLogBtnPrev" in html
+    assert "btLogBtnNext" in html
+    assert "btLogPageInfo" in html
+    assert "Pair Capture Rate ℹ️" in html
+    assert "Exit Stop Rate ℹ️" in html
+    assert "Win Rate ℹ️" in html
+    assert "renderBacktestTradesPage" in html
+
+
 def test_api_upload_stream_ingest(tmp_path, monkeypatch):
     """Verify single direct stream upload of JSONL payload with index creation."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
