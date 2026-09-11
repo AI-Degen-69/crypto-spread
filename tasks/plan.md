@@ -1,71 +1,66 @@
-# Plan: Issue #137 — Wire research-winning 'patient undecided-band maker' preset into live trader
+# Plan: Issue #138 — per-fill queue-position telemetry (tape-vs-tapeq EV)
 
 Task Type: Code
 Size Tier: Standard
-Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trader.py, tests/test_entry_timeout.py (+ new tests/test_patient_band_preset.py)
+Target Files: strategy/live_trader.py, scripts/bucket_fills.py (new), tests/test_fill_telemetry.py (new), tests/test_live_trader.py
 
 ## Task Breakdown
 
-### Task 1: Engine knobs — init + update_config + state echo
-- **Files**: `strategy/live_trader.py` (`__init__` :600, `update_config` :1945, `get_state` :1842)
+### Task 1: Rest context + queue-ahead math + book stash
+- **Files**: `strategy/live_trader.py` (`MarketLiveState`, quote-placement block)
 - **Type**: Code
 - **Description**:
-  1. Add `entry_delay_sec: float = 0.0`, `entry_band: float = 0.0`, `stop_loss_enabled: bool = True` to `__init__` (defaults = current behavior).
-  2. Extend `update_config()` signature + while-running change detection + clamped mutation (delay ≥ 0, band 0..0.50, bool cast) following the existing knob conventions.
-  3. Echo all three + `active_preset` in `get_state()["params"]`.
-  4. Track `active_preset: str | None` (None = custom/manual); set on preset application, cleared on any manual knob divergence.
+  1. Add per-leg rest-context fields (`rest_up_price/queue/ts/elapsed`, same for DOWN) + `last_bids_up/down` stash dicts to `MarketLiveState`; reset all on window rollover.
+  2. Add `_queue_ahead(bids, price)` helper (sum sizes at levels ≥ price; empty → None), mirroring `run/sweeps/sim2.py:_queue_ahead`.
+  3. At each placement tick: copy current bid books into the stash; when a leg newly rests, snapshot its rest context.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_live_trader.py -q`
+- **Verification**: `python -m pytest tests/test_fill_telemetry.py -q -k queue_ahead`
 
-### Task 2: Entry-delay gate in the quote path
-- **Files**: `strategy/live_trader.py` (quote placement block :3418-3470, pre-entry section :3565+)
+### Task 2: Telemetry record builder + best-effort writer + tape join
+- **Files**: `strategy/live_trader.py` (new `_record_fill_telemetry` + `FILL_TELEMETRY_FILE = RUN_DIR / "live_fill_telemetry.jsonl"`)
 - **Type**: Code
 - **Description**:
-  1. Compute `elapsed = now - start_ts` per tick; when `entry_delay_sec > 0` and `elapsed < entry_delay_sec` and no leg filled yet: place no orders (live or paper-sim), set informative `last_action` (e.g. `entry delayed Xs/Ys`), do NOT latch any skip flag.
-  2. Compose with existing gates: delay evaluated before adverse-open (#92) snapshot consumption and entry_timeout/late-start (#96) handling; a window that fills nothing during the delay keeps all existing skip paths intact after expiry.
-  3. Reset per-window state on rollover (same reset family as `entry_cancelled_timeout`, `open_gate_evaluated`).
-   (Implemented statelessly as a pure function of `elapsed_sec`, so no rollover reset is required.)
+  1. Builder computes `fill_ratio = printed / max(queue_ahead, 1)`, `ratio_flagged = ratio > 10`, all 16 fields (incl. `market_slug`/`condition_id` for the PnL join).
+  2. Adopted improvement: also record `resting_pair_cost` (resting_up + resting_down at fill) enabling future pair-cost × queue analysis at zero re-collection cost.
+  3. Tape join: timestamped variant of the data-api /trades fetch (same endpoint/schema as `markets.recent_trades`, keeping per-row ts); sum sizes at ≈ resting price with ts ≥ rest_ts; any failure → nulls.
+  4. Writer appends one JSON line, wrapped so failure logs a warning and never raises; path injectable for tests.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_entry_timeout.py -q` + new delay tests
+- **Verification**: `python -m pytest tests/test_fill_telemetry.py -q -k "join or writer or ratio"`
 
-### Task 3: Post-delay entry-band gate (undecided-market filter)
-- **Files**: `strategy/live_trader.py` (open-gate snapshot :3542-3548 as pattern, pre-entry skip :3565+)
+### Task 3: Hook CLOB-confirmed + paper-simulated fill paths
+- **Files**: `strategy/live_trader.py` (CLOB fill-confirmation block, paper-sim branches incl. chased immediate fill)
 - **Type**: Code
 - **Description**:
-  1. After delay expiry, on the first tick with a two-sided book: check `abs(mid - 0.50) <= entry_band` (only when `entry_band > 0`); on failure latch the window skipped via the `entry_cancelled_timeout` family + `last_action` log mirroring the adverse-drift skip wording, without touching `open_mid/open_drift` telemetry.
-  2. One-sided book at expiry: wait for the first two-sided tick instead of failing the window (same `book_two_sided` guard as the open gate).
-  3. Explicitly NOT applied to re-entry (#95): re-entry keeps `reentry_drift_band` only.
-  4. Distinct telemetry (adopted improvement): per-window `band_skip` flag + session-level `band_skip_stats` counter (follows the `reentry_stats` precedent), echoed in `get_state()`, so the pilot can tell band-filter skips apart from adverse-open skips.
-  5. Placement is additionally held while the armed band awaits its first two-sided book (`band_hold`); re-entry marks the band evaluated (band never gates re-entry).
+  1. Call the helper at every site that sets `filled_up/filled_down` (UP, DOWN, chased), passing `chased=` from `chased_leg` state.
+  2. Exactly-once semantics per leg per window (guard against double-record on re-poll).
+  3. Pure appendage: no change to fill conditions, prices, or order flow.
+   (Hooks sit outside the naked-only conditionals so paired fills record too.)
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q` + new band tests
+- **Verification**: `python -m pytest tests/test_live_trader.py tests/test_fill_telemetry.py -q`
 
-### Task 4: stop_loss_enabled gate on stop paths
-- **Files**: `strategy/live_trader.py` (`place_stop_order` :877, fill→stage call sites :3766/3799/3821/3853, drift-stop triggers :4013/4039)
+### Task 4: Hook stream-detected fill path
+- **Files**: `strategy/live_trader.py` (`on_user_order_event`)
 - **Type**: Code
 - **Description**:
-  1. `place_stop_order()` early-returns (no-op, no id/staged status) when `stop_loss_enabled` is False — single choke point covering live-buffered and paper-RESTING paths.
-  2. Drift-stop trigger evaluation skips when disabled; naked-timeout (`_naked_timeout_elapsed`) and rollover settlement paths stay authoritative.
-  3. Defaults (`True`) leave every existing stop test green unchanged.
+  1. Call the same helper on stream UP/DOWN fills, using the stashed last-seen books for queue-ahead (null when stash empty).
+  2. Same exactly-once guard as Task 3.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_live_trader.py -q` + new no-stop tests
+- **Verification**: `python -m pytest tests/test_fill_telemetry.py -q -k stream`
 
-### Task 5: Preset + API wiring (config + state)
-- **Files**: `server/osc_dash.py` (`LiveConfigPayload` :1062, `POST /api/live/config` :1172, `GET /api/live/state` :896), `strategy/live_trader.py` (`update_config`, `get_state`)
+### Task 5: Bucketing helper script
+- **Files**: `scripts/bucket_fills.py` (new)
 - **Type**: Code
 - **Description**:
-  1. Define preset table `patient_band_maker` = offset 0.03, entry_band 0.04, entry_delay_sec 60, stop_loss_enabled False, max_pair_cost 0.98, universe (xrp-15m, bnb-15m, eth-5m).
-  2. `LiveConfigPayload`: add optional `preset`, `entry_delay_sec`, `entry_band`, `stop_loss_enabled`, `enable_leg_chase`, `max_pair_cost` fields with matching validators/ranges.
-  3. `POST /api/live/config`: `preset="patient_band_maker"` atomically applies all six fields (or returns 400 leaving config untouched, per existing contract); individual knobs remain settable without a preset.
-  4. `GET /api/live/state`: echo `active_preset` + knob values.
+  1. Read `run/live_fill_telemetry.jsonl`; bucket by `fill_ratio` ([0–0.25), [0.25–0.5), [0.5–1), [1+]); join settlement PnL via `market_slug` → `WINDOW_SETTLE` lines in `run/live_trades.jsonl` (missing → counted, PnL null).
+  2. Print per-bucket table: count, mean subsequent PnL; exit 0 on empty input with a clear message.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` + new preset API tests
+- **Verification**: `python scripts/bucket_fills.py run/live_fill_telemetry.jsonl` on synthetic fixture (covered by a test driving main() with tmp files)
 
 ### Task 6: Tests + regression gate
-- **Files**: `tests/test_patient_band_preset.py` (new), `tests/test_live_trader.py`, `tests/test_entry_timeout.py`
+- **Files**: `tests/test_fill_telemetry.py` (new), `tests/test_live_trader.py`
 - **Type**: Code
 - **Description**:
-  1. New tests: delay suppresses quoting before 60s and allows after; band failure skips without placing orders; no stop staged when disabled; chase still capped at 0.98 under the preset; defaults preserve behavior.
+  1. Cover: queue-ahead math incl. empty book; tape-join sum/window/filtering; one line per fill path (paper, CLOB-mocked with associate_trades, stream); degenerate nulls; writer failure tolerance (unwritable path); bucket table on fixture.
   2. Run targeted gate, then the full suite.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q` then `python -m pytest -q` (440 passed)
+- **Verification**: `python -m pytest tests/test_live_trader.py -q` then `python -m pytest -q` (462 passed)
