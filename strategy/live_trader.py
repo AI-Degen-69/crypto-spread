@@ -46,7 +46,8 @@ REENTRY_FILE = RUN_DIR / "reentry_events.jsonl"
 def _empty_reentry_stats() -> Dict[str, int]:
     """A zeroed re-entry tally, one counter per outcome plus the reached-book count."""
     return {"reentries": 0, "reached_book": 0, "paired": 0, "single_leg": 0,
-            "exited": 0, "both_no_merge": 0, "no_fill": 0}
+            "exited": 0, "both_no_merge": 0, "no_fill": 0,
+            "chased_fills": 0, "passive_fills": 0}
 
 
 def _reentry_outcome(m: "MarketLiveState") -> str:
@@ -483,6 +484,9 @@ class MarketLiveState:
     pair_captured: bool = False
     exit_taken: bool = False
     exit_side: Optional[str] = None
+    # Issue #123: leg chase tracking
+    chased_leg: Optional[str] = None
+    chased_fill: bool = False
 
     # Multi-merge re-quoting (issue #89): completed merges in the current
     # window. Round 0 is the initial static-anchor quote; each re-quote opens
@@ -602,6 +606,10 @@ class LiveTraderEngine:
         # entry can pair before the naked timeout would fire. When False, re-entry
         # behaves as before (issue #95 semantics).
         self.reentry_require_pairable: bool = True
+        # Issue #123: actively chase second leg after a one-sided fill by stepping
+        # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
+        self.enable_leg_chase: bool = True
+        self.max_pair_cost: float = 0.98
         self.spot_exit_drift: float = 0.003
         self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
         self.shares: int = 5
@@ -1377,12 +1385,16 @@ class LiveTraderEngine:
                 m.order_status_up = status
                 if status in ("MATCHED", "FILLED"):
                     m.filled_up = True
+                    if m.chased_leg == "UP":
+                        m.chased_fill = True
                     m.fill_price_up = float(payload.get("price") or m.resting_up)
                     m.status = "FILLED_UP"
             elif m.order_id_down == order_id:
                 m.order_status_down = status
                 if status in ("MATCHED", "FILLED"):
                     m.filled_down = True
+                    if m.chased_leg == "DOWN":
+                        m.chased_fill = True
                     m.fill_price_down = float(payload.get("price") or m.resting_down)
                     m.status = "FILLED_DOWN"
             elif m.order_id_exit_up == order_id:
@@ -1862,6 +1874,8 @@ class LiveTraderEngine:
                 "reentry_drift_band": self.reentry_drift_band,
                 "reentry_min_remaining_pct": self.reentry_min_remaining_pct,
                 "max_reentries_per_window": self.max_reentries_per_window,
+                "enable_leg_chase": self.enable_leg_chase,
+                "max_pair_cost": self.max_pair_cost,
             },
             "reentry_stats": reentry_stats_snapshot,
             "markets": mkts_dict,
@@ -1905,7 +1919,9 @@ class LiveTraderEngine:
                       max_reentries_per_window: Optional[int] = None,
                       exit_thresh_naked: Optional[float] = None,
                       naked_leg_timeout_pct: Optional[float] = None,
-                      reentry_require_pairable: Optional[bool] = None) -> Dict[str, Any]:
+                      reentry_require_pairable: Optional[bool] = None,
+                      enable_leg_chase: Optional[bool] = None,
+                      max_pair_cost: Optional[float] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
         Raises:
@@ -1966,6 +1982,10 @@ class LiveTraderEngine:
                 if reentry_require_pairable is not None and bool(reentry_require_pairable) != self.reentry_require_pairable:
                     param_changed = True
                 if max_reentries_per_window is not None and int(max_reentries_per_window) != self.max_reentries_per_window:
+                    param_changed = True
+                if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
+                    param_changed = True
+                if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
                     param_changed = True
 
                 if param_changed:
@@ -2094,6 +2114,10 @@ class LiveTraderEngine:
                     self.naked_leg_timeout_pct = max(0.0, min(1.0, float(naked_leg_timeout_pct)))
                 if reentry_require_pairable is not None:
                     self.reentry_require_pairable = bool(reentry_require_pairable)
+                if enable_leg_chase is not None:
+                    self.enable_leg_chase = bool(enable_leg_chase)
+                if max_pair_cost is not None:
+                    self.max_pair_cost = max(0.50, min(1.00, float(max_pair_cost)))
                 # Re-entry is a narrower test than the adverse-open gate, never a
                 # looser one: a band at or above `exit_thresh` would let a window
                 # re-enter at the very drift the gate exists to reject. Applied
@@ -3360,6 +3384,45 @@ class LiveTraderEngine:
             resting_down = mstate.resting_down
         mstate.order_shares = self.shares
 
+        # --- LEG CHASE AFTER ONE-SIDED FILL (Issue #123) ---
+        # When one leg fills, step up the opposite leg's quote towards the ask,
+        # strictly capped so pair cost stays <= max_pair_cost (default 0.98).
+        if self.enable_leg_chase and not mstate.pair_captured and not mstate.exit_taken:
+            if mstate.filled_up and not mstate.filled_down:
+                entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                max_down_bid = round(math.floor((self.max_pair_cost - entry_up + 1e-9) * 100) / 100.0, 2)
+                if mstate.down_ask is not None:
+                    target_down = min(mstate.down_ask, max_down_bid)
+                    if target_down > resting_down:
+                        resting_down = target_down
+                        mstate.resting_down = resting_down
+                        mstate.chased_leg = "DOWN"
+                    elif target_down == max_down_bid and target_down >= resting_down:
+                        if max_down_bid > resting_down:
+                            resting_down = max_down_bid
+                            mstate.resting_down = resting_down
+                            mstate.chased_leg = "DOWN"
+            elif mstate.filled_down and not mstate.filled_up:
+                entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                max_up_bid = round(math.floor((self.max_pair_cost - entry_dn + 1e-9) * 100) / 100.0, 2)
+                if mstate.up_ask is not None:
+                    target_up = min(mstate.up_ask, max_up_bid)
+                    if target_up > resting_up:
+                        resting_up = target_up
+                        mstate.resting_up = resting_up
+                        mstate.chased_leg = "UP"
+                    elif target_up == max_up_bid and target_up >= resting_up:
+                        if max_up_bid > resting_up:
+                            resting_up = max_up_bid
+                            mstate.resting_up = resting_up
+                            mstate.chased_leg = "UP"
+            else:
+                mstate.chased_leg = None
+        else:
+            mstate.chased_leg = None
+
         # --- DRIFT TRACKING (vs 0.50 base) ---
         mid = mstate.mid or 0.50
         if mid > 0.50:
@@ -3580,6 +3643,14 @@ class LiveTraderEngine:
         )
         if can_place_entry:
             if self.mode == "live":
+                # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
+                if mstate.chased_leg == "DOWN" and mstate.order_id_down and mstate.order_status_down == "RESTING":
+                    if self.cancel_live_order(mstate.order_id_down):
+                        mstate.order_id_down = None
+                elif mstate.chased_leg == "UP" and mstate.order_id_up and mstate.order_status_up == "RESTING":
+                    if self.cancel_live_order(mstate.order_id_up):
+                        mstate.order_id_up = None
+
                 if not mstate.order_id_up and mstate.up_token:
                     res_up = self.place_live_quote(mstate.up_token, resting_up, self.shares, "BUY")
                     if res_up and res_up.get("order_id"):
@@ -3625,6 +3696,8 @@ class LiveTraderEngine:
                             sz_up = float(ord_up.get("size_matched", 0.0) or 0.0)
                             if st_up in ("MATCHED", "FILLED") or sz_up >= mstate.order_shares:
                                 mstate.filled_up = True
+                                if mstate.chased_leg == "UP":
+                                    mstate.chased_fill = True
                                 actual_px_up = None
                                 trades_up = ord_up.get("associate_trades") or ord_up.get("trades")
                                 if isinstance(trades_up, list) and trades_up:
@@ -3655,6 +3728,8 @@ class LiveTraderEngine:
                             sz_dn = float(ord_dn.get("size_matched", 0.0) or 0.0)
                             if st_dn in ("MATCHED", "FILLED") or sz_dn >= mstate.order_shares:
                                 mstate.filled_down = True
+                                if mstate.chased_leg == "DOWN":
+                                    mstate.chased_fill = True
                                 actual_px_dn = None
                                 trades_dn = ord_dn.get("associate_trades") or ord_dn.get("trades")
                                 if isinstance(trades_dn, list) and trades_dn:
@@ -3690,12 +3765,29 @@ class LiveTraderEngine:
                         mstate.order_status_up = "FILLED"
                         mstate.order_time_up = time.strftime("%H:%M:%S")
                         mstate.status = "FILLED_UP"
+                        if mstate.chased_leg == "UP":
+                            mstate.chased_fill = True
                         mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
                         log.info("[%s] Filled UP @ %.2f", slug, resting_up)
                         if mstate.naked_since_ts is None and not mstate.filled_down:
                             mstate.naked_since_ts = now
                         # Pre-place resting stop-loss protection for the filled leg (issue #87)
                         self.place_stop_order(mstate, "UP")
+                        # If DOWN is not yet filled, step up DOWN quote towards ask within cap
+                        if not mstate.filled_down and self.enable_leg_chase:
+                            entry_up = mstate.fill_price_up
+                            # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                            max_down_bid = round(math.floor((self.max_pair_cost - entry_up + 1e-9) * 100) / 100.0, 2)
+                            if mstate.down_ask is not None:
+                                target_down = min(mstate.down_ask, max_down_bid)
+                                if target_down > resting_down:
+                                    resting_down = target_down
+                                    mstate.resting_down = resting_down
+                                    mstate.chased_leg = "DOWN"
+                                elif target_down == max_down_bid and target_down >= resting_down and max_down_bid > resting_down:
+                                    resting_down = max_down_bid
+                                    mstate.resting_down = resting_down
+                                    mstate.chased_leg = "DOWN"
 
                 if can_sim_dn:
                     if mstate.down_ask is not None and mstate.down_ask <= resting_down:
@@ -3704,6 +3796,8 @@ class LiveTraderEngine:
                         mstate.order_status_down = "FILLED"
                         mstate.order_time_down = time.strftime("%H:%M:%S")
                         mstate.status = "FILLED_DOWN" if not mstate.filled_up else "PAIR_MERGED"
+                        if mstate.chased_leg == "DOWN":
+                            mstate.chased_fill = True
                         mstate.last_action = f"Filled DOWN {self.shares} shares @ {resting_down:.2f}"
                         log.info("[%s] Filled DOWN @ %.2f", slug, resting_down)
                         if not mstate.filled_up:
@@ -3711,10 +3805,35 @@ class LiveTraderEngine:
                                 mstate.naked_since_ts = now
                             # Pre-place resting stop-loss protection for the filled leg (issue #87)
                             self.place_stop_order(mstate, "DOWN")
-
+                            # If UP is not yet filled, step up UP quote towards ask within cap
+                            if self.enable_leg_chase:
+                                entry_dn = mstate.fill_price_down
+                                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
+                                max_up_bid = round(math.floor((self.max_pair_cost - entry_dn + 1e-9) * 100) / 100.0, 2)
+                                if mstate.up_ask is not None:
+                                    target_up = min(mstate.up_ask, max_up_bid)
+                                    if target_up > resting_up:
+                                        resting_up = target_up
+                                        mstate.resting_up = resting_up
+                                        mstate.chased_leg = "UP"
+                                    elif target_up == max_up_bid and target_up >= resting_up and max_up_bid > resting_up:
+                                        resting_up = max_up_bid
+                                        mstate.resting_up = resting_up
+                                        mstate.chased_leg = "UP"
+                                    # Immediate fill check if UP ask meets new chase quote
+                                    if can_sim_up and mstate.up_ask <= resting_up:
+                                        mstate.filled_up = True
+                                        mstate.fill_price_up = resting_up
+                                        mstate.order_status_up = "FILLED"
+                                        mstate.order_time_up = time.strftime("%H:%M:%S")
+                                        mstate.status = "PAIR_MERGED"
+                                        mstate.chased_fill = True
+                                        mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
+                                        log.info("[%s] Filled UP @ %.2f (chased)", slug, resting_up)
 
             # --- PAIR COMPLETION & MERGE ---
             if mstate.filled_up and mstate.filled_down:
+                mstate.chased_leg = None
                 # OCO Case A: cancel the stop-loss before the merge — a hedged
                 # pair must never keep protection working against one leg (issue #87).
                 # If a venue-side cancellation fails, block the merge and retry next tick.
@@ -4034,6 +4153,7 @@ class LiveTraderEngine:
             tel["realized_pnl_usd"] = round(mstate.realized_pnl_usd, 4)
             tel["final_status"] = mstate.status
             tel["outcome"] = _reentry_outcome(mstate)
+            tel["chased_fill"] = mstate.chased_fill
             tel["outcome_locked_at_round"] = mstate.requote_round
 
     def _flush_reentry_event(self, mstate: MarketLiveState) -> Optional[Dict[str, Any]]:
@@ -4060,6 +4180,10 @@ class LiveTraderEngine:
             if record.get("mid_at_resting") is not None:
                 self.reentry_stats["reached_book"] += 1
             self.reentry_stats[record["outcome"]] = self.reentry_stats.get(record["outcome"], 0) + 1
+            if record.get("chased_fill"):
+                self.reentry_stats["chased_fills"] = self.reentry_stats.get("chased_fills", 0) + 1
+            elif record.get("outcome") == "paired":
+                self.reentry_stats["passive_fills"] = self.reentry_stats.get("passive_fills", 0) + 1
         if not os.getenv("PYTEST_CURRENT_TEST"):
             try:
                 RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -4225,6 +4349,8 @@ class LiveTraderEngine:
             mstate.fill_price_down = None
             mstate.pair_captured = False
             mstate.exit_taken = False
+            mstate.chased_leg = None
+            mstate.chased_fill = False
             mstate.entry_cancelled_timeout = False
             mstate.requote_round = 0
             mstate.last_requote_telemetry = None
