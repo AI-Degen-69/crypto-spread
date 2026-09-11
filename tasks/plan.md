@@ -24,7 +24,8 @@ Target Files: strategy/live_trader.py, server/osc_dash.py, tests/test_live_trade
   1. Compute `elapsed = now - start_ts` per tick; when `entry_delay_sec > 0` and `elapsed < entry_delay_sec` and no leg filled yet: place no orders (live or paper-sim), set informative `last_action` (e.g. `entry delayed Xs/Ys`), do NOT latch any skip flag.
   2. Compose with existing gates: delay evaluated before adverse-open (#92) snapshot consumption and entry_timeout/late-start (#96) handling; a window that fills nothing during the delay keeps all existing skip paths intact after expiry.
   3. Reset per-window state on rollover (same reset family as `entry_cancelled_timeout`, `open_gate_evaluated`).
-- **Status**: [ ]
+   (Implemented statelessly as a pure function of `elapsed_sec`, so no rollover reset is required.)
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_entry_timeout.py -q` + new delay tests
 
 ### Task 3: Post-delay entry-band gate (undecided-market filter)

@@ -3603,6 +3603,20 @@ class LiveTraderEngine:
             entry_timeout_sec = win_duration
             is_late_start = False
 
+        # --- ENTRY DELAY (issue #137) ---
+        # While the window is younger than `entry_delay_sec`, no quotes are
+        # placed at all. Transient by design: no skip flag is latched, so the
+        # adverse-open, band, and timeout gates below still evaluate normally
+        # after expiry. Stateless (a pure function of `elapsed_sec`), so there
+        # is nothing to reset on rollover. Windows with a fill already are
+        # unaffected.
+        entry_delay_pending = (
+            self.entry_delay_sec > 0
+            and elapsed_sec < self.entry_delay_sec
+            and not mstate.filled_up
+            and not mstate.filled_down
+        )
+
         # Late-start latch (issue #96). Evaluated once per window from the first
         # tick the engine observes for it, keyed on `start_ts` so it re-arms on every
         # rollover. Gating on the latched value rather than on the live `elapsed_sec`
@@ -3797,7 +3811,13 @@ class LiveTraderEngine:
             and not is_late_start
             and not is_adverse_open
             and not mstate.late_start_skip
+            and not entry_delay_pending
         )
+        if entry_delay_pending and not mstate.entry_cancelled_timeout:
+            mstate.last_action = (
+                f"Entry delayed ({elapsed_sec:.0f}s/{self.entry_delay_sec:.0f}s into window)"
+                " — quoting after delay"
+            )
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price

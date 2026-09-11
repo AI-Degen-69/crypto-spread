@@ -5,7 +5,40 @@ entry-delay gate, post-delay entry-band gate + telemetry, stop-loss-off
 semantics, and the patient_band_maker preset incl. API wiring.
 """
 
+from unittest.mock import MagicMock
+
 from strategy.live_trader import LiveTraderEngine
+
+
+def _poll_data(start_ts: float, duration: float = 300.0, mid: float = 0.50) -> dict:
+    half = 0.01
+    return {
+        "market": {
+            "conditionId": "0x137",
+            "slug": "mkt-137",
+            "up_token": "tok_up_137",
+            "down_token": "tok_dn_137",
+            "start_ts": start_ts,
+            "end_ts": start_ts + duration,
+        },
+        "up_book": {"best_bid": round(mid - half, 4), "best_ask": round(mid + half, 4)},
+        "down_book": {"best_bid": round(mid - half, 4), "best_ask": round(mid + half, 4)},
+    }
+
+
+def _live_engine(**config) -> LiveTraderEngine:
+    engine = LiveTraderEngine()
+    if config:
+        # Applied before is_running flips, per the stop-the-bot-first contract.
+        engine.update_config(**config)
+    engine.mode = "live"
+    engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
+    engine.place_live_quote = MagicMock(
+        side_effect=lambda tok, px, sz, side: {"order_id": f"ord_{tok}", "status": "RESTING"}
+    )
+    engine.cancel_live_order = MagicMock(return_value=True)
+    return engine
 
 
 # ============================================================================
@@ -57,3 +90,44 @@ def test_issue137_update_config_rejects_unknown_preset_atomically():
     after = engine.get_state()["params"]
     assert after == before
     assert engine.active_preset is None
+
+
+# ============================================================================
+# TASK 2: entry-delay gate
+# ============================================================================
+
+def test_issue137_delay_suppresses_quoting_before_expiry():
+    """With entry_delay_sec=60, a tick 5s in places no orders and latches nothing."""
+    engine = _live_engine(entry_delay_sec=60.0)
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(slug, _poll_data(1000.0), now=1005.0)
+    mstate = engine.markets[slug]
+    assert engine.place_live_quote.call_count == 0
+    assert mstate.order_id_up is None
+    assert mstate.order_id_down is None
+    assert mstate.entry_cancelled_timeout is False
+    assert "delayed" in mstate.last_action
+
+
+def test_issue137_delay_allows_quoting_after_expiry():
+    """Same window quotes normally once elapsed passes the delay."""
+    engine = _live_engine(entry_delay_sec=60.0)
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(slug, _poll_data(1000.0), now=1005.0)
+    assert engine.place_live_quote.call_count == 0
+    engine._update_market_strategy(slug, _poll_data(1000.0), now=1061.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_id_up is not None
+    assert mstate.order_id_down is not None
+    assert mstate.order_status_up == "RESTING"
+    assert mstate.order_status_down == "RESTING"
+
+
+def test_issue137_no_delay_quotes_immediately_by_default():
+    """Defaults (delay 0) quote on the first tick — behavior unchanged."""
+    engine = _live_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(slug, _poll_data(1000.0), now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_id_up is not None
+    assert mstate.order_id_down is not None
