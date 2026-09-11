@@ -315,6 +315,19 @@ def test_issue137_drift_stop_still_fires_when_enabled():
     assert mstate.exit_taken is True
 
 
+def test_issue137_naked_timeout_still_fires_when_stop_disabled():
+    """Stop-off disables the stop, not the naked-timeout safety net."""
+    engine = _paper_engine(stop_loss_enabled=False)
+    slug = "btc-up-or-down-5m"
+    mstate = _fill_up_naked(engine, slug)
+    assert mstate.stop_order_id is None
+    # 211s after the fill exceeds 70% of the 300s window: the timeout exits
+    # the unpaired leg at the live bid even with the stop disabled.
+    engine._update_market_strategy(
+        slug, _side_books(1000.0, 0.49, 0.51, 0.49, 0.51), now=1212.0)
+    assert mstate.exit_taken is True
+
+
 # ============================================================================
 # TASK 5: preset application (engine side)
 # ============================================================================
@@ -355,6 +368,25 @@ def test_issue137_matching_manual_set_keeps_active_preset():
     engine.update_config(preset="patient_band_maker")
     engine.update_config(offset=0.03)
     assert engine.active_preset == "patient_band_maker"
+
+
+def test_issue137_new_knobs_guarded_while_running():
+    """New knobs and preset changes are rejected on a running engine."""
+    engine = LiveTraderEngine()
+    engine.is_running = True
+    for kw in ({"entry_delay_sec": 5.0}, {"entry_band": 0.02},
+               {"stop_loss_enabled": False}, {"preset": "patient_band_maker"}):
+        try:
+            engine.update_config(**kw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {kw} while running")
+    assert engine.entry_delay_sec == 0.0
+    assert engine.active_preset is None
+    # Idempotent same-value posts stay allowed while running.
+    engine.update_config(entry_delay_sec=0.0, entry_band=0.0, stop_loss_enabled=True)
+    assert engine.entry_delay_sec == 0.0
 
 
 # ============================================================================

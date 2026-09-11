@@ -678,7 +678,7 @@ class LiveTraderEngine:
         self.stop_loss_enabled: bool = True
         # Name of the active named preset, or None for a manual/custom
         # configuration. Set by update_config(preset=...), cleared as soon as
-        # a manual knob change diverges from the preset table.
+        # a manual change to a preset-table knob diverges from the table.
         self.active_preset: Optional[str] = None
         self.spot_exit_drift: float = 0.003
         self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
@@ -933,8 +933,9 @@ class LiveTraderEngine:
         """
         # Issue #137: with the stop-loss disabled the preset holds naked legs
         # to settlement/rollover instead, so no protection is ever staged.
-        # Single choke point covering the live-buffered, paper-simulated, and
-        # polling fill paths (naked-timeout and rollover stay authoritative).
+        # Staging choke point covering the live-buffered, paper-simulated, and
+        # polling fill paths; the drift-stop triggers are gated separately
+        # below (naked-timeout and rollover stay authoritative).
         if not self.stop_loss_enabled:
             return
         is_up = (side.upper() == "UP")

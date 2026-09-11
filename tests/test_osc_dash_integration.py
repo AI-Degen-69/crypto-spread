@@ -1623,6 +1623,9 @@ def test_api_live_config_patient_band_preset():
         # Unknown preset rejected, config untouched.
         res_bad = client.post("/api/live/config", json={"preset": "nope"})
         assert res_bad.status_code == 400
+        # Absurd delay rejected at the boundary (would silently never quote).
+        assert client.post(
+            "/api/live/config", json={"entry_delay_sec": 99999}).status_code == 422
     finally:
         engine.update_config(
             offset=orig_params["offset"],

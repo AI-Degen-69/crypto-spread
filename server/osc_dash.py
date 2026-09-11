@@ -1081,7 +1081,10 @@ class LiveConfigPayload(BaseModel):
     # upper bound (a delay past the window simply never quotes); entry_band
     # matches the engine's 0..0.50 clamp; max_pair_cost matches 0.50..1.00.
     preset: Optional[str] = None
-    entry_delay_sec: Optional[float] = Field(default=None, ge=0.0)
+    # No upper bound would let a typo (or inf) silently never quote, since a
+    # delay past the window end never expires. 3600s is 4x the longest 900s
+    # window — anything larger is rejected at the boundary instead.
+    entry_delay_sec: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
     entry_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
     stop_loss_enabled: Optional[bool] = None
     enable_leg_chase: Optional[bool] = None
