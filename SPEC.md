@@ -39,7 +39,7 @@ Ensure canonical directory sources in `~/.agents/skills/` are deployed via Direc
 ---
 
 ## 3. Out of Scope
-- Rewriting `docs/agent-skills-guide.md` (Issue #117).
+- Rewriting `docs/issue-workflow.md` (formerly `agent-skills-guide.md`; Issue #117).
 - Modifying skill runtime logic or adding new skills beyond the 7.
 - Modifying other unrelated skills in `~/.agents/skills/`.
 
