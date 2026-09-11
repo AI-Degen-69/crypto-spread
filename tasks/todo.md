@@ -1,8 +1,8 @@
-# Todo: Issue #137 — patient undecided-band maker preset
+# Todo: Issue #138 — per-fill queue-position telemetry
 
-- [x] Task 1: Engine knobs — init + update_config + state echo (`strategy/live_trader.py`)
-- [x] Task 2: Entry-delay gate in the quote path (`strategy/live_trader.py`)
-- [x] Task 3: Post-delay entry-band gate, re-entry exempt (`strategy/live_trader.py`)
-- [x] Task 4: stop_loss_enabled gate on stop paths, timeout/settlement intact (`strategy/live_trader.py`)
-- [x] Task 5: Preset + API wiring — `POST /api/live/config`, `GET /api/live/state` (`server/osc_dash.py`)
-- [x] Task 6: New tests + regression gate (`python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`, then `python -m pytest -q`)
+- [x] Task 1: Rest context + queue-ahead math + book stash (`strategy/live_trader.py`)
+- [ ] Task 2: Telemetry record builder + best-effort writer + tape join (`strategy/live_trader.py`)
+- [ ] Task 3: Hook CLOB-confirmed + paper-simulated fill paths (`strategy/live_trader.py`)
+- [ ] Task 4: Hook stream-detected fill path (`strategy/live_trader.py`)
+- [ ] Task 5: Bucketing helper script (`scripts/bucket_fills.py`)
+- [ ] Task 6: New tests + regression gate (`python -m pytest tests/test_live_trader.py -q`, then `python -m pytest -q`)

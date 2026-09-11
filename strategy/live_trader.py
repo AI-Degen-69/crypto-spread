@@ -81,6 +81,21 @@ def _empty_band_skip_stats() -> Dict[str, int]:
     return {"band_skips": 0}
 
 
+def _queue_ahead(bids: Optional[Dict[float, float]], price: float) -> Optional[float]:
+    """Shares resting at or above `price` — our queue position at rest.
+
+    Issue #138: mirrors run/sweeps/sim2.py:_queue_ahead. An empty or missing
+    book yields None (unknown), never zero, so a degenerate book cannot
+    masquerade as front-of-queue.
+    """
+    if not bids:
+        return None
+    try:
+        return float(sum(s for p, s in bids.items() if float(p) >= price))
+    except (TypeError, ValueError):
+        return None
+
+
 def _reentry_outcome(m: "MarketLiveState") -> str:
     """Name the end state of a re-entered window, for the observability record."""
     if m.pair_captured:
@@ -476,6 +491,21 @@ class MarketLiveState:
     # re-evaluated, never applied to re-entry, and cleared on rollover.
     band_gate_evaluated: bool = False
     band_skip: bool = False
+
+    # Fill-telemetry rest context (issue #138). Snapshot per leg the first
+    # tick its entry order is active; cleared on rollover. `last_bids_*`
+    # stash the most recent full bid books so the stream fill path (which
+    # carries no book) can still estimate queue-ahead.
+    rest_up_price: Optional[float] = None
+    rest_up_queue: Optional[float] = None
+    rest_up_ts: Optional[float] = None
+    rest_dn_price: Optional[float] = None
+    rest_dn_queue: Optional[float] = None
+    rest_dn_ts: Optional[float] = None
+    last_bids_up: Dict[float, float] = field(default_factory=dict)
+    last_bids_down: Dict[float, float] = field(default_factory=dict)
+    fill_telemetry_done_up: bool = False
+    fill_telemetry_done_down: bool = False
 
     # Late-start guard (issue #96). `first_seen_start_ts` records which window the
     # latch belongs to, `first_tick_elapsed_sec` how far into that window the
@@ -3957,6 +3987,26 @@ class LiveTraderEngine:
                     self._finalize_requote_telemetry(mstate, slug, mid)
                 self._finalize_reentry_telemetry(mstate, slug, mid)
 
+        # --- FILL-TELEMETRY REST SNAPSHOT (issue #138) ---
+        # Observation only: stash the full bid books for the stream fill path
+        # and snapshot per-leg rest context the first tick a leg is active.
+        # Snapshot-once semantics mirror sim2 (queue at quotable time); the
+        # context persists until rollover so fills on later ticks join it.
+        if isinstance(ubook.get("bids"), dict) and ubook["bids"]:
+            mstate.last_bids_up = dict(ubook["bids"])
+        if isinstance(dbook.get("bids"), dict) and dbook["bids"]:
+            mstate.last_bids_down = dict(dbook["bids"])
+        up_active = bool(mstate.order_id_up) or mstate.order_status_up == "RESTING"
+        dn_active = bool(mstate.order_id_down) or mstate.order_status_down == "RESTING"
+        if up_active and mstate.rest_up_price is None:
+            mstate.rest_up_price = resting_up
+            mstate.rest_up_queue = _queue_ahead(mstate.last_bids_up, resting_up)
+            mstate.rest_up_ts = now
+        if dn_active and mstate.rest_dn_price is None:
+            mstate.rest_dn_price = resting_down
+            mstate.rest_dn_queue = _queue_ahead(mstate.last_bids_down, resting_down)
+            mstate.rest_dn_ts = now
+
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
             mstate.status = "QUOTING"
@@ -4641,6 +4691,16 @@ class LiveTraderEngine:
             mstate.open_gate_evaluated = False
             mstate.band_gate_evaluated = False
             mstate.band_skip = False
+            mstate.rest_up_price = None
+            mstate.rest_up_queue = None
+            mstate.rest_up_ts = None
+            mstate.rest_dn_price = None
+            mstate.rest_dn_queue = None
+            mstate.rest_dn_ts = None
+            mstate.last_bids_up = {}
+            mstate.last_bids_down = {}
+            mstate.fill_telemetry_done_up = False
+            mstate.fill_telemetry_done_down = False
             mstate.first_seen_start_ts = None
             mstate.first_tick_elapsed_sec = None
             mstate.late_start_skip = False
