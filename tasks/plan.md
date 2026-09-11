@@ -34,7 +34,8 @@ Target Files: strategy/live_trader.py, scripts/bucket_fills.py (new), tests/test
   1. Call the helper at every site that sets `filled_up/filled_down` (UP, DOWN, chased), passing `chased=` from `chased_leg` state.
   2. Exactly-once semantics per leg per window (guard against double-record on re-poll).
   3. Pure appendage: no change to fill conditions, prices, or order flow.
-- **Status**: [ ]
+   (Hooks sit outside the naked-only conditionals so paired fills record too.)
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_live_trader.py tests/test_fill_telemetry.py -q`
 
 ### Task 4: Hook stream-detected fill path

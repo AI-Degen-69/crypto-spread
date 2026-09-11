@@ -159,3 +159,122 @@ def test_issue138_tape_fetch_failure_returns_none(monkeypatch):
 
     monkeypatch.setattr(lt.requests, "get", boom)
     assert _fetch_price_prints("0xdead") is None
+
+
+# ============================================================================
+# TASK 3: CLOB + paper fill-path hooks
+# ============================================================================
+
+import json
+from unittest.mock import MagicMock
+
+import strategy.live_trader as lt
+
+_CANNED_TAPE = [
+    {"asset": "tok_up_138", "price": 0.48, "size": 30.0, "timestamp": 1006},
+    {"asset": "tok_up_138", "price": 0.48, "size": 30.0, "timestamp": 1008},
+    {"asset": "tok_dn_138", "price": 0.50, "size": 11.0, "timestamp": 1009},
+]
+
+
+def _telemetry_env(monkeypatch, tmp_path):
+    """Redirect sidecar writes and tape fetch to canned fixtures."""
+    path = tmp_path / "fills.jsonl"
+    monkeypatch.setattr(lt, "FILL_TELEMETRY_FILE", path)
+    monkeypatch.setattr(
+        lt, "_fetch_price_prints",
+        lambda condition_id, limit=500: [dict(r) for r in _CANNED_TAPE])
+    return path
+
+
+def _fill_lines(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_issue138_paper_fill_appends_exactly_one_line(monkeypatch, tmp_path):
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    assert _fill_lines(path) == []
+    # UP ask collapses onto the 0.48 resting bid.
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0})
+    tick2["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+    lines = _fill_lines(path)
+    assert len(lines) == 1
+    rec = lines[0]
+    assert rec["leg"] == "UP"
+    assert rec["chased"] is False
+    assert rec["resting_price"] == 0.48
+    assert rec["fill_price"] == 0.48
+    assert rec["queue_ahead_at_rest"] == 120.0
+    assert rec["printed_size_at_price_since_rest"] == 60.0
+    assert rec["fill_ratio"] == 0.5
+    assert rec["market_slug"] == "mkt-138"
+    # A later tick with no new fill records nothing more.
+    engine._update_market_strategy(slug, tick2, now=1002.0)
+    assert len(_fill_lines(path)) == 1
+
+
+def test_issue138_clob_fill_appends_line_with_venue_price(monkeypatch, tmp_path):
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = LiveTraderEngine()
+    engine.mode = "live"
+    engine.is_running = True
+    engine.place_live_quote = MagicMock(
+        side_effect=lambda tok, px, sz, side: {"order_id": f"ord_{tok}", "status": "RESTING"})
+    engine.cancel_live_order = MagicMock(return_value=True)
+    client = MagicMock()
+
+    def _one_sided_fill(order_id, *a, **k):
+        if "up_138" in str(order_id):
+            return {"status": "MATCHED", "size_matched": 5.0, "price": 0.47,
+                    "associate_trades": [{"price": 0.47, "size": 5.0}]}
+        return {"status": "OPEN", "size_matched": 0.0}
+
+    client.get_order = MagicMock(side_effect=_one_sided_fill)
+    engine.get_clob_client = MagicMock(return_value=client)
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1001.0)
+    lines = _fill_lines(path)
+    assert len(lines) == 1
+    assert lines[0]["leg"] == "UP"
+    assert lines[0]["fill_price"] == 0.47
+    assert lines[0]["queue_ahead_at_rest"] == 120.0
+
+
+def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    # Tick 2: UP fills; DOWN ask 0.55 chases the DOWN quote to 0.50 w/o filling.
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0, 0.50: 200.0})
+    tick2["up_book"]["best_ask"] = 0.46
+    tick2["down_book"]["best_bid"] = 0.48
+    tick2["down_book"]["best_ask"] = 0.55
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+    m = engine.markets[slug]
+    assert m.filled_up is True
+    assert m.filled_down is False
+    assert m.chased_leg == "DOWN"
+    # Tick 3: DOWN ask meets the chased 0.50 quote.
+    tick3 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0, 0.50: 200.0})
+    tick3["up_book"]["best_ask"] = 0.46
+    tick3["down_book"]["best_bid"] = 0.48
+    tick3["down_book"]["best_ask"] = 0.50
+    engine._update_market_strategy(slug, tick3, now=1002.0)
+    assert m.filled_down is True
+    by_leg = {r["leg"]: r for r in _fill_lines(path)}
+    assert set(by_leg) == {"UP", "DOWN"}
+    assert by_leg["UP"]["chased"] is False
+    assert by_leg["DOWN"]["chased"] is True

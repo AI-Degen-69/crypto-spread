@@ -4223,6 +4223,9 @@ class LiveTraderEngine:
                                     mstate.naked_since_ts = time.time()
                                 # Pre-place resting stop-loss protection for the filled leg (issue #87)
                                 self.place_stop_order(mstate, "UP")
+                                # Issue #138: queue-position telemetry (observation only).
+                                self._record_fill_telemetry(
+                                    mstate, "UP", mstate.fill_price_up, sz_up, now)
                         except Exception as e:
                             log.debug("[%s] Error checking UP order: %s", slug, e)
 
@@ -4253,6 +4256,10 @@ class LiveTraderEngine:
                                 log.info("[%s] DOWN leg FILLED on CLOB (status=%s, matched=%.1f, price=%.4f)", slug, st_dn, sz_dn, mstate.fill_price_down)
                                 if not mstate.filled_up and mstate.naked_since_ts is None:
                                     mstate.naked_since_ts = time.time()
+                                # Issue #138: queue-position telemetry (observation only,
+                                # every fill incl. paired ones).
+                                self._record_fill_telemetry(
+                                    mstate, "DOWN", mstate.fill_price_down, sz_dn, now)
                                 if not mstate.filled_up:
                                     # Pre-place resting stop-loss protection for the filled leg (issue #87)
                                     self.place_stop_order(mstate, "DOWN")
@@ -4278,6 +4285,9 @@ class LiveTraderEngine:
                             mstate.naked_since_ts = now
                         # Pre-place resting stop-loss protection for the filled leg (issue #87)
                         self.place_stop_order(mstate, "UP")
+                        # Issue #138: queue-position telemetry (observation only).
+                        self._record_fill_telemetry(
+                            mstate, "UP", mstate.fill_price_up, self.shares, now)
                         # If DOWN is not yet filled, step up DOWN quote towards ask within cap
                         if not mstate.filled_down and self.enable_leg_chase:
                             entry_up = mstate.fill_price_up
@@ -4308,6 +4318,11 @@ class LiveTraderEngine:
                         if not mstate.filled_up:
                             if mstate.naked_since_ts is None:
                                 mstate.naked_since_ts = now
+                        # Issue #138: queue-position telemetry (observation only,
+                        # every fill incl. paired ones).
+                        self._record_fill_telemetry(
+                            mstate, "DOWN", mstate.fill_price_down, self.shares, now)
+                        if not mstate.filled_up:
                             # Pre-place resting stop-loss protection for the filled leg (issue #87)
                             self.place_stop_order(mstate, "DOWN")
                             # If UP is not yet filled, step up UP quote towards ask within cap
@@ -4335,6 +4350,9 @@ class LiveTraderEngine:
                                         mstate.chased_fill = True
                                         mstate.last_action = f"Filled UP {self.shares} shares @ {resting_up:.2f}"
                                         log.info("[%s] Filled UP @ %.2f (chased)", slug, resting_up)
+                                        # Issue #138: queue-position telemetry (observation only).
+                                        self._record_fill_telemetry(
+                                            mstate, "UP", mstate.fill_price_up, self.shares, now)
 
             # --- PAIR COMPLETION & MERGE ---
             if mstate.filled_up and mstate.filled_down:
