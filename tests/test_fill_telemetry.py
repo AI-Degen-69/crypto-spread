@@ -308,3 +308,44 @@ def test_issue138_stream_fill_uses_stashed_book(monkeypatch, tmp_path):
     engine.on_user_order_event(
         {"order_id": "oid_stream_up", "status": "FILLED", "price": 0.48})
     assert len(_fill_lines(path)) == 1
+
+
+# ============================================================================
+# TASK 5: bucketing helper
+# ============================================================================
+
+def test_issue138_bucket_helper_prints_per_bucket_table(tmp_path, capsys):
+    from scripts.bucket_fills import main
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = [
+        {"fill_ratio": 0.1, "market_slug": "w1"},
+        {"fill_ratio": 0.2, "market_slug": "w1"},
+        {"fill_ratio": 0.6, "market_slug": "w2"},
+        {"fill_ratio": 2.5, "market_slug": "w3"},
+        {"fill_ratio": None, "market_slug": "w4"},
+    ]
+    fills.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    marvels = [
+        {"action": "WINDOW_SETTLE", "market_slug": "w1", "pnl_usd": 0.10},
+        {"action": "WINDOW_SETTLE", "market_slug": "w2", "pnl_usd": -0.40},
+        {"action": "WINDOW_SETTLE", "market_slug": "w3", "pnl_usd": 0.05},
+        {"action": "PAIR_MERGE", "market_slug": "w1", "pnl_usd": 9.99},
+    ]
+    trades.write_text("\n".join(json.dumps(t) for t in marvels) + "\n", encoding="utf-8")
+    assert main([str(fills), "--trades", str(trades)]) == 0
+    out = capsys.readouterr().out
+    assert "0.00-0.25" in out and "2" in out  # two fills, mean +0.10
+    assert "+0.10" in out
+    assert "0.50-1.00" in out and "-0.40" in out
+    assert "1.00+" in out and "+0.05" in out
+    # Null-ratio and non-settle actions never leak into a bucket.
+    assert "9.99" not in out
+
+
+def test_issue138_bucket_helper_empty_input(tmp_path, capsys):
+    from scripts.bucket_fills import main
+    fills = tmp_path / "fills.jsonl"
+    fills.write_text("", encoding="utf-8")
+    assert main([str(fills)]) == 0
+    assert "no fill" in capsys.readouterr().out.lower()

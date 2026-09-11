@@ -4,5 +4,5 @@
 - [x] Task 2: Telemetry record builder + best-effort writer + tape join (`strategy/live_trader.py`)
 - [x] Task 3: Hook CLOB-confirmed + paper-simulated fill paths (`strategy/live_trader.py`)
 - [x] Task 4: Hook stream-detected fill path (`strategy/live_trader.py`)
-- [ ] Task 5: Bucketing helper script (`scripts/bucket_fills.py`)
+- [x] Task 5: Bucketing helper script (`scripts/bucket_fills.py`)
 - [ ] Task 6: New tests + regression gate (`python -m pytest tests/test_live_trader.py -q`, then `python -m pytest -q`)

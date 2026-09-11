@@ -53,7 +53,7 @@ Target Files: strategy/live_trader.py, scripts/bucket_fills.py (new), tests/test
 - **Description**:
   1. Read `run/live_fill_telemetry.jsonl`; bucket by `fill_ratio` ([0–0.25), [0.25–0.5), [0.5–1), [1+]); join settlement PnL via `market_slug` → `WINDOW_SETTLE` lines in `run/live_trades.jsonl` (missing → counted, PnL null).
   2. Print per-bucket table: count, mean subsequent PnL; exit 0 on empty input with a clear message.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python scripts/bucket_fills.py run/live_fill_telemetry.jsonl` on synthetic fixture (covered by a test driving main() with tmp files)
 
 ### Task 6: Tests + regression gate
