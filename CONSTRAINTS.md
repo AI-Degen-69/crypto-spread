@@ -1,18 +1,18 @@
-# CONSTRAINTS.md — Issue #138: per-fill queue-position telemetry
+# CONSTRAINTS.md — Issue #139: cockpit queue panel + PnL histogram
 
 ## Quality Gates & Hard Thresholds
 
 ### 1. Test Suite Integrity
-- **Pass Rate**: 100% — `python -m pytest -q` fully green; targeted gate `python -m pytest tests/test_live_trader.py -q` green plus new tests.
-- **No Test Swallowing**: strictly forbidden to skip, comment out, or mock-pass failing assertions; every fill path needs a telemetry-line test.
-- **Anti-Cheat**: no weakening of fill assertions, no stub telemetry (every claimed field must be really computed or explicitly `null`).
+- **Pass Rate**: 100% — `python -m pytest -q` fully green; targeted gate `python -m pytest tests/test_osc_dash_integration.py -q` green plus new tests.
+- **No Test Swallowing**: no skipped assertions; histogram/empty-state behavior covered by HTML-presence + endpoint-math tests (JS rendering itself is visually verified, same as the existing equity chart).
+- **Anti-Cheat**: no weakening of existing dashboard assertions to fit new markup.
 
-### 2. Observation-Only Boundaries
-- **Zero behavior change**: quoting, fill, chase, stop, timeout, and rollover logic byte-for-byte identical; telemetry code paths must not gate, delay, or mutate trading state (append-only side effects).
-- **Best-effort I/O**: tape fetch and file append wrapped so any exception → `null` fields + warning log; a failed write never raises into the fill path. No new network calls in the per-tick hot path (tape joined on-demand at fill time only; fills are rare, ≤25/market).
-- **Degenerate nulls**: empty/missing book side → `queue_ahead_at_rest=null`; missing tape → printed/ratio `null`; ratio denominator guarded (`max(queue,1)`).
-- **File location**: sidecar strictly under `run/` (gitignored); analysis script reads — never writes — live state.
+### 2. UI & API Boundaries
+- **No new dependencies**: inline SVG + vanilla JS only (repo ships no chart library).
+- **Read-only endpoint**: no trading-state mutation; file-not-found → explicit empty payload, never 500.
+- **XSS**: all interpolated trade/market strings through the existing `esc()` helper.
+- **Scope honesty**: histogram subtitle states the session window (same trades the table shows); verdict rule deterministic and documented.
+- **Perf**: endpoint work is a small-file read + aggregation; bootstrap (2,000 resamples) runs client-side on ≤50 values only.
 
-### 3. Performance & Dependencies
-- **Per-tick cost**: only small dict copies for the book stash + one arithmetic sum per resting leg; no I/O per tick.
-- **Dependencies**: no new external libraries without explicit approval (stdlib `json` + existing `requests` session only).
+### 3. Dependencies
+- None new (stdlib + existing FastAPI/pydantic only).

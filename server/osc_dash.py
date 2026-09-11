@@ -42,6 +42,69 @@ TICKS_DIR = RUN / "ticks"
 RUN.mkdir(parents=True, exist_ok=True)
 TICKS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Queue-telemetry panel source (issue #139). Paths are module constants so
+# tests can redirect them; the aggregated payload is cached for one poll
+# interval (mirrors the engine's _orders_cache TTL pattern).
+QUEUE_TELEMETRY_FILE = RUN / "live_fill_telemetry.jsonl"
+QUEUE_TELEMETRY_TRADES_FILE = RUN / "live_trades.jsonl"
+QUEUE_TELEMETRY_CACHE_TTL = 5.0
+_queue_telemetry_cache: dict = {"ts": 0.0, "payload": None}
+
+
+def _queue_verdict(low_mean: float | None, high_mean: float | None) -> str:
+    """Deterministic tape-vs-tapeq verdict from passive-bucket means.
+
+    low = mean over fills with fill_ratio < 0.5, high = mean over >= 0.5.
+    """
+    if low_mean is None and high_mean is None:
+        return "awaiting fills"
+    if low_mean is not None and low_mean > 0 and (high_mean is None or high_mean <= 0):
+        return "tape-like"
+    if high_mean is not None and high_mean > 0 and (low_mean is None or low_mean <= 0):
+        return "queue-toxic"
+    return "mixed/unclear"
+
+
+def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
+    """Aggregate the fill sidecar into buckets + chased stats + verdict."""
+    from scripts.bucket_fills import (
+        _read_jsonl, _settlement_pnl_by_market, bucketize,
+    )
+    fills = _read_jsonl(fills_path)
+    usable = [f for f in fills
+              if isinstance(f.get("fill_ratio"), (int, float))
+              and not isinstance(f.get("fill_ratio"), bool)]
+    if not usable:
+        return {"empty": True, "total_fills": 0, "buckets": [],
+                "chased": {"count": 0, "mean_settle_pnl_usd": None},
+                "verdict": "awaiting fills"}
+    settle = _settlement_pnl_by_market(trades_path)
+    passive = [f for f in usable if not f.get("chased")]
+    chased = [f for f in usable if f.get("chased")]
+    buckets = bucketize(passive, settle)
+    chased_pnls = [settle[str(f.get("market_slug") or "")]
+                   for f in chased]
+    chased_pnls = [p for p in chased_pnls if p is not None]
+    low = [settle.get(str(f.get("market_slug") or ""))
+           for f in passive if f["fill_ratio"] < 0.5]
+    high = [settle.get(str(f.get("market_slug") or ""))
+            for f in passive if f["fill_ratio"] >= 0.5]
+    low = [p for p in low if p is not None]
+    high = [p for p in high if p is not None]
+    low_mean = sum(low) / len(low) if low else None
+    high_mean = sum(high) / len(high) if high else None
+    return {
+        "empty": False,
+        "total_fills": len(usable),
+        "buckets": buckets,
+        "chased": {
+            "count": len(chased),
+            "mean_settle_pnl_usd": (sum(chased_pnls) / len(chased_pnls)
+                                    if chased_pnls else None),
+        },
+        "verdict": _queue_verdict(low_mean, high_mean),
+    }
+
 app = FastAPI(title="Crypto Spread Lab")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -898,6 +961,28 @@ def api_live_state():
     """Return real-time state snapshot of the Live Trading Cockpit engine."""
     engine = get_live_trader_engine()
     return engine.get_state()
+
+
+@app.get("/api/live/queue_telemetry")
+def api_live_queue_telemetry():
+    """Bucketed fill-ratio evidence + verdict for the cockpit queue panel.
+
+    Read-only aggregation over run/live_fill_telemetry.jsonl. Missing or
+    unparsable input yields an explicit empty payload (HTTP 200, never 500).
+    """
+    now = time.time()
+    cached = _queue_telemetry_cache
+    if cached["payload"] is not None and now - cached["ts"] < QUEUE_TELEMETRY_CACHE_TTL:
+        return cached["payload"]
+    try:
+        payload = _compute_queue_telemetry(QUEUE_TELEMETRY_FILE, QUEUE_TELEMETRY_TRADES_FILE)
+    except Exception as e:
+        payload = {"empty": True, "total_fills": 0, "buckets": [],
+                   "chased": {"count": 0, "mean_settle_pnl_usd": None},
+                   "verdict": "awaiting fills", "error": str(e)[:200]}
+    cached["ts"] = now
+    cached["payload"] = payload
+    return payload
 
 
 @app.get("/api/live/latency")
