@@ -224,5 +224,7 @@ Legacy names still present as junctions in some roots (`issue-create`,
 `pr-babysitter`) are deprecated aliases; use the `*-issue` / `babysit-pr-and-merge`
 forms above. Codex (`~/.codex/skills/`) does not currently carry the family.
 
-Related: `docs/ecc-flow-guide.md` (the ECC `orch-pipeline` interactive flow,
-which hands off to `babysit-pr-and-merge` at its CI Gate).
+Related: the old ECC `orch-pipeline` guide (`docs/ecc-flow-guide.md`) was
+**superseded by this doc and removed** — this is the canonical process guide.
+Git conventions (branching, commits, PRs, the CI merge gate) live in
+`docs/git-workflow.md`.
