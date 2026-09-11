@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy the 7-skill issue workflow family across all agent harnesses via Directory Junctions.
+"""Deploy the 7-skill issue workflow family across all agent harnesses via Directory Symbolic Links.
 
 Canonical source of truth is: ~/.agents/skills/<skill-name>
 Harness targets:
@@ -74,20 +74,26 @@ def clean_legacy_junctions() -> None:
                     print(f"        Warning: failed to remove {target}: {e}")
 
 
-def create_junction(src: Path, dst: Path) -> bool:
-    """Create a Windows directory junction from src to dst via mklink /J."""
+def create_link(src: Path, dst: Path) -> bool:
+    """Create a Windows directory symbolic link from dst to src via mklink /D.
+
+    Symlinks (not junctions) are used so all harness roots match the style
+    Antigravity/Gemini expects (same link type as the eli5 skill).
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
+        already = False
         try:
-            if os.path.samefile(src, dst):
-                return True
+            already = dst.is_symlink() and os.path.samefile(src, dst)
         except OSError:
             pass
-        # Safely remove existing target directory or junction
+        if already:
+            return True
+        # Safely remove existing link, junction, or directory
         try:
             res = subprocess.run(["cmd", "/c", "rmdir", str(dst)], capture_output=True)
             if res.returncode != 0:
-                if dst.is_dir():
+                if dst.is_dir() and not dst.is_symlink():
                     shutil.rmtree(dst)
                 else:
                     dst.unlink()
@@ -95,10 +101,10 @@ def create_junction(src: Path, dst: Path) -> bool:
             print(f"  [ERR] Failed removing existing {dst}: {e}")
             return False
 
-    # Create directory junction via mklink /J
-    res = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)], capture_output=True, text=True)
+    # Create directory symbolic link via mklink /D
+    res = subprocess.run(["cmd", "/c", "mklink", "/D", str(dst), str(src)], capture_output=True, text=True)
     if res.returncode != 0:
-        print(f"  [ERR] mklink /J failed: {res.stderr.strip()}")
+        print(f"  [ERR] mklink /D failed: {res.stderr.strip()}")
         return False
     return True
 
@@ -121,7 +127,7 @@ def deploy_family() -> int:
     # 2. Clean legacy junctions
     clean_legacy_junctions()
 
-    # 3. Create junctions for all 7 skills across harnesses
+    # 3. Create symlinks for all 7 skills across harnesses
     errors = 0
     for root in HARNESS_ROOTS:
         harness_name = root.parent.name if root.name == "skills" else root.name
@@ -129,7 +135,7 @@ def deploy_family() -> int:
         for skill in FAMILY_SKILLS:
             src = CANONICAL_ROOT / skill
             dst = root / skill
-            ok = create_junction(src, dst)
+            ok = create_link(src, dst)
             status = "[OK]" if ok else "[FAIL]"
             print(f"  {status} {skill} -> {dst}")
             if not ok:
@@ -151,7 +157,7 @@ def deploy_family() -> int:
                 errors += 1
 
     if errors == 0:
-        print("\n[SUCCESS] All 7 skills successfully deployed and verified via junctions.")
+        print("\n[SUCCESS] All 7 skills successfully deployed and verified via symlinks.")
         return 0
     else:
         print(f"\n[ERROR] Deployment finished with {errors} errors.")
