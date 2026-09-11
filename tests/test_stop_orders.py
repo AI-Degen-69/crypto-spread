@@ -71,7 +71,7 @@ def test_resting_stop_visible_in_open_orders(monkeypatch):
     assert row["order_id"] == f"paper_stop_{SLUG}"
     assert row["side"] == "SELL (UP)"
     assert row["status"] == "RESTING"
-    assert row["price"] == 0.43
+    assert row["price"] == 0.45  # 0.48 - 0.03 naked threshold (issue #124)
     assert row["size"] == 5
 
 
@@ -305,7 +305,11 @@ def _poll(market, up_bid, up_ask, dn_bid, dn_ask) -> dict:
 
 
 def test_place_stop_order_resting_paper():
-    """place_stop_order stages an idempotent resting stop at fill - exit_thresh."""
+    """place_stop_order stages an idempotent resting stop at fill - exit_thresh_naked.
+
+    Issue #124: a single (naked) leg uses the tighter naked threshold 0.03, not
+    the paired exit_thresh 0.05.
+    """
     engine = LiveTraderEngine()
     mstate = engine.markets[SLUG]
     mstate.fill_price_up = 0.48
@@ -315,7 +319,7 @@ def test_place_stop_order_resting_paper():
 
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
     assert mstate.stop_order_status == "RESTING"
-    assert mstate.stop_price == 0.43  # 0.48 - 0.05
+    assert mstate.stop_price == 0.45  # 0.48 - 0.03 (naked threshold, issue #124)
     assert mstate.stop_side == "UP"
     assert mstate.stop_order_time != "-"
 
@@ -351,7 +355,7 @@ def test_single_leg_fill_places_stop_paper():
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
     assert mstate.stop_order_status == "RESTING"
     assert mstate.stop_side == "UP"
-    assert mstate.stop_price == 0.43
+    assert mstate.stop_price == 0.45  # 0.48 - 0.03 naked threshold
 
 
 def test_pair_completion_cancels_stop_live():
@@ -450,29 +454,30 @@ def test_stop_fill_triggers_stop_exit_paper():
 
 
 def test_stop_fill_triggers_stop_exit_down_paper():
-    """OCO Case B (paper for DOWN): DOWN fills at 0.48, down_bid of 0.47 does NOT trigger stop,
-    but dropping to <= 0.43 triggers stop exit and cancels resting UP entry."""
+    """OCO Case B (paper for DOWN): DOWN fills at 0.48, stop staged at 0.45
+    (naked threshold, issue #124); down_bid of 0.47 does NOT trigger stop,
+    but dropping to <= 0.45 triggers stop exit and cancels resting UP entry."""
     engine = LiveTraderEngine()
     engine.is_running = True
     now = time.time()
     market = _fake_market(now)
 
-    # DOWN leg fills at 0.48; stop staged at 0.43 (down_ask is 0.48 so DOWN fills)
+    # DOWN leg fills at 0.48; stop staged at 0.45 (down_ask is 0.48 so DOWN fills)
     engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now)
     mstate = engine.markets[SLUG]
     assert mstate.filled_down is True
     assert mstate.stop_side == "DOWN"
-    assert mstate.stop_price == 0.43
+    assert mstate.stop_price == 0.45
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
     assert mstate.order_status_up == "RESTING"
 
-    # Next tick: down_bid is 0.47 (above 0.43). Stop must NOT trigger!
+    # Next tick: down_bid is 0.47 (above 0.45). Stop must NOT trigger!
     engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now + 1)
     assert mstate.exit_taken is False
     assert mstate.status == "FILLED_DOWN"
     assert mstate.order_status_up == "RESTING"
 
-    # Bid collapses to <= 0.43: stop triggers, UP entry cancelled
+    # Bid collapses to <= 0.45: stop triggers, UP entry cancelled
     engine._update_market_strategy(SLUG, _poll(market, 0.55, 0.56, 0.43, 0.44), now + 2)
     assert mstate.exit_taken is True
     assert mstate.status == "STOP_EXIT"

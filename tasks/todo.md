@@ -1,7 +1,6 @@
-# tasks/todo.md — Issue #109
+# tasks/todo.md — Issue #123
 
-- [x] T1 — RED: aggregate endpoint tests (tests/test_osc_dash_integration.py)
-- [x] T2 — GREEN: backend aggregation + verify cache sidecar (server/osc_dash.py)
-- [x] T3 — verify-cache write test (red→green)
-- [x] T4 — UI: totals card + per-series grid in loadManifest()
-- [x] T5 — full pytest gate + self-audit + CONSTRAINTS.md §5 update
+- [x] T1 — Config and State attributes (strategy/config.py, strategy/live_trader.py)
+- [x] T2 — Quoting & Fill Logic in update_market (strategy/live_trader.py)
+- [x] T3 — Unit Tests in tests/test_live_trader.py
+- [x] T4 — Verification & Full Regression Test Suite

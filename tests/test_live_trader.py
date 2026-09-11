@@ -2057,14 +2057,25 @@ def test_reentry_works_on_5m_at_stock_settings():
 
 
 def test_reentry_gate_scales_with_window_duration():
-    """The effective gate is the tighter of the shared knob and the percentage."""
+    """The effective gate is the tighter of the shared knob and the percentage.
+
+    Issue #124: with `reentry_require_pairable` on (default), the gate also has a
+    floor of (1 - naked_leg_timeout_pct) of the window -- the horizon a fresh
+    entry needs to pair before the naked timeout would fire. On a 5m window at
+    stock settings that floor is (1 - 0.70) * 300 = 90s, matching the 30% gate.
+    """
     engine = _drift_engine()
-    assert engine._reentry_min_remaining_sec(300.0) == 90.0     # 5m  -> 30%
-    assert engine._reentry_min_remaining_sec(900.0) == 270.0    # 15m -> 30%
+    assert engine._reentry_min_remaining_sec(300.0) == 90.0     # 5m  -> max(30%, 30% pairable)
+    assert engine._reentry_min_remaining_sec(900.0) == 270.0    # 15m -> max(30%, 30% pairable)
 
     # The shared knob stays the ceiling: it can only tighten the gate, never loosen
     # it, so issue #89's post-merge re-quoting keeps its own 300s meaning.
     engine.min_requote_remaining_sec = 30.0
+    assert engine._reentry_min_remaining_sec(300.0) == 90.0
+
+    # With the pairable gate off, the old #95 semantics return: the shared knob
+    # and the percentage alone decide.
+    engine.reentry_require_pairable = False
     assert engine._reentry_min_remaining_sec(300.0) == 30.0
 
 
@@ -2931,3 +2942,416 @@ def test_update_config_rejects_exit_reversal_change_while_running():
     with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
         engine.update_config(exit_reversal=0.03)
     assert engine.exit_reversal == 0.02
+
+
+# ==========================================================================
+# Issue #124: naked-leg risk controls (asymmetric stop, naked timeout,
+# pairable re-entry gate).
+# ==========================================================================
+
+def _naked_market(now, elapsed=10.0, duration=300.0):
+    """A live 5m market that opened `elapsed` seconds ago."""
+    return LiveMarket(
+        condition_id="0xnaked124",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - elapsed,
+        end_ts=now - elapsed + duration,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+
+def test_naked_leg_stops_at_exit_thresh_naked():
+    """A naked UP leg exits at drift 0.04 (naked 0.03), not at 0.05."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+
+    # Fill UP at 0.48
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+
+    # Drift 0.04: past the naked threshold 0.03, inside the paired 0.05.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.45, "best_ask": 0.47},
+        "down_book": {"best_bid": 0.53, "best_ask": 0.55},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert "0.03" in engine.trades[-1].notes
+
+
+def test_paired_position_not_stopped_by_naked_threshold():
+    """Drift 0.04 does NOT exit a position once both legs are filled (pair path)."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+
+    # Fill UP, then DOWN -> PAIR_MERGED immediately (0.48 + 0.48)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now + 1)
+    m = engine.markets[slug]
+    assert m.pair_captured is True
+    assert m.naked_since_ts is None
+    # No stop can fire on a paired position at naked-threshold drift.
+    assert m.exit_taken is False
+
+
+def test_naked_timeout_force_exits_unpaired_leg():
+    """A leg unpaired past naked_leg_timeout_pct of the window force-exits."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    # Window opened 10s ago; fill UP at t=now -> naked clock starts here.
+    market = _naked_market(now, elapsed=10.0)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True
+    assert m.exit_taken is False
+
+    # 70% of 300s = 210s after the fill, no drift beyond the stop: timeout fires.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 211.0)
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert "Naked-leg timeout" in engine.trades[-1].notes
+
+
+def test_naked_timeout_not_fired_before_horizon_or_disabled():
+    """Just inside the horizon nothing happens; timeout=0 disables entirely."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+
+    # 60s after the fill: well inside the 210s horizon.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 60.0)
+    assert m.exit_taken is False
+
+    # Disabled: no timeout ever fires.
+    engine.naked_leg_timeout_pct = 0.0
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 400.0)
+    assert m.exit_taken is False
+
+
+def test_reentry_pairable_gate_blocks_late_reentry():
+    """Re-entry inside the pairable horizon is blocked while the flag is on."""
+    slug = "btc-up-or-down-5m"
+    now = 1000.0
+
+    def make():
+        engine = LiveTraderEngine(load_persisted=False)
+        engine.naked_leg_timeout_pct = 0.70
+        engine.reentry_require_pairable = True
+        return engine
+
+    engine = _drift_engine()
+    engine.naked_leg_timeout_pct = 0.50   # horizon: (1-0.50)*300 = 150s > 90s gate
+    engine.reentry_require_pairable = True
+    m = _skip_window_on_adverse_open(engine, slug, now)
+
+    # 100s left: past the 90s #95 gate but inside the 150s pairable horizon.
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 199.0)
+    assert m.reentry_count == 0
+    assert m.status == "DRIFT_SKIPPED"
+
+    # Flag off restores #95 semantics: 100s left passes the 90s gate alone.
+    engine.reentry_require_pairable = False
+    engine._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 200.0)
+    assert m.reentry_count == 1
+    assert m.status == "QUOTING"
+
+    # A second engine with the flag on and plenty of window left re-enters.
+    engine2 = _drift_engine()
+    engine2.naked_leg_timeout_pct = 0.50
+    engine2.reentry_require_pairable = True
+    m2 = _skip_window_on_adverse_open(engine2, slug, now)
+    engine2._update_market_strategy(
+        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
+    assert m2.reentry_count == 1
+    assert m2.status == "QUOTING"
+
+
+def test_update_config_naked_knobs_roundtrip_and_clamp():
+    """New #124 knobs round-trip through update_config with clamping."""
+    engine = LiveTraderEngine(load_persisted=False)
+    state = engine.update_config(
+        exit_thresh_naked=0.04, naked_leg_timeout_pct=0.8,
+        reentry_require_pairable=False)
+    assert engine.exit_thresh_naked == 0.04
+    assert engine.naked_leg_timeout_pct == 0.8
+    assert engine.reentry_require_pairable is False
+    assert state["params"]["exit_thresh_naked"] == 0.04
+    assert state["params"]["naked_leg_timeout_pct"] == 0.8
+    assert state["params"]["reentry_require_pairable"] is False
+
+    # Clamping: naked threshold can never exceed the paired stop; timeout in 0..1.
+    engine.update_config(exit_thresh_naked=0.10, naked_leg_timeout_pct=1.5)
+    assert engine.exit_thresh_naked == 0.05
+    assert engine._naked_exit_thresh() == 0.05
+    assert engine.naked_leg_timeout_pct == 1.0
+    engine.update_config(naked_leg_timeout_pct=-1.0)
+    assert engine.naked_leg_timeout_pct == 0.0  # 0 = disabled
+
+    # Guarded while running like every other scalar param.
+    engine.is_running = True
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(exit_thresh_naked=0.02)
+    assert engine.exit_thresh_naked == 0.05
+
+
+# ============================================================================
+# Issue #123: Chase the second leg after a one-sided fill (cross spread within cap)
+# ============================================================================
+
+def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
+    """When UP fills, DOWN quote steps up to ask bounded by max_pair_cost."""
+    engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+
+    fake_market = LiveMarket(
+        condition_id="0xchase123",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+    # Initial resting bids: 0.48 / 0.48.
+    # Poll 1: UP ask is 0.48 -> UP fills at 0.48.
+    # DOWN ask is 0.51.
+    # Max allowed DOWN bid with max_pair_cost=0.98 is 0.98 - 0.48 = 0.50.
+    # DOWN quote steps up to min(0.51, 0.50) = 0.50, so it does NOT cross 0.51.
+    poll1 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }
+    engine._update_market_strategy(slug, poll1, now)
+    mstate = engine.markets[slug]
+    assert mstate.filled_up is True
+    assert mstate.filled_down is False
+    assert mstate.chased_leg == "DOWN"
+    assert mstate.resting_down == 0.50
+    assert mstate.chased_fill is False
+
+    # Poll 2: DOWN ask drops to 0.50 -> DOWN fills at 0.50!
+    poll2 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.50},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.50},
+    }
+    engine._update_market_strategy(slug, poll2, now + 1)
+    assert mstate.filled_down is True
+    assert mstate.pair_captured is True
+    assert mstate.status == "PAIR_MERGED"
+    assert mstate.chased_fill is True
+    assert mstate.chased_leg is None
+    # Profit: (1.00 - (0.48 + 0.50)) * 5 = 0.02 * 5 = $0.10
+    assert round(mstate.realized_pnl_usd, 2) == 0.10
+
+
+def test_leg_chase_symmetric_down_first(monkeypatch):
+    """When DOWN fills first, UP quote steps up to ask bounded by max_pair_cost."""
+    engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine.start()
+    slug = "eth-up-or-down-5m"
+    now = time.time()
+
+    fake_market = LiveMarket(
+        condition_id="0xchase_eth",
+        market_slug="eth-up-down-5m",
+        up_token="tok_eth_up",
+        down_token="tok_eth_dn",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+    # DOWN fills at 0.48. UP ask is 0.49.
+    # Allowed UP quote: 0.98 - 0.48 = 0.50.
+    # UP ask is 0.49 <= 0.50, so UP immediately chases and fills at 0.49.
+    poll1 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.49},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }
+    engine._update_market_strategy(slug, poll1, now)
+    mstate = engine.markets[slug]
+    assert mstate.filled_down is True
+    # If DOWN filled first on this tick, UP chased to 0.49 and also filled!
+    assert mstate.filled_up is True
+    assert mstate.pair_captured is True
+    assert mstate.chased_fill is True
+
+
+def test_leg_chase_disabled_or_both_filled(monkeypatch):
+    """When enable_leg_chase=False or both legs filled, quotes remain passive."""
+    # Case 1: enable_leg_chase=False
+    engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine.enable_leg_chase = False
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+
+    fake_market = LiveMarket(
+        condition_id="0xnochase",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+    poll1 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.50},
+    }
+    engine._update_market_strategy(slug, poll1, now)
+    mstate = engine.markets[slug]
+    assert mstate.filled_up is True
+    assert mstate.filled_down is False
+    assert mstate.chased_leg is None
+    assert mstate.resting_down == 0.48
+
+    # Case 2: When both legs are filled and enable_leg_chase=True, chase does not trigger
+    engine2 = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine2.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine2, "_schedule_wallet_balance_fetch", lambda: None)
+    engine2.start()
+    m2 = engine2.markets[slug]
+    m2.filled_up = True
+    m2.filled_down = True
+    m2.fill_price_up = 0.48
+    m2.fill_price_down = 0.48
+    m2.resting_up = 0.48
+    m2.resting_down = 0.48
+    m2.pair_captured = True
+    engine2._update_market_strategy(slug, poll1, now)
+    assert m2.chased_leg is None
+    assert m2.resting_down == 0.48
+    assert m2.resting_up == 0.48
+
+
+def test_update_config_leg_chase_knobs():
+    """enable_leg_chase and max_pair_cost roundtrip and clamp properly."""
+    engine = LiveTraderEngine(load_persisted=False)
+    state = engine.update_config(enable_leg_chase=False, max_pair_cost=0.97)
+    assert engine.enable_leg_chase is False
+    assert engine.max_pair_cost == 0.97
+    assert state["params"]["enable_leg_chase"] is False
+    assert state["params"]["max_pair_cost"] == 0.97
+
+    # Clamping
+    engine.update_config(max_pair_cost=1.50)
+    assert engine.max_pair_cost == 1.00
+    engine.update_config(max_pair_cost=0.20)
+    assert engine.max_pair_cost == 0.50
+
+    # Guard while running
+    engine.is_running = True
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(max_pair_cost=0.96)
+
+
+def test_reentry_telemetry_distinguishes_chased_fill():
+    """Reentry telemetry records chased_fill and updates reentry_stats counters."""
+    engine = LiveTraderEngine(load_persisted=False)
+    mstate = engine.markets["btc-up-or-down-5m"]
+    mstate.reentry_telemetry = {
+        "reentry_count": 1,
+        "reentry_mid": 0.50,
+        "mid_at_resting": 0.50,
+        "perf_start": time.perf_counter(),
+    }
+    mstate.filled_up = True
+    mstate.filled_down = True
+    mstate.pair_captured = True
+    mstate.chased_fill = True
+
+    record = engine._flush_reentry_event(mstate)
+    assert record is not None
+    assert record["outcome"] == "paired"
+    assert record["chased_fill"] is True
+    assert engine.reentry_stats["chased_fills"] == 1
+    assert engine.reentry_stats["passive_fills"] == 0
+
+    # Test passive merge
+    mstate.reentry_telemetry = {
+        "reentry_count": 2,
+        "reentry_mid": 0.50,
+        "mid_at_resting": 0.50,
+        "perf_start": time.perf_counter(),
+    }
+    mstate.filled_up = True
+    mstate.filled_down = True
+    mstate.pair_captured = True
+    mstate.chased_fill = False
+
+    record2 = engine._flush_reentry_event(mstate)
+    assert record2 is not None
+    assert record2["chased_fill"] is False
+    assert engine.reentry_stats["chased_fills"] == 1
+    assert engine.reentry_stats["passive_fills"] == 1
+
+
