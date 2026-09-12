@@ -2243,6 +2243,14 @@ textarea:focus-visible,
               <input type="number" step="5" id="btQueue" value="0">
             </div>
             <div class="form-group">
+              <label>Entry Delay, s (0 = off)</label>
+              <input type="number" min="0" step="1" id="btEntryDelay" value="0">
+            </div>
+            <div class="form-group">
+              <label>Entry Band (0 = off)</label>
+              <input type="number" min="0" max="0.5" step="0.005" id="btEntryBand" value="0">
+            </div>
+            <div class="form-group">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <label for="btPairCost">Max Pair Cost ($)</label>
                 <label class="toggle-wrap" title="Enable or disable max pair cost filter">
@@ -2348,6 +2356,7 @@ textarea:focus-visible,
       <div style="margin-top:14px;display:flex;gap:8px">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <button class="btn" id="btnWinningConfig" onclick="applyWinningConfig()">🏆 Winning config</button>
       </div>
     </div>
 
@@ -3539,13 +3548,15 @@ async function runBacktest(fileOverride){
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
     const reentryBand = getVal('btReentryBand', 0.015);
     const requoteMin = getVal('btRequoteMin', 300.0);
+    const entryDelay = getVal('btEntryDelay', 0.0);
+    const entryBand = getVal('btEntryBand', 0.0);
 
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -3792,8 +3803,32 @@ function resetBtParams(){
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
   $('btReentryBand').value = "0.015";
   $('btRequoteMin').value = "300";
+  if ($('btEntryDelay')) $('btEntryDelay').value = "0";
+  if ($('btEntryBand')) $('btEntryBand').value = "0";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
+  runBacktest();
+}
+
+// Winning config preset (issue #145): the EV-research-winning setup —
+// offset 0.03, delay 60s, band 0.04, tape fills, pair cost 0.98, size 5,
+// hold-to-settle (exits 0.49/0.50 = ex=none mirror). Fills every field,
+// then auto-runs the backtest.
+function applyWinningConfig(){
+  $('btOffset').value = "0.03";
+  if ($('btEntryDelay')) $('btEntryDelay').value = "60";
+  if ($('btEntryBand')) $('btEntryBand').value = "0.04";
+  if ($('btFillModel')) $('btFillModel').value = "tape";
+  $('btPairCost').value = "0.98";
+  if ($('btPairCostEnabled') && !$('btPairCostEnabled').checked) {
+    $('btPairCostEnabled').checked = true;
+    togglePairCostInput();
+  }
+  $('btSize').value = "5";
+  $('btExit5m').value = "0.49";
+  $('btExit15m').value = "0.50";
+  $('btExitBtc').value = "0.49";
+  $('btExitSol').value = "0.49";
   runBacktest();
 }
 
