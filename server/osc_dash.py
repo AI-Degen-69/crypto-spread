@@ -521,6 +521,8 @@ def api_backtest(
     entry_timeout_pct: float = 0.10,
     reentry_drift_band: float = 0.015,
     min_requote_remaining_sec: float = 300.0,
+    entry_delay_sec: float = 0.0,
+    entry_band: float = 0.0,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -549,6 +551,12 @@ def api_backtest(
     reentry_drift_band = max(0.0, min(0.50, reentry_drift_band))
     min_requote_remaining_sec = max(0.0, min_requote_remaining_sec)
 
+    # Patient maker knobs (issue #145), clamped like LiveConfigPayload:
+    # delay 0..3600 (a delay past the window simply never quotes),
+    # band 0..0.50 (0 = off).
+    entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
+    entry_band = max(0.0, min(0.50, entry_band))
+
     params = BacktestParams(
         offset=offset,
         queue_gate=queue,
@@ -562,6 +570,8 @@ def api_backtest(
         entry_timeout_pct=entry_timeout_pct,
         reentry_drift_band=reentry_drift_band,
         min_requote_remaining_sec=min_requote_remaining_sec,
+        entry_delay_sec=entry_delay_sec,
+        entry_band=entry_band,
     )
 
     if not TICKS_DIR.exists():
@@ -619,6 +629,8 @@ def api_backtest(
                 "max_start_delay": params.max_start_delay_sec,
                 "reentry_drift_band": params.reentry_drift_band,
                 "min_requote_remaining_sec": params.min_requote_remaining_sec,
+                "entry_delay_sec": params.entry_delay_sec,
+                "entry_band": params.entry_band,
             },
             "params_groups": gp,
             "overall": {
@@ -832,6 +844,8 @@ def api_backtest(
             "max_start_delay_sec": max_start_delay,
             "reentry_drift_band": round(reentry_drift_band, 4),
             "min_requote_remaining_sec": round(min_requote_remaining_sec, 2),
+            "entry_delay_sec": entry_delay_sec,
+            "entry_band": entry_band,
         },
         "params_groups": gp,
         "n_snaps": n_snaps,
