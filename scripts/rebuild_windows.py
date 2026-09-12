@@ -14,33 +14,21 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import time
-from collections import defaultdict
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
-from strategy.series import SERIES
+from strategy.windows import (
+    classify_window,
+    compute_summary,
+    finalize_window,
+    write_json_atomic,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TICKS_DIR = ROOT / "run" / "ticks"
 DEFAULT_WINDOWS_FILE = ROOT / "run" / "oscillation_windows.jsonl"
 DEFAULT_SUMMARY_FILE = ROOT / "run" / "oscillation_summary.json"
-
-
-def classify_window(mids: list[float]) -> str:
-    """Classify 5m/15m window based on mid price excursions from 0.50 base."""
-    if not mids:
-        return "no_data"
-    base = 0.50
-    max_up = max(mids) - base
-    max_down = base - min(mids)
-    up2 = max_up >= 0.02
-    down2 = max_down >= 0.02
-    if up2 and down2:
-        return "oscillating"
-    if up2 or down2:
-        return "monotonic"
-    return "flat"
 
 
 def _open_tick_file(path: Path):
@@ -129,112 +117,24 @@ def build_windows_from_ticks(
 
     results: list[dict[str, Any]] = []
     for cid, w in windows.items():
-        mids = w["mids"]
-        touch_pairs = w["touch_pairs"]
-
-        if mids:
-            start_mid = round(mids[0], 4)
-            close_mid = round(mids[-1], 4)
-            min_mid = round(min(mids), 4)
-            max_mid = round(max(mids), 4)
-            max_up = round(max(mids) - 0.50, 4)
-            max_down = round(0.50 - min(mids), 4)
-            cls = classify_window(mids)
-        else:
-            start_mid = close_mid = min_mid = max_mid = None
-            max_up = max_down = 0.0
-            cls = "no_data"
-
-        tp_med = (
-            round(sorted(touch_pairs)[len(touch_pairs) // 2], 4)
-            if touch_pairs
-            else None
-        )
-
-        slug = w["slug"]
-        url = f"https://polymarket.com/market/{slug}" if slug else ""
-
-        results.append({
+        meta = {
             "series": w["series"],
             "label": w["label"],
             "duration": w["duration"],
             "cid": cid,
-            "slug": slug,
+            "slug": w["slug"],
             "start_ts": w["start_ts"],
             "end_ts": w["end_ts"],
             "closed_ts": w["last_ts"],
             "snaps": w["snap_count"],
-            "start_mid": start_mid,
-            "close_mid": close_mid,
-            "max_up": max_up,
-            "max_down": max_down,
-            "min_mid": min_mid,
-            "max_mid": max_mid,
-            "class": cls,
-            "touch_pair_median": tp_med,
-            "url": url,
-        })
+        }
+        results.append(
+            finalize_window(w["mids"], w["touch_pairs"], meta)
+        )
 
     # Sort chronologically by end_ts ascending
     results.sort(key=lambda x: (x.get("end_ts") or 0.0, x.get("start_ts") or 0.0))
     return results
-
-
-def compute_summary(windows_list: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compute per-series aggregate summary matching measure_5m_oscillation schema."""
-    per_series = defaultdict(list)
-    for w in windows_list:
-        per_series[w["series"]].append(w)
-
-    summary = {}
-    for series_slug, duration, label in SERIES:
-        ws = per_series.get(series_slug, [])
-        n = len(ws)
-        if n == 0:
-            summary[series_slug] = {
-                "label": label,
-                "duration": duration,
-                "windows": 0,
-                "any_2c": 0,
-                "any_3c": 0,
-                "oscillating": 0,
-                "monotonic": 0,
-                "flat": 0,
-                "pair_cost_median": None,
-                "recent": [],
-            }
-            continue
-
-        any2 = sum(1 for w in ws if max(w["max_up"], w["max_down"]) >= 0.02)
-        any3 = sum(1 for w in ws if max(w["max_up"], w["max_down"]) >= 0.03)
-        mono = sum(1 for w in ws if w["class"] == "monotonic")
-        flat = sum(1 for w in ws if w["class"] == "flat")
-        osc = sum(1 for w in ws if w["class"] == "oscillating")
-
-        pcs = [
-            w.get("touch_pair_median")
-            for w in ws
-            if w.get("touch_pair_median") is not None
-        ]
-        pcs_median = sorted(pcs)[len(pcs) // 2] if pcs else None
-
-        # Last 10 windows, newest first
-        recent = sorted(ws, key=lambda x: x.get("end_ts", 0), reverse=True)[:10]
-
-        summary[series_slug] = {
-            "label": label,
-            "duration": duration,
-            "windows": n,
-            "any_2c": any2,
-            "any_3c": any3,
-            "oscillating": osc,
-            "monotonic": mono,
-            "flat": flat,
-            "pair_cost_median": pcs_median,
-            "recent": recent,
-        }
-
-    return {"ts": time.time(), "per_series": summary}
 
 
 def rebuild_windows(
@@ -266,14 +166,16 @@ def rebuild_windows(
 
     windows = build_windows_from_ticks(iter_ticks(tick_files))
 
+    out_windows = Path(out_windows)
     out_windows.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_windows, "w", encoding="utf-8") as f:
+    tmp_windows = out_windows.with_name(out_windows.name + ".tmp")
+    with open(tmp_windows, "w", encoding="utf-8") as f:
         for w in windows:
             f.write(json.dumps(w) + "\n")
+    os.replace(tmp_windows, out_windows)
 
     summary = compute_summary(windows)
-    out_summary.parent.mkdir(parents=True, exist_ok=True)
-    out_summary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    write_json_atomic(Path(out_summary), summary)
 
     if not quiet:
         print(
