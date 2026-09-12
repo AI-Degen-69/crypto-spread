@@ -1,62 +1,55 @@
-# SPEC.md — Issue #151: Dashboard collector toggle is blind to the external standalone collector
+# SPEC.md — Issue #152: Tick-file audit — keep today, quarantine fragments, repair 09-11
 
 ## 1. Goal
-The dashboard collector badge and Start/Stop toggle must tell the truth when a
-standalone `scripts.collect_ticks` process (started outside the dashboard) is
-writing `run/ticks/`, and must refuse to spawn a second writer on the same
-daily file.
+Curate `run/ticks/` into one trusted backtest set (today-only) so every
+backtest and the #132 auto-refresh build on known-good data. Fragments go to
+quarantine, nothing is deleted, originals are never edited in place.
 
-## 2. Background (observed 2026-09-12)
-- `api_collector_status/start/stop` track only the dashboard child
-  `_collector_proc` (`server/osc_dash.py:130,854-922`); they know nothing about
-  an external process.
-- `api_collector_start` runs `[sys.executable, -m, scripts.collect_ticks]`
-  with default args → same `run/ticks/ticks_YYYY-MM-DD.jsonl` → interleaved
-  JSONL plus manifest races.
-- Observed: banner read `Paused / 208,610 ticks` while the file grew every second.
+## 2. Background (observed 2026-09-12/13)
+- `run/ticks/` holds 6 files: 08-31 (580MB, full day), 09-07 (37MB, 1.7h),
+  09-08 (177MB, 8.6h), 09-09 (19MB, 35min), 09-11 (271MB, 7.4h, 12 corrupt
+  lines), 09-12 (620MB+, still growing — collector live). 09-10 missing.
+- The 12 corrupt lines in 09-11 (0.013%) are truncation/interleave fragments
+  (mid-JSON starts/ends, empty lines) — each JSONL line is one independent
+  tick, so dropping them is tail-safe. Pattern matches the dual-writer race
+  from #151.
+- `run/oscillation_windows.jsonl` is stale (built 09-01, pre-today data).
+- Both `verify_ticks_dir` (`scripts/verify_tick_data.py:511`) and
+  `rebuild_windows` (`scripts/rebuild_windows.py:251`) use non-recursive
+  `Path.glob`, so a `run/ticks/quarantine/` subdir is automatically excluded
+  from verification and rebuilds — no code change needed.
 
 ## 3. In Scope
-1. External-writer detection: if `run/ticks/manifest.json` `ts` is fresh
-   (age ≤ 5s) but no dashboard child exists → status reports `External · live`
-   instead of `Paused`.
-2. Guard: `POST /api/collector/start` refuses (explicit reason) while an
-   external writer is detected; banner documents why.
-3. Banner + toggle UI reflects the three states (none / external-only /
-   child) and surfaces the refusal reason.
-4. Tests: status matrix (no writer / external only / child only) in
-   `tests/test_osc_dash_integration.py`.
+1. Backup derived `run/oscillation_windows.jsonl` + `run/oscillation_summary.json`
+   before rebuild (cheap insurance; both are regenerable + gitignored).
+2. Move 08-31, 09-07, 09-08, 09-09 to `run/ticks/quarantine/` (reversible,
+   same disk); 09-11 quarantined as-is pending the repair call.
+3. Rebuild windows from today-only (`ticks_2026-09-12.jsonl`) and report the
+   window count vs the ~1,900/day max and the 2,430 ev-research sample.
+4. Backtest smoke on the kept set proves it replays green.
+5. OPTIONAL (needs operator sign-off): repair 09-11 by writing a repaired
+   *copy* (drop 12 bad lines), original stays in quarantine, re-verify green.
 
 ## 4. Out of Scope
-- Changing `collect_ticks` locking/rotation. Merging the two collector modes
-  (#148 territory).
-- Guarding `/api/collector/poll-once` (proposed as optional improvement —
-  needs operator sign-off, see tasks/plan.md Task 5).
+- Deleting anything (one-way door — proposal + approval first, per issue).
+- Moving `ticks/` to `data/` (~40 refs — separate issue).
+- The oscillation-page auto-refresh itself (#132 consumes this decision).
+- Editing originals in place — live-captured ticks are irreplaceable.
 
 ## 5. Interfaces (locked before logic)
-- `server/osc_dash.py`:
-  - `EXTERNAL_COLLECTOR_STALE_SEC = 5.0` — manifest `ts` freshness threshold.
-  - `_detect_external_collector(now: float | None = None) -> dict` — reads
-    `TICKS_DIR / "manifest.json"`, returns
-    `{"live": bool, "manifest_age_sec": float | None}`; `live` is True iff
-    `ts` exists and `now - ts <= EXTERNAL_COLLECTOR_STALE_SEC`. Never raises
-    (missing/corrupt manifest → `live: False`).
-  - `GET /api/collector/status` response gains:
-    - `source: "child" | "external" | "none"` — who (if anyone) is writing.
-    - `external: bool` — external writer live (for banner logic).
-    - `manifest_age_sec: float | None`.
-    - Existing keys (`running`, `pid`, `total_ticks_collected`, tape metrics)
-    unchanged.
-  - `POST /api/collector/start` — while external live and no dashboard child:
-    HTTP 409 + `{"ok": False, "error": "external collector live …", "source": "external"}`
-    and does NOT spawn a process. Child-running and none states behave as today.
-- Frontend (inline JS in `osc_dash.py`):
-  - `refreshCollectorStatus()` — `External 🟡 live` badge + `Start blocked (external live)`
-    toggle label/disabled state when `source == "external"`.
-  - `toggleCollector()` — surfaces the 409 reason in the badge instead of
-    silently re-rendering.
+- No production code changes. CLI contracts used as-is:
+  - `python -m scripts.verify_tick_data run/ticks [--json]` → per-file
+    PASS/WARN/FAIL; kept set must show no FAIL.
+  - `python -m scripts.rebuild_windows --pattern ticks_2026-09-12.jsonl`
+    → `(num_files, num_windows)`; `--pattern` selects the kept set explicitly
+    so the count is auditable even if quarantine layout changes.
+  - `python -m scripts.backtest run/ticks/ticks_2026-09-12.jsonl --offset 0.02 --queue 50`
+    → exit 0 with per-series + overall stats (source may be a single file).
+- Quarantine contract: `run/ticks/quarantine/<original-name>`; excluded from
+  all globs by non-recursive `Path.glob` (verified, not assumed).
 
 ## 6. Acceptance Criteria
-- [ ] Banner states truth with external collector running.
-- [ ] Start is refused with a reason while external writer is live.
-- [ ] `python -m pytest tests/test_osc_dash_integration.py -q` green.
-- [ ] `python -m pytest -q` green (no regressions).
+- [ ] Window count from today-only reported (vs ~1,900 max / 2,430 sample).
+- [ ] Quarantine done; kept set replays green; verify badges on kept files not FAIL.
+- [ ] Report reclaimed bytes and window counts for each quarantined file, including 09-11.
+- [ ] `python -m pytest -q` green.
