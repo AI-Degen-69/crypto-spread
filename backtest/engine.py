@@ -413,12 +413,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     exit_thr = params.exit_thresh(slug, duration, series=series)
 
     # Patient undecided-band maker knobs (issue #145, mirrors live issue #137).
-    # `delay_sec` holds all quoting until that far into the window (0 = off);
-    # `band` admits only undecided markets at entry time (0 = off). Resting
-    # quotes anchor at the first mid AT/AFTER delay expiry (sim2 parity); with
-    # delay 0 that is the first valid snapshot, exactly as before.
-    delay_sec = params.entry_delay_sec or 0.0
-    band = params.entry_band or 0.0
+    # `entry_delay` holds all quoting until that far into the window (0 = off);
+    # `entry_band` admits only undecided markets at entry time (0 = off).
+    # Resting quotes anchor at the first mid AT/AFTER delay expiry (sim2
+    # research-sim parity: sim2 anchors from its cached window mids, same
+    # one-sided source as `s["mid"]` here); with delay 0 that is the first
+    # valid snapshot, exactly as before. Explicit None handling matches the
+    # validator (`__post_init__` owns range/finiteness for constructed params).
+    entry_delay = 0.0 if params.entry_delay_sec is None else params.entry_delay_sec
+    entry_band = 0.0 if params.entry_band is None else params.entry_band
     resting_up: float | None = None
     resting_down: float | None = None
     band_gate_evaluated = False
@@ -463,6 +466,25 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         ub = s.get("up_book") or {}
         db = s.get("down_book") or {}
         mid = _mid(ub)
+        # Lazy quote anchor (replaces the old pre-loop scan): replicates its
+        # source order (`s["mid"]` first, then the up-book mid) but only from
+        # delay expiry onward. Ticks with no usable mid leave the anchor
+        # unset for a later tick; garbage/non-finite mids are skipped, never
+        # quoted. With delay 0 this anchors at the first valid snapshot,
+        # exactly like the old scan (including `s["mid"]`-only prefixes).
+        delay_expired = entry_delay <= 0 or elapsed >= entry_delay
+        if resting_up is None and delay_expired:
+            _anchor_src = s.get("mid")
+            if _anchor_src is None:
+                _anchor_src = mid
+            if _anchor_src is not None:
+                try:
+                    _anchor_f = float(_anchor_src)
+                except (ValueError, TypeError):
+                    _anchor_f = None
+                if _anchor_f is not None and math.isfinite(_anchor_f):
+                    resting_up = round(min(0.99, max(0.01, _anchor_f - params.offset)), 3)
+                    resting_down = round(min(0.99, max(0.01, (1.0 - _anchor_f) - params.offset)), 3)
         if mid is None:
             continue
         mids.append(mid)
@@ -493,28 +515,26 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if abs(open_mid - 0.50) >= exit_thr:
                     entry_cancelled = True
                     adverse_skipped = True
+                    # The adverse gate owns windows it claims (mirrors live):
+                    # the band gate never evaluates them.
+                    band_gate_evaluated = True
 
         # Post-delay entry band (issue #145, mirrors live issue #137): once the
         # entry delay has expired, the first tick with a two-sided book checks
         # |mid - 0.50| against `entry_band` (0 = off). A failure latches the
         # window cancelled; the re-entry rule below only undoes adverse-gate
         # skips, so a band skip is final, matching live. While the band is
-        # armed but unevaluated, placement is held too (`band_hold`).
-        delay_expired = delay_sec <= 0 or elapsed >= delay_sec
-        if resting_up is None and delay_expired:
-            anchor = s.get("mid")
-            if anchor is None:
-                anchor = mid
-            anchor = float(anchor)
-            resting_up = round(min(0.99, max(0.01, anchor - params.offset)), 3)
-            resting_down = round(min(0.99, max(0.01, (1.0 - anchor) - params.offset)), 3)
-        if band > 0 and delay_expired and not band_gate_evaluated:
+        # armed but unevaluated, placement is held too (`band_hold`, same as
+        # live). In adverse-owned or late-start windows `entry_cancelled` is
+        # already latched, so the hold changes nothing there — fills are
+        # blocked either way; the hold only matters for live-healthy windows.
+        if entry_band > 0 and delay_expired and not band_gate_evaluated:
             band_mid = _two_sided_mid(ub, db)
             if band_mid is not None:
                 band_gate_evaluated = True
-                if abs(band_mid - 0.50) > band:
+                if abs(band_mid - 0.50) > entry_band:
                     entry_cancelled = True
-        band_hold = band > 0 and delay_expired and not band_gate_evaluated
+        band_hold = entry_band > 0 and delay_expired and not band_gate_evaluated
 
         # Drift-skip re-entry (issue #95): a gate-skipped window is re-entered on
         # a later tick once the mid is back within `reentry_drift_band` of 0.50.
@@ -559,7 +579,12 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     r_mid = s.get("mid")
                     if r_mid is None:
                         r_mid = reentry_mid
-                    r_mid = float(r_mid)
+                    try:
+                        r_mid = float(r_mid)
+                    except (ValueError, TypeError):
+                        r_mid = reentry_mid
+                    if not math.isfinite(r_mid):
+                        r_mid = reentry_mid
                     if not filled_up:
                         resting_up = round(min(0.99, max(0.01, r_mid - params.offset)), 3)
                     if not filled_down:
@@ -569,7 +594,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         if params.queue_gate <= 0:
             queue_ok = True
         elif resting_up is None or resting_down is None:
-            queue_ok = False  # delay not expired yet: nothing quotable
+            # Delay not expired (or no usable mid yet): nothing quotable.
+            # Same single fact as `quotable` below, expressed for the depth
+            # filter, which needs a resting price to measure against.
+            queue_ok = False
         else:
             q_up = sum(sz for p, sz in (ub.get("bids") or {}).items()
                        if float(p) >= resting_up)

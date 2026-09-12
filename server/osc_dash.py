@@ -553,9 +553,16 @@ def api_backtest(
 
     # Patient maker knobs (issue #145), clamped like LiveConfigPayload:
     # delay 0..3600 (a delay past the window simply never quotes),
-    # band 0..0.50 (0 = off).
-    entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
-    entry_band = max(0.0, min(0.50, entry_band))
+    # band 0..0.50 (0 = off). Non-finite input (nan/inf) falls back to off —
+    # min/max comparisons against NaN silently yield the boundary otherwise.
+    if not math.isfinite(entry_delay_sec):
+        entry_delay_sec = 0.0
+    else:
+        entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
+    if not math.isfinite(entry_band):
+        entry_band = 0.0
+    else:
+        entry_band = max(0.0, min(0.50, entry_band))
 
     params = BacktestParams(
         offset=offset,
@@ -2243,8 +2250,8 @@ textarea:focus-visible,
               <input type="number" step="5" id="btQueue" value="0">
             </div>
             <div class="form-group">
-              <label>Entry Delay, s (0 = off)</label>
-              <input type="number" min="0" step="1" id="btEntryDelay" value="0">
+              <label>Entry Delay, s (0 = off, max 3600)</label>
+              <input type="number" min="0" max="3600" step="1" id="btEntryDelay" value="0">
             </div>
             <div class="form-group">
               <label>Entry Band (0 = off)</label>
@@ -3529,7 +3536,7 @@ async function runBacktest(fileOverride){
       const el = $(id);
       if (!el) return def;
       const v = String(el.value).trim();
-      return (v !== '' && !isNaN(Number(v))) ? Number(v) : def;
+      return (v !== '' && Number.isFinite(Number(v))) ? Number(v) : def;
     };
 
     const offset = getVal('btOffset', 0.02);
@@ -3801,8 +3808,8 @@ function resetBtParams(){
   $('btSize').value = "5";
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
-  $('btReentryBand').value = "0.015";
-  $('btRequoteMin').value = "300";
+  if ($('btReentryBand')) $('btReentryBand').value = "0.015";
+  if ($('btRequoteMin')) $('btRequoteMin').value = "300";
   if ($('btEntryDelay')) $('btEntryDelay').value = "0";
   if ($('btEntryBand')) $('btEntryBand').value = "0";
   if ($('btFileSelect')) $('btFileSelect').value = "";
@@ -3812,13 +3819,19 @@ function resetBtParams(){
 
 // Winning config preset (issue #145): the EV-research-winning setup —
 // offset 0.03, delay 60s, band 0.04, tape fills, pair cost 0.98, size 5,
-// hold-to-settle (exits 0.49/0.50 = ex=none mirror). Fills every field,
-// then auto-runs the backtest.
+// hold-to-settle (exits 0.49/0.50 = ex=none mirror). The remaining replay
+// inputs are pinned to dashboard defaults (queue 0, gas 0, no partial
+// filter, re-entry band 0.015, re-quote-min 300) so the button is a
+// reproducible 1-click config, then auto-runs the backtest. Aborts without
+// running if any required input is missing (no half-applied state).
 function applyWinningConfig(){
+  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btFillModel','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
+  for (const id of required) { if (!$(id)) return; }
   $('btOffset').value = "0.03";
-  if ($('btEntryDelay')) $('btEntryDelay').value = "60";
-  if ($('btEntryBand')) $('btEntryBand').value = "0.04";
-  if ($('btFillModel')) $('btFillModel').value = "tape";
+  $('btQueue').value = "0";
+  $('btEntryDelay').value = "60";
+  $('btEntryBand').value = "0.04";
+  $('btFillModel').value = "tape";
   $('btPairCost').value = "0.98";
   if ($('btPairCostEnabled') && !$('btPairCostEnabled').checked) {
     $('btPairCostEnabled').checked = true;
@@ -3829,6 +3842,10 @@ function applyWinningConfig(){
   $('btExit15m').value = "0.50";
   $('btExitBtc').value = "0.49";
   $('btExitSol').value = "0.49";
+  $('btGas').value = "0.00";
+  $('btMaxStartDelay').value = "0";
+  $('btReentryBand').value = "0.015";
+  $('btRequoteMin').value = "300";
   runBacktest();
 }
 

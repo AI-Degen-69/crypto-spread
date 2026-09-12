@@ -15,9 +15,9 @@
 ### 2. Behavior & Scope Boundaries
 - **Defaults byte-identical**: `entry_delay_sec=0, entry_band=0` must replay
   exactly as today — same resting anchor (first snapshot), same fills, same
-  `params_hash` for old param sets (new fields default into the hash payload
-  deterministically; old hashes only stable when new fields are default —
-  document, don't chase).
+  PnL (proven by the untouched existing suite). `params_hash` payload gains
+  the new keys, so old sweep-cache keys miss once post-merge (one-time,
+  correct bust — stated in the PR, not chased).
 - **Live-identical semantics**: delay = observe-only (classification uses full
   path); band once, latched, two-sided mid, bypass for adverse-owned windows;
   re-entry path untouched.

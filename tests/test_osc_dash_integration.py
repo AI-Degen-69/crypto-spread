@@ -1986,6 +1986,15 @@ def test_api_backtest_entry_delay_band_clamps(tmp_path, monkeypatch):
     assert d["params"]["entry_band"] == 0.50
 
 
+def test_api_backtest_entry_delay_band_nan_falls_back_off(tmp_path, monkeypatch):
+    """Non-finite knobs fall back to off (0.0), never to the boundary."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_delay_fixture(tmp_path)
+    d = client.get("/api/backtest?file=fake_delay.jsonl&entry_delay_sec=nan&entry_band=inf").json()
+    assert d["params"]["entry_delay_sec"] == 0.0
+    assert d["params"]["entry_band"] == 0.0
+
+
 def test_backtest_delay_band_ui_elements():
     """Dashboard exposes delay/band inputs plus the winning-config preset."""
     html = client.get("/").text

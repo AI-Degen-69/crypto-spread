@@ -64,7 +64,9 @@ preset — so #146 can replay the shadow night through the official engine.
 - [ ] `/api/backtest?...&entry_delay_sec=60&entry_band=0.04&fill_model=tape`
       shows delay+band behavior identical to live semantics on a fixture file.
 - [ ] Dashboard shows both inputs + working preset button filling all fields.
-- [ ] Defaults unchanged: omitted params replay exactly as before (fixture
-      hashes untouched).
+- [ ] Defaults unchanged: omitted params replay identically (same fills/PnL —
+      proven by the untouched existing suite). Note: `params_hash` payload
+      gains the two new keys, so pre-existing sweep-cache keys miss once
+      after merge (one-time, correct bust — called out in the PR).
 - [ ] `python -m pytest tests/test_backtest_engine.py
       tests/test_osc_dash_integration.py -q` green.

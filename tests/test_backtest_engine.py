@@ -773,4 +773,66 @@ def test_entry_delay_anchors_quotes_post_delay():
                                                entry_timeout_pct=0.0))
     assert w.pair_captured is True
     assert w.entry_price_up == 0.53
+    assert w.entry_price_down == 0.43
+
+
+def test_entry_band_boundary_admits_inside_band():
+    # Drift 0.0400..36 (float repr of 0.54-0.50) admits under band 0.041
+    # (strict `>` skips); exit 0.05 lets it through. Mirrors live's raw
+    # comparison — exact-decimal boundaries are not promised.
+    snaps = _window_snaps(
+        10, lambda i: 0.54, lambda i: _tape_both(0.52, 0.44),
+        up_ask_fn=lambda i: 0.545, down_ask_fn=lambda i: 0.4625)
+    w = _simulate_window(snaps, BacktestParams(entry_band=0.041,
+                                               entry_timeout_pct=0.0))
+    assert w.pair_captured is True
+
+
+def test_entry_delay_classifies_full_path():
+    # Observe-only delay: no fills, but classification uses the whole path.
+    snaps = _window_snaps(70, lambda i: 0.45 if i % 2 == 0 else 0.55,
+                          lambda i: [])
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
+                                               entry_timeout_pct=0.0))
+    assert w.filled_up is False
+    assert w.filled_down is False
+    assert w.n_snaps == 70
+    assert w.class_label == "oscillating"
+
+
+def test_adverse_claimed_window_bypasses_band_then_reenters():
+    # Drift 0.10 trips both gates; the adverse gate owns the window, so a
+    # later revert to 0.50 recovers via re-entry (a band skip is final).
+    def mid_fn(i):
+        return 0.60 if i < 10 else 0.50
+    snaps = _window_snaps(
+        30, mid_fn, lambda i: [],
+        up_ask_fn=lambda i: 0.605 if i < 10 else 0.505,
+        down_ask_fn=lambda i: 0.4025 if i < 10 else 0.5025)
+    w = _simulate_window(snaps, BacktestParams(
+        entry_band=0.04, entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
+    assert w.reentry_count == 1
+    assert w.filled_up is False
+
+
+def test_anchor_uses_mid_only_prefix():
+    # First snaps carry s["mid"] but no quotable book: the anchor still
+    # latches from s["mid"] (old pre-loop scan parity), not a later tick.
+    snaps = _window_snaps(
+        10, lambda i: 0.50, lambda i: _tape_both(0.50, 0.46),
+        up_ask_fn=lambda i: 0.505, down_ask_fn=lambda i: 0.5025)
+    for s in snaps[:3]:
+        s["mid"] = 0.52
+        s["up_book"] = {**s["up_book"], "best_bid": None, "best_ask": None}
+    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
+    assert w.pair_captured is True
+    assert w.entry_price_up == 0.50  # anchored at 0.52, not the 0.50 books
+
+
+def test_entry_delay_band_changes_hash():
+    p0 = BacktestParams()
+    p1 = BacktestParams(entry_delay_sec=60.0, entry_band=0.04)
+    assert p0.params_hash() != p1.params_hash()
+    assert p1.params_hash() == BacktestParams(
+        entry_delay_sec=60.0, entry_band=0.04).params_hash()
 
