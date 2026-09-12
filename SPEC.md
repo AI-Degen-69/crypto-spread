@@ -51,4 +51,5 @@ quarantine, nothing is deleted, originals are never edited in place.
 ## 6. Acceptance Criteria
 - [ ] Window count from today-only reported (vs ~1,900 max / 2,430 sample).
 - [ ] Quarantine done; kept set replays green; verify badges on kept files not FAIL.
+- [ ] Report reclaimed bytes and window counts for each quarantined file, including 09-11.
 - [ ] `python -m pytest -q` green.

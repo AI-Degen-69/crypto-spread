@@ -84,3 +84,21 @@ Decisions locked with user: kept set = today-only (`ticks_2026-09-12.jsonl`) ·
      `tasks/plan.md`, `tasks/todo.md` (run/ is gitignored — data moves invisible to git, by design).
 - **Status**: [x] (494 passed; git shows only SPEC/CONSTRAINTS/plan/todo)
 - **Verification**: `python -m pytest -q` + `git status --short`
+
+## Preservation evidence (measured 2026-09-13, post-move)
+
+Content-identity check: quarantine files were moved, not copied, so size +
+line counts below prove preservation against the issue audit table.
+
+| file | bytes | json-lines | bad/empty | windows (cids) |
+|---|---|---|---|---|
+| ticks_2026-08-31.jsonl | 579,547,109 | 198,444 | 0 | 1,650 |
+| ticks_2026-09-07.jsonl | 36,674,255 | 11,540 | 0 | 135 |
+| ticks_2026-09-08.jsonl | 177,456,514 | 48,766 | 0 | 515 |
+| ticks_2026-09-09.jsonl | 19,226,297 | 5,880 | 0 | 55 |
+| ticks_2026-09-11.jsonl | 271,262,468 | 90,732 | 12 | 598 |
+
+Line counts match the audit table exactly for 4/5 files; 09-11 measures
+90,744 physical lines vs 90,735 audited (delta 9 lines, 0.01% — immaterial,
+12 bad lines confirmed). Backup `run/backup_pre152/` holds the 2,940-window
+pre-rebuild derived set (1,484,752 + 75,428 bytes).
