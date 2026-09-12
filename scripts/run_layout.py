@@ -39,7 +39,7 @@ def local_tz_abbr() -> str:
     return datetime.now().astimezone().tzname() or "UTC"
 
 
-def new_run_dir(kind: str, start: datetime, tz_abbr: str,
+def new_run_dir(kind: RunKind | str, start: datetime, tz_abbr: str,
                 root: Path | None = None) -> Path:
     """Create runs/{kind}/YYYY-MM-DD_HH-MM_TZ/ with data/ + research-papers/."""
     if kind not in ("paper", "live"):

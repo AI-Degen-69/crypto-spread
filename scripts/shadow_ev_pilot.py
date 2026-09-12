@@ -200,6 +200,8 @@ async def amain(hours: float, band: float, shares: int,
             "results_and_findings": "research-papers/results-and-findings.html",
             "conclusions_and_projections": "research-papers/conclusions-and-projections.html",
         }
+        data_list = ["data/meta.json", "data/snapshots.jsonl",
+                     "data/trades.jsonl", "data/final.json"]
         run_layout.write_summary_html(run_dir, {
             "title": f"Shadow EV pilot — {run_dir.name}",
             "run_id": run_dir.name,
@@ -207,8 +209,7 @@ async def amain(hours: float, band: float, shares: int,
             "started_local": started_utc.astimezone().isoformat(),
             "config_hypothesis": config_hypothesis,
             "papers": papers,
-            "data": ["data/meta.json", "data/snapshots.jsonl",
-                     "data/trades.jsonl", "data/final.json"],
+            "data": data_list,
         })
         run_layout.write_manifest(run_dir, {
             "kind": "paper",
@@ -223,8 +224,7 @@ async def amain(hours: float, band: float, shares: int,
             "final": {k: final[k] for k in (
                 "total_pnl", "realized_pnl", "total_trades",
                 "win_rate", "pairs_merged", "stops_triggered")},
-            "data": ["data/meta.json", "data/snapshots.jsonl",
-                     "data/trades.jsonl", "data/final.json"],
+            "data": data_list,
             "papers": papers,
             "summary": "summary.html",
         })
