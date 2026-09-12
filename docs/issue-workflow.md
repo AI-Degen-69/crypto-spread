@@ -138,11 +138,19 @@ phrasing: **"ship."**
 ### Station 4 — `explain-issue` (Visual Explain & Verify)
 
 Optional closeout after Station 3. Generates an interactive standalone HTML
-artifact at `docs/reports/issue_<id>_showcase.html`: dry facts (issue, PR
+artifact at `docs/issues/<id>-<kind>-<slug>.html` (`<kind>` ∈ {showcase, explained}, `<slug>` from the issue title — e.g. `docs/issues/147-showcase-run-folders.html`): dry facts (issue, PR
 link, branch/commit), Before vs After architecture, a visual flow diagram,
 and a project-tailored manual verification guide — all in Hebrew (ELI5,
 RTL), with code/commands in LTR blocks. Opens it live in the browser
 automatically. Robert's phrasing: **"explain."**
+
+### Artifact homes — global rule
+
+Three homes, three purposes — never mixed:
+
+1. `runs/.../research-papers/` — **per-run** papers (one run's methodology, results, conclusions).
+2. `docs/issues/<id>-<kind>-<slug>.html` — **per-issue** HTML artifacts from this workflow (Station 4 showcases, research explainers).
+3. `.freebuff/`, `%TEMP%` — **scratch / transient preview only**. Never the canonical home of anything. (No doc or skill ever mandated `.freebuff/` — it grew organically as gitignored scratch.)
 
 ## 4. Babysitter — `babysit-pr-and-merge`
 
@@ -184,7 +192,7 @@ supported — the stations do not require the orchestrator.
 
 After `babysit-pr-and-merge` reports MERGED, run the `prune-artifacts` skill:
 it deletes per-issue artifacts whose work is closed and unreferenced —
-`docs/reports/issue_*_showcase.html` for CLOSED issues, orphaned root
+`docs/issues/<id>-*-*.html` for CLOSED issues, orphaned root
 `eli5_*.html` files, `docs/plan/issue-*.md` for CLOSED issues (removing
 `docs/plan/` if left empty), and shipped scratch drafts — while always keeping
 dated finding reports (`*_explained.html`, open-thread `*_showcase.html`).

@@ -10,6 +10,7 @@
 | Component | Purpose |
 |---|---|
 | `scripts/collect_ticks.py` | Forks `measure_5m_oscillation.py` and writes **full** UP+DOWN book depth + tape delta every 1s to `run/ticks/ticks_YYYY-MM-DD.jsonl` |
+| `scripts/shadow_ev_pilot.py` + `scripts/run_layout.py` | Paper EV pilot writing self-contained `runs/paper|live/YYYY-MM-DD_HH-MM_TZ/` (`data/`, `research-papers/`, `summary.html`, `manifest.json`); convention: `docs/run-conventions.md` |
 | `backtest/engine.py` | Pure function `replay(snaps, params) -> results`. Consumes tick jsonl, simulates SPREAD-2 (resting bid at `mid-offset`, queue gate, monotonic exit, pair capture). |
 | `backtest/index.py` | Per-file `<file>.jsonl.idx` sidecar (cid -> byte offset, ts). First backtest on a file scans once; subsequent calls jump to cid spans. |
 | `scripts/backtest.py` | Thin CLI: `python -m scripts.backtest run/ticks/ --offset 0.02 --queue 50 --exit btc-up-or-down-5m=0.09` |
