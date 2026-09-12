@@ -541,8 +541,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Mirrors `LiveTraderEngine._maybe_reenter_drift_skipped`: the skip must
         # have been the gate (`adverse_skipped`), the entry-timeout cutoff must
         # not have passed, at least `min_requote_remaining_sec` must remain to
-        # pair two legs, and the per-window cap applies.
+        # pair two legs, and the per-window cap applies. Re-entry also waits
+        # for delay expiry (issue #145): live holds ALL quoting — including
+        # post-re-entry quotes — while `entry_delay_pending`, so granting
+        # earlier would anchor and fill before the configured delay. The
+        # grant is deferred, not dropped: `adverse_skipped` persists, so a
+        # later post-delay tick can still recover the window.
         if (adverse_skipped and not filled_up and not filled_down
+                and delay_expired
                 and reentry_count < params.max_reentries_per_window):
             entry_timeout_cutoff = (
                 params.entry_timeout_pct * duration

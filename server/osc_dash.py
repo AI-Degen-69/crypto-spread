@@ -6347,7 +6347,7 @@ function setupBacktestInputListeners(){
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol', 'btFillModel',
     'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
-    'btReentryBand', 'btRequoteMin'
+    'btReentryBand', 'btRequoteMin', 'btEntryDelay', 'btEntryBand'
   ];
 
   inputIds.forEach(id => {

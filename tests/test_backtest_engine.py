@@ -836,3 +836,25 @@ def test_entry_delay_band_changes_hash():
     assert p1.params_hash() == BacktestParams(
         entry_delay_sec=60.0, entry_band=0.04).params_hash()
 
+
+def test_reentry_deferred_until_delay_expiry():
+    # Adverse tick at t=0, revert at t=1, tape pre-delay only. delay=60 must
+    # not fill before expiry (live holds all quotes while delay pending);
+    # the grant is deferred to t=60 (reentry_count==1), not dropped.
+    # delay=0 control grants and fills at t=1.
+    def mid_fn(i):
+        return 0.60 if i == 0 else 0.50
+    snaps = _window_snaps(
+        70, mid_fn, lambda i: _tape_both(0.48, 0.48) if 1 <= i < 60 else [],
+        up_ask_fn=lambda i: 0.605 if i == 0 else 0.505,
+        down_ask_fn=lambda i: 0.4025 if i == 0 else 0.5025)
+    w = _simulate_window(snaps, BacktestParams(
+        entry_delay_sec=60.0, entry_timeout_pct=0.0,
+        min_requote_remaining_sec=0.0))
+    assert w.filled_up is False
+    assert w.filled_down is False
+    assert w.reentry_count == 1
+    w0 = _simulate_window(snaps, BacktestParams(
+        entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
+    assert w0.pair_captured is True
+
