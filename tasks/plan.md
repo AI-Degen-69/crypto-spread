@@ -1,72 +1,85 @@
-# Plan: Issue #147 — run-folders layout (Stage 1, no entrypoint unification)
+# Plan: Issue #151 — Dashboard collector toggle is blind to the external standalone collector
 
-Task Type: Code + Docs
+Task Type: Debug + Code
 Size Tier: Standard
-Target Files: scripts/run_layout.py (new), scripts/shadow_ev_pilot.py, tests/test_run_layout.py (new),
-  docs/run-conventions.md (new), .gitignore, AGENTS.md, README.md, docs/operations.md,
-  docs/issue-workflow.md, runs/paper/2026-09-11_22-10_IDT/ (local, gitignored)
+Target Files: server/osc_dash.py, tests/test_osc_dash_integration.py
 
-Decisions locked with user: `runs/` gitignored (migration is local-only) · hard cut, no shim ·
-  papers derived from HTML contents (explained→abstract, showcase→results, showcase tail→conclusions).
+Decisions locked with user: freshness threshold 5s on manifest `ts` (per issue) ·
+  start refusal = HTTP 409 with explicit reason · stop stays no-op when no child ·
+  `collect_ticks` untouched.
 
 ## Task Breakdown
 
-### Task 1: Layout helper (naming, manifest schema, paper stubs)
-- **Files**: `scripts/run_layout.py` (new)
+### Task 1: Detection helper + status `source` field (TDD)
+- **Files**: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
+- **Type**: Debug + Code
+- **Description**:
+  1. RED: failing test — fresh manifest (`ts` = now) + `_collector_proc = None`
+     → `GET /api/collector/status` reports `source == "external"`,
+     `external is True`, `running is False`.
+  2. GREEN: add `EXTERNAL_COLLECTOR_STALE_SEC = 5.0` +
+     `_detect_external_collector()` (never raises; missing/corrupt manifest →
+     `live: False`) and wire `source`/`external`/`manifest_age_sec` into
+     `api_collector_status` without changing existing keys.
+- **Status**: [x]
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q -k "external or collector"`
+
+### Task 2: Start guard — 409 while external live (TDD)
+- **Files**: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
+- **Type**: Debug + Code
+- **Description**:
+  1. RED: failing test — fresh manifest + no child →
+     `POST /api/collector/start` returns 409 with `ok is False` and a reason
+     mentioning the external collector, and no process is spawned (Popen mock
+     not called).
+  2. GREEN: guard in `api_collector_start`; child-running and none states
+     behave exactly as today.
+- **Status**: [x]
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q -k "collector"`
+
+### Task 3: Status matrix tests (none / external-only / child-only)
+- **Files**: `tests/test_osc_dash_integration.py`
 - **Type**: Code
 - **Description**:
-  1. `RUNS_ROOT`, `new_run_dir(kind, start, tz_abbr)` creating `runs/{paper|live}/YYYY-MM-DD_HH-MM_TZ/` + `data/` + `research-papers/`; `ValueError` on non-paper/live kind.
-  2. `write_manifest` (§6 schema), `write_summary_html`, `write_paper_stub` (themed shell).
-  3. TZ helper: local abbr via `datetime.now().astimezone().tzname()`.
+  1. `none`: no manifest (tmp TICKS_DIR), no child → `source == "none"`.
+  2. `external-only`: fresh manifest, no child → `source == "external"`.
+  3. `child-only`: DummyProc child + stale/missing manifest → `source == "child"`.
+  4. Stale manifest (ts older than 5s) + no child → `source == "none"`.
+  5. Lifecycle test isolated to tmp TICKS_DIR (real fresh manifest must not
+     make it flaky — isolation, not weakening).
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_run_layout.py -q -k "naming or kind or schema"`
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q -k "collector"`
 
-### Task 2: Layout unit tests + pilot smoke scaffolding
-- **Files**: `tests/test_run_layout.py` (new)
+### Task 4: Banner + toggle UI truth (external state + 409 reason)
+- **Files**: `server/osc_dash.py` (inline JS: `refreshCollectorStatus`, `toggleCollector`)
+- **Type**: Design + Code
+- **Description**:
+  1. `refreshCollectorStatus()`: `source == "external"` → badge
+     `Collector: 🟡 External live · N ticks today`, toggle button reads
+     `Start blocked (external live)` and is disabled.
+  2. `toggleCollector()`: on 409, render the refusal reason in the badge
+     instead of silently re-rendering.
+  3. Existing child/none rendering unchanged.
+- **Status**: [x]
+- **Verification**: `rg -n "External live|start-blocked|source" server/osc_dash.py`; existing test `test_osc_dash*` HTML assertions (`collectorBadge`) still pass
+
+### Task 5 (OPTIONAL — needs operator sign-off): guard `poll-once` too
+- **Files**: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
 - **Type**: Code
-- **Description**:
-  1. Naming format (`YYYY-MM-DD_HH-MM_TZ`, no colons, sortable), kind validation, manifest schema keys, stub/summary writers round-trip in `tmp_path`.
-  2. Pilot smoke test into tmp dir via `--outdir` asserting `data/` + `manifest.json` + `summary.html` + abstract stub exist.
-- **Status**: [x]
-- **Verification**: `python -m pytest tests/test_run_layout.py -q`
+- **Description**: `POST /api/collector/poll-once` appends to the same daily
+  file, so it is the same corruption vector. Refuse with 409 while external
+  live. NOT part of the issue scope — implement only if the operator approves
+  the improvement below.
+- **Status**: [ ] (blocked on approval)
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q -k "poll_once"`
 
-### Task 3: Pilot writes the new layout directly
-- **Files**: `scripts/shadow_ev_pilot.py`
-- **Type**: Code
-- **Description**:
-  1. `RUN_DIR` → `run_layout.new_run_dir("paper", …)`; `meta/snapshots/trades/final` → `data/`; keep `--outdir` writing the same layout inside the given dir.
-  2. Abstract stub at start (preset + universe + config hypothesis), results stub at stop (final numbers table + data pointers), manifest + summary at stop; fix `:3` docstring ref to the canonical papers path.
-  3. No quoting/pricing/risk change; paper-mode guards untouched.
-- **Status**: [x]
-- **Verification**: `python -m scripts.shadow_ev_pilot --hours 0.01 --snap-every 5 --outdir <tmp>` then `python -m pytest tests/test_run_layout.py -q`
-
-### Task 4: Migrate the 11h run (hash-verified, hard cut)
-- **Files**: `runs/paper/2026-09-11_22-10_IDT/` (new, local); deletes under `run/shadow_ev/`, `docs/reports/`
-- **Type**: Code
-- **Description**:
-  1. Copy 4 JSONs → `data/` + log tail; SHA-256 verify before any delete.
-  2. Papers per SPEC §4 (explained→abstract + banner, showcase→results with stale-ref fixes, new conclusions from showcase tail); generate `summary.html` + `manifest.json` (final: +6.74 realized / 66 trades / 53 pairs / 97% win / 0 stops).
-  3. Delete `run/shadow_ev_20260911_220912` (aborted), `…_221054`, empty parent, the two `docs/reports/` HTMLs. `.freebuff/` untouched.
-- **Status**: [x]
-- **Verification**: hashes match; `Test-Path run/shadow_ev` is False; folder tree matches the convention
-
-### Task 5: Convention doc + ref updates
-- **Files**: `docs/run-conventions.md` (new), `.gitignore`, `AGENTS.md`, `README.md`, `docs/operations.md`, `docs/issue-workflow.md`
-- **Type**: Docs
-- **Description**:
-  1. `docs/run-conventions.md` = SPEC §2 + taxonomy (run papers vs issue showcases vs scratch) + lifecycle (abstract@start, results@stop, conclusions post-run).
-  2. `.gitignore` +`runs/`; AGENTS.md structure (`runs/` line, `run/` line stays); README/operations one-line pointers.
-  3. `docs/issue-workflow.md`: Station 4 output → `docs/issues/<id>-<kind>-<slug>.html` (kind ∈ {showcase, explained}, slug from issue title); §6 prune paths updated to the same scheme; artifact-home rule subsection (repo finding: no doc/skill ever mandated `.freebuff/` — it grew organically as gitignored scratch, so this writes down the real rule).
-  4. Global skill `~/.agents/skills/explain-issue/SKILL.md` (+ `reference.md:15`): same `docs/issues/<id>-<kind>-<slug>.html` scheme for the persisted artifact (`$TEMP` stays preview-only). Follow-up (not this issue): global `prune-artifacts` skill still matches `docs/reports/issue_*` — needs its own update once new-scheme files exist.
-  3. `server/osc_dash.py`: verify-only (grep shows no `shadow_ev`/`reports` refs) — no logic change.
-- **Status**: [x]
-- **Verification**: `rg -n "run/shadow_ev" --glob '*.py'` empty; `python -m pytest -q` green
-
-### Task 6: Full regression gate + commit
+### Task 6: Full regression gate
 - **Files**: —
 - **Type**: Code
 - **Description**:
-  1. `python -m pytest -q` (0 failures); confirm `git status` shows no data files under `runs/` staged.
-  2. Commit on a `feat/147-…` branch per `docs/git-workflow.md` (gan-harness removal rides along as its own commit — owner confirmed it served its purpose).
+  1. `python -m pytest -q` (0 failures).
+  2. `git status --short` shows only `server/osc_dash.py`,
+     `tests/test_osc_dash_integration.py`, `SPEC.md`, `CONSTRAINTS.md`,
+     `tasks/plan.md`, `tasks/todo.md`.
 - **Status**: [x]
 - **Verification**: `python -m pytest -q` + `git status --short`

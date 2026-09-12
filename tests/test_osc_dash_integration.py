@@ -1,6 +1,7 @@
 """Integration tests for the 4-tab dashboard SPA and FastAPI API endpoints."""
 import json
 import subprocess
+import time
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
@@ -331,8 +332,11 @@ def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
     osc_dash._VERIFY_REPORT_CACHE.clear()
 
 
-def test_api_collector_lifecycle_and_status(monkeypatch):
+def test_api_collector_lifecycle_and_status(monkeypatch, tmp_path):
     """Verify collector start, status, and stop workflow with mocked process."""
+    # Isolated TICKS_DIR: a live external manifest in the real dir must not
+    # make this lifecycle test flaky (Issue #151 start guard).
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     class DummyProc:
         def __init__(self):
             self.pid = 99999
@@ -434,6 +438,104 @@ def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
     d = res.json()
     assert d["tape_empty_rate"] == 0.995
     assert d["tape_alert"] is True
+
+
+
+def test_collector_status_external_only(tmp_path, monkeypatch):
+    """Issue #151: fresh manifest + no dashboard child => source external."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ts": time.time(), "lines": 10}),
+        encoding="utf-8",
+    )
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    d = res.json()
+    assert d["source"] == "external"
+    assert d["external"] is True
+    assert d["running"] is False
+
+
+
+def test_collector_start_refused_while_external_live(tmp_path, monkeypatch):
+    """Issue #151: Start returns 409 with a reason and spawns nothing."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ts": time.time(), "lines": 10}),
+        encoding="utf-8",
+    )
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not spawn a second collector")
+    monkeypatch.setattr(osc_dash.subprocess, "Popen", _boom)
+    try:
+        res = client.post("/api/collector/start")
+    finally:
+        osc_dash._collector_proc = None
+    assert res.status_code == 409
+    body = res.json()
+    assert body.get("ok") is False
+    assert body.get("source") == "external"
+    assert "external" in body.get("error", "").lower()
+
+
+
+def test_collector_status_source_matrix(tmp_path, monkeypatch):
+    """Issue #151: status source covers none / child-only / stale-manifest."""
+    class DummyProc:
+        pid = 99999
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    try:
+        # none: no manifest, no child
+        monkeypatch.setattr(osc_dash, "_collector_proc", None)
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+
+        # child-only: child running, no manifest
+        monkeypatch.setattr(osc_dash, "_collector_proc", DummyProc())
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "child"
+        assert d["external"] is False
+        assert d["running"] is True
+
+        # stale manifest + no child => none (not external)
+        monkeypatch.setattr(osc_dash, "_collector_proc", None)
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"ts": time.time() - 3600, "lines": 10}),
+            encoding="utf-8",
+        )
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+
+        # corrupt manifest + no child => none (detection never raises)
+        (tmp_path / "manifest.json").write_text("{not json", encoding="utf-8")
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+
+        # valid JSON but not an object (list) => none, never raises
+        (tmp_path / "manifest.json").write_text("[1, 2, 3]", encoding="utf-8")
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+
+        # child wins: child running + fresh manifest => child, not external
+        monkeypatch.setattr(osc_dash, "_collector_proc", DummyProc())
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"ts": time.time(), "lines": 10}),
+            encoding="utf-8",
+        )
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "child"
+        assert d["external"] is False
+    finally:
+        osc_dash._collector_proc = None
 
 
 

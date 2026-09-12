@@ -129,6 +129,34 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
 MAX_TEST_ORDER_SHARES = 10.0
+# Manifest `ts` age below which a writer that is NOT our dashboard child
+# counts as a live external standalone collector (Issue #151).
+EXTERNAL_COLLECTOR_STALE_SEC = 5.0
+
+
+def _detect_external_collector(now: float | None = None) -> dict[str, Any]:
+    """Detect a live external standalone collector without touching processes.
+
+    Returns {"live": bool, "manifest_age_sec": float | None}. `live` is True
+    iff run/ticks/manifest.json carries a `ts` no older than
+    EXTERNAL_COLLECTOR_STALE_SEC. Never raises: a missing or corrupt
+    manifest means "no external writer seen".
+    """
+    if now is None:
+        now = time.time()
+    try:
+        raw = (TICKS_DIR / "manifest.json").read_text(encoding="utf-8")
+        mdata = json.loads(raw)
+        if not isinstance(mdata, dict):
+            return {"live": False, "manifest_age_sec": None}
+        ts = mdata.get("ts")
+        if not isinstance(ts, (int, float)):
+            return {"live": False, "manifest_age_sec": None}
+        age = now - float(ts)
+        live = 0.0 <= age <= EXTERNAL_COLLECTOR_STALE_SEC
+        return {"live": live, "manifest_age_sec": age}
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {"live": False, "manifest_age_sec": None}
 
 
 def _verify_safe_origin(request: Request) -> None:
@@ -883,9 +911,14 @@ def api_collector_status():
         except Exception:
             pass
 
+    ext = _detect_external_collector()
+
     return {
         "running": running,
         "pid": _collector_proc.pid if running else None,
+        "source": "child" if running else ("external" if ext["live"] else "none"),
+        "external": ext["live"] and not running,
+        "manifest_age_sec": ext["manifest_age_sec"],
         "total_ticks_collected": today_ticks,
         "tape_empty_rate": tape_empty_rate,
         "tape_recent_empty_rate": tape_recent_empty_rate,
@@ -900,6 +933,22 @@ def api_collector_start(request: Request):
     _verify_safe_origin(request)
     global _collector_proc
     if _collector_proc is None or _collector_proc.poll() is not None:
+        ext = _detect_external_collector()
+        if ext["live"]:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "running": False,
+                    "source": "external",
+                    "manifest_age_sec": ext["manifest_age_sec"],
+                    "error": (
+                        "External standalone collector is live "
+                        "(run/ticks/manifest.json is fresh); refusing to spawn "
+                        "a second writer on the same daily tick file."
+                    ),
+                },
+            )
         cmd = [sys.executable, "-m", "scripts.collect_ticks"]
         _collector_proc = subprocess.Popen(
             cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -3231,10 +3280,20 @@ async function refreshCollectorStatus(){
     const res = await fetch('/api/collector/status');
     const st = await res.json();
     isCollectorActive = st.running;
-    $('collectorBadge').textContent = `Collector: ${st.running ? '🟢 Running (1s)' : '⚪ Paused'} · ${(st.total_ticks_collected||0).toLocaleString()} ticks today`;
-    $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
-    $('btnToggleCollector').textContent = st.running ? 'Stop Polling' : 'Start Polling (1s)';
-    $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
+    const src = st.source || (st.running ? 'child' : 'none');
+    if(src === 'external'){
+      $('collectorBadge').textContent = `Collector: 🟡 External live · ${(st.total_ticks_collected||0).toLocaleString()} ticks today (standalone writer — Start blocked)`;
+      $('collectorBadge').style.color = 'var(--warn, #e8b23f)';
+      $('btnToggleCollector').textContent = 'Start blocked (external live)';
+      $('btnToggleCollector').className = 'btn';
+      $('btnToggleCollector').disabled = true;
+    } else {
+      $('collectorBadge').textContent = `Collector: ${st.running ? '🟢 Running (1s)' : '⚪ Paused'} · ${(st.total_ticks_collected||0).toLocaleString()} ticks today`;
+      $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
+      $('btnToggleCollector').textContent = st.running ? 'Stop Polling' : 'Start Polling (1s)';
+      $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
+      $('btnToggleCollector').disabled = false;
+    }
 
     const tb = $('tapeBadge');
     if(tb){
@@ -3260,7 +3319,13 @@ async function refreshCollectorStatus(){
 
 async function toggleCollector(){
   const endpoint = isCollectorActive ? '/api/collector/stop' : '/api/collector/start';
-  await fetch(endpoint, {method:'POST'});
+  const res = await fetch(endpoint, {method:'POST'});
+  if(res.status === 409){
+    let reason = 'external collector live — Start blocked';
+    try{ reason = (await res.json()).error || reason; }catch{}
+    $('collectorBadge').textContent = 'Collector: 🟡 Start blocked (external live)';
+    $('collectorBadge').title = reason;
+  }
   refreshCollectorStatus();
 }
 
