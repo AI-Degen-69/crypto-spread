@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .venv/
 run/
+runs/
 logs/
 .env
 .env.*
