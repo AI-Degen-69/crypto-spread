@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from scripts import run_layout as rl
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_naming_format_and_subdirs(tmp_path, monkeypatch):
@@ -90,6 +93,22 @@ def test_local_tz_abbr_nonempty():
     assert rl.local_tz_abbr().strip() != ""
 
 
-@pytest.mark.skip(reason="needs Task 3: pilot layout wiring")
 def test_pilot_smoke_writes_new_layout(tmp_path):
-    pass
+    import subprocess
+    import sys
+    out = tmp_path / "smoke_run"
+    r = subprocess.run(
+        [sys.executable, "-m", "scripts.shadow_ev_pilot",
+         "--hours", "0", "--snap-every", "1", "--outdir", str(out)],
+        capture_output=True, text=True, timeout=300,
+        cwd=str(ROOT),
+    )
+    assert r.returncode == 0, r.stderr[-2000:]
+    for rel in ("data/meta.json", "data/final.json", "manifest.json",
+                "summary.html",
+                "research-papers/abstract-and-methodology.html",
+                "research-papers/results-and-findings.html"):
+        assert (out / rel).is_file(), rel
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["kind"] == "paper"
+    assert manifest["final"]["total_trades"] == 0
