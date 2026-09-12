@@ -4,7 +4,7 @@
 
 ### 1. Test Suite Integrity
 - **Pass Rate**: 100% — `python -m pytest -q` fully green before and after
-  (data ops must not break code; globs/p szerződések unchanged).
+  (data ops must not break code; globs unchanged).
 - **No Test Swallowing**: no skipped tests, no weakened assertions to fit the
   change; this issue adds no production code, so no new unit tests required —
   verification is via the three CLI smoke gates below.
