@@ -658,3 +658,34 @@ def test_replay_trades_sample_untruncated_with_prices():
     assert "exit_price" in sample0
     assert "exit_side" in sample0
 
+
+# --- entry delay / entry band params (issue #145) ---------------------------
+
+def test_entry_delay_band_defaults_off():
+    p = BacktestParams()
+    assert p.entry_delay_sec == 0.0
+    assert p.entry_band == 0.0
+
+
+def test_entry_delay_band_accept_winning_config():
+    p = BacktestParams(entry_delay_sec=60.0, entry_band=0.04)
+    assert p.entry_delay_sec == 60.0
+    assert p.entry_band == 0.04
+
+
+def test_entry_delay_band_reject_out_of_range():
+    with pytest.raises(ValueError):
+        BacktestParams(entry_delay_sec=-1.0)
+    with pytest.raises(ValueError):
+        BacktestParams(entry_delay_sec=3600.01)
+    with pytest.raises(ValueError):
+        BacktestParams(entry_band=-0.01)
+    with pytest.raises(ValueError):
+        BacktestParams(entry_band=0.51)
+
+
+def test_entry_delay_band_grouped_as_trading_knobs():
+    gp = BacktestParams().grouped_params()
+    assert "entry_delay_sec" in gp["trading_knobs"]
+    assert "entry_band" in gp["trading_knobs"]
+

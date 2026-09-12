@@ -153,6 +153,13 @@ class BacktestParams:
     # oscillating across the band from thrashing the book for a whole window;
     # 0 disables re-entry outright. Mirrors LiveTraderEngine.
     max_reentries_per_window: int = 1
+    # Patient undecided-band maker knobs (issue #145, mirrors issue #137 live
+    # semantics). `entry_delay_sec` holds all quoting until that many seconds
+    # into the window (0 = off); `entry_band` only admits windows whose
+    # two-sided mid is still near 0.50 at entry time (0 = off). Defaults
+    # preserve the current behavior exactly.
+    entry_delay_sec: float = 0.0
+    entry_band: float = 0.0
 
     # ── param grouping metadata ──────────────────────────────────────────────
     # Separates operator-controlled (live-replicable) knobs from execution
@@ -167,6 +174,8 @@ class BacktestParams:
             ("pair_cost_gate", "Max Pair Cost ($) — cost ceiling", "Your cost threshold before walking away"),
             ("quote_shares", "Order Shares per Leg — position size", "Your sizing decision"),
             ("max_start_delay_sec", "Max Start Delay (s) — window filter", "You decide which windows are fresh enough to enter"),
+            ("entry_delay_sec", "Entry Delay (s) — quote hold", "You hold quotes until the window matures"),
+            ("entry_band", "Entry Band — undecided-market filter", "You admit only undecided markets at entry time"),
             ("exit_thresh_by_slug", "Exit Stop Loss Thresholds ($)", "Your stop placement — per series / duration"),
         ],
         "execution_assumptions": [
@@ -245,6 +254,16 @@ class BacktestParams:
             if self.max_reentries_per_window < 0:
                 raise ValueError(
                     f"max_reentries_per_window must be >= 0, got {self.max_reentries_per_window}"
+                )
+        if self.entry_delay_sec is not None:
+            if not math.isfinite(self.entry_delay_sec) or not (0.0 <= self.entry_delay_sec <= 3600.0):
+                raise ValueError(
+                    f"entry_delay_sec must be between 0.0 and 3600.0, got {self.entry_delay_sec}"
+                )
+        if self.entry_band is not None:
+            if not math.isfinite(self.entry_band) or not (0.0 <= self.entry_band <= 0.50):
+                raise ValueError(
+                    f"entry_band must be between 0.0 and 0.50, got {self.entry_band}"
                 )
 
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
