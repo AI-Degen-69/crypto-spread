@@ -1792,4 +1792,53 @@ def test_cockpit_pnl_histogram_render_hook_in_html():
     assert "zero-PnL" in html or "zero pnl" in html.lower()
     # Explicit empty states, never a blank box.
     assert "awaiting fills" in html
+
+
+def test_api_live_queue_telemetry_rejects_bad_ratios(tmp_path, monkeypatch):
+    """NaN / inf / negative fill_ratio are excluded from totals and verdict."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = [dict(r) for r in _telemetry_rows() if not r["chased"]]
+    rows[0]["fill_ratio"] = float("nan")
+    rows[1]["fill_ratio"] = float("inf")
+    rows[2]["fill_ratio"] = -0.5
+    _write_fills(fills, rows)
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    # Only the 2.5-ratio row survives (finite, >= 0).
+    assert body["empty"] is False
+    assert body["total_fills"] == 1
+
+
+def test_api_live_queue_telemetry_chased_without_settlement(tmp_path, monkeypatch):
+    """Chased fill whose market never settled: 200, count kept, mean None."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = [dict(r) for r in _telemetry_rows() if r["chased"]]
+    rows[0]["market_slug"] = "unsettled-xyz"
+    _write_fills(fills, rows)
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["chased"] == {"count": 1, "mean_settle_pnl_usd": None}
+
+
+def test_cockpit_panels_inside_cockpit_tab():
+    """Queue + PnL cards live inside tab-cockpit, not after it."""
+    html = client.get("/").text
+    tab = html.index('id="tab-cockpit"')
+    toast = html.index('id="toastContainer"')
+    assert tab < html.index('id="queuePanel"') < toast
+    assert tab < html.index('id="pnlHistPanel"') < toast
     assert "No closed trades yet" in html

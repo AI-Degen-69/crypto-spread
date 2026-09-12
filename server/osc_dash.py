@@ -14,6 +14,7 @@ import asyncio
 import collections
 import gzip
 import json
+import math
 import os
 import re
 import shutil
@@ -73,7 +74,9 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
     fills = _read_jsonl(fills_path)
     usable = [f for f in fills
               if isinstance(f.get("fill_ratio"), (int, float))
-              and not isinstance(f.get("fill_ratio"), bool)]
+              and not isinstance(f.get("fill_ratio"), bool)
+              and math.isfinite(f["fill_ratio"])
+              and f["fill_ratio"] >= 0]
     if not usable:
         return {"empty": True, "total_fills": 0, "buckets": [],
                 "chased": {"count": 0, "mean_settle_pnl_usd": None},
@@ -82,7 +85,7 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
     passive = [f for f in usable if not f.get("chased")]
     chased = [f for f in usable if f.get("chased")]
     buckets = bucketize(passive, settle)
-    chased_pnls = [settle[str(f.get("market_slug") or "")]
+    chased_pnls = [settle.get(str(f.get("market_slug") or ""))
                    for f in chased]
     chased_pnls = [p for p in chased_pnls if p is not None]
     low_raw = [settle.get(str(f.get("market_slug") or ""))
@@ -2692,34 +2695,33 @@ textarea:focus-visible,
           </tbody>
         </table>
       </div>
+      <!-- Issue #139: Queue Telemetry + PnL Distribution (inside tab-cockpit) -->
+      <div class="card" id="queuePanel" style="margin-top:12px">
+        <h3 style="margin:0 0 10px">
+          <span>📊 Queue Telemetry (tape vs tapeq)</span>
+          <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fills</span>
+        </h3>
+        <div id="queueSvgWrap" style="width:100%;min-height:150px"></div>
+        <details id="queueFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
+          <summary style="cursor:pointer">Data table</summary>
+          <div id="queueFallback"></div>
+        </details>
+      </div>
+
+      <div class="card" id="pnlHistPanel" style="margin-top:12px">
+        <h3 style="margin:0 0 10px">
+          <span>📈 PnL per Position</span>
+          <span id="pnlHistStats" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">No closed trades yet</span>
+        </h3>
+        <div id="pnlHistSvgWrap" style="width:100%;min-height:150px"></div>
+        <details id="pnlHistFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
+          <summary style="cursor:pointer">Data table</summary>
+          <div id="pnlHistFallback"></div>
+        </details>
+      </div>
     </div>
   </div>
 </div>
-
-    <!-- Issue #139: Queue Telemetry + PnL Distribution -->
-    <div class="card" id="queuePanel" style="margin-top:12px">
-      <h3 style="margin:0 0 10px">
-        <span>📊 Queue Telemetry (tape vs tapeq)</span>
-        <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fills</span>
-      </h3>
-      <div id="queueSvgWrap" style="width:100%;min-height:150px"></div>
-      <details id="queueFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
-        <summary style="cursor:pointer">Data table</summary>
-        <div id="queueFallback"></div>
-      </details>
-    </div>
-
-    <div class="card" id="pnlHistPanel" style="margin-top:12px">
-      <h3 style="margin:0 0 10px">
-        <span>📈 PnL per Position</span>
-        <span id="pnlHistStats" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">No closed trades yet</span>
-      </h3>
-      <div id="pnlHistSvgWrap" style="width:100%;min-height:150px"></div>
-      <details id="pnlHistFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
-        <summary style="cursor:pointer">Data table</summary>
-        <div id="pnlHistFallback"></div>
-      </details>
-    </div>
 
 <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
