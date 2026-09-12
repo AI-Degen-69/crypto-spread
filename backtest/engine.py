@@ -412,23 +412,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
 
-    # Dynamic symmetric mid-anchored resting quotes for the window (mid - offset).
-    # Inspect initial valid snapshot to anchor quotes to initial window midpoint.
-    init_mid = None
-    for s_init in window_snaps:
-        if s_init.get("mid") is not None:
-            init_mid = float(s_init["mid"])
-            break
-        ub_init = s_init.get("up_book") or {}
-        u_m = _mid(ub_init)
-        if u_m is not None:
-            init_mid = float(u_m)
-            break
-    if init_mid is None:
-        init_mid = 0.50
-
-    resting_up = round(min(0.99, max(0.01, init_mid - params.offset)), 3)
-    resting_down = round(min(0.99, max(0.01, (1.0 - init_mid) - params.offset)), 3)
+    # Patient undecided-band maker knobs (issue #145, mirrors live issue #137).
+    # `delay_sec` holds all quoting until that far into the window (0 = off);
+    # `band` admits only undecided markets at entry time (0 = off). Resting
+    # quotes anchor at the first mid AT/AFTER delay expiry (sim2 parity); with
+    # delay 0 that is the first valid snapshot, exactly as before.
+    delay_sec = params.entry_delay_sec or 0.0
+    band = params.entry_band or 0.0
+    resting_up: float | None = None
+    resting_down: float | None = None
+    band_gate_evaluated = False
 
     entry_cancelled = False
     adverse_gate_evaluated = False
@@ -501,6 +494,28 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     entry_cancelled = True
                     adverse_skipped = True
 
+        # Post-delay entry band (issue #145, mirrors live issue #137): once the
+        # entry delay has expired, the first tick with a two-sided book checks
+        # |mid - 0.50| against `entry_band` (0 = off). A failure latches the
+        # window cancelled; the re-entry rule below only undoes adverse-gate
+        # skips, so a band skip is final, matching live. While the band is
+        # armed but unevaluated, placement is held too (`band_hold`).
+        delay_expired = delay_sec <= 0 or elapsed >= delay_sec
+        if resting_up is None and delay_expired:
+            anchor = s.get("mid")
+            if anchor is None:
+                anchor = mid
+            anchor = float(anchor)
+            resting_up = round(min(0.99, max(0.01, anchor - params.offset)), 3)
+            resting_down = round(min(0.99, max(0.01, (1.0 - anchor) - params.offset)), 3)
+        if band > 0 and delay_expired and not band_gate_evaluated:
+            band_mid = _two_sided_mid(ub, db)
+            if band_mid is not None:
+                band_gate_evaluated = True
+                if abs(band_mid - 0.50) > band:
+                    entry_cancelled = True
+        band_hold = band > 0 and delay_expired and not band_gate_evaluated
+
         # Drift-skip re-entry (issue #95): a gate-skipped window is re-entered on
         # a later tick once the mid is back within `reentry_drift_band` of 0.50.
         # Mirrors `LiveTraderEngine._maybe_reenter_drift_skipped`: the skip must
@@ -537,6 +552,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 entry_cancelled = False
                 adverse_skipped = False
                 reentry_count += 1
+                # Re-entry bypasses the entry band entirely (mirrors live,
+                # which marks the band evaluated when re-entry is granted).
+                band_gate_evaluated = True
                 if not filled_up or not filled_down:
                     r_mid = s.get("mid")
                     if r_mid is None:
@@ -550,6 +568,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
             queue_ok = True
+        elif resting_up is None or resting_down is None:
+            queue_ok = False  # delay not expired yet: nothing quotable
         else:
             q_up = sum(sz for p, sz in (ub.get("bids") or {}).items()
                        if float(p) >= resting_up)
@@ -602,8 +622,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Hoist token lookups and guard empty identifiers (prevents "" == "" match).
         up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
-        can_fill_up = (not filled_up) and (not entry_cancelled or filled_down)
-        can_fill_down = (not filled_down) and (not entry_cancelled or filled_up)
+        quotable = (resting_up is not None and resting_down is not None
+                    and not band_hold)
+        can_fill_up = (not filled_up) and (not entry_cancelled or filled_down) and quotable
+        can_fill_down = (not filled_down) and (not entry_cancelled or filled_up) and quotable
         for trade in s.get("tape_delta") or []:
             tasset = str(trade.get("asset", "")).strip()
             if not tasset:
