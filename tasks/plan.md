@@ -67,6 +67,6 @@ Decisions locked with user: `runs/` gitignored (migration is local-only) · hard
 - **Type**: Code
 - **Description**:
   1. `python -m pytest -q` (0 failures); confirm `git status` shows no data files under `runs/` staged.
-  2. Commit on a `feat/147-…` branch per `docs/git-workflow.md` (separate from the pending gan-harness deletion commit).
+  2. Commit on a `feat/147-…` branch per `docs/git-workflow.md` (gan-harness removal rides along as its own commit — owner confirmed it served its purpose).
 - **Status**: [x]
 - **Verification**: `python -m pytest -q` + `git status --short`
