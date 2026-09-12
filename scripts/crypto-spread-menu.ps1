@@ -27,15 +27,17 @@ $Port        = 8802
 $DashUrl     = "http://127.0.0.1:$Port"
 $RunDir      = Join-Path $ProjectPath "run"
 $TicksDir    = Join-Path $RunDir "ticks"
+$LogDir      = Join-Path $ProjectPath "logs"
 $DashPidFile = Join-Path $RunDir "dash.pids.json"
-$OutLog      = Join-Path $RunDir "dash.out.log"
-$ErrLog      = Join-Path $RunDir "dash.err.log"
+$OutLog      = Join-Path $LogDir "dash.out.log"
+$ErrLog      = Join-Path $LogDir "dash.err.log"
 
 # Ensure PYTHONPATH includes project root for python -m invocations
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectPath;$env:PYTHONPATH" } else { $ProjectPath }
 
 # Ensure runtime directory exists
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 # ── Theme system (shared profile templates, self-contained fallback) ──
 try {

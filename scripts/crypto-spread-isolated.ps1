@@ -35,13 +35,15 @@ $Port        = 8888
 $DashUrl     = "http://127.0.0.1:$Port"
 $RunDir      = Join-Path $IsolatedPath "run"
 $TicksDir    = Join-Path $RunDir "ticks"
+$LogDir      = Join-Path $IsolatedPath "logs"
 $DashPidFile = Join-Path $RunDir "dash.pids.json"
-$OutLog      = Join-Path $RunDir "dash.out.log"
-$ErrLog      = Join-Path $RunDir "dash.err.log"
+$OutLog      = Join-Path $LogDir "dash.out.log"
+$ErrLog      = Join-Path $LogDir "dash.err.log"
 
 # Ensure runtime directory exists
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $TicksDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 # ── Theme system (shared profile templates, self-contained fallback) ──
 try {

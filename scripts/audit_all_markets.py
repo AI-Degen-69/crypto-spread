@@ -204,12 +204,12 @@ def save_audit_artifact(
     threshold: float,
     output_path: Optional[str] = None,
 ) -> str:
-    """Save aggregated audit results to JSON artifact file under run/ directory."""
+    """Save aggregated audit results to JSON artifact file under logs/ directory."""
     if output_path:
         out_path = Path(output_path)
     else:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = Path("run") / f"latency_audit_{ts}.json"
+        out_path = Path("logs") / f"latency_audit_{ts}.json"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {

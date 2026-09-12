@@ -22,6 +22,17 @@ Every paper/live run is one self-contained folder. A future script can scan
 
 `runs/` is gitignored (like `run/`). Runs are local evidence, not committed artifacts.
 
+## Working dirs: `run/` vs `runs/` vs `logs/`
+
+- `run/` — machine working state (gitignored): `ticks/` capture landing zone,
+  `observations/` paper-observer journal, `sweeps/` research cache + drivers,
+  live runtime state (`live_trades*.jsonl`, `live_fill_telemetry.jsonl`,
+  `oscillation_*`). Ephemeral except `ticks/` (irreplaceable capture).
+- `runs/` — curated per-run records (this doc's layout).
+- `logs/` — process logs and audit artifacts (dash/collector/observer logs,
+  `latency_audit_*.json`). Launchers (`scripts/crypto-spread-*.ps1`) and
+  `audit_all_markets.py` write here.
+
 ## Lifecycle (who writes what, when)
 
 | Stage | Writer | Output |
