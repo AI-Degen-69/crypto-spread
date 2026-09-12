@@ -512,6 +512,22 @@ def test_collector_status_source_matrix(tmp_path, monkeypatch):
         d = client.get("/api/collector/status").json()
         assert d["source"] == "none"
         assert d["external"] is False
+
+        # corrupt manifest + no child => none (detection never raises)
+        (tmp_path / "manifest.json").write_text("{not json", encoding="utf-8")
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+
+        # child wins: child running + fresh manifest => child, not external
+        monkeypatch.setattr(osc_dash, "_collector_proc", DummyProc())
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"ts": time.time(), "lines": 10}),
+            encoding="utf-8",
+        )
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "child"
+        assert d["external"] is False
     finally:
         osc_dash._collector_proc = None
 

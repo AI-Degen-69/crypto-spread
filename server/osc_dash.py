@@ -151,8 +151,9 @@ def _detect_external_collector(now: float | None = None) -> dict[str, Any]:
         if not isinstance(ts, (int, float)):
             return {"live": False, "manifest_age_sec": None}
         age = now - float(ts)
-        return {"live": age <= EXTERNAL_COLLECTOR_STALE_SEC, "manifest_age_sec": age}
-    except Exception:
+        live = 0.0 <= age <= EXTERNAL_COLLECTOR_STALE_SEC
+        return {"live": live, "manifest_age_sec": age}
+    except (OSError, ValueError, UnicodeDecodeError):
         return {"live": False, "manifest_age_sec": None}
 
 
@@ -938,6 +939,7 @@ def api_collector_start(request: Request):
                     "ok": False,
                     "running": False,
                     "source": "external",
+                    "manifest_age_sec": ext["manifest_age_sec"],
                     "error": (
                         "External standalone collector is live "
                         "(run/ticks/manifest.json is fresh); refusing to spawn "
@@ -3319,7 +3321,8 @@ async function toggleCollector(){
   if(res.status === 409){
     let reason = 'external collector live — Start blocked';
     try{ reason = (await res.json()).error || reason; }catch{}
-    $('collectorBadge').textContent = 'Collector: 🟡 ' + reason;
+    $('collectorBadge').textContent = 'Collector: 🟡 Start blocked (external live)';
+    $('collectorBadge').title = reason;
   }
   refreshCollectorStatus();
 }
