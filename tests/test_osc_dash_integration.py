@@ -1,6 +1,7 @@
 """Integration tests for the 4-tab dashboard SPA and FastAPI API endpoints."""
 import json
 import subprocess
+import time
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
@@ -434,6 +435,23 @@ def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
     d = res.json()
     assert d["tape_empty_rate"] == 0.995
     assert d["tape_alert"] is True
+
+
+
+def test_collector_status_external_only(tmp_path, monkeypatch):
+    """Issue #151: fresh manifest + no dashboard child => source external."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ts": time.time(), "lines": 10}),
+        encoding="utf-8",
+    )
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    d = res.json()
+    assert d["source"] == "external"
+    assert d["external"] is True
+    assert d["running"] is False
 
 
 

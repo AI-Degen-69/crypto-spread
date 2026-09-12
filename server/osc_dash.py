@@ -129,6 +129,31 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
 MAX_TEST_ORDER_SHARES = 10.0
+# Manifest `ts` age below which a writer that is NOT our dashboard child
+# counts as a live external standalone collector (Issue #151).
+EXTERNAL_COLLECTOR_STALE_SEC = 5.0
+
+
+def _detect_external_collector(now: float | None = None) -> dict[str, Any]:
+    """Detect a live external standalone collector without touching processes.
+
+    Returns {"live": bool, "manifest_age_sec": float | None}. `live` is True
+    iff run/ticks/manifest.json carries a `ts` no older than
+    EXTERNAL_COLLECTOR_STALE_SEC. Never raises: a missing or corrupt
+    manifest means "no external writer seen".
+    """
+    if now is None:
+        now = time.time()
+    try:
+        raw = (TICKS_DIR / "manifest.json").read_text(encoding="utf-8")
+        mdata = json.loads(raw)
+        ts = mdata.get("ts")
+        if not isinstance(ts, (int, float)):
+            return {"live": False, "manifest_age_sec": None}
+        age = now - float(ts)
+        return {"live": age <= EXTERNAL_COLLECTOR_STALE_SEC, "manifest_age_sec": age}
+    except Exception:
+        return {"live": False, "manifest_age_sec": None}
 
 
 def _verify_safe_origin(request: Request) -> None:
@@ -883,9 +908,14 @@ def api_collector_status():
         except Exception:
             pass
 
+    ext = _detect_external_collector()
+
     return {
         "running": running,
         "pid": _collector_proc.pid if running else None,
+        "source": "child" if running else ("external" if ext["live"] else "none"),
+        "external": ext["live"] and not running,
+        "manifest_age_sec": ext["manifest_age_sec"],
         "total_ticks_collected": today_ticks,
         "tape_empty_rate": tape_empty_rate,
         "tape_recent_empty_rate": tape_recent_empty_rate,
