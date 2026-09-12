@@ -21,7 +21,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
      `BacktestParams`; validate delay 0–3600, band 0–0.50 in `__post_init__`
      (raise `ValueError` outside).
   2. Register both under `_PARAM_GROUPS["trading_knobs"]` with label/why.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -c "from backtest import BacktestParams; BacktestParams(entry_delay_sec=60,entry_band=0.04); BacktestParams(entry_band=9)"` → second raises ValueError
 
 ### Task 2: Engine — delay/band in `_simulate_window` (`backtest/engine.py:357+`)
@@ -37,7 +37,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
      `adverse_skipped`). Adverse gate + timeout logic untouched.
   3. Anchor `resting_up/down` at first mid AT/AFTER delay expiry (sim2 parity);
      delay 0 → first valid snapshot = today's behavior exactly.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: new engine tests (Task 3) green
 
 ### Task 3: Engine parity + defaults-unchanged tests
@@ -48,7 +48,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
   (|mid−0.50| > 0.04 at expiry) and admits undecided one; post-delay quote
   anchor differs from t=0 anchor on a drifting fixture; delay/band validation
   rejects out-of-range. Existing tests untouched.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_backtest_engine.py -q` (0 failures)
 
 ### Task 4: API — query params, clamps, echo (`server/osc_dash.py:505-665`)
@@ -60,7 +60,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
      (mirror `LiveConfigPayload`); pass into `BacktestParams`.
   2. Echo both in the `params` dict of the empty-window early return AND the
      main path (mirror `max_start_delay` handling).
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: new integration tests (Task 5) green
 
 ### Task 5: API passthrough/clamp + UI presence tests
@@ -70,7 +70,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
   changes results vs omitted on a delay-sensitive fixture; clamp test
   (`entry_delay_sec=9999` → echoed 3600.0, `entry_band=9` → 0.50); UI presence
   test for `btEntryDelay`, `btEntryBand`, `btnWinningConfig` ids.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` (0 failures)
 
 ### Task 6 (OPTIONAL — needs operator sign-off): CLI flags
@@ -79,7 +79,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
 - **Description**: `--entry-delay` (default 0.0) + `--entry-band` (default 0.0),
   wired into `BacktestParams`; printed in the header line. NOT in issue scope
   — included only because #146's replay runs via this CLI.
-- **Status**: [ ] (opt-in, skipped by default)
+- **Status**: [x] (opt-in — SKIPPED, no operator approval)
 - **Verification**: `python -m scripts.backtest --help` shows both flags
 
 ### Task 7: Dashboard inputs + wiring + reset (Design)
@@ -92,7 +92,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
   2. `runBacktest()`: read both via `getVal`, append
      `&entry_delay_sec=&entry_band=` to URL.
   3. `resetBtParams()`: reset both to "0" (no auto-run change).
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: UI presence test (Task 5) + manual `runBacktest` URL check
 
 ### Task 8: "Winning config" preset button (Design)
@@ -102,7 +102,7 @@ Decisions locked with user: none yet — requirements fully clear from the issue
   fill tape, pairCost 0.98 + toggle ON, size 5, exits 0.49/0.50/0.49/0.49,
   then calls `runBacktest()`. Pair-cost toggle set via existing
   `togglePairCostInput()` path.
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: presence test + click fills all fields (manual or DOM test)
 
 ### Task 9: Full regression gate + defaults proof
@@ -113,5 +113,5 @@ Decisions locked with user: none yet — requirements fully clear from the issue
   2. Defaults proof: replay a fixture with new params omitted → identical
      `params_hash`/totals as pre-change baseline (existing suite covers;
      call out explicitly in the PR).
-- **Status**: [ ]
+- **Status**: [x]
 - **Verification**: pytest exit 0 + defaults statement in PR body
