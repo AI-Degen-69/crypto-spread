@@ -147,6 +147,8 @@ def _detect_external_collector(now: float | None = None) -> dict[str, Any]:
     try:
         raw = (TICKS_DIR / "manifest.json").read_text(encoding="utf-8")
         mdata = json.loads(raw)
+        if not isinstance(mdata, dict):
+            return {"live": False, "manifest_age_sec": None}
         ts = mdata.get("ts")
         if not isinstance(ts, (int, float)):
             return {"live": False, "manifest_age_sec": None}
