@@ -1,11 +1,10 @@
-# Todo: Issue #145 — delay/band knobs + winning preset
+# Todo: Issue #132 — collector→overview bridge + auto-rebuild
 
-- [x] Task 1: Params fields + validation + grouping (`backtest/engine.py`)
-- [x] Task 2: Delay/band logic in `_simulate_window` (live-identical semantics)
-- [x] Task 3: Engine parity + defaults-unchanged tests
-- [x] Task 4: API query params + clamps + echo dicts (`server/osc_dash.py`)
-- [x] Task 5: API passthrough/clamp + UI presence tests
-- [ ] Task 6 (OPTIONAL — SKIPPED, no approval): CLI `--entry-delay` / `--entry-band`
-- [x] Task 7: Dashboard inputs + URL wiring + reset defaults
-- [x] Task 8: "Winning config" preset button + auto-run
-- [x] Task 9: Full regression gate + defaults proof
+- [x] Task 1: Shared module `strategy/windows.py` (classify/finalize/summary/atomic-write)
+- [x] Task 2: Offline rebuild routed through shared module (signatures preserved)
+- [x] Task 3: Collector accumulates mids/touch_pairs + closes into dataset (best-effort)
+- [x] Task 4: Dashboard `POST /api/rebuild` + provenance fields in `/api/oscillation`
+- [x] Task 5: Dashboard HTML/JS — Rebuild button + badge + tooltip + live goal bar
+- [x] Task 6: Tests — shared module + collector closure + endpoint/provenance
+- [x] Task 7: Rebuild accuracy over `.jsonl` + `.jsonl.gz` fixtures
+- [x] Task 8: Full regression gate (`pytest -q` + real rebuild run)

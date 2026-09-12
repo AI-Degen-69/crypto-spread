@@ -1,117 +1,136 @@
-# Plan: Issue #145 — entry-delay + entry-band knobs and winning-config preset
+# Plan: Issue #132 — Bridge live tick collector to oscillation overview + auto-rebuild
 
 Task Type: Code + Design
-Size Tier: Standard
-Target Files: `backtest/engine.py` (params + `_simulate_window`),
-  `server/osc_dash.py` (API + dashboard HTML/JS), `scripts/backtest.py`
-  (CLI flags — Task 6, opt-in), `tests/test_backtest_engine.py`,
-  `tests/test_osc_dash_integration.py`
+Size Tier: Large
+Target Files: `strategy/windows.py` (new), `scripts/rebuild_windows.py`,
+  `scripts/collect_ticks.py`, `server/osc_dash.py` (API + HTML/JS),
+  `tests/test_windows.py` (new), `tests/test_collect_ticks_smoke.py`,
+  `tests/test_osc_dash_integration.py`, `tests/test_rebuild_windows.py`
 
-Decisions locked with user: none yet — requirements fully clear from the issue
-(`interview-me` skipped). Live semantics ported 1:1 from
-`strategy/live_trader.py` delay/band blocks + `sim2.py` anchoring/ex=none.
+Decisions locked with user: none yet — requirements fully clear from the
+issue (detailed 4-phase plan embedded in #132 comments; `interview-me`
+skipped). Classification math (base 0.50, threshold 0.02) frozen.
 
 ## Task Breakdown
 
-### Task 1: Params — fields, validation, grouping (`backtest/engine.py:111-187`)
-- **Files**: `backtest/engine.py`
+### Task 1: Shared module `strategy/windows.py` (new)
+- **Files**: `strategy/windows.py`
 - **Type**: Code
 - **Description**:
-  1. Add `entry_delay_sec: float = 0.0`, `entry_band: float = 0.0` to
-     `BacktestParams`; validate delay 0–3600, band 0–0.50 in `__post_init__`
-     (raise `ValueError` outside).
-  2. Register both under `_PARAM_GROUPS["trading_knobs"]` with label/why.
+  1. `classify_window(mids) -> str` — moved UNCHANGED from
+     `scripts/rebuild_windows.py` (base 0.50, 0.02 threshold).
+  2. `finalize_window(mids, touch_pairs, meta) -> dict` — exact rebuild
+     schema (series, label, duration, cid, slug, start_ts, end_ts,
+     closed_ts, snaps, start_mid, close_mid, max_up, max_down, min_mid,
+     max_mid, class, touch_pair_median, url); 4-decimal rounding;
+     `https://polymarket.com/market/{slug}` URL.
+  3. `compute_summary(windows) -> dict` — `{"ts", "per_series"}` over
+     `strategy.series.SERIES` with zero-fill for empty series.
+  4. `write_json_atomic(path, data)` — temp file in same dir + `os.replace`
+     (mirror `_finalize_upload` in `server/osc_dash.py:1476`).
+  5. Docstring on every function (`test_docstrings.py` gate).
 - **Status**: [x]
-- **Verification**: `python -c "from backtest import BacktestParams; BacktestParams(entry_delay_sec=60,entry_band=0.04); BacktestParams(entry_band=9)"` → second raises ValueError
+- **Verification**: `python -c "from strategy.windows import classify_window, finalize_window, compute_summary, write_json_atomic; print(classify_window([0.53,0.47]))"` → `oscillating`
 
-### Task 2: Engine — delay/band in `_simulate_window` (`backtest/engine.py:357+`)
-- **Files**: `backtest/engine.py`
+### Task 2: Route offline rebuild through shared module
+- **Files**: `scripts/rebuild_windows.py`
 - **Type**: Code
 - **Description**:
-  1. `quotable` gate per snap: `elapsed >= entry_delay_sec` AND
-     (`entry_band == 0` OR band evaluated-pass). Pre-quotable snaps still
-     record mids/max (full-path classification) but take NO fills/pairs/exits.
-  2. Band: once delay expired, first snap with `_two_sided_mid is not None`
-     latches `band_gate_evaluated`; `|mid − 0.50| > entry_band` →
-     `entry_cancelled = True` (never re-entered; re-entry block only undoes
-     `adverse_skipped`). Adverse gate + timeout logic untouched.
-  3. Anchor `resting_up/down` at first mid AT/AFTER delay expiry (sim2 parity);
-     delay 0 → first valid snapshot = today's behavior exactly.
+  1. Import `classify_window`, `finalize_window`, `compute_summary` from
+     `strategy.windows`; replace local copy + inline finalize block in
+     `build_windows_from_ticks` with shared calls.
+  2. Preserve `build_windows_from_ticks` / `rebuild_windows` signatures
+     and `(num_files, num_windows)` return.
+  3. Atomic writes for `oscillation_summary.json` (`write_json_atomic`)
+     and `oscillation_windows.jsonl`.
 - **Status**: [x]
-- **Verification**: new engine tests (Task 3) green
+- **Verification**: `python -m pytest tests/test_rebuild_windows.py -q` (0 failures)
 
-### Task 3: Engine parity + defaults-unchanged tests
-- **Files**: `tests/test_backtest_engine.py`
+### Task 3: Collector accumulates mids/touch_pairs + closes into dataset
+- **Files**: `scripts/collect_ticks.py`
 - **Type**: Code
-- **Description**: add tests — delay holds quotes (no fills before 60s on a
-  fixture that fills at t=0 without delay); band skips decided window
-  (|mid−0.50| > 0.04 at expiry) and admits undecided one; post-delay quote
-  anchor differs from t=0 anchor on a drifting fixture; delay/band validation
-  rejects out-of-range. Existing tests untouched.
+- **Description**:
+  1. `windows[cid]` init (`poll_once:211-217`) gains `"mids": []`,
+     `"touch_pairs": []`; append per-tick `mid` (`:250`) + `touch_pair`
+     (`:251-253`) each poll — append-only, snap schema untouched.
+  2. Closure block (`:290-293`): before `del windows[cid]`, call
+     `finalize_window` with accumulated lists + window metadata.
+  3. New `write_window(rec, out_dir)` helper — one JSON line appended to
+     `<out_dir>/oscillation_windows.jsonl` (`write_snap` idiom).
+  4. All new I/O in `try/except` → `errs`; skip when mids empty
+     (`no_data`); summary refresh (read windows file → `compute_summary`
+     → `write_json_atomic` with `ts`) ONLY when ≥1 window closed.
 - **Status**: [x]
-- **Verification**: `python -m pytest tests/test_backtest_engine.py -q` (0 failures)
+- **Verification**: `python -m scripts.collect_ticks --once` exits 0; new
+  smoke tests (Task 6) green
 
-### Task 4: API — query params, clamps, echo (`server/osc_dash.py:505-665`)
+### Task 4: Dashboard `POST /api/rebuild` + provenance fields
 - **Files**: `server/osc_dash.py`
 - **Type**: Code
 - **Description**:
-  1. Add `entry_delay_sec: float = 0.0`, `entry_band: float = 0.0` params;
-     clamp `max(0.0, min(3600.0, ...))` / `max(0.0, min(0.50, ...))`
-     (mirror `LiveConfigPayload`); pass into `BacktestParams`.
-  2. Echo both in the `params` dict of the empty-window early return AND the
-     main path (mirror `max_start_delay` handling).
-- **Status**: [x]
-- **Verification**: new integration tests (Task 5) green
-
-### Task 5: API passthrough/clamp + UI presence tests
-- **Files**: `tests/test_osc_dash_integration.py`
-- **Type**: Code
-- **Description**: fixture-tick test — `entry_delay_sec=60&entry_band=0.04`
-  changes results vs omitted on a delay-sensitive fixture; clamp test
-  (`entry_delay_sec=9999` → echoed 3600.0, `entry_band=9` → 0.50); UI presence
-  test for `btEntryDelay`, `btEntryBand`, `btnWinningConfig` ids.
+  1. `POST /api/rebuild` — `_verify_safe_origin` guard; runs
+     `python -m scripts.rebuild_windows` via `subprocess.run(cwd=ROOT,
+     timeout=60, capture_output=True)`; returns `{ok, output[:500]}`
+     (mirror `api_collector_poll_once:995-1007`). Docstring required.
+  2. `/api/oscillation` gains provenance: source filename
+     (`oscillation_windows.jsonl`), file mtime, total closed-window
+     count; best-effort guards, explicit `null` when missing; reuse
+     `_load_all_windows` mtime/size cache — no background watcher.
 - **Status**: [x]
 - **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` (0 failures)
 
-### Task 6 (OPTIONAL — needs operator sign-off): CLI flags
-- **Files**: `scripts/backtest.py`
-- **Type**: Code
-- **Description**: `--entry-delay` (default 0.0) + `--entry-band` (default 0.0),
-  wired into `BacktestParams`; printed in the header line. NOT in issue scope
-  — included only because #146's replay runs via this CLI.
-- **Status**: [x] (opt-in — SKIPPED, no operator approval)
-- **Verification**: `python -m scripts.backtest --help` shows both flags
-
-### Task 7: Dashboard inputs + wiring + reset (Design)
-- **Files**: `server/osc_dash.py` (HTML ~2216-2272, JS `runBacktest` :3502-3534, `resetBtParams` :3763-3784)
+### Task 5: Dashboard HTML/JS — button, badge, tooltip, live goal bar (Design)
+- **Files**: `server/osc_dash.py` (`FULL_APP_HTML`, `#app-hdr`, `tick()`)
 - **Type**: Design
 - **Description**:
-  1. Operator Controls: `btEntryDelay` (number, min 0, step 1, value 0,
-     "Entry Delay (s, 0 = off)") + `btEntryBand` (number, min 0, max 0.5,
-     step 0.005, value 0, "Entry Band (0 = off)").
-  2. `runBacktest()`: read both via `getVal`, append
-     `&entry_delay_sec=&entry_band=` to URL.
-  3. `resetBtParams()`: reset both to "0" (no auto-run change).
+  1. "Rebuild Stats" button in `#app-hdr` (`<button class="btn"
+     onclick="...">`, `#btnToggleCollector` pattern) + JS fn POSTing
+     `/api/rebuild` then calling `tick()`.
+  2. Provenance line in Window Capture Targets bar inside `tick()`:
+     source file + last-updated age (min) + total closed count
+     (`#collectorBadge` style).
+  3. Tooltip on "Start Polling" button (1s ticks+tape → `run/ticks/`,
+     windows close into dataset).
+  4. Goal bar count reads live-refreshed data (newly closed windows
+     increment during polling).
 - **Status**: [x]
-- **Verification**: UI presence test (Task 5) + manual `runBacktest` URL check
+- **Verification**: HTML-string presence tests (Task 6) + manual:
+  `python -m uvicorn server.osc_dash:app --port 8802`, check button/badge
 
-### Task 8: "Winning config" preset button (Design)
-- **Files**: `server/osc_dash.py` (button next to Reset, `applyWinningConfig()`)
-- **Type**: Design
-- **Description**: `btnWinningConfig` → sets offset 0.03, delay 60, band 0.04,
-  fill tape, pairCost 0.98 + toggle ON, size 5, exits 0.49/0.50/0.49/0.49,
-  then calls `runBacktest()`. Pair-cost toggle set via existing
-  `togglePairCostInput()` path.
+### Task 6: Tests — shared module + collector closure + endpoint/provenance
+- **Files**: `tests/test_windows.py` (new), `tests/test_collect_ticks_smoke.py`,
+  `tests/test_osc_dash_integration.py`
+- **Type**: Code
+- **Description**:
+  1. `test_windows.py`: classify thresholds (`no_data`/`flat`/
+     `monotonic`/`oscillating` per `test_rebuild_windows.py` spec);
+     `finalize_window` schema + rounding; `compute_summary` per_series
+     shape + zero-fill; `write_json_atomic` valid JSON + replace.
+  2. `test_collect_ticks_smoke.py`: `write_window` + summary-refresh via
+     `tmp_path`, no network/subprocess; assert +1 JSON line per window,
+     summary has `ts` + `per_series`.
+  3. `test_osc_dash_integration.py`: mocked `subprocess.run` → `{ok,
+     output}` shape; cross-origin rejection; HTML contains button + JS
+     fn; `/api/oscillation` returns provenance fields.
 - **Status**: [x]
-- **Verification**: presence test + click fills all fields (manual or DOM test)
+- **Verification**: `python -m pytest tests/test_windows.py tests/test_collect_ticks_smoke.py tests/test_osc_dash_integration.py -q` (0 failures)
 
-### Task 9: Full regression gate + defaults proof
+### Task 7: Rebuild accuracy over existing ticks (gzip + plain)
+- **Files**: `tests/test_rebuild_windows.py`
+- **Type**: Code
+- **Description**: fixture exercising `.jsonl` AND `.jsonl.gz` tick
+  sources; assert records match shared `finalize_window` output and
+  `rebuild_windows` returns correct `(num_files, num_windows)`;
+  all pre-existing assertions stay green.
+- **Status**: [x]
+- **Verification**: `python -m pytest tests/test_rebuild_windows.py -q` (0 failures)
+
+### Task 8: Full regression gate
 - **Files**: —
 - **Type**: Code
 - **Description**:
-  1. `python -m pytest tests/test_backtest_engine.py tests/test_osc_dash_integration.py -q`.
-  2. Defaults proof: replay a fixture with new params omitted → identical
-     `params_hash`/totals as pre-change baseline (existing suite covers;
-     call out explicitly in the PR).
+  1. `python -m pytest -q` (entire suite, 0 failures).
+  2. `python -m scripts.rebuild_windows --quiet` runs clean on real
+     `run/ticks/`.
 - **Status**: [x]
-- **Verification**: pytest exit 0 + defaults statement in PR body
+- **Verification**: pytest exit 0 + rebuild prints file/window counts

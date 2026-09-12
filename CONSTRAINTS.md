@@ -1,30 +1,34 @@
-# CONSTRAINTS.md — Issue #145: delay/band knobs + winning preset
+# CONSTRAINTS.md — Issue #132: collector→overview bridge + auto-rebuild
 
 ## Quality Gates & Hard Thresholds
 
 ### 1. Test Suite Integrity
-- **Pass Rate**: 100% — `python -m pytest tests/test_backtest_engine.py
-  tests/test_osc_dash_integration.py -q` fully green before and after.
-- **New behavior needs tests**: every new knob gets ≥1 engine test (delay
-  holds quotes; band skip/admit; post-delay quote anchoring) + API
-  passthrough/clamp test; dashboard ids covered by a UI presence test.
-- **Anti-Cheat**: no touching existing fixtures/expectations to fit the change
-  (defaults-unchanged proven by untouched hashes); no skipped tests, no
-  weakened assertions, no linter suppressions.
+- **Pass Rate**: 100% — `python -m pytest -q` fully green before and after.
+- **New behavior needs tests**: shared module (classify/finalize/summary/
+  atomic-write), collector closure path (`tmp_path`, no network), rebuild
+  endpoint (mocked subprocess + origin rejection + HTML presence +
+  provenance fields), rebuild accuracy (`.jsonl` + `.jsonl.gz` fixtures).
+- **Anti-Cheat**: no touching existing fixtures/expectations; no skipped
+  tests, no weakened assertions, no linter suppressions, no
+  `@ts-ignore`-style silencing. Classification math byte-identical
+  (base 0.50, threshold 0.02).
 
 ### 2. Behavior & Scope Boundaries
-- **Defaults byte-identical**: `entry_delay_sec=0, entry_band=0` must replay
-  exactly as today — same resting anchor (first snapshot), same fills, same
-  PnL (proven by the untouched existing suite). `params_hash` payload gains
-  the new keys, so old sweep-cache keys miss once post-merge (one-time,
-  correct bust — stated in the PR, not chased).
-- **Live-identical semantics**: delay = observe-only (classification uses full
-  path); band once, latched, two-sided mid, bypass for adverse-owned windows;
-  re-entry path untouched.
-- **No live-trader changes, no sweep changes, no new dependencies.**
-- **Clamps at the boundary**: API clamps invalid values (no 400s, no silent
-  inf/NaN acceptance) mirroring `LiveConfigPayload`.
+- **Tick path untouched**: snap schema and `write_snap` behavior identical;
+  collector change is append-only (`mids`/`touch_pairs` accumulation).
+- **Best-effort I/O**: every new collector file op wrapped in
+  `try/except` → recorded in existing `errs` list; window-file failure
+  must not abort the poll or lose tick data; summary refresh on closure
+  only (never per-tick).
+- **Legacy freeze**: `scripts/measure_5m_oscillation.py` NOT modified.
+- **No new dependencies** (stdlib + existing stack only). No background
+  watcher in the dashboard. Every new function gets a docstring
+  (`test_docstrings.py` gate).
+- **Security**: `/api/rebuild` guarded by `_verify_safe_origin`, same as
+  `poll-once`; subprocess `cwd=ROOT`, `timeout=60`, output truncated.
 
 ### 3. Perf & Dependencies
-- **Perf**: per-window loop stays O(snaps); no extra passes, no buffering.
-- **Dependencies**: none new (stdlib + existing stack only).
+- **Perf**: per-poll overhead O(1) appends; summary recompute only on
+  closure (file read of `oscillation_windows.jsonl`, rare event).
+  Dashboard reuses `_load_all_windows` mtime/size cache.
+- **Dependencies**: none new.
