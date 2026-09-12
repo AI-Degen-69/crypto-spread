@@ -3276,10 +3276,20 @@ async function refreshCollectorStatus(){
     const res = await fetch('/api/collector/status');
     const st = await res.json();
     isCollectorActive = st.running;
-    $('collectorBadge').textContent = `Collector: ${st.running ? '🟢 Running (1s)' : '⚪ Paused'} · ${(st.total_ticks_collected||0).toLocaleString()} ticks today`;
-    $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
-    $('btnToggleCollector').textContent = st.running ? 'Stop Polling' : 'Start Polling (1s)';
-    $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
+    const src = st.source || (st.running ? 'child' : 'none');
+    if(src === 'external'){
+      $('collectorBadge').textContent = `Collector: 🟡 External live · ${(st.total_ticks_collected||0).toLocaleString()} ticks today (standalone writer — Start blocked)`;
+      $('collectorBadge').style.color = 'var(--warn, #e8b23f)';
+      $('btnToggleCollector').textContent = 'Start blocked (external live)';
+      $('btnToggleCollector').className = 'btn';
+      $('btnToggleCollector').disabled = true;
+    } else {
+      $('collectorBadge').textContent = `Collector: ${st.running ? '🟢 Running (1s)' : '⚪ Paused'} · ${(st.total_ticks_collected||0).toLocaleString()} ticks today`;
+      $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
+      $('btnToggleCollector').textContent = st.running ? 'Stop Polling' : 'Start Polling (1s)';
+      $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
+      $('btnToggleCollector').disabled = false;
+    }
 
     const tb = $('tapeBadge');
     if(tb){
@@ -3305,7 +3315,12 @@ async function refreshCollectorStatus(){
 
 async function toggleCollector(){
   const endpoint = isCollectorActive ? '/api/collector/stop' : '/api/collector/start';
-  await fetch(endpoint, {method:'POST'});
+  const res = await fetch(endpoint, {method:'POST'});
+  if(res.status === 409){
+    let reason = 'external collector live — Start blocked';
+    try{ reason = (await res.json()).error || reason; }catch{}
+    $('collectorBadge').textContent = 'Collector: 🟡 ' + reason;
+  }
   refreshCollectorStatus();
 }
 
