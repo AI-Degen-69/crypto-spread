@@ -156,3 +156,41 @@ def test_record_tape_sample_healthy_then_silent_transition():
     # Lifetime rate is still only ~75%, but time-bounded rolling detector caught the outage
     assert stats["tape_empty_rate"] < 0.90
 
+
+def _build_window_rec(**over):
+    from strategy.windows import finalize_window
+    base = {
+        "series": "btc-up-or-down-5m", "label": "BTC 5m", "duration": 300,
+        "cid": "0xC10", "slug": "btc-updown-5m-1",
+        "start_ts": 1700000000.0, "end_ts": 1700000300.0,
+        "closed_ts": 1700000301.0, "snaps": 300,
+    }
+    base.update(over)
+    return finalize_window([0.51, 0.53, 0.49], [1.01, 1.02], base)
+
+
+def test_write_window_appends_one_json_line(tmp_path: Path):
+    """write_window appends exactly one JSON line per closed window."""
+    import scripts.collect_ticks as ct
+
+    ct.write_window(_build_window_rec(), tmp_path)
+    ct.write_window(_build_window_rec(cid="0xC11"), tmp_path)
+    lines = (tmp_path / "oscillation_windows.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["cid"] == "0xC10"
+    assert json.loads(lines[1])["cid"] == "0xC11"
+
+
+def test_refresh_summary_writes_ts_and_per_series(tmp_path: Path):
+    """refresh_summary rebuilds oscillation_summary.json with ts + per_series."""
+    import scripts.collect_ticks as ct
+
+    ct.write_window(_build_window_rec(), tmp_path)
+    ct.refresh_summary(tmp_path)
+    data = json.loads((tmp_path / "oscillation_summary.json").read_text(
+        encoding="utf-8"))
+    assert data["ts"] > 0
+    assert data["per_series"]["btc-up-or-down-5m"]["windows"] == 1
+    assert data["per_series"]["eth-up-or-down-5m"]["windows"] == 0
+
