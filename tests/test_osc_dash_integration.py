@@ -332,8 +332,11 @@ def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
     osc_dash._VERIFY_REPORT_CACHE.clear()
 
 
-def test_api_collector_lifecycle_and_status(monkeypatch):
+def test_api_collector_lifecycle_and_status(monkeypatch, tmp_path):
     """Verify collector start, status, and stop workflow with mocked process."""
+    # Isolated TICKS_DIR: a live external manifest in the real dir must not
+    # make this lifecycle test flaky (Issue #151 start guard).
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     class DummyProc:
         def __init__(self):
             self.pid = 99999
@@ -475,6 +478,42 @@ def test_collector_start_refused_while_external_live(tmp_path, monkeypatch):
     assert body.get("ok") is False
     assert body.get("source") == "external"
     assert "external" in body.get("error", "").lower()
+
+
+
+def test_collector_status_source_matrix(tmp_path, monkeypatch):
+    """Issue #151: status source covers none / child-only / stale-manifest."""
+    class DummyProc:
+        pid = 99999
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    try:
+        # none: no manifest, no child
+        monkeypatch.setattr(osc_dash, "_collector_proc", None)
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+
+        # child-only: child running, no manifest
+        monkeypatch.setattr(osc_dash, "_collector_proc", DummyProc())
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "child"
+        assert d["external"] is False
+        assert d["running"] is True
+
+        # stale manifest + no child => none (not external)
+        monkeypatch.setattr(osc_dash, "_collector_proc", None)
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"ts": time.time() - 3600, "lines": 10}),
+            encoding="utf-8",
+        )
+        d = client.get("/api/collector/status").json()
+        assert d["source"] == "none"
+        assert d["external"] is False
+    finally:
+        osc_dash._collector_proc = None
 
 
 
