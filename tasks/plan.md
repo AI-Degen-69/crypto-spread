@@ -1,104 +1,117 @@
-# Plan: Issue #152 — Tick-file audit: keep today, quarantine fragments, repair 09-11
+# Plan: Issue #145 — entry-delay + entry-band knobs and winning-config preset
 
-Task Type: Code
-Size Tier: Small
-Target Files: (data ops only) `run/ticks/`, `run/oscillation_windows.jsonl`, `run/oscillation_summary.json`; docs `SPEC.md`, `CONSTRAINTS.md`, `tasks/plan.md`, `tasks/todo.md`
+Task Type: Code + Design
+Size Tier: Standard
+Target Files: `backtest/engine.py` (params + `_simulate_window`),
+  `server/osc_dash.py` (API + dashboard HTML/JS), `scripts/backtest.py`
+  (CLI flags — Task 6, opt-in), `tests/test_backtest_engine.py`,
+  `tests/test_osc_dash_integration.py`
 
-Decisions locked with user: kept set = today-only (`ticks_2026-09-12.jsonl`) ·
-  08-31 to quarantine as reserve (not in kept set) ·
-  09-11 repair still open — quarantined as-is; repair is Task 5 OPTIONAL ·
-  originals never edited in place.
+Decisions locked with user: none yet — requirements fully clear from the issue
+(`interview-me` skipped). Live semantics ported 1:1 from
+`strategy/live_trader.py` delay/band blocks + `sim2.py` anchoring/ex=none.
 
 ## Task Breakdown
 
-### Task 1: Backup derived dataset (safety first)
-- **Files**: `run/oscillation_windows.jsonl`, `run/oscillation_summary.json` → `run/backup_pre152/`
+### Task 1: Params — fields, validation, grouping (`backtest/engine.py:111-187`)
+- **Files**: `backtest/engine.py`
 - **Type**: Code
 - **Description**:
-  1. `mkdir run/backup_pre152`; copy both files (Copy-Item).
-  2. Record byte sizes + line count of `oscillation_windows.jsonl` in the
-     build log (baseline to compare post-rebuild counts against).
-- **Status**: [x] (backup 2940 baseline windows, 1,484,752 bytes)
-- **Verification**: `Get-ChildItem run/backup_pre152` shows both files, sizes match originals
+  1. Add `entry_delay_sec: float = 0.0`, `entry_band: float = 0.0` to
+     `BacktestParams`; validate delay 0–3600, band 0–0.50 in `__post_init__`
+     (raise `ValueError` outside).
+  2. Register both under `_PARAM_GROUPS["trading_knobs"]` with label/why.
+- **Status**: [ ]
+- **Verification**: `python -c "from backtest import BacktestParams; BacktestParams(entry_delay_sec=60,entry_band=0.04); BacktestParams(entry_band=9)"` → second raises ValueError
 
-### Task 2: Quarantine fragments + 08-31 reserve
-- **Files**: `run/ticks/ticks_2026-08-31.jsonl`, `ticks_2026-09-07.jsonl`, `ticks_2026-09-08.jsonl`, `ticks_2026-09-09.jsonl` → `run/ticks/quarantine/`
+### Task 2: Engine — delay/band in `_simulate_window` (`backtest/engine.py:357+`)
+- **Files**: `backtest/engine.py`
 - **Type**: Code
 - **Description**:
-  1. `mkdir run/ticks/quarantine`; move the 4 files (same-disk rename, reversible).
-  2. Confirm non-recursive globs exclude quarantine: `verify_ticks_dir` must
-     list only the remaining files (check `--json` `files_checked`).
-- **Status**: [x] (files_checked == 2 confirmed; quarantine auto-excluded)
-- **Verification**: `python -m scripts.verify_tick_data run/ticks --json` shows `files_checked == 2` (09-11 + 09-12 only)
+  1. `quotable` gate per snap: `elapsed >= entry_delay_sec` AND
+     (`entry_band == 0` OR band evaluated-pass). Pre-quotable snaps still
+     record mids/max (full-path classification) but take NO fills/pairs/exits.
+  2. Band: once delay expired, first snap with `_two_sided_mid is not None`
+     latches `band_gate_evaluated`; `|mid − 0.50| > entry_band` →
+     `entry_cancelled = True` (never re-entered; re-entry block only undoes
+     `adverse_skipped`). Adverse gate + timeout logic untouched.
+  3. Anchor `resting_up/down` at first mid AT/AFTER delay expiry (sim2 parity);
+     delay 0 → first valid snapshot = today's behavior exactly.
+- **Status**: [ ]
+- **Verification**: new engine tests (Task 3) green
 
-### Task 3: Quarantine 09-11 as-is (repair decision pending)
-- **Files**: `run/ticks/ticks_2026-09-11.jsonl` → `run/ticks/quarantine/`
+### Task 3: Engine parity + defaults-unchanged tests
+- **Files**: `tests/test_backtest_engine.py`
+- **Type**: Code
+- **Description**: add tests — delay holds quotes (no fills before 60s on a
+  fixture that fills at t=0 without delay); band skips decided window
+  (|mid−0.50| > 0.04 at expiry) and admits undecided one; post-delay quote
+  anchor differs from t=0 anchor on a drifting fixture; delay/band validation
+  rejects out-of-range. Existing tests untouched.
+- **Status**: [ ]
+- **Verification**: `python -m pytest tests/test_backtest_engine.py -q` (0 failures)
+
+### Task 4: API — query params, clamps, echo (`server/osc_dash.py:505-665`)
+- **Files**: `server/osc_dash.py`
 - **Type**: Code
 - **Description**:
-  1. Move 09-11 to quarantine unmodified (12 corrupt lines intact as evidence).
-  2. Kept set is now exactly `ticks_2026-09-12.jsonl`; verify kept file is not FAIL.
-- **Status**: [x] (09-12: WARN, 0 corrupt, 219,594 valid ticks)
-- **Verification**: `python -m scripts.verify_tick_data run/ticks/ticks_2026-09-12.jsonl` exits 0 (status PASS or WARN, not FAIL)
+  1. Add `entry_delay_sec: float = 0.0`, `entry_band: float = 0.0` params;
+     clamp `max(0.0, min(3600.0, ...))` / `max(0.0, min(0.50, ...))`
+     (mirror `LiveConfigPayload`); pass into `BacktestParams`.
+  2. Echo both in the `params` dict of the empty-window early return AND the
+     main path (mirror `max_start_delay` handling).
+- **Status**: [ ]
+- **Verification**: new integration tests (Task 5) green
 
-### Task 4: Rebuild windows from today-only + report count
-- **Files**: `run/oscillation_windows.jsonl`, `run/oscillation_summary.json` (regenerated)
+### Task 5: API passthrough/clamp + UI presence tests
+- **Files**: `tests/test_osc_dash_integration.py`
 - **Type**: Code
-- **Description**:
-  1. `python -m scripts.rebuild_windows --pattern ticks_2026-09-12.jsonl`
-     (explicit pattern = auditable kept set).
-  2. Report: `(num_files, num_windows)`, rebuild timestamp (09-12 still live —
-     count is a snapshot), vs ~1,900/day max and 2,430 ev-research sample.
-     Post the numbers on #152.
-- **Status**: [x] (1730 windows @ 2026-09-13 00:30 snapshot; posted on #152)
-- **Verification**: command prints `Wrote N windows`; `python -m scripts.verify_tick_data run/ticks --json` still clean on the kept set
+- **Description**: fixture-tick test — `entry_delay_sec=60&entry_band=0.04`
+  changes results vs omitted on a delay-sensitive fixture; clamp test
+  (`entry_delay_sec=9999` → echoed 3600.0, `entry_band=9` → 0.50); UI presence
+  test for `btEntryDelay`, `btEntryBand`, `btnWinningConfig` ids.
+- **Status**: [ ]
+- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` (0 failures)
 
-### Task 5 (OPTIONAL — needs operator sign-off): repair 09-11 as reserve
-- **Files**: `run/ticks/quarantine/ticks_2026-09-11.jsonl` (read-only source) → new repaired copy
+### Task 6 (OPTIONAL — needs operator sign-off): CLI flags
+- **Files**: `scripts/backtest.py`
 - **Type**: Code
-- **Description**:
-  1. Stream 09-11, drop the 12 unparseable lines (0.013%; truncation fragments,
-     each JSONL line independent — tail-safe), write repaired copy
-     (original untouched in quarantine).
-  2. Re-verify repaired copy to green (no FAIL); keep it as reserve OUTSIDE the
-     today-only kept set unless operator says otherwise.
-  3. NOT part of base scope — implement only on operator approval of the
-     improvement below.
-- **Status**: [ ] (blocked on approval)
-- **Verification**: `python -m scripts.verify_tick_data <repaired-copy>` → status PASS/WARN, `corrupt_lines == 0`
+- **Description**: `--entry-delay` (default 0.0) + `--entry-band` (default 0.0),
+  wired into `BacktestParams`; printed in the header line. NOT in issue scope
+  — included only because #146's replay runs via this CLI.
+- **Status**: [ ] (opt-in, skipped by default)
+- **Verification**: `python -m scripts.backtest --help` shows both flags
 
-### Task 6: Backtest smoke on the kept set
-- **Files**: `run/ticks/ticks_2026-09-12.jsonl` (read-only)
-- **Type**: Code
+### Task 7: Dashboard inputs + wiring + reset (Design)
+- **Files**: `server/osc_dash.py` (HTML ~2216-2272, JS `runBacktest` :3502-3534, `resetBtParams` :3763-3784)
+- **Type**: Design
 - **Description**:
-  1. `python -m scripts.backtest run/ticks/ticks_2026-09-12.jsonl --offset 0.02 --queue 50`
-     → exit 0, per-series + overall stats printed (= replays green).
-- **Status**: [x] (exit 0, 1730 windows replayed, params baseline offset=0.02 queue=50)
-- **Verification**: exit code 0 + stats table in stdout
+  1. Operator Controls: `btEntryDelay` (number, min 0, step 1, value 0,
+     "Entry Delay (s, 0 = off)") + `btEntryBand` (number, min 0, max 0.5,
+     step 0.005, value 0, "Entry Band (0 = off)").
+  2. `runBacktest()`: read both via `getVal`, append
+     `&entry_delay_sec=&entry_band=` to URL.
+  3. `resetBtParams()`: reset both to "0" (no auto-run change).
+- **Status**: [ ]
+- **Verification**: UI presence test (Task 5) + manual `runBacktest` URL check
 
-### Task 7: Full regression gate
+### Task 8: "Winning config" preset button (Design)
+- **Files**: `server/osc_dash.py` (button next to Reset, `applyWinningConfig()`)
+- **Type**: Design
+- **Description**: `btnWinningConfig` → sets offset 0.03, delay 60, band 0.04,
+  fill tape, pairCost 0.98 + toggle ON, size 5, exits 0.49/0.50/0.49/0.49,
+  then calls `runBacktest()`. Pair-cost toggle set via existing
+  `togglePairCostInput()` path.
+- **Status**: [ ]
+- **Verification**: presence test + click fills all fields (manual or DOM test)
+
+### Task 9: Full regression gate + defaults proof
 - **Files**: —
 - **Type**: Code
 - **Description**:
-  1. `python -m pytest -q` (0 failures).
-  2. `git status --short` shows only `SPEC.md`, `CONSTRAINTS.md`,
-     `tasks/plan.md`, `tasks/todo.md` (run/ is gitignored — data moves invisible to git, by design).
-- **Status**: [x] (494 passed; git shows only SPEC/CONSTRAINTS/plan/todo)
-- **Verification**: `python -m pytest -q` + `git status --short`
-
-## Preservation evidence (measured 2026-09-13, post-move)
-
-Content-identity check: quarantine files were moved, not copied, so size +
-line counts below prove preservation against the issue audit table.
-
-| file | bytes | json-lines | bad/empty | windows (cids) |
-|---|---|---|---|---|
-| ticks_2026-08-31.jsonl | 579,547,109 | 198,444 | 0 | 1,650 |
-| ticks_2026-09-07.jsonl | 36,674,255 | 11,540 | 0 | 135 |
-| ticks_2026-09-08.jsonl | 177,456,514 | 48,766 | 0 | 515 |
-| ticks_2026-09-09.jsonl | 19,226,297 | 5,880 | 0 | 55 |
-| ticks_2026-09-11.jsonl | 271,262,468 | 90,732 | 12 | 598 |
-
-Line counts match the audit table exactly for 4/5 files; 09-11 measures
-90,744 physical lines vs 90,735 audited (delta 9 lines, 0.01% — immaterial,
-12 bad lines confirmed). Backup `run/backup_pre152/` holds the 2,940-window
-pre-rebuild derived set (1,484,752 + 75,428 bytes).
+  1. `python -m pytest tests/test_backtest_engine.py tests/test_osc_dash_integration.py -q`.
+  2. Defaults proof: replay a fixture with new params omitted → identical
+     `params_hash`/totals as pre-change baseline (existing suite covers;
+     call out explicitly in the PR).
+- **Status**: [ ]
+- **Verification**: pytest exit 0 + defaults statement in PR body
