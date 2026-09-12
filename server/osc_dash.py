@@ -930,6 +930,21 @@ def api_collector_start(request: Request):
     _verify_safe_origin(request)
     global _collector_proc
     if _collector_proc is None or _collector_proc.poll() is not None:
+        ext = _detect_external_collector()
+        if ext["live"]:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "running": False,
+                    "source": "external",
+                    "error": (
+                        "External standalone collector is live "
+                        "(run/ticks/manifest.json is fresh); refusing to spawn "
+                        "a second writer on the same daily tick file."
+                    ),
+                },
+            )
         cmd = [sys.executable, "-m", "scripts.collect_ticks"]
         _collector_proc = subprocess.Popen(
             cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL

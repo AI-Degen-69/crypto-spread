@@ -455,6 +455,29 @@ def test_collector_status_external_only(tmp_path, monkeypatch):
 
 
 
+def test_collector_start_refused_while_external_live(tmp_path, monkeypatch):
+    """Issue #151: Start returns 409 with a reason and spawns nothing."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ts": time.time(), "lines": 10}),
+        encoding="utf-8",
+    )
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not spawn a second collector")
+    monkeypatch.setattr(osc_dash.subprocess, "Popen", _boom)
+    try:
+        res = client.post("/api/collector/start")
+    finally:
+        osc_dash._collector_proc = None
+    assert res.status_code == 409
+    body = res.json()
+    assert body.get("ok") is False
+    assert body.get("source") == "external"
+    assert "external" in body.get("error", "").lower()
+
+
+
 def test_api_backtest_simulation(tmp_path, monkeypatch):
     """Verify backtest simulation on an isolated deterministic 4-window fixture."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
