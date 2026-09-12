@@ -180,6 +180,18 @@ supported — the stations do not require the orchestrator.
 
 ---
 
+## 6. Post-merge sweep — `prune-artifacts`
+
+After `babysit-pr-and-merge` reports MERGED, run the `prune-artifacts` skill:
+it deletes per-issue artifacts whose work is closed and unreferenced —
+`docs/reports/issue_*_showcase.html` for CLOSED issues, orphaned root
+`eli5_*.html` files, `docs/plan/issue-*.md` for CLOSED issues (removing
+`docs/plan/` if left empty), and shipped scratch drafts — while always keeping
+dated finding reports (`*_explained.html`, open-thread `*_showcase.html`).
+Robert's phrasing: **"prune."**
+
+---
+
 ## Cheatsheet
 
 Robert's phrasing first, canonical trigger second.
@@ -195,6 +207,7 @@ Robert's phrasing first, canonical trigger second.
 | Review, push, open PR, babysit | `review-build-and-pr` | "ship" | `/review-build-and-pr` |
 | Explain what shipped + how to verify | `explain-issue` | "explain" | `/explain-issue <n>` |
 | Track CodeRabbit review and merge | `babysit-pr-and-merge` | "PR babysitter" | `babysit-pr-and-merge` |
+| Sweep stale artifacts post-merge | `prune-artifacts` | "prune" | `prune-artifacts` |
 | Clarify vague requirements | `interview-me` | "grill me" | `interview-me` |
 | Audit the diff pre-commit | `code-review-and-quality` | "use code-review-and-quality" | `code-review-and-quality` |
 

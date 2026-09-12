@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>מחקר EV — SPREAD-2 · הסבר חזותי מלא</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#0e141b; --card:#141b24; --card2:#182130;
+    --line:#233042; --line2:#2d3d54;
+    --tx:#e6edf3; --tx2:#9fb0c3; --tx3:#6d7f94;
+    --green:#3fb950; --green2:#2ea043; --red:#f85149; --amber:#d29922; --blue:#58a6ff; --purple:#bc8cff; --cyan:#39c5cf;
+    --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.65;font-size:16px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 20px 90px}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  h1{font-size:clamp(26px,4vw,38px);line-height:1.25;font-weight:800}
+  h2{font-size:clamp(21px,3vw,28px);margin:0 0 6px;font-weight:800;letter-spacing:-.01em}
+  h3{font-size:17.5px;margin:18px 0 8px;color:var(--tx)}
+  p{margin:8px 0;color:var(--tx2)}
+  strong{color:var(--tx)}
+  code{font-family:var(--mono);font-size:.86em;background:#1b2531;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cde3f8;direction:ltr;unicode-bidi:embed}
+  .num{font-family:var(--mono);direction:ltr;unicode-bidi:embed}
+  header.hero{padding:56px 0 26px;border-bottom:1px solid var(--line);position:relative;overflow:hidden}
+  .hero .glow{position:absolute;top:-120px;left:-80px;width:420px;height:420px;background:radial-gradient(closest-side,rgba(88,166,255,.14),transparent);pointer-events:none}
+  .kicker{color:var(--cyan);font-weight:700;font-size:13px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:10px}
+  .sub{font-size:17px;max-width:760px;margin-top:10px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .chip{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 13px;font-size:13px;color:var(--tx2)}
+  .chip b{color:var(--tx)}
+  nav.toc{display:flex;flex-wrap:wrap;gap:8px;padding:16px 0;border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(11,15,20,.92);backdrop-filter:blur(8px);z-index:50}
+  nav.toc a{font-size:12.5px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 11px;color:var(--tx2)}
+  nav.toc a:hover{border-color:var(--line2);color:var(--tx);text-decoration:none}
+  section{padding:44px 0 8px;border-bottom:1px solid var(--line)}
+  section:last-of-type{border-bottom:none}
+  .lede{font-size:16.5px;max-width:820px}
+  .verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:26px 0 10px}
+  .vcard{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--line);border-radius:14px;padding:18px}
+  .vcard .big{font-size:30px;font-weight:800;font-family:var(--mono);direction:ltr;text-align:right;unicode-bidi:embed}
+  .vcard .lbl{font-size:13px;color:var(--tx2);margin-top:6px}
+  .vcard.good .big{color:var(--green)} .vcard.bad .big{color:var(--red)} .vcard.warn .big{color:var(--amber)} .vcard.neutral .big{color:var(--blue)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:18px 0}
+  .callout{border-radius:12px;padding:15px 18px;margin:16px 0;border:1px solid;font-size:15px}
+  .callout.good{background:rgba(63,185,80,.08);border-color:rgba(63,185,80,.35)}
+  .callout.bad{background:rgba(248,81,73,.08);border-color:rgba(248,81,73,.35)}
+  .callout.warn{background:rgba(210,153,34,.08);border-color:rgba(210,153,34,.4)}
+  .callout.info{background:rgba(88,166,255,.07);border-color:rgba(88,166,255,.3)}
+  .callout b.tag{display:inline-block;font-size:12px;letter-spacing:.1em;text-transform:uppercase;margin-inline-end:8px}
+  .callout.good b.tag{color:var(--green)} .callout.bad b.tag{color:var(--red)} .callout.warn b.tag{color:var(--amber)} .callout.info b.tag{color:var(--blue)}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin:16px 0}
+  .fail{background:var(--card);border:1px solid var(--line);border-inline-start:3px solid var(--red);border-radius:10px;padding:14px 16px}
+  .fail h4{font-size:15px;margin-bottom:4px;color:var(--tx)}
+  .fail p{font-size:13.5px;margin:2px 0}
+  .fail .m{font-family:var(--mono);color:var(--red);direction:ltr;unicode-bidi:embed}
+  .winbox{border-inline-start-color:var(--green)} .winbox .m{color:var(--green)}
+  .chartcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 18px 10px;margin:18px 0}
+  .chartcard h3{margin:0 0 2px;font-size:16px}
+  .chartcard .sub2{font-size:13px;color:var(--tx3);margin-bottom:10px}
+  .chartcard svg{width:100%;height:auto;display:block}
+  svg text{font-family:'Segoe UI',system-ui,sans-serif}
+  svg .mono{font-family:var(--mono)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}
+  th{color:var(--tx3);font-weight:600;font-size:12px;letter-spacing:.04em;text-transform:uppercase;background:var(--bg2)}
+  td{font-variant-numeric:tabular-nums}
+  td.pos{color:var(--green);font-weight:700} td.neg{color:var(--red);font-weight:700}
+  tr:hover td{background:rgba(88,166,255,.04)}
+  .hlrow td{background:rgba(63,185,80,.07)}
+  .tblnote{font-size:12.5px;color:var(--tx3);margin-top:-6px}
+  .steps{counter-reset:st;margin:18px 0}
+  .step{position:relative;padding:14px 52px 14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--card);margin-bottom:12px}
+  .step::before{counter-increment:st;content:counter(st);position:absolute;right:14px;top:14px;width:26px;height:26px;border-radius:50%;background:var(--card2);border:1px solid var(--line2);color:var(--blue);font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;font-family:var(--mono)}
+  .step h4{font-size:15.5px;margin-bottom:3px}
+  .step p{font-size:13.5px;margin:2px 0}
+  .step .res{font-size:13px;margin-top:6px;display:inline-block;padding:2px 10px;border-radius:6px;border:1px solid var(--line2)}
+  .step .res.good{color:var(--green);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.07)}
+  .step .res.bad{color:var(--red);border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.07)}
+  .step .res.warn{color:var(--amber);border-color:rgba(210,153,34,.45);background:rgba(210,153,34,.07)}
+  .decision{border:1px solid var(--line);border-inline-start:3px solid var(--purple);border-radius:10px;background:var(--card);padding:13px 16px;margin:12px 0}
+  .decision h4{font-size:14.5px;color:var(--purple);margin-bottom:3px}
+  .decision p{font-size:13.5px;margin:2px 0}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:18px 0}
+  .fnode{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px;min-width:130px}
+  .fnode b{display:block;font-size:13.5px;color:var(--tx)}
+  .fnode span{color:var(--tx3);font-size:12px}
+  .farrow{align-self:center;color:var(--tx3);padding:0 10px;font-size:18px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--tx2);margin:6px 2px 2px}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-inline-end:5px;vertical-align:-1px}
+  footer{padding:30px 0;color:var(--tx3);font-size:13px;border-top:1px solid var(--line)}
+  .kbd{font-family:var(--mono);font-size:12px;background:#1b2531;border:1px solid var(--line);border-radius:5px;padding:1px 6px;direction:ltr;display:inline-block}
+  .reveal{opacity:0;transform:translateY(14px);transition:opacity .5s ease,transform .5s ease}
+  .reveal.vis{opacity:1;transform:none}
+  @media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}.reveal{opacity:1;transform:none;transition:none}}
+  @media (max-width:640px){table{font-size:12px}th,td{padding:6px 7px}.fnode{flex:1 1 100%}.farrow{display:none}}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="glow"></div>
+  <div class="wrap" style="padding-bottom:0">
+    <div class="kicker">EV Research · SPREAD-2 · 2026-09-11</div>
+    <h1>חיפוש הגדרות רווחיות: מה שרד, מה מת, והמהלך שהפך את הסימן</h1>
+    <p class="sub">מחקר שיטתי על <b>2,430 חלונות</b> (5 ימים × 10 סדרות BTC/ETH/BNB/SOL/XRP ב-5m ו-15m) באמצעות סימולטור מהיר שאומת טיק-אחר-טיק מול מנוע הבקטסט הרשמי — <b>~180 קונפיגורציות</b> נבדקו, כל אחת עם רווח 95% Bootstrap וגם ברמת יום-אשכול.</p>
+    <div class="chips">
+      <span class="chip"><b>2,430</b> חלונות</span>
+      <span class="chip"><b>~265k</b> סנאפשוטים</span>
+      <span class="chip"><b>~180</b> קונפיגים</span>
+      <span class="chip"><b>6,840</b> בדיקות הקבה, 0 אי-התאמות</span>
+      <span class="chip"><b>10</b> סדרות · <b>2</b> טיימפריימים</span>
+      <span class="chip"><b>5,000</b> resamples ל-CI</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+<nav class="toc" aria-label="תוכן עניינים">
+  <a href="#verdict">שורה תחתונה</a>
+  <a href="#method">שיטה ונתונים</a>
+  <a href="#timeline">ציר הזמן</a>
+  <a href="#failed">מה לא עבד</a>
+  <a href="#turn">נקודת המפנה</a>
+  <a href="#winner">הקונפיג המנצח</a>
+  <a href="#universe">יקום השוק</a>
+  <a href="#queue">מבחן התור</a>
+  <a href="#decisions">יומן החלטות</a>
+  <a href="#live">המלצות ללייב</a>
+  <a href="#caveats">הסתייגויות</a>
+</nav>
+
+<!-- ======================= VERDICT ======================= -->
+<section id="verdict">
+  <h2>שורה תחתונה</h2>
+  <p class="lede">המסקנה המרכזית: <b>הסטופ-לוס הוא הרסני</b> בדאטה החדש, והקונפיג האופטימלי הישן של הריפו כבר לא עובד. במקומו עולה משפחה חדשה — <b>היכנס מאוחר, רק לשוק "לא מוחלט", ותן לזוגות להגיע לסטtlement</b> — שהיא היחידה עם גבול תחתון של רווח 95% מעל אפס.</p>
+
+  <div class="verdicts">
+    <div class="vcard bad reveal">
+      <div class="big">−0.80¢</div>
+      <div class="lbl">הבסיס הישן של הריפו (off 0.02 · exit 0.08) — הפסד ממוצע לחלון, CI lo −2.38¢</div>
+    </div>
+    <div class="vcard good reveal">
+      <div class="big">+1.56¢</div>
+      <div class="lbl">הקונפיג המנצח: off 0.03 · band 0.04 · delay 60s · ללא סטופ · CI95 [+0.77, +2.44] · חיובי בכל 5 הימים</div>
+    </div>
+    <div class="vcard warn reveal">
+      <div class="big">−4.40¢</div>
+      <div class="lbl">אותו קונפיג מנצח תחת חשבון-תור מחמיר (tapeq) — הקצה תלוי במקום שלך בתור</div>
+    </div>
+    <div class="vcard neutral reveal">
+      <div class="big">+$37.9</div>
+      <div class="lbl">סך הרווח על 5 שייר/חלון לאורך כל הדאטה, מתוך 36 חלונות ממולאים בלבד</div>
+    </div>
+  </div>
+
+  <div class="callout info reveal"><b class="tag">הגדרה</b> יחידת המדידה היא <b>סנט לחלון</b> בגודל 5 שייר (המינימום ב-Polymarket): הרווח הנקי הממוצע של חלון אחד — כולל עמלות יציאה וסימון settlement, ולאחר תיקון הטיית הסימון שגילינו במנוע.</div>
+</section>
+
+<!-- ======================= METHOD ======================= -->
+<section id="method">
+  <h2>איך בדקנו — צינור המחקר</h2>
+  <p class="lede">בקטסט מלא על 776MB JSONL לוקח ~2 שעות לקונפיג. כדי לבדוק ~180 קונפיגים בנינו מטמון חלונות קומפקטי וסימולטור מהיר — ואימתני שהוא <b>זהה ביט-ביט</b> למנוע הרשמי לפני שסמכנו עליו.</p>
+
+  <div class="flow reveal">
+    <div class="fnode"><b>ticks JSONL</b><span>776MB · 5 ימים</span></div>
+    <div class="farrow">←</div>
+    <div class="fnode"><b>מטמון חלונות</b><span>2,430 חלונות · 336MB</span></div>
+    <div class="farrow">←</div>
+    <div class="fnode"><b>סימולטור מהיר</b><span>הקבה: 6,840 בדיקות · 0 סטיות</span></div>
+    <div class="farrow">←</div>
+    <div class="fnode"><b>סוויפים</b><span>6 פאזות · ~180 קונפיגים</span></div>
+    <div class="farrow">←</div>
+    <div class="fnode"><b>סטטיסטיקה</b><span>CI bootstrap + אשכול-יום</span></div>
+    <div class="farrow">←</div>
+    <div class="fnode"><b>דוח + מסקנות</b><span>docs/ev-research-findings</span></div>
+  </div>
+
+  <div class="grid2">
+    <div class="callout good" style="margin:0"><b class="tag">אמון</b> <b>הקבה (parity) מלאה:</b> 6,840 חלונות × 12 קונפיגורציות של המנוע הרשמי — PnL, עמלות, מילויים, יציאות ורי-אנטרי — 0 אי-התאמות. כל מספר בעמוד הזה מיוצר באותה סמנטיקה בדיוק.</div>
+    <div class="callout warn" style="margin:0"><b class="tag">תיקון</b> <b>תיקנו הטייה במנוע:</b> כשרגל עירומה מגיעה לסטtlement והספר ריק, המנוע רושם 0 במקום הפסד. ביקורת גילתה 79 חלונות כאלה — <b>כולם הפסידו</b> (−39.3¢ אמיתי). בלי התיקון, hold-to-settle נראה טוב ב-~40% ממה שהוא באמת.</div>
+  </div>
+
+  <h3>גודל המדגם לפי יום</h3>
+  <table>
+    <thead><tr><th>יום</th><th>חלונות</th><th>5m</th><th>15m</th><th>הערה</th></tr></thead>
+    <tbody>
+      <tr><td>2026-08-31</td><td class="num">1,650</td><td class="num">~1,188</td><td class="num">~462</td><td>לכידה מלאה של יום שלם</td></tr>
+      <tr><td>2026-09-07</td><td class="num">135</td><td class="num">98</td><td class="num">37</td><td>חלקי</td></tr>
+      <tr><td>2026-09-08</td><td class="num">515</td><td class="num">373</td><td class="num">142</td><td>חלקי</td></tr>
+      <tr><td>2026-09-09</td><td class="num">55</td><td class="num">40</td><td class="num">15</td><td>חלקי</td></tr>
+      <tr><td>2026-09-11</td><td class="num">75</td><td class="num">75</td><td>—</td><td>נאסף בזמן המחקר</td></tr>
+      <tr class="hlrow"><td><b>סה"כ</b></td><td class="num"><b>2,430</b></td><td class="num"><b>1,805</b></td><td class="num"><b>625</b></td><td>10 סדרות לאורך כל הדרך</td></tr>
+    </tbody>
+  </table>
+  <p class="tblnote">תקינות הדאטה אומתה: 0 שורות פגומות, 0 ספרים מוצלבים, 0 קיפוצי זמן (<span class="kbd">scripts/verify_tick_data</span>).</p>
+
+  <div class="callout info"><b class="tag">סטטיסטיקה</b> שני סוגי רווחים לכל קונפיג: <b>CI95 Bootstrap</b> (5,000 resamples על חלונות) וגם <b>אשכול-יום</b> (דגימה מחדש של ימים שלמים) — חלונות באותו יום חולקים רג'ים, ולכן גבול תחתון ברמת-יום הוא הגיוני והכנה. רק קונפיגים שעוברים את שניהם קיבלו המלצה.</div>
+</section>
+
+<!-- ======================= TIMELINE ======================= -->
+<section id="timeline">
+  <h2>ציר הזמן: 6 פאזות של ניסוי וטעות</h2>
+  <p class="lede">הכל נבנה בשכבות: קודם לוודא שהמדידה נכונה, אחר כך לשלול מה לא עובד, ורק אז לחפש לבד מה כן.</p>
+  <div class="steps">
+    <div class="step reveal"><h4>תשתית: מטמון + סימולטור מהיר</h4><p>פירוק חד-פעמי של 776MB ל-2,430 חלונות קומפקטיים (ספרים מלאים + טייפ), וסימולטור מהיר שרץ פי ~60 מהר יותר מהמנוע. אימות הקבה לפני כל סוויפ.</p><span class="res good">פאריטי תקין · ~30 קונפיגים/דקה</span></div>
+    <div class="step reveal"><h4>פאזה 1 — רגישות 1D על הבסיס הישן</h4><p>44 קונפיגים: offset, queue-gate, exit, reversal, pair-cost, timeout, מודל מילוי. כל ציר נסרק מקצה לקצה.</p><span class="res bad">הבסיס הישן מפסיד · כל הסטופים מפסידים</span></div>
+    <div class="step reveal"><h4>פאזה 2 — מודלי מילוי, עמלות, רי-אנטרי</h4><p>מודל תור-מודע (tapeq), תרחיש עמלות-אפס, רי-אנטרי (issue #95). גילוי: עמלות הן סדר גודל משני — הבחירה השלילית (adverse selection) היא הדרייבר.</p><span class="res bad">כל הווריאציות שליליות על tape</span></div>
+    <div class="step reveal"><h4>פאזה 3 — leg-chase (מכניקת לייב שמעולם לא נבדקה)</h4><p>אחרי מילוי רגל אחת — לרדוף את הציטוט הנגדי עד תקרת pair-cost. השוואנו 0.90–0.98 וללא רדיפה.</p><span class="res warn">הצ'ייס משפר כל קונפיג (+~1¢) אבל לא הופך את הסימן</span></div>
+    <div class="step reveal"><h4>פאזה 4 — יקום: סדרות × טיימפריים × דיליי כניסה</h4><p>כל סדרה לבד, שילובים, ולראשונה — <b>השהיית כניסה</b> של 30/60/120/240 שניות אחרי פתיחת החלון.</p><span class="res good">דיליי 60s = +0.82¢ מול −0.42 בלעדיו · xrp-15m מוביל</span></div>
+    <div class="step reveal"><h4>פאזה 5 — מסנן רגימה: entry-band × delay × chase</h4><p>100 תאי גריד: להיכנס רק אם ה-mid עדיין קרוב ל-0.50 (שוק "לא מוחלט"). כאן הסימן התהפך.</p><span class="res good">משפחה שלמה CI-lo &gt; 0 · חיובי בכל הימים</span></div>
+    <div class="step reveal"><h4>פאזה 6 — מבחן הלחץ: האם זה שורד תור אמיתי?</h4><p>הקונפיגים המנצחים רצו מחדש תחת חשבון-תור מחמיר (tapeq). בנוסף: ולידציה ברמת-טרייד לפי יום.</p><span class="res warn">לא שורד tapeq · גבול מוגדר למדידה בלייב</span></div>
+  </div>
+</section>
+
+<!-- ======================= FAILED ======================= -->
+<section id="failed">
+  <h2>מה לא עבד — והגרפים שמוכיחים את זה</h2>
+  <p class="lede">לפני המצאות: קודם וידאנו שהדברים שהריפו חשב שעובדים — באמת עובדים. הם לא. הנה הראיות.</p>
+
+  <div class="chartcard reveal">
+    <h3>גרף 1 · סף הסטופ-לוס: נזק מונוטוני</h3>
+    <div class="sub2">רווח נקי ממוצע לחלון (¢) בכל רמת סטופ-לוס, שאר הפרמטרים = הבסיס הישן. קו האפס מסומן.</div>
+    <svg id="chart-exit" viewBox="0 0 1000 340" role="img" aria-label="גרף קו של רווח ממוצע לפי סף סטופ לוס — כל הערכים שליליים ויורדים"></svg>
+    <div class="legend"><span><i style="background:#f85149"></i>הפסד ממוצע לחלון</span><span><i style="background:#d29922"></i>נקודת הבסיס הישן (exit 0.08)</span></div>
+    <p style="font-size:13.5px">קריאה: ככל שהעצירה <b>רחוקה יותר</b>, ההפסד ליציאה גדול יותר מהר משמעותית ממה שהיציאות הנוספות מצילות. גם "ללא סטופ בכלל" מפסיד (−1.85¢) — אבל רק כי <b>בלי מסנני רגימה</b> נכנסים לחלונות שכבר הוחלטו. הבעיה היא הכניסה, לא היציאה.</p>
+  </div>
+
+  <div class="chartcard reveal">
+    <h3>גרף 2 · ה-offset: כמעט אף נקודה לא חיובית</h3>
+    <div class="sub2">רווח נקי ממוצע לחלון (¢) לפי מרחק הציטוט מה-mid, בסטופ 0.08. ירוק = חיובי, אדום = שלילי.</div>
+    <svg id="chart-off" viewBox="0 0 1000 320" role="img" aria-label="גרף עמודות של רווח לפי היסט — עמודה אחת חיובית בלבד"></svg>
+    <p style="font-size:13.5px">רק <span class="num">off=0.025</span> חיובי (+0.06¢) — וסטטיסטית אפס (CI lo −1.92). שימו לב לתופעה החשובה: <b>קרוב מדי ל-mid = מילויים רעים יותר</b> (off 0.015 גרוע מ-0.005!). זו עדות ישירה ל-adverse selection: ככל שהמחיר שלך אטרקטיבי יותר, סביר יותר שמישהו יודע משהו שאתה לא.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="fail reveal"><h4>⛔ הבסיס הישן של הריפו</h4><p>off 0.02 · exit 0.08 · queue 0 · pc 1.05 — האופטימום מהדוח הקודם על 1,680 חלונות.</p><p class="m">−0.80¢/חלון · CI lo −2.38 · PF 0.81</p></div>
+    <div class="fail reveal"><h4>⛔ מודלי מילוי נאיביים (book / cross)</h4><p>כל נגיעה במחיר = מילוי. הדוח הישן נהנה מזה בטעות; על 2,430 חלונות זו קטסטרופה.</p><p class="m">book: −19.56¢ · cross: −18.45¢ לחלון</p></div>
+    <div class="fail reveal"><h4>⛔ Entry timeout</h4><p>ביטול ציטוטים שלא מולאו אחרי 0.05–0.30 — מבטל בדיוק את המילויים שהיו מנצחים.</p><p class="m">כל 5 הרמות שליליות · PF ≤ 0.85</p></div>
+    <div class="fail reveal"><h4>⛔ Queue gate &gt; 0</h4><p>דרישת עומק מינימלי לפני כניסה הורגת את המילויים (≤0.3%) בלי לשפר את איכותם.</p><p class="m">q=10..200: מאופס ועד −0.18¢, PF 0–1.3</p></div>
+    <div class="fail reveal"><h4>⛔ Re-entry (issue #95)</h4><p>כניסה חוזרת אחרי יציאה, band 0.015/0.030 — מוסיף חשיפה בדיוק ברגעים הרעים.</p><p class="m">−0.19¢ / −0.30¢ · CI lo ≈ −2.3</p></div>
+    <div class="fail reveal"><h4>⛔ עמלות-אפס לא מצילות</h4><p>גם בלי עמלות בכלל הבסיס מפסיד — העמלות לא הבעיה.</p><p class="m">fee=0: −0.30¢ מול −0.80¢ עם עמלות</p></div>
+  </div>
+
+  <div class="chartcard reveal">
+    <h3>גרף 3 · מודל המילוי קובע את המסקנה</h3>
+    <div class="sub2">אותן אסטרטגיות, מודלי מילוי שונים — רווח נקי ממוצע לחלון (¢). זה הגורם הדומיננטי בכל המחקר.</div>
+    <svg id="chart-fill" viewBox="0 0 1000 330" role="img" aria-label="גרף עמודות השוואת מודלי מילוי — מודלים נאיביים קטסטרופיים"></svg>
+    <p style="font-size:13.5px"><b>tape</b> = מילוי רק כשהדפסת מסחר אמיתית נחתמת במחיר שלך (אופטימי-אך-כנה). <b>tapeq</b> = בנוסף, התור שלפניך חייב להיאכל בגודל שנסחר. <b>book/cross</b> = נאיבי. הפער בין tape ל-tapeq הוא ליבת האי-ודאות של הפרויקט כולו.</p>
+  </div>
+</section>
+
+<!-- ======================= TURNING POINT ======================= -->
+<section id="turn">
+  <h2>נקודת המפנה: שני מסנני רגימה</h2>
+  <p class="lede">אחרי שכל הכיולים הקלאסיים נכשלו, השאלה השתנתה: לא "איך לצטט טוב יותר" אלא <b>"מתי בכלל כדאי להיכנס"</b>. שני לברים מבניים עשו את ההבדל.</p>
+
+  <div class="grid2">
+    <div class="card reveal" style="margin:0">
+      <h3 style="margin-top:0">⏱ לבר 1 — דיליי כניסה (60 שניות)</h3>
+      <p style="font-size:14px">במקום לצטט בשנייה שהחלון נפתח — לחכות דקה. מה שנסקר: שערי הפתיחה מתרוקנים, הסניפים של הפתיחה עוברים, וחלונות שכבר "הוחלט" מזוהים לפני שמזמינים אותך לספק נזילות למי שיודע יותר.</p>
+    </div>
+    <div class="card reveal" style="margin:0">
+      <h3 style="margin-top:0">🎯 לבר 2 — מסנן band (|mid−0.50| ≤ 3–4¢)</h3>
+      <p style="font-size:14px">להיכנס רק אם השוק עדיין <b>לא מוחלט</b> ברגע הכניסה. חלונות שנפתחו עם הטיה חדה נשללים — בהם ה"זוג" נדיר והרגל העירומה מפסידת כמעט תמיד.</p>
+    </div>
+  </div>
+
+  <div class="chartcard reveal">
+    <h3>גרף 4 · הסימן מתהפך: לבר-על-לבר</h3>
+    <div class="sub2">אותו פרופיל (off 0.03 · ללא סטופ · מילויי tape) עם הוספה הדרגתית של המסננים. ערכי phase-1/4/5 עקביים בין פאזות; הולידציה הסופית מדדה אף יותר (ר' סעיף המנצח).</div>
+    <svg id="chart-levers" viewBox="0 0 1000 330" role="img" aria-label="גרף עמודות: משלילי לחיובי עם הוספת דיליי ובנד"></svg>
+  </div>
+
+  <div class="callout good"><b class="tag">מדוע זה עובד</b> המסננים לא "משפרים את הציטוט" — הם <b>משנים את תמהיל התוצאות</b>: פחות רגליים עירומות מפסידות, הרגליים שכן נשארות מגיעות לסטtlement בשוק שהתלבט ונפסק לטובתך בשכיחות גבוהה מ-50%, והעמלות נשארות זהות. זה יתרון מבני, לא כיול עדין.</div>
+</section>
+
+<!-- ======================= WINNER ======================= -->
+<section id="winner">
+  <h2>המשפחה המנצחת — המספרים המלאים</h2>
+  <p class="lede">הקונפיג המומלץ: <b>דיליי 60s · band 0.03–0.04 · ציטוט שני הצדדים ב-mid−3¢ · ללא סטופ-לוס · hold-to-settle</b>. הטבלה עם כל מדד הדרישה שלך: win-rate, זוגות, יציאות, P/L.</p>
+
+  <table>
+    <thead><tr><th>קונפיג</th><th>ממוצע ¢/חלון</th><th>CI95 lo</th><th>CI95 hi</th><th>Day-lo</th><th>PF</th><th>מילואים</th><th>¢/טרייד</th><th>CI lo טרייד</th><th>סה"כ $</th><th>ימים חיוביים</th></tr></thead>
+    <tbody>
+      <tr class="hlrow"><td><b>off 0.03 · band 0.04 · d60 · ללא סטופ</b></td><td class="pos">+1.56</td><td class="pos">+0.77</td><td class="num">+2.44</td><td class="pos">+0.86</td><td class="num">2.19</td><td class="num">36 / 2,430</td><td class="pos">+105.2</td><td class="pos">+57.7</td><td class="pos">+$37.88</td><td class="pos">5 / 5</td></tr>
+      <tr class="hlrow"><td><b>off 0.03 · band 0.03 · d60 · ללא סטופ</b></td><td class="pos">+1.24</td><td class="pos">+0.53</td><td class="num">+2.06</td><td class="pos">+0.77</td><td class="num">2.87</td><td class="num">27 / 2,430</td><td class="pos">+111.4</td><td class="pos">+55.0</td><td class="pos">+$30.07</td><td class="pos">4 / 5*</td></tr>
+      <tr><td>off 0.02 · band 0.06 · d60 · chase 0.98</td><td class="pos">+1.65</td><td class="pos">+0.60</td><td class="num">+2.80</td><td class="neg">−1.27</td><td class="num">1.79</td><td class="num">71 / 2,430</td><td class="pos">+56.6</td><td class="pos">+21.8</td><td class="pos">+$40.19</td><td class="neg">2 / 5</td></tr>
+      <tr><td>off 0.02 · ללא band · d60 · chase 0.98</td><td class="pos">+1.76</td><td class="pos">+0.62</td><td class="num">+2.95</td><td class="pos">+0.50</td><td class="num">1.57</td><td class="num">88 / 2,430</td><td class="pos">+48.7</td><td class="pos">+18.3</td><td class="pos">+$42.88</td><td class="neg">4 / 5</td></tr>
+      <tr><td>off 0.03 · band 0.06 · d60 · chase 0.98</td><td class="pos">+1.11</td><td class="pos">+0.31</td><td class="num">+1.96</td><td class="pos">+0.07</td><td class="num">1.66</td><td class="num">59 / 2,430</td><td class="pos">+45.7</td><td class="pos">+13.8</td><td class="pos">+$26.96</td><td class="neg">4 / 5</td></tr>
+    </tbody>
+  </table>
+  <p class="tblnote">* יום 09-09 בלי אף מילוי (לא הפסד). שורות מודגשות = עוברות גם CI רגיל וגם אשכול-יום מעל 0. win-rate ברמת חלון נמוך (0.9–1.2%) כי 98.5% מהחלונות הם no-fill — עליך לשפוט לפי CI של חלונות-ממולאים.</p>
+
+  <div class="chartcard reveal">
+    <h3>גרף 5 · הקונפיג המנצח: P/L לפי יום — חיובי בכל רג'ים</h3>
+    <div class="sub2">off 0.03 · band 0.04 · d60 · ללא סטופ · 5 שייר/חלון. סה"כ +$37.88.</div>
+    <svg id="chart-days" viewBox="0 0 1000 320" role="img" aria-label="גרף עמודות של רווח לפי יום — כל הימים חיוביים"></svg>
+  </div>
+
+  <div class="chartcard reveal">
+    <h3>גרף 6 · מאיפה בא הכסף (waterfall)</h3>
+    <div class="sub2">פירוק תוצאות לקונפיג המנצח: 23 רגליים עירומות שהגיעו לסטtlement (+107.9¢ ממוצע), 11 זוגות (+30¢ כל אחד), 2 סטופים (−234.9¢). 2,394 חלונות ללא מילוי = 0. סנאפשוט phase-5: נטו +$23.41.</div>
+    <svg id="chart-decomp" viewBox="0 0 1000 340" role="img" aria-label="גרף מפל של מקורות הרווח וההפסד"></svg>
+    <p style="font-size:13.5px">התובנה המכנית: האסטרטגיה היא בעיקר <b>מכונת רגליים-עירומות-מנצחות</b> שמסוננות לרג'ים לא-מוחלט — לא מכונת זוגות. הזוגות יציבים אבל נדירים; שני הסטופים במדגם כמעט ומאכלים את כל הזוגות — עוד ראיה למה "ללא סטופ" עדיף כאן.</p>
+  </div>
+</section>
+
+<!-- ======================= UNIVERSE ======================= -->
+<section id="universe">
+  <h2>יקום השוק: איזה סדרות ואיזה טיימפריים</h2>
+  <p class="lede">אותו פרופיל מכני רץ בנפרד על כל סדרה. הפערים גדולים — אבל שימו לב לגדלים: לסדרות 15m יש רק n=125.</p>
+
+  <div class="chartcard reveal">
+    <h3>גרף 7 · רווח ממוצע לפי סדרה (¢/חלון)</h3>
+    <div class="sub2">chase 0.98 · tape · off 0.03 · ex 0.08 · דיליי 60s. ירוק = חיובי.</div>
+    <svg id="chart-series" viewBox="0 0 1000 430" role="img" aria-label="גרף עמודות אופקי של רווח לפי סדרה"></svg>
+    <p style="font-size:13.5px"><b>xrp-15m</b> הוא המוביל (+4.11¢, PF 1.99) ואחריו <b>eth-5m</b> ו-<b>bnb-15m</b>. בתחתית — <b>sol-15m</b> ו-<b>eth-15m</b>: שיעורי יציאה גבוהים (13.6% / 8.8%) — השווקים שנוטים כיוון חד. <b>btc-5m</b> השוק היעיל ביותר — אין שם כמעט קצה. שילוב יקומים מדלל את הקצה לסדרה; ההמלצה: להתחיל מ-xrp15+bnb15+eth5 ולהיזהר ב-sol15/btc5.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="card reveal" style="margin:0"><h3 style="margin-top:0">5m מול 15m</h3><p style="font-size:14px">15m נותן קצוות גדולים יותר אבל דגימה דקה (625 חלונות, 125 לסדרה) ו-CI רחבים. 5m הוא הפוך: סטטיסטיקה יציבה, קצה דק. ההמלצה המעשית — תיק מעורב עם דגש 15m על xrp/bnb.</p></div>
+    <div class="card reveal" style="margin:0"><h3 style="margin-top:0">הדיליי האופטימלי</h3><p style="font-size:14px">30s ≈ אפס, <b>60s השיא</b>, 120s טוב, 240s מתקרב לאפס — מפספסים את החלונות הטובים. יש חלון הזדמנויות אמיתי בין הפתיחה הרועשת להכרעה.</p></div>
+  </div>
+</section>
+
+<!-- ======================= QUEUE ======================= -->
+<section id="queue">
+  <h2>מבחן התור: הדבר האחד שבקטסט אי אפשר לדעת</h2>
+  <p class="lede">מודל tape אומר: "הדפסה במחיר שלי = מילאתי". אבל אם 2,000 שייר עמדו לפניך — אותה הדפסה לא הייתה מגיעה אליך. tapeq מחייב שהתור ייאכל קודם. הפער בין המודלים הוא כל סיפור ה-EV.</p>
+
+  <div class="chartcard reveal">
+    <h3>גרף 8 · tape מול tapeq על אותם קונפיגים מנצחים</h3>
+    <div class="sub2">ירוק = מודל tape (הדפסה במחירך ממלאת אותך). אדום = tapeq (התור לפניך נאכל קודם).</div>
+    <svg id="chart-tapeq" viewBox="0 0 1000 340" role="img" aria-label="גרף עמודות מקובצות: tape מול tapeq"></svg>
+    <p style="font-size:13.5px">תחת tapeq, מספר החלונות הממולאים מזנק (למשל 36 → 302) והמילויים השוליים הנוספים <b>רעילים</b> — התוצאה הופכת שלילה בכל הקונפיגים. זה לא אומר שלייב יהיה שלילי; זה אומר שהתשובה נמצאת בין שני המודלים ותלויה במקום שלך בתור ברגע ההדפסה.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="card reveal" style="margin:0">
+      <h3 style="margin-top:0">תרחיש tape — אתה קרוב לחזית</h3>
+      <svg viewBox="0 0 420 130" role="img" aria-label="דיאגרמת תור: הזמנה קרובה לחזית ממולאת בהדפסה">
+        <rect x="230" y="30" width="34" height="24" rx="4" fill="#2d3d54"/><text x="247" y="46" text-anchor="middle" font-size="11" fill="#9fb0c3">120</text>
+        <rect x="268" y="30" width="34" height="24" rx="4" fill="#2d3d54"/><text x="285" y="46" text-anchor="middle" font-size="11" fill="#9fb0c3">60</text>
+        <rect x="306" y="30" width="46" height="24" rx="4" fill="#3fb950"/><text x="329" y="46" text-anchor="middle" font-size="11" fill="#06210c" font-weight="700">אתה 5</text>
+        <rect x="230" y="72" width="122" height="20" rx="4" fill="#58a6ff" opacity=".85"/>
+        <text x="291" y="86" text-anchor="middle" font-size="11" fill="#062033">הדפסה 60 שייר ←</text>
+        <text x="230" y="18" font-size="12" fill="#6d7f94">חזית התור (bid @ מחירך)</text>
+        <text x="360" y="46" font-size="12" fill="#3fb950">✔ מילוי</text>
+      </svg>
+      <p style="font-size:13px">ההדפסה ״חודרת״ עד למחירך ואתה בקדמת התור שנותר — מקבל מילוי.</p>
+    </div>
+    <div class="card reveal" style="margin:0">
+      <h3 style="margin-top:0">תרחיש tapeq — התור לפניך נאכל קודם</h3>
+      <svg viewBox="0 0 420 130" role="img" aria-label="דיאגרמת תור: הזמנה אחרי תור גדול שנאכל — מילוי שולי רעיל">
+        <rect x="150" y="30" width="140" height="24" rx="4" fill="#f85149" opacity=".85"/><text x="220" y="46" text-anchor="middle" font-size="11" fill="#330604">תור 2,000 שייר לפניך</text>
+        <rect x="294" y="30" width="46" height="24" rx="4" fill="#d29922"/><text x="317" y="46" text-anchor="middle" font-size="11" fill="#241a02">אתה 5</text>
+        <rect x="150" y="72" width="140" height="20" rx="4" fill="#58a6ff" opacity=".85"/>
+        <text x="220" y="86" text-anchor="middle" font-size="11" fill="#062033">הדפסה 120 שייר ←</text>
+        <text x="150" y="18" font-size="12" fill="#6d7f94">חזית התור</text>
+        <text x="344" y="46" font-size="12" fill="#d29922">? תלוי בשארית</text>
+      </svg>
+      <p style="font-size:13px">המילוי שלך מגיע רק אחרי שהצד השני סחב את כל התור — בדיוק הרגעים שבהם המחיר עומד לנוע נגדך. המילויים השוליים האלה רעילים.</p>
+    </div>
+  </div>
+
+  <div class="callout bad"><b class="tag">קיל-סוויץ׳</b> אף קונפיג לא שורד tapeq. לכן תוכנית ההפעלה חייבת לכלול מדידת <b>מקום-בתור בזמן מילוי</b> על הזמנות לייב: 200–300 מילויים בגודל מינימום (~2–3 ימים) מספיקים כדי לדעת באיזה צד של הגרף אתה. המנוע הלייב כבר רושם את הטלמטריה הדרושה (<span class="kbd">queue_ahead</span> + הצטרפות להדפסות).</div>
+</section>
+
+<!-- ======================= DECISIONS ======================= -->
+<section id="decisions">
+  <h2>יומן החלטות — איך הגענו למסקנות</h2>
+  <p class="lede">החלטות מתודולוגיות שקבעו אם המסקנות אמיתיות או אמנות:</p>
+
+  <div class="decision reveal"><h4>החלטה 1 · לאמת פאריטי לפני לסמוך על המהירות</h4><p>במקום לכתוב סימולטור משלי "בקירוב" — הצבתי 6,840 בדיקות מול המנוע הרשמי. כל סטייה = עצירה. רק אחרי 0 אי-התאמות הסוויפים קיבלו תוקף.</p></div>
+  <div class="decision reveal"><h4>החלטה 2 · לתקן את הטיית הסימון במקום להתעלם</h4><p>ראיתי ש-ex=none נראה מדהים (+5.77¢) — ובדקתי את התוצאות ה"אפס". 79 חלונות לא-מסומנים, כולם הפסדים. תיקנתי את כל הקונפיגים באותו תיקון — זה הפך את ex=none לשלילי (−1.85¢) עד שהמסננים הצילו אותו. בלי זה היינו ממליצים על אסטרטגיה שבוגדת בזמן אמת.</p></div>
+  <div class="decision reveal"><h4>החלטה 3 · tape כבסיס, book/cross כסימן אזהרה</h4><p>מודל המילוי קובע הכל. בחרתי במודל הכנה ביותר שעדיין ריאלי (הדפסות במחירך) והצבתי tapeq כמבחן-לחץ. מודלים נאיביים נזרקו אחרי שהראו −19¢/חלון.</p></div>
+  <div class="decision reveal"><h4>החלטה 4 · אשכול-יום כשער נוסף</h4><p>חלונות באותו יום חולקים רג'ים — bootstrap רגיל מנפח ביטחון. כל קונפיג חייב לעבור גם דגימה מחדש של ימים שלמים. המשפחה המנצחת עוברת את שניהם; המתחרות נופלות באחד מהם.</p></div>
+  <div class="decision reveal"><h4>החלטה 5 · מקום גיאומטרי במרחב הפרמטרים, לא תא בודד</h4><p>אחרי ~180 קונפיגים הסיכון ל-false discovery גבוה. לכן ההמלצה היא משפחה שלמה (band 0.03–0.06 × delay 60s × off 0.02–0.03) שכולה חיובית, לא תא מנצח בודד. שכנות חיוביות = עמידות.</p></div>
+  <div class="decision reveal"><h4>החלטה 6 · לבדוק את מכניקת הלייב שמעולם לא נבדקה</h4><p>גיליתי שה-trader הלייב מבצע leg-chase (issue #123) שהבקטסט אף פעם לאדגמת. מימשתי אותו בסימולטור: הוא מוסיף ~+1¢/חלון בכל קונפיג — אבל רק כשהמסננים כבר פעילים, אחרת הוא מגדיל חשיפה רעה.</p></div>
+</section>
+
+<!-- ======================= LIVE ======================= -->
+<section id="live">
+  <h2>המלצות להפעלה</h2>
+  <div class="steps">
+    <div class="step reveal"><h4>שלב 1 · פיילוט בגודל מינימום עם הקונפיג המנצח</h4><p>off 0.03 · band 0.04 · delay 60s · ללא סטופ · chase 0.96–0.98 כשרגל מתמלאת · יקום: xrp-15m + bnb-15m + eth-5m. 5 שייר/רגל.</p><span class="res good">צפי אם המילויים tape-דומים: +1.0–1.6¢/חלון · PF 2.2–2.9</span></div>
+    <div class="step reveal"><h4>שלב 2 · לאסוף טלמטריית תור</h4><p>לכל מילוי: מקום-בתור בזמן ההדפסה ÷ גודל ההדפסה. 200–300 מילויים מכריעים באיזה מודל אתה חי.</p><span class="res warn">זה ה-kil-sוויץ׳ של הפרויקט כולו</span></div>
+    <div class="step reveal"><h4>שלב 3 · להריץ מחדש את ה-EV עם ההתפלגות האמיתית</h4><p>sim2 מוכן לקבל התפלגות מילויים ממודדת ולתת EV מותאם-אישית. רק אם EV ≥ 0 על ≥200 מילויים — להגדיל גודל.</p><span class="res good">שער ההגדלה: מדידה, לא תקווה</span></div>
+  </div>
+
+  <div class="callout bad"><b class="tag">אל תריצו</b> אף קונפיג בלי המסננים (הכל שלילי) · סטופ-לוס בשום רמה · entry timeouts · queue gates &gt; 0 · re-entry · ואף החלטת סייזינג על בסיס מודל book/cross.</div>
+
+  <div class="callout info"><b class="tag">סטטוס</b> הקולקטור תוקן ורץ רציף (pid 4824; קרס פעמיים על UnicodeEncodeError של cp1252 מהדפסת ⚠️ — תוקן עם UTF-8 כפוי ב-<span class="kbd">scripts/collect_ticks.py</span>). כל יום נוסף מצמצם את ה-CI ברמת-היום.</div>
+</section>
+
+<!-- ======================= CAVEATS ======================= -->
+<section id="caveats">
+  <h2>הסתייגויות — קרא לפני סייזינג</h2>
+  <div class="grid2">
+    <div class="card reveal" style="margin:0"><h3 style="margin-top:0">📉 לכידת הטייפ פגומה</h3><p style="font-size:14px">~97% מהסנאפשוטים עם טייפ ריק (מול ~2% בתקופת המחקר הישן). כל שיעורי המילוי כאן הם <b>חסרי-תחתית יחסית ללייב</b>; הדירוג היחסי אמין, ה-PnL המוחלט — חסר עליון.</p></div>
+    <div class="card reveal" style="margin:0"><h3 style="margin-top:0">🎲 ריבוי השוואות</h3><p style="font-size:14px">~180 קונפיגים = סיכון false-discovery. ההגנות: משפחה רציפה של תאים חיוביים (לא תא בודד), 5 ימים כולם חיוביים, שני סוגי CI, ומנגנון כלכלי מוסבר — לא קסם סטטיסטי.</p></div>
+    <div class="card reveal" style="margin:0"><h3 style="margin-top:0">🕳 שני חורים שחורים</h3><p style="font-size:14px">(1) מקום-בתור תוך-שנייה — המכריע, לא ניתן לבקטסט; (2) וריאציות fee-schedule בין שווקים — נבדק תרחיש אפס-עמלות, לא משנה דירוגים.</p></div>
+    <div class="card reveal" style="margin:0"><h3 style="margin-top:0">📐 מתמטיקת דגימה</h3><p style="font-size:14px">עם σ ≈ 30¢ לחלון, נדרשים ~1,570 חלונות ממולאים כדי שה-CI lo יעלה על 0 מהממוצע לבד. הקונפיגים המומלצים עוברים כי רוב החלונות הם אפס מדויק והזוכים מרוכזים — אבל בלייב שפוט לפי CI של חלונות-ממולאים ומחשב מחדש שבועית.</p></div>
+  </div>
+
+  <h3>ארטיפקטים לשחזור</h3>
+  <table>
+    <thead><tr><th>קובץ</th><th>תוכן</th></tr></thead>
+    <tbody>
+      <tr><td><span class="kbd">run/sweeps/ev_lab.py</span></td><td>בונה מטמון + סימולטור מהודד + סטטיסטיקת bootstrap</td></tr>
+      <tr><td><span class="kbd">run/sweeps/sim2.py</span></td><td>הרחבות מחקר: tapeq, chase, delay, band</td></tr>
+      <tr><td><span class="kbd">run/sweeps/audit_settlement.py</span></td><td>ביקורת הטיית הסימון</td></tr>
+      <tr><td><span class="kbd">run/sweeps/phase1..6*.json</span></td><td>כל תוצאות הסוויפים (המספרים בגרפים כאן)</td></tr>
+      <tr><td><span class="kbd">docs/ev-research-findings-2026-09-11.md</span></td><td>הדוח הטקסטי המלא</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  נבנה אוטומטית מתוצאות הרצה אמיתיות · 2026-09-11 · כל הגרפים מרונדרים מ-SVG מקומי ללא תלות חיצונית · מקור המספרים: run/sweeps/phase*.json ו-validate_top.json
+</footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var NS='http://www.w3.org/2000/svg';
+function E(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
+function T(x,y,s,cls,anchor,fill,size){var t=E('text',{x:x,y:y,'text-anchor':anchor||'start','font-size':size||12,fill:fill||'#9fb0c3'});if(cls)t.setAttribute('class',cls);t.textContent=s;return t;}
+function fmt(v){return (v>0?'+':'')+v.toFixed(2);}
+function clr(v){return v>=0?'#3fb950':'#f85149';}
+
+/* ---- generic vertical bar chart with zero baseline ---- */
+function vbars(id,cfg){
+  var svg=document.getElementById(id); if(!svg)return;
+  var W=cfg.w||1000,H=cfg.h||320,padL=52,padR=14,padT=18,padB=42;
+  var iw=W-padL-padR, ih=H-padT-padB;
+  var vals=cfg.bars.map(function(b){return b.v;});
+  var mx=Math.max(0.5,Math.max.apply(null,vals)), mn=Math.min(-0.5,Math.min.apply(null,vals));
+  var span=mx-mn; mx+=span*0.14; mn-=span*0.12;
+  function Y(v){return padT+ih*( (mx-v)/(mx-mn) );}
+  var zero=Y(0);
+  svg.appendChild(E('line',{x1:padL,x2:W-padR,y1:zero,y2:zero,stroke:'#4a5a70','stroke-width':1.4}));
+  // y ticks
+  var step=(mx-mn)/5;
+  for(var g=0;g<=5;g++){var v=mn+g*step;var y=Y(v);
+    svg.appendChild(E('line',{x1:padL,x2:W-padR,y1:y,y2:y,stroke:'#1c2634','stroke-width':1}));
+    svg.appendChild(T(padL-8,y+4,v.toFixed(v>=10||v<=-10?0:1),'mono','end','#5a6b80',11));}
+  var n=cfg.bars.length, slot=iw/n, bw=Math.min(58,slot*0.62);
+  cfg.bars.forEach(function(b,i){
+    var cx=padL+slot*(i+0.5), x=cx-bw/2, y0=Y(0), y1=Y(b.v);
+    var top=Math.min(y0,y1), hgt=Math.max(2,Math.abs(y0-y1));
+    var fill=b.color||clr(b.v), op=b.dim?0.45:1;
+    var r=E('rect',{x:x,y:top,width:bw,height:hgt,rx:3,fill:fill,opacity:op});
+    r.style.cursor='default';
+    var ttl=document.createElementNS(NS,'title');ttl.textContent=(b.tip||b.label)+': '+fmt(b.v)+'¢';r.appendChild(ttl);
+    svg.appendChild(r);
+    if(b.hl){svg.appendChild(E('rect',{x:x-5,y:top-5,width:bw+10,height:hgt+10,rx:6,fill:'none',stroke:b.color||clr(b.v),'stroke-width':1.2,'stroke-dasharray':'4 3',opacity:.8}));}
+    svg.appendChild(T(cx,top-6,fmt(b.v),'mono','middle',b.dim?'#5a6b80':fill,12));
+    var ly=H-padB+16;
+    svg.appendChild(T(cx,ly,b.label,'','middle','#9fb0c3',11.5));
+    if(b.label2)svg.appendChild(T(cx,ly+15,b.label2,'','middle','#6d7f94',10.5));
+  });
+  if(cfg.caption)svg.appendChild(T(padL,14,cfg.caption,'','', '#6d7f94',11));
+}
+
+/* ---- line chart (exit sweep) ---- */
+function line(id,cfg){
+  var svg=document.getElementById(id); if(!svg)return;
+  var W=1000,H=340,padL=52,padR=16,padT=20,padB=44;
+  var iw=W-padL-padR,ih=H-padT-padB;
+  var xs=cfg.pts.map(function(p){return p.x;}), ys=cfg.pts.map(function(p){return p.y;});
+  var x0=Math.min.apply(null,xs),x1=Math.max.apply(null,xs);
+  var mx=0.4,mn=Math.min.apply(null,ys)-0.5;
+  function X(x){return padL+iw*(x-x0)/(x1-x0);}
+  function Y(y){return padT+ih*((mx-y)/(mx-mn));}
+  // gridlines + y labels
+  var step=0.5;
+  for(var v=Math.ceil(mn/0.5)*0.5;v<=mx;v+=step){var y=Y(v);
+    svg.appendChild(E('line',{x1:padL,x2:W-padR,y1:y,y2:y,stroke: Math.abs(v)<0.001?'#4a5a70':'#1c2634','stroke-width':Math.abs(v)<0.001?1.4:1}));
+    svg.appendChild(T(padL-8,y+4,v.toFixed(1),'mono','end','#5a6b80',11));}
+  // zero label
+  svg.appendChild(T(W-padR,Y(0)-7,'אפס','','end','#8a9ab0',11));
+  // area+line
+  var d='';
+  cfg.pts.forEach(function(p,i){d+=(i?'L':'M')+X(p.x).toFixed(1)+' '+Y(p.y).toFixed(1)+' ';});
+  var area=d+('L'+X(x1).toFixed(1)+' '+Y(0).toFixed(1)+' L'+X(x0).toFixed(1)+' '+Y(0).toFixed(1)+' Z');
+  svg.appendChild(E('path',{d:area,fill:'rgba(248,81,73,.10)'}));
+  svg.appendChild(E('path',{d:d,fill:'none',stroke:'#f85149','stroke-width':2.4,'stroke-linejoin':'round'}));
+  cfg.pts.forEach(function(p){
+    var isHl=p.hl;
+    var c=E('circle',{cx:X(p.x),cy:Y(p.y),r:isHl?6.5:4.2,fill:isHl?'#d29922':'#f85149',stroke:'#0b0f14','stroke-width':1.5});
+    var ttl=document.createElementNS(NS,'title');ttl.textContent='exit '+p.x+': '+fmt(p.y)+'¢';c.appendChild(ttl);
+    svg.appendChild(c);
+    if(isHl){
+      svg.appendChild(T(X(p.x),Y(p.y)-26,'exit 0.08 — הבסיס הישן','','middle','#d29922',12));
+      svg.appendChild(T(X(p.x),Y(p.y)-12,fmt(p.y)+'¢','mono','middle','#d29922',12.5));
+      svg.appendChild(E('line',{x1:X(p.x),y1:Y(p.y)-8,x2:X(p.x),y2:Y(p.y)-2,stroke:'#d29922','stroke-width':1}));
+    } else if(p.lab){svg.appendChild(T(X(p.x),Y(p.y)-10,p.lab,'','middle','#c9d6e4',10.5));}
+    svg.appendChild(T(X(p.x),H-padB+16,p.x,'mono','middle','#9fb0c3',11.5));
+  });
+  svg.appendChild(T(padL+iw/2,H-6,'סף הסטופ-לוס (מרחק מה-mid)','','middle','#6d7f94',12));
+}
+
+/* ---- horizontal bars (series) ---- */
+function hbars(id,cfg){
+  var svg=document.getElementById(id); if(!svg)return;
+  var W=1000,rowH=34,padL=190,padR=70,H=cfg.rows.length*rowH+30;
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);
+  var iw=W-padL-padR, mx=5.5, mn=-6.5;
+  function X(v){return padL+iw*(v-mn)/(mx-mn);}
+  var zero=X(0);
+  svg.appendChild(E('line',{x1:zero,x2:zero,y1:8,y2:H-22,stroke:'#4a5a70','stroke-width':1.4}));
+  for(var v=-6;v<=5;v+=1){var x=X(v);
+    svg.appendChild(E('line',{x1:padL,x2:W-padR,y1:x&&0,y2:0,stroke:'none'}));
+    svg.appendChild(E('line',{x1:x,x2:x,y1:8,y2:H-22,stroke:'#1c2634','stroke-width':1}));
+    svg.appendChild(T(x,H-8,(v>0?'+':'')+v,'mono','middle','#5a6b80',10.5));}
+  cfg.rows.forEach(function(r,i){
+    var y=16+i*rowH;
+    svg.appendChild(T(padL-10,y+14,r.label,'','end',r.pos?'#e6edf3':'#9fb0c3',12.5));
+    var x0=X(Math.min(0,r.v)), x1=X(Math.max(0,r.v));
+    var rect=E('rect',{x:x0,y:y,width:Math.max(2,x1-x0),height:20,rx:3,fill:clr(r.v),opacity:r.dim?0.5:1});
+    var ttl=document.createElementNS(NS,'title');ttl.textContent=r.label+': '+fmt(r.v)+'¢ ('+r.n+')';rect.appendChild(ttl);
+    svg.appendChild(rect);
+    svg.appendChild(T(x1+8,y+14,fmt(r.v),'mono','start',clr(r.v),12));
+    svg.appendChild(T(W-padR+58,y+14,'n='+r.n,'mono','middle','#5a6b80',10.5));
+  });
+}
+
+vbars('chart-off',{h:320,bars:[
+  {label:'0.005',v:-0.85},{label:'0.010',v:-1.26},{label:'0.015',v:-2.02},{label:'0.020',v:-0.80,hl:true,color:'#d29922',tip:'off 0.020 (הבסיס הישן)'},
+  {label:'0.025',v:0.06},{label:'0.030',v:-0.57},{label:'0.035',v:-0.67},{label:'0.040',v:-0.08},{label:'0.050',v:-1.10}
+]});
+
+line('chart-exit',{pts:[
+  {x:'0.04',y:-0.83},{x:'0.05',y:-0.87},{x:'0.06',y:-0.65},{x:'0.07',y:-0.89},
+  {x:'0.08',y:-0.80,hl:true},{x:'0.09',y:-1.28},{x:'0.10',y:-1.44},{x:'0.11',y:-1.51},
+  {x:'0.12',y:-1.41},{x:'0.14',y:-1.78},{x:'0.16',y:-2.31},{x:'0.20',y:-2.51}
+]});
+
+vbars('chart-fill',{h:330,bars:[
+  {label:'book',label2:'כל נגיעה = מילוי',v:-19.56,tip:'fill=book'},
+  {label:'cross',label2:'חצייה = מילוי',v:-18.45,tip:'fill=cross'},
+  {label:'tapeq',label2:'תור נאכל קודם',v:-20.23,tip:'tapeq ex=none'},
+  {label:'tape',label2:'הדפסה במחירך',v:-1.85,tip:'tape ex=none'},
+  {label:'tape',label2:'+ off 0.025',v:0.06,tip:'tape off=0.025'}
+]});
+
+vbars('chart-levers',{h:330,bars:[
+  {label:'ללא מסננים',v:-1.85,tip:'off 0.03 ex=none tape'},
+  {label:'+ דיליי 60s',v:1.65,tip:'phase4 delay=60s nochase ex=none'},
+  {label:'+ band 0.04',v:0.96,tip:'phase5 snapshot'},
+  {label:'+ band 0.03',v:0.94,tip:'phase5 snapshot'}
+],caption:'משפחת off 0.03 · ex=none · מילויי tape · 2,430 חלונות'});
+
+vbars('chart-days',{h:320,bars:[
+  {label:'08-31',label2:'1,650 חלונות',v:26.44,color:'#3fb950',tip:'2026-08-31'},
+  {label:'09-07',label2:'135',v:2.46,color:'#3fb950',tip:'2026-09-07'},
+  {label:'09-08',label2:'515',v:3.94,color:'#3fb950',tip:'2026-09-08'},
+  {label:'09-09',label2:'55',v:0.30,color:'#3fb950',tip:'2026-09-09'},
+  {label:'09-11',label2:'75',v:4.74,color:'#3fb950',tip:'2026-09-11'}
+],caption:'$ נטו ליום (5 שייר/חלון) · off 0.03 · band 0.04 · d60 · ללא סטופ'});
+
+/* waterfall */
+(function(){
+  var svg=document.getElementById('chart-decomp'); if(!svg)return;
+  var W=1000,H=340,padL=64,padR=16,padT=22,padB=46;
+  var iw=W-padL-padR,ih=H-padT-padB,mx=30,mn=-8;
+  function Y(v){return padT+ih*((mx-v)/(mx-mn));}
+  var zero=Y(0);
+  svg.appendChild(E('line',{x1:padL,x2:W-padR,y1:zero,y2:zero,stroke:'#4a5a70','stroke-width':1.4}));
+  for(var v=-5;v<=30;v+=5){var y=Y(v);
+    svg.appendChild(E('line',{x1:padL,x2:W-padR,y1:y,y2:y,stroke:'#1c2634'}));
+    svg.appendChild(T(padL-8,y+4,String(v),'mono','end','#5a6b80',11));}
+  var items=[
+    {lab:'רגליים עירומות',lab2:'23 × +107.9¢',v:24.81,type:'abs',color:'#3fb950'},
+    {lab:'זוגות',lab2:'11 × +30¢',v:3.30,type:'inc',color:'#3fb950'},
+    {lab:'סטופים',lab2:'2 × −234.9¢',v:-4.70,type:'dec',color:'#f85149'},
+    {lab:'נטו',lab2:'סה"כ',v:23.41,type:'tot',color:'#58a6ff'}
+  ];
+  var n=items.length,slot=iw/n,bw=Math.min(120,slot*0.58),run=0;
+  items.forEach(function(it,i){
+    var cx=padL+slot*(i+0.5),x=cx-bw/2,y0,y1;
+    if(it.type==='abs'){y0=0;y1=it.v;run=it.v;}
+    else if(it.type==='inc'){y0=run;y1=run+it.v;run=y1;}
+    else if(it.type==='dec'){y0=run;y1=run+it.v;run=y1;}
+    else {y0=0;y1=it.v;}
+    var top=Y(Math.max(y0,y1)),h=Math.max(3,Math.abs(Y(y0)-Y(y1)));
+    if(it.type!=='tot')svg.appendChild(E('line',{x1:x+bw,x2:x+bw+slot-bw,y1:Y(run),y2:Y(run),stroke:'#4a5a70','stroke-dasharray':'3 3','stroke-width':1}));
+    svg.appendChild(E('rect',{x:x,y:top,width:bw,height:h,rx:3,fill:it.color,opacity:it.type==='tot'?0.9:0.85}));
+    svg.appendChild(T(cx,top-6,(it.v>0?'+':'')+it.v.toFixed(2)+'$','mono','middle',it.color,12.5));
+    svg.appendChild(T(cx,H-padB+16,it.lab,'','middle','#e6edf3',12));
+    svg.appendChild(T(cx,H-padB+32,it.lab2,'','middle','#6d7f94',10.5));
+  });
+  svg.appendChild(T(padL,14,'¢→$: 5 שייר לחלון · 100¢ = $1','','start','#6d7f94',11));
+})();
+
+hbars('chart-series',{rows:[
+  {label:'xrp-15m',v:4.11,n:125},
+  {label:'eth-5m',v:1.95,n:361},
+  {label:'bnb-15m',v:1.36,n:125},
+  {label:'sol-5m',v:0.07,n:361,dim:true},
+  {label:'xrp-5m',v:-0.04,n:361,dim:true},
+  {label:'btc-15m',v:-1.11,n:125},
+  {label:'btc-5m',v:-1.35,n:361},
+  {label:'bnb-5m',v:-1.64,n:361},
+  {label:'sol-15m',v:-4.34,n:125},
+  {label:'eth-15m',v:-5.19,n:125}
+]});
+
+vbars('chart-tapeq',{h:340,bars:[
+  {label:'band 0.03',label2:'d60 · ללא סטופ',v:1.24,color:'#3fb950',tip:'tape'},
+  {label:'band 0.03',label2:'d60 · ללא סטופ',v:-3.38,color:'#f85149',tip:'tapeq · 27→232 מילואים'},
+  {label:'band 0.04',label2:'d60 · ללא סטופ',v:1.56,color:'#3fb950',tip:'tape'},
+  {label:'band 0.04',label2:'d60 · ללא סטופ',v:-4.40,color:'#f85149',tip:'tapeq · 36→302 מילואים'},
+  {label:'band 0.06',label2:'d60 · chase',v:1.65,color:'#3fb950',tip:'tape'},
+  {label:'band 0.06',label2:'d60 · chase',v:-8.03,color:'#f85149',tip:'tapeq · 71→472 מילואים'},
+  {label:'ללא band',label2:'d60 · chase',v:1.76,color:'#3fb950',tip:'tape'},
+  {label:'ללא band',label2:'d60 · chase',v:-9.93,color:'#f85149',tip:'tapeq · 88→587 מילואים'}
+],caption:'ירוק = tape (אופטימי-כנה) · אדום = tapeq (תור נאכל) · ¢/חלון'});
+
+/* reveal on scroll */
+var revealAll=function(){document.querySelectorAll('.reveal').forEach(function(el){el.classList.add('vis');});};
+if('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add('vis');io.unobserve(e.target);}});},{threshold:0.12});
+  document.querySelectorAll('.reveal').forEach(function(el){io.observe(el);});
+  setTimeout(revealAll, 2500); /* safety: never leave content invisible */
+}else{revealAll();}
+})();
+</script>
+</body>
+</html>
