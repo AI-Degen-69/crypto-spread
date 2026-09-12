@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issue #151 — Showcase: External Collector Guard (PR #153)</title>
+<style>
+  :root{ --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2a3342;
+         --txt:#dbe2ec; --dim:#8b95a5; --up:#3fb950; --warn:#e8b23f; --down:#f0684d; --link:#6cb6ff; }
+  *{ box-sizing:border-box; }
+  body{ background:var(--bg); color:var(--txt); font-family:"Segoe UI",Arial,sans-serif; margin:0; padding:24px; }
+  .wrap{ max-width:960px; margin:0 auto; }
+  h1{ font-size:24px; margin:0 0 4px; }
+  h2{ font-size:17px; margin:28px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line); }
+  .sub{ color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .box{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:10px 0; }
+  .cols{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:700px){ .cols{ grid-template-columns:1fr; } }
+  .before{ border-right:4px solid var(--down); }
+  .after{ border-right:4px solid var(--up); }
+  .badge{ display:inline-block; font-family:Consolas,monospace; font-size:12px; padding:3px 10px; border-radius:6px; background:var(--panel2); border:1px solid var(--line); }
+  .mono{ font-family:Consolas,monospace; font-size:12.5px; }
+  code{ font-family:Consolas,monospace; font-size:12.5px; background:var(--panel2); padding:1px 6px; border-radius:4px; }
+  pre{ background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:12px; overflow-x:auto; font-size:12.5px; direction:ltr; text-align:left; }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  th,td{ border:1px solid var(--line); padding:7px 10px; text-align:right; }
+  th{ background:var(--panel2); }
+  .ok{ color:var(--up); } .warn{ color:var(--warn); }
+  ol.steps li{ margin:7px 0; }
+  a{ color:var(--link); }
+  .foot{ color:var(--dim); font-size:12px; margin-top:26px; border-top:1px solid var(--line); padding-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>🛡️ Issue #151 — הגנה מפני קולקטור חיצוני כפול</h1>
+<div class="sub">PR <a href="https://github.com/AI-Degen-69/crypto-spread/pull/153">#153</a> · מוזג (squash) ב-2026-09-12 · ‏7 קומיטים · ‎+316/−125 · סוויטה מלאה: 494 passed</div>
+
+<h2>🎯 הבעיה</h2>
+<div class="box">
+הדשבורד עקב רק אחרי ה-child שהוא עצמו הפעיל (<code>_collector_proc</code>).
+כשקולקטור עצמאי (standalone) רץ ברקע וכתב ל-<code>run/ticks</code>, הבאנר הראה
+<span class="badge">Collector: ⚪ Paused</span> — ולחיצה על Start יצרה כותב <b>שני</b>
+על אותו קובץ יומי: JSONL משולב + מרוץ על המניפסט.
+</div>
+
+<h2>⏮ לפני / אחרי</h2>
+<div class="cols">
+  <div class="box before"><b>לפני</b><br><br>
+    <span class="badge">Collector: ⚪ Paused · 208,610 ticks</span><br><br>
+    הקובץ גדל כל שנייה, הכפתור אמר "Start Polling", ולחיצה = 💥 כותב כפול.
+  </div>
+  <div class="box after"><b>אחרי</b><br><br>
+    <span class="badge">Collector: 🟡 External live · N ticks (standalone — Start blocked)</span><br><br>
+    הכפתור חסום (<code>Start blocked (external live)</code>), ו-Start ישיר מחזיר <code>409</code> עם הסבר.
+  </div>
+</div>
+
+<h2>🔧 מה מומש (יבש)</h2>
+<table>
+  <tr><th>רכיב</th><th>מה נעשה</th><th>איפה</th></tr>
+  <tr><td>זיהוי</td><td><code>_detect_external_collector()</code> — מניפסט עם <code>ts</code> טרי (≤5 שניות) = כותב חיצוני חי. read-only, לעולם לא זורק (חסין למניפסט חסר/פגום/לא-אובייקט)</td><td class="mono">server/osc_dash.py</td></tr>
+  <tr><td>סטטוס</td><td><code>GET /api/collector/status</code> מחזיר <code>source: child|external|none</code> + <code>external</code> + <code>manifest_age_sec</code> (שדות קיימים לא השתנו)</td><td class="mono">server/osc_dash.py</td></tr>
+  <tr><td>גארד</td><td><code>POST /api/collector/start</code> מסרב ב-<code>409</code> עם <code>error</code> מפורש כשהחיצוני חי — בלי ליצור תהליך</td><td class="mono">server/osc_dash.py</td></tr>
+  <tr><td>באנר</td><td>מצב 🟡 External-live, כפתור חסום, סיבת ה-409 בטולטיפ</td><td class="mono">inline JS ב-osc_dash.py</td></tr>
+  <tr><td>טסטים</td><td>4 טסטים חדשים: external-only, סירוב 409 (עם מלכודת Popen), מטריצת none/child/stale/corrupt/list-JSON/child-wins</td><td class="mono">tests/test_osc_dash_integration.py</td></tr>
+</table>
+
+<h2>🧪 ראיות</h2>
+<div class="box">
+<ul>
+  <li><span class="ok">✔</span> כל Task התחיל בטסט אדום (RED אומת) ואז קוד ירוק.</li>
+  <li><span class="ok">✔</span> תפסנו רגרסיה אמיתית באמצע: טסט ה-lifecycle הישן נפל כי המניפסט האמיתי בסביבה היה טרי — ההוכחה שהגארד עובד. תוקן ע"י בידוד ל-tmp dir.</li>
+  <li><span class="ok">✔</span> סקירת fallback (CodeRabbit היה ב-rate-limit) מצאה באג אמיתי אחד — JSON לא-אובייקט — שתוקן ונכסה בטסט.</li>
+  <li><span class="ok">✔</span> CI ירוק: pytest ✅ · GitGuardian ✅ · <code>python -m pytest -q → 494 passed</code>.</li>
+  <li><span class="warn">⏸</span> שיפור אופציונלי שלא נכנס (מחכה לאישור): גארד גם על <code>poll-once</code> — אותו וקטור שחיתות.</li>
+</ul>
+</div>
+
+<h2>🔍 מה לא נכנס (במכוון)</h2>
+<div class="box">
+<code>scripts/collect_ticks.py</code> לא נגע בכלל — בלי locking/rotation (סקופ של #148).
+<code>POST /api/collector/stop</code> בלי child נשאר no-op — לעולם לא הורג תהליך חיצוני.
+</div>
+
+<h2>✅ וידוא ידני (צעד-אחר-צעד)</h2>
+<ol class="steps">
+  <li>הפעל קולקטור עצמאי: <code>python -m scripts.collect_ticks</code> (טרמינל נפרד).</li>
+  <li>פתח את הדשבורד (<code>:8802</code>) — הבאנר צריך להראות <b>🟡 External live</b> והכפתור חסום.</li>
+  <li>נסה <code>POST /api/collector/start</code> — צריך להחזיר <code>409</code> עם שדה <code>error</code>.</li>
+  <li>עצור את העצמאי, המתן 6+ שניות — הבאנר חוזר ל-⚪ Paused והכפתור נפתח.</li>
+  <li>לחץ Start — הקולקטור של הדשבורד עולה (🟢 Running), ולחיצה חוזרת לא יוצרת כפילות.</li>
+</ol>
+
+<h2>🔗 קישורים</h2>
+<div class="box">
+Issue: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/151">#151</a> (CLOSED) ·
+PR: <a href="https://github.com/AI-Degen-69/crypto-spread/pull/153">#153</a> (MERGED) ·
+ענף (נמחק): <code>feat/151-collector-external-guard</code>
+</div>
+
+<div class="foot">נוצר אוטומטית בתחנה VIII (Present PR) · 2026-09-13 · קובץ: <code>docs/issues/151-showcase-collector-external-guard.html</code></div>
+
+</div>
+</body>
+</html>
