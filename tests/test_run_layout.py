@@ -93,6 +93,19 @@ def test_local_tz_abbr_nonempty():
     assert rl.local_tz_abbr().strip() != ""
 
 
+def test_fixed_offset_tz_normalized(tmp_path, monkeypatch):
+    monkeypatch.setattr(rl, "RUNS_ROOT", tmp_path / "runs")
+    d = rl.new_run_dir("paper", datetime(2026, 9, 11, 22, 10), "UTC+03:00")
+    assert d.name == "2026-09-11_22-10_UTC+03-00"
+
+
+def test_timestamp_collision_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(rl, "RUNS_ROOT", tmp_path / "runs")
+    rl.new_run_dir("paper", datetime(2026, 9, 11, 22, 10), "IDT")
+    with pytest.raises(FileExistsError):
+        rl.new_run_dir("paper", datetime(2026, 9, 11, 22, 10), "IDT")
+
+
 def test_pilot_smoke_writes_new_layout(tmp_path):
     import subprocess
     import sys

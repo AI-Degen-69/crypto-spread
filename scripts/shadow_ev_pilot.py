@@ -110,6 +110,9 @@ async def amain(hours: float, band: float, shares: int,
     (run_dir / "research-papers").mkdir(parents=True, exist_ok=True)
     snap_file = data_dir / "snapshots.jsonl"
     trades_file = data_dir / "trades.jsonl"
+    # Manifest/summary reference these paths even for zero-hour runs.
+    snap_file.touch()
+    trades_file.touch()
     started_utc = datetime.now(timezone.utc)
     config_hypothesis = {
         "preset": PATIENT_BAND_MAKER,
@@ -231,7 +234,8 @@ async def amain(hours: float, band: float, shares: int,
         print(f"[shadow] DONE pnl={final['total_pnl']:+.2f} trades={final['total_trades']} "
               f"win={final['win_rate']}% pairs={final['pairs_merged']} "
               f"final -> {data_dir / 'final.json'}", flush=True)
-        return final
+    # Outside finally: a loop exception must propagate (Ruff B012), not be swallowed.
+    return final
 
 
 def main() -> None:

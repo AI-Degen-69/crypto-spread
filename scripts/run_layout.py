@@ -30,7 +30,8 @@ _FINAL_KEYS = ("total_pnl", "realized_pnl", "total_trades", "win_rate",
 _PAPER_KEYS = ("abstract_and_methodology", "results_and_findings",
                "conclusions_and_projections")
 
-_SAFE_TZ_RE = re.compile(r"^[A-Za-z]{2,5}$")
+_SAFE_TZ_RE = re.compile(r"^[A-Za-z]{2,5}([+-]\d{2}-\d{2})?$")
+_FIXED_TZ_RE = re.compile(r"^UTC([+-])(\d{2}):(\d{2})$")
 _SAFE_SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 
 
@@ -44,13 +45,19 @@ def new_run_dir(kind: RunKind | str, start: datetime, tz_abbr: str,
     """Create runs/{kind}/YYYY-MM-DD_HH-MM_TZ/ with data/ + research-papers/."""
     if kind not in ("paper", "live"):
         raise ValueError(f"kind must be 'paper' or 'live', got {kind!r}")
+    m = _FIXED_TZ_RE.match(tz_abbr or "")
+    if m:
+        # Unnamed fixed-offset host zone (e.g. UTC+03:00) -> filename-safe form.
+        tz_abbr = f"UTC{m.group(1)}{m.group(2)}-{m.group(3)}"
     if not _SAFE_TZ_RE.match(tz_abbr or ""):
         raise ValueError(f"bad TZ abbreviation: {tz_abbr!r}")
     base = root if root is not None else RUNS_ROOT
     run_id = f"{start:%Y-%m-%d_%H-%M}_{tz_abbr}"
     d = base / kind / run_id
-    (d / "data").mkdir(parents=True, exist_ok=True)
-    (d / "research-papers").mkdir(parents=True, exist_ok=True)
+    # exist_ok=False: a timestamp collision is a hard error, never silent reuse.
+    d.mkdir(parents=True, exist_ok=False)
+    (d / "data").mkdir()
+    (d / "research-papers").mkdir()
     return d
 
 
