@@ -1,55 +1,72 @@
-# SPEC.md — Issue #152: Tick-file audit — keep today, quarantine fragments, repair 09-11
+# SPEC.md — Issue #145: entry-delay + entry-band knobs and winning-config preset
 
 ## 1. Goal
-Curate `run/ticks/` into one trusted backtest set (today-only) so every
-backtest and the #132 auto-refresh build on known-good data. Fragments go to
-quarantine, nothing is deleted, originals are never edited in place.
+Close the gap between the EV-winning config and the official replay path:
+`BacktestParams` + `/api/backtest` + dashboard gain `entry_delay_sec` /
+`entry_band` with live-identical semantics, plus a one-click "Winning config"
+preset — so #146 can replay the shadow night through the official engine.
 
-## 2. Background (observed 2026-09-12/13)
-- `run/ticks/` holds 6 files: 08-31 (580MB, full day), 09-07 (37MB, 1.7h),
-  09-08 (177MB, 8.6h), 09-09 (19MB, 35min), 09-11 (271MB, 7.4h, 12 corrupt
-  lines), 09-12 (620MB+, still growing — collector live). 09-10 missing.
-- The 12 corrupt lines in 09-11 (0.013%) are truncation/interleave fragments
-  (mid-JSON starts/ends, empty lines) — each JSONL line is one independent
-  tick, so dropping them is tail-safe. Pattern matches the dual-writer race
-  from #151.
-- `run/oscillation_windows.jsonl` is stale (built 09-01, pre-today data).
-- Both `verify_ticks_dir` (`scripts/verify_tick_data.py:511`) and
-  `rebuild_windows` (`scripts/rebuild_windows.py:251`) use non-recursive
-  `Path.glob`, so a `run/ticks/quarantine/` subdir is automatically excluded
-  from verification and rebuilds — no code change needed.
+## 2. Background (verified 2026-09-13 in code)
+- Live semantics (`strategy/live_trader.py`): delay holds ALL quotes until
+  `elapsed >= entry_delay_sec` (transient, nothing latched; fills bypass);
+  post-delay, the first two-sided tick latches the band gate once —
+  `|mid − 0.50| > entry_band` → window skipped (`BAND_SKIPPED`); adverse-owned
+  and re-entered windows bypass the band; while armed-but-unevaluated,
+  placement is held (`band_hold`). Clamps: delay 0–3600, band 0–0.50
+  (`server/osc_dash.py:1224-1225`).
+- Research parity (`run/sweeps/sim2.py:36-66`): observe-only until delay;
+  band vs two-sided mid at first quoted tick; resting quotes anchored at first
+  mid AT/AFTER delay expiry; `ex=none` = `exit_thresh` 0.49/0.50
+  (`phase6_tapeq_top.py:33-39`) = effectively never exits (hold-to-settle).
+- Official engine today (`backtest/engine.py:357+`): no delay/band; quotes
+  anchored at first valid snapshot; fills from loop start. `_two_sided_mid`
+  helper already exists (`engine.py:315`) for the band check.
+- Dashboard: Operator Controls inputs `btOffset/btQueue/...` + `runBacktest()`
+  URL builder (`osc_dash.py:3502-3534`) + `resetBtParams()` (`:3763-3784`).
 
 ## 3. In Scope
-1. Backup derived `run/oscillation_windows.jsonl` + `run/oscillation_summary.json`
-   before rebuild (cheap insurance; both are regenerable + gitignored).
-2. Move 08-31, 09-07, 09-08, 09-09 to `run/ticks/quarantine/` (reversible,
-   same disk); 09-11 quarantined as-is pending the repair call.
-3. Rebuild windows from today-only (`ticks_2026-09-12.jsonl`) and report the
-   window count vs the ~1,900/day max and the 2,430 ev-research sample.
-4. Backtest smoke on the kept set proves it replays green.
-5. OPTIONAL (needs operator sign-off): repair 09-11 by writing a repaired
-   *copy* (drop 12 bad lines), original stays in quarantine, re-verify green.
+1. `BacktestParams.entry_delay_sec = 0.0` (0 = off) + `entry_band = 0.0`
+   (0 = off), validated 0–3600 / 0–0.50 in `__post_init__`, grouped under
+   `trading_knobs` (operator-controlled, live-replicable).
+2. `_simulate_window` honors both with live-identical semantics:
+   delay → observe-only (mids/classification still use the FULL path);
+   band evaluated once at delay expiry on first two-sided mid, latched per
+   window; no fills until delay expired AND (band off OR band passed);
+   resting quotes anchored at first mid at/after delay expiry.
+3. `/api/backtest` gains `entry_delay_sec` / `entry_band` query params with
+   live-identical clamps, passed into `BacktestParams`, echoed in BOTH
+   `params` dicts (empty-window early return AND main path).
+4. Dashboard: `btEntryDelay` + `btEntryBand` inputs in Operator Controls,
+   wired into `runBacktest()` URL + `resetBtParams()` defaults (0 / 0);
+   `applyWinningConfig()` preset button → offset 0.03, delay 60, band 0.04,
+   fill tape, pair_cost 0.98 (toggle ON), size 5, exits 0.49 / 0.50 /
+   0.49 / 0.49 (ex=none mirror), then auto-runs.
+5. Engine parity tests + API passthrough/clamp tests + UI presence test.
 
 ## 4. Out of Scope
-- Deleting anything (one-way door — proposal + approval first, per issue).
-- Moving `ticks/` to `data/` (~40 refs — separate issue).
-- The oscillation-page auto-refresh itself (#132 consumes this decision).
-- Editing originals in place — live-captured ticks are irreplaceable.
+- Changing ANY backtest default (delay/band default 0 = byte-identical
+  behavior; existing fixture hashes untouched); live-trader changes; sweep
+  scripts; the #146 replay comparison itself.
 
 ## 5. Interfaces (locked before logic)
-- No production code changes. CLI contracts used as-is:
-  - `python -m scripts.verify_tick_data run/ticks [--json]` → per-file
-    PASS/WARN/FAIL; kept set must show no FAIL.
-  - `python -m scripts.rebuild_windows --pattern ticks_2026-09-12.jsonl`
-    → `(num_files, num_windows)`; `--pattern` selects the kept set explicitly
-    so the count is auditable even if quarantine layout changes.
-  - `python -m scripts.backtest run/ticks/ticks_2026-09-12.jsonl --offset 0.02 --queue 50`
-    → exit 0 with per-series + overall stats (source may be a single file).
-- Quarantine contract: `run/ticks/quarantine/<original-name>`; excluded from
-  all globs by non-recursive `Path.glob` (verified, not assumed).
+- `BacktestParams(offset=..., entry_delay_sec=60.0, entry_band=0.04, ...)` —
+  frozen dataclass, `params_hash()` covers new fields automatically.
+- `GET /api/backtest?...&entry_delay_sec=60&entry_band=0.04&fill_model=tape`
+  — clamps: `delay = max(0.0, min(3600.0, v))`, `band = max(0.0, min(0.50, v))`.
+- Dashboard ids (locked): `btEntryDelay` (number, min 0, step 1, value 0),
+  `btEntryBand` (number, min 0, max 0.5, step 0.005, value 0),
+  preset button `btnWinningConfig` → `applyWinningConfig()`.
+- Winning preset values (locked): `{offset:0.03, delay:60, band:0.04,
+  fill:tape, pairCost:0.98(enabled), size:5, exit5m:0.49, exit15m:0.50,
+  exitBtc:0.49, exitSol:0.49}`.
 
 ## 6. Acceptance Criteria
-- [ ] Window count from today-only reported (vs ~1,900 max / 2,430 sample).
-- [ ] Quarantine done; kept set replays green; verify badges on kept files not FAIL.
-- [ ] Report reclaimed bytes and window counts for each quarantined file, including 09-11.
-- [ ] `python -m pytest -q` green.
+- [ ] `/api/backtest?...&entry_delay_sec=60&entry_band=0.04&fill_model=tape`
+      shows delay+band behavior identical to live semantics on a fixture file.
+- [ ] Dashboard shows both inputs + working preset button filling all fields.
+- [ ] Defaults unchanged: omitted params replay identically (same fills/PnL —
+      proven by the untouched existing suite). Note: `params_hash` payload
+      gains the two new keys, so pre-existing sweep-cache keys miss once
+      after merge (one-time, correct bust — called out in the PR).
+- [ ] `python -m pytest tests/test_backtest_engine.py
+      tests/test_osc_dash_integration.py -q` green.

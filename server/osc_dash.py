@@ -521,6 +521,8 @@ def api_backtest(
     entry_timeout_pct: float = 0.10,
     reentry_drift_band: float = 0.015,
     min_requote_remaining_sec: float = 300.0,
+    entry_delay_sec: float = 0.0,
+    entry_band: float = 0.0,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -549,6 +551,19 @@ def api_backtest(
     reentry_drift_band = max(0.0, min(0.50, reentry_drift_band))
     min_requote_remaining_sec = max(0.0, min_requote_remaining_sec)
 
+    # Patient maker knobs (issue #145), clamped like LiveConfigPayload:
+    # delay 0..3600 (a delay past the window simply never quotes),
+    # band 0..0.50 (0 = off). Non-finite input (nan/inf) falls back to off —
+    # min/max comparisons against NaN silently yield the boundary otherwise.
+    if not math.isfinite(entry_delay_sec):
+        entry_delay_sec = 0.0
+    else:
+        entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
+    if not math.isfinite(entry_band):
+        entry_band = 0.0
+    else:
+        entry_band = max(0.0, min(0.50, entry_band))
+
     params = BacktestParams(
         offset=offset,
         queue_gate=queue,
@@ -562,6 +577,8 @@ def api_backtest(
         entry_timeout_pct=entry_timeout_pct,
         reentry_drift_band=reentry_drift_band,
         min_requote_remaining_sec=min_requote_remaining_sec,
+        entry_delay_sec=entry_delay_sec,
+        entry_band=entry_band,
     )
 
     if not TICKS_DIR.exists():
@@ -619,6 +636,8 @@ def api_backtest(
                 "max_start_delay": params.max_start_delay_sec,
                 "reentry_drift_band": params.reentry_drift_band,
                 "min_requote_remaining_sec": params.min_requote_remaining_sec,
+                "entry_delay_sec": params.entry_delay_sec,
+                "entry_band": params.entry_band,
             },
             "params_groups": gp,
             "overall": {
@@ -832,6 +851,8 @@ def api_backtest(
             "max_start_delay_sec": max_start_delay,
             "reentry_drift_band": round(reentry_drift_band, 4),
             "min_requote_remaining_sec": round(min_requote_remaining_sec, 2),
+            "entry_delay_sec": entry_delay_sec,
+            "entry_band": entry_band,
         },
         "params_groups": gp,
         "n_snaps": n_snaps,
@@ -2229,6 +2250,14 @@ textarea:focus-visible,
               <input type="number" step="5" id="btQueue" value="0">
             </div>
             <div class="form-group">
+              <label>Entry Delay, s (0 = off, max 3600)</label>
+              <input type="number" min="0" max="3600" step="1" id="btEntryDelay" value="0">
+            </div>
+            <div class="form-group">
+              <label>Entry Band (0 = off)</label>
+              <input type="number" min="0" max="0.5" step="0.005" id="btEntryBand" value="0">
+            </div>
+            <div class="form-group">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <label for="btPairCost">Max Pair Cost ($)</label>
                 <label class="toggle-wrap" title="Enable or disable max pair cost filter">
@@ -2334,6 +2363,7 @@ textarea:focus-visible,
       <div style="margin-top:14px;display:flex;gap:8px">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <button class="btn" id="btnWinningConfig" onclick="applyWinningConfig()">🏆 Winning config</button>
       </div>
     </div>
 
@@ -3506,7 +3536,7 @@ async function runBacktest(fileOverride){
       const el = $(id);
       if (!el) return def;
       const v = String(el.value).trim();
-      return (v !== '' && !isNaN(Number(v))) ? Number(v) : def;
+      return (v !== '' && Number.isFinite(Number(v))) ? Number(v) : def;
     };
 
     const offset = getVal('btOffset', 0.02);
@@ -3525,13 +3555,15 @@ async function runBacktest(fileOverride){
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
     const reentryBand = getVal('btReentryBand', 0.015);
     const requoteMin = getVal('btRequoteMin', 300.0);
+    const entryDelay = getVal('btEntryDelay', 0.0);
+    const entryBand = getVal('btEntryBand', 0.0);
 
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -3776,10 +3808,44 @@ function resetBtParams(){
   $('btSize').value = "5";
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
-  $('btReentryBand').value = "0.015";
-  $('btRequoteMin').value = "300";
+  if ($('btReentryBand')) $('btReentryBand').value = "0.015";
+  if ($('btRequoteMin')) $('btRequoteMin').value = "300";
+  if ($('btEntryDelay')) $('btEntryDelay').value = "0";
+  if ($('btEntryBand')) $('btEntryBand').value = "0";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
+  runBacktest();
+}
+
+// Winning config preset (issue #145): the EV-research-winning setup —
+// offset 0.03, delay 60s, band 0.04, tape fills, pair cost 0.98, size 5,
+// hold-to-settle (exits 0.49/0.50 = ex=none mirror). The remaining replay
+// inputs are pinned to dashboard defaults (queue 0, gas 0, no partial
+// filter, re-entry band 0.015, re-quote-min 300) so the button is a
+// reproducible 1-click config, then auto-runs the backtest. Aborts without
+// running if any required input is missing (no half-applied state).
+function applyWinningConfig(){
+  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btFillModel','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
+  for (const id of required) { if (!$(id)) return; }
+  $('btOffset').value = "0.03";
+  $('btQueue').value = "0";
+  $('btEntryDelay').value = "60";
+  $('btEntryBand').value = "0.04";
+  $('btFillModel').value = "tape";
+  $('btPairCost').value = "0.98";
+  if ($('btPairCostEnabled') && !$('btPairCostEnabled').checked) {
+    $('btPairCostEnabled').checked = true;
+    togglePairCostInput();
+  }
+  $('btSize').value = "5";
+  $('btExit5m').value = "0.49";
+  $('btExit15m').value = "0.50";
+  $('btExitBtc').value = "0.49";
+  $('btExitSol').value = "0.49";
+  $('btGas').value = "0.00";
+  $('btMaxStartDelay').value = "0";
+  $('btReentryBand').value = "0.015";
+  $('btRequoteMin').value = "300";
   runBacktest();
 }
 
@@ -6281,7 +6347,7 @@ function setupBacktestInputListeners(){
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol', 'btFillModel',
     'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
-    'btReentryBand', 'btRequoteMin'
+    'btReentryBand', 'btRequoteMin', 'btEntryDelay', 'btEntryBand'
   ];
 
   inputIds.forEach(id => {

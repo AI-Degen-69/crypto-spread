@@ -658,3 +658,203 @@ def test_replay_trades_sample_untruncated_with_prices():
     assert "exit_price" in sample0
     assert "exit_side" in sample0
 
+
+# --- entry delay / entry band params (issue #145) ---------------------------
+
+def test_entry_delay_band_defaults_off():
+    p = BacktestParams()
+    assert p.entry_delay_sec == 0.0
+    assert p.entry_band == 0.0
+
+
+def test_entry_delay_band_accept_winning_config():
+    p = BacktestParams(entry_delay_sec=60.0, entry_band=0.04)
+    assert p.entry_delay_sec == 60.0
+    assert p.entry_band == 0.04
+
+
+def test_entry_delay_band_reject_out_of_range():
+    with pytest.raises(ValueError):
+        BacktestParams(entry_delay_sec=-1.0)
+    with pytest.raises(ValueError):
+        BacktestParams(entry_delay_sec=3600.01)
+    with pytest.raises(ValueError):
+        BacktestParams(entry_band=-0.01)
+    with pytest.raises(ValueError):
+        BacktestParams(entry_band=0.51)
+
+
+def test_entry_delay_band_grouped_as_trading_knobs():
+    gp = BacktestParams().grouped_params()
+    assert "entry_delay_sec" in gp["trading_knobs"]
+    assert "entry_band" in gp["trading_knobs"]
+
+
+def _window_snaps(n: int, mid_fn, tape_fn, start: float = 1000.0,
+                  up_ask_fn=None, down_ask_fn=None) -> list[dict]:
+    """Build an n-snap window with a FIXED start_ts so elapsed_i == i.
+
+    snap() stamps start_ts = ts - 2 per tick; a real window shares one
+    start_ts, so patch every snap to `start` (raw_start_delay == 0).
+    """
+    out = []
+    for i in range(n):
+        mid = mid_fn(i)
+        kw = {}
+        if up_ask_fn is not None:
+            kw["up_ask"] = up_ask_fn(i)
+        if down_ask_fn is not None:
+            kw["down_ask"] = down_ask_fn(i)
+        s = snap(start + i, mid, tape=tape_fn(i), **kw)
+        s["start_ts"] = start
+        out.append(s)
+    return out
+
+
+def _tape_both(up_price: float, down_price: float) -> list[dict]:
+    return [
+        {"asset": UP_TOKEN, "price": up_price, "size": 5.0},
+        {"asset": DN_TOKEN, "price": down_price, "size": 5.0},
+    ]
+
+
+def test_entry_delay_holds_quotes_until_expiry():
+    # Tape prints at resting (0.48/0.48) on snaps 0..59 only. With delay=60
+    # nothing may fill; without delay the pair captures immediately.
+    snaps = _window_snaps(70, lambda i: 0.50,
+                          lambda i: _tape_both(0.48, 0.48) if i < 60 else [])
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
+                                               entry_timeout_pct=0.0))
+    assert w.filled_up is False
+    assert w.filled_down is False
+    assert w.pair_captured is False
+    w0 = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
+    assert w0.pair_captured is True
+
+
+def test_entry_band_skips_decided_window():
+    # Two-sided mid 0.60 at expiry (drift 0.10 > 0.04) -> skip, no fills.
+    # exit_thresh is raised to 0.15 so the adverse-open gate (drift 0.10)
+    # passes and only the band decides the window.
+    no_adverse = {"default_5m": 0.15}
+    snaps = _window_snaps(
+        10, lambda i: 0.60, lambda i: _tape_both(0.58, 0.38),
+        up_ask_fn=lambda i: 0.605, down_ask_fn=lambda i: 0.4025)
+    w = _simulate_window(snaps, BacktestParams(entry_band=0.04,
+                                               entry_timeout_pct=0.0,
+                                               exit_thresh_by_slug=no_adverse))
+    assert w.filled_up is False
+    assert w.filled_down is False
+    w0 = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0,
+                                                exit_thresh_by_slug=no_adverse))
+    assert w0.pair_captured is True
+
+
+def test_entry_band_admits_undecided_window():
+    # Two-sided mid 0.51 (drift 0.01 <= 0.04) -> admitted, pair captures.
+    snaps = _window_snaps(
+        10, lambda i: 0.51, lambda i: _tape_both(0.49, 0.47),
+        up_ask_fn=lambda i: 0.515, down_ask_fn=lambda i: 0.4925)
+    w = _simulate_window(snaps, BacktestParams(entry_band=0.04,
+                                               entry_timeout_pct=0.0))
+    assert w.pair_captured is True
+
+
+def test_entry_delay_anchors_quotes_post_delay():
+    # Mid 0.50 before t=60, 0.55 after. Delay=60 must anchor at 0.55
+    # (resting_up 0.53), not at the 0.50 open (0.48).
+    def mid_fn(i):
+        return 0.50 if i < 60 else 0.55
+    snaps = _window_snaps(
+        70, mid_fn, lambda i: _tape_both(0.53, 0.43) if i >= 60 else [],
+        up_ask_fn=lambda i: 0.49 if i < 60 else 0.555,
+        down_ask_fn=lambda i: 0.49 if i < 60 else 0.4525)
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
+                                               entry_timeout_pct=0.0))
+    assert w.pair_captured is True
+    assert w.entry_price_up == 0.53
+    assert w.entry_price_down == 0.43
+
+
+def test_entry_band_boundary_admits_inside_band():
+    # Drift 0.0400..36 (float repr of 0.54-0.50) admits under band 0.041
+    # (strict `>` skips); exit 0.05 lets it through. Mirrors live's raw
+    # comparison — exact-decimal boundaries are not promised.
+    snaps = _window_snaps(
+        10, lambda i: 0.54, lambda i: _tape_both(0.52, 0.44),
+        up_ask_fn=lambda i: 0.545, down_ask_fn=lambda i: 0.4625)
+    w = _simulate_window(snaps, BacktestParams(entry_band=0.041,
+                                               entry_timeout_pct=0.0))
+    assert w.pair_captured is True
+
+
+def test_entry_delay_classifies_full_path():
+    # Observe-only delay: no fills, but classification uses the whole path.
+    snaps = _window_snaps(70, lambda i: 0.45 if i % 2 == 0 else 0.55,
+                          lambda i: [])
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
+                                               entry_timeout_pct=0.0))
+    assert w.filled_up is False
+    assert w.filled_down is False
+    assert w.n_snaps == 70
+    assert w.class_label == "oscillating"
+
+
+def test_adverse_claimed_window_bypasses_band_then_reenters():
+    # Drift 0.10 trips both gates; the adverse gate owns the window, so a
+    # later revert to 0.50 recovers via re-entry (a band skip is final).
+    def mid_fn(i):
+        return 0.60 if i < 10 else 0.50
+    snaps = _window_snaps(
+        30, mid_fn, lambda i: [],
+        up_ask_fn=lambda i: 0.605 if i < 10 else 0.505,
+        down_ask_fn=lambda i: 0.4025 if i < 10 else 0.5025)
+    w = _simulate_window(snaps, BacktestParams(
+        entry_band=0.04, entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
+    assert w.reentry_count == 1
+    assert w.filled_up is False
+
+
+def test_anchor_uses_mid_only_prefix():
+    # First snaps carry s["mid"] but no quotable book: the anchor still
+    # latches from s["mid"] (old pre-loop scan parity), not a later tick.
+    snaps = _window_snaps(
+        10, lambda i: 0.50, lambda i: _tape_both(0.50, 0.46),
+        up_ask_fn=lambda i: 0.505, down_ask_fn=lambda i: 0.5025)
+    for s in snaps[:3]:
+        s["mid"] = 0.52
+        s["up_book"] = {**s["up_book"], "best_bid": None, "best_ask": None}
+    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
+    assert w.pair_captured is True
+    assert w.entry_price_up == 0.50  # anchored at 0.52, not the 0.50 books
+
+
+def test_entry_delay_band_changes_hash():
+    p0 = BacktestParams()
+    p1 = BacktestParams(entry_delay_sec=60.0, entry_band=0.04)
+    assert p0.params_hash() != p1.params_hash()
+    assert p1.params_hash() == BacktestParams(
+        entry_delay_sec=60.0, entry_band=0.04).params_hash()
+
+
+def test_reentry_deferred_until_delay_expiry():
+    # Adverse tick at t=0, revert at t=1, tape pre-delay only. delay=60 must
+    # not fill before expiry (live holds all quotes while delay pending);
+    # the grant is deferred to t=60 (reentry_count==1), not dropped.
+    # delay=0 control grants and fills at t=1.
+    def mid_fn(i):
+        return 0.60 if i == 0 else 0.50
+    snaps = _window_snaps(
+        70, mid_fn, lambda i: _tape_both(0.48, 0.48) if 1 <= i < 60 else [],
+        up_ask_fn=lambda i: 0.605 if i == 0 else 0.505,
+        down_ask_fn=lambda i: 0.4025 if i == 0 else 0.5025)
+    w = _simulate_window(snaps, BacktestParams(
+        entry_delay_sec=60.0, entry_timeout_pct=0.0,
+        min_requote_remaining_sec=0.0))
+    assert w.filled_up is False
+    assert w.filled_down is False
+    assert w.reentry_count == 1
+    w0 = _simulate_window(snaps, BacktestParams(
+        entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
+    assert w0.pair_captured is True
+

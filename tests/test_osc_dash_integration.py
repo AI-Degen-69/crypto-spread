@@ -1944,3 +1944,61 @@ def test_cockpit_panels_inside_cockpit_tab():
     assert tab < html.index('id="queuePanel"') < toast
     assert tab < html.index('id="pnlHistPanel"') < toast
     assert "No closed trades yet" in html
+
+
+def _write_delay_fixture(tmp_path):
+    """One 70-tick window, tape on ticks 0..59 only (issue #145)."""
+    cid = "0xCID_DELAY"
+    ticks = []
+    for i in range(70):
+        t = _make_fake_tick(1000.0 + i, cid, "btc-updown-5m-1000",
+                            "btc-up-or-down-5m", 0.50,
+                            tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100},
+                                  {"asset": f"{cid}_dn", "price": 0.48, "size": 100}] if i < 60 else [])
+        t["start_ts"] = 1000.0
+        ticks.append(t)
+    fake = tmp_path / "fake_delay.jsonl"
+    with open(fake, "w", encoding="utf-8") as f:
+        for t in ticks:
+            f.write(json.dumps(t) + "\n")
+    return fake
+
+
+def test_api_backtest_entry_delay_band_passthrough(tmp_path, monkeypatch):
+    """Delay=60 holds quotes past the only tape prints; echo carries knobs."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_delay_fixture(tmp_path)
+    base = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02&fill_model=tape").json()
+    assert base["overall"]["pairs"] == 1
+    delayed = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02&fill_model=tape"
+                         "&entry_delay_sec=60&entry_band=0.04").json()
+    assert delayed["overall"]["pairs"] == 0
+    assert delayed["params"]["entry_delay_sec"] == 60.0
+    assert delayed["params"]["entry_band"] == 0.04
+
+
+def test_api_backtest_entry_delay_band_clamps(tmp_path, monkeypatch):
+    """Out-of-range knobs clamp like the live config (3600 / 0.50)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_delay_fixture(tmp_path)
+    d = client.get("/api/backtest?file=fake_delay.jsonl&entry_delay_sec=9999&entry_band=9").json()
+    assert d["params"]["entry_delay_sec"] == 3600.0
+    assert d["params"]["entry_band"] == 0.50
+
+
+def test_api_backtest_entry_delay_band_nan_falls_back_off(tmp_path, monkeypatch):
+    """Non-finite knobs fall back to off (0.0), never to the boundary."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_delay_fixture(tmp_path)
+    d = client.get("/api/backtest?file=fake_delay.jsonl&entry_delay_sec=nan&entry_band=inf").json()
+    assert d["params"]["entry_delay_sec"] == 0.0
+    assert d["params"]["entry_band"] == 0.0
+
+
+def test_backtest_delay_band_ui_elements():
+    """Dashboard exposes delay/band inputs plus the winning-config preset."""
+    html = client.get("/").text
+    assert 'id="btEntryDelay"' in html
+    assert 'id="btEntryBand"' in html
+    assert 'id="btnWinningConfig"' in html
+    assert "applyWinningConfig" in html
