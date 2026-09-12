@@ -14,6 +14,7 @@ import asyncio
 import collections
 import gzip
 import json
+import math
 import os
 import re
 import shutil
@@ -41,6 +42,71 @@ RUN = ROOT / "run"
 TICKS_DIR = RUN / "ticks"
 RUN.mkdir(parents=True, exist_ok=True)
 TICKS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Queue-telemetry panel source (issue #139). Paths are module constants so
+# tests can redirect them; the aggregated payload is cached for one poll
+# interval (mirrors the engine's _orders_cache TTL pattern).
+QUEUE_TELEMETRY_FILE = RUN / "live_fill_telemetry.jsonl"
+QUEUE_TELEMETRY_TRADES_FILE = RUN / "live_trades.jsonl"
+QUEUE_TELEMETRY_CACHE_TTL = 5.0
+_queue_telemetry_cache: dict = {"ts": 0.0, "payload": None}
+
+
+def _queue_verdict(low_mean: float | None, high_mean: float | None) -> str:
+    """Deterministic tape-vs-tapeq verdict from passive-bucket means.
+
+    low = mean over fills with fill_ratio < 0.5, high = mean over >= 0.5.
+    """
+    if low_mean is None and high_mean is None:
+        return "awaiting fills"
+    if low_mean is not None and low_mean > 0 and (high_mean is None or high_mean <= 0):
+        return "tape-like"
+    if high_mean is not None and high_mean > 0 and (low_mean is None or low_mean <= 0):
+        return "queue-toxic"
+    return "mixed/unclear"
+
+
+def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
+    """Aggregate the fill sidecar into buckets + chased stats + verdict."""
+    from scripts.bucket_fills import (
+        _read_jsonl, _settlement_pnl_by_market, bucketize,
+    )
+    fills = _read_jsonl(fills_path)
+    usable = [f for f in fills
+              if isinstance(f.get("fill_ratio"), (int, float))
+              and not isinstance(f.get("fill_ratio"), bool)
+              and math.isfinite(f["fill_ratio"])
+              and f["fill_ratio"] >= 0]
+    if not usable:
+        return {"empty": True, "total_fills": 0, "buckets": [],
+                "chased": {"count": 0, "mean_settle_pnl_usd": None},
+                "verdict": "awaiting fills"}
+    settle = _settlement_pnl_by_market(trades_path)
+    passive = [f for f in usable if not f.get("chased")]
+    chased = [f for f in usable if f.get("chased")]
+    buckets = bucketize(passive, settle)
+    chased_pnls = [settle.get(str(f.get("market_slug") or ""))
+                   for f in chased]
+    chased_pnls = [p for p in chased_pnls if p is not None]
+    low_raw = [settle.get(str(f.get("market_slug") or ""))
+               for f in passive if f["fill_ratio"] < 0.5]
+    high_raw = [settle.get(str(f.get("market_slug") or ""))
+                for f in passive if f["fill_ratio"] >= 0.5]
+    low = [p for p in low_raw if p is not None]
+    high = [p for p in high_raw if p is not None]
+    low_mean = sum(low) / len(low) if low else None
+    high_mean = sum(high) / len(high) if high else None
+    return {
+        "empty": False,
+        "total_fills": len(usable),
+        "buckets": buckets,
+        "chased": {
+            "count": len(chased),
+            "mean_settle_pnl_usd": (sum(chased_pnls) / len(chased_pnls)
+                                    if chased_pnls else None),
+        },
+        "verdict": _queue_verdict(low_mean, high_mean),
+    }
 
 app = FastAPI(title="Crypto Spread Lab")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -898,6 +964,28 @@ def api_live_state():
     """Return real-time state snapshot of the Live Trading Cockpit engine."""
     engine = get_live_trader_engine()
     return engine.get_state()
+
+
+@app.get("/api/live/queue_telemetry")
+def api_live_queue_telemetry():
+    """Bucketed fill-ratio evidence + verdict for the cockpit queue panel.
+
+    Read-only aggregation over run/live_fill_telemetry.jsonl. Missing or
+    unparsable input yields an explicit empty payload (HTTP 200, never 500).
+    """
+    now = time.time()
+    cached = _queue_telemetry_cache
+    if cached["payload"] is not None and now - cached["ts"] < QUEUE_TELEMETRY_CACHE_TTL:
+        return cached["payload"]
+    try:
+        payload = _compute_queue_telemetry(QUEUE_TELEMETRY_FILE, QUEUE_TELEMETRY_TRADES_FILE)
+    except Exception as e:
+        payload = {"empty": True, "total_fills": 0, "buckets": [],
+                   "chased": {"count": 0, "mean_settle_pnl_usd": None},
+                   "verdict": "awaiting fills", "error": str(e)[:200]}
+    cached["ts"] = now
+    cached["payload"] = payload
+    return payload
 
 
 @app.get("/api/live/latency")
@@ -2606,6 +2694,30 @@ textarea:focus-visible,
             <tr><td colspan="8" style="text-align:center;color:var(--dim);padding:20px">No closed trades recorded in this session.</td></tr>
           </tbody>
         </table>
+      </div>
+      <!-- Issue #139: Queue Telemetry + PnL Distribution (inside tab-cockpit) -->
+      <div class="card" id="queuePanel" style="margin-top:12px">
+        <h3 style="margin:0 0 10px">
+          <span>📊 Queue Telemetry (tape vs tapeq)</span>
+          <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fills</span>
+        </h3>
+        <div id="queueSvgWrap" style="width:100%;min-height:150px"></div>
+        <details id="queueFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
+          <summary style="cursor:pointer">Data table</summary>
+          <div id="queueFallback"></div>
+        </details>
+      </div>
+
+      <div class="card" id="pnlHistPanel" style="margin-top:12px">
+        <h3 style="margin:0 0 10px">
+          <span>📈 PnL per Position</span>
+          <span id="pnlHistStats" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">No closed trades yet</span>
+        </h3>
+        <div id="pnlHistSvgWrap" style="width:100%;min-height:150px"></div>
+        <details id="pnlHistFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
+          <summary style="cursor:pointer">Data table</summary>
+          <div id="pnlHistFallback"></div>
+        </details>
       </div>
     </div>
   </div>
@@ -4556,6 +4668,104 @@ async function fetchCockpitLatency() {
   }
 }
 
+// Issue #139: PnL-per-position histogram from st.trades (session window).
+// Mean + CI-lo use the study's bootstrap statistic (2,000 resamples).
+function pnlBootstrapCiLo(values, resamples) {
+  const n = values.length;
+  const R = resamples || 2000;
+  let sum = 0;
+  for (const v of values) sum += v;
+  const mean = sum / n;
+  const means = new Array(R);
+  for (let r = 0; r < R; r++) {
+    let s = 0;
+    for (let i = 0; i < n; i++) s += values[(Math.random() * n) | 0];
+    means[r] = s / n;
+  }
+  means.sort((a, b) => a - b);
+  return { mean: mean, lo: means[Math.floor(0.025 * R)] };
+}
+function freedmanDiaconisBins(values) {
+  const n = values.length;
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = p => sorted[Math.min(n - 1, Math.floor(p * (n - 1)))];
+  const iqr = at(0.75) - at(0.25);
+  const min = sorted[0], max = sorted[n - 1];
+  let nb = 12;
+  if (iqr > 0 && max > min) {
+    const w = 2 * iqr / Math.cbrt(n);
+    if (w > 0) nb = Math.ceil((max - min) / w);
+  }
+  nb = Math.max(12, Math.min(20, nb));
+  const edges = [];
+  for (let i = 0; i <= nb; i++) edges.push(min + (max - min) * i / nb);
+  return edges;
+}
+function renderPnlHistogram(trades) {
+  const wrap = $('pnlHistSvgWrap');
+  const statsEl = $('pnlHistStats');
+  const fb = $('pnlHistFallback');
+  if (!wrap) return;
+  const pnls = (trades || []).map(t => Number(t.pnl_usd)).filter(v => isFinite(v));
+  if (pnls.length === 0) {
+    if (statsEl) statsEl.textContent = 'No closed trades yet';
+    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">No closed trades yet — the distribution appears after the first settlements.</div>';
+    if (fb) fb.innerHTML = '';
+    const fbWrap = $('pnlHistFallbackWrap');
+    if (fbWrap) fbWrap.style.display = 'none';
+    return;
+  }
+  const stats = pnlBootstrapCiLo(pnls);
+  const meanTxt = (stats.mean >= 0 ? '+' : '') + '$' + stats.mean.toFixed(2);
+  const loTxt = (stats.lo >= 0 ? '+' : '') + '$' + stats.lo.toFixed(2);
+  if (statsEl) statsEl.textContent = `n=${pnls.length} · mean ${meanTxt} · CI-lo ${loTxt}`;
+  const zeros = pnls.filter(v => v === 0).length;
+  const nz = pnls.filter(v => v !== 0);
+  let bars = [];  // {label, count, color}
+  if (nz.length === 0) {
+    bars = [{ label: '0', count: zeros, color: 'var(--dim)' }];
+  } else {
+    const edges = freedmanDiaconisBins(nz);
+    const counts = new Array(edges.length - 1).fill(0);
+    for (const v of nz) {
+      let bi = 0;
+      while (bi < counts.length - 1 && v >= edges[bi + 1]) bi++;
+      counts[bi]++;
+    }
+    for (let i = 0; i < counts.length; i++) {
+      if (counts[i] === 0) continue;
+      const mid = (edges[i] + edges[i + 1]) / 2;
+      bars.push({ label: edges[i].toFixed(2) + '–' + edges[i + 1].toFixed(2), count: counts[i], color: mid >= 0 ? 'var(--up)' : 'var(--down)' });
+    }
+    if (zeros > 0) bars.unshift({ label: 'zero-PnL', count: zeros, color: 'var(--dim)' });
+  }
+  const w = 560, padL = 70, padR = 14, padT = 8, padB = 30;
+  const maxC = Math.max(1, ...bars.map(b => b.count));
+  const bw = (w - padL - padR) / bars.length;
+  const maxH = 130;
+  let rects = '';
+  bars.forEach((b, i) => {
+    const bh = Math.max(2, (b.count / maxC) * maxH);
+    const x = padL + i * bw + 2;
+    const y = padT + (maxH - bh);
+    const tip = `${b.label}: ${b.count} positions`;
+    rects += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(2, bw - 4).toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="${b.color}" fill-opacity="0.8"><title>${esc(tip)}</title></rect>
+      <text x="${(x + bw / 2).toFixed(1)}" y="${(padT + maxH + 14).toFixed(1)}" fill="var(--faint)" font-size="9" font-family="var(--mono)" text-anchor="middle">${esc(b.label.length > 12 ? b.count + '×' : b.label)}</text>`;
+  });
+  const h = padT + maxH + padB;
+  wrap.innerHTML = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="display:block" role="img" aria-label="PnL per position histogram"><title>PnL distribution over closed positions</title>
+      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + maxH}" stroke="var(--line)" stroke-width="1"/>
+      <line x1="${padL}" y1="${padT + maxH}" x2="${w - padR}" y2="${padT + maxH}" stroke="var(--line)" stroke-width="1"/>
+      ${rects}</svg>
+    <div style="font-size:10px;color:var(--faint);margin-top:4px" class="mono">session window: last ${pnls.length} closed trades (matches the table); zero-PnL bin shown separately</div>`;
+  if (fb) {
+    const trows = bars.map(b => `<tr><td class="mono">${esc(b.label)}</td><td class="mono">${esc(b.count)}</td></tr>`).join('');
+    fb.innerHTML = `<table class="tbl"><thead><tr><th>Bin</th><th>Positions</th></tr></thead><tbody>${trows}</tbody></table>`;
+    const fbWrapShow = $('pnlHistFallbackWrap');
+    if (fbWrapShow) fbWrapShow.style.display = '';
+  }
+}
+
 async function fetchCockpitState() {
   try {
     const res = await fetch('/api/live/state', { cache: 'no-store' });
@@ -4568,6 +4778,72 @@ async function fetchCockpitState() {
     console.error('Failed fetching cockpit state', e);
   }
   await fetchCockpitLatency();
+  await fetchQueueTelemetry();
+}
+
+// Issue #139: queue-telemetry panel (tape vs tapeq evidence as it accumulates).
+async function fetchQueueTelemetry() {
+  try {
+    const res = await fetch('/api/live/queue_telemetry', { cache: 'no-store' });
+    if (res.ok) renderQueuePanel(await res.json());
+  } catch (e) {
+    console.error('Failed fetching queue telemetry', e);
+  }
+}
+
+function renderQueuePanel(q) {
+  const wrap = $('queueSvgWrap');
+  const verdictEl = $('queueVerdict');
+  const fb = $('queueFallback');
+  if (!wrap) return;
+  const verdictTxt = (q && q.verdict) ? q.verdict : 'awaiting fills';
+  if (verdictEl) {
+    verdictEl.textContent = verdictTxt;
+    verdictEl.style.color = verdictTxt === 'tape-like' ? 'var(--up)'
+      : verdictTxt === 'queue-toxic' ? 'var(--down)'
+      : verdictTxt === 'mixed/unclear' ? 'var(--gold)' : '';
+  }
+  if (!q || q.empty || !Array.isArray(q.buckets) || q.total_fills === 0) {
+    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;min-height:150px;color:var(--dim);font-size:12px" class="mono">awaiting fills — lines appear in run/live_fill_telemetry.jsonl after the first live fills.</div>';
+    if (fb) fb.innerHTML = '';
+    const fbWrap = $('queueFallbackWrap');
+    if (fbWrap) fbWrap.style.display = 'none';
+    return;
+  }
+  const fbWrapShow = $('queueFallbackWrap');
+  if (fbWrapShow) fbWrapShow.style.display = '';
+  const buckets = q.buckets;
+  const maxCount = Math.max(1, ...buckets.map(b => b.count || 0));
+  const w = 560, rowH = 34, padL = 86, padR = 110, h = buckets.length * rowH + 46;
+  let rows = '';
+  buckets.forEach((b, i) => {
+    const y = 8 + i * rowH;
+    const bw = Math.max(2, ((b.count || 0) / maxCount) * (w - padL - padR));
+    const mean = b.mean_settle_pnl_usd;
+    const meanTxt = (mean === null || mean === undefined) ? 'n/a' : (mean >= 0 ? '+' : '') + '$' + mean.toFixed(2);
+    const meanCol = (mean === null || mean === undefined) ? 'var(--dim)' : (mean >= 0 ? 'var(--up)' : 'var(--down)');
+    const tip = `${b.bucket}: ${b.count} fills, mean settle ${meanTxt}`;
+    rows += `
+      <text x="${padL - 8}" y="${y + 15}" fill="var(--dim)" font-size="11" font-family="var(--mono)" text-anchor="end">${esc(b.bucket)}</text>
+      <rect x="${padL}" y="${y}" width="${bw.toFixed(1)}" height="18" rx="3" fill="var(--gold)" fill-opacity="0.75"><title>${esc(tip)}</title></rect>
+      <text x="${(padL + bw + 6).toFixed(1)}" y="${y + 14}" fill="var(--tx)" font-size="11" font-family="var(--mono)">${b.count} fills</text>
+      <text x="${(w - padR + 10).toFixed(1)}" y="${y + 14}" fill="${meanCol}" font-size="11" font-family="var(--mono)">${esc(meanTxt)}</text>`;
+  });
+  const ch = q.chased || { count: 0, mean_settle_pnl_usd: null };
+  const chMean = ch.mean_settle_pnl_usd;
+  const chMeanTxt = (chMean === null || chMean === undefined) ? 'n/a' : (chMean >= 0 ? '+' : '') + '$' + chMean.toFixed(2);
+  const chY = 8 + buckets.length * rowH;
+  rows += `<text x="${padL - 8}" y="${chY + 15}" fill="var(--dim)" font-size="11" font-family="var(--mono)" text-anchor="end">chased</text>
+    <text x="${padL}" y="${chY + 14}" fill="var(--tx)" font-size="11" font-family="var(--mono)">${ch.count} fills × ${esc(chMeanTxt)} (kept separate)</text>`;
+  wrap.innerHTML = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="display:block" role="img" aria-label="fill ratio buckets"><title>Fill-ratio buckets with mean settlement PnL</title>${rows}</svg>`;
+  if (fb) {
+    let trows = buckets.map(b => {
+      const mean = b.mean_settle_pnl_usd;
+      return `<tr><td class="mono">${esc(b.bucket)}</td><td class="mono">${esc(b.count)}</td><td class="mono">${esc(mean === null || mean === undefined ? 'n/a' : mean.toFixed(2))}</td></tr>`;
+    }).join('');
+    trows += `<tr><td class="mono">chased</td><td class="mono">${esc(ch.count)}</td><td class="mono">${esc(chMeanTxt)}</td></tr>`;
+    fb.innerHTML = `<table class="tbl"><thead><tr><th>Bucket</th><th>Fills</th><th>Mean settle $</th></tr></thead><tbody>${trows}</tbody></table>`;
+  }
 }
 
 async function pollCockpit() {
@@ -5524,7 +5800,10 @@ function renderCockpitUI(st) {
     }
   }
 
-  // 6. Render Chart
+  // 6. Issue #139: PnL-per-position histogram from the same trades.
+  renderPnlHistogram(st.trades || []);
+
+  // 7. Render Chart
   renderCockpitChart(st.timeline, activeCockpitChartMode, st.starting_balance);
 }
 

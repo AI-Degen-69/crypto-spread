@@ -7,6 +7,7 @@
 - `server/osc_dash.py` — :8802 Live + /summary עם גרפים
 - `strategy/markets.py` — fetch live 5m/15m via `gamma-api /events?series_slug`
 - `run/` — 635 חלונות היסטוריים (82 oscillating 74% ב-5m, touch_pair 1.01)
+- `runs/` — תיקיות-ריצה עצמאיות (paper/live), ראה `docs/run-conventions.md`
 
 **ממצא (635 חלונות):**
 - כל חלון זז ≥20¢ (חציון 49.5¢) — 2¢ לא מבדיל

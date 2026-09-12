@@ -1642,3 +1642,203 @@ def test_api_live_config_patient_band_preset():
         )
         engine.mode = orig_mode
         engine.is_running = orig_running
+
+
+# ============================================================================
+# Issue #139: queue-telemetry endpoint
+# ============================================================================
+
+def _write_fills(path, rows):
+    Path(path).write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def _telemetry_rows():
+    return [
+        {"ts": 1.0, "slug": "s", "market_slug": "w1", "condition_id": "c1",
+         "leg": "UP", "chased": False, "resting_price": 0.48, "fill_price": 0.48,
+         "queue_ahead_at_rest": 120.0, "printed_size_at_price_since_rest": 12.0,
+         "filled_size": 5, "fill_ratio": 0.1, "ratio_flagged": False,
+         "window_elapsed_sec": 10.0, "mid_at_fill": 0.50, "resting_pair_cost": 0.96},
+        {"ts": 2.0, "slug": "s", "market_slug": "w1", "condition_id": "c1",
+         "leg": "DOWN", "chased": False, "resting_price": 0.48, "fill_price": 0.48,
+         "queue_ahead_at_rest": 100.0, "printed_size_at_price_since_rest": 20.0,
+         "filled_size": 5, "fill_ratio": 0.2, "ratio_flagged": False,
+         "window_elapsed_sec": 12.0, "mid_at_fill": 0.50, "resting_pair_cost": 0.96},
+        {"ts": 3.0, "slug": "s", "market_slug": "w2", "condition_id": "c2",
+         "leg": "UP", "chased": False, "resting_price": 0.48, "fill_price": 0.48,
+         "queue_ahead_at_rest": 100.0, "printed_size_at_price_since_rest": 60.0,
+         "filled_size": 5, "fill_ratio": 0.6, "ratio_flagged": False,
+         "window_elapsed_sec": 10.0, "mid_at_fill": 0.50, "resting_pair_cost": 0.96},
+        {"ts": 4.0, "slug": "s", "market_slug": "w3", "condition_id": "c3",
+         "leg": "UP", "chased": False, "resting_price": 0.48, "fill_price": 0.48,
+         "queue_ahead_at_rest": 100.0, "printed_size_at_price_since_rest": 250.0,
+         "filled_size": 5, "fill_ratio": 2.5, "ratio_flagged": False,
+         "window_elapsed_sec": 10.0, "mid_at_fill": 0.50, "resting_pair_cost": 0.96},
+        {"ts": 5.0, "slug": "s", "market_slug": "w1", "condition_id": "c1",
+         "leg": "DOWN", "chased": True, "resting_price": 0.50, "fill_price": 0.50,
+         "queue_ahead_at_rest": 0.0, "printed_size_at_price_since_rest": 5.0,
+         "filled_size": 5, "fill_ratio": 0.05, "ratio_flagged": False,
+         "window_elapsed_sec": 14.0, "mid_at_fill": 0.50, "resting_pair_cost": 0.98},
+    ]
+
+
+def _settle_rows():
+    return [
+        {"action": "WINDOW_SETTLE", "market_slug": "w1", "pnl_usd": 0.10},
+        {"action": "WINDOW_SETTLE", "market_slug": "w2", "pnl_usd": -0.40},
+        {"action": "WINDOW_SETTLE", "market_slug": "w3", "pnl_usd": 0.05},
+    ]
+
+
+def test_api_live_queue_telemetry_aggregation(tmp_path, monkeypatch):
+    """Buckets, chased separation, and tape-like verdict from a fixture."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    _write_fills(fills, _telemetry_rows())
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["empty"] is False
+    assert body["total_fills"] == 5
+    counts = [b["count"] for b in body["buckets"]]
+    assert counts == [2, 0, 1, 1]
+    means = [b["mean_settle_pnl_usd"] for b in body["buckets"]]
+    assert abs(means[0] - 0.10) < 1e-9
+    assert means[1] is None
+    assert abs(means[2] - (-0.40)) < 1e-9
+    assert abs(means[3] - 0.05) < 1e-9
+    assert body["chased"] == {"count": 1, "mean_settle_pnl_usd": 0.10}
+    assert body["verdict"] == "tape-like"
+
+
+def test_api_live_queue_telemetry_verdict_transitions(tmp_path, monkeypatch):
+    """queue-toxic and mixed/unclear verdicts follow the bucket means."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = [dict(r, market_slug="wx", fill_ratio=2.0,
+                 printed_size_at_price_since_rest=200.0) for r in _telemetry_rows()]
+    rows = [r for r in rows if not r["chased"]]
+    _write_fills(fills, rows)
+    _write_fills(trades, [{"action": "WINDOW_SETTLE", "market_slug": "wx", "pnl_usd": 0.30}])
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["verdict"] == "queue-toxic"
+
+    # Mixed: high buckets positive but low buckets positive too.
+    mixed_rows = [dict(r, market_slug="wm", fill_ratio=0.1,
+                       printed_size_at_price_since_rest=10.0) for r in _telemetry_rows()]
+    mixed_rows = [r for r in mixed_rows if not r["chased"]]
+    mixed_rows.append(dict(_telemetry_rows()[3], market_slug="wm"))
+    _write_fills(fills, mixed_rows)
+    _write_fills(trades, [{"action": "WINDOW_SETTLE", "market_slug": "wm", "pnl_usd": 0.20}])
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    assert client.get("/api/live/queue_telemetry").json()["verdict"] == "mixed/unclear"
+
+
+def test_api_live_queue_telemetry_empty_state(tmp_path, monkeypatch):
+    """Missing file yields an explicit empty payload, HTTP 200."""
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE",
+                        tmp_path / "absent.jsonl")
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["empty"] is True
+    assert body["total_fills"] == 0
+    assert body["buckets"] == []
+    assert body["chased"] == {"count": 0, "mean_settle_pnl_usd": None}
+    assert body["verdict"] == "awaiting fills"
+
+
+def test_cockpit_queue_and_pnl_panels_in_html():
+    """Cockpit page carries the queue-telemetry panel and histogram shells."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    # Queue panel: verdict, SVG wrap, table fallback, fetch + render hooks.
+    assert "queuePanel" in html
+    assert "queueVerdict" in html
+    assert "queueSvgWrap" in html
+    assert "queueFallback" in html
+    assert "fetchQueueTelemetry" in html
+    assert "renderQueuePanel" in html
+
+
+def test_cockpit_pnl_histogram_render_hook_in_html():
+    """Histogram render, stats math, and session-window honesty in the page."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    assert "pnlHistSvgWrap" in html
+    assert "pnlHistStats" in html
+    assert "pnlHistFallback" in html
+    assert "renderPnlHistogram" in html
+    assert "pnlBootstrapCiLo" in html
+    assert "freedmanDiaconisBins" in html
+    assert "session window" in html
+    assert "zero-PnL" in html or "zero pnl" in html.lower()
+    # Explicit empty states, never a blank box.
+    assert "awaiting fills" in html
+
+
+def test_api_live_queue_telemetry_rejects_bad_ratios(tmp_path, monkeypatch):
+    """NaN / inf / negative fill_ratio are excluded from totals and verdict."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = [dict(r) for r in _telemetry_rows() if not r["chased"]]
+    rows[0]["fill_ratio"] = float("nan")
+    rows[1]["fill_ratio"] = float("inf")
+    rows[2]["fill_ratio"] = -0.5
+    _write_fills(fills, rows)
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    # Only the 2.5-ratio row survives (finite, >= 0).
+    assert body["empty"] is False
+    assert body["total_fills"] == 1
+
+
+def test_api_live_queue_telemetry_chased_without_settlement(tmp_path, monkeypatch):
+    """Chased fill whose market never settled: 200, count kept, mean None."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = [dict(r) for r in _telemetry_rows() if r["chased"]]
+    rows[0]["market_slug"] = "unsettled-xyz"
+    _write_fills(fills, rows)
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    res = client.get("/api/live/queue_telemetry")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["chased"] == {"count": 1, "mean_settle_pnl_usd": None}
+
+
+def test_cockpit_panels_inside_cockpit_tab():
+    """Queue + PnL cards live inside tab-cockpit, not after it."""
+    html = client.get("/").text
+    tab = html.index('id="tab-cockpit"')
+    toast = html.index('id="toastContainer"')
+    assert tab < html.index('id="queuePanel"') < toast
+    assert tab < html.index('id="pnlHistPanel"') < toast
+    assert "No closed trades yet" in html
