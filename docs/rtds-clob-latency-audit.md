@@ -41,7 +41,7 @@ Empirical lead-lag latency and drift distribution metrics captured across all 10
 | **SOL** | 15m | REST (Binance) | RTDS Relay | 1 | 1 | `100.0%` | `2,895.7 ms` | `2,895.7 ms` | `2,895.7 ms` | `2,895.7 ms` | `0.06%` | `0.06%` |
 | **XRP** | 15m | REST (Binance) | RTDS Relay | 0 | 0 | `--` | `--` | `--` | `--` | `--` | `--` | `--` |
 
-> *Source Artifact: [`run/latency_audit_20260906_065157.json`](../run/latency_audit_20260906_065157.json). Note: The latency audit probe (`scripts/monitor_stream_latency.py`) samples Binance REST ticker prices at 1s cadence across all assets to baseline CLOB book reactions. 'Bot Stream Mode' indicates the production bot's live streaming bridge configuration (`strategy/streaming.py`).*
+> *Source Artifact: [`logs/latency_audit_20260906_065157.json`](../logs/latency_audit_20260906_065157.json). Note: The latency audit probe (`scripts/monitor_stream_latency.py`) samples Binance REST ticker prices at 1s cadence across all assets to baseline CLOB book reactions. 'Bot Stream Mode' indicates the production bot's live streaming bridge configuration (`strategy/streaming.py`).*
 
 ---
 
