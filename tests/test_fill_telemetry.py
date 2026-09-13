@@ -860,3 +860,97 @@ def test_issue173_record_defaults_to_rest_when_no_source_is_named():
         printed_size=None, filled_size=5.0, window_elapsed_sec=1.0,
         mid_at_fill=None, resting_pair_cost=None,
         tape_source="none")["tape_source"] == "none"
+
+
+def _write_fills(tmp_path, rows):
+    """Write fill-telemetry lines and return the path."""
+    p = tmp_path / "fills.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return p
+
+
+def _bucket_counts(out):
+    """Parse the helper's text table into {bucket: fills} (spacing-agnostic).
+
+    Every bucket must appear: a table that lost a row is a regression, not a
+    zero, so this raises rather than quietly returning a short dict.
+    """
+    from scripts.bucket_fills import BUCKETS
+    names = [name for name, _, _ in BUCKETS]
+    counts = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] in names:
+            counts[parts[0]] = int(parts[1])
+    missing = [n for n in names if n not in counts]
+    assert not missing, f"table is missing bucket rows: {missing}\n{out}"
+    return counts
+
+
+_MIXED_FILLS = [
+    {"fill_ratio": 0.1, "market_slug": "w1", "tape_source": "rest"},
+    {"fill_ratio": 0.6, "market_slug": "w2", "tape_source": "ws"},
+    {"fill_ratio": 2.5, "market_slug": "w3", "tape_source": "ws"},
+]
+
+
+def test_issue173_bucket_helper_filters_by_tape_source(tmp_path, capsys):
+    """The #138 table must be restrictable to one tape, or it averages two."""
+    from scripts.bucket_fills import main
+    fills = _write_fills(tmp_path, _MIXED_FILLS)
+
+    assert main([str(fills), "--tape-source", "ws"]) == 0
+    out = capsys.readouterr().out
+    assert "tape_source=ws (2 of 3 lines)" in out
+    ws = _bucket_counts(out)
+    assert ws["0.50-1.00"] == 1 and ws["1.00+"] == 1
+    assert ws["0.00-0.25"] == 0, "the REST line leaked into the ws table"
+
+    assert main([str(fills), "--tape-source", "rest"]) == 0
+    out = capsys.readouterr().out
+    assert "tape_source=rest (1 of 3 lines)" in out
+    rest = _bucket_counts(out)
+    assert rest["0.00-0.25"] == 1
+    assert rest["0.50-1.00"] == 0 and rest["1.00+"] == 0
+
+
+def test_issue173_bucket_helper_warns_on_a_mixed_file(tmp_path, capsys):
+    """Pooling two tapes describes neither; that must not happen silently."""
+    from scripts.bucket_fills import main
+    assert main([str(_write_fills(tmp_path, _MIXED_FILLS))]) == 0
+    out = capsys.readouterr().out
+    assert "mixed tape sources" in out
+    assert "ws=2" in out and "rest=1" in out
+
+
+def test_issue173_bucket_helper_quiet_when_one_tape(tmp_path, capsys):
+    """A single-tape file is comparable, so no warning is warranted."""
+    from scripts.bucket_fills import main
+    rows = [dict(r, tape_source="ws") for r in _MIXED_FILLS]
+    assert main([str(_write_fills(tmp_path, rows))]) == 0
+    assert "mixed tape sources" not in capsys.readouterr().out
+
+
+def test_issue173_legacy_lines_without_the_field_count_as_rest(tmp_path, capsys):
+    """Pre-#173 lines were REST-measured; calling them anything else lies."""
+    from scripts.bucket_fills import main, tape_source_of, source_counts
+    assert tape_source_of({"fill_ratio": 0.1}) == "rest"
+    assert tape_source_of({"fill_ratio": 0.1, "tape_source": "bogus"}) == "rest"
+    assert tape_source_of({"fill_ratio": 0.1, "tape_source": "ws"}) == "ws"
+    assert source_counts([{}, {"tape_source": "ws"}]) == {"ws": 1, "rest": 1, "none": 0}
+
+    rows = [{"fill_ratio": 0.1, "market_slug": "w1"},          # legacy line
+            {"fill_ratio": 0.6, "market_slug": "w2", "tape_source": "ws"}]
+    assert main([str(_write_fills(tmp_path, rows)), "--tape-source", "rest"]) == 0
+    out = capsys.readouterr().out
+    assert "tape_source=rest (1 of 2 lines)" in out
+    assert _bucket_counts(out)["0.00-0.25"] == 1
+
+
+def test_issue173_bucketize_without_a_filter_is_unchanged(tmp_path):
+    """Existing callers passing no source still get every line."""
+    from scripts.bucket_fills import bucketize
+    table = {r["bucket"]: r["count"] for r in bucketize(_MIXED_FILLS, {})}
+    assert table["0.00-0.25"] == 1
+    assert table["0.50-1.00"] == 1
+    assert table["1.00+"] == 1
