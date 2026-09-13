@@ -14,15 +14,15 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import os
 from pathlib import Path
-from typing import Any, Iterable
+from typing import IO, Any, Iterable
 
 from strategy.windows import (
-    classify_window,
+    classify_window,  # re-exported: tests import classify_window from here
     compute_summary,
     finalize_window,
     write_json_atomic,
+    write_lines_atomic,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,7 +31,7 @@ DEFAULT_WINDOWS_FILE = ROOT / "run" / "oscillation_windows.jsonl"
 DEFAULT_SUMMARY_FILE = ROOT / "run" / "oscillation_summary.json"
 
 
-def _open_tick_file(path: Path):
+def _open_tick_file(path: Path) -> IO[str]:
     """Open .jsonl or .jsonl.gz file in text mode."""
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
@@ -149,7 +149,11 @@ def rebuild_windows(
     Returns (num_files_scanned, num_windows_built).
     """
     tick_files = sorted(
-        [p for p in ticks_dir.glob(pattern) if not p.name.endswith(".idx")]
+        [
+            p
+            for p in ticks_dir.glob(pattern)
+            if not p.name.endswith(".idx") and not p.name.endswith(".tmp")
+        ]
     )
     if not tick_files:
         # Fallback to any .jsonl / .jsonl.gz if no ticks_*.jsonl matches
@@ -157,7 +161,9 @@ def rebuild_windows(
             [
                 p
                 for p in ticks_dir.glob("*.jsonl*")
-                if not p.name.endswith(".idx") and not p.name.startswith("fake_")
+                if not p.name.endswith(".idx")
+                and not p.name.endswith(".tmp")
+                and not p.name.startswith("fake_")
             ]
         )
 
@@ -166,13 +172,9 @@ def rebuild_windows(
 
     windows = build_windows_from_ticks(iter_ticks(tick_files))
 
-    out_windows = Path(out_windows)
-    out_windows.parent.mkdir(parents=True, exist_ok=True)
-    tmp_windows = out_windows.with_name(out_windows.name + ".tmp")
-    with open(tmp_windows, "w", encoding="utf-8") as f:
-        for w in windows:
-            f.write(json.dumps(w) + "\n")
-    os.replace(tmp_windows, out_windows)
+    write_lines_atomic(
+        Path(out_windows), [json.dumps(w) for w in windows]
+    )
 
     summary = compute_summary(windows)
     write_json_atomic(Path(out_summary), summary)
@@ -185,7 +187,7 @@ def rebuild_windows(
     return len(tick_files), len(windows)
 
 
-def main():
+def main() -> None:
     """Rebuild oscillation_windows.jsonl and oscillation_summary.json from tick files."""
     parser = argparse.ArgumentParser(
         description="Rebuild oscillation windows and summary from run/ticks data"

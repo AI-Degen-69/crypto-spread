@@ -128,6 +128,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
+# Serializes POST /api/rebuild (Issue #132): concurrent rebuilds race on tmp/output files.
+_rebuild_lock = threading.Lock()
 MAX_TEST_ORDER_SHARES = 10.0
 # Manifest `ts` age below which a writer that is NOT our dashboard child
 # counts as a live external standalone collector (Issue #151).
@@ -1017,17 +1019,34 @@ def api_collector_poll_once(request: Request):
 
 @app.post("/api/rebuild")
 def api_rebuild_windows(request: Request):
-    """Reconstruct oscillation windows and summary from persisted tick data."""
+    """Reconstruct oscillation windows and summary from persisted tick data.
+
+    Serialized with a lock: concurrent rebuilds would race on the same
+    output files (collector appends during a rebuild replace can also drop
+    a freshly closed window — prefer rebuilding while polling is paused).
+    """
     _verify_safe_origin(request)
-    cmd = [sys.executable, "-m", "scripts.rebuild_windows"]
-    try:
-        res = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True,
-            timeout=300, check=False,
+    if not _rebuild_lock.acquire(blocking=False):
+        return JSONResponse(
+            status_code=409, content={"ok": False, "output": "rebuild already running"}
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "output": "rebuild timed out after 300s"}
-    return {"ok": res.returncode == 0, "output": res.stdout[:500]}
+    try:
+        cmd = [sys.executable, "-m", "scripts.rebuild_windows"]
+        try:
+            res = subprocess.run(
+                cmd, cwd=str(ROOT), capture_output=True, text=True,
+                timeout=300, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "output": "rebuild timed out after 300s"}
+        except Exception as e:
+            return {"ok": False, "output": f"rebuild failed to start: {e}"}
+        if res.returncode == 0:
+            return {"ok": True, "output": res.stdout[:500]}
+        detail = (res.stderr or res.stdout or "")[:500]
+        return {"ok": False, "output": detail or "rebuild failed"}
+    finally:
+        _rebuild_lock.release()
 
 
 @app.delete("/api/ticks/file")
@@ -3391,10 +3410,23 @@ async function pollOnce(){
 }
 
 async function rebuildStats(){
+  const btn=$('btnRebuildStats');
+  if(btn) btn.disabled=true;
   $('collectorBadge').textContent = 'Rebuilding stats...';
-  await fetch('/api/rebuild', {method:'POST'});
-  tick();
-  refreshCollectorStatus();
+  try{
+    const res=await fetch('/api/rebuild', {method:'POST'});
+    let body={}; try{body=await res.json();}catch{}
+    if(!res.ok || !body.ok){
+      $('collectorBadge').textContent = 'Rebuild failed: ' + (body.output||res.status);
+    } else {
+      tick();
+      refreshCollectorStatus();
+    }
+  }catch(e){
+    $('collectorBadge').textContent = 'Rebuild failed: ' + e;
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
 
 async function tick(){

@@ -194,3 +194,22 @@ def test_refresh_summary_writes_ts_and_per_series(tmp_path: Path):
     assert data["per_series"]["btc-up-or-down-5m"]["windows"] == 1
     assert data["per_series"]["eth-up-or-down-5m"]["windows"] == 0
 
+
+def test_refresh_summary_on_empty_dir(tmp_path: Path):
+    """refresh_summary on a dir without a windows file writes a zeroed summary."""
+    import scripts.collect_ticks as ct
+
+    ct.refresh_summary(tmp_path)
+    data = json.loads((tmp_path / "oscillation_summary.json").read_text(
+        encoding="utf-8"))
+    assert data["ts"] > 0
+    assert data["per_series"]["btc-up-or-down-5m"]["windows"] == 0
+
+
+def test_run_dir_for_ticks_layout(tmp_path: Path):
+    """run_dir_for maps <run>/ticks -> <run> and keeps custom out dirs."""
+    import scripts.collect_ticks as ct
+
+    assert ct.run_dir_for(tmp_path / "ticks") == tmp_path
+    assert ct.run_dir_for(tmp_path / "custom") == tmp_path / "custom"
+

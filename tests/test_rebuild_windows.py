@@ -226,7 +226,4 @@ def test_rebuild_matches_shared_finalize_window(tmp_path: Path):
     )
     (got,) = [json.loads(line) for line in out_win.read_text(
         encoding="utf-8").splitlines() if line.strip()]
-    for key in ("series", "label", "duration", "cid", "slug", "start_mid",
-                "close_mid", "max_up", "max_down", "min_mid", "max_mid",
-                "class", "touch_pair_median", "url", "snaps"):
-        assert got[key] == expected[key], key
+    assert got == expected

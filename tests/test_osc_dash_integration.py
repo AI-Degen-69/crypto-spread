@@ -2021,6 +2021,40 @@ def test_api_rebuild_windows(monkeypatch):
     assert "Wrote 10 windows" in data.get("output")
 
 
+def test_api_rebuild_windows_failure_and_busy(monkeypatch):
+    """Verify rebuild surfaces subprocess failure output and serializes runs."""
+    import server.osc_dash as osc_dash_mod
+
+    def _mock_fail(*args, **kwargs):
+        class DummyResult:
+            returncode = 1
+            stdout = ""
+            stderr = "traceback: boom"
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", _mock_fail)
+    data = client.post("/api/rebuild").json()
+    assert data.get("ok") is False
+    assert "boom" in data.get("output")
+
+    def _mock_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="rebuild", timeout=300)
+
+    monkeypatch.setattr(subprocess, "run", _mock_timeout)
+    data = client.post("/api/rebuild").json()
+    assert data.get("ok") is False
+    assert "timed out" in data.get("output")
+
+    # Lock held -> 409 busy without invoking subprocess
+    osc_dash_mod._rebuild_lock.acquire()
+    try:
+        res = client.post("/api/rebuild")
+        assert res.status_code == 409
+        assert res.json().get("ok") is False
+    finally:
+        osc_dash_mod._rebuild_lock.release()
+
+
 def test_api_rebuild_rejects_cross_origin():
     """Verify cross-origin rebuild requests are rejected."""
     res = client.post(

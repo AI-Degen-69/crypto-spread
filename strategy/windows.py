@@ -41,6 +41,7 @@ def finalize_window(
 
     Reproduces exactly the record schema emitted by
     `build_windows_from_ticks` (4-decimal rounding, Polymarket URL format).
+    Touch-pair median is the upper-middle element (matches legacy behavior).
     `meta` must carry: series, label, duration, cid, slug, start_ts,
     end_ts, closed_ts, snaps.
     """
@@ -89,10 +90,23 @@ def finalize_window(
 
 
 def compute_summary(windows_list: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compute per-series aggregate summary matching measure_5m_oscillation schema."""
+    """Compute per-series aggregate summary matching measure_5m_oscillation schema.
+
+    Rows missing `series` are skipped; missing numeric/class fields fall
+    back to neutral defaults so one corrupt row never fails the rebuild.
+    """
     per_series = defaultdict(list)
     for w in windows_list:
+        if not w.get("series"):
+            continue
         per_series[w["series"]].append(w)
+
+    def _excursion(row: dict[str, Any]) -> float:
+        """Max two-sided excursion with neutral fallback for corrupt rows."""
+        try:
+            return max(float(row.get("max_up", 0.0)), float(row.get("max_down", 0.0)))
+        except (ValueError, TypeError):
+            return 0.0
 
     summary = {}
     for series_slug, duration, label in SERIES:
@@ -113,11 +127,11 @@ def compute_summary(windows_list: list[dict[str, Any]]) -> dict[str, Any]:
             }
             continue
 
-        any2 = sum(1 for w in ws if max(w["max_up"], w["max_down"]) >= 0.02)
-        any3 = sum(1 for w in ws if max(w["max_up"], w["max_down"]) >= 0.03)
-        mono = sum(1 for w in ws if w["class"] == "monotonic")
-        flat = sum(1 for w in ws if w["class"] == "flat")
-        osc = sum(1 for w in ws if w["class"] == "oscillating")
+        any2 = sum(1 for w in ws if _excursion(w) >= 0.02)
+        any3 = sum(1 for w in ws if _excursion(w) >= 0.03)
+        mono = sum(1 for w in ws if w.get("class") == "monotonic")
+        flat = sum(1 for w in ws if w.get("class") == "flat")
+        osc = sum(1 for w in ws if w.get("class") == "oscillating")
 
         pcs = [
             w.get("touch_pair_median")
@@ -155,6 +169,26 @@ def write_json_atomic(path: Path, data: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def write_lines_atomic(path: Path, lines: list[str]) -> None:
+    """Write text lines to path atomically via temp file + os.replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(line + "\n")
         os.replace(tmp_name, path)
     except BaseException:
         try:

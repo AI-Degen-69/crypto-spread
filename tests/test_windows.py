@@ -31,6 +31,18 @@ def test_classify_window_thresholds():
     assert classify_window([0.50, 0.53, 0.54]) == "monotonic"
     assert classify_window([0.50, 0.46, 0.45]) == "monotonic"
     assert classify_window([0.50, 0.47, 0.53]) == "oscillating"
+    # Exact 0.02 boundary is inclusive (>=)
+    assert classify_window([0.50, 0.52]) == "monotonic"
+    assert classify_window([0.50, 0.48]) == "monotonic"
+    assert classify_window([0.50, 0.5199, 0.4801]) == "flat"
+
+
+def test_compute_summary_skips_corrupt_rows():
+    rec = finalize_window(
+        [0.50, 0.53], [1.0], _meta(series="btc-up-or-down-5m")
+    )
+    summary = compute_summary([rec, {"no": "series"}, {"series": ""}])
+    assert summary["per_series"]["btc-up-or-down-5m"]["windows"] == 1
 
 
 def test_finalize_window_schema_and_rounding():

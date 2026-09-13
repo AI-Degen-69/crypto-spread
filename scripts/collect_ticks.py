@@ -27,6 +27,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import requests
 from strategy.markets import full_book, recent_trades
@@ -36,7 +37,6 @@ from strategy.windows import compute_summary, finalize_window, write_json_atomic
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "run" / "ticks"
 DEFAULT_OUT.mkdir(parents=True, exist_ok=True)
-RUN_DIR = ROOT / "run"
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
@@ -49,12 +49,20 @@ TAPE_LIMIT = 200
 TICK_BUDGET_MS = 2000.0
 
 # Per-cid state: { cid: {series, slug, start_ts, end_ts, up_token, down_token,
-#                         seen_tape, snap_count, label, duration, jitter_jitter,
+#                         seen_tape, snap_count, label, duration,
 #                         mids, touch_pairs} }
-windows: dict[str, dict] = {}
+windows: dict[str, dict[str, Any]] = {}
 
 
-def write_window(rec: dict, out_dir: Path) -> None:
+def run_dir_for(out_dir: Path) -> Path:
+    """Resolve the dataset dir holding oscillation_windows.jsonl for a ticks out_dir."""
+    out_dir = Path(out_dir)
+    if out_dir.name == "ticks":
+        return out_dir.parent
+    return out_dir
+
+
+def write_window(rec: dict[str, Any], out_dir: Path) -> None:
     """Append one closed-window record to <out_dir>/oscillation_windows.jsonl."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -65,16 +73,17 @@ def write_window(rec: dict, out_dir: Path) -> None:
 def refresh_summary(out_dir: Path) -> None:
     """Recompute oscillation_summary.json from <out_dir>/oscillation_windows.jsonl."""
     out_dir = Path(out_dir)
-    rows = []
+    rows: list[dict[str, Any]] = []
     f = out_dir / "oscillation_windows.jsonl"
     if f.exists():
-        for line in f.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception:
-                continue
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
     write_json_atomic(out_dir / "oscillation_summary.json", compute_summary(rows))
 
 
@@ -141,9 +150,9 @@ def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
     path = out_dir / f"ticks_{day_key}{suffix}"
     payload = (json.dumps(line) + "\n").encode("utf-8")
     if gzip:
-        import gzip
+        import gzip as _gzip
         with open(path, "ab") as f:
-            f.write(gzip.compress(payload))
+            f.write(_gzip.compress(payload))
     else:
         with open(path, "ab") as f:
             f.write(payload)
@@ -301,8 +310,6 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
             "queue_up": q_up, "queue_down": q_dn,
             "err": ub_err or db_err or tape_err or None,
         }
-        if any(rr in snap for rr in ()):
-            pass
         stats["lines"] = stats.get("lines", 0) + 1
         stats["series_seen"] = sorted(set(stats.get("series_seen", []) + [series_slug]))
         stats["day"] = day_key
@@ -320,6 +327,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
         errs.append(f"slow_tick:{tick_ms:.0f}ms")
 
     closed_now = 0
+    run_dir = run_dir_for(out_dir)
     for cid, w in list(windows.items()):
         if w["end_ts"] < now:
             closed.append(w["slug"])
@@ -340,14 +348,14 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
                     },
                 )
                 if rec.get("class") != "no_data":
-                    write_window(rec, RUN_DIR)
+                    write_window(rec, run_dir)
                     closed_now += 1
             except Exception as e:
                 errs.append(f"window:{cid}:{e}")
             del windows[cid]
     if closed_now:
         try:
-            refresh_summary(RUN_DIR)
+            refresh_summary(run_dir)
         except Exception as e:
             errs.append(f"summary:{e}")
     return closed, errs
