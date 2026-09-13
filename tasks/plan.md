@@ -69,7 +69,7 @@ a healthy socket is most legs most seconds.
 
 ---
 
-## T3 — Bounded concurrent fan-out across the slate `[Performance/Backend]`
+## T3 — Bounded concurrent fan-out across the slate `[Performance/Backend]` — [x] DONE
 
 **Files:** `scripts/collect_ticks.py`, `strategy/markets.py`,
 `tests/test_collect_ticks_smoke.py`

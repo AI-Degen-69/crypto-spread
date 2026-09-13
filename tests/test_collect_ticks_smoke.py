@@ -259,11 +259,13 @@ def gamma(monkeypatch):
     import scripts.collect_ticks as ct
 
     ct.reset_gamma_cache()
-    state = {"calls": 0, "queue": [(_market(), None)]}
+    # `seen` is a list, not a counter: poll_once resolves off-thread and `+= 1`
+    # is not atomic, while list.append is.
+    state = {"seen": [], "queue": [(_market(), None)]}
 
     def fake_fetch(series_slug: str):
         """Pop the next scripted result, repeating the last one forever."""
-        state["calls"] += 1
+        state["seen"].append(series_slug)
         if len(state["queue"]) > 1:
             return state["queue"].pop(0)
         return state["queue"][0]
@@ -281,7 +283,7 @@ def test_gamma_cache_serves_within_window(gamma):
     second, err2 = ct.resolve_series_market("btc-up-or-down-5m", now=1001.0)
     assert err1 is None and err2 is None
     assert first["conditionId"] == second["conditionId"] == "0xC1"
-    assert gamma["calls"] == 1
+    assert len(gamma["seen"]) == 1
 
 
 def test_gamma_cache_reresolves_after_end_ts(gamma):
@@ -293,7 +295,7 @@ def test_gamma_cache_reresolves_after_end_ts(gamma):
     assert ct.resolve_series_market("btc-up-or-down-5m", now=1900.0)[0]["conditionId"] == "0xOLD"
     got, _ = ct.resolve_series_market("btc-up-or-down-5m", now=2001.0)
     assert got["conditionId"] == "0xNEW"
-    assert gamma["calls"] == 2
+    assert len(gamma["seen"]) == 2
 
 
 def test_gamma_cache_reresolves_after_max_age(gamma):
@@ -304,9 +306,9 @@ def test_gamma_cache_reresolves_after_max_age(gamma):
     gamma["queue"] = [(far, None)]
     ct.resolve_series_market("btc-up-or-down-5m", now=1000.0)
     ct.resolve_series_market("btc-up-or-down-5m", now=1000.0 + ct.GAMMA_CACHE_MAX_AGE - 1.0)
-    assert gamma["calls"] == 1
+    assert len(gamma["seen"]) == 1
     ct.resolve_series_market("btc-up-or-down-5m", now=1000.0 + ct.GAMMA_CACHE_MAX_AGE + 1.0)
-    assert gamma["calls"] == 2
+    assert len(gamma["seen"]) == 2
 
 
 def test_gamma_cache_does_not_cache_failure(gamma):
@@ -318,7 +320,7 @@ def test_gamma_cache_does_not_cache_failure(gamma):
     assert info is None and err == "gamma err boom"
     info, err = ct.resolve_series_market("btc-up-or-down-5m", now=1000.5)
     assert err is None and info["conditionId"] == "0xOK"
-    assert gamma["calls"] == 2
+    assert len(gamma["seen"]) == 2
 
 
 def test_gamma_cache_picks_up_replaced_market(gamma):
@@ -338,11 +340,11 @@ def test_poll_once_uses_the_gamma_cache(monkeypatch, tmp_path):
 
     ct.reset_gamma_cache()
     ct.windows.clear()
-    calls = {"n": 0}
+    calls: list[str] = []
 
     def fake_fetch(series_slug: str):
-        """Return a live market for the first series only, counting calls."""
-        calls["n"] += 1
+        """Return a live market for the first series only, recording each call."""
+        calls.append(series_slug)
         if series_slug != ct.SERIES[0][0]:
             return None, "no live"
         return _market("0xPOLL", end_ts=time.time() + 300.0), None
@@ -355,9 +357,152 @@ def test_poll_once_uses_the_gamma_cache(monkeypatch, tmp_path):
 
     stats: dict = {}
     ct.poll_once(tmp_path, False, stats)
-    after_first = calls["n"]
+    after_first = len(calls)
     ct.poll_once(tmp_path, False, stats)
     # Only the nine failing series re-resolve; the cached live one does not.
-    assert calls["n"] - after_first == len(ct.SERIES) - 1
+    assert len(calls) - after_first == len(ct.SERIES) - 1
     ct.reset_gamma_cache()
     ct.windows.clear()
+
+
+# --- Issue #167 T3: bounded concurrent fan-out ----------------------------
+
+@pytest.fixture
+def slate(monkeypatch):
+    """A three-series collector whose gamma/book/tape calls are stubbed out."""
+    import scripts.collect_ticks as ct
+
+    ct.reset_gamma_cache()
+    ct.windows.clear()
+    series = [("a-5m", 300, "A"), ("b-5m", 300, "B"), ("c-5m", 300, "C")]
+    monkeypatch.setattr(ct, "SERIES", series)
+
+    def fake_fetch(slug: str):
+        """One live market per series, keyed so cid and tokens stay distinct."""
+        tag = slug[0]
+        return {
+            "conditionId": f"0x{tag.upper()}", "slug": f"slug-{tag}",
+            "start_ts": time.time() - 10.0, "end_ts": time.time() + 300.0,
+            "up_token": f"{tag}_up", "down_token": f"{tag}_dn", "series": slug,
+        }, None
+
+    monkeypatch.setattr(ct, "fetch_live_for_series", fake_fetch)
+    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
+    yield ct
+    ct.windows.clear()
+    ct.reset_gamma_cache()
+
+
+def _snaps(out_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    for f in sorted(out_dir.glob("ticks_*.jsonl")):
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def test_snaps_are_written_in_series_order_despite_completion_order(slate, tmp_path):
+    """Workers finish out of order; the tick file must still follow SERIES."""
+    def slow_book(host, tok):
+        """Make the first series the slowest so completion order inverts."""
+        time.sleep({"a": 0.25, "b": 0.1}.get(tok[0], 0.0))
+        return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+                "malformed": 0, "token_id": tok}
+
+    slate.full_book = slow_book
+    slate.poll_once(tmp_path, False, {})
+
+    assert [s["series"] for s in _snaps(tmp_path)] == ["a-5m", "b-5m", "c-5m"]
+
+
+def test_the_slate_is_actually_concurrent(slate, tmp_path):
+    """Three 250ms series must cost about one series, not three."""
+    def slow_book(host, tok):
+        """Every book takes 250ms, so a sequential round would take 1.5s."""
+        time.sleep(0.25)
+        return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+                "malformed": 0, "token_id": tok}
+
+    slate.full_book = slow_book
+    t0 = time.perf_counter()
+    slate.poll_once(tmp_path, False, {})
+    elapsed = time.perf_counter() - t0
+
+    # Sequential would be 6 books x 250ms = 1.5s; concurrent is 2 x 250ms plus
+    # the stagger ramp. Assert well clear of both to stay stable on slow CI.
+    assert elapsed < 1.0, f"round took {elapsed:.2f}s, fan-out is not concurrent"
+
+
+def test_one_failing_series_leaves_the_others_writing(slate, tmp_path):
+    """A worker raising must isolate to its own snap, not abort the round."""
+    def flaky_book(host, tok):
+        """The B series blows up on both legs; A and C are healthy."""
+        if tok.startswith("b"):
+            raise RuntimeError("clob exploded")
+        return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+                "malformed": 0, "token_id": tok}
+
+    slate.full_book = flaky_book
+    slate.poll_once(tmp_path, False, {})
+
+    snaps = _snaps(tmp_path)
+    assert [s["series"] for s in snaps] == ["a-5m", "b-5m", "c-5m"]
+    by_series = {s["series"]: s for s in snaps}
+    assert by_series["a-5m"]["err"] is None
+    assert by_series["c-5m"]["err"] is None
+    assert "clob exploded" in by_series["b-5m"]["err"]
+
+
+def test_a_gamma_failure_still_skips_only_that_series(slate, tmp_path):
+    """A series with no live market is reported and skipped, not fatal."""
+    def partial_gamma(slug: str):
+        """B has no live market this tick."""
+        if slug == "b-5m":
+            return None, "no live"
+        tag = slug[0]
+        return {
+            "conditionId": f"0x{tag.upper()}", "slug": f"slug-{tag}",
+            "start_ts": time.time() - 10.0, "end_ts": time.time() + 300.0,
+            "up_token": f"{tag}_up", "down_token": f"{tag}_dn", "series": slug,
+        }, None
+
+    slate.fetch_live_for_series = partial_gamma
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    _closed, errs = slate.poll_once(tmp_path, False, {})
+
+    assert [s["series"] for s in _snaps(tmp_path)] == ["a-5m", "c-5m"]
+    assert errs == ["b-5m:no live"]
+
+
+def test_poll_executor_is_bounded_and_reused():
+    """One process-wide pool, sized to the slate — never rebuilt per tick."""
+    import scripts.collect_ticks as ct
+
+    ct.shutdown_poll_executor()
+    first = ct.get_poll_executor()
+    assert first is ct.get_poll_executor()
+    assert first._max_workers == ct.MAX_POLL_WORKERS
+    ct.shutdown_poll_executor()
+    assert ct.get_poll_executor() is not first
+    ct.shutdown_poll_executor()
+
+
+def test_workers_are_staggered_to_keep_the_anti_burst_property(slate, tmp_path):
+    """Fan-out must ramp its first requests, not fire the slate as one burst."""
+    starts: list[float] = []
+
+    def timed_book(host, tok):
+        """Record when each series' first request lands."""
+        if tok.endswith("_up"):
+            starts.append(time.perf_counter())
+        return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+                "malformed": 0, "token_id": tok}
+
+    slate.full_book = timed_book
+    slate.poll_once(tmp_path, False, {})
+
+    assert len(starts) == 3
+    assert max(starts) - min(starts) >= slate.SERIES_STAGGER_SEC

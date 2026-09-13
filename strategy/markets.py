@@ -25,11 +25,16 @@ EVENTS_TIMEOUT = (3.05, 5.0)
 # Pooled keep-alive instead of a fresh TLS handshake per call. No retries -- a
 # failed load is handled by the caller (the market is skipped for this visit)
 # and retrying here would spend the loop's time budget silently.
+# The tick collector fans its ten series out concurrently (issue #167), so the
+# pool has to cover every in-flight book/tape request at once. Sized under it,
+# urllib3 discards and re-handshakes connections and the concurrency buys
+# nothing.
+_POOL_SIZE = 32
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 for _scheme in ("https://", "http://"):
     _SESSION.mount(_scheme, requests.adapters.HTTPAdapter(
-        pool_connections=8, pool_maxsize=8, max_retries=0))
+        pool_connections=_POOL_SIZE, pool_maxsize=_POOL_SIZE, max_retries=0))
 
 
 @dataclass(frozen=True)

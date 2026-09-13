@@ -7,7 +7,7 @@ Issue: https://github.com/AI-Degen-69/crypto-spread/issues/167
       (saves 10 HTTP calls / ~390 ms per tick)
 - [x] **T2** Skip the REST tape while the socket is authoritative — `scripts/collect_ticks.py`
       (saves up to ~970 ms per tick on a healthy socket)
-- [ ] **T3** Fan the slate out over a bounded thread pool — `scripts/collect_ticks.py`,
+- [x] **T3** Fan the slate out over a bounded thread pool — `scripts/collect_ticks.py`,
       `strategy/markets.py` (collapses the sequential ~269 ms × 10)
 - [ ] **T4** Publish the real cadence, retune `TICK_BUDGET_MS`, fix the docstring —
       `scripts/collect_ticks.py`

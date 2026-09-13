@@ -26,6 +26,8 @@ import random
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -58,6 +60,15 @@ TRADES_API = "https://data-api.polymarket.com/trades"
 
 POLL_INTERVAL = 1.0
 JITTER_SEC = 0.010
+
+# The slate is polled concurrently (issue #167): ten independent series cost
+# ~269ms each and adding them up put every round over TICK_BUDGET_MS. One
+# worker per series, created once for the process, never per tick.
+MAX_POLL_WORKERS = 10
+# Fan-out would otherwise fire the whole slate as a single burst, which is
+# exactly what the old per-request jitter existed to prevent (docstring D2/D4).
+# Worker i waits i * this before its first request, so the requests ramp.
+SERIES_STAGGER_SEC = 0.010
 SPREAD_OFFSET = 0.02
 TAPE_LIMIT = 200
 TICK_BUDGET_MS = 2000.0
@@ -87,8 +98,10 @@ WS_TOKEN_WARMUP = 5.0
 WS_AUTHORITY_HORIZON = 90.0
 
 # Per-cid state: { cid: {series, slug, start_ts, end_ts, up_token, down_token,
-#                         seen_tape, seen_ws, ws_levels, snap_count, label,
-#                         duration, mids, touch_pairs} }
+#                         seen_tape, seen_ws, ws_levels, ws_ready_at,
+#                         ws_last_print, snap_count, label, duration, mids,
+#                         touch_pairs} }
+# Mutated only on the main thread — the poll workers return values, never write.
 windows: dict[str, dict[str, Any]] = {}
 
 
@@ -125,10 +138,31 @@ def refresh_summary(out_dir: Path) -> None:
     write_json_atomic(out_dir / "oscillation_summary.json", compute_summary(rows))
 
 
+_poll_executor: Optional[ThreadPoolExecutor] = None
+
+
+def get_poll_executor() -> ThreadPoolExecutor:
+    """The one bounded pool the tick loop fans out over; built on first use."""
+    global _poll_executor
+    if _poll_executor is None:
+        _poll_executor = ThreadPoolExecutor(
+            max_workers=MAX_POLL_WORKERS, thread_name_prefix="collect-tick")
+    return _poll_executor
+
+
+def shutdown_poll_executor() -> None:
+    """Release the pool so a restarted collector starts from a clean one."""
+    global _poll_executor
+    if _poll_executor is not None:
+        _poll_executor.shutdown(wait=False)
+        _poll_executor = None
+
+
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 SESSION.mount("https://", requests.adapters.HTTPAdapter(
-    pool_connections=10, pool_maxsize=10, max_retries=0))
+    pool_connections=MAX_POLL_WORKERS, pool_maxsize=MAX_POLL_WORKERS * 2,
+    max_retries=0))
 SESSION.mount("http://", requests.adapters.HTTPAdapter(
     pool_connections=4, pool_maxsize=4, max_retries=0))
 
@@ -356,6 +390,86 @@ def prune_ws_levels(w: dict[str, Any], now: float) -> None:
         ws_levels.pop(key, None)
 
 
+@dataclass
+class SeriesFetch:
+    """What one worker thread brings back for one series. No shared state."""
+    series: str
+    duration: int
+    label: str
+    info: Optional[dict] = None
+    err: str = ""
+    up_book: dict = field(default_factory=dict)
+    down_book: dict = field(default_factory=dict)
+
+
+def _book_or_err(token_id: str, leg: str) -> dict:
+    """Fetch one book, turning any failure into an empty book carrying `err`.
+
+    Per-call isolation (Plan D2): one CLOB hiccup must not kill the collector.
+    An earlier version let ReadTimeout propagate to main() and exit the process
+    after four hours of work.
+    """
+    try:
+        return full_book(CLOB_HOST, token_id)
+    except Exception as e:
+        return {"bids": {}, "asks": {}, "best_bid": None, "best_ask": None,
+                "malformed": 0, "err": f"{leg}:{e}"}
+
+
+def fetch_series_books(series_slug: str, duration: int, label: str, now: float,
+                       stagger: float = 0.0) -> SeriesFetch:
+    """Resolve one series and fetch both of its books. Safe to run off-thread.
+
+    Touches no module-level collector state and writes no files, so the ten
+    series can run at once without a lock. `stagger` spreads the slate's first
+    requests instead of firing them as one burst (Plan D2/D4).
+    """
+    if stagger > 0.0:
+        time.sleep(stagger + random.uniform(0.0, JITTER_SEC))
+    try:
+        info, err = resolve_series_market(series_slug, now)
+    except Exception as e:
+        return SeriesFetch(series_slug, duration, label, None, f"gamma err {e}")
+    if not info:
+        return SeriesFetch(series_slug, duration, label, None, err or "no live")
+    return SeriesFetch(
+        series_slug, duration, label, info, "",
+        _book_or_err(info["up_token"], "up"),
+        _book_or_err(info["down_token"], "down"),
+    )
+
+
+def fetch_slate_books(now: float) -> list[SeriesFetch]:
+    """Fan the whole slate out; results come back in SERIES order."""
+    jobs = list(enumerate(SERIES))
+    return list(get_poll_executor().map(
+        lambda job: fetch_series_books(job[1][0], job[1][1], job[1][2], now,
+                                       job[0] * SERIES_STAGGER_SEC),
+        jobs,
+    ))
+
+
+def fetch_slate_tapes(jobs: list[tuple[str, dict, list[str]]]
+                      ) -> list[tuple[dict, str]]:
+    """REST-tape only the legs the socket could not vouch for, concurrently.
+
+    Each window owns its own `seen_tape` set, so no two workers share state.
+    """
+    def _one(job: tuple[str, dict, list[str]]) -> tuple[dict, str]:
+        """Fetch one window's tape, or nothing when every leg is covered."""
+        cid, w, missing = job
+        if not missing:
+            return {}, ""
+        try:
+            return recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT), ""
+        except Exception as e:
+            return {}, f"tape:{e}"
+
+    if not jobs:
+        return []
+    return list(get_poll_executor().map(_one, jobs))
+
+
 def poll_once(out_dir: Path, gzip: bool, stats: dict,
               ws_bridge: "Optional[CLOBStreamCollectorBridge]" = None,
               ) -> tuple[list[str], list[str]]:
@@ -366,7 +480,6 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     tick_start = time.perf_counter()
     closed: list[str] = []
     errs: list[str] = []
-    deadline = tick_start + 1.0  # target 1s cadence
     ws_connected = bool(ws_bridge is not None and getattr(ws_bridge, "is_connected", False))
     active_tokens: list[str] = []
 
@@ -383,11 +496,22 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                 w["ws_ready_at"] = {}
         stats["ws_reconnects"] = reconnects
 
-    for series_slug, duration, label in SERIES:
-        info, err = resolve_series_market(series_slug, now)
+    # Phase 1 — off-thread: resolve every series and fetch its two books. The
+    # ten series are independent, so ~269ms each sequentially became one round
+    # of roughly one series' latency (issue #167).
+    fetches = fetch_slate_books(now)
+
+    # Phase 2 — main thread, SERIES order: window upkeep and the socket tape.
+    # Every mutation of `windows` and `stats` and every file append lives on
+    # this thread, so the tick file stays ordered and needs no lock.
+    pending: list[tuple[SeriesFetch, str, dict, list[dict], list[str], str]] = []
+    for fetched in fetches:
+        series_slug, duration, label = fetched.series, fetched.duration, fetched.label
+        info = fetched.info
         if not info:
-            errs.append(f"{series_slug}:{err}")
+            errs.append(f"{series_slug}:{fetched.err}")
             continue
+        ub, db = fetched.up_book, fetched.down_book
         cid = info["conditionId"]
         if cid not in windows:
             windows[cid] = {
@@ -402,26 +526,6 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
             }
         w = windows[cid]
         active_tokens.extend([w["up_token"], w["down_token"]])
-
-        # Per-call isolation: one CLOB hiccup must not kill the collector
-        # (Plan D2 hardening — earlier version let ReadTimeout propagate
-        # to main() and exit the process after 4h of work).
-        try:
-            ub = full_book(CLOB_HOST, w["up_token"])
-            ub_err = ub.get("err")
-        except Exception as e:
-            ub = {"bids": {}, "asks": {}, "best_bid": None,
-                  "best_ask": None, "malformed": 0, "err": f"up:{e}"}
-            ub_err = ub["err"]
-        time.sleep(random.uniform(0.0, JITTER_SEC))
-        try:
-            db = full_book(CLOB_HOST, w["down_token"])
-            db_err = db.get("err")
-        except Exception as e:
-            db = {"bids": {}, "asks": {}, "best_bid": None,
-                  "best_ask": None, "malformed": 0, "err": f"down:{e}"}
-            db_err = db["err"]
-        time.sleep(random.uniform(0.0, JITTER_SEC))
 
         # Tape: the market socket sees every intra-second print, the 1-poll/s
         # REST tape sees ~1.4% of them. Socket first; REST only covers the
@@ -449,18 +553,30 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                 stats["tape_rest_skipped"] = stats.get("tape_rest_skipped", 0) + 1
                 continue
             missing.append(tok)
-        if missing:
-            try:
-                tape_map = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT)
-                ws_levels = w.get("ws_levels") or {}
-                for tok in missing:
-                    for p, s in tape_map.get(tok, {}).items():
-                        if f"{tok}:{float(p):.4f}" in ws_levels:
-                            continue  # already printed by the socket
-                        tape_list.append({"asset": tok, "price": p, "size": s})
-                        stats["tape_captured_rest"] = stats.get("tape_captured_rest", 0) + 1
-            except Exception as e:
-                tape_err = f"tape:{e}"
+        pending.append((fetched, cid, w, tape_list, missing, tape_err))
+
+    # Phase 3 — off-thread: only the legs the socket could not vouch for pay a
+    # REST round-trip, and those run concurrently too. On a healthy feed this
+    # list is usually empty and the round costs nothing.
+    tape_results = fetch_slate_tapes(
+        [(cid, w, missing) for _f, cid, w, _t, missing, _e in pending])
+
+    # Phase 4 — main thread, SERIES order: merge, assemble, write.
+    for (fetched, cid, w, tape_list, missing, tape_err), (tape_map, fetch_err) in zip(
+            pending, tape_results):
+        series_slug, duration, label = fetched.series, fetched.duration, fetched.label
+        info = fetched.info
+        ub, db = fetched.up_book, fetched.down_book
+        ub_err, db_err = ub.get("err"), db.get("err")
+        tape_err = tape_err or fetch_err
+        if missing and tape_map:
+            ws_levels = w.get("ws_levels") or {}
+            for tok in missing:
+                for p, s in tape_map.get(tok, {}).items():
+                    if f"{tok}:{float(p):.4f}" in ws_levels:
+                        continue  # already printed by the socket
+                    tape_list.append({"asset": tok, "price": p, "size": s})
+                    stats["tape_captured_rest"] = stats.get("tape_captured_rest", 0) + 1
 
         mid = compute_mid(ub)
         touch_pair = None
@@ -679,6 +795,7 @@ def main():
             update_manifest(out_dir, stats)
         finally:
             stop_ws_bridge(ws_bridge)
+            shutdown_poll_executor()
         print(
             f"once done · closed={len(closed)} errs={len(errs)} · "
             f"tape_empty_rate={stats.get('tape_empty_rate', 0.0):.1%} · "
@@ -721,6 +838,7 @@ def main():
         print("interrupted")
     finally:
         stop_ws_bridge(ws_bridge)
+        shutdown_poll_executor()
         update_manifest(out_dir, stats)
 
 
