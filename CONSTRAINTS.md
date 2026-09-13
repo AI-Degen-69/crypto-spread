@@ -20,8 +20,8 @@
 - **Exact-config mirror**: every `BacktestParams` field set from the shadow
   `final.json` params (§1 mapping in `tasks/plan.md`); any field that cannot
   be mirrored is disclosed in the verdict, never silently defaulted.
-- **Scoped honesty**: only the 57 in-coverage events are compared; the 9
-  pre-coverage events are reported separately, never folded into replay totals.
+- **Scoped honesty**: only the 55 in-coverage events are compared; the 11
+  pre-coverage/boundary events are reported separately, never folded into replay totals.
 - **Units**: cents↔USD normalization explicit in-artifact before any verdict.
 - **No new dependencies** (stdlib + existing stack only). New files limited to
   `scripts/replay_shadow_check.py` + `replay_comparison/` artifacts.

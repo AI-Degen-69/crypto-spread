@@ -77,31 +77,49 @@ def build_params(fill_model: str = "tape", gates_on: bool = True) -> BacktestPar
     )
 
 
-def assert_config_mirror(params: BacktestParams, fill_model: str, gates_on: bool) -> None:
-    """Fail fast if any mirrored knob drifts from the shadow config."""
-    checks = {
-        "offset": 0.03,
-        "queue_gate": 0.0,
-        "pair_cost_gate": 0.98,
-        "exit_reversal": 0.5,
-        "quote_shares": SHARES,
-        "fill_model": fill_model,
-        "merge_gas_usd": 0.0,
-        "max_start_delay_sec": 0.0,
-        "entry_timeout_pct": 1.0,
-        "max_start_elapsed_pct": 0.1,
-        "reentry_drift_band": 0.015,
-        "min_requote_remaining_sec": 300.0,
-        "reentry_min_remaining_pct": 0.3,
-        "max_reentries_per_window": 0,
-        "entry_delay_sec": 60.0 if gates_on else 0.0,
-        "entry_band": 0.04 if gates_on else 0.0,
-    }
-    for field, want in checks.items():
+def load_shadow_recorded(path: Path | None = None) -> dict:
+    """Read the shadow run's recorded params (data/final.json).
+
+    Single source of truth for the config mirror: expected values are derived
+    from what the shadow actually ran, never re-typed. `path` is injectable so
+    tests stay hermetic (runs/ is gitignored and absent on fresh clones).
+    """
+    src = path or (SHADOW_DIR / "data" / "final.json")
+    raw = json.loads(src.read_text(encoding="utf-8"))
+    return raw["params"]
+
+
+def assert_config_mirror(params: BacktestParams, recorded: dict,
+                         fill_model: str, gates_on: bool) -> None:
+    """Fail fast if any mirrored knob drifts from the recorded shadow config.
+
+    Field renames recorded -> engine: max_pair_cost -> pair_cost_gate,
+    shares -> quote_shares. fill_model/queue_gate/merge_gas_usd have no recorded
+    equivalent (paper fills on touch; replay-side documented choices).
+    """
+    pairs = [
+        ("offset", recorded["offset"]),
+        ("pair_cost_gate", recorded["max_pair_cost"]),
+        ("exit_reversal", recorded["exit_reversal"]),
+        ("quote_shares", recorded["shares"]),
+        ("entry_timeout_pct", recorded["entry_timeout_pct"]),
+        ("max_start_elapsed_pct", recorded["max_start_elapsed_pct"]),
+        ("reentry_drift_band", recorded["reentry_drift_band"]),
+        ("min_requote_remaining_sec", recorded["min_requote_remaining_sec"]),
+        ("reentry_min_remaining_pct", recorded["reentry_min_remaining_pct"]),
+        ("max_reentries_per_window", recorded["max_reentries_per_window"]),
+        ("entry_delay_sec", recorded["entry_delay_sec"] if gates_on else 0.0),
+        ("entry_band", recorded["entry_band"] if gates_on else 0.0),
+    ]
+    for field, want in pairs:
         got = getattr(params, field)
         assert got == want, f"config mirror broken: {field}={got!r} want {want!r}"
-    assert params.exit_thresh_by_slug.get("default_5m") == 0.05
-    assert params.exit_thresh_by_slug.get("default_15m") == 0.05
+    assert params.fill_model == fill_model, "fill leg mismatch"
+    assert params.queue_gate == 0.0, "queue gate must stay off (paper has none)"
+    assert params.merge_gas_usd == 0.0, "merge gas must stay 0 (gasless merges)"
+    assert recorded["exit_thresh"] == 0.05 and recorded["exit_thresh_naked"] == 0.05
+    for key, want in (("default_5m", 0.05), ("default_15m", 0.05)):
+        assert params.exit_thresh_by_slug.get(key) == want, f"exit mirror gap: {key}"
     for slug in UNIVERSE:
         assert params.exit_thresh_by_slug.get(slug) == 0.05, f"exit mirror gap: {slug}"
 
@@ -201,16 +219,39 @@ def summarize(params: BacktestParams, groups: list[tuple[str, list[dict]]]) -> d
     }
 
 
+def require_tick_verification() -> dict:
+    """Enforce the Task-1 integrity gate via its file-bound artifact.
+
+    The verifier scan is expensive (700MB), so main() validates the recorded
+    report instead of re-scanning: same ticks file, no FAIL status, zero
+    corrupt lines. Raises with the exact remediation command otherwise.
+    """
+    path = OUT_DIR / "verify_ticks.json"
+    hint = ("run: python -m scripts.verify_tick_data "
+            "run/ticks/ticks_2026-09-12.jsonl --json > " + str(path))
+    if not path.exists():
+        raise RuntimeError(f"missing tick verification artifact {path}; {hint}")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("file") != TICKS_FILE.name:
+        raise RuntimeError(f"verification artifact is for {report.get('file')}, "
+                           f"not {TICKS_FILE.name}; {hint}")
+    if report.get("status") == "FAIL" or report.get("corrupt_lines"):
+        raise RuntimeError(f"tick data failed verification ({path}); refusing replay")
+    return report
+
+
 def main() -> None:
     """Run the scoped replay legs and write replay_totals.json."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    verification = require_tick_verification()
+    recorded = load_shadow_recorded()
     snaps = load_scoped_snaps()
     groups, excluded = select_groups(snaps)
     legs: dict[str, dict] = {}
     for fill_model, gates_on in (("tape", True), ("book", True),
                                  ("tape", False), ("book", False)):
         params = build_params(fill_model, gates_on)
-        assert_config_mirror(params, fill_model, gates_on)
+        assert_config_mirror(params, recorded, fill_model, gates_on)
         totals = summarize(params, groups)
         totals["params_hash"] = params.params_hash()
         legs[f"{fill_model}_{'gates' if gates_on else 'nogates'}"] = totals
@@ -218,11 +259,14 @@ def main() -> None:
               f"windows={totals['n_included_windows']} pairs={totals['pairs']} "
               f"settles={totals['settles']} exits={totals['exits']} "
               f"gross_usd={totals['replay_gross_usd']}")
+    if sum(t["n_events"] for t in legs.values()) == 0:
+        raise RuntimeError("all replay legs empty — data flow broken, refusing artifact")
     out_payload = {
         "verdict_leg": "tape_gates",
         "legs": legs,
         "scope": {
             "ticks_file": TICKS_FILE.name,
+            "tick_verification_status": verification.get("status"),
             "universe": list(UNIVERSE),
             "t0_utc": "2026-09-12T00:00:00Z",
             "t1_utc": "2026-09-12T09:10:58Z",
