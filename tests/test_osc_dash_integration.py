@@ -2015,8 +2015,25 @@ def test_run_backtest_aborts_previous_run():
     assert "window._btAbort !== ctl" in html
 
 
-def test_api_rebuild_windows(monkeypatch):
+def _no_external_collector(monkeypatch, tmp_path):
+    """Point the external-collector probe at an empty directory.
+
+    `/api/rebuild` refuses with 409 while a collector is writing
+    `run/ticks/`, and the probe reads that real path. So these tests passed or
+    failed depending on whether a collector happened to be running on the
+    machine — and, with one running, on where in its ~10-20s manifest write
+    gap the assertion landed. Measured on master: 2 of 6 consecutive runs
+    failed. Give the probe a directory with no manifest instead.
+    """
+    empty = tmp_path / "no_ticks"
+    empty.mkdir()
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", empty)
+
+
+def test_api_rebuild_windows(monkeypatch, tmp_path):
     """Verify rebuild endpoint runs the rebuild script and echoes ok/output."""
+    _no_external_collector(monkeypatch, tmp_path)
+
     def _mock_run(*args, **kwargs):
         class DummyResult:
             returncode = 0
@@ -2032,9 +2049,10 @@ def test_api_rebuild_windows(monkeypatch):
     assert "Wrote 10 windows" in data.get("output")
 
 
-def test_api_rebuild_windows_failure_and_busy(monkeypatch):
+def test_api_rebuild_windows_failure_and_busy(monkeypatch, tmp_path):
     """Verify rebuild surfaces subprocess failure output and serializes runs."""
     import server.osc_dash as osc_dash_mod
+    _no_external_collector(monkeypatch, tmp_path)
 
     def _mock_fail(*args, **kwargs):
         class DummyResult:
@@ -2127,3 +2145,74 @@ def test_api_oscillation_provenance_fields(tmp_path, monkeypatch):
     data2 = client.get("/api/oscillation").json()
     assert data2["total_windows"] == 1
     assert isinstance(data2["source_mtime"], float)
+
+
+# ---------------------------------------------------------------------------
+# Collector badge: staleness threshold vs the collector's real write cadence
+# ---------------------------------------------------------------------------
+
+def test_external_collector_threshold_covers_the_real_manifest_cadence():
+    """The dashboard must not call a healthy collector dead between writes.
+
+    `scripts/collect_ticks.py` writes the manifest only when
+    `int(time.time()) % 10 == 0`, and a ~1.36s round usually steps over that
+    second entirely — so real write gaps run to ~20s, not 10s. A threshold at
+    or below that gap flickers the badge AND re-opens the Start button, which
+    is what stops a second writer from corrupting the same daily tick file.
+    """
+    step = 1.36                      # observed round + POLL_INTERVAL
+    t, writes = 1000.0, []
+    for _ in range(1500):
+        if int(t) % 10 == 0:
+            writes.append(t)
+        t += step
+    worst_gap = max(writes[i + 1] - writes[i] for i in range(len(writes) - 1))
+    assert worst_gap > 10.0, "cadence model no longer reproduces the skipped-second gap"
+    assert osc_dash.EXTERNAL_COLLECTOR_STALE_SEC > worst_gap, (
+        f"threshold {osc_dash.EXTERNAL_COLLECTOR_STALE_SEC}s is inside the "
+        f"collector's own {worst_gap:.1f}s write gap — the badge will flicker "
+        "and Start will unlock mid-capture")
+
+
+def test_live_external_collector_is_detected_across_a_write_gap(tmp_path, monkeypatch):
+    """A manifest written 20s ago is a live collector, not a dead one."""
+    ticks = tmp_path / "ticks"
+    ticks.mkdir()
+    now = 1_760_000_000.0
+    (ticks / "manifest.json").write_text(json.dumps({"ts": now - 20.0}), encoding="utf-8")
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", ticks)
+    ext = osc_dash._detect_external_collector(now=now)
+    assert ext["live"] is True
+    assert ext["manifest_age_sec"] == pytest.approx(20.0)
+
+
+def test_genuinely_dead_collector_is_still_reported_dead(tmp_path, monkeypatch):
+    """Raising the threshold must not make a stopped writer look alive."""
+    ticks = tmp_path / "ticks"
+    ticks.mkdir()
+    now = 1_760_000_000.0
+    (ticks / "manifest.json").write_text(json.dumps({"ts": now - 120.0}), encoding="utf-8")
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", ticks)
+    assert osc_dash._detect_external_collector(now=now)["live"] is False
+
+
+def test_collector_badge_reads_as_healthy_not_as_a_warning():
+    """Amber read as danger for what is the normal way to run a long capture."""
+    html = client.get("/").text
+    assert "COLLECTING" in html
+    # The old wording is gone: it put process ownership in the badge text.
+    # The old wording is gone: it put process ownership in the badge text and
+    # painted a normal standalone capture amber, which reads as a warning.
+    assert "🟡 External live" not in html
+    assert "(standalone writer — Start blocked)" not in html
+    assert "⚪ Paused" not in html
+    assert "Collector: 🟡 Start blocked" not in html
+
+
+def test_start_button_is_locked_not_merely_relabelled():
+    """A disabled control needs a style, or it just looks broken on hover."""
+    html = client.get("/").text
+    assert ".btn-locked{" in html
+    assert "cursor:not-allowed" in html
+    assert "'btn btn-locked'" in html
+    assert "disabled = (src === 'external')" in html

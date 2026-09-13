@@ -152,7 +152,17 @@ _rebuild_lock = threading.Lock()
 MAX_TEST_ORDER_SHARES = 10.0
 # Manifest `ts` age below which a writer that is NOT our dashboard child
 # counts as a live external standalone collector (Issue #151).
-EXTERNAL_COLLECTOR_STALE_SEC = 5.0
+#
+# The collector only writes the manifest when `int(time.time()) % 10 == 0`
+# (`scripts/collect_ticks.py`), and a ~1.36s round usually steps over that
+# second entirely — observed write gaps are 9.5s, 10.9s and 20.4s. A 5s
+# threshold therefore called a healthy collector dead about half the time,
+# which flickered the badge and, worse, re-enabled the Start button: the 409
+# that refuses a second writer on the same daily tick file is gated on this
+# same check, so the window was real, not cosmetic. 30s clears the worst
+# observed gap with margin while still noticing a genuinely dead writer
+# within one window.
+EXTERNAL_COLLECTOR_STALE_SEC = 30.0
 
 
 def _detect_external_collector(now: float | None = None) -> dict[str, Any]:
@@ -2004,6 +2014,13 @@ textarea:focus-visible,
 .btn-primary{background:var(--up);color:#0a0d12;border:none;font-weight:700;position:relative;transition:all .2s ease}
 .btn-primary:hover{background:#2bb5a2}
 .btn-primary:disabled{opacity:0.75;cursor:wait}
+/* A locked control is not a broken one: it stays legible, shows a
+   not-allowed cursor, and does not invite a hover. Used when a
+   standalone collector owns run/ticks/ and Start would spawn a
+   second writer on the same daily file. */
+.btn-locked{background:rgba(51,201,181,0.10);color:var(--up);border:1px solid rgba(51,201,181,0.35);font-weight:700}
+.btn:disabled,.btn-locked:disabled{cursor:not-allowed;opacity:1}
+.btn:disabled:hover,.btn-locked:disabled:hover{background:rgba(51,201,181,0.10);border-color:rgba(51,201,181,0.35)}
 .btn-primary.thinking{background:#2bb5a2;box-shadow:0 0 12px rgba(51,201,181,0.45);animation:pulse-glow 1.4s infinite alternate;pointer-events:none}
 @keyframes pulse-glow{0%{box-shadow:0 0 4px rgba(51,201,181,0.3);transform:scale(0.995)}100%{box-shadow:0 0 16px rgba(51,201,181,0.7);transform:scale(1.015)}}
 .spinner{width:12px;height:12px;border:2px solid rgba(10,13,18,0.25);border-top-color:#0a0d12;border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:middle;margin-left:4px}
@@ -3284,18 +3301,36 @@ async function refreshCollectorStatus(){
     const st = await res.json();
     isCollectorActive = st.running;
     const src = st.source || (st.running ? 'child' : 'none');
-    if(src === 'external'){
-      $('collectorBadge').textContent = `Collector: 🟡 External live · ${(st.total_ticks_collected||0).toLocaleString()} ticks today (standalone writer — Start blocked)`;
-      $('collectorBadge').style.color = 'var(--warn, #e8b23f)';
-      $('btnToggleCollector').textContent = 'Start blocked (external live)';
-      $('btnToggleCollector').className = 'btn';
-      $('btnToggleCollector').disabled = true;
+    const cb = $('collectorBadge');
+    const ticks = (st.total_ticks_collected||0).toLocaleString();
+    // A standalone collector is the normal way to run a long capture, so it
+    // reads as healthy green like any other running writer. Amber here used to
+    // suggest something was wrong; the only thing that differs is who owns the
+    // process, which belongs in the tooltip, not in the badge text.
+    if(src === 'external' || st.running){
+      cb.textContent = `● COLLECTING · ${ticks} ticks`;
+      cb.style.color = 'var(--up)';
+      cb.style.borderColor = 'rgba(51,201,181,0.45)';
+      cb.style.background = 'rgba(51,201,181,0.12)';
+      cb.title = src === 'external'
+        ? `Standalone collector is writing run/ticks/ (${ticks} ticks today). Start is locked so a second writer cannot corrupt the same daily file — stop it in its own terminal.`
+        : `Dashboard-owned collector is running (${ticks} ticks today).`;
+      $('btnToggleCollector').textContent = src === 'external' ? '🔒 Collecting' : 'Stop Polling';
+      $('btnToggleCollector').className = src === 'external' ? 'btn btn-locked' : 'btn btn-danger';
+      $('btnToggleCollector').disabled = (src === 'external');
+      $('btnToggleCollector').title = src === 'external'
+        ? 'A standalone collector already owns run/ticks/ — stop it in its own terminal.'
+        : 'Stop the dashboard-owned collector.';
     } else {
-      $('collectorBadge').textContent = `Collector: ${st.running ? '🟢 Running (1s)' : '⚪ Paused'} · ${(st.total_ticks_collected||0).toLocaleString()} ticks today`;
-      $('collectorBadge').style.color = st.running ? 'var(--up)' : 'var(--dim)';
-      $('btnToggleCollector').textContent = st.running ? 'Stop Polling' : 'Start Polling (1s)';
-      $('btnToggleCollector').className = st.running ? 'btn btn-danger' : 'btn';
+      cb.textContent = `○ IDLE · ${ticks} ticks`;
+      cb.style.color = 'var(--dim)';
+      cb.style.borderColor = 'var(--line)';
+      cb.style.background = 'var(--panel2)';
+      cb.title = 'No collector is writing run/ticks/.';
+      $('btnToggleCollector').textContent = 'Start Polling (1s)';
+      $('btnToggleCollector').className = 'btn';
       $('btnToggleCollector').disabled = false;
+      $('btnToggleCollector').title = 'Capture 1-second live ticks and tape into run/ticks/.';
     }
 
     const tb = $('tapeBadge');
@@ -3324,9 +3359,11 @@ async function toggleCollector(){
   const endpoint = isCollectorActive ? '/api/collector/stop' : '/api/collector/start';
   const res = await fetch(endpoint, {method:'POST'});
   if(res.status === 409){
-    let reason = 'external collector live — Start blocked';
+    // A 409 means a standalone writer beat us to run/ticks/. Let the refresh
+    // below paint the real state rather than writing a competing label here;
+    // only the reason is worth keeping, and it belongs in the tooltip.
+    let reason = 'A standalone collector already owns run/ticks/.';
     try{ reason = (await res.json()).error || reason; }catch{}
-    $('collectorBadge').textContent = 'Collector: 🟡 Start blocked (external live)';
     $('collectorBadge').title = reason;
   }
   refreshCollectorStatus();
