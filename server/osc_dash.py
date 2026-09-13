@@ -3608,6 +3608,9 @@ function toggleBtSection(btn, bodyId){
 })();
 
 async function runBacktest(fileOverride){
+  if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
+  const ctl = new AbortController();
+  window._btAbort = ctl;
   setBacktestLoadingState(true);
   try {
     const getVal = (id, def) => {
@@ -3645,8 +3648,9 @@ async function runBacktest(fileOverride){
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
-    const res = await fetch(url);
+    const res = await fetch(url, {signal: ctl.signal});
     const data = await res.json();
+    if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
 
     $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${fileVal ? ' · [' + fileVal + ']' : ''}`;
     const ov = data.overall || {};
@@ -3753,9 +3757,10 @@ async function runBacktest(fileOverride){
 
     renderBacktestTradesPage();
   } catch(err) {
+    if (err && err.name === 'AbortError') return;
     console.error('Error running backtest:', err);
   } finally {
-    setBacktestLoadingState(false);
+    if (window._btAbort === ctl) { window._btAbort = null; setBacktestLoadingState(false); }
   }
 }
 

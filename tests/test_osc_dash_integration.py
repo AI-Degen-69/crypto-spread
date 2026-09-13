@@ -2011,6 +2011,17 @@ def test_backtest_delay_band_ui_elements():
     assert "applyWinningConfig" in html
 
 
+def test_run_backtest_aborts_previous_run():
+    """runBacktest must abort the in-flight request before starting a new one."""
+    html = client.get("/").text
+    assert "window._btAbort" in html
+    assert "new AbortController()" in html
+    assert "{signal: ctl.signal}" in html
+    assert "err.name === 'AbortError'" in html
+    assert "window._btAbort === ctl" in html
+    assert "window._btAbort !== ctl" in html
+
+
 def test_api_rebuild_windows(monkeypatch):
     """Verify rebuild endpoint runs the rebuild script and echoes ok/output."""
     def _mock_run(*args, **kwargs):
