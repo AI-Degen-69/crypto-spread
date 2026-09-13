@@ -506,3 +506,66 @@ def test_workers_are_staggered_to_keep_the_anti_burst_property(slate, tmp_path):
 
     assert len(starts) == 3
     assert max(starts) - min(starts) >= slate.SERIES_STAGGER_SEC
+
+
+# --- Issue #167 T4: cadence telemetry and a truthful budget ---------------
+
+def test_a_healthy_round_reports_no_slow_tick(slate, tmp_path):
+    """slow_tick must be silent on a round that is comfortably in budget."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    stats: dict = {}
+    slate.poll_once(tmp_path, False, stats)          # warm-up round
+    _closed, errs = slate.poll_once(tmp_path, False, stats)
+
+    assert [e for e in errs if e.startswith("slow_tick")] == []
+
+
+def test_a_genuinely_slow_round_still_reports_slow_tick(slate, tmp_path,
+                                                        monkeypatch):
+    """The budget check must keep its teeth: a real degradation is reported."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    stats: dict = {}
+    slate.poll_once(tmp_path, False, stats)          # warm-up round
+
+    monkeypatch.setattr(slate, "TICK_BUDGET_MS", 0.0)
+    _closed, errs = slate.poll_once(tmp_path, False, stats)
+
+    assert any(e.startswith("slow_tick:") for e in errs)
+
+
+def test_the_opening_round_is_recorded_but_not_budgeted(slate, tmp_path,
+                                                        monkeypatch):
+    """The first round pays for a cold cache and pool; judging it is noise."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    monkeypatch.setattr(slate, "TICK_BUDGET_MS", 0.0)
+    stats: dict = {}
+    _closed, errs = slate.poll_once(tmp_path, False, stats)
+
+    assert [e for e in errs if e.startswith("slow_tick")] == []
+    assert stats["tick_ms_first"] > 0.0
+    assert "tick_ms_max" not in stats
+
+
+def test_manifest_publishes_the_real_sampling_interval(slate, tmp_path):
+    """Consumers of run/ticks must be able to read the true granularity."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    stats: dict = {}
+    slate.poll_once(tmp_path, False, stats)
+    slate.poll_once(tmp_path, False, stats)
+    slate.update_manifest(tmp_path, stats)
+
+    data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert isinstance(data["tick_ms_last"], float)
+    assert isinstance(data["tick_ms_max"], float)
+    assert isinstance(data["tick_ms_first"], float)
+    # Round time plus the sleep between rounds is what a reader actually gets.
+    assert data["sampling_interval_s"] == pytest.approx(
+        data["tick_ms_last"] / 1000.0 + slate.POLL_INTERVAL, abs=0.02)

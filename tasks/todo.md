@@ -9,7 +9,7 @@ Issue: https://github.com/AI-Degen-69/crypto-spread/issues/167
       (saves up to ~970 ms per tick on a healthy socket)
 - [x] **T3** Fan the slate out over a bounded thread pool — `scripts/collect_ticks.py`,
       `strategy/markets.py` (collapses the sequential ~269 ms × 10)
-- [ ] **T4** Publish the real cadence, retune `TICK_BUDGET_MS`, fix the docstring —
+- [x] **T4** Publish the real cadence, retune `TICK_BUDGET_MS`, fix the docstring —
       `scripts/collect_ticks.py`
 - [ ] **T5** Live `--once` run, `verify_tick_data` pass, re-run the scaling benchmark,
       full suite

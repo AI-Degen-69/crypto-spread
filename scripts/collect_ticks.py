@@ -1,13 +1,26 @@
 """Full-depth tick collector for 5m/15m SPREAD-2 replay.
 
-Fork of `scripts/measure_5m_oscillation.py:1-305`. Same 1-second poll cadence
-and gamma discovery, but every snapshot persists the complete UP and DOWN
-order books plus the trade-tape delta. Output is replay-grade jsonl that
-`backtest.engine.replay` consumes offline.
+Fork of `scripts/measure_5m_oscillation.py:1-305`. Same gamma discovery, but
+every snapshot persists the complete UP and DOWN order books plus the
+trade-tape delta. Output is replay-grade jsonl that `backtest.engine.replay`
+consumes offline.
+
+Cadence — read this before treating the output as a 1-second series (#167).
+A round is one pass over the whole slate, and the collector then sleeps
+POLL_INTERVAL, so the real gap between snapshots is round + POLL_INTERVAL.
+On this hardware a warm round measures ~420ms, i.e. ~1.4s between snapshots;
+it was ~2.7s (so ~3.8s between snapshots) before the slate was fanned out.
+The live figure is published every tick as `sampling_interval_s` in
+manifest.json — use that, not POLL_INTERVAL, when reasoning about granularity.
+The opening round is several times slower (empty gamma cache, cold TLS pool,
+socket still connecting) and is reported as `tick_ms_first` rather than
+charged against TICK_BUDGET_MS.
 
 Per-series failure is isolated (D2, D4):
-- 0-80ms per-request jitter prevents synchronized 30-rps bursts that
-  trigger venue 429s at window boundaries.
+- The slate is fetched concurrently over a bounded pool, with a per-worker
+  start stagger (SERIES_STAGGER_SEC) so the round ramps instead of firing as
+  one synchronized burst — that burst is what triggers venue 429s at window
+  boundaries.
 - Per-cid tape dedup set is dropped when the window closes — bounded memory.
 - `err` field on a snap means "this series failed this second", other 9
   series still write normally.
@@ -71,7 +84,12 @@ MAX_POLL_WORKERS = 10
 SERIES_STAGGER_SEC = 0.010
 SPREAD_OFFSET = 0.02
 TAPE_LIMIT = 200
-TICK_BUDGET_MS = 2000.0
+# Measured warm rounds after #167: 392 / 420 / 439 / 424 / 448 / 345 / 446 ms.
+# 1500ms is ~3x that ceiling — loose enough that ordinary venue latency is not
+# reported as a fault, tight enough that losing the fan-out (~2.7s) trips it.
+# Lowered from 2000ms, which the pre-#167 round exceeded on literally every
+# tick and so reported nothing at all.
+TICK_BUDGET_MS = 1500.0
 
 # Cross-source tape dedup (issue #165). The socket prints a trade the instant it
 # happens; the REST tape reports the same trade for as long as it stays in the
@@ -630,8 +648,22 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
             errs.append(f"ws_sync:{e}")
 
     tick_ms = (time.perf_counter() - tick_start) * 1000.0
-    if tick_ms > TICK_BUDGET_MS:
-        errs.append(f"slow_tick:{tick_ms:.0f}ms")
+    stats["tick_ms_last"] = round(tick_ms, 1)
+    # What a reader of run/ticks/*.jsonl actually gets between snapshots. It is
+    # published because it is not POLL_INTERVAL and never was: replay, the
+    # oscillation summary and queue telemetry all consume this series.
+    stats["sampling_interval_s"] = round(tick_ms / 1000.0 + POLL_INTERVAL, 2)
+    if "tick_ms_first" not in stats:
+        # The opening round pays for an empty gamma cache, a cold TLS pool and
+        # a socket that has not finished connecting — several times the steady
+        # cost. Budgeting it would fire slow_tick on every `--once` run, which
+        # is the exact false positive issue #167 set out to remove, so it is
+        # recorded for the operator rather than judged.
+        stats["tick_ms_first"] = round(tick_ms, 1)
+    else:
+        stats["tick_ms_max"] = round(max(tick_ms, stats.get("tick_ms_max", 0.0)), 1)
+        if tick_ms > TICK_BUDGET_MS:
+            errs.append(f"slow_tick:{tick_ms:.0f}ms")
 
     closed_now = 0
     run_dir = run_dir_for(out_dir)
@@ -781,6 +813,9 @@ def main():
         "tape_captured_rest": 0,
         "tape_rest_skipped": 0,
         "ws_restarts": 0,
+        "tick_ms_last": 0.0,
+        "tick_ms_max": 0.0,
+        "sampling_interval_s": 0.0,
     }
 
     ws_bridge = start_ws_bridge(disabled=args.no_ws)
@@ -798,6 +833,8 @@ def main():
             shutdown_poll_executor()
         print(
             f"once done · closed={len(closed)} errs={len(errs)} · "
+            f"round={stats.get('tick_ms_last', 0.0):.0f}ms "
+            f"(cold start; warm rounds are several times faster) · "
             f"tape_empty_rate={stats.get('tape_empty_rate', 0.0):.1%} · "
             f"ws_trades={stats.get('tape_captured_ws', 0)}"
         )

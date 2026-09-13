@@ -101,7 +101,7 @@ a healthy socket is most legs most seconds.
 
 ---
 
-## T4 — Tell the truth about the cadence `[Performance/Docs]`
+## T4 — Tell the truth about the cadence `[Performance/Docs]` — [x] DONE
 
 **Files:** `scripts/collect_ticks.py`, `tests/test_collect_ticks_smoke.py`
 
