@@ -40,7 +40,7 @@ wraps it with the cache so the raw fetcher stays trivially testable.
 
 ---
 
-## T2 — Gate the REST tape on socket authority `[Performance/Backend]`
+## T2 — Gate the REST tape on socket authority `[Performance/Backend]` — [x] DONE
 
 **Files:** `scripts/collect_ticks.py`, `tests/test_clob_ws_collector.py`
 

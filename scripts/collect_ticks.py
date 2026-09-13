@@ -70,6 +70,22 @@ TICK_BUDGET_MS = 2000.0
 # printed — the conservative direction, and fill detection is presence-based.
 WS_REST_DEDUP_TTL = 60.0
 
+# When the socket is authoritative for a leg, the REST tape call is pure latency
+# (~97ms per series per tick) spent to confirm what the socket already reported.
+# "Authoritative" is deliberately conservative and needs all three of:
+#   - the bridge reports connected (the #165 PONG watchdog already drops a
+#     half-open socket, so this is a real liveness signal, not a hopeful one);
+#   - the token has been continuously subscribed for WS_TOKEN_WARMUP, which is
+#     what makes silence mean "no trades" rather than "not listening yet" —
+#     a new window's tokens only join the subscription at the END of the tick
+#     that opened it, and a reconnect restarts this clock because prints during
+#     the gap are simply gone;
+#   - the socket has printed for that token within WS_AUTHORITY_HORIZON, so a
+#     subscription that breaks without dropping the connection still gets
+#     cross-checked against REST instead of silently starving the tape.
+WS_TOKEN_WARMUP = 5.0
+WS_AUTHORITY_HORIZON = 90.0
+
 # Per-cid state: { cid: {series, slug, start_ts, end_ts, up_token, down_token,
 #                         seen_tape, seen_ws, ws_levels, snap_count, label,
 #                         duration, mids, touch_pairs} }
@@ -295,6 +311,7 @@ def drain_ws_tape(ws_bridge: "CLOBStreamCollectorBridge", w: dict[str, Any],
     """
     seen_ws: set = w.setdefault("seen_ws", set())
     ws_levels: dict = w.setdefault("ws_levels", {})
+    last_print: dict = w.setdefault("ws_last_print", {})
     rows: list[dict] = []
     for tok in (w["up_token"], w["down_token"]):
         for t in ws_bridge.drain_trades_for_token(tok) or []:
@@ -308,8 +325,27 @@ def drain_ws_tape(ws_bridge: "CLOBStreamCollectorBridge", w: dict[str, Any],
                 continue
             seen_ws.add(sig)
             ws_levels[f"{tok}:{price:.4f}"] = now
+            last_print[tok] = now
             rows.append({"asset": tok, "price": price, "size": size})
     return rows
+
+
+def ws_leg_authoritative(w: dict[str, Any], token: str, now: float,
+                         ws_connected: bool) -> bool:
+    """True when the socket alone can be trusted for this leg's tape this tick.
+
+    See WS_TOKEN_WARMUP / WS_AUTHORITY_HORIZON for why all three conditions are
+    required. False is always the safe answer: it only costs one REST call.
+    """
+    if not ws_connected:
+        return False
+    ready_at = (w.get("ws_ready_at") or {}).get(token)
+    if ready_at is None or (now - ready_at) < WS_TOKEN_WARMUP:
+        return False
+    last_print = (w.get("ws_last_print") or {}).get(token)
+    if last_print is None or (now - last_print) > WS_AUTHORITY_HORIZON:
+        return False
+    return True
 
 
 def prune_ws_levels(w: dict[str, Any], now: float) -> None:
@@ -334,6 +370,19 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     ws_connected = bool(ws_bridge is not None and getattr(ws_bridge, "is_connected", False))
     active_tokens: list[str] = []
 
+    # A reconnect means the subscription was rebuilt and any print during the
+    # gap is gone, so every token has to earn its warm-up again before its
+    # silence can be read as "no trades".
+    if ws_bridge is not None:
+        try:
+            reconnects = ws_bridge.get_status().get("reconnects", 0)
+        except Exception:
+            reconnects = stats.get("ws_reconnects", 0)
+        if reconnects != stats.get("ws_reconnects", 0):
+            for w in windows.values():
+                w["ws_ready_at"] = {}
+        stats["ws_reconnects"] = reconnects
+
     for series_slug, duration, label in SERIES:
         info, err = resolve_series_market(series_slug, now)
         if not info:
@@ -346,6 +395,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                 "start_ts": info["start_ts"], "end_ts": info["end_ts"],
                 "up_token": info["up_token"], "down_token": info["down_token"],
                 "seen_tape": set(), "seen_ws": set(), "ws_levels": {},
+                "ws_ready_at": {}, "ws_last_print": {},
                 "snap_count": 0,
                 "label": label, "duration": duration,
                 "mids": [], "touch_pairs": [],
@@ -386,9 +436,19 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
             except Exception as e:
                 tape_err = f"ws_tape:{e}"
         # Fall back per token, not per snapshot: one leg printing on the socket
-        # must not suppress the other leg's REST tape for that second.
+        # must not suppress the other leg's REST tape for that second. A leg the
+        # socket is authoritative for skips the call entirely — on a healthy feed
+        # most legs have no trades most seconds, so that REST round-trip was
+        # latency spent to be told nothing happened.
         streamed = {t["asset"] for t in tape_list}
-        missing = [t for t in (w["up_token"], w["down_token"]) if t not in streamed]
+        missing = []
+        for tok in (w["up_token"], w["down_token"]):
+            if tok in streamed:
+                continue
+            if ws_leg_authoritative(w, tok, now, ws_connected):
+                stats["tape_rest_skipped"] = stats.get("tape_rest_skipped", 0) + 1
+                continue
+            missing.append(tok)
         if missing:
             try:
                 tape_map = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT)
@@ -444,7 +504,12 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     if ws_bridge is not None:
         try:
             ws_bridge.update_subscribed_tokens(sorted(set(active_tokens)))
-            stats["ws_reconnects"] = ws_bridge.get_status().get("reconnects", 0)
+            # Start the warm-up clock only once a token is actually subscribed:
+            # a window opened this tick was not being listened to during it.
+            for w in windows.values():
+                ready = w.setdefault("ws_ready_at", {})
+                for tok in (w["up_token"], w["down_token"]):
+                    ready.setdefault(tok, now)
         except Exception as e:
             errs.append(f"ws_sync:{e}")
 
@@ -598,6 +663,7 @@ def main():
         "ws_reconnects": 0,
         "tape_captured_ws": 0,
         "tape_captured_rest": 0,
+        "tape_rest_skipped": 0,
         "ws_restarts": 0,
     }
 
