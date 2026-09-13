@@ -89,6 +89,152 @@ def test_live_trader_pair_merge_execution():
     assert engine.trades[0].action == "PAIR_MERGE"
 
 
+def test_ws_book_update_not_regressed_by_stale_rest_poll():
+    """Issue #171: a REST poll must never overwrite strictly newer WS data.
+
+    Drives `on_book_update` (the WS writer) first, establishing a fresh book
+    and a `mid` computed from it. Then drives `_update_market_strategy` (the
+    REST-poll writer) with an older/stale-looking snapshot while the WS book
+    is still fresh (within `ws_book_max_age_sec`, socket connected). The
+    resulting `mid` must still reflect the WS data -- it must never regress
+    to the staler REST value racing in behind it.
+    """
+    engine = LiveTraderEngine()
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    now = time.time()
+
+    fake_market = LiveMarket(
+        condition_id="0xdef456",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+
+    # Socket reports itself live -- required for is_ws_book_fresh() to trust it.
+    engine.stream_bridge.clob.is_connected = True
+
+    # 1. WS callback delivers a fresh, newer book: up mid 0.61, down mid 0.37.
+    engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
+    engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
+    ws_mid = mstate.mid
+    assert ws_mid is not None
+    assert ws_mid > 0.55  # sanity: WS pushed mid up, away from 0.50 default
+
+    # 2. A REST poll lands right behind it (same tick loop cadence) carrying a
+    #    stale, lower-mid snapshot -- exactly the race the issue describes.
+    #    WS is still fresh (age ~0s, well under ws_book_max_age_sec), so this
+    #    REST data must be rejected for both legs.
+    stale_poll = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.44, "best_ask": 0.46},
+        "down_book": {"best_bid": 0.53, "best_ask": 0.55},
+    }
+    engine._update_market_strategy(slug, stale_poll, now)
+
+    # mid must not have regressed to the older/staler REST-implied value.
+    assert mstate.mid == ws_mid
+    assert mstate.mid >= ws_mid
+    # And the WS-authoritative best bid/ask must have survived the REST poll.
+    assert mstate.up_bid == 0.60
+    assert mstate.up_ask == 0.62
+    assert mstate.down_bid == 0.36
+    assert mstate.down_ask == 0.38
+
+
+def test_rest_mid_recompute_cannot_tear_against_concurrent_ws_update(monkeypatch):
+    """Issue #171: mid must stay consistent with the bests it was derived from.
+
+    The REST path reads the four best bid/ask fields, computes the mid they
+    imply, and writes it back. If a WS update lands between that read and that
+    write, the REST thread writes a mid derived from a book that no longer
+    exists -- `mstate.mid` then disagrees with `mstate.up_bid`/`up_ask` et al.
+
+    The interleave is forced deterministically: the mid helper blocks on the
+    REST path while a second thread drives `on_book_update` with a different
+    book. Whichever writer lands last is fine; what must hold is that the
+    final `mid` is the mid of the final bests.
+    """
+    import threading
+    from strategy import book_math
+
+    engine = LiveTraderEngine()
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    now = time.time()
+
+    fake_market = LiveMarket(
+        condition_id="0xrace01",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+    engine.stream_bridge.clob.is_connected = True
+
+    # Establish a fresh WS book so the REST legs are rejected and only the
+    # unconditional mid recompute remains in play.
+    engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
+    engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
+
+    rest_thread = threading.current_thread()
+    ws_started = threading.Event()
+    ws_done = threading.Event()
+    tripped = threading.Event()
+
+    def _ws_writer():
+        ws_started.wait(timeout=2.0)
+        # A genuinely newer book, far from the one the REST path just read.
+        engine.on_book_update("tok_up", bids={0.70: 10.0}, asks={0.72: 10.0})
+        engine.on_book_update("tok_dn", bids={0.26: 10.0}, asks={0.28: 10.0})
+        ws_done.set()
+
+    real_mid = book_math.two_sided_mid_with_default
+
+    def _blocking_mid(up: Any, down: Any) -> Any:
+        # Only stall the REST path's own call, and only once.
+        if threading.current_thread() is rest_thread and not tripped.is_set():
+            tripped.set()
+            ws_started.set()
+            # If the recompute is correctly locked, the WS thread is blocked on
+            # the lock and this wait times out -- that is the passing shape.
+            ws_done.wait(timeout=0.5)
+        return real_mid(up, down)
+
+    monkeypatch.setattr(book_math, "two_sided_mid_with_default", _blocking_mid)
+
+    writer = threading.Thread(target=_ws_writer, daemon=True)
+    writer.start()
+    engine._update_market_strategy(slug, {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.44, "best_ask": 0.46},
+        "down_book": {"best_bid": 0.53, "best_ask": 0.55},
+    }, now)
+    writer.join(timeout=5.0)
+    assert not writer.is_alive()
+    assert tripped.is_set(), "the racing interleave was never exercised"
+
+    expected = real_mid(
+        {"best_bid": mstate.up_bid, "best_ask": mstate.up_ask},
+        {"best_bid": mstate.down_bid, "best_ask": mstate.down_ask})
+    assert mstate.mid == expected, (
+        f"mid {mstate.mid} was derived from a book that no longer exists; "
+        f"current bests imply {expected}")
+
+
 def test_live_trader_stop_loss_exit():
     engine = LiveTraderEngine()
     engine.start()

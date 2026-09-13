@@ -137,10 +137,11 @@ def two_sided_mid_with_default(up_book: Optional[Dict[str, Any]],
     the adverse-open gate (#92) exists to catch.
 
     It lives here only so the two live call sites share one copy instead of two
-    inline ones. Whether live should move to the honest `two_sided_mid` (and
-    make `mstate.mid` Optional, which most of its consumers already guard for)
-    is issue #171's decision, because that changes live trading behaviour and
-    needs its own review and its own revert.
+    inline ones. Issue #171 (WS/REST write-ordering race) kept this default-
+    substitution semantic as-is -- moving to the honest `two_sided_mid` (and
+    making `mstate.mid` Optional, which most of its consumers already guard
+    for) changes live trading behaviour on its own and is out of scope here;
+    revisit under #174 (full WS authority) instead.
     """
     up_book = up_book or {}
     down_book = down_book or {}

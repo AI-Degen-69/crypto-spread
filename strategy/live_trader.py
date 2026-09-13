@@ -1954,9 +1954,11 @@ class LiveTraderEngine:
                         m.last_valid_down_ask = best_a
                 # mid/spread recomputed from authoritative bests
                 # Issue #170: one shared implementation instead of this copy
-                # and the REST-path copy below. Semantics are unchanged for
-                # now -- whether live should adopt the honest `two_sided_mid`
-                # (None for an unpriceable leg) is issue #171.
+                # and the REST-path copy below. Issue #171 kept the
+                # default-substitution semantics as-is (see
+                # book_math.two_sided_mid_with_default) -- adopting the
+                # honest `two_sided_mid` (None for an unpriceable leg) is
+                # deferred to #174.
                 m.mid = book_math.two_sided_mid_with_default(
                     {"best_bid": m.up_bid, "best_ask": m.up_ask},
                     {"best_bid": m.down_bid, "best_ask": m.down_ask})
@@ -4127,17 +4129,23 @@ class LiveTraderEngine:
                         mstate.ws_book_ts_down = now
                     except (TypeError, ValueError, OverflowError, AttributeError):
                         pass
-        # Mid/spread always derived from current bests regardless of source
-        _up_bid = mstate.up_bid
-        _up_ask = mstate.up_ask
-        _down_bid = mstate.down_bid
-        _down_ask = mstate.down_ask
-        mstate.mid = book_math.two_sided_mid_with_default(
-            {"best_bid": _up_bid, "best_ask": _up_ask},
-            {"best_bid": _down_bid, "best_ask": _down_ask})
-        _pair = book_math.pair_cost(_up_ask, _down_ask)
-        if _pair is not None:
-            mstate.spread = _pair
+        # Mid/spread always derived from current bests regardless of source.
+        # Held under the same lock as the writes above and as on_book_update:
+        # reading the bests and writing the mid they imply must be one step, or
+        # a WS update landing in between leaves mstate.mid derived from a book
+        # that no longer exists. mid prices the resting order (resting_up =
+        # mid - offset), so a torn read here is a live-money regression (#171).
+        with self._book_reconcile_lock:
+            _up_bid = mstate.up_bid
+            _up_ask = mstate.up_ask
+            _down_bid = mstate.down_bid
+            _down_ask = mstate.down_ask
+            mstate.mid = book_math.two_sided_mid_with_default(
+                {"best_bid": _up_bid, "best_ask": _up_ask},
+                {"best_bid": _down_bid, "best_ask": _down_ask})
+            _pair = book_math.pair_cost(_up_ask, _down_ask)
+            if _pair is not None:
+                mstate.spread = _pair
         # Keep legacy last_valid* in sync even when WS kept authority (already set in on_book_update)
 
         # If not active or window is expired, stay idle
