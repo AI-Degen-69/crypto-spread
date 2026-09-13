@@ -32,10 +32,13 @@ OUT_DIR = SHADOW_DIR / "replay_comparison"
 # Shadow universe (runs/paper/2026-09-11_22-10_IDT/data/meta.json).
 UNIVERSE = ("xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m")
 
-# Tick coverage starts at the first snap of ticks_2026-09-12.jsonl; T1 is the
-# shadow stop time (data/final.json stopped_utc).
+# T0 is the floor of tick coverage (first snap lands 2s later at 00:00:02Z);
+# START_TOL_SEC absorbs that sub-poll offset so windows opening exactly at
+# coverage start count as fully observed. T1 is the shadow stop time
+# (data/final.json stopped_utc).
 T0 = datetime.datetime(2026, 9, 12, 0, 0, 0, tzinfo=datetime.timezone.utc).timestamp()
 T1 = datetime.datetime(2026, 9, 12, 9, 10, 58, tzinfo=datetime.timezone.utc).timestamp()
+START_TOL_SEC = 1.0
 
 SHARES = 5
 
@@ -54,10 +57,9 @@ def build_params(fill_model: str = "tape", gates_on: bool = True) -> BacktestPar
         exit_thresh_by_slug={
             "default_5m": 0.05,
             "default_15m": 0.05,
-            "btc-up-or-down-5m": 0.05,
-            "sol-up-or-down-5m": 0.05,
-            "btc-up-or-down-15m": 0.05,
-            "sol-up-or-down-15m": 0.05,
+            "xrp-up-or-down-15m": 0.05,
+            "bnb-up-or-down-15m": 0.05,
+            "eth-up-or-down-5m": 0.05,
         },
         exit_reversal=0.5,
         quote_shares=SHARES,
@@ -84,7 +86,13 @@ def assert_config_mirror(params: BacktestParams, fill_model: str, gates_on: bool
         "exit_reversal": 0.5,
         "quote_shares": SHARES,
         "fill_model": fill_model,
+        "merge_gas_usd": 0.0,
+        "max_start_delay_sec": 0.0,
         "entry_timeout_pct": 1.0,
+        "max_start_elapsed_pct": 0.1,
+        "reentry_drift_band": 0.015,
+        "min_requote_remaining_sec": 300.0,
+        "reentry_min_remaining_pct": 0.3,
         "max_reentries_per_window": 0,
         "entry_delay_sec": 60.0 if gates_on else 0.0,
         "entry_band": 0.04 if gates_on else 0.0,
@@ -92,6 +100,10 @@ def assert_config_mirror(params: BacktestParams, fill_model: str, gates_on: bool
     for field, want in checks.items():
         got = getattr(params, field)
         assert got == want, f"config mirror broken: {field}={got!r} want {want!r}"
+    assert params.exit_thresh_by_slug.get("default_5m") == 0.05
+    assert params.exit_thresh_by_slug.get("default_15m") == 0.05
+    for slug in UNIVERSE:
+        assert params.exit_thresh_by_slug.get(slug) == 0.05, f"exit mirror gap: {slug}"
 
 
 def load_scoped_snaps() -> list[dict]:
@@ -113,7 +125,7 @@ def select_groups(snaps: list[dict]) -> tuple[list[tuple[str, list[dict]]], int]
     excluded = 0
     for cid, group in group_by_cid(snaps):
         start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
-        if start_ts >= T0 - 1:
+        if start_ts >= T0 - START_TOL_SEC:
             included.append((cid, group))
         else:
             excluded += 1
@@ -150,7 +162,7 @@ def summarize(params: BacktestParams, groups: list[tuple[str, list[dict]]]) -> d
         windows.append({
             "series": w.series,
             "window_start": int(start_ts),
-            "market_slug": f"{w.slug}",
+            "market_slug": w.slug,
             "kind": kind,
             "pnl_cents": w.pnl_cents,
             "gross_usd": round(w.pnl_cents * SHARES / 100.0, 4),
@@ -215,7 +227,8 @@ def main() -> None:
             "t0_utc": "2026-09-12T00:00:00Z",
             "t1_utc": "2026-09-12T09:10:58Z",
             "n_snaps_scoped": len(snaps),
-            "n_excluded_pre_coverage_windows": excluded,
+            "n_tick_windows_excluded_pre_coverage": excluded,
+            "n_shadow_events_excluded_pre_coverage": 11,
         },
         "accounting": (
             "gross pnl_cents per share x 5 shares / 100 = USD; "

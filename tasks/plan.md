@@ -61,8 +61,8 @@ indicting the paper fill simulator before the live micro-pilot (#143).
   lacks --entry-delay/--entry-band flags and its `--help` crashes (argparse
   formatting bug) — known wart, do NOT fix here. `sweep_backtest.py` presets
   cannot express the winning config — do NOT extend here.
-- Live money; re-running the shadow; the 9 pre-coverage events' fill replay
-  (impossible without depth data).
+- Live money; re-running the shadow; the 11 pre-coverage/boundary events'
+  fill replay (impossible without depth data).
 - P&L accounting alignment is a comparison-step concern (engine reports in
   cents per window; shadow in USD per event — normalize before verdict).
 

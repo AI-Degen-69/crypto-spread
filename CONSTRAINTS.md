@@ -35,7 +35,7 @@
   pessimistic by X) plus known model deltas (tape vs touch, chase, re-entry).
 
 ### 4. Perf & Dependencies
-- **Perf**: single-file replay over `ticks_2026-09-12.jsonl` (700MB) — stream
-  via `iter_ticks`, never load whole file into memory; reuse existing engine
-  batching. Expected runtime: minutes, not hours.
+- **Perf**: single-file replay over `ticks_2026-09-12.jsonl` (700MB) — the
+  source file streams via `iter_ticks`; only universe- and time-scoped snaps
+  (~29k) are retained in memory. Expected runtime: minutes, not hours.
 - **Dependencies**: none new.
