@@ -68,7 +68,7 @@ what let them drift; it would drift again.
   *Verify:* default replay is bit-identical to master on a fixture; `False`
   path proves the naked leg reaches settlement.
 
-- [ ] **3. `[Backend/Logic]` `naked_leg_timeout_pct` + `exit_thresh_naked`.**
+- [x] **3. `[Backend/Logic]` `naked_leg_timeout_pct` + `exit_thresh_naked`.**
   Mirror `_naked_timeout_hit` (`live_trader.py:4045-4054`): measured from the
   moment the leg went naked, not window open; `0.0` disables.
   `exit_thresh_naked` defaults to `None` → falls back to `exit_thresh`.

@@ -169,6 +169,16 @@ class BacktestParams:
     # different mechanism for the same intent, so neither proved the other.
     # True preserves current behaviour exactly.
     stop_loss_enabled: bool = True
+    # Issue #164: mirrors LiveTraderEngine.exit_thresh_naked (issue #124). A
+    # single unpaired leg may carry a tighter stop than the paired one. 0 or a
+    # value at/above the paired `exit_thresh` falls back to `exit_thresh`, so
+    # the knob can never loosen risk beyond the paired stop. 0 = off = today.
+    exit_thresh_naked: float = 0.0
+    # Issue #164: mirrors LiveTraderEngine.naked_leg_timeout_pct. A leg left
+    # unpaired this long — measured from the moment it went naked, not from
+    # window open, so a late fill still gets its full horizon — is exited at
+    # the book. 0 disables, which is today's behaviour.
+    naked_leg_timeout_pct: float = 0.0
 
     # ── param grouping metadata ──────────────────────────────────────────────
     # Separates operator-controlled (live-replicable) knobs from execution
@@ -204,6 +214,10 @@ class BacktestParams:
              "$", None, ("backtest", "cockpit")),
             ("stop_loss_enabled", "Stop Loss Enabled", "Off holds a filled naked leg to settlement instead of stopping out",
              "bool", None, ("backtest", "cockpit")),
+            ("exit_thresh_naked", "Naked Leg Stop ($)", "Tighter stop for a leg still unpaired; 0 follows the paired stop",
+             "$", (0.0, 0.50), ("backtest", "cockpit")),
+            ("naked_leg_timeout_pct", "Naked Leg Timeout (% of window)", "How long one filled leg may sit unpaired before you exit it",
+             "%", (0.0, 1.0), ("backtest", "cockpit")),
             ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
              "$", (0.0, 0.50), ("backtest", "cockpit")),
         ],
@@ -339,6 +353,16 @@ class BacktestParams:
                 raise ValueError(
                     f"entry_delay_sec must be between 0.0 and 3600.0, got {self.entry_delay_sec}"
                 )
+        if self.exit_thresh_naked is not None:
+            if not math.isfinite(self.exit_thresh_naked) or not (0.0 <= self.exit_thresh_naked <= 0.50):
+                raise ValueError(
+                    f"exit_thresh_naked must be between 0.0 and 0.50, got {self.exit_thresh_naked}"
+                )
+        if self.naked_leg_timeout_pct is not None:
+            if not math.isfinite(self.naked_leg_timeout_pct) or not (0.0 <= self.naked_leg_timeout_pct <= 1.0):
+                raise ValueError(
+                    f"naked_leg_timeout_pct must be between 0.0 and 1.0, got {self.naked_leg_timeout_pct}"
+                )
         if self.entry_band is not None:
             if not math.isfinite(self.entry_band) or not (0.0 <= self.entry_band <= 0.50):
                 raise ValueError(
@@ -358,6 +382,19 @@ class BacktestParams:
                 return float(v)
         key = f"default_{'5m' if duration == 300 else '15m'}"
         return float(self.exit_thresh_by_slug.get(key, 0.05))
+
+    def naked_exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
+        """Stop distance for a leg still unpaired — mirrors live `_naked_exit_thresh`.
+
+        Issue #164/#124: a naked leg may carry a tighter stop than the paired
+        one, but never a looser one. 0, or any value at or above the paired
+        threshold, falls back to the paired threshold.
+        """
+        paired = self.exit_thresh(slug, duration, series=series)
+        naked = self.exit_thresh_naked
+        if naked is None or naked <= 0 or naked >= paired:
+            return paired
+        return float(naked)
 
     def params_hash(self) -> str:
         """Stable hash for cache keying slider sweeps (Plan D8)."""
@@ -469,6 +506,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     err = ""
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
+    # Issue #164: a leg still unpaired may carry a tighter stop than the paired
+    # one, and may be timed out entirely. `naked_since_elapsed` is the moment
+    # the leg went naked — not window open — so a late fill still gets its full
+    # horizon and a just-completed pair is never killed (mirrors live
+    # `_naked_timeout_hit`).
+    naked_thr = params.naked_exit_thresh(slug, duration, series=series)
+    naked_since_elapsed: float | None = None
 
     # Patient undecided-band maker knobs (issue #145, mirrors live issue #137).
     # `entry_delay` holds all quoting until that far into the window (0 = off);
@@ -767,12 +811,42 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
             break
 
+        # --- NAKED LEG CLOCK (issue #164, mirrors live `naked_since_ts`) ---
+        # Starts when exactly one leg is filled and resets the moment that
+        # stops being true, so a pair completing clears the timeout instead of
+        # carrying a stale deadline.
+        _one_leg = (filled_up != filled_down)
+        if _one_leg and naked_since_elapsed is None:
+            naked_since_elapsed = elapsed
+        elif not _one_leg:
+            naked_since_elapsed = None
+
+        # --- NAKED TIMEOUT (issue #164) ---
+        # An unpaired leg held past the horizon is exited at the book,
+        # independently of drift: this is a time stop, not a price stop, so it
+        # is not gated on `stop_loss_enabled`, exactly as live treats them as
+        # separate triggers.
+        if (params.naked_leg_timeout_pct > 0 and duration > 0
+                and _one_leg and not exit_taken and not pair_captured
+                and naked_since_elapsed is not None
+                and (elapsed - naked_since_elapsed) >= params.naked_leg_timeout_pct * duration):
+            _book = ub if filled_up else db
+            _bb = _book.get("best_bid")
+            if _bb is not None:
+                exit_taken = True
+                exit_side = "up" if filled_up else "down"
+                exit_price = _bb
+                _rest = resting_up if filled_up else resting_down
+                pnl_cents += (_bb - _rest) * 100.0
+                fees_cents += _taker_fee(_bb, params.taker_fee_rate) * 100.0
+                break
+
         # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
         # Check BEFORE we update the reversal flag this tick so the crossing
         # tick is the exit tick (otherwise the flag toggles the same tick and
         # the exit is suppressed).
         if (params.stop_loss_enabled
-                and filled_up and not filled_down and max_down >= exit_thr
+                and filled_up and not filled_down and max_down >= naked_thr
                 and not reversal_seen_down and not exit_taken):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
@@ -783,7 +857,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
         if (params.stop_loss_enabled
-                and filled_down and not filled_up and max_up >= exit_thr
+                and filled_down and not filled_up and max_up >= naked_thr
                 and not reversal_seen_up and not exit_taken):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:

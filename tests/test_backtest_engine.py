@@ -936,3 +936,116 @@ def test_disabling_the_stop_does_not_suppress_pairing():
 def test_stop_loss_enabled_is_part_of_the_params_hash():
     """Sweep caches key on the hash; two strategies must not collide."""
     assert _params().params_hash() != _params(stop_loss_enabled=False).params_hash()
+
+
+# ===========================================================================
+# Issue #164: naked_leg_timeout_pct + exit_thresh_naked
+# ===========================================================================
+
+def _flat_naked_window(n_ticks=29, start_ts=1_760_000_000.0, duration=300,
+                       fill_tick=1):
+    """UP fills on `fill_tick`, then the mid sits near 0.50 for the rest.
+
+    The point is to isolate the *time* stop: the drift never approaches the
+    price stop, so anything that exits here exited on the clock. Ticks are 10s
+    apart and stay inside `duration`.
+    """
+    snaps = []
+    for i in range(n_ticks):
+        m = 0.50
+        up_bid, up_ask = 0.49, (0.47 if i == fill_tick else 0.51)
+        dn_bid, dn_ask = 0.49, 0.51
+        snaps.append({
+            "ts": start_ts + i * 10.0, "cid": "0xnaked",
+            "series": "eth-up-or-down-5m", "slug": "eth-up-or-down-5m",
+            "start_ts": start_ts, "end_ts": start_ts + duration,
+            "duration": duration, "mid": m,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": dn_bid, "best_ask": dn_ask,
+                          "bids": {str(dn_bid): 500.0}, "asks": {str(dn_ask): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_naked_timeout_defaults_to_off():
+    """0 is today: a flat naked leg rides to the end of the window."""
+    assert BacktestParams().naked_leg_timeout_pct == 0.0
+    w = _simulate_window(_flat_naked_window(), _params())
+    assert w.filled_up is True and w.filled_down is False
+    assert w.exit_taken is False
+
+
+def test_naked_leg_is_exited_once_the_horizon_passes():
+    """A time stop, not a price stop — the mid never moves in this window."""
+    w = _simulate_window(_flat_naked_window(), _params(naked_leg_timeout_pct=0.50))
+    assert w.exit_taken is True, "the naked leg was never timed out"
+    assert w.exit_side == "up"
+    # The invariant that matters: drift never reached the price stop, so the
+    # exit above cannot have been a price stop.
+    assert max(w.max_up, w.max_down) < 0.05, (
+        f"drift reached {max(w.max_up, w.max_down)} — at or past the 0.05 "
+        "price stop, so this no longer isolates the time stop")
+
+
+def test_the_clock_starts_when_the_leg_goes_naked_not_at_window_open():
+    """A late fill must still get its full horizon (mirrors live)."""
+    # Fill at tick 20 = 200s into a 300s window; the window's last tick is 280s.
+    snaps = _flat_naked_window(fill_tick=20)
+    w = _simulate_window(snaps, _params(naked_leg_timeout_pct=0.50))
+    assert w.filled_up is True
+    # 50% of 300s = 150s of naked time. The fill lands at 200s, so the window
+    # ends before the horizon: measured from window open it would have fired.
+    assert w.exit_taken is False, (
+        "the timeout fired early — the clock is measured from window open, "
+        "not from the moment the leg went naked")
+
+
+def test_a_completed_pair_is_never_timed_out():
+    """The clock resets when the leg stops being naked."""
+    snaps = _flat_naked_window()
+    snaps[1]["down_book"]["best_ask"] = 0.47      # both legs fill on tick 1
+    w = _simulate_window(snaps, _params(naked_leg_timeout_pct=0.10))
+    assert w.pair_captured is True
+    assert w.exit_taken is False, "a merged pair was killed by the naked timeout"
+
+
+def test_naked_stop_may_tighten_the_paired_stop_but_never_loosen_it():
+    """Mirrors live `_naked_exit_thresh`: 0 or >= paired falls back to paired."""
+    p = _params(exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
+    tight = _params(exit_thresh_naked=0.02,
+                    exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.02)
+    loose = _params(exit_thresh_naked=0.09,
+                    exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert loose.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05), (
+        "a naked stop above the paired stop must not loosen risk")
+
+
+def test_a_tighter_naked_stop_exits_a_drift_the_paired_stop_would_ride():
+    """The knob has to reach the exit comparison, not just the helper."""
+    wide = _simulate_window(_drift_window(), _params())
+    tight = _simulate_window(_drift_window(), _params(exit_thresh_naked=0.02))
+    assert wide.exit_taken and tight.exit_taken
+    assert tight.exit_price > wide.exit_price, (
+        "the tighter naked stop should have exited earlier, at a better bid")
+
+
+def test_naked_timeout_is_not_suppressed_by_disabling_the_price_stop():
+    """Time stop and price stop are separate triggers, as they are live."""
+    w = _simulate_window(_flat_naked_window(),
+                         _params(stop_loss_enabled=False, naked_leg_timeout_pct=0.50))
+    assert w.exit_taken is True, (
+        "stop_loss_enabled=False suppressed the naked *time* stop — live "
+        "treats them as independent triggers")
+
+
+@pytest.mark.parametrize("kw", [
+    {"naked_leg_timeout_pct": 1.01}, {"naked_leg_timeout_pct": -0.01},
+    {"exit_thresh_naked": 0.51}, {"exit_thresh_naked": -0.01},
+])
+def test_out_of_range_naked_knobs_are_refused(kw):
+    with pytest.raises(ValueError):
+        BacktestParams(**kw)
