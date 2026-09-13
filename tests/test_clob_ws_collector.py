@@ -651,7 +651,7 @@ def collector(monkeypatch):
         "bids": {0.48: 100.0}, "asks": {0.52: 100.0},
         "best_bid": 0.48, "best_ask": 0.52, "malformed": 0, "token_id": tok,
     })
-    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
+    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200, **_kw: {})
     yield ct
     ct.windows.clear()
     ct.reset_gamma_cache()
@@ -708,7 +708,7 @@ def test_rest_fallback_is_per_token_not_per_snapshot(collector, tmp_path,
     """One leg printing on the socket must not mute the other leg's REST tape."""
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_dn": {0.55: 4.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_dn": {0.55: 4.0}},
     )
     bridge = StubBridge({
         "tok_up": [{"asset": "tok_up", "price": 0.46, "size": 30.0,
@@ -728,7 +728,7 @@ def test_poll_once_falls_back_to_rest_when_ws_disconnected(collector, tmp_path,
     """A dead socket must not starve the tape — REST takes over silently."""
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_up": {0.45: 77.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_up": {0.45: 77.0}},
     )
     bridge = StubBridge({}, connected=False)
     stats: dict = {}
@@ -744,7 +744,7 @@ def test_poll_once_without_bridge_uses_rest_only(collector, tmp_path, monkeypatc
     """`--no-ws` (no bridge at all) keeps the legacy REST behaviour intact."""
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_dn": {0.55: 4.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_dn": {0.55: 4.0}},
     )
     stats: dict = {}
     collector.poll_once(tmp_path, False, stats)
@@ -768,7 +768,7 @@ def test_rest_fallback_does_not_replay_a_price_the_socket_already_printed(
     bridge._connected = False
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_up": {0.46: 30.0, 0.44: 9.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_up": {0.46: 30.0, 0.44: 9.0}},
     )
     collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
 
@@ -798,7 +798,7 @@ def test_ws_level_suppression_expires_after_the_ttl(collector, tmp_path,
                         for k, v in win["ws_levels"].items()}
     bridge._connected = False
     monkeypatch.setattr(collector, "recent_trades",
-                        lambda cid, seen, limit=200: {"tok_up": {0.46: 30.0}})
+                        lambda cid, seen, limit=200, **_kw: {"tok_up": {0.46: 30.0}})
     collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
 
     snaps = _read_snaps(tmp_path)
@@ -1015,7 +1015,7 @@ def test_ws_leg_authoritative_needs_a_first_print():
 def test_first_tick_of_a_window_still_uses_the_rest_tape(collector, tmp_path):
     """Tokens are only subscribed at the end of a tick, so tick one needs REST."""
     calls: list[str] = []
-    collector.recent_trades = lambda cid, seen, limit=200: calls.append(cid) or {}
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
     bridge = StubBridge({})
 
     collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
@@ -1036,7 +1036,7 @@ def test_rest_tape_is_skipped_once_the_socket_is_authoritative(collector, tmp_pa
     now = time.time()
     w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
     w["ws_last_print"] = {"tok_up": now - 1.0, "tok_dn": now - 1.0}
-    collector.recent_trades = lambda cid, seen, limit=200: calls.append(cid) or {}
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
 
     collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
 
@@ -1055,7 +1055,7 @@ def test_rest_tape_returns_when_the_socket_drops(collector, tmp_path):
     w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
     w["ws_last_print"] = {"tok_up": now - 1.0, "tok_dn": now - 1.0}
     bridge._connected = False
-    collector.recent_trades = lambda cid, seen, limit=200: calls.append(cid) or {}
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
 
     collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
 
@@ -1074,7 +1074,7 @@ def test_reconnect_restarts_the_subscription_warmup(collector, tmp_path):
     w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
     w["ws_last_print"] = {"tok_up": now - 1.0, "tok_dn": now - 1.0}
     bridge.reconnects = 3  # the socket dropped and came back since the last tick
-    collector.recent_trades = lambda cid, seen, limit=200: calls.append(cid) or {}
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
 
     collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
 
@@ -1107,7 +1107,7 @@ def test_one_authoritative_leg_does_not_cover_the_other(collector, tmp_path):
     now = time.time()
     w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
     w["ws_last_print"] = {"tok_up": now - 1.0}
-    collector.recent_trades = lambda cid, seen, limit=200: (
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: (
         calls.append(cid) or {"tok_up": {0.44: 99.0}, "tok_dn": {0.50: 7.0}})
     stats.pop("tape_rest_skipped", None)
 
@@ -1130,7 +1130,7 @@ def test_both_tape_sources_failing_reports_both_errors(collector, tmp_path,
         """The socket drain blows up."""
         raise RuntimeError("drain died")
 
-    def boom_rest(cid, seen, limit=200):
+    def boom_rest(cid, seen, limit=200, **_kw):
         """...and so does the REST fallback."""
         raise RuntimeError("rest died")
 

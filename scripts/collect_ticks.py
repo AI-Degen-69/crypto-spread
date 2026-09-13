@@ -539,10 +539,17 @@ def fetch_slate_tapes(jobs: list[tuple[str, dict, list[str]]]
         if not missing:
             return {}, ""
         _ramp(idx * SERIES_STAGGER_SEC)
+        # `recent_trades` swallows its own HTTP and decode failures and returns
+        # an empty dict, which is indistinguishable from a quiet market. The
+        # sink makes a dead endpoint visible in snap["err"] instead of writing
+        # an empty tape that looks like a legitimately silent second.
+        soft: list[str] = []
         try:
-            return recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT), ""
+            rows = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT,
+                                 on_error=soft.append)
         except Exception as e:
             return {}, f"tape:{e}"
+        return rows, (f"tape:{soft[0]}" if soft else "")
 
     if not jobs:
         return []
@@ -724,7 +731,18 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     # What a reader of run/ticks/*.jsonl actually gets between snapshots. It is
     # published because it is not POLL_INTERVAL and never was: replay, the
     # oscillation summary and queue telemetry all consume this series.
-    stats["sampling_interval_s"] = round(tick_ms / 1000.0 + POLL_INTERVAL, 2)
+    #
+    # Measured from successive `now` values rather than computed as round +
+    # POLL_INTERVAL. Every snap in a round is stamped with `now`, so this is
+    # the real gap between consecutive snapshot timestamps -- and the computed
+    # form understated it, because main() also does restart, day-boundary,
+    # alert and manifest work between rounds, and time.sleep only guarantees a
+    # lower bound. The first round has no predecessor and keeps the estimate.
+    prev_tick_ts = stats.get("_last_tick_ts")
+    stats["sampling_interval_s"] = round(
+        now - prev_tick_ts if prev_tick_ts is not None
+        else tick_ms / 1000.0 + POLL_INTERVAL, 2)
+    stats["_last_tick_ts"] = now
     if "tick_ms_first" not in stats:
         # Charging the opening round against TICK_BUDGET_MS would fire slow_tick
         # on every `--once` run — the exact false positive issue #167 set out to

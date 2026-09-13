@@ -353,7 +353,7 @@ def test_poll_once_uses_the_gamma_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(ct, "full_book", lambda host, tok: {
         "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
         "malformed": 0, "token_id": tok})
-    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
+    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200, **_kw: {})
 
     stats: dict = {}
     ct.poll_once(tmp_path, False, stats)
@@ -387,7 +387,7 @@ def slate(monkeypatch):
         }, None
 
     monkeypatch.setattr(ct, "fetch_live_for_series", fake_fetch)
-    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
+    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200, **_kw: {})
     yield ct
     ct.windows.clear()
     ct.reset_gamma_cache()
@@ -604,9 +604,31 @@ def test_manifest_publishes_the_real_sampling_interval(slate, tmp_path):
     assert isinstance(data["tick_ms_last"], float)
     assert isinstance(data["tick_ms_max"], float)
     assert isinstance(data["tick_ms_first"], float)
-    # Round time plus the sleep between rounds is what a reader actually gets.
-    assert data["sampling_interval_s"] == pytest.approx(
-        data["tick_ms_last"] / 1000.0 + slate.POLL_INTERVAL, abs=0.02)
+    # Measured from the gap between the two rounds' own timestamps, not
+    # computed from POLL_INTERVAL, so it reflects what a reader really sees.
+    assert data["sampling_interval_s"] > 0.0
+    assert "_last_tick_ts" not in data, "internal cursor must stay out of the manifest"
+
+
+def test_the_sampling_interval_is_measured_not_assumed(slate, tmp_path,
+                                                       monkeypatch):
+    """It must track the real gap between rounds, including work after a poll."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    stats: dict = {}
+    slate.poll_once(tmp_path, False, stats)
+    # The first round has no predecessor, so it keeps the computed estimate.
+    assert stats["sampling_interval_s"] == pytest.approx(
+        stats["tick_ms_last"] / 1000.0 + slate.POLL_INTERVAL, abs=0.05)
+
+    # Stand in for main()'s between-round work plus an overshooting sleep. The
+    # old computed form could not see any of this.
+    time.sleep(0.5)
+    slate.poll_once(tmp_path, False, stats)
+
+    assert stats["sampling_interval_s"] >= 0.5
+    assert stats["sampling_interval_s"] > stats["tick_ms_last"] / 1000.0
 
 
 # --- Issue #167 review follow-ups: rollover, cold budget, telemetry --------

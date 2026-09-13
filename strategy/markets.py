@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -305,7 +305,8 @@ def full_book(clob_host: str, token_id: str) -> dict:
     return parse_book(r.json(), token_id)
 
 
-def recent_trades(condition_id: str, seen: set, limit: int = 500) -> dict:
+def recent_trades(condition_id: str, seen: set, limit: int = 500,
+                  on_error: Optional[Callable[[str], None]] = None) -> dict:
     """Volume by (token_id, price) that has actually TRADED since we last looked.
 
     The fill model needs this to tell a level that was TRADED from one that was
@@ -335,6 +336,12 @@ def recent_trades(condition_id: str, seen: set, limit: int = 500) -> dict:
         rows = r.json() or []
     except Exception as e:
         log.debug("tape fetch failed: %s", e)
+        # An empty dict is indistinguishable from "no trades this second", so a
+        # caller that needs to tell a dead endpoint from a quiet market has to
+        # be told (issue #167). Silence here previously let a failing tape fetch
+        # write an empty tape_delta with no error recorded anywhere.
+        if on_error is not None:
+            on_error(f"{type(e).__name__}: {e}")
         return out                      # no tape -> caller falls back to books
     if not isinstance(rows, list):
         log.debug("tape response is not a list (got %s)", type(rows).__name__)

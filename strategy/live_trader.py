@@ -1170,6 +1170,12 @@ class LiveTraderEngine:
                     stash = mstate.last_bids_up if is_up else mstate.last_bids_down
                     rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
                 snapshot = {
+                    # Bind the sidecar path at dispatch, not at write time. The
+                    # worker below runs on its own daemon thread and used to
+                    # resolve the FILL_TELEMETRY_FILE global whenever it got
+                    # scheduled, so a path swapped underneath an in-flight
+                    # worker silently redirected that fill's line.
+                    "telemetry_path": FILL_TELEMETRY_FILE,
                     "slug": mstate.slug,
                     "market_slug": mstate.market_slug or "",
                     "condition_id": mstate.condition_id or "",
@@ -1207,7 +1213,8 @@ class LiveTraderEngine:
                                filled_size: float, window_elapsed_sec: float,
                                mid_at_fill: Optional[float],
                                resting_pair_cost: Optional[float],
-                               ts: float) -> None:
+                               ts: float,
+                               telemetry_path: Any = None) -> None:
         """Fetch tape, build the record, append it. Exceptions never propagate."""
         try:
             printed: Optional[float] = None
@@ -1232,7 +1239,7 @@ class LiveTraderEngine:
                 mid_at_fill=mid_at_fill,
                 resting_pair_cost=resting_pair_cost,
             )
-            if not _append_fill_telemetry(record):
+            if not _append_fill_telemetry(record, telemetry_path):
                 log.warning("[%s] fill-telemetry append failed (line lost)", slug)
         except Exception as e:
             log.warning("[%s] fill-telemetry worker failed: %s", slug, e)
