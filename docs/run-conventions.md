@@ -25,9 +25,15 @@ Every paper/live run is one self-contained folder. A future script can scan
 ## Working dirs: `run/` vs `runs/` vs `logs/`
 
 - `run/` — machine working state (gitignored): `ticks/` capture landing zone,
-  `observations/` paper-observer journal, `sweeps/` research cache + drivers,
-  live runtime state (`live_trades*.jsonl`, `live_fill_telemetry.jsonl`,
-  `oscillation_*`). Ephemeral except `ticks/` (irreplaceable capture).
+  `observations/` paper-observer journal, `sweeps/` research *cache* only
+  (`window_cache.pkl`), live runtime state (`live_trades*.jsonl`,
+  `live_fill_telemetry.jsonl`, `oscillation_*`). Ephemeral except `ticks/`
+  (irreplaceable capture).
+- `research/sweeps/` — the sweep **drivers and their result tables**, committed.
+  They used to sit in `run/sweeps/` beside the cache, which meant a committed
+  document (`docs/ev-research-findings-2026-09-11.md`) cited evidence any
+  cleanup of `run/` could delete. Anything a committed doc cites belongs in git;
+  only the regenerable cache stays in `run/`.
 - `runs/` — curated per-run records (this doc's layout).
 - `logs/` — process logs and audit artifacts (dash/collector/observer logs,
   `latency_audit_*.json`). Launchers (`scripts/crypto-spread-*.ps1`) and

@@ -88,8 +88,8 @@
 Dedicated 1D sweep of the mercy-rule disarm distance at 0.005 steps, holding
 all other params at baseline (`offset=0.02, queue_gate=0, exit_5m=0.08,
 fill_model=tape`, size 5). Dataset: `run/ticks/ticks_2026-09-08.jsonl`
-(48,766 snaps, 515 windows). Full artifact: `run/sweeps/exit_reversal_110.json`
-(gitignored); driver: `run/sweeps/run_exit_rev_110.py`.
+(48,766 snaps, 515 windows). Full artifact: `research/sweeps/exit_reversal_110.json`;
+driver: `research/sweeps/run_exit_rev_110.py`.
 
 | exit_reversal | exit_rate | pair_rate | total_pnl | avg_pnl | win_rate | max_dd | profit_factor | sharpe |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
