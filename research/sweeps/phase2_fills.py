@@ -87,7 +87,10 @@ def main() -> int:
     cfgs = build_configs()
     print(f"configs: {len(cfgs)}")
     results = sweep_configs(cfgs, workers=8, n_boot=2000, size=5)
-    results.sort(key=lambda r: -(r.get("total_pnl_usd") or -9e9))
+    # `0.0 or -9e9` is -9e9, so a break-even config sorted below every
+    # loss. Test for None explicitly (issue #182).
+    results.sort(key=lambda r: -(r["total_pnl_usd"]
+                                 if r.get("total_pnl_usd") is not None else -9e9))
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=1, default=str)
     print(f"{'config':<22}{'n':>6}{'pairs':>7}{'exits':>7}{'win%':>7}"

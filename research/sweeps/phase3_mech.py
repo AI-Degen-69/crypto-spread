@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams  # noqa: E402
-from ev_lab import _get_cache, summarize, default_base_params  # noqa: E402
+from ev_lab import _get_cache, summarize, default_base_params, stable_seed  # noqa: E402
 from sim2 import sim2  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "phase3_mech.json"
@@ -86,8 +86,11 @@ def build_tasks() -> list[dict]:
 
 def _worker(args):
     idxs, params_dict, chase_cap = args
-    from ev_lab import load_cache
-    cache = load_cache()
+    # `_get_cache` memoises in a process-level global; `load_cache`
+    # re-unpickles ~336MB per call, and pool.map dispatches one task
+    # per shard per config (issue #182).
+    from ev_lab import _get_cache
+    cache = _get_cache()
     params = BacktestParams(**params_dict)
     return [sim2(cache[i], params, chase_cap=chase_cap or None) for i in idxs]
 
@@ -112,12 +115,15 @@ def main() -> int:
     results = []
     for t in tasks:
         rows = all_rows[t["name"]]
-        s = summarize(rows, size=5, n_boot=2000, seed=hash(t["name"]) & 0xFFFF,
+        s = summarize(rows, size=5, n_boot=2000, seed=stable_seed(t["name"]),
                       settle_correct=True)
         s["name"] = t["name"]
         s["chase_cap"] = t["chase_cap"]
         results.append(s)
-    results.sort(key=lambda r: -(r.get("total_pnl_usd") or -9e9))
+    # `0.0 or -9e9` is -9e9, so a break-even config sorted below every
+    # loss. Test for None explicitly (issue #182).
+    results.sort(key=lambda r: -(r["total_pnl_usd"]
+                                 if r.get("total_pnl_usd") is not None else -9e9))
 
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=1, default=str)

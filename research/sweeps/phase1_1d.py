@@ -19,9 +19,6 @@ from ev_lab import _get_cache, sweep_configs, default_base_params
 
 OUT = Path(__file__).resolve().parent / "phase1_1d.json"
 
-BASE = default_base_params()  # offset .02, q0, pc1.05, tape, no timeout, no reentry
-
-
 def exit_dict(e5: float, rev_note: str = "") -> dict:
     """Repo joint-grid convention: 15m = e5+0.01, BTC 5m tightest, SOL -1c."""
     return {
@@ -32,6 +29,17 @@ def exit_dict(e5: float, rev_note: str = "") -> dict:
         "btc-up-or-down-15m": round(e5 + 0.01, 2),
         "sol-up-or-down-15m": round(e5 + 0.01, 2),
     }
+
+
+# The documented Phase 1 baseline is `off=0.02, q=0, pc=1.05, ex_5m=0.08,
+# rev=0.015, tape`. `default_base_params()` sets neither exit threshold nor
+# reversal, so both fell through to the engine defaults (0.05 / 0.02) and the
+# sweep never ran the baseline it reports against — while `rev=0.020` on the
+# reversal axis silently duplicated that default. Build it explicitly (#182);
+# this has to sit below `exit_dict` because it calls it.
+BASE = replace(default_base_params(),
+               exit_thresh_by_slug=exit_dict(0.08),
+               exit_reversal=0.015)
 
 
 def build_configs() -> list[dict]:
@@ -79,7 +87,10 @@ def main() -> int:
     cfgs = build_configs()
     print(f"configs: {len(cfgs)}")
     results = sweep_configs(cfgs, workers=8, n_boot=2000, size=5)
-    results.sort(key=lambda r: -(r.get("total_pnl_usd") or -9e9))
+    # `0.0 or -9e9` is -9e9, so a break-even config sorted below every
+    # loss. Test for None explicitly (issue #182).
+    results.sort(key=lambda r: -(r["total_pnl_usd"]
+                                 if r.get("total_pnl_usd") is not None else -9e9))
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=1, default=str)
     hdr = (f"{'config':<16}{'n':>6}{'pairs':>7}{'exits':>7}{'win%':>7}"

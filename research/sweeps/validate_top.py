@@ -46,8 +46,11 @@ def exit_dict(e5: float) -> dict:
 
 def _worker(args):
     idxs, pd, chase, delay, band = args
-    from ev_lab import load_cache
-    cache = load_cache()
+    # `_get_cache` memoises in a process-level global; `load_cache`
+    # re-unpickles ~336MB per call, and pool.map dispatches one task
+    # per shard per config (issue #182).
+    from ev_lab import _get_cache
+    cache = _get_cache()
     params = BacktestParams(**pd)
     return [sim2(cache[i], params, chase_cap=chase or None,
                  entry_delay_sec=delay or 0.0, entry_band=band if band > 0 else None)

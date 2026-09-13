@@ -1,5 +1,12 @@
 # EV research sweeps
 
+> **The `phase*.json` tables here are stale — see
+> [`RESULTS-ARE-STALE.md`](RESULTS-ARE-STALE.md).** Issue #182 fixed five
+> defects that change what those numbers mean, including a `roi_pct_per_window`
+> that was 100× too high and bootstrap CI bounds that were never reproducible.
+> The drivers below are fixed; the results predate the fixes and cannot be
+> regenerated, because the dataset they were computed from has been deleted.
+
 The lab that produced the `patient_band_maker` preset, and the results it
 produced. Every number in
 [`docs/ev-research-findings-2026-09-11.md`](../../docs/ev-research-findings-2026-09-11.md)

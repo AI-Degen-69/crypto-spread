@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams
-from ev_lab import _get_cache, fast_simulate, default_base_params
+from ev_lab import _get_cache, fast_simulate, default_base_params, _mid_from
 
 
 def main() -> int:
@@ -39,17 +39,28 @@ def main() -> int:
         if not ((r["filled_up"] != r["filled_dn"]) and not r["exit"] and not r["pair"]):
             continue
         held_up = r["filled_up"]
-        resting = 0.0
-        # recover resting price from pnl components is unreliable; recompute here
-        # by re-deriving the anchor (same rule as the sim).
+        # Recovering the resting price from the pnl components is unreliable,
+        # so re-derive the anchor with *exactly* the rule `fast_simulate` uses
+        # (issue #182). This previously diverged twice: it skipped the up-book
+        # fallback and went straight to 0.50, and it always applied the up-leg
+        # formula with a literal 0.02 even for a held down leg. Either one
+        # assigns `true_pnl` an entry price the simulated trade never had —
+        # in the audit whose whole job is to correct a ~40% optimism bias.
         init_mid = None
         for m in w.s_mid:
             if m is not None:
                 init_mid = float(m)
                 break
         if init_mid is None:
+            for k in range(len(w.ts)):
+                u_m = _mid_from(w.up_bb[k], w.up_ba[k])
+                if u_m is not None:
+                    init_mid = float(u_m)
+                    break
+        if init_mid is None:
             init_mid = 0.50
-        resting = round(min(0.99, max(0.01, init_mid - 0.02)), 3)
+        anchor = init_mid if held_up else (1.0 - init_mid)
+        resting = round(min(0.99, max(0.01, anchor - p.offset)), 3)
         last_bid = w.up_bb[-1] if held_up else w.dn_bb[-1]
         last_mid = w.s_mid[-1] if w.s_mid[-1] is not None else (
             (w.up_bb[-1] + w.up_ba[-1]) / 2.0 if held_up and w.up_bb[-1] is not None and w.up_ba[-1] is not None
@@ -80,18 +91,27 @@ def main() -> int:
         pnl_engine_list.append(engine_pnl)
 
     n = len(pnl_engine_list)
+    # `pnl_*_list` holds cents for ONE contract. Dividing by 100 gives the
+    # one-contract dollar total, which the output then labelled "at size 5" —
+    # understating every total fivefold (issue #182). Scale by the same
+    # `quote_shares` the simulation used rather than re-labelling, since the
+    # figure is quoted against the size the strategy actually trades.
+    size = base.quote_shares
+    to_usd = size / 100.0
     print(f"naked-settle windows: {n}")
     print(f"engine mark: wins={engine_mark_wins} losses={engine_mark_losses} "
           f"none-marked(0 pnl)={engine_mark_none}")
     print(f"true settlement: wins={true_wins} losses={true_losses}")
     print(f"engine mean pnl/naked window: {statistics.fmean(pnl_engine_list):+.2f}c "
-          f"(total {sum(pnl_engine_list)/100:+.2f}$ at size 5)")
+          f"(total {sum(pnl_engine_list)*to_usd:+.2f}$ at size {size})")
     print(f"true   mean pnl/naked window: {statistics.fmean(pnl_true_list):+.2f}c "
-          f"(total {sum(pnl_true_list)/100:+.2f}$ at size 5)")
-    print(f"bias (true - engine) total: {(sum(pnl_true_list)-sum(pnl_engine_list))/100:+.2f}$")
+          f"(total {sum(pnl_true_list)*to_usd:+.2f}$ at size {size})")
+    print(f"bias (true - engine) total: "
+          f"{(sum(pnl_true_list)-sum(pnl_engine_list))*to_usd:+.2f}$ at size {size}")
     if bias_windows:
         tot = sum(b[5] for b in bias_windows)
-        print(f"unmarked windows: {len(bias_windows)}, their true total pnl: {tot/100:+.2f}$")
+        print(f"unmarked windows: {len(bias_windows)}, "
+              f"their true total pnl: {tot*to_usd:+.2f}$ at size {size}")
         from collections import Counter
         print("unmarked by won/lost:",
               Counter("won" if b[6] else "lost" for b in bias_windows))
