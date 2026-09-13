@@ -1266,3 +1266,27 @@ def test_a_naked_stop_equal_to_the_paired_stop_falls_back_to_it():
     p = _params(exit_thresh_naked=0.05,
                 exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
     assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
+
+
+def test_a_naked_leg_always_reaches_the_naked_threshold_check():
+    """The gate-failure branch keeps `exit_thr` and that is safe by structure.
+
+    Two of the four stop-exit sites sit inside `if not queue_ok or not
+    pair_cost_ok:` and compare against the paired `exit_thr`; the two on the
+    main path use the tighter `naked_thr`. The asymmetry is only safe because
+    the `continue` ending that branch fires just when NEITHER leg is filled —
+    so a naked leg always falls through to the `naked_thr` check on the same
+    tick. If that `continue` ever widens to cover a filled leg, a drift between
+    the two thresholds would silently stop being exited.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(_simulate_window)
+    gate = src.index("if not queue_ok or not pair_cost_ok:")
+    fill = src.index("# --- FILL DETECTION")
+    branch = src[gate:fill]
+    continues = re.findall(r"^\s+if (.+):\n\s+continue$", branch, re.M)
+    assert continues == ["not filled_up and not filled_down"], (
+        "the gate-failure branch's exit condition changed; a naked leg may no "
+        f"longer reach the naked_thr check: {continues}")

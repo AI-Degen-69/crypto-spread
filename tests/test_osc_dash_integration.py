@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 import server.osc_dash as osc_dash
+from backtest.engine import BacktestParams
 from server.osc_dash import app
 
 client = TestClient(app)
@@ -2502,3 +2503,64 @@ def test_no_input_advertises_a_range_that_contradicts_the_registry():
     assert stale == [], (
         f"these inputs restate their range in a placeholder instead of "
         f"taking it from the registry: {stale}")
+
+
+def test_param_spec_hands_out_a_copy_not_the_cache():
+    """One caller mutating the spec must not rewrite it for every surface.
+
+    `param_spec()` is cached, and the cached dict is what `/api/params/spec`
+    serialises — the definition both tabs render from. Returning it by
+    reference meant a single in-place edit anywhere could silently change every
+    label and bound the operator sees.
+    """
+    first = BacktestParams.param_spec()
+    first["trading_knobs"]["offset"]["label"] = "POISONED"
+    first["trading_knobs"]["offset"]["bounds"] = (-99.0, 99.0)
+    fresh = BacktestParams.param_spec()
+    assert fresh["trading_knobs"]["offset"]["label"] == "Spread Offset ($)"
+    assert fresh["trading_knobs"]["offset"]["bounds"] == (0.001, 0.49)
+
+
+def test_spec_for_hands_out_a_copy_too():
+    """The single-knob accessor is the one used per-request; same rule."""
+    s = BacktestParams.spec_for("entry_band")
+    s["label"] = "POISONED"
+    s["surfaces"] = ()
+    again = BacktestParams.spec_for("entry_band")
+    assert again["label"] == "Entry Band ($ from 0.50)"
+    assert "cockpit" in again["surfaces"]
+
+
+def test_the_spec_is_actually_cached_not_rebuilt_each_call():
+    """`spec_for` runs once per knob per request; rebuilding would be waste."""
+    BacktestParams.param_spec()          # warm
+    a = BacktestParams._param_spec_cached()
+    b = BacktestParams._param_spec_cached()
+    assert a is b, "the build is no longer cached"
+
+
+def test_every_registry_control_has_an_id_the_surface_detection_understands():
+    """`applyParamSpec()` picks a surface from the id prefix.
+
+    A control whose id starts with neither `cockpit` nor `bt` falls through to
+    the shared bounds, which for `pair_cost_gate` means a Cockpit-style control
+    silently rendering the research range. Nothing today is misnamed; this
+    fails the moment one is.
+    """
+    import re
+
+    html = client.get("/").text
+    stray = []
+    for tag in re.findall(r"<(?:input|select)[^>]*>", html):
+        if "data-param=" not in tag:
+            continue
+        m = re.search(r'id="([A-Za-z0-9_]+)"', tag)
+        if not m:
+            stray.append(tag[:60])
+            continue
+        el_id = m.group(1)
+        if not (el_id.startswith("cockpit") or el_id.startswith("bt")):
+            stray.append(el_id)
+    assert stray == [], (
+        "these registry-driven controls have ids applyParamSpec() cannot map "
+        f"to a surface, so they get the shared bounds: {stray}")

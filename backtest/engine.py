@@ -21,6 +21,7 @@ can show the gap.
 """
 from __future__ import annotations
 import gzip
+import copy
 import hashlib
 from functools import lru_cache
 import json
@@ -297,7 +298,6 @@ class BacktestParams:
         return out
 
     @classmethod
-    @lru_cache(maxsize=1)
     def param_spec(cls) -> dict[str, dict[str, dict[str, Any]]]:
         """The full definition of every knob, grouped, for UIs and validators.
 
@@ -317,6 +317,18 @@ class BacktestParams:
         accept. `surfaces` says which tabs may show a knob: an execution
         assumption like `fill_model` is not something an operator sets on a
         live order, so it is backtest-only by design.
+        """
+        return copy.deepcopy(cls._param_spec_cached())
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _param_spec_cached(cls) -> dict[str, dict[str, dict[str, Any]]]:
+        """Build the spec once. Never hand this object out directly.
+
+        `param_spec()` returns a deep copy: the cached dict is shared by every
+        caller, and one of them mutating a label or a bounds tuple in place
+        would silently rewrite what every other surface renders — including
+        `/api/params/spec`, which is the definition both tabs read.
         """
         defaults = asdict(cls())
         out: dict[str, dict[str, dict[str, Any]]] = {}
@@ -355,9 +367,10 @@ class BacktestParams:
     @classmethod
     def spec_for(cls, name: str) -> dict[str, Any]:
         """One knob's spec, or KeyError naming the field that is unregistered."""
-        for grp in cls.param_spec().values():
+        for grp in cls._param_spec_cached().values():
             if name in grp:
-                return grp[name]
+                # One knob, copied — cheap, and still no handle on the cache.
+                return copy.deepcopy(grp[name])
         raise KeyError(f"{name!r} is not in BacktestParams._PARAM_GROUPS")
 
     def __post_init__(self):
@@ -833,6 +846,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # if the live book no longer meets the entry gate. Check exit
             # BEFORE updating the reversal flag, otherwise the crossing tick
             # sets the flag and the exit is suppressed.
+            #
+            # These two deliberately keep the *paired* `exit_thr` while the
+            # main-path pair below uses the tighter `naked_thr` (issue #164).
+            # The asymmetry is safe and intentional: the `continue` at the end
+            # of this branch only fires when NEITHER leg is filled, so a naked
+            # leg always falls through to the `naked_thr` check on this same
+            # tick. Tightening these would make the stop fire *before* fill
+            # detection and pair completion run — costing the leg its chance to
+            # pair on a tick where it could have.
             if (params.stop_loss_enabled
                     and filled_up and not filled_down and max_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
