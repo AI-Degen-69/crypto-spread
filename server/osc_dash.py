@@ -541,6 +541,63 @@ def api_ticks_manifest():
     return out
 
 
+@app.get("/api/params/spec")
+def api_params_spec():
+    """The parameter registry — labels, units, defaults, bounds, surfaces.
+
+    Issue #164: Backtest and Cockpit each hand-rolled their own copies of all
+    four, which is how they came to disagree about the same knob and to each
+    miss knobs the other had. Both now render and validate from this.
+    """
+    from backtest.engine import BacktestParams
+
+    spec = BacktestParams.param_spec()
+    return {
+        "groups": {
+            g: {n: {**v, "surfaces": list(v["surfaces"])} for n, v in entries.items()}
+            for g, entries in spec.items()
+        },
+        "by_surface": {
+            surface: sorted(
+                n for entries in spec.values()
+                for n, v in entries.items() if surface in v["surfaces"]
+            )
+            for surface in ("backtest", "cockpit")
+        },
+    }
+
+
+def _clamp_to_spec(name: str, value: Any) -> Any:
+    """Clamp one knob to the bounds the registry advertises.
+
+    Issue #164: the two endpoints used to clamp with their own inline
+    min/max calls, so a bound could be tightened in the engine and silently
+    stay loose in one API. Non-finite input falls back to the registered
+    default — comparing against NaN yields the boundary otherwise, which turns
+    a malformed request into a plausible-looking run.
+    """
+    from backtest.engine import BacktestParams
+
+    try:
+        spec = BacktestParams.spec_for(name)
+    except KeyError:
+        return value
+    bounds = spec.get("bounds")
+    if bounds is None:
+        return value
+    low, high = bounds
+    if isinstance(value, bool):
+        return value
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return spec["default"]
+    if not math.isfinite(num):
+        return spec["default"]
+    num = max(float(low), min(float(high), num))
+    return int(num) if isinstance(spec["default"], int) else num
+
+
 @app.get("/api/backtest")
 def api_backtest(
     file: str = "",
@@ -562,6 +619,10 @@ def api_backtest(
     min_requote_remaining_sec: float = 300.0,
     entry_delay_sec: float = 0.0,
     entry_band: float = 0.0,
+    exit_thresh_naked: float = 0.0,
+    naked_leg_timeout_pct: float = 0.0,
+    stop_loss_enabled: bool = True,
+    enable_leg_chase: bool = False,
     limit_windows: int = 0,
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
@@ -603,21 +664,32 @@ def api_backtest(
     else:
         entry_band = max(0.0, min(0.50, entry_band))
 
+    # Issue #164: every numeric knob is clamped to the bounds the registry
+    # advertises, so the API refuses exactly what the engine refuses and what
+    # the UI's min/max already showed. Previously each endpoint clamped with
+    # its own inline min/max calls, which is how a bound tightened in the
+    # engine could stay loose here.
     params = BacktestParams(
-        offset=offset,
-        queue_gate=queue,
-        pair_cost_gate=pair_cost,
+        offset=_clamp_to_spec("offset", offset),
+        queue_gate=_clamp_to_spec("queue_gate", queue),
+        pair_cost_gate=_clamp_to_spec("pair_cost_gate", pair_cost),
         exit_thresh_by_slug=exit_thresh,
-        exit_reversal=exit_reversal,
+        exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
         quote_shares=size,
         fill_model=fill_model,
-        merge_gas_usd=gas,
-        max_start_delay_sec=max_start_delay,
-        entry_timeout_pct=entry_timeout_pct,
-        reentry_drift_band=reentry_drift_band,
-        min_requote_remaining_sec=min_requote_remaining_sec,
-        entry_delay_sec=entry_delay_sec,
-        entry_band=entry_band,
+        merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
+        max_start_delay_sec=_clamp_to_spec("max_start_delay_sec", max_start_delay),
+        entry_timeout_pct=_clamp_to_spec("entry_timeout_pct", entry_timeout_pct),
+        reentry_drift_band=_clamp_to_spec("reentry_drift_band", reentry_drift_band),
+        min_requote_remaining_sec=_clamp_to_spec(
+            "min_requote_remaining_sec", min_requote_remaining_sec),
+        entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
+        entry_band=_clamp_to_spec("entry_band", entry_band),
+        exit_thresh_naked=_clamp_to_spec("exit_thresh_naked", exit_thresh_naked),
+        naked_leg_timeout_pct=_clamp_to_spec(
+            "naked_leg_timeout_pct", naked_leg_timeout_pct),
+        stop_loss_enabled=bool(stop_loss_enabled),
+        enable_leg_chase=bool(enable_leg_chase),
     )
 
     if not TICKS_DIR.exists():
@@ -1238,6 +1310,11 @@ class LiveConfigPayload(BaseModel):
     entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     exit_reversal: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     reentry_drift_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
+    # Issue #164: `update_config()` has always accepted this, but the payload
+    # model never declared it — so the Cockpit could not send it and the
+    # re-entry time gate was unreachable from the dashboard. Bounds match the
+    # registry entry the Backtest tab renders from.
+    min_requote_remaining_sec: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
     exit_thresh_naked: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     naked_leg_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     reentry_require_pairable: Optional[bool] = None
@@ -1364,6 +1441,7 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             entry_timeout_pct=payload.entry_timeout_pct,
             exit_reversal=payload.exit_reversal,
             reentry_drift_band=payload.reentry_drift_band,
+            min_requote_remaining_sec=payload.min_requote_remaining_sec,
             exit_thresh_naked=payload.exit_thresh_naked,
             naked_leg_timeout_pct=payload.naked_leg_timeout_pct,
             reentry_require_pairable=payload.reentry_require_pairable,
@@ -2247,24 +2325,24 @@ textarea:focus-visible,
               </select>
             </div>
             <div class="form-group">
-              <label>Offset from Mid ($0.02 = 0.02 spread)</label>
-              <input type="number" step="0.005" id="btOffset" value="0.02">
+              <label data-param-label="offset"></label>
+              <input type="number" step="0.005" id="btOffset" data-param="offset" value="0.02">
             </div>
             <div class="form-group">
-              <label>Queue Depth Ahead (0 = no filter)</label>
-              <input type="number" step="5" id="btQueue" value="0">
+              <label data-param-label="queue_gate"></label>
+              <input type="number" step="5" id="btQueue" data-param="queue_gate" value="0">
             </div>
             <div class="form-group">
-              <label>Entry Delay, s (0 = off, max 3600)</label>
-              <input type="number" min="0" max="3600" step="1" id="btEntryDelay" value="0">
+              <label data-param-label="entry_delay_sec"></label>
+              <input type="number" min="0" max="3600" step="1" id="btEntryDelay" data-param="entry_delay_sec" value="0">
             </div>
             <div class="form-group">
-              <label>Entry Band (0 = off)</label>
-              <input type="number" min="0" max="0.5" step="0.005" id="btEntryBand" value="0">
+              <label data-param-label="entry_band"></label>
+              <input type="number" min="0" max="0.5" step="0.005" id="btEntryBand" data-param="entry_band" value="0">
             </div>
             <div class="form-group">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <label for="btPairCost">Max Pair Cost ($)</label>
+                <label for="btPairCost" data-param-label="pair_cost_gate"></label>
                 <label class="toggle-wrap" title="Enable or disable max pair cost filter">
                   <span id="btPairCostToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--dim)">OFF</span>
                   <div class="toggle-switch">
@@ -2273,7 +2351,7 @@ textarea:focus-visible,
                   </div>
                 </label>
               </div>
-              <input type="number" step="0.005" id="btPairCost" value="1.05" disabled style="opacity:0.45">
+              <input type="number" step="0.005" id="btPairCost" data-param="pair_cost_gate" value="1.05" disabled style="opacity:0.45">
             </div>
             <div class="form-group">
               <label>Exit Stop Loss 5m ($)</label>
@@ -2292,12 +2370,54 @@ textarea:focus-visible,
               <input type="number" step="0.01" id="btExitSol" value="0.05">
             </div>
             <div class="form-group">
-              <label>Order Shares per Leg (Min 5)</label>
-              <input type="number" min="5" step="1" id="btSize" value="5">
+              <label data-param-label="quote_shares"></label>
+              <input type="number" min="5" step="1" id="btSize" data-param="quote_shares" value="5">
+            </div>
+            <div class="form-group">
+              <label data-param-label="reentry_min_remaining_pct"></label>
+              <input type="number" min="0" max="1" step="0.05" id="btReentryMinPct" data-param="reentry_min_remaining_pct" value="0.30">
+            </div>
+            <div class="form-group">
+              <label data-param-label="max_reentries_per_window"></label>
+              <input type="number" min="0" max="100" step="1" id="btMaxReentries" data-param="max_reentries_per_window" value="1">
+            </div>
+            <div class="form-group">
+              <label data-param-label="max_start_elapsed_pct"></label>
+              <input type="number" min="0" max="1" step="0.05" id="btMaxStartElapsed" data-param="max_start_elapsed_pct" value="0.10">
+            </div>
+            <div class="form-group">
+              <label data-param-label="exit_reversal"></label>
+              <input type="number" min="0" max="0.5" step="0.005" id="btExitReversal" data-param="exit_reversal" value="0.02">
+            </div>
+            <div class="form-group">
+              <label data-param-label="entry_timeout_pct"></label>
+              <input type="number" min="0" max="1" step="0.05" id="btEntryTimeout" data-param="entry_timeout_pct" value="0.10">
+            </div>
+            <div class="form-group">
+              <label data-param-label="exit_thresh_naked"></label>
+              <input type="number" min="0" max="0.5" step="0.01" id="btExitNaked" data-param="exit_thresh_naked" value="0">
+            </div>
+            <div class="form-group">
+              <label data-param-label="naked_leg_timeout_pct"></label>
+              <input type="number" min="0" max="1" step="0.05" id="btNakedTimeout" data-param="naked_leg_timeout_pct" value="0">
+            </div>
+            <div class="form-group">
+              <label data-param-label="stop_loss_enabled"></label>
+              <select id="btStopLossEnabled" data-param="stop_loss_enabled">
+                <option value="1" selected>On — stop out an adverse naked leg</option>
+                <option value="0">Off — hold to settlement (patient_band_maker)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label data-param-label="enable_leg_chase"></label>
+              <select id="btLegChase" data-param="enable_leg_chase">
+                <option value="0" selected>Off — passive quote only</option>
+                <option value="1">On — chase the unfilled leg within the cap</option>
+              </select>
             </div>
             <div class="form-group">
               <label>Partial Windows Filter</label>
-              <select id="btMaxStartDelay">
+              <select id="btMaxStartDelay" data-param="max_start_delay_sec">
                 <option value="0" selected>All (No filter)</option>
                 <option value="5.0">Full Windows Only (≤5s delay)</option>
                 <option value="2.0">Strict Full Windows (≤2s delay)</option>
@@ -2322,8 +2442,8 @@ textarea:focus-visible,
           </div>
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
-              <label>Fill Model</label>
-              <select id="btFillModel">
+              <label data-param-label="fill_model"></label>
+              <select id="btFillModel" data-param="fill_model">
                 <option value="cross" selected>Cross (Strict Through-Price Fill — Ask ≤ Resting Bid - 1¢)</option>
                 <option value="tape">Tape (Conservative - executed trades)</option>
                 <option value="book">Book (Optimistic - Ask crossing)</option>
@@ -2331,8 +2451,20 @@ textarea:focus-visible,
               </select>
             </div>
             <div class="form-group">
-              <label>Gas Merge Cost (USD)</label>
-              <input type="number" step="0.01" id="btGas" value="0.00">
+              <label data-param-label="taker_fee_rate"></label>
+              <input type="number" min="0" max="1" step="0.01" id="btTakerFee" data-param="taker_fee_rate" value="0.07">
+            </div>
+            <div class="form-group">
+              <label data-param-label="tick_size"></label>
+              <input type="number" min="0" max="1" step="0.001" id="btTickSize" data-param="tick_size" value="0.001">
+            </div>
+            <div class="form-group">
+              <label data-param-label="min_quote_shares"></label>
+              <input type="number" min="1" max="100000" step="1" id="btMinShares" data-param="min_quote_shares" value="5">
+            </div>
+            <div class="form-group">
+              <label data-param-label="merge_gas_usd"></label>
+              <input type="number" step="0.01" id="btGas" data-param="merge_gas_usd" value="0.00">
             </div>
           </div>
           </div>
@@ -2355,11 +2487,11 @@ textarea:focus-visible,
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
               <label>Drift Re-Entry Band (0 = off)</label>
-              <input type="number" min="0" max="0.5" step="0.005" id="btReentryBand" value="0.015">
+              <input type="number" min="0" max="0.5" step="0.005" id="btReentryBand" data-param="reentry_drift_band" value="0.015">
             </div>
             <div class="form-group">
-              <label>Min Window Left for Re-Entry (s)</label>
-              <input type="number" min="0" step="5" id="btRequoteMin" value="300">
+              <label data-param-label="min_requote_remaining_sec"></label>
+              <input type="number" min="0" step="5" id="btRequoteMin" data-param="min_requote_remaining_sec" value="300">
             </div>
           </div>
           </div>
@@ -2537,20 +2669,20 @@ textarea:focus-visible,
       <!-- Config Inputs -->
       <div class="form-grid" style="margin-top:10px">
         <div class="form-group">
-          <label>Spread Offset (Rest @ 0.50 - offset)</label>
-          <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" value="0.02" placeholder="0.001 – 0.490" oninput="validateCockpitInputs()">
+          <label data-param-label="offset"></label>
+          <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" data-param="offset" value="0.02" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Safety Exit Cap ($)</label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+          <label data-param-label="exit_thresh_by_slug"></label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Stop Loss Trigger ($)</label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" value="0.05" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+          <label data-param-label="exit_thresh_naked"></label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" data-param="exit_thresh_naked" value="0.05" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Naked Timeout (% of window)</label>
-          <input type="number" min="0" max="100" step="5" id="cockpitNakedTimeout" value="70" placeholder="0 = off" oninput="validateCockpitInputs()">
+          <label data-param-label="naked_leg_timeout_pct"></label>
+          <input type="number" min="0" max="100" step="5" id="cockpitNakedTimeout" data-param="naked_leg_timeout_pct" value="70" placeholder="0 = off" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label>Re-entry must be pairable</label>
@@ -2560,12 +2692,54 @@ textarea:focus-visible,
           </select>
         </div>
         <div class="form-group">
-          <label>Exit Reversal Buffer ($)</label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitReversal" value="0.02" placeholder="0.001 – 0.500" oninput="validateCockpitInputs()">
+          <label data-param-label="exit_reversal"></label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitReversal" data-param="exit_reversal" value="0.02" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Share Size (per leg)</label>
-          <input type="number" min="5" max="10000" step="1" id="cockpitShares" value="5" placeholder="5 – 10000" oninput="validateCockpitInputs()">
+          <label data-param-label="quote_shares"></label>
+          <input type="number" min="5" max="10000" step="1" id="cockpitShares" data-param="quote_shares" value="5" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="entry_delay_sec"></label>
+          <input type="number" min="0" max="3600" step="5" id="cockpitEntryDelay" data-param="entry_delay_sec" value="0" placeholder="0 = off" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="entry_band"></label>
+          <input type="number" min="0" max="0.5" step="0.005" id="cockpitEntryBand" data-param="entry_band" value="0" placeholder="0 = off" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="pair_cost_gate"></label>
+          <input type="number" min="0" max="2" step="0.005" id="cockpitPairCost" data-param="pair_cost_gate" value="0.98" placeholder="max pair cost" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="reentry_drift_band"></label>
+          <input type="number" min="0" max="0.5" step="0.005" id="cockpitReentryBand" data-param="reentry_drift_band" value="0.015" placeholder="0 = off" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="min_requote_remaining_sec"></label>
+          <input type="number" min="0" max="3600" step="10" id="cockpitRequoteMin" data-param="min_requote_remaining_sec" value="300" placeholder="seconds" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="reentry_min_remaining_pct"></label>
+          <input type="number" min="0" max="1" step="0.05" id="cockpitReentryMinPct" data-param="reentry_min_remaining_pct" value="0.30" placeholder="0 = off" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="max_reentries_per_window"></label>
+          <input type="number" min="0" max="100" step="1" id="cockpitMaxReentries" data-param="max_reentries_per_window" value="1" placeholder="0 = no re-entry" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="stop_loss_enabled"></label>
+          <select id="cockpitStopLossEnabled" data-param="stop_loss_enabled">
+            <option value="true" selected>On — stop out an adverse naked leg</option>
+            <option value="false">Off — hold to settlement (patient_band_maker)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label data-param-label="enable_leg_chase"></label>
+          <select id="cockpitLegChase" data-param="enable_leg_chase">
+            <option value="true" selected>On — chase the unfilled leg within the cap</option>
+            <option value="false">Off — passive quote only</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Execution Mode</label>
@@ -2575,8 +2749,8 @@ textarea:focus-visible,
           </select>
         </div>
         <div class="form-group">
-          <label>Entry Timeout (% of window)</label>
-          <input type="number" min="1" max="100" step="5" id="cockpitEntryTimeout" value="100" placeholder="100 = full window" oninput="validateCockpitInputs()">
+          <label data-param-label="entry_timeout_pct"></label>
+          <input type="number" min="1" max="100" step="5" id="cockpitEntryTimeout" data-param="entry_timeout_pct" value="100" placeholder="100 = full window" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group" style="grid-column:span 2">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
@@ -3295,6 +3469,53 @@ function marketName(series){
   return m ? `${ASSET_LABELS[m[1]]||m[1].toUpperCase()} ${m[2]}` : String(series||'');
 }
 
+// ── Parameter registry (issue #164) ──────────────────────────────────────
+// Backtest and Cockpit render from one definition. Every label, min, max and
+// title below comes from /api/params/spec; nothing here hard-codes a shared
+// parameter's wording, which is what let the two tabs drift apart.
+let PARAM_SPEC = null;
+
+async function loadParamSpec(){
+  if(PARAM_SPEC) return PARAM_SPEC;
+  try{
+    const res = await fetch('/api/params/spec');
+    PARAM_SPEC = await res.json();
+  }catch{
+    PARAM_SPEC = null;   // leave the served defaults in place rather than blanking the form
+  }
+  return PARAM_SPEC;
+}
+
+function paramSpecFor(name){
+  if(!PARAM_SPEC || !PARAM_SPEC.groups) return null;
+  for(const entries of Object.values(PARAM_SPEC.groups)){
+    if(entries[name]) return entries[name];
+  }
+  return null;
+}
+
+async function applyParamSpec(root){
+  await loadParamSpec();
+  if(!PARAM_SPEC) return;
+  const scope = root || document;
+  // Labels: an empty placeholder is filled, an existing one is overwritten, so
+  // a stale hard-coded string cannot survive a registry rename.
+  scope.querySelectorAll('[data-param-label]').forEach(el => {
+    const spec = paramSpecFor(el.getAttribute('data-param-label'));
+    if(spec) el.textContent = spec.label;
+  });
+  // Bounds and tooltips on the controls themselves.
+  scope.querySelectorAll('[data-param]').forEach(el => {
+    const spec = paramSpecFor(el.getAttribute('data-param'));
+    if(!spec) return;
+    if(spec.why) el.title = spec.why;
+    if(Array.isArray(spec.bounds) && el.tagName === 'INPUT' && el.type === 'number'){
+      el.min = String(spec.bounds[0]);
+      el.max = String(spec.bounds[1]);
+    }
+  });
+}
+
 async function refreshCollectorStatus(){
   try{
     const res = await fetch('/api/collector/status');
@@ -3594,13 +3815,20 @@ async function runBacktest(fileOverride){
     const requoteMin = getVal('btRequoteMin', 300.0);
     const entryDelay = getVal('btEntryDelay', 0.0);
     const entryBand = getVal('btEntryBand', 0.0);
+    // Issue #164: knobs the live engine has always had, now simulated too.
+    const exitReversal = getVal('btExitReversal', 0.02);
+    const entryTimeout = getVal('btEntryTimeout', 0.10);
+    const exitNaked = getVal('btExitNaked', 0.0);
+    const nakedTimeout = getVal('btNakedTimeout', 0.0);
+    const stopLoss = $('btStopLossEnabled') ? $('btStopLossEnabled').value : '1';
+    const legChase = $('btLegChase') ? $('btLegChase').value : '0';
 
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -5264,6 +5492,29 @@ async function applyCockpitConfig() {
   if (pairableEl) {
     body.reentry_require_pairable = pairableEl.value === 'true';
   }
+  // Issue #164: knobs the live engine has always accepted but the Cockpit
+  // never offered — entry_delay_sec and entry_band among them, which is what
+  // `patient_band_maker` is made of. An operator could apply the preset but
+  // not see or tune the two values that define it.
+  const numeric = {
+    entry_delay_sec: 'cockpitEntryDelay',
+    entry_band: 'cockpitEntryBand',
+    max_pair_cost: 'cockpitPairCost',
+    reentry_drift_band: 'cockpitReentryBand',
+    min_requote_remaining_sec: 'cockpitRequoteMin',
+    reentry_min_remaining_pct: 'cockpitReentryMinPct',
+    max_reentries_per_window: 'cockpitMaxReentries',
+  };
+  for (const [field, elId] of Object.entries(numeric)) {
+    const el = $(elId);
+    if (el && el.value !== '' && !isNaN(parseFloat(el.value))) {
+      body[field] = parseFloat(el.value);
+    }
+  }
+  const stopEl = $('cockpitStopLossEnabled');
+  if (stopEl) body.stop_loss_enabled = stopEl.value === 'true';
+  const chaseEl = $('cockpitLegChase');
+  if (chaseEl) body.enable_leg_chase = chaseEl.value === 'true';
   // Market selection is immutable while the bot runs; only send filters when stopped
   if (!filtersLocked) {
     if (cockpitExactSelection) {
@@ -6391,6 +6642,9 @@ function initLiveCockpitStream() {
   }
 }
 
+// Labels and bounds come from /api/params/spec before anything renders,
+// so a stale hard-coded string can never be what the operator reads.
+applyParamSpec();
 setupBacktestInputListeners();
 switchOtTab(activeOtTab);
 initSidebarState();

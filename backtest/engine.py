@@ -203,13 +203,13 @@ class BacktestParams:
     _PARAM_GROUPS: ClassVar[dict[str, list[tuple]]] = {
         "trading_knobs": [
             ("offset", "Spread Offset ($)", "You set this live on the book",
-             "$", (0.0, 0.49), ("backtest", "cockpit")),
+             "$", (0.001, 0.49), ("backtest", "cockpit")),
             ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
              "shares", (0.0, 100000.0), ("backtest",)),
             ("pair_cost_gate", "Max Pair Cost ($)", "Your cost threshold before walking away",
              "$", (0.0, 2.0), ("backtest", "cockpit")),
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
-             "shares", (1, 100000), ("backtest", "cockpit")),
+             "shares", (5, 10000), ("backtest", "cockpit")),
             ("max_start_delay_sec", "Max Start Delay (s)", "You decide which windows are fresh enough to enter",
              "s", (0.0, 3600.0), ("backtest",)),
             ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",

@@ -79,19 +79,19 @@ what let them drift; it would drift again.
   default `False` = today's behaviour.
   *Verify:* parity against `sim2`'s chase on the same window.
 
-- [ ] **5. `[Design/UI]` Backtest tab reads the registry.** Render its inputs
+- [x] **5. `[Design/UI]` Backtest tab reads the registry.** Render its inputs
   from `param_spec()`; adds the missing `exit_reversal` and
   `entry_timeout_pct`, plus the four new knobs. Delete hard-coded labels.
   *Verify:* served-HTML assertions + live DOM read at `:8802`.
 
-- [ ] **6. `[Design/UI]` Cockpit tab reads the registry.** Same, adding
+- [x] **6. `[Design/UI]` Cockpit tab reads the registry.** Same, adding
   `entry_delay_sec`, `entry_band`, `reentry_drift_band`,
   `min_requote_remaining_sec`, `max_pair_cost`. Keep the running-bot lock
   (`cockpitParamsLockHint`) on every new input.
   *Verify:* served-HTML + live DOM; a test asserts no shared label is
   hard-coded outside the registry.
 
-- [ ] **7. `[Backend/Logic]` Schema sync.** `/api/backtest` and
+- [x] **7. `[Backend/Logic]` Schema sync.** `/api/backtest` and
   `/api/live/config` validate against the registry rather than ad-hoc parsing,
   so an out-of-range value is refused identically on both.
   *Verify:* parametrised bounds tests per knob on both endpoints.

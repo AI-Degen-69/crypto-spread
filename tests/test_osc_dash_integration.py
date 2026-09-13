@@ -1393,13 +1393,18 @@ def test_card_stream_telemetry_rendered_in_html():
 
 
 def test_cockpit_input_placeholders_and_validation_script_in_html():
-    """Verify placeholders, invalid-input CSS, and validation function exist in cockpit HTML, without under-field hints."""
+    """Invalid-input CSS and the validation function exist, without under-field hints.
+
+    Issue #164 removed the numeric range placeholders these used to assert on.
+    They restated bounds the registry now supplies as `min`/`max`, and a second
+    copy of a bound is exactly what drifted between the two tabs — the Cockpit
+    still read "5 – 10000" while the control had been given `min="1"`. The
+    range is now asserted against the registry in
+    `test_registry_bounds_match_what_the_live_payload_enforces`.
+    """
     res = client.get("/")
     assert res.status_code == 200
     html = res.text
-    assert 'placeholder="0.001 – 0.490"' in html
-    assert 'placeholder="0.001 – 0.500"' in html
-    assert 'placeholder="5 – 10000"' in html
     assert 'placeholder="≥ 5.00"' in html
     assert '.form-group input.input-invalid' in html
     assert 'function validateCockpitInputs()' in html
@@ -2216,3 +2221,200 @@ def test_start_button_is_locked_not_merely_relabelled():
     assert "cursor:not-allowed" in html
     assert "'btn btn-locked'" in html
     assert "disabled = (src === 'external')" in html
+
+
+# ===========================================================================
+# Issue #164: both tabs render and validate from the one registry
+# ===========================================================================
+
+def _spec():
+    from backtest.engine import BacktestParams
+    return BacktestParams.param_spec()
+
+
+def test_param_spec_endpoint_serves_the_registry():
+    body = client.get("/api/params/spec").json()
+    assert "groups" in body and "by_surface" in body
+    off = body["groups"]["trading_knobs"]["offset"]
+    assert off["label"] == "Spread Offset ($)"
+    assert off["bounds"] == [0.001, 0.49]   # the bound live actually enforces
+    assert "cockpit" in off["surfaces"] and "backtest" in off["surfaces"]
+
+
+def _controls_by_surface(html):
+    """Map each rendered `data-param` to the tabs that render it.
+
+    Scoped by element id prefix — `bt*` is the Backtest tab, `cockpit*` the
+    Cockpit. An earlier version searched the whole page for
+    `data-param="<name>"`, so a knob marked for the Cockpit passed while only
+    the Backtest rendered it. Verified by deleting the Cockpit's attribute and
+    watching the test stay green.
+    """
+    import re
+
+    tag_re = re.compile(r"<(?:input|select)[^>]*>")
+    id_re = re.compile(r'id="([A-Za-z0-9_]+)"')
+    param_re = re.compile(r'data-param="([a-z_]+)"')
+    out: dict[str, set[str]] = {}
+    for tag in tag_re.findall(html):
+        m_id = id_re.search(tag)
+        m_p = param_re.search(tag)
+        if not (m_id and m_p):
+            continue
+        el_id = m_id.group(1)
+        if el_id.startswith("cockpit"):
+            surface = "cockpit"
+        elif el_id.startswith("bt"):
+            surface = "backtest"
+        else:
+            continue
+        out.setdefault(m_p.group(1), set()).add(surface)
+    return out
+
+
+@pytest.mark.parametrize("surface", ["cockpit", "backtest"])
+def test_every_knob_marked_for_a_surface_is_rendered_there(surface):
+    """A knob marked for a tab that the tab never renders is a lie."""
+    rendered = _controls_by_surface(client.get("/").text)
+    missing = sorted(
+        name
+        for group in _spec().values()
+        for name, v in group.items()
+        if surface in v["surfaces"] and surface not in rendered.get(name, set())
+    )
+    # `exit_thresh_by_slug` is a dict fanned out into four per-series inputs
+    # rather than one control, so it has no single `data-param` of its own.
+    missing = [m for m in missing if m != "exit_thresh_by_slug"]
+    assert missing == [], (
+        f"registry marks these for the {surface} tab, which renders none of "
+        f"them: {missing}")
+
+
+def test_no_knob_is_rendered_on_a_surface_it_is_not_marked_for():
+    """Execution assumptions must not leak into the live Cockpit."""
+    rendered = _controls_by_surface(client.get("/").text)
+    spec = {n: v for group in _spec().values() for n, v in group.items()}
+    leaked = sorted(
+        f"{name} on {surface}"
+        for name, surfaces in rendered.items()
+        if name in spec
+        for surface in surfaces
+        if surface not in spec[name]["surfaces"]
+    )
+    assert leaked == [], f"knobs rendered where the registry forbids them: {leaked}"
+
+
+def test_the_two_knobs_that_define_the_winning_preset_are_settable_live():
+    """The Cockpit had no input for either; they were reachable only by preset."""
+    html = client.get("/").text
+    assert 'id="cockpitEntryDelay"' in html
+    assert 'id="cockpitEntryBand"' in html
+    assert 'id="cockpitStopLossEnabled"' in html
+
+
+def test_shared_labels_are_not_hard_coded_in_the_page():
+    """Drift came from two hand-written copies of each label.
+
+    The registry wording must appear in the served HTML only inside the JSON
+    the page fetches — never typed into a `<label>`.
+    """
+    html = client.get("/").text
+    for group in _spec().values():
+        for name, v in group.items():
+            assert f"<label>{v['label']}</label>" not in html, (
+                f"{name}'s label is hard-coded in the page instead of coming "
+                "from /api/params/spec")
+
+
+def test_the_old_drifted_wordings_are_gone():
+    """The exact strings the issue cited as evidence of drift."""
+    html = client.get("/").text
+    for stale in ("Offset from Mid ($0.02 = 0.02 spread)",
+                  "Spread Offset (Rest @ 0.50 - offset)",
+                  "Order Shares per Leg (Min 5)",
+                  "Share Size (per leg)",
+                  "Safety Exit Cap ($)"):
+        assert stale not in html, f"drifted label still in the page: {stale!r}"
+
+
+def test_backtest_sends_the_new_knobs():
+    html = client.get("/").text
+    for q in ("exit_reversal=", "entry_timeout_pct=", "exit_thresh_naked=",
+              "naked_leg_timeout_pct=", "stop_loss_enabled=", "enable_leg_chase="):
+        assert q in html, f"the Backtest run URL never sends {q}"
+
+
+@pytest.mark.parametrize("field,over,clamped", [
+    ("entry_band", 99.0, 0.50),
+    ("entry_delay_sec", 999999.0, 3600.0),
+    ("naked_leg_timeout_pct", 5.0, 1.0),
+    ("exit_thresh_naked", 9.0, 0.50),
+    ("reentry_drift_band", 9.0, 0.50),
+])
+def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped):
+    """The API must refuse exactly what the engine refuses — no wider."""
+    r = client.get("/api/backtest", params={field: over})
+    assert r.status_code == 200, f"{field}={over} produced {r.status_code}"
+    from server.osc_dash import _clamp_to_spec
+    assert _clamp_to_spec(field, over) == pytest.approx(clamped)
+
+
+def test_clamp_falls_back_to_the_default_on_non_finite_input():
+    """NaN compares False against every bound, so min/max would pass it through."""
+    from server.osc_dash import _clamp_to_spec
+    assert _clamp_to_spec("entry_band", float("nan")) == 0.0
+    assert _clamp_to_spec("entry_delay_sec", float("inf")) == 0.0
+    assert _clamp_to_spec("entry_band", "not a number") == 0.0
+
+
+def test_live_config_accepts_the_re_entry_time_gate():
+    """`update_config()` always took it; the payload model never declared it."""
+    from server.osc_dash import LiveConfigPayload
+    assert "min_requote_remaining_sec" in LiveConfigPayload.model_fields
+    p = LiveConfigPayload(min_requote_remaining_sec=120.0)
+    assert p.min_requote_remaining_sec == pytest.approx(120.0)
+    with pytest.raises(Exception):
+        LiveConfigPayload(min_requote_remaining_sec=99999.0)
+
+
+@pytest.mark.parametrize("field,payload_field", [
+    ("offset", "offset"),
+    ("quote_shares", "shares"),
+    ("entry_band", "entry_band"),
+    ("entry_delay_sec", "entry_delay_sec"),
+    ("naked_leg_timeout_pct", "naked_leg_timeout_pct"),
+    ("reentry_drift_band", "reentry_drift_band"),
+    ("min_requote_remaining_sec", "min_requote_remaining_sec"),
+])
+def test_registry_bounds_match_what_the_live_payload_enforces(field, payload_field):
+    """A registry bound looser than the live one makes the UI lie.
+
+    Found in a live DOM read: the registry advertised `quote_shares` as
+    (1, 100000), so the Cockpit rendered `min="1"` over an engine that clamps
+    to 5 — the form accepted a value it would silently discard. The registry
+    is the source of truth for the *label*; it must not contradict the
+    validation the request will actually meet.
+    """
+    from server.osc_dash import LiveConfigPayload
+    from backtest.engine import BacktestParams
+
+    low, high = BacktestParams.spec_for(field)["bounds"]
+    meta = LiveConfigPayload.model_fields[payload_field].metadata
+    live_low = next((m.ge for m in meta if hasattr(m, "ge")), None)
+    live_high = next((m.le for m in meta if hasattr(m, "le")), None)
+    if live_low is not None:
+        assert low >= live_low, (
+            f"{field}: registry allows {low}, live rejects below {live_low}")
+    if live_high is not None:
+        assert high <= live_high, (
+            f"{field}: registry allows {high}, live rejects above {live_high}")
+
+
+def test_no_input_advertises_a_range_that_contradicts_the_registry():
+    """A `placeholder="5 – 10000"` beside `min="5"` is one more copy to drift."""
+    import re
+    html = client.get("/").text
+    stale = re.findall(r'placeholder="[\d.]+\s*[–-]\s*[\d.]+"', html)
+    assert stale == [], (
+        f"these inputs restate their range in a placeholder instead of "
+        f"taking it from the registry: {stale}")
