@@ -4069,12 +4069,14 @@ async function loadManifest(){
     if(sel && d.files){
       const currentVal = sel.value || window.selectedBacktestFile;
       sel.innerHTML = '';
-      const agg = d.aggregate || {};
-      const winRaw = (agg.total_windows||0).toLocaleString();
-      const defWinVal = (agg.windows_source === 'partial' ? '≥' : '') + winRaw;
       const defOpt = document.createElement('option');
       defOpt.value = '';
-      defOpt.textContent = `All Files / ${defWinVal} Windows (Default)`;
+      defOpt.textContent = 'All Files (Default)';
+      if (d.aggregate) {
+        const winRaw = (d.aggregate.total_windows||0).toLocaleString();
+        const defWinVal = (d.aggregate.windows_source === 'partial' ? '≥' : '') + winRaw;
+        defOpt.textContent = `All Files / ${defWinVal} Windows (Default)`;
+      }
       sel.appendChild(defOpt);
 
       for(const f of d.files){
