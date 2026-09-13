@@ -34,18 +34,18 @@ and a socket outage leaves the REST path exactly as it is today.
 
 ## Tasks
 
-- [ ] 1. `MarketLiveState` gains a bounded per-leg socket print ledger, appended
+- [x] 1. `MarketLiveState` gains a bounded per-leg socket print ledger, appended
       in `on_ws_trade` and no longer thrown away by the tick loop.
-- [ ] 2. `_sum_ws_prints_at_price()` — pure numerator over the ledger, matching
+- [x] 2. `_sum_ws_prints_at_price()` — pure numerator over the ledger, matching
       the `FILL_PRICE_TICK_TOL` tolerance and `since_ts` semantics of
       `_sum_prints_at_price`.
-- [ ] 3. `_ws_tape_authoritative(m, leg)` — the three conditions of
+- [x] 3. `_ws_tape_authoritative(m, leg)` — the three conditions of
       `ws_leg_authoritative` (`scripts/collect_ticks.py:403`): socket connected,
       token subscribed at least `WS_TAPE_WARMUP_SEC`, and a print for that token
       within `WS_TAPE_AUTHORITY_HORIZON_SEC`.
-- [ ] 4. `_record_fill_telemetry` snapshots the ledger under the engine lock;
+- [x] 4. `_record_fill_telemetry` snapshots the ledger under the engine lock;
       `_fill_telemetry_worker` picks the source; `_build_fill_record` records
       `tape_source`.
-- [ ] 5. Tests covering: socket-sourced `printed_size`, REST fallback when the
+- [x] 5. Tests covering: socket-sourced `printed_size`, REST fallback when the
       socket is not authoritative, no double count across sources, ledger bound,
       and the new record field.
