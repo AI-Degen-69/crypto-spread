@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams  # noqa: E402
-from ev_lab import _get_cache, summarize, default_base_params  # noqa: E402
+from ev_lab import _get_cache, summarize, default_base_params, stable_seed  # noqa: E402
 from sim2 import sim2  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "phase3_mech.json"

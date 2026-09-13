@@ -103,6 +103,69 @@ def test_no_sweep_script_seeds_a_bootstrap_with_builtin_hash():
     assert offenders == [], f"salted bootstrap seed reintroduced in {offenders}"
 
 
+def _undefined_globals(path: Path) -> set:
+    """Names a module calls at runtime that it never binds or imports.
+
+    A miniature pyflakes: collect every bare name in call position, subtract
+    builtins, module-level bindings, imports, and anything bound inside the
+    enclosing function (parameters, assignments, comprehension targets, `with`
+    and `except` names). What remains would raise `NameError` when that line
+    finally executes.
+    """
+    import ast
+    import builtins
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    bound = set(dir(builtins))
+    called: set = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                bound.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+            args = getattr(node, "args", None)
+            if args is not None:
+                for a in (list(args.args) + list(args.posonlyargs)
+                          + list(args.kwonlyargs)
+                          + [args.vararg, args.kwarg]):
+                    if a is not None:
+                        bound.add(a.arg)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.Global):
+            bound.update(node.names)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+    return called - bound
+
+
+def test_every_sweep_script_can_resolve_the_functions_it_calls():
+    """A converted call site is useless if the name was never imported.
+
+    Found by review: three drivers had `seed=hash(...)` replaced with
+    `seed=stable_seed(...)` while their `from ev_lab import ...` line was left
+    untouched. Each would have raised `NameError` only at the final
+    `summarize()` call — after the whole multiprocessing sweep had already run
+    and with no results written. The string-grep test above stayed green,
+    because the offending string really was gone.
+    """
+    offenders = {}
+    for path in sorted(SWEEPS.glob("*.py")):
+        missing = _undefined_globals(path)
+        if missing:
+            offenders[path.name] = sorted(missing)
+    assert offenders == {}, (
+        "these drivers call names they never bind — they would NameError at "
+        f"runtime: {offenders}")
+
+
 # ---------------------------------------------------------------------------
 # 6. Knobs the fast simulator does not implement
 # ---------------------------------------------------------------------------
