@@ -8,8 +8,9 @@ consumes offline.
 Cadence — read this before treating the output as a 1-second series (#167).
 A round is one pass over the whole slate, and the collector then sleeps
 POLL_INTERVAL, so the real gap between snapshots is round + POLL_INTERVAL.
-On this hardware a warm round measures ~420ms, i.e. ~1.4s between snapshots;
-it was ~2.7s (so ~3.8s between snapshots) before the slate was fanned out.
+On this hardware a warm 10-series round measures ~405ms (median of 5), i.e.
+~1.4s between snapshots. It was ~2.7s (so ~3.8s between snapshots) before the
+slate was fanned out.
 The live figure is published every tick as `sampling_interval_s` in
 manifest.json — use that, not POLL_INTERVAL, when reasoning about granularity.
 The opening round is several times slower (empty gamma cache, cold TLS pool,

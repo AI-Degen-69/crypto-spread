@@ -128,7 +128,43 @@ a healthy socket is most legs most seconds.
 
 ---
 
-## T5 — Live verification and schema proof `[Performance/Verify]`
+## T5 — Live verification and schema proof `[Performance/Verify]` — [x] DONE
+
+### Measured result
+
+`python -m scripts.collect_ticks --once --out run/ticks-perf`:
+
+```
+once done - closed=0 errs=0 - round=5773ms (cold start) - tape_empty_rate=10.0%
+```
+
+`errs=0`. The cold opening round is 5.8s and is reported, not budgeted.
+
+`python -m scripts.verify_tick_data run/ticks-perf` - exit 0:
+
+```
+Files Checked: 1   Total Lines: 10   Valid Ticks: 10
+Corrupt Lines: 0   Crossed Books: 0  Collector Errors: 0
+```
+
+Warm rounds, socket connected, `tape_rest_skipped=30`, median of 5:
+
+| Series | Before (avg) | After (median) | Per series before | Per series after |
+|---|---|---|---|---|
+| 1 | 267 ms | 198 ms | 267 ms | 198 ms |
+| 2 | 527 ms | 241 ms | 264 ms | 120 ms |
+| 5 | 1344 ms | 302 ms | 269 ms | 60 ms |
+| 10 | 2691 ms | 405 ms | 269 ms | 41 ms |
+
+Per-series cost falls from flat ~269 ms to 41 ms at full slate: the curve is no
+longer linear, which was the point. A full slate now costs 2.0x a single series
+instead of 10x. Effective sampling interval: ~3.8 s to ~1.4 s.
+
+Full suite: `python -m pytest -q` - 617 passed.
+
+---
+
+### Original task
 
 **Files:** none expected; documentation touch-ups only if a claim turns out stale.
 

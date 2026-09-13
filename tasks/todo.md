@@ -11,7 +11,7 @@ Issue: https://github.com/AI-Degen-69/crypto-spread/issues/167
       `strategy/markets.py` (collapses the sequential ~269 ms × 10)
 - [x] **T4** Publish the real cadence, retune `TICK_BUDGET_MS`, fix the docstring —
       `scripts/collect_ticks.py`
-- [ ] **T5** Live `--once` run, `verify_tick_data` pass, re-run the scaling benchmark,
+- [x] **T5** Live `--once` run, `verify_tick_data` pass, re-run the scaling benchmark,
       full suite
 
 Deferred by decision (SPEC §7): serving books from the #165 socket instead of REST
