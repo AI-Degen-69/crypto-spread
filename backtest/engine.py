@@ -21,7 +21,9 @@ can show the gap.
 """
 from __future__ import annotations
 import gzip
+import copy
 import hashlib
+from functools import lru_cache
 import json
 import math
 from collections import defaultdict
@@ -162,38 +164,105 @@ class BacktestParams:
     # preserve the current behavior exactly.
     entry_delay_sec: float = 0.0
     entry_band: float = 0.0
+    # Issue #164: mirrors LiveTraderEngine.stop_loss_enabled. False holds a
+    # filled naked leg to settlement/rollover instead of stopping it out, which
+    # is how `patient_band_maker` actually trades. The backtest previously had
+    # to fake that by setting exit thresholds so wide they never tripped — a
+    # different mechanism for the same intent, so neither proved the other.
+    # True preserves current behaviour exactly.
+    stop_loss_enabled: bool = True
+    # Issue #164: mirrors LiveTraderEngine.exit_thresh_naked (issue #124). A
+    # single unpaired leg may carry a tighter stop than the paired one. 0 or a
+    # value at/above the paired `exit_thresh` falls back to `exit_thresh`, so
+    # the knob can never loosen risk beyond the paired stop. 0 = off = today.
+    exit_thresh_naked: float = 0.0
+    # Issue #164: mirrors LiveTraderEngine.naked_leg_timeout_pct. A leg left
+    # unpaired this long — measured from the moment it went naked, not from
+    # window open, so a late fill still gets its full horizon — is exited at
+    # the book. 0 disables, which is today's behaviour.
+    naked_leg_timeout_pct: float = 0.0
+    # Issue #164: mirrors LiveTraderEngine.enable_leg_chase (issue #123). Once
+    # one leg fills, the other is re-anchored each tick toward its ask, capped
+    # so the pair still costs at most `pair_cost_gate` — converting a naked leg
+    # into a pair at or under the cap instead of riding it. The quote is only
+    # ever raised, never lowered. False = off = today's behaviour.
+    enable_leg_chase: bool = False
 
     # ── param grouping metadata ──────────────────────────────────────────────
     # Separates operator-controlled (live-replicable) knobs from execution
     # assumptions and internal window policy so the UI and API can render them
     # in distinct sections without touching any field names or the hash contract.
-    # Each group lists (field_name, label, why). Unknown keys silently drop so new
-    # fields don't break the grouping on a missing-entry error.
-    _PARAM_GROUPS: ClassVar[dict[str, list[tuple[str, str, str]]]] = {
+    # Each group lists (field_name, label, why, unit, bounds, surfaces) and
+    # optionally a 7th element: per-surface bound overrides.
+    # `bounds` is the (low, high) range the UI renders and the API clamps to —
+    # not a claim about `__post_init__`, which validates only a subset (see
+    # `param_spec`). `surfaces` names which tabs may render the knob.
+    # Unknown keys silently drop so new fields don't break the grouping on a
+    # missing-entry error.
+    #
+    # Issue #164: this is the single source of truth. Backtest and Cockpit
+    # drifted — different labels for one knob, and each missing knobs the other
+    # had — because both hand-rolled their own copies. A label, unit, default or
+    # bound written anywhere else in the dashboard is a defect.
+    _PARAM_GROUPS: ClassVar[dict[str, list[tuple]]] = {
         "trading_knobs": [
-            ("offset", "Spread Offset — where you rest", "You set this live on the book"),
-            ("queue_gate", "Queue Depth — book depth filter", "You choose how many orders ahead to clear through"),
-            ("pair_cost_gate", "Max Pair Cost ($) — cost ceiling", "Your cost threshold before walking away"),
-            ("quote_shares", "Order Shares per Leg — position size", "Your sizing decision"),
-            ("max_start_delay_sec", "Max Start Delay (s) — window filter", "You decide which windows are fresh enough to enter"),
-            ("entry_delay_sec", "Entry Delay (s) — quote hold", "You hold quotes until the window matures"),
-            ("entry_band", "Entry Band — undecided-market filter", "You admit only undecided markets at entry time"),
-            ("exit_thresh_by_slug", "Exit Stop Loss Thresholds ($)", "Your stop placement — per series / duration"),
+            ("offset", "Spread Offset ($)", "You set this live on the book",
+             "$", (0.001, 0.49), ("backtest", "cockpit")),
+            ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
+             "shares", (0.0, 100000.0), ("backtest",)),
+            # Research sweeps a gate that may sit above 1.00 to disable it —
+            # the dataclass default is 1.05 — while the live engine caps
+            # `max_pair_cost` at 1.00. One global range cannot be honest about
+            # both, so the Cockpit gets the live range and the Backtest keeps
+            # the research one.
+            ("pair_cost_gate", "Max Pair Cost ($)", "Your cost threshold before walking away",
+             "$", (0.0, 2.0), ("backtest", "cockpit"), {"cockpit": (0.50, 1.00)}),
+            ("quote_shares", "Share Size per Leg", "Your sizing decision",
+             "shares", (5, 10000), ("backtest", "cockpit")),
+            ("max_start_delay_sec", "Max Start Delay (s)", "You decide which windows are fresh enough to enter",
+             "s", (0.0, 3600.0), ("backtest",)),
+            ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
+             "s", (0.0, 3600.0), ("backtest", "cockpit")),
+            ("entry_band", "Entry Band ($ from 0.50)", "You admit only undecided markets at entry time",
+             "$", (0.0, 0.50), ("backtest", "cockpit")),
+            ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
+             "$", None, ("backtest", "cockpit")),
+            ("stop_loss_enabled", "Stop Loss Enabled", "Off holds a filled naked leg to settlement instead of stopping out",
+             "bool", None, ("backtest", "cockpit")),
+            ("exit_thresh_naked", "Naked Leg Stop ($)", "Tighter stop for a leg still unpaired; 0 follows the paired stop",
+             "$", (0.0, 0.50), ("backtest", "cockpit")),
+            ("naked_leg_timeout_pct", "Naked Leg Timeout (% of window)", "How long one filled leg may sit unpaired before you exit it",
+             "%", (0.0, 1.0), ("backtest", "cockpit")),
+            ("enable_leg_chase", "Leg Chase Enabled", "After one leg fills, re-anchor the other toward its ask within the pair-cost cap",
+             "bool", None, ("backtest", "cockpit")),
+            ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
+             "$", (0.001, 0.50), ("backtest", "cockpit")),
         ],
         "execution_assumptions": [
-            ("fill_model", "Fill Model — execution assumption", "Not directly settable live: the book decides fills"),
-            ("merge_gas_usd", "Gas Merge Cost (USD)", "Real cost, not a tuning knob"),
-            ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption"),
-            ("tick_size", "Tick Size", "Price granularity assumption"),
-            ("min_quote_shares", "Min Quote Shares", "Minimum order size floor"),
+            ("fill_model", "Fill Model", "Not directly settable live: the book decides fills",
+             "enum", None, ("backtest",)),
+            ("merge_gas_usd", "Gas Merge Cost ($)", "Real cost, not a tuning knob",
+             "$", (0.0, 100.0), ("backtest",)),
+            ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption",
+             "coef", (0.0, 1.0), ("backtest",)),
+            ("tick_size", "Tick Size ($)", "Price granularity assumption",
+             "$", (0.0, 1.0), ("backtest",)),
+            ("min_quote_shares", "Min Quote Shares", "Minimum order size floor",
+             "shares", (1, 100000), ("backtest",)),
         ],
         "window_policy": [
-            ("entry_timeout_pct", "Entry Timeout (% of window)", "Engine policy — mirrors live config, tuned in research"),
-            ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live"),
-            ("reentry_drift_band", "Drift Re-Entry Band", "Re-entry discipline — policy knob"),
-            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy"),
-            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy"),
-            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy"),
+            ("entry_timeout_pct", "Entry Timeout (% of window)", "Engine policy — mirrors live config, tuned in research",
+             "%", (0.0, 1.0), ("backtest", "cockpit")),
+            ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live",
+             "%", (0.0, 1.0), ("backtest",)),
+            ("reentry_drift_band", "Drift Re-Entry Band ($)", "Re-entry discipline — policy knob",
+             "$", (0.0, 0.5), ("backtest", "cockpit")),
+            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy",
+             "s", (0.0, 3600.0), ("backtest", "cockpit")),
+            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy",
+             "%", (0.0, 1.0), ("backtest", "cockpit")),
+            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy",
+             "count", (0, 100), ("backtest", "cockpit")),
         ],
     }
 
@@ -207,9 +276,10 @@ class BacktestParams:
         """
         flat = asdict(self)
         out: dict[str, dict[str, Any]] = {}
-        for group_name, fields in self._PARAM_GROUPS.items():
+        for group_name, entries in self._PARAM_GROUPS.items():
             grp: dict[str, Any] = {}
-            for fname, _label, _why in fields:
+            for entry in entries:
+                fname = entry[0]
                 if fname in flat:
                     grp[fname] = flat[fname]
             out[group_name] = grp
@@ -226,6 +296,82 @@ class BacktestParams:
             # trading_knobs section for consumers that want the whole map
             out["trading_knobs"]["_exit_thresh_by_slug"] = et
         return out
+
+    @classmethod
+    def param_spec(cls) -> dict[str, dict[str, dict[str, Any]]]:
+        """The full definition of every knob, grouped, for UIs and validators.
+
+        Issue #164: Backtest and Cockpit each hand-rolled labels, units,
+        defaults and bounds, which is how they came to disagree about the same
+        knob and to each miss knobs the other had. Both now render and validate
+        from this, so a new field reaches every surface it declares and a
+        label exists in exactly one place.
+
+        `bounds` is the `(low, high)` range the UI renders and the API clamps
+        to, or None for a non-numeric field. It is NOT a claim about
+        `__post_init__`: that validates a subset (the fractions and the two
+        patient-maker knobs) and leaves the rest unchecked, so a caller that
+        builds `BacktestParams` directly — every driver in `research/sweeps/`
+        does — can still construct a value outside these bounds. The registry
+        constrains what a *request* may ask for, not what the dataclass will
+        accept. `surfaces` says which tabs may show a knob: an execution
+        assumption like `fill_model` is not something an operator sets on a
+        live order, so it is backtest-only by design.
+        """
+        return copy.deepcopy(cls._param_spec_cached())
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _param_spec_cached(cls) -> dict[str, dict[str, dict[str, Any]]]:
+        """Build the spec once. Never hand this object out directly.
+
+        `param_spec()` returns a deep copy: the cached dict is shared by every
+        caller, and one of them mutating a label or a bounds tuple in place
+        would silently rewrite what every other surface renders — including
+        `/api/params/spec`, which is the definition both tabs read.
+        """
+        defaults = asdict(cls())
+        out: dict[str, dict[str, dict[str, Any]]] = {}
+        for group_name, entries in cls._PARAM_GROUPS.items():
+            grp: dict[str, dict[str, Any]] = {}
+            for entry in entries:
+                fname, label, why, unit, bounds, surfaces = entry[:6]
+                if fname not in defaults:
+                    continue
+                grp[fname] = {
+                    "label": label, "why": why, "unit": unit,
+                    "default": defaults[fname], "bounds": bounds,
+                    "surfaces": tuple(surfaces),
+                    # Per-surface overrides where research and live legitimately
+                    # differ; a surface with no entry uses `bounds`.
+                    "surface_bounds": dict(entry[6]) if len(entry) > 6 else {},
+                }
+            out[group_name] = grp
+        return out
+
+    @classmethod
+    def bounds_for(cls, name: str, surface: str = "") -> "tuple[float, float] | None":
+        """Bounds for one knob on one surface, falling back to the shared pair.
+
+        Issue #164: a single global range cannot describe a knob whose research
+        and live meanings differ — `pair_cost_gate` sweeps above 1.00 to switch
+        the gate off, while live `max_pair_cost` stops at 1.00. Rendering one
+        range on both surfaces either blocks a legitimate sweep or shows the
+        operator a value the request will reject.
+        """
+        spec = cls.spec_for(name)
+        if surface and surface in spec.get("surface_bounds", {}):
+            return spec["surface_bounds"][surface]
+        return spec["bounds"]
+
+    @classmethod
+    def spec_for(cls, name: str) -> dict[str, Any]:
+        """One knob's spec, or KeyError naming the field that is unregistered."""
+        for grp in cls._param_spec_cached().values():
+            if name in grp:
+                # One knob, copied — cheap, and still no handle on the cache.
+                return copy.deepcopy(grp[name])
+        raise KeyError(f"{name!r} is not in BacktestParams._PARAM_GROUPS")
 
     def __post_init__(self):
         """Validate parameter ranges and finite boundaries."""
@@ -262,6 +408,16 @@ class BacktestParams:
                 raise ValueError(
                     f"entry_delay_sec must be between 0.0 and 3600.0, got {self.entry_delay_sec}"
                 )
+        if self.exit_thresh_naked is not None:
+            if not math.isfinite(self.exit_thresh_naked) or not (0.0 <= self.exit_thresh_naked <= 0.50):
+                raise ValueError(
+                    f"exit_thresh_naked must be between 0.0 and 0.50, got {self.exit_thresh_naked}"
+                )
+        if self.naked_leg_timeout_pct is not None:
+            if not math.isfinite(self.naked_leg_timeout_pct) or not (0.0 <= self.naked_leg_timeout_pct <= 1.0):
+                raise ValueError(
+                    f"naked_leg_timeout_pct must be between 0.0 and 1.0, got {self.naked_leg_timeout_pct}"
+                )
         if self.entry_band is not None:
             if not math.isfinite(self.entry_band) or not (0.0 <= self.entry_band <= 0.50):
                 raise ValueError(
@@ -281,6 +437,19 @@ class BacktestParams:
                 return float(v)
         key = f"default_{'5m' if duration == 300 else '15m'}"
         return float(self.exit_thresh_by_slug.get(key, 0.05))
+
+    def naked_exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
+        """Stop distance for a leg still unpaired — mirrors live `_naked_exit_thresh`.
+
+        Issue #164/#124: a naked leg may carry a tighter stop than the paired
+        one, but never a looser one. 0, or any value at or above the paired
+        threshold, falls back to the paired threshold.
+        """
+        paired = self.exit_thresh(slug, duration, series=series)
+        naked = self.exit_thresh_naked
+        if naked is None or naked <= 0 or naked >= paired:
+            return paired
+        return float(naked)
 
     def params_hash(self) -> str:
         """Stable hash for cache keying slider sweeps (Plan D8)."""
@@ -319,6 +488,12 @@ class WindowResult:
     entry_price_down: float | None = None
     exit_price: float | None = None
     settlement_mid: float | None = None
+    # Issue #164: which leg the chase re-anchored ("up"/"down"/""), and the
+    # price it was last moved to. `sim2` already returned the former; the
+    # latter makes the pair-cost cap observable even when the chased leg
+    # never filled, which is exactly when a breached cap would go unnoticed.
+    chased_leg: str = ""
+    chased_resting: float | None = None
 
 
 # Issue #170: these used to be local copies that disagreed with the collector
@@ -392,6 +567,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     err = ""
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
+    # Issue #164: a leg still unpaired may carry a tighter stop than the paired
+    # one, and may be timed out entirely. `naked_since_elapsed` is the moment
+    # the leg went naked — not window open — so a late fill still gets its full
+    # horizon and a just-completed pair is never killed (mirrors live
+    # `_naked_timeout_hit`).
+    naked_thr = params.naked_exit_thresh(slug, duration, series=series)
+    naked_since_elapsed: float | None = None
+    # Which leg (if any) the chase moved, so the entry price recorded for it is
+    # the price it actually rested at when it filled, not a later chase step.
+    chased_leg = ""
 
     # Patient undecided-band maker knobs (issue #145, mirrors live issue #137).
     # `entry_delay` holds all quoting until that far into the window (0 = off);
@@ -479,9 +664,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # monotonic, so don't exit. E.g. if max_down >= exit_thr and then mid
         # is now back within exit_reversal of 0.50, the down excursion was a
         # round-trip and the adverse drift is no longer sustained.
-        if max_down >= exit_thr and (0.50 - mid) < params.exit_reversal:
+        # Latched against `naked_thr`, not `exit_thr`, because every one of the
+        # four exit sites below requires exactly one leg filled — they are all
+        # naked exits, so the threshold that governs them is the one that must
+        # arm the round-trip guard. Tightening the stop without tightening this
+        # left a reachable hole (issue #164): a drift past `naked_thr` while the
+        # book had no best_bid blocked the exit, the mid fully reverted, and the
+        # exit then fired on the stale drift because the latch was still waiting
+        # for the looser paired threshold. `naked_thr` equals `exit_thr` unless
+        # `exit_thresh_naked` tightens it, so the default path is unchanged.
+        if max_down >= naked_thr and (0.50 - mid) < params.exit_reversal:
             reversal_seen_down = True
-        if max_up >= exit_thr and (mid - 0.50) < params.exit_reversal:
+        if max_up >= naked_thr and (mid - 0.50) < params.exit_reversal:
             reversal_seen_up = True
 
         # Adverse-open gate (issue #92): evaluated once per window against the
@@ -607,12 +801,62 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 touch = up_ask + dn_ask
             pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
 
+        # --- LEG CHASE (issue #164, mirrors live issue #123 and sim2) ---
+        # One leg filled: step the other toward its ask, floored to cent
+        # precision so entry + opposite can never exceed `pair_cost_gate`. The
+        # quote is only ever raised — lowering it would walk away from a fill
+        # already within reach. Runs before fill detection so a chase and its
+        # fill can land on the same tick, as they do live.
+        #
+        # Placed ABOVE the entry gate deliberately. Completing a pair you are
+        # already half into is not a new entry, so a book that no longer meets
+        # the entry gate must not strand the open leg — the same reasoning the
+        # exit check below is placed there for.
+        if (params.enable_leg_chase and (filled_up != filled_down)
+                and not pair_captured and not exit_taken
+                and resting_up is not None and resting_down is not None):
+            _cap = params.pair_cost_gate
+            # No ask means nothing to anchor to, and live
+            # (`live_trader.py:4406/4421`) wraps its whole chase in
+            # `if <leg>_ask is not None`. Advancing to the cap ceiling on a
+            # blind tick would rest the leg where live never would — and under
+            # `fill_model="tape"`, which needs no ask to fill, manufacture a
+            # fill the live engine could not have produced.
+            if filled_up:
+                _ask = db.get("best_ask")
+                if _ask is not None:
+                    _entry = entry_price_up if entry_price_up is not None else resting_up
+                    _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                    _target = min(_ask, _max_bid)
+                    if _target > resting_down:
+                        resting_down = round(min(0.99, max(0.01, _target)), 3)
+                        chased_leg = "down"
+            else:
+                _ask = ub.get("best_ask")
+                if _ask is not None:
+                    _entry = entry_price_down if entry_price_down is not None else resting_down
+                    _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                    _target = min(_ask, _max_bid)
+                    if _target > resting_up:
+                        resting_up = round(min(0.99, max(0.01, _target)), 3)
+                        chased_leg = "up"
+
         if not queue_ok or not pair_cost_ok:
             # An already-filled position must still be eligible to exit even
             # if the live book no longer meets the entry gate. Check exit
             # BEFORE updating the reversal flag, otherwise the crossing tick
             # sets the flag and the exit is suppressed.
-            if (filled_up and not filled_down and max_down >= exit_thr
+            #
+            # These two deliberately keep the *paired* `exit_thr` while the
+            # main-path pair below uses the tighter `naked_thr` (issue #164).
+            # The asymmetry is safe and intentional: the `continue` at the end
+            # of this branch only fires when NEITHER leg is filled, so a naked
+            # leg always falls through to the `naked_thr` check on this same
+            # tick. Tightening these would make the stop fire *before* fill
+            # detection and pair completion run — costing the leg its chance to
+            # pair on a tick where it could have.
+            if (params.stop_loss_enabled
+                    and filled_up and not filled_down and max_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
                 bb_up = ub.get("best_bid")
                 if bb_up is not None:
@@ -622,7 +866,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     pnl_cents += (bb_up - resting_up) * 100.0
                     fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                     break
-            if (filled_down and not filled_up and max_up >= exit_thr
+            if (params.stop_loss_enabled
+                    and filled_down and not filled_up and max_up >= exit_thr
                     and not reversal_seen_up and not exit_taken):
                 bb_dn = db.get("best_bid")
                 if bb_dn is not None:
@@ -679,6 +924,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 filled_down = True
                 can_fill_down = False
 
+        # Latch each leg's entry price the tick it fills. Without this, a
+        # chase step after the fill would rewrite the entry the P&L is
+        # computed against (issue #164).
+        if filled_up and entry_price_up is None:
+            entry_price_up = resting_up
+        if filled_down and entry_price_down is None:
+            entry_price_down = resting_down
+
         # --- PAIR COMPLETION ---
         if filled_up and filled_down and not pair_captured and not exit_taken:
             pair_captured = True
@@ -688,11 +941,42 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
             break
 
+        # --- NAKED LEG CLOCK (issue #164, mirrors live `naked_since_ts`) ---
+        # Starts when exactly one leg is filled and resets the moment that
+        # stops being true, so a pair completing clears the timeout instead of
+        # carrying a stale deadline.
+        _one_leg = (filled_up != filled_down)
+        if _one_leg and naked_since_elapsed is None:
+            naked_since_elapsed = elapsed
+        elif not _one_leg:
+            naked_since_elapsed = None
+
+        # --- NAKED TIMEOUT (issue #164) ---
+        # An unpaired leg held past the horizon is exited at the book,
+        # independently of drift: this is a time stop, not a price stop, so it
+        # is not gated on `stop_loss_enabled`, exactly as live treats them as
+        # separate triggers.
+        if (params.naked_leg_timeout_pct > 0 and duration > 0
+                and _one_leg and not exit_taken and not pair_captured
+                and naked_since_elapsed is not None
+                and (elapsed - naked_since_elapsed) >= params.naked_leg_timeout_pct * duration):
+            _book = ub if filled_up else db
+            _bb = _book.get("best_bid")
+            if _bb is not None:
+                exit_taken = True
+                exit_side = "up" if filled_up else "down"
+                exit_price = _bb
+                _rest = resting_up if filled_up else resting_down
+                pnl_cents += (_bb - _rest) * 100.0
+                fees_cents += _taker_fee(_bb, params.taker_fee_rate) * 100.0
+                break
+
         # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
         # Check BEFORE we update the reversal flag this tick so the crossing
         # tick is the exit tick (otherwise the flag toggles the same tick and
         # the exit is suppressed).
-        if (filled_up and not filled_down and max_down >= exit_thr
+        if (params.stop_loss_enabled
+                and filled_up and not filled_down and max_down >= naked_thr
                 and not reversal_seen_down and not exit_taken):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
@@ -702,7 +986,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_up - resting_up) * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
-        if (filled_down and not filled_up and max_up >= exit_thr
+        if (params.stop_loss_enabled
+                and filled_down and not filled_up and max_up >= naked_thr
                 and not reversal_seen_up and not exit_taken):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:
@@ -720,9 +1005,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if not filled_up and not filled_down:
                     entry_cancelled = True
 
-    if filled_up:
+    # Fallback for windows where the chase never ran: the resting price at
+    # loop end is the price the leg rested at throughout.
+    if filled_up and entry_price_up is None:
         entry_price_up = resting_up
-    if filled_down:
+    if filled_down and entry_price_down is None:
         entry_price_down = resting_down
 
     if filled_up or filled_down:
@@ -764,6 +1051,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         entry_price_down=entry_price_down,
         exit_price=exit_price,
         settlement_mid=settlement_mid,
+        chased_leg=chased_leg,
+        chased_resting=(resting_down if chased_leg == "down"
+                        else resting_up if chased_leg == "up" else None),
     )
 
 

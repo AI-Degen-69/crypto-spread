@@ -1,18 +1,13 @@
-# tasks/todo.md — Issue #167
+# TODO — issue #164
 
-Plan: `tasks/plan.md` · Spec: `SPEC.md` · Gates: `CONSTRAINTS.md`
-Issue: https://github.com/AI-Degen-69/crypto-spread/issues/167
+Baseline before any change: `python -m pytest -q` → **713 passed**.
 
-- [x] **T1** Cache the gamma market resolution per window — `scripts/collect_ticks.py`
-      (saves 10 HTTP calls / ~390 ms per tick)
-- [x] **T2** Skip the REST tape while the socket is authoritative — `scripts/collect_ticks.py`
-      (saves up to ~970 ms per tick on a healthy socket)
-- [x] **T3** Fan the slate out over a bounded thread pool — `scripts/collect_ticks.py`,
-      `strategy/markets.py` (collapses the sequential ~269 ms × 10)
-- [x] **T4** Publish the real cadence, retune `TICK_BUDGET_MS`, fix the docstring —
-      `scripts/collect_ticks.py`
-- [x] **T5** Live `--once` run, `verify_tick_data` pass, re-run the scaling benchmark,
-      full suite
+- [x] 1. `[Backend]` Extend `_PARAM_GROUPS` into a full spec; add `param_spec()`
+- [x] 2. `[Backend]` `stop_loss_enabled` in `_simulate_window` (default True = today)
+- [x] 3. `[Backend]` `naked_leg_timeout_pct` + `exit_thresh_naked` (default off)
+- [x] 4. `[Backend]` `enable_leg_chase` ported from `sim2.py` (default False)
+- [x] 5. `[UI]` Backtest tab renders from the registry (+ exit_reversal, entry_timeout)
+- [x] 6. `[UI]` Cockpit tab renders from the registry (+ delay, band, reentry, pair cost)
+- [x] 7. `[Backend]` `/api/backtest` and `/api/live/config` validate from the registry
 
-Deferred by decision (SPEC §7): serving books from the #165 socket instead of REST
-`full_book`. Own issue after #167 lands, if adopted.
+Gate on every task: defaults reproduce master exactly; full suite green.

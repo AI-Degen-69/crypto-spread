@@ -858,3 +858,435 @@ def test_reentry_deferred_until_delay_expiry():
         entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
     assert w0.pair_captured is True
 
+
+# ===========================================================================
+# Issue #164: stop_loss_enabled — mirrors LiveTraderEngine
+# ===========================================================================
+
+def _drift_window(start_ts=1_760_000_000.0, duration=300):
+    """One window where UP fills, then the mid drifts down past any stop."""
+    snaps = []
+    # tick 0: both sides quotable at 0.50, nothing filled yet
+    mids = [0.50, 0.50, 0.42, 0.38, 0.35, 0.33]
+    for i, m in enumerate(mids):
+        up_bid, up_ask = round(m - 0.01, 3), round(m + 0.01, 3)
+        dn_bid, dn_ask = round(1 - m - 0.01, 3), round(1 - m + 0.01, 3)
+        # after the first tick the UP ask collapses onto our resting bid
+        if i == 1:
+            up_ask = 0.47
+        snaps.append({
+            "ts": start_ts + i, "cid": "0xstop", "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m", "start_ts": start_ts,
+            "end_ts": start_ts + duration, "duration": duration, "mid": m,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": dn_bid, "best_ask": dn_ask,
+                          "bids": {str(dn_bid): 500.0}, "asks": {str(dn_ask): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def _params(**kw):
+    base = dict(offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
+                fill_model="book", entry_timeout_pct=0.0,
+                max_start_elapsed_pct=0.0, exit_reversal=0.0,
+                exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    base.update(kw)
+    return BacktestParams(**base)
+
+
+def test_stop_loss_enabled_defaults_to_the_previous_behaviour():
+    """True is today: a naked leg past the threshold stops out."""
+    assert BacktestParams().stop_loss_enabled is True
+    w = _simulate_window(_drift_window(), _params())
+    assert w.exit_taken is True, "the drift stop no longer fires by default"
+    assert w.exit_side == "up"
+
+
+def test_disabling_the_stop_holds_the_naked_leg_to_settlement():
+    """`patient_band_maker` runs with stop_loss_enabled=False.
+
+    Same ticks, same thresholds — the only difference is the knob. The leg
+    must ride the drift instead of being sold into it.
+    """
+    w = _simulate_window(_drift_window(), _params(stop_loss_enabled=False))
+    assert w.exit_taken is False, "the stop fired with stop_loss_enabled=False"
+    assert w.filled_up is True, "the leg should still have filled"
+
+
+def test_the_knob_changes_pnl_rather_than_only_a_flag():
+    """A flag that flips without moving P&L would prove nothing."""
+    on = _simulate_window(_drift_window(), _params())
+    off = _simulate_window(_drift_window(), _params(stop_loss_enabled=False))
+    assert on.pnl_cents != off.pnl_cents, (
+        "disabling the stop left P&L unchanged — the gate is not on the path "
+        "that books the exit")
+
+
+def test_disabling_the_stop_does_not_suppress_pairing():
+    """Only the stop is gated; a window that pairs must still pair."""
+    snaps = _drift_window()
+    # collapse the DOWN ask too, so both legs fill and the pair merges
+    snaps[1]["down_book"]["best_ask"] = 0.47
+    w = _simulate_window(snaps, _params(stop_loss_enabled=False))
+    assert w.pair_captured is True, "pairing broke when the stop was disabled"
+
+
+def test_stop_loss_enabled_is_part_of_the_params_hash():
+    """Sweep caches key on the hash; two strategies must not collide."""
+    assert _params().params_hash() != _params(stop_loss_enabled=False).params_hash()
+
+
+# ===========================================================================
+# Issue #164: naked_leg_timeout_pct + exit_thresh_naked
+# ===========================================================================
+
+def _flat_naked_window(n_ticks=29, start_ts=1_760_000_000.0, duration=300,
+                       fill_tick=1):
+    """UP fills on `fill_tick`, then the mid sits near 0.50 for the rest.
+
+    The point is to isolate the *time* stop: the drift never approaches the
+    price stop, so anything that exits here exited on the clock. Ticks are 10s
+    apart and stay inside `duration`.
+    """
+    snaps = []
+    for i in range(n_ticks):
+        m = 0.50
+        up_bid, up_ask = 0.49, (0.47 if i == fill_tick else 0.51)
+        dn_bid, dn_ask = 0.49, 0.51
+        snaps.append({
+            "ts": start_ts + i * 10.0, "cid": "0xnaked",
+            "series": "eth-up-or-down-5m", "slug": "eth-up-or-down-5m",
+            "start_ts": start_ts, "end_ts": start_ts + duration,
+            "duration": duration, "mid": m,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": dn_bid, "best_ask": dn_ask,
+                          "bids": {str(dn_bid): 500.0}, "asks": {str(dn_ask): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_naked_timeout_defaults_to_off():
+    """0 is today: a flat naked leg rides to the end of the window."""
+    assert BacktestParams().naked_leg_timeout_pct == 0.0
+    w = _simulate_window(_flat_naked_window(), _params())
+    assert w.filled_up is True and w.filled_down is False
+    assert w.exit_taken is False
+
+
+def test_naked_leg_is_exited_once_the_horizon_passes():
+    """A time stop, not a price stop — the mid never moves in this window."""
+    w = _simulate_window(_flat_naked_window(), _params(naked_leg_timeout_pct=0.50))
+    assert w.exit_taken is True, "the naked leg was never timed out"
+    assert w.exit_side == "up"
+    # The invariant that matters: drift never reached the price stop, so the
+    # exit above cannot have been a price stop.
+    assert max(w.max_up, w.max_down) < 0.05, (
+        f"drift reached {max(w.max_up, w.max_down)} — at or past the 0.05 "
+        "price stop, so this no longer isolates the time stop")
+
+
+def test_the_clock_starts_when_the_leg_goes_naked_not_at_window_open():
+    """A late fill must still get its full horizon (mirrors live)."""
+    # Fill at tick 20 = 200s into a 300s window; the window's last tick is 280s.
+    snaps = _flat_naked_window(fill_tick=20)
+    w = _simulate_window(snaps, _params(naked_leg_timeout_pct=0.50))
+    assert w.filled_up is True
+    # 50% of 300s = 150s of naked time. The fill lands at 200s, so the window
+    # ends before the horizon: measured from window open it would have fired.
+    assert w.exit_taken is False, (
+        "the timeout fired early — the clock is measured from window open, "
+        "not from the moment the leg went naked")
+
+
+def test_a_completed_pair_is_never_timed_out():
+    """The clock resets when the leg stops being naked."""
+    snaps = _flat_naked_window()
+    snaps[1]["down_book"]["best_ask"] = 0.47      # both legs fill on tick 1
+    w = _simulate_window(snaps, _params(naked_leg_timeout_pct=0.10))
+    assert w.pair_captured is True
+    assert w.exit_taken is False, "a merged pair was killed by the naked timeout"
+
+
+def test_naked_stop_may_tighten_the_paired_stop_but_never_loosen_it():
+    """Mirrors live `_naked_exit_thresh`: 0 or >= paired falls back to paired."""
+    p = _params(exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
+    tight = _params(exit_thresh_naked=0.02,
+                    exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.02)
+    loose = _params(exit_thresh_naked=0.09,
+                    exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert loose.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05), (
+        "a naked stop above the paired stop must not loosen risk")
+
+
+def test_a_tighter_naked_stop_exits_a_drift_the_paired_stop_would_ride():
+    """The knob has to reach the exit comparison, not just the helper."""
+    wide = _simulate_window(_drift_window(), _params())
+    tight = _simulate_window(_drift_window(), _params(exit_thresh_naked=0.02))
+    assert wide.exit_taken and tight.exit_taken
+    assert tight.exit_price > wide.exit_price, (
+        "the tighter naked stop should have exited earlier, at a better bid")
+
+
+def test_naked_timeout_is_not_suppressed_by_disabling_the_price_stop():
+    """Time stop and price stop are separate triggers, as they are live."""
+    w = _simulate_window(_flat_naked_window(),
+                         _params(stop_loss_enabled=False, naked_leg_timeout_pct=0.50))
+    assert w.exit_taken is True, (
+        "stop_loss_enabled=False suppressed the naked *time* stop — live "
+        "treats them as independent triggers")
+
+
+@pytest.mark.parametrize("kw", [
+    {"naked_leg_timeout_pct": 1.01}, {"naked_leg_timeout_pct": -0.01},
+    {"exit_thresh_naked": 0.51}, {"exit_thresh_naked": -0.01},
+])
+def test_out_of_range_naked_knobs_are_refused(kw):
+    with pytest.raises(ValueError):
+        BacktestParams(**kw)
+
+
+# ===========================================================================
+# Issue #164: enable_leg_chase — mirrors live issue #123 and sim2
+# ===========================================================================
+
+def _chaseable_window(start_ts=1_760_000_000.0, duration=300,
+                      dn_ask=0.49, dn_ask_after=None, last_dn_ask=None):
+    """UP fills on tick 1; afterwards DOWN's ask is what the chase aims at.
+
+    `dn_ask` is deliberately low on the fill tick so the pair-cost entry gate
+    lets the window in at all — with a high ask throughout, nothing fills and
+    every assertion about the chase becomes vacuous. `dn_ask_after` is the ask
+    the chase then has to deal with, and `last_dn_ask` overrides the final tick.
+    """
+    after = dn_ask if dn_ask_after is None else dn_ask_after
+    snaps = []
+    n = 12
+    for i in range(n):
+        up_bid, up_ask = 0.49, (0.47 if i == 1 else 0.51)
+        a = dn_ask if i <= 1 else after
+        if last_dn_ask is not None and i == n - 1:
+            a = last_dn_ask
+        snaps.append({
+            "ts": start_ts + i * 10.0, "cid": "0xchase",
+            "series": "eth-up-or-down-5m", "slug": "eth-up-or-down-5m",
+            "start_ts": start_ts, "end_ts": start_ts + duration,
+            "duration": duration, "mid": 0.50,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": 0.47, "best_ask": a,
+                          "bids": {"0.47": 500.0}, "asks": {str(a): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_leg_chase_defaults_to_off():
+    """False is today: the passive DOWN quote never moves, so it never fills."""
+    assert BacktestParams().enable_leg_chase is False
+    w = _simulate_window(_chaseable_window(), _params())
+    assert w.filled_up is True
+    assert w.filled_down is False, "DOWN filled without the chase being enabled"
+    assert w.pair_captured is False
+
+
+def test_leg_chase_converts_a_naked_leg_into_a_pair():
+    """The whole point of the knob (live issue #123)."""
+    w = _simulate_window(_chaseable_window(), _params(enable_leg_chase=True))
+    assert w.filled_down is True, "the chase never reached the DOWN ask"
+    assert w.pair_captured is True
+
+
+def test_the_chase_never_breaches_the_pair_cost_cap():
+    """A chase that pairs above the cap is worse than no chase at all.
+
+    Asserts on `chased_resting`, not on a captured pair. Two earlier versions
+    passed with the cap deleted from the engine: one guarded on
+    `if w.pair_captured:` in a window that could not clear the entry gate, and
+    one used an ask equal to the cap, so `min()` had nothing to bite on.
+    """
+    cap = 0.98
+    # Low ask on the fill tick so the window enters; a far ask afterwards so
+    # the cap is the only thing that can stop the chase. entry_up is 0.48, so
+    # floor((0.98 - 0.48) * 100) / 100 = 0.50 is the ceiling.
+    w = _simulate_window(_chaseable_window(dn_ask=0.49, dn_ask_after=0.60),
+                         _params(enable_leg_chase=True, pair_cost_gate=cap))
+    assert w.filled_up is True, "the window never entered — fixture is vacuous"
+    assert w.chased_leg == "down", "the chase never ran"
+    assert w.chased_resting is not None
+    assert w.chased_resting <= 0.50 + 1e-9, (
+        f"chased DOWN to {w.chased_resting}, past the 0.50 the cap allows")
+    assert (w.entry_price_up + w.chased_resting) <= cap + 1e-9, (
+        f"a fill there would pair at {w.entry_price_up + w.chased_resting}, "
+        f"over the {cap} cap")
+
+
+def test_the_chase_only_raises_the_quote_never_lowers_it():
+    """Lowering would walk away from a fill already within reach."""
+    # The ask after the fill sits above what the cap allows (ceiling is
+    # floor((1.05 - 0.48) * 100) / 100 = 0.57), so the chased leg never fills
+    # and the chase keeps running — an ask the chase could reach would pair
+    # immediately and the loop would break before the drop ever happened.
+    w = _simulate_window(
+        _chaseable_window(dn_ask=0.49, dn_ask_after=0.70, last_dn_ask=0.20),
+        _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    assert w.chased_leg == "down", "the chase never ran"
+    assert w.chased_resting >= 0.57 - 1e-9, (
+        f"the resting DOWN bid followed the ask down to {w.chased_resting}")
+
+
+def test_the_chase_does_not_move_a_leg_that_already_filled():
+    """Only the unfilled leg is re-anchored; the filled one keeps its entry."""
+    snaps = _chaseable_window()
+    w = _simulate_window(snaps, _params(enable_leg_chase=True))
+    # UP filled passively at mid - offset = 0.50 - 0.02 = 0.48
+    assert w.entry_price_up == pytest.approx(0.48), (
+        f"the filled UP leg's entry moved to {w.entry_price_up}")
+
+
+def test_the_chase_stops_once_the_pair_is_captured():
+    """No further re-anchoring after both legs are filled."""
+    w = _simulate_window(_chaseable_window(), _params(enable_leg_chase=True))
+    assert w.pair_captured is True
+    assert (w.entry_price_up + w.entry_price_down) <= 1.05 + 1e-9
+
+
+def test_enable_leg_chase_is_part_of_the_params_hash():
+    """Chased and unchased runs must not collide in a sweep cache."""
+    assert _params().params_hash() != _params(enable_leg_chase=True).params_hash()
+
+
+def _blocked_exit_then_reversion():
+    """Drift past a tight naked stop while the UP book has no bid, then revert.
+
+    The missing best_bid is what makes this reachable: the exit cannot fire on
+    the crossing tick, so the drift is still on the books when the mid comes
+    back. With the round-trip guard armed at the paired threshold instead of
+    the naked one, the exit then fires into a fully recovered market.
+    """
+    start, dur = 1_760_000_000.0, 300
+    mids = [0.50, 0.50, 0.46, 0.46, 0.499, 0.499]
+    no_bid = {2, 3, 4}
+    snaps = []
+    for i, m in enumerate(mids):
+        ub, ua = round(m - 0.01, 3), (0.47 if i == 1 else round(m + 0.01, 3))
+        db, da = round(1 - m - 0.01, 3), round(1 - m + 0.01, 3)
+        up = {"best_bid": (None if i in no_bid else ub), "best_ask": ua,
+              "bids": ({} if i in no_bid else {str(ub): 500.0}),
+              "asks": {str(ua): 500.0}}
+        snaps.append({
+            "ts": start + i * 10, "cid": "0xrev", "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m", "start_ts": start, "end_ts": start + dur,
+            "duration": dur, "mid": m, "up_book": up,
+            "down_book": {"best_bid": db, "best_ask": da,
+                          "bids": {str(db): 500.0}, "asks": {str(da): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_a_tight_naked_stop_arms_the_reversal_guard_at_its_own_threshold():
+    """A round trip must suppress the stop that the round trip round-tripped.
+
+    Regression: `exit_thresh_naked` tightened the exit comparison to
+    `naked_thr` while the reversal latch still waited for the looser paired
+    `exit_thr`. A drift past 0.03 that the book could not act on, followed by a
+    full reversion to 0.499, then exited at 0.489 — selling into a recovered
+    market on a stale drift.
+    """
+    w = _simulate_window(_blocked_exit_then_reversion(),
+                         _params(exit_thresh_naked=0.03))
+    assert w.filled_up is True, "fixture never entered"
+    assert w.max_down >= 0.03, "fixture never crossed the tight stop"
+    assert w.exit_taken is False, (
+        f"stopped out at {w.exit_price} after the mid had reverted to 0.499 — "
+        "the reversal guard is armed at the paired threshold, not the naked one")
+
+
+def test_the_reversal_guard_is_unchanged_when_the_naked_stop_is_not_tightened():
+    """`naked_thr` equals `exit_thr` by default, so this path must not move."""
+    w = _simulate_window(_blocked_exit_then_reversion(), _params())
+    assert w.exit_taken is False
+    tight = _params(exit_thresh_naked=0.05)   # equal to paired: falls back
+    assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
+
+
+def test_the_chase_does_not_move_a_quote_with_no_ask_to_anchor_to():
+    """Live wraps its whole chase in `if <leg>_ask is not None`.
+
+    Without that gate the backtest advanced the resting price to the pair-cost
+    ceiling on a tick where the book showed no ask at all — resting the leg
+    where the live engine never would, and under `fill_model="tape"` (which
+    needs no ask to fill) manufacturing a fill live could not have produced.
+    """
+    snaps = _chaseable_window(dn_ask=0.49, dn_ask_after=0.70)
+    for s in snaps[2:]:                      # blind the DOWN book after the fill
+        s["down_book"]["best_ask"] = None
+        s["down_book"]["asks"] = {}
+    w = _simulate_window(snaps, _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    assert w.filled_up is True, "fixture never entered"
+    assert w.chased_leg == "", (
+        f"the chase moved the DOWN leg to {w.chased_resting} with no ask on "
+        "the book — live would not have quoted at all")
+
+
+def test_the_chase_resumes_once_an_ask_reappears():
+    """The gate must skip the blind tick, not disable the chase for the window."""
+    snaps = _chaseable_window(dn_ask=0.49, dn_ask_after=0.70)
+    for s in snaps[2:5]:
+        s["down_book"]["best_ask"] = None
+        s["down_book"]["asks"] = {}
+    w = _simulate_window(snaps, _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    assert w.chased_leg == "down", "the chase never resumed after the ask returned"
+    assert w.chased_resting is not None
+
+
+def test_nothing_closes_a_naked_leg_when_both_stops_are_off():
+    """`stop_loss_enabled=False` with no timeout is newly reachable.
+
+    Neither stop can fire, so the leg must still be marked to the final book
+    rather than silently contributing nothing.
+    """
+    w = _simulate_window(_drift_window(),
+                         _params(stop_loss_enabled=False, naked_leg_timeout_pct=0.0))
+    assert w.filled_up is True and w.filled_down is False
+    assert w.exit_taken is False
+    assert w.settlement_mid is not None, (
+        "a naked leg with both stops disabled was never marked to settlement")
+    assert w.pnl_cents != 0.0, "the held leg contributed no P&L at all"
+
+
+def test_a_naked_stop_equal_to_the_paired_stop_falls_back_to_it():
+    """The `>=` boundary, not just the strictly-looser case."""
+    p = _params(exit_thresh_naked=0.05,
+                exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
+
+
+def test_a_naked_leg_always_reaches_the_naked_threshold_check():
+    """The gate-failure branch keeps `exit_thr` and that is safe by structure.
+
+    Two of the four stop-exit sites sit inside `if not queue_ok or not
+    pair_cost_ok:` and compare against the paired `exit_thr`; the two on the
+    main path use the tighter `naked_thr`. The asymmetry is only safe because
+    the `continue` ending that branch fires just when NEITHER leg is filled —
+    so a naked leg always falls through to the `naked_thr` check on the same
+    tick. If that `continue` ever widens to cover a filled leg, a drift between
+    the two thresholds would silently stop being exited.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(_simulate_window)
+    gate = src.index("if not queue_ok or not pair_cost_ok:")
+    fill = src.index("# --- FILL DETECTION")
+    branch = src[gate:fill]
+    continues = re.findall(r"^\s+if (.+):\n\s+continue$", branch, re.M)
+    assert continues == ["not filled_up and not filled_down"], (
+        "the gate-failure branch's exit condition changed; a naked leg may no "
+        f"longer reach the naked_thr check: {continues}")
