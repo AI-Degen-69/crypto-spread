@@ -1,53 +1,66 @@
-# SPEC.md — Issue #160: Fix paper sim settles mark naked legs to 0.50 (bids never maintained)
+# SPEC.md — Issue #165: Implement CLOB WebSocket stream collector for 100% tape trade & book capture
 
 ## 1. Goal
-Eliminate the silent `0.50` settlement fallback in `strategy/live_trader.py` for naked legs at window expiry. In paper mode and live rollover, positions must mark to true executable book bids, binary complement quotes (`1.0 - opposite_ask`), or latched valid bids. Any failure to determine an executable mark must fail loud, ensuring P&L honesty and unblocking the live pilot path (#144, #143).
+Eliminate the 98.6% tape starvation caused by 1-second REST polling on Polymarket's Data API. Replace or augment the tape trade collection in `scripts/collect_ticks.py` with a real-time, persistent WebSocket connection directly to Polymarket's CLOB WebSocket (`wss://ws-subscriptions-clob.polymarket.com/ws/market`) per `docs/live-dashboard-streaming-spec.md`. Capture 100% of executed trades (`last_trade_price`) and book updates into `run/ticks/ticks_YYYY-MM-DD.jsonl` with zero lost prints, enabling accurate `fill_model="tape"` backtesting and replay research.
 
 ## 2. Background & Evidence
-- Cross-check analysis in #146 (`runs/paper/2026-09-11_22-10_IDT/replay_comparison/comparison.md`) proved that all 10 in-scope shadow settles booked `(0.50 - fill) * 5` exactly.
-- Replay-grade ticks showed real executable bids existed at expiry (0.99 / 0.01 / 0.001). Reconstructed at true marks, the 10 settles produced -$24.49 instead of the booked +$0.24, turning a claimed +$6.74 shadow night into an actual ~$19.5 loss.
-- At rollover (`strategy/live_trader.py:4935-4939`), `mstate.up_bid or 0.50` and `mstate.down_bid or 0.50` silently fell back to 0.50 whenever `up_bid` / `down_bid` were None (which happens when books clear at the boundary or when boundary book polls overwrite state).
-- `scripts/shadow_ev_pilot.py` omitted `up_bid` and `down_bid` from its snapshot exporter.
+- Currently, `scripts/collect_ticks.py` polls `https://data-api.polymarket.com/trades` once per second over HTTP REST.
+- As demonstrated in Issue #146 cross-checks and manifest audits, ~98.6% of snapshots have `tape_delta: []` because REST polling is too slow and high-latency to catch intra-second trade prints on Polymarket.
+- This creates an unworkable dichotomy in research:
+  1. `fill_model = "tape"` suffers from tape starvation and records 0 fills across hundreds of windows.
+  2. `fill_model = "book"` is overly optimistic and assumes every vanished level was a fill.
+- The blueprint already exists in `docs/live-dashboard-streaming-spec.md:46-56`. Moving trade collection from REST polling to a streaming WebSocket connection solves the tape starvation problem at the root.
 
 ## 3. In Scope
-1. **Bid Maintenance & Persistence in `strategy/live_trader.py`**:
-   - Add `last_valid_up_bid` and `last_valid_down_bid` to `MarketLiveState`.
-   - In `_update_market_strategy` and `on_book_update`: whenever a non-null bid is received, update `up_bid` / `down_bid` AND latch `last_valid_up_bid` / `last_valid_down_bid`.
-   - Preserve latched bids across boundary ticks; never wipe them when an expiring window's book becomes temporarily empty.
-2. **True Mark-to-Book Settlement Logic**:
-   - In `_handle_window_rollover`:
-     - For UP leg: mark bid resolution order:
-       1. `mstate.up_bid` (if valid float > 0)
-       2. Binary complement: `round(1.0 - mstate.down_ask, 4)` (if `mstate.down_ask` is valid float < 1.0)
-       3. Latched bid: `mstate.last_valid_up_bid`
-       4. Latched complement: `round(1.0 - mstate.last_valid_down_ask, 4)`
-     - For DOWN leg: mark bid resolution order:
-       1. `mstate.down_bid`
-       2. Binary complement: `round(1.0 - mstate.up_ask, 4)`
-       3. Latched bid: `mstate.last_valid_down_bid`
-       4. Latched complement: `round(1.0 - mstate.last_valid_up_ask, 4)`
-     - **Fail-Loud Guard**: If no market bid or complement can be resolved, raise `RuntimeError` or log a CRITICAL alert and fail the settle explicitly with a designated `MARK_UNAVAILABLE` error rather than silently defaulting to 0.50.
-   - Record `settle_source` and `mark_bid` in `TradeEvent.notes` for complete auditability.
-3. **Snapshot Telemetry in `scripts/shadow_ev_pilot.py`**:
-   - Include `up_bid`, `down_bid`, `up_ask`, `down_ask` in the per-minute market snapshot dict.
-4. **Entry-Fill Validation & Engine Structural Deltas**:
-   - Record formal entry-fill documentation: the 45 pairs filled on touch/mid in paper mode; real queue toxicity measurement is deferred to #143 queue telemetry.
-   - Document the structural delta between engine 1-pair/window cap vs paper re-quoting.
-5. **Comprehensive Automated Tests**:
-   - Add tests in `tests/test_live_trader.py`:
-     - Direct book settle: assert settle uses actual `up_bid` / `down_bid`.
-     - Complement settle: assert missing `up_bid` resolves via `1.0 - down_ask`.
-     - Latched bid settle: assert boundary empty book uses latched bid.
-     - Fail-loud assertion: assert bid-less fixture cannot silently produce 0.50.
+1. **CLOB Market WebSocket Client Enhancement (`strategy/streaming.py`)**:
+   - Direct connection to `wss://ws-subscriptions-clob.polymarket.com/ws/market` using standard `websockets` library.
+   - Subscription frame:
+     ```json
+     {
+       "assets_ids": ["<token_id>", ...],
+       "type": "market",
+       "custom_feature_enabled": true
+     }
+     ```
+   - Ingestion of `last_trade_price` events to record every trade with exact price, size, side, timestamp, and transaction hash.
+   - Maintenance of order book state via `book` snapshots and `price_change` level mutations.
+   - Application-level keepalive: 10s PING text frame sending and PONG response tracking.
+   - Automatic exponential backoff reconnection with jitter upon socket disconnects.
+   - Dynamic multi-token subscription updates when 5m/15m markets rotate.
+2. **Thread-Safe Streaming Bridge (`CLOBStreamCollectorBridge`)**:
+   - Background asyncio loop managed in a daemon thread.
+   - Thread-safe trade queue buffering with `drain_trades()` per token or across all tokens.
+   - Thread-safe order book cache queries (`get_book()`).
+   - Connection status and health metrics (`get_status()`).
+3. **Collector Integration (`scripts/collect_ticks.py`)**:
+   - Integrate `CLOBStreamCollectorBridge` into the 1-second tick loop.
+   - Dynamically subscribe to the 20 active UP/DOWN tokens across the 10 series in `strategy/series.py:SERIES`.
+   - In `poll_once`, drain intra-second trades from the WebSocket buffer into `snap["tape_delta"]`.
+   - Maintain dedup logic via `seen_tape` to prevent duplicates.
+   - Graceful fallback: If WebSocket is reconnecting, gracefully fall back to REST `recent_trades` / `full_book`.
+   - CLI flag `--no-ws` to allow forcing pure REST mode for diagnostics.
+   - Update `manifest.json` with WebSocket connection status, trades captured via WS, and stream metrics.
+   - Windows-safe UTF-8 console output and clean signal handling (SIGINT/SIGTERM).
+4. **Comprehensive Automated Tests**:
+   - Unit tests in `tests/test_clob_ws_collector.py`:
+     - Test WebSocket message parser for `book`, `price_change`, `last_trade_price`, `best_bid_ask`, and `PONG`.
+     - Test trade buffering and draining semantics.
+     - Test 10s PING heartbeat and reconnection backoff.
+     - Test dynamic token updates and resubscription.
+     - Test `poll_once` with WebSocket bridge feeding tape trades.
+     - Test backtest replay fill execution with streamed tape prints.
+   - Smoke tests in `tests/test_collect_ticks_smoke.py`:
+     - Verify `--no-ws` CLI parsing.
+     - Verify manifest schema includes `ws_connected` and stream counters.
 
 ## 4. Out of Scope
-- Modifying backtest engine fill algorithms or re-entry logic.
-- Live real-money trading or deploying order placement changes to mainnet CLOB.
-- Sizing increases or changing the #143 pilot parameters.
+- Order placement or execution signing (lives in `strategy/live_trader.py`).
+- Frontend dashboard UI changes (separate issue).
+- Direct Binance spot feed changes (already handled in `BinanceDirectWSClient`).
 
 ## 5. Acceptance Criteria
-- [ ] No paper settle can silently mark to 0.50 when books exist (test with bid-less fixture fails loud or uses last book).
-- [ ] Re-running the scoped comparison shows settle distortion < 20% of scoped paper P&L.
-- [ ] Entry-fill validation recorded and deferred to #143 with clear rationale.
-- [ ] `python -m pytest tests/test_live_trader.py -q` green (123+ tests passing).
-- [ ] Entire test suite `python -m pytest -q` passes without regressions.
+- [ ] WebSocket client connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market` and subscribes to tokens for all 10 series in `strategy/series.py`.
+- [ ] 100% of executed trades (`last_trade_price`) are captured in real-time and written to the tick stream (`tape_delta`).
+- [ ] Heartbeat ping sent every 10s; automatic reconnection on socket closure or network disconnect.
+- [ ] Replay test demonstrates non-zero, realistic tape trade fills in backtest engine without starvation.
+- [ ] `python -m pytest -q` passes with 0 regressions.

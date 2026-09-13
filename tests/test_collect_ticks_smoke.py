@@ -71,6 +71,32 @@ def test_cli_help_runs():
     assert "out" in r.stdout or "ticks" in r.stdout.lower()
 
 
+def test_cli_exposes_no_ws_flag():
+    """--no-ws must be advertised so operators can revert to pure REST polling."""
+    r = subprocess.run(
+        [sys.executable, "-m", "scripts.collect_ticks", "--help"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=10,
+    )
+    assert r.returncode == 0
+    assert "--no-ws" in r.stdout
+
+
+def test_manifest_includes_ws_telemetry(tmp_path: Path):
+    """Socket health fields survive into manifest.json for the dashboard."""
+    import scripts.collect_ticks as ct
+
+    ct.update_manifest(tmp_path, {
+        "lines": 10, "ws_enabled": True, "ws_connected": False,
+        "ws_reconnects": 3, "tape_captured_ws": 120, "tape_captured_rest": 7,
+    })
+    data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert data["ws_enabled"] is True
+    assert data["ws_connected"] is False
+    assert data["ws_reconnects"] == 3
+    assert data["tape_captured_ws"] == 120
+    assert data["tape_captured_rest"] == 7
+
+
 def test_manifest_tape_empty_rate_tracking(tmp_path: Path):
     """Verify update_manifest writes public tape stats and strips internal keys."""
     import scripts.collect_ticks as ct

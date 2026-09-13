@@ -23,11 +23,17 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import requests
 from strategy.markets import full_book, recent_trades
@@ -48,9 +54,17 @@ SPREAD_OFFSET = 0.02
 TAPE_LIMIT = 200
 TICK_BUDGET_MS = 2000.0
 
+# Cross-source tape dedup (issue #165). The socket prints a trade the instant it
+# happens; the REST tape reports the same trade for as long as it stays in the
+# last-200 window, and its dedup set never saw the socket's copy. So every level
+# the socket printed is remembered for this long and suppressed on the REST
+# fallback path. Suppression can only under-count volume at a level we already
+# printed — the conservative direction, and fill detection is presence-based.
+WS_REST_DEDUP_TTL = 60.0
+
 # Per-cid state: { cid: {series, slug, start_ts, end_ts, up_token, down_token,
-#                         seen_tape, snap_count, label, duration,
-#                         mids, touch_pairs} }
+#                         seen_tape, seen_ws, ws_levels, snap_count, label,
+#                         duration, mids, touch_pairs} }
 windows: dict[str, dict[str, Any]] = {}
 
 
@@ -227,7 +241,42 @@ def now_day_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[str]]:
+def drain_ws_tape(ws_bridge: Any, w: dict, now: float) -> list[dict]:
+    """Drain streamed prints for one window's two tokens into tape rows.
+
+    Deduplicated by full print identity (`asset:price:size:ts:hash`) so a
+    redelivered frame is written once, and every drained level is stamped into
+    `w["ws_levels"]` so the REST fallback does not echo it back.
+    """
+    seen_ws: set = w.setdefault("seen_ws", set())
+    ws_levels: dict = w.setdefault("ws_levels", {})
+    rows: list[dict] = []
+    for tok in (w["up_token"], w["down_token"]):
+        for t in ws_bridge.drain_trades_for_token(tok) or []:
+            try:
+                price = float(t["price"])
+                size = float(t["size"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            sig = f"{tok}:{price}:{size}:{t.get('ts')}:{t.get('hash')}"
+            if sig in seen_ws:
+                continue
+            seen_ws.add(sig)
+            ws_levels[f"{tok}:{price:.4f}"] = now
+            rows.append({"asset": tok, "price": price, "size": size})
+    return rows
+
+
+def prune_ws_levels(w: dict, now: float) -> None:
+    """Drop socket-printed levels older than the cross-source dedup TTL."""
+    ws_levels: dict = w.get("ws_levels") or {}
+    cutoff = now - WS_REST_DEDUP_TTL
+    for key in [k for k, ts in ws_levels.items() if ts < cutoff]:
+        ws_levels.pop(key, None)
+
+
+def poll_once(out_dir: Path, gzip: bool, stats: dict,
+              ws_bridge: Any = None) -> tuple[list[str], list[str]]:
     """One poll across all 10 series. Returns (closed_window_slugs, errors)."""
     now = time.time()
     day_key = now_day_key()
@@ -236,6 +285,8 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
     closed: list[str] = []
     errs: list[str] = []
     deadline = tick_start + 1.0  # target 1s cadence
+    ws_connected = bool(ws_bridge is not None and getattr(ws_bridge, "is_connected", False))
+    active_tokens: list[str] = []
 
     for series_slug, duration, label in SERIES:
         info, err = fetch_live_for_series(series_slug)
@@ -248,11 +299,13 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
                 "series": series_slug, "slug": info["slug"],
                 "start_ts": info["start_ts"], "end_ts": info["end_ts"],
                 "up_token": info["up_token"], "down_token": info["down_token"],
-                "seen_tape": set(), "snap_count": 0,
+                "seen_tape": set(), "seen_ws": set(), "ws_levels": {},
+                "snap_count": 0,
                 "label": label, "duration": duration,
                 "mids": [], "touch_pairs": [],
             }
         w = windows[cid]
+        active_tokens.extend([w["up_token"], w["down_token"]])
 
         # Per-call isolation: one CLOB hiccup must not kill the collector
         # (Plan D2 hardening — earlier version let ReadTimeout propagate
@@ -274,15 +327,30 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
             db_err = db["err"]
         time.sleep(random.uniform(0.0, JITTER_SEC))
 
+        # Tape: the market socket sees every intra-second print, the 1-poll/s
+        # REST tape sees ~1.4% of them. Socket first; REST only covers the
+        # seconds it produced nothing (disconnected, or simply no prints yet).
         tape_list: list[dict] = []
         tape_err = ""
-        try:
-            tape_map = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT)
-            for tok in (w["up_token"], w["down_token"]):
-                for p, s in tape_map.get(tok, {}).items():
-                    tape_list.append({"asset": tok, "price": p, "size": s})
-        except Exception as e:
-            tape_err = f"tape:{e}"
+        prune_ws_levels(w, now)
+        if ws_connected:
+            try:
+                tape_list = drain_ws_tape(ws_bridge, w, now)
+                stats["tape_captured_ws"] = stats.get("tape_captured_ws", 0) + len(tape_list)
+            except Exception as e:
+                tape_err = f"ws_tape:{e}"
+        if not tape_list:
+            try:
+                tape_map = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT)
+                ws_levels = w.get("ws_levels") or {}
+                for tok in (w["up_token"], w["down_token"]):
+                    for p, s in tape_map.get(tok, {}).items():
+                        if f"{tok}:{float(p):.4f}" in ws_levels:
+                            continue  # already printed by the socket
+                        tape_list.append({"asset": tok, "price": p, "size": s})
+                        stats["tape_captured_rest"] = stats.get("tape_captured_rest", 0) + 1
+            except Exception as e:
+                tape_err = f"tape:{e}"
 
         mid = compute_mid(ub)
         touch_pair = None
@@ -321,6 +389,14 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
         except Exception as e:
             errs.append(f"write:{e}")
         w["snap_count"] += 1
+
+    stats["ws_connected"] = ws_connected
+    if ws_bridge is not None:
+        try:
+            ws_bridge.update_subscribed_tokens(sorted(set(active_tokens)))
+            stats["ws_reconnects"] = ws_bridge.get_status().get("reconnects", 0)
+        except Exception as e:
+            errs.append(f"ws_sync:{e}")
 
     tick_ms = (time.perf_counter() - tick_start) * 1000.0
     if tick_ms > TICK_BUDGET_MS:
@@ -361,6 +437,52 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
     return closed, errs
 
 
+def start_ws_bridge(disabled: bool = False) -> Any:
+    """Start the CLOB market stream bridge, or None when disabled/unavailable.
+
+    A socket that cannot be opened is never fatal: the collector keeps running
+    on the REST tape exactly as it did before issue #165.
+    """
+    if disabled:
+        return None
+    try:
+        from strategy.streaming import CLOBStreamCollectorBridge
+        bridge = CLOBStreamCollectorBridge()
+        bridge.start()
+        return bridge
+    except Exception as e:
+        print(f"ws bridge unavailable ({e}); falling back to REST tape")
+        return None
+
+
+def stop_ws_bridge(ws_bridge: Any) -> None:
+    """Stop the stream bridge if one is running."""
+    if ws_bridge is None:
+        return
+    try:
+        ws_bridge.stop()
+    except Exception as e:
+        print(f"ws bridge shutdown error: {e}")
+
+
+def install_signal_handlers() -> None:
+    """Route SIGINT/SIGTERM into the existing KeyboardInterrupt shutdown path."""
+    import signal
+
+    def _raise_interrupt(signum, frame):
+        """Turn a termination signal into the loop's normal exit."""
+        raise KeyboardInterrupt
+
+    for name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _raise_interrupt)
+        except (ValueError, OSError, RuntimeError):
+            continue  # not the main thread, or unsupported on this platform
+
+
 def main():
     """Run full-depth 1-second tick collection across 10 Polymarket series."""
     ap = argparse.ArgumentParser()
@@ -368,6 +490,8 @@ def main():
     ap.add_argument("--days", type=int, default=0, help="run until N UTC day boundaries pass")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory")
     ap.add_argument("--gzip", action="store_true", help="rotate daily file as .jsonl.gz")
+    ap.add_argument("--no-ws", action="store_true",
+                    help="disable the CLOB market WebSocket tape stream (REST polling only)")
     args = ap.parse_args()
 
     out_dir: Path = args.out
@@ -381,15 +505,29 @@ def main():
         "tape_recent_empty_rate": 0.0,
         "tape_alert": False,
         "tape_entries_total": 0,
+        "ws_enabled": False,
+        "ws_connected": False,
+        "ws_reconnects": 0,
+        "tape_captured_ws": 0,
+        "tape_captured_rest": 0,
     }
 
-    print(f"collect_ticks: {len(SERIES)} series -> {out_dir}  gzip={args.gzip}")
+    ws_bridge = start_ws_bridge(disabled=args.no_ws)
+    stats["ws_enabled"] = ws_bridge is not None
+    install_signal_handlers()
+
+    print(f"collect_ticks: {len(SERIES)} series -> {out_dir}  gzip={args.gzip}  "
+          f"ws={'on' if ws_bridge is not None else 'off'}")
     if args.once:
-        closed, errs = poll_once(out_dir, args.gzip, stats)
-        update_manifest(out_dir, stats)
+        try:
+            closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge)
+            update_manifest(out_dir, stats)
+        finally:
+            stop_ws_bridge(ws_bridge)
         print(
             f"once done · closed={len(closed)} errs={len(errs)} · "
-            f"tape_empty_rate={stats.get('tape_empty_rate', 0.0):.1%}"
+            f"tape_empty_rate={stats.get('tape_empty_rate', 0.0):.1%} · "
+            f"ws_trades={stats.get('tape_captured_ws', 0)}"
         )
         return
 
@@ -397,7 +535,7 @@ def main():
     current_day = now_day_key()
     try:
         while True:
-            closed, errs = poll_once(out_dir, args.gzip, stats)
+            closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge)
             new_day = now_day_key()
             if new_day != current_day:
                 day_boundaries += 1
@@ -426,6 +564,7 @@ def main():
     except KeyboardInterrupt:
         print("interrupted")
     finally:
+        stop_ws_bridge(ws_bridge)
         update_manifest(out_dir, stats)
 
 
