@@ -1,136 +1,142 @@
-# Plan: Issue #132 — Bridge live tick collector to oscillation overview + auto-rebuild
+# Plan: Issue #146 — Replay cross-check: official backtest of the shadow night vs paper results
 
-Task Type: Code + Design
-Size Tier: Large
-Target Files: `strategy/windows.py` (new), `scripts/rebuild_windows.py`,
-  `scripts/collect_ticks.py`, `server/osc_dash.py` (API + HTML/JS),
-  `tests/test_windows.py` (new), `tests/test_collect_ticks_smoke.py`,
-  `tests/test_osc_dash_integration.py`, `tests/test_rebuild_windows.py`
+Task Type: Research + Code
+Size Tier: Small
+Target Files: (no production code changes) new `scripts/replay_shadow_check.py`,
+  new artifact dir `runs/paper/2026-09-11_22-10_IDT/replay_comparison/`,
+  `tests/test_backtest_engine.py` (gate only, read-only)
 
-Decisions locked with user: none yet — requirements fully clear from the
-issue (detailed 4-phase plan embedded in #132 comments; `interview-me`
-skipped). Classification math (base 0.50, threshold 0.02) frozen.
+Decisions locked with user: none — requirements fully clear from the issue;
+`interview-me` was skipped. Two issue-text deviations resolved by local
+evidence (no operator question needed): stale shadow path + partial tick
+overlap (see §1).
 
-## Task Breakdown
+## 1. Spec (embedded — Small tier, no SPEC.md change)
 
-### Task 1: Shared module `strategy/windows.py` (new)
-- **Files**: `strategy/windows.py`
+### Goal
+Replay the 11h shadow night through the official backtest engine with the
+winning config and quantify paper-vs-replay divergence, validating or
+indicting the paper fill simulator before the live micro-pilot (#143).
+
+### Verified ground truth (local, 2026-09-13)
+- Shadow dir (issue cites stale `run/shadow_ev/...`; actual location):
+  `runs/paper/2026-09-11_22-10_IDT/data/` — `meta.json` (config hypothesis),
+  `final.json` (totals), `trades.jsonl` (66 events), `snapshots.jsonl`, log.
+- Shadow ran 2026-09-11T22:10:54Z → 2026-09-12T09:10:58Z. Totals:
+  realized +$6.74, 66 events, 53 pairs + 13 settles, win-rate 97%.
+- Tick coverage starts 2026-09-12T00:00:02Z (`run/ticks/ticks_2026-09-12.jsonl`,
+  full-depth `up_book`/`down_book` + `tape_delta` present — engine-ready).
+  `ticks_2026-09-11.jsonl` does NOT exist locally.
+- Overlap (measured, refined in build): 55/66 events (45 pairs + 10 settles,
+  +$5.265) fall inside tick coverage AND open inside coverage
+  (event epoch in [T0, T1], window start ≥ T0 − 1s); 11 events (+$1.475) are
+  pre-coverage/boundary and cannot be fill-replayed (only legacy
+  `run/observations/obs_2026-09-11.jsonl` exists — no depth, engine-incompatible).
+- Blocker resolved: #145 knobs LANDED (`BacktestParams.entry_delay_sec`,
+  `entry_band`, `backtest/engine.py:161-162`); `/api/backtest` exposes them
+  (`server/osc_dash.py:534-535`).
+
+### In scope
+1. `python -m scripts.verify_tick_data run/ticks/ticks_2026-09-12.jsonl`
+   integrity gate for the replayed range.
+2. Exact-config replay via direct engine driver (NOT `/api/backtest`:
+   the API cannot set `max_reentries_per_window=0`, which the shadow used;
+   engine default is 1). The driver calls `backtest.engine._simulate_window`
+   per included window — the same per-window core `/api/backtest` uses. Shadow→engine mapping (all other fields API- and
+   engine-settable): offset 0.03, entry_delay_sec 60, entry_band 0.04,
+   fill_model "tape", quote_shares 5, pair_cost_gate 0.98, exit 0.05/0.05,
+   exit_reversal 0.5, entry_timeout_pct 1.0, max_start_elapsed_pct 0.1,
+   reentry_drift_band 0.015, min_requote_remaining_sec 300,
+   reentry_min_remaining_pct 0.3, max_reentries_per_window 0, queue_gate 0,
+   gas 0. Scope: shadow universe only (xrp-15m, bnb-15m, eth-5m) +
+   window range 2026-09-12T00:00Z → 09:11Z.
+3. Scoped shadow baseline: same 55 in-coverage events from `trades.jsonl`.
+4. Comparison (events, pairs, settles, realized P&L, expectancy) + bias verdict;
+   >20% of shadow scoped realized P&L (|Δ| > $1.053 on $5.265) → file follow-up.
+5. Post comparison table + verdict as an issue comment on #146.
+6. Gate: `python -m pytest tests/test_backtest_engine.py -q` green.
+
+### Out of scope
+- Engine, dashboard, collector, or CLI code changes. `scripts/backtest.py`
+  lacks --entry-delay/--entry-band flags and its `--help` crashes (argparse
+  formatting bug) — known wart, do NOT fix here. `sweep_backtest.py` presets
+  cannot express the winning config — do NOT extend here.
+- Live money; re-running the shadow; the 11 pre-coverage/boundary events'
+  fill replay (impossible without depth data).
+- P&L accounting alignment is a comparison-step concern (engine reports in
+  cents per window; shadow in USD per event — normalize before verdict).
+
+### Known model deltas to disclose in the verdict (not to "fix")
+- Paper sim fills on book touch; replay uses `fill_model="tape"` (conservative).
+- Shadow ran `enable_leg_chase=true`; verify whether the engine models chase —
+  if not, record as a one-sided divergence source.
+- Re-entry forced off (0) to mirror the shadow; engine default would allow 1.
+
+## 2. Task Breakdown
+
+### Task 0: Branch + baseline [Setup]
+- **Files**: (git state only)
 - **Type**: Code
-- **Description**:
-  1. `classify_window(mids) -> str` — moved UNCHANGED from
-     `scripts/rebuild_windows.py` (base 0.50, 0.02 threshold).
-  2. `finalize_window(mids, touch_pairs, meta) -> dict` — exact rebuild
-     schema (series, label, duration, cid, slug, start_ts, end_ts,
-     closed_ts, snaps, start_mid, close_mid, max_up, max_down, min_mid,
-     max_mid, class, touch_pair_median, url); 4-decimal rounding;
-     `https://polymarket.com/market/{slug}` URL.
-  3. `compute_summary(windows) -> dict` — `{"ts", "per_series"}` over
-     `strategy.series.SERIES` with zero-fill for empty series.
-  4. `write_json_atomic(path, data)` — temp file in same dir + `os.replace`
-     (mirror `_finalize_upload` in `server/osc_dash.py:1476`).
-  5. Docstring on every function (`test_docstrings.py` gate).
-- **Status**: [x]
-- **Verification**: `python -c "from strategy.windows import classify_window, finalize_window, compute_summary, write_json_atomic; print(classify_window([0.53,0.47]))"` → `oscillating`
+- **Skill**: `git-workflow-and-versioning`
+- **Description**: Create feature branch `add/146-replay-cross-check` from
+  updated main; record `python -m pytest tests/test_backtest_engine.py -q`
+  baseline output.
+- **Verify**: `git status` clean on new branch; baseline log saved.
 
-### Task 2: Route offline rebuild through shared module
-- **Files**: `scripts/rebuild_windows.py`
+### Task 1: Tick integrity gate [Research]
+- **Files**: `run/ticks/ticks_2026-09-12.jsonl` (read-only)
+- **Type**: Research
+- **Skill**: `source-driven-development` (tool docs/flags as ground truth)
+- **Description**: Run
+  `python -m scripts.verify_tick_data run/ticks/ticks_2026-09-12.jsonl`;
+  record error rate, gaps, late starts for the 00:00–09:11Z replay range.
+  Abort-or-scope decision if the range is not intact.
+- **Verify**: verifier exit code 0 + summary numbers captured in the
+  comparison artifact.
+
+### Task 2: Exact-config replay driver [Code/Backend]
+- **Files**: `scripts/replay_shadow_check.py` (new),
+  `runs/paper/2026-09-11_22-10_IDT/replay_comparison/` (new artifacts)
 - **Type**: Code
-- **Description**:
-  1. Import `classify_window`, `finalize_window`, `compute_summary` from
-     `strategy.windows`; replace local copy + inline finalize block in
-     `build_windows_from_ticks` with shared calls.
-  2. Preserve `build_windows_from_ticks` / `rebuild_windows` signatures
-     and `(num_files, num_windows)` return.
-  3. Atomic writes for `oscillation_summary.json` (`write_json_atomic`)
-     and `oscillation_windows.jsonl`.
-- **Status**: [x]
-- **Verification**: `python -m pytest tests/test_rebuild_windows.py -q` (0 failures)
+- **Skill**: `test-driven-development` (assert config mirror + scope filter
+  before accepting totals)
+- **Description**: Small driver calling `backtest.replay()` with the §1
+  BacktestParams mapping; restrict snaps to the 3-series universe and the
+  00:00–09:11Z window range; write machine-readable replay totals JSON
+  (events, pairs, settles, realized P&L, per-event expectancy) to the
+  artifact dir. No changes to `backtest/`, `server/`, or `scripts/backtest.py`.
+- **Verify**: driver prints params hash matching the intended config;
+  replay totals JSON exists with n_events > 0; cents→USD normalization
+  documented in-artifact.
 
-### Task 3: Collector accumulates mids/touch_pairs + closes into dataset
-- **Files**: `scripts/collect_ticks.py`
+### Task 3: Scoped shadow baseline [Code/Backend]
+- **Files**: `runs/paper/2026-09-11_22-10_IDT/data/trades.jsonl` (read-only)
 - **Type**: Code
-- **Description**:
-  1. `windows[cid]` init (`poll_once:211-217`) gains `"mids": []`,
-     `"touch_pairs": []`; append per-tick `mid` (`:250`) + `touch_pair`
-     (`:251-253`) each poll — append-only, snap schema untouched.
-  2. Closure block (`:290-293`): before `del windows[cid]`, call
-     `finalize_window` with accumulated lists + window metadata.
-  3. New `write_window(rec, out_dir)` helper — one JSON line appended to
-     `<out_dir>/oscillation_windows.jsonl` (`write_snap` idiom).
-  4. All new I/O in `try/except` → `errs`; skip when mids empty
-     (`no_data`); summary refresh (read windows file → `compute_summary`
-     → `write_json_atomic` with `ts`) ONLY when ≥1 window closed.
-- **Status**: [x]
-- **Verification**: `python -m scripts.collect_ticks --once` exits 0; new
-  smoke tests (Task 6) green
+- **Skill**: `test-driven-development`
+- **Description**: Filter the 66 shadow events to the 55 in-coverage events
+  (event epoch in [T0, T1], window start ≥ T0 − 1s); expected baseline:
+  45 pairs + 10 settles, +$5.265 realized. Write `shadow_scoped.json`
+  next to the replay totals.
+- **Verify**: counts and P&L reproduce the pre-computed baseline exactly.
 
-### Task 4: Dashboard `POST /api/rebuild` + provenance fields
-- **Files**: `server/osc_dash.py`
-- **Type**: Code
-- **Description**:
-  1. `POST /api/rebuild` — `_verify_safe_origin` guard; runs
-     `python -m scripts.rebuild_windows` via `subprocess.run(cwd=ROOT,
-     timeout=60, capture_output=True)`; returns `{ok, output[:500]}`
-     (mirror `api_collector_poll_once:995-1007`). Docstring required.
-  2. `/api/oscillation` gains provenance: source filename
-     (`oscillation_windows.jsonl`), file mtime, total closed-window
-     count; best-effort guards, explicit `null` when missing; reuse
-     `_load_all_windows` mtime/size cache — no background watcher.
-- **Status**: [x]
-- **Verification**: `python -m pytest tests/test_osc_dash_integration.py -q` (0 failures)
+### Task 4: Comparison + bias verdict [Research]
+- **Files**: `replay_comparison/` artifacts (new `comparison.md`)
+- **Type**: Research
+- **Skill**: `source-driven-development` (cite engine + shadow sources per number)
+- **Description**: Line-by-line table replay-vs-shadow (events, pairs,
+  settles, realized P&L, expectancy); verdict: validated / optimistic by X /
+  pessimistic by X; apply the 20% rule (|Δ| > $1.053 → follow-up finding).
+  Disclose the §1 model deltas (tape vs touch, chase, re-entry).
+- **Verify**: every table cell traceable to either `trades.jsonl` or replay
+  JSON; verdict sentence states magnitude + direction.
 
-### Task 5: Dashboard HTML/JS — button, badge, tooltip, live goal bar (Design)
-- **Files**: `server/osc_dash.py` (`FULL_APP_HTML`, `#app-hdr`, `tick()`)
-- **Type**: Design
-- **Description**:
-  1. "Rebuild Stats" button in `#app-hdr` (`<button class="btn"
-     onclick="...">`, `#btnToggleCollector` pattern) + JS fn POSTing
-     `/api/rebuild` then calling `tick()`.
-  2. Provenance line in Window Capture Targets bar inside `tick()`:
-     source file + last-updated age (min) + total closed count
-     (`#collectorBadge` style).
-  3. Tooltip on "Start Polling" button (1s ticks+tape → `run/ticks/`,
-     windows close into dataset).
-  4. Goal bar count reads live-refreshed data (newly closed windows
-     increment during polling).
-- **Status**: [x]
-- **Verification**: HTML-string presence tests (Task 6) + manual:
-  `python -m uvicorn server.osc_dash:app --port 8802`, check button/badge
-
-### Task 6: Tests — shared module + collector closure + endpoint/provenance
-- **Files**: `tests/test_windows.py` (new), `tests/test_collect_ticks_smoke.py`,
-  `tests/test_osc_dash_integration.py`
-- **Type**: Code
-- **Description**:
-  1. `test_windows.py`: classify thresholds (`no_data`/`flat`/
-     `monotonic`/`oscillating` per `test_rebuild_windows.py` spec);
-     `finalize_window` schema + rounding; `compute_summary` per_series
-     shape + zero-fill; `write_json_atomic` valid JSON + replace.
-  2. `test_collect_ticks_smoke.py`: `write_window` + summary-refresh via
-     `tmp_path`, no network/subprocess; assert +1 JSON line per window,
-     summary has `ts` + `per_series`.
-  3. `test_osc_dash_integration.py`: mocked `subprocess.run` → `{ok,
-     output}` shape; cross-origin rejection; HTML contains button + JS
-     fn; `/api/oscillation` returns provenance fields.
-- **Status**: [x]
-- **Verification**: `python -m pytest tests/test_windows.py tests/test_collect_ticks_smoke.py tests/test_osc_dash_integration.py -q` (0 failures)
-
-### Task 7: Rebuild accuracy over existing ticks (gzip + plain)
-- **Files**: `tests/test_rebuild_windows.py`
-- **Type**: Code
-- **Description**: fixture exercising `.jsonl` AND `.jsonl.gz` tick
-  sources; assert records match shared `finalize_window` output and
-  `rebuild_windows` returns correct `(num_files, num_windows)`;
-  all pre-existing assertions stay green.
-- **Status**: [x]
-- **Verification**: `python -m pytest tests/test_rebuild_windows.py -q` (0 failures)
-
-### Task 8: Full regression gate
-- **Files**: —
-- **Type**: Code
-- **Description**:
-  1. `python -m pytest -q` (entire suite, 0 failures).
-  2. `python -m scripts.rebuild_windows --quiet` runs clean on real
-     `run/ticks/`.
-- **Status**: [x]
-- **Verification**: pytest exit 0 + rebuild prints file/window counts
+### Task 5: Publish + gate [Research]
+- **Files**: (GitHub only + test run)
+- **Type**: Research
+- **Skill**: `verification-before-completion`
+- **Description**: Post the comparison table + verdict as a `#146` issue
+  comment (`gh issue comment 146 --body-file`); if divergence >20%, file the
+  follow-up finding as a new issue and link it. Run
+  `python -m pytest tests/test_backtest_engine.py -q` green.
+- **Verify**: comment URL returned; test suite output green; follow-up filed
+  or explicitly ruled out with the Δ number.
