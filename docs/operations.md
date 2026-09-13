@@ -9,7 +9,7 @@
 
 | Component | Purpose |
 |---|---|
-| `scripts/collect_ticks.py` | Forks `measure_5m_oscillation.py` and writes **full** UP+DOWN book depth + tape delta every 1s to `run/ticks/ticks_YYYY-MM-DD.jsonl` |
+| `scripts/collect_ticks.py` | Forks `measure_5m_oscillation.py` and writes **full** UP+DOWN book depth + tape delta to `run/ticks/ticks_YYYY-MM-DD.jsonl`. Cadence is round + `POLL_INTERVAL`, ~1.4s today — read `sampling_interval_s` from the manifest, not the 1s the old docs claimed (#167) |
 | `scripts/shadow_ev_pilot.py` + `scripts/run_layout.py` | Paper EV pilot writing self-contained `runs/{paper,live}/YYYY-MM-DD_HH-MM_TZ/` (`data/`, `research-papers/`, `summary.html`, `manifest.json`); convention: `docs/run-conventions.md` |
 | `backtest/engine.py` | Pure function `replay(snaps, params) -> results`. Consumes tick jsonl, simulates SPREAD-2 (resting bid at `mid-offset`, queue gate, monotonic exit, pair capture). |
 | `backtest/index.py` | Per-file `<file>.jsonl.idx` sidecar (cid -> byte offset, ts). First backtest on a file scans once; subsequent calls jump to cid spans. |
@@ -35,12 +35,19 @@ python -m scripts.collect_ticks --gzip          # .jsonl.gz rotation
 Output:
 ```
 run/ticks/ticks_2026-08-29.jsonl   # ~150MB raw, ~20MB gz
-run/ticks/manifest.json            # line count, series seen, last update ts
+run/ticks/manifest.json            # line count, series seen, last update ts,
+                                   # tape/socket health, and cadence:
+                                   #   sampling_interval_s  real gap between snaps
+                                   #   tick_ms_last/_max    round duration
+                                   #   tick_ms_first        cold opening round
 ```
 
 Per-series failure is isolated: a 429 on one CLOB call only skips that series
-for that tick (`err` field on the snap). A slow tick (>2000 ms) is logged
-but does not crash the loop.
+for that tick (`err` field on the snap). A slow tick (>`TICK_BUDGET_MS`,
+currently 1500 ms) is logged but does not crash the loop. The opening round is
+several times slower than a warm one (cold gamma cache, cold TLS pool, socket
+still connecting); it is reported as `tick_ms_first` and not charged against
+the budget, so `--once` reads `errs=0` on a healthy connection.
 
 ## Run a sweep
 
