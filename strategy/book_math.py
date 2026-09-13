@@ -109,7 +109,7 @@ def queue_ahead(bids: Optional[Dict[Any, Any]],
     for level, size in bids.items():
         level_price = _as_price(level)
         level_size = _as_price(size)
-        if level_price is None or level_size is None:
+        if level_price is None or level_size is None or level_size < 0:
             return None  # a book we cannot parse is unknown, not empty
         if level_price >= target:
             total += level_size
