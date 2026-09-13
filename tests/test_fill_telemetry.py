@@ -572,3 +572,37 @@ def test_issue138_filled_size_fallback_to_shares(monkeypatch, tmp_path):
     lines = _fill_lines(path)
     assert len(lines) == 4
     assert all(r["filled_size"] == engine.shares for r in lines)
+
+
+def test_async_telemetry_binds_its_path_at_dispatch(monkeypatch, tmp_path):
+    """A path swapped under an in-flight worker must not redirect its line.
+
+    The worker runs on its own daemon thread. It used to resolve the module
+    global whenever it happened to be scheduled, so a late write could land in
+    whatever file the global pointed at by then — across tests, that meant one
+    test's fill appearing in another test's sidecar.
+    """
+    intended = _telemetry_env(monkeypatch, tmp_path)
+    elsewhere = tmp_path / "somewhere-else.jsonl"
+    engine = LiveTraderEngine()
+    engine.is_running = True
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0})
+    tick2["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+
+    # Repoint the global the instant the worker is in flight.
+    monkeypatch.setattr(lt, "FILL_TELEMETRY_FILE", elsewhere)
+
+    deadline = time.time() + 5.0
+    lines: list = []
+    while time.time() < deadline:
+        lines = _fill_lines(intended)
+        if lines:
+            break
+        time.sleep(0.05)
+
+    assert len(lines) == 1, "the fill did not land in the path bound at dispatch"
+    assert _fill_lines(elsewhere) == [], "the line followed the global instead"

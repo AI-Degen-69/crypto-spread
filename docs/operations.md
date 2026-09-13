@@ -9,7 +9,7 @@
 
 | Component | Purpose |
 |---|---|
-| `scripts/collect_ticks.py` | Forks `measure_5m_oscillation.py` and writes **full** UP+DOWN book depth + tape delta every 1s to `run/ticks/ticks_YYYY-MM-DD.jsonl` |
+| `scripts/collect_ticks.py` | Forks `measure_5m_oscillation.py` and writes **full** UP+DOWN book depth + tape delta to `run/ticks/ticks_YYYY-MM-DD.jsonl`. Cadence is round + `POLL_INTERVAL`, ~1.4s today — read `sampling_interval_s` from the manifest, not the 1s the old docs claimed (#167) |
 | `scripts/shadow_ev_pilot.py` + `scripts/run_layout.py` | Paper EV pilot writing self-contained `runs/{paper,live}/YYYY-MM-DD_HH-MM_TZ/` (`data/`, `research-papers/`, `summary.html`, `manifest.json`); convention: `docs/run-conventions.md` |
 | `backtest/engine.py` | Pure function `replay(snaps, params) -> results`. Consumes tick jsonl, simulates SPREAD-2 (resting bid at `mid-offset`, queue gate, monotonic exit, pair capture). |
 | `backtest/index.py` | Per-file `<file>.jsonl.idx` sidecar (cid -> byte offset, ts). First backtest on a file scans once; subsequent calls jump to cid spans. |
@@ -35,12 +35,21 @@ python -m scripts.collect_ticks --gzip          # .jsonl.gz rotation
 Output:
 ```
 run/ticks/ticks_2026-08-29.jsonl   # ~150MB raw, ~20MB gz
-run/ticks/manifest.json            # line count, series seen, last update ts
+run/ticks/manifest.json            # line count, series seen, last update ts,
+                                   # tape/socket health, and cadence:
+                                   #   sampling_interval_s  real gap between snaps
+                                   #   tick_ms_last/_max    round duration
+                                   #   tick_ms_first        cold opening round
 ```
 
 Per-series failure is isolated: a 429 on one CLOB call only skips that series
-for that tick (`err` field on the snap). A slow tick (>2000 ms) is logged
-but does not crash the loop.
+for that tick (`err` field on the snap). A slow tick (>`TICK_BUDGET_MS`,
+currently 1500 ms) is logged but does not crash the loop. The opening round is
+several times slower than a warm one (cold gamma cache, cold TLS pool, socket
+still connecting); it is reported as `tick_ms_first` and judged against the
+looser `COLD_TICK_BUDGET_MS` (15000 ms, logged as `slow_first_tick`), so
+`--once` reads `errs=0` on a healthy connection but a wedged cold start is
+still reported.
 
 ## Run a sweep
 
@@ -125,10 +134,14 @@ Total: 44 (engine) + 5 (index) + 4 (smoke) = 49.
 - **Backtesting is pure capture + simulation.** The replay engine performs
   pure offline replay without live venue calls. Live order execution is handled
   independently by `strategy/live_trader.py`.
-- **No live websocket.** 1s polling matches the documented `requote_interval`
-  in `strategy/config.py:637`; the documented `post_venue_accept_ms=81`
-  means tick-by-tick price moves on a 1s poll are within the resting-quote
-  refresh window.
+- **Mixed transport: streamed tape, polled books.** Since #165 the trade tape
+  comes from the CLOB market websocket (`strategy/streaming.py`), which is what
+  cut snapshot tape starvation from ~98.6% to ~58%. Order books are still
+  fetched over REST every round, so book freshness is bounded by the round, not
+  by the venue. Since #167 the effective cadence is round + `POLL_INTERVAL`
+  (~1.45s, published live as `sampling_interval_s`) rather than the 1s this
+  section used to claim: `requote_interval` in `strategy/config.py:637` and the
+  documented `post_venue_accept_ms=81` should be read against that real figure.
 - **No V2 pUSD migration.** `merge_gas_usd 0.05` is a placeholder; verify
   against the real on-chain figure before any live merge.
 

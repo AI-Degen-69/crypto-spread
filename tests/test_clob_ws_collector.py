@@ -640,6 +640,7 @@ def collector(monkeypatch):
     import scripts.collect_ticks as ct
 
     ct.windows.clear()
+    ct.reset_gamma_cache()
     monkeypatch.setattr(ct, "SERIES", [("btc-up-or-down-5m", 300, "BTC 5m")])
     monkeypatch.setattr(ct, "fetch_live_for_series", lambda slug: ({
         "conditionId": "0xCID", "slug": "btc-updown-5m-1",
@@ -650,9 +651,10 @@ def collector(monkeypatch):
         "bids": {0.48: 100.0}, "asks": {0.52: 100.0},
         "best_bid": 0.48, "best_ask": 0.52, "malformed": 0, "token_id": tok,
     })
-    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
+    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200, **_kw: {})
     yield ct
     ct.windows.clear()
+    ct.reset_gamma_cache()
 
 
 def _read_snaps(out_dir: Path) -> list[dict]:
@@ -706,7 +708,7 @@ def test_rest_fallback_is_per_token_not_per_snapshot(collector, tmp_path,
     """One leg printing on the socket must not mute the other leg's REST tape."""
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_dn": {0.55: 4.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_dn": {0.55: 4.0}},
     )
     bridge = StubBridge({
         "tok_up": [{"asset": "tok_up", "price": 0.46, "size": 30.0,
@@ -726,7 +728,7 @@ def test_poll_once_falls_back_to_rest_when_ws_disconnected(collector, tmp_path,
     """A dead socket must not starve the tape — REST takes over silently."""
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_up": {0.45: 77.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_up": {0.45: 77.0}},
     )
     bridge = StubBridge({}, connected=False)
     stats: dict = {}
@@ -742,7 +744,7 @@ def test_poll_once_without_bridge_uses_rest_only(collector, tmp_path, monkeypatc
     """`--no-ws` (no bridge at all) keeps the legacy REST behaviour intact."""
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_dn": {0.55: 4.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_dn": {0.55: 4.0}},
     )
     stats: dict = {}
     collector.poll_once(tmp_path, False, stats)
@@ -766,7 +768,7 @@ def test_rest_fallback_does_not_replay_a_price_the_socket_already_printed(
     bridge._connected = False
     monkeypatch.setattr(
         collector, "recent_trades",
-        lambda cid, seen, limit=200: {"tok_up": {0.46: 30.0, 0.44: 9.0}},
+        lambda cid, seen, limit=200, **_kw: {"tok_up": {0.46: 30.0, 0.44: 9.0}},
     )
     collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
 
@@ -796,7 +798,7 @@ def test_ws_level_suppression_expires_after_the_ttl(collector, tmp_path,
                         for k, v in win["ws_levels"].items()}
     bridge._connected = False
     monkeypatch.setattr(collector, "recent_trades",
-                        lambda cid, seen, limit=200: {"tok_up": {0.46: 30.0}})
+                        lambda cid, seen, limit=200, **_kw: {"tok_up": {0.46: 30.0}})
     collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
 
     snaps = _read_snaps(tmp_path)
@@ -955,3 +957,220 @@ def test_streamed_tape_produces_fills_in_replay():
     starved = replay([snap(i, []) for i in range(40)], params)
     sw = starved["per_window"][0]
     assert sw["filled_up"] is False and sw["filled_down"] is False
+
+
+# --- Issue #167 T2: REST tape gated on socket authority -------------------
+
+def _authority_window(now: float, ready_age: float, print_age: float) -> dict:
+    """Window state with the socket-authority clocks placed relative to `now`."""
+    return {
+        "up_token": "tok_up", "down_token": "tok_dn",
+        "ws_ready_at": {"tok_up": now - ready_age, "tok_dn": now - ready_age},
+        "ws_last_print": {"tok_up": now - print_age, "tok_dn": now - print_age},
+    }
+
+
+def test_ws_leg_authoritative_requires_a_live_connection():
+    """A disconnected bridge is never authoritative, however warm the clocks are."""
+    import scripts.collect_ticks as ct
+
+    now = 1000.0
+    w = _authority_window(now, ready_age=60.0, print_age=1.0)
+    assert ct.ws_leg_authoritative(w, "tok_up", now, ws_connected=True) is True
+    assert ct.ws_leg_authoritative(w, "tok_up", now, ws_connected=False) is False
+
+
+def test_ws_leg_authoritative_waits_out_the_subscription_warmup():
+    """A token only just subscribed cannot have its silence trusted yet."""
+    import scripts.collect_ticks as ct
+
+    now = 1000.0
+    cold = _authority_window(now, ready_age=ct.WS_TOKEN_WARMUP - 1.0, print_age=1.0)
+    warm = _authority_window(now, ready_age=ct.WS_TOKEN_WARMUP + 1.0, print_age=1.0)
+    assert ct.ws_leg_authoritative(cold, "tok_up", now, ws_connected=True) is False
+    assert ct.ws_leg_authoritative(warm, "tok_up", now, ws_connected=True) is True
+
+
+def test_ws_leg_authoritative_expires_after_a_silent_horizon():
+    """A leg silent past the horizon falls back to REST as a cross-check."""
+    import scripts.collect_ticks as ct
+
+    now = 1000.0
+    fresh = _authority_window(now, ready_age=600.0, print_age=ct.WS_AUTHORITY_HORIZON - 1.0)
+    stale = _authority_window(now, ready_age=600.0, print_age=ct.WS_AUTHORITY_HORIZON + 1.0)
+    assert ct.ws_leg_authoritative(fresh, "tok_up", now, ws_connected=True) is True
+    assert ct.ws_leg_authoritative(stale, "tok_up", now, ws_connected=True) is False
+
+
+def test_ws_leg_authoritative_needs_a_first_print():
+    """A window whose socket has never printed is not yet trusted."""
+    import scripts.collect_ticks as ct
+
+    now = 1000.0
+    w = _authority_window(now, ready_age=600.0, print_age=1.0)
+    w["ws_last_print"] = {}
+    assert ct.ws_leg_authoritative(w, "tok_up", now, ws_connected=True) is False
+
+
+def test_first_tick_of_a_window_still_uses_the_rest_tape(collector, tmp_path):
+    """Tokens are only subscribed at the end of a tick, so tick one needs REST."""
+    calls: list[str] = []
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
+    bridge = StubBridge({})
+
+    collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
+
+    assert len(calls) == 1, "the first tick must not trust an unsubscribed token"
+    assert bridge.subscribed == ["tok_dn", "tok_up"]
+
+
+def test_rest_tape_is_skipped_once_the_socket_is_authoritative(collector, tmp_path):
+    """A warm, recently-printing socket makes the REST tape call pure latency."""
+    calls: list[str] = []
+    bridge = StubBridge({})
+    stats: dict = {}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    # Age the authority clocks as a healthy window would after a minute of prints.
+    w = collector.windows["0xCID"]
+    now = time.time()
+    w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
+    w["ws_last_print"] = {"tok_up": now - 1.0, "tok_dn": now - 1.0}
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
+
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    assert calls == []
+    assert stats["tape_rest_skipped"] == 2
+
+
+def test_rest_tape_returns_when_the_socket_drops(collector, tmp_path):
+    """Authority is revoked the moment the bridge reports disconnected."""
+    calls: list[str] = []
+    bridge = StubBridge({})
+    collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
+
+    w = collector.windows["0xCID"]
+    now = time.time()
+    w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
+    w["ws_last_print"] = {"tok_up": now - 1.0, "tok_dn": now - 1.0}
+    bridge._connected = False
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
+
+    collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
+
+    assert len(calls) == 1
+
+
+def test_reconnect_restarts_the_subscription_warmup(collector, tmp_path):
+    """Prints are lost across a reconnect, so the warm-up clock must restart."""
+    calls: list[str] = []
+    bridge = StubBridge({})
+    stats: dict = {}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    w = collector.windows["0xCID"]
+    now = time.time()
+    w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
+    w["ws_last_print"] = {"tok_up": now - 1.0, "tok_dn": now - 1.0}
+    bridge.reconnects = 3  # the socket dropped and came back since the last tick
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: calls.append(cid) or {}
+
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    assert len(calls) == 1, "a resubscribed token must re-serve its warm-up"
+
+
+def test_socket_prints_stamp_the_authority_clock(collector, tmp_path):
+    """Draining a print records when that token last spoke on the socket."""
+    bridge = StubBridge({
+        "tok_up": [{"asset": "tok_up", "price": 0.46, "size": 30.0,
+                    "side": "BUY", "ts": 1700000000000, "hash": "0xa"}],
+    })
+    collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
+
+    w = collector.windows["0xCID"]
+    assert "tok_up" in w["ws_last_print"]
+    assert "tok_dn" not in w["ws_last_print"]
+
+
+def test_one_authoritative_leg_does_not_cover_the_other(collector, tmp_path):
+    """Legs desync in liveness; each must be judged on its own clocks."""
+    calls: list[str] = []
+    bridge = StubBridge({})
+    stats: dict = {}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    # UP is warm and printing; DOWN was subscribed just as long but has never
+    # spoken, so only UP can be trusted.
+    w = collector.windows["0xCID"]
+    now = time.time()
+    w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
+    w["ws_last_print"] = {"tok_up": now - 1.0}
+    collector.recent_trades = lambda cid, seen, limit=200, **_kw: (
+        calls.append(cid) or {"tok_up": {0.44: 99.0}, "tok_dn": {0.50: 7.0}})
+    stats.pop("tape_rest_skipped", None)
+
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    assert len(calls) == 1, "the cold leg still needs its REST tape"
+    assert stats["tape_rest_skipped"] == 1, "exactly the warm leg was skipped"
+
+    # The REST response carried rows for BOTH tokens. Only the leg that asked
+    # for them may be merged, or the authoritative leg gets double-counted.
+    snaps = _read_snaps(tmp_path)
+    assets = [t["asset"] for t in snaps[-1]["tape_delta"]]
+    assert assets == ["tok_dn"], f"authoritative leg leaked REST rows: {assets}"
+
+
+def test_both_tape_sources_failing_reports_both_errors(collector, tmp_path,
+                                                       monkeypatch):
+    """A socket failure must not mask a REST failure in the same tick."""
+    def boom_drain(bridge, w, now):
+        """The socket drain blows up."""
+        raise RuntimeError("drain died")
+
+    def boom_rest(cid, seen, limit=200, **_kw):
+        """...and so does the REST fallback."""
+        raise RuntimeError("rest died")
+
+    monkeypatch.setattr(collector, "drain_ws_tape", boom_drain)
+    monkeypatch.setattr(collector, "recent_trades", boom_rest)
+    collector.poll_once(tmp_path, False, {}, ws_bridge=StubBridge({}))
+
+    err = _read_snaps(tmp_path)[0]["err"]
+    assert "ws_tape:" in err and "drain died" in err
+    assert "tape:" in err and "rest died" in err
+
+
+def test_the_warmup_clock_does_not_start_before_the_socket_connects(
+        collector, tmp_path):
+    """A bridge that is not up yet is not listening, so nothing is subscribed."""
+    down = StubBridge({}, connected=False)
+    collector.poll_once(tmp_path, False, {}, ws_bridge=down)
+
+    w = collector.windows["0xCID"]
+    assert w["ws_ready_at"] == {}, "clock started against time the feed never spent"
+
+    up = StubBridge({}, connected=True)
+    collector.poll_once(tmp_path, False, {}, ws_bridge=up)
+    assert set(w["ws_ready_at"]) == {"tok_up", "tok_dn"}
+
+
+def test_duplicate_series_slugs_are_rejected(monkeypatch):
+    """Two workers sharing a gamma-cache key would race; reject it up front."""
+    import scripts.collect_ticks as ct
+
+    monkeypatch.setattr(ct, "SERIES", [
+        ("btc-up-or-down-5m", 300, "BTC 5m"),
+        ("btc-up-or-down-5m", 900, "BTC 15m"),
+    ])
+    with pytest.raises(ValueError, match="duplicate series slugs"):
+        ct.assert_unique_series_slugs()
+
+
+def test_the_real_slate_has_unique_slugs():
+    """The shipped SERIES must satisfy the invariant the fan-out relies on."""
+    import scripts.collect_ticks as ct
+
+    ct.assert_unique_series_slugs()
