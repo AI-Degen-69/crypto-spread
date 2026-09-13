@@ -630,9 +630,16 @@ def test_unified_stream_bridge_drives_run_direct_on_its_shared_loop():
     socket triggers a reconnect, and book updates still reach the bridge's
     broadcast callback.
     """
-    async def _mock_bnb(self):
-        while not self._stop_event.is_set():
-            await asyncio.sleep(0.05)
+    async def _idle_stream():
+        """Stand in for one sibling transport without opening a real socket.
+
+        `_worker_main()` launches binance/rtds/user alongside the CLOB task,
+        and their real `run()` methods reach the network whenever
+        `websockets` or the Polymarket SDK is importable — which it is here.
+        Only the CLOB leg is under test, so the other three are replaced by a
+        task that just idles until the bridge shuts the sockets down.
+        """
+        await bridge.clob._stop_event.wait()
 
     first = _FakeWS(["PONG"])            # goes half-open after the one PONG
     second = _FakeWS([json.dumps([{
@@ -652,7 +659,11 @@ def test_unified_stream_bridge_drives_run_direct_on_its_shared_loop():
     bridge.clob.backoff_max = 0.1
     bridge.clob.update_tokens(["tok_up"])
 
-    with patch.object(RTDSStreamClient, "_poll_bnb_fallback", _mock_bnb):
+    with (
+        patch.object(bridge.binance, "run", _idle_stream),
+        patch.object(bridge.rtds, "run", _idle_stream),
+        patch.object(bridge.user, "run", _idle_stream),
+    ):
         bridge.start()
         try:
             deadline = time.time() + 8.0
