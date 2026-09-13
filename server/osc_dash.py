@@ -2168,6 +2168,7 @@ textarea:focus-visible,
   <div style="display:flex;align-items:center;gap:8px">
     <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Collector: Loading...</span>
     <span id="tapeBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Tape: Loading...</span>
+    <span id="globalStreamPill" class="mono" title="Stream health: green = live <1s, yellow = 1s, red = offline/polling" style="font-size:11px;padding:3px 10px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);font-weight:700">● STREAM: CONNECTING...</span>
     <button class="btn" id="btnToggleCollector" onclick="toggleCollector()" title="Capture 1-second live ticks and tape into run/ticks/; closing 5m/15m windows append to the dataset">Start Polling (1s)</button>
     <button class="btn" onclick="pollOnce()">Poll Now (Once)</button>
     <button class="btn" id="btnRebuildStats" onclick="rebuildStats()">Rebuild Stats</button>
@@ -2485,7 +2486,6 @@ textarea:focus-visible,
           </h3>
           <span id="cockpitStatusPill" class="pill pill-flat" style="font-size:11px;padding:3px 10px;font-weight:700">BOT: STOPPED</span>
           <span id="cockpitModePill" class="pill" style="font-size:11px;padding:3px 10px;background:rgba(51,201,181,0.15);color:var(--up);border-color:rgba(51,201,181,0.3);font-weight:700">PAPER TRADING</span>
-          <span id="cockpitStreamPill" class="pill pill-flat" style="font-size:11px;padding:3px 10px;font-weight:700">📡 STREAM: CONNECTING...</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <button id="btnCockpitToggle" class="btn btn-primary" style="font-size:13px;padding:7px 16px" onclick="toggleCockpitBot()">▶ START BOT</button>
@@ -5344,23 +5344,30 @@ function renderCockpitUI(st) {
     modePill.style.borderColor = st.mode === 'live' ? 'rgba(240,104,77,0.4)' : 'rgba(51,201,181,0.4)';
   }
 
-  const streamPill = $('cockpitStreamPill');
-  if (streamPill) {
+  // Global stream health pill — traffic light in the top bar (green <1s, yellow 1s, red offline)
+  (function(){
+    const el = $('globalStreamPill') || $('cockpitStreamPill');
+    if (!el) return;
     const sb = st.stream_bridge || {};
-    if (sb.binance_ws_connected) {
-      streamPill.textContent = '🟢 BINANCE WS: <1s';
-      streamPill.className = 'pill pill-osc';
-      streamPill.style.color = 'var(--up)';
-    } else if (sb.rtds_connected || liveStreamConnected) {
-      streamPill.textContent = '🟢 RTDS STREAM: 1s';
-      streamPill.className = 'pill pill-osc';
-      streamPill.style.color = 'var(--up)';
+    const isLive = !!sb.binance_ws_connected;
+    const isOk = !isLive && (!!sb.rtds_connected || !!liveStreamConnected);
+    if (isLive) {
+      el.textContent = '● LIVE · <1s';
+      el.style.background = 'rgba(51,201,181,0.15)';
+      el.style.color = 'var(--up)';
+      el.style.borderColor = 'rgba(51,201,181,0.35)';
+    } else if (isOk) {
+      el.textContent = '● OK · 1s';
+      el.style.background = 'rgba(243,186,47,0.15)';
+      el.style.color = 'var(--gold)';
+      el.style.borderColor = 'rgba(243,186,47,0.35)';
     } else {
-      streamPill.textContent = '🟡 REST POLLING';
-      streamPill.className = 'pill pill-flat';
-      streamPill.style.color = 'var(--gold)';
+      el.textContent = '● OFFLINE · POLLING';
+      el.style.background = 'rgba(240,104,77,0.15)';
+      el.style.color = 'var(--down)';
+      el.style.borderColor = 'rgba(240,104,77,0.35)';
     }
-  }
+  })();
 
   const toggleBtn = $('btnCockpitToggle');
   if (toggleBtn) {
@@ -6245,12 +6252,17 @@ function initLiveCockpitStream() {
     liveEventSource = new EventSource('/api/live/stream');
     liveEventSource.onopen = () => {
       liveStreamConnected = true;
-      const sp = $('cockpitStreamPill');
-      if (sp) {
-        const isBinance = cockpitState && cockpitState.stream_bridge && cockpitState.stream_bridge.binance_ws_connected;
-        sp.textContent = isBinance ? '🟢 BINANCE WS: <1s' : '🟢 RTDS STREAM: 1s';
-        sp.className = 'pill pill-osc';
-        sp.style.color = 'var(--up)';
+      const el = $('globalStreamPill') || $('cockpitStreamPill');
+      if (el) {
+        const sb = (cockpitState && cockpitState.stream_bridge) || {};
+        const isLive = !!sb.binance_ws_connected;
+        if (isLive) {
+          el.textContent = '● LIVE · <1s';
+          el.style.background = 'rgba(51,201,181,0.15)'; el.style.color = 'var(--up)'; el.style.borderColor = 'rgba(51,201,181,0.35)';
+        } else {
+          el.textContent = '● OK · 1s';
+          el.style.background = 'rgba(243,186,47,0.15)'; el.style.color = 'var(--gold)'; el.style.borderColor = 'rgba(243,186,47,0.35)';
+        }
       }
     };
     liveEventSource.onmessage = (e) => {
@@ -6308,11 +6320,10 @@ function initLiveCockpitStream() {
     };
     liveEventSource.onerror = () => {
       liveStreamConnected = false;
-      const sp = $('cockpitStreamPill');
-      if (sp) {
-        sp.textContent = '🟡 REST POLLING';
-        sp.className = 'pill pill-flat';
-        sp.style.color = 'var(--gold)';
+      const el = $('globalStreamPill') || $('cockpitStreamPill');
+      if (el) {
+        el.textContent = '● OFFLINE · POLLING';
+        el.style.background = 'rgba(240,104,77,0.15)'; el.style.color = 'var(--down)'; el.style.borderColor = 'rgba(240,104,77,0.35)';
       }
       fetchCockpitState();
       ensureCockpitPolling();
