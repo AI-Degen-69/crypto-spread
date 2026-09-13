@@ -1,0 +1,232 @@
+"""Replay cross-check driver for issue #146.
+
+Replays the shadow night's tick coverage through the official backtest
+engine (`backtest.engine._simulate_window` — the same per-window core the
+dashboard `/api/backtest` uses) with the shadow's exact config mirrored,
+scoped to the shadow universe + tick-coverage overlap. Writes
+machine-readable totals for the paper-vs-replay comparison.
+
+Scope rule (see tasks/plan.md §1): a window is INCLUDED iff its start_ts is
+inside tick coverage [T0, T1]. Windows that opened before coverage are
+excluded (their opens were never observed). Trailing windows that close
+after T1 are kept — both paper (stop-time rollover) and replay (last
+in-range bid) mark them to book symmetrically.
+
+Usage:
+    python -m scripts.replay_shadow_check
+"""
+from __future__ import annotations
+
+import datetime
+import json
+from pathlib import Path
+
+from backtest import BacktestParams, iter_ticks
+from backtest.engine import _simulate_window, group_by_cid
+
+ROOT = Path(__file__).resolve().parent.parent
+TICKS_FILE = ROOT / "run" / "ticks" / "ticks_2026-09-12.jsonl"
+SHADOW_DIR = ROOT / "runs" / "paper" / "2026-09-11_22-10_IDT"
+OUT_DIR = SHADOW_DIR / "replay_comparison"
+
+# Shadow universe (runs/paper/2026-09-11_22-10_IDT/data/meta.json).
+UNIVERSE = ("xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m")
+
+# Tick coverage starts at the first snap of ticks_2026-09-12.jsonl; T1 is the
+# shadow stop time (data/final.json stopped_utc).
+T0 = datetime.datetime(2026, 9, 12, 0, 0, 0, tzinfo=datetime.timezone.utc).timestamp()
+T1 = datetime.datetime(2026, 9, 12, 9, 10, 58, tzinfo=datetime.timezone.utc).timestamp()
+
+SHARES = 5
+
+
+def build_params(fill_model: str = "tape", gates_on: bool = True) -> BacktestParams:
+    """Mirror the shadow final.json params into engine knobs (issue #146 §1).
+
+    The prescribed verdict leg is fill_model="tape" with gates on. The other
+    three legs of the 2x2 matrix (book x gates) attribute divergence to the
+    fill model vs the delay/band gates.
+    """
+    return BacktestParams(
+        offset=0.03,
+        queue_gate=0.0,
+        pair_cost_gate=0.98,
+        exit_thresh_by_slug={
+            "default_5m": 0.05,
+            "default_15m": 0.05,
+            "btc-up-or-down-5m": 0.05,
+            "sol-up-or-down-5m": 0.05,
+            "btc-up-or-down-15m": 0.05,
+            "sol-up-or-down-15m": 0.05,
+        },
+        exit_reversal=0.5,
+        quote_shares=SHARES,
+        fill_model=fill_model,
+        merge_gas_usd=0.0,
+        max_start_delay_sec=0.0,
+        entry_timeout_pct=1.0,
+        max_start_elapsed_pct=0.1,
+        reentry_drift_band=0.015,
+        min_requote_remaining_sec=300.0,
+        reentry_min_remaining_pct=0.3,
+        max_reentries_per_window=0,
+        entry_delay_sec=60.0 if gates_on else 0.0,
+        entry_band=0.04 if gates_on else 0.0,
+    )
+
+
+def assert_config_mirror(params: BacktestParams, fill_model: str, gates_on: bool) -> None:
+    """Fail fast if any mirrored knob drifts from the shadow config."""
+    checks = {
+        "offset": 0.03,
+        "queue_gate": 0.0,
+        "pair_cost_gate": 0.98,
+        "exit_reversal": 0.5,
+        "quote_shares": SHARES,
+        "fill_model": fill_model,
+        "entry_timeout_pct": 1.0,
+        "max_reentries_per_window": 0,
+        "entry_delay_sec": 60.0 if gates_on else 0.0,
+        "entry_band": 0.04 if gates_on else 0.0,
+    }
+    for field, want in checks.items():
+        got = getattr(params, field)
+        assert got == want, f"config mirror broken: {field}={got!r} want {want!r}"
+
+
+def load_scoped_snaps() -> list[dict]:
+    """Stream the tick file, keeping only universe snaps inside [T0, T1]."""
+    kept: list[dict] = []
+    for snap in iter_ticks(TICKS_FILE):
+        if snap.get("series") not in UNIVERSE:
+            continue
+        ts = float(snap.get("ts", 0.0) or 0.0)
+        if T0 <= ts <= T1:
+            kept.append(snap)
+    assert kept, "scope filter empty: no universe snaps in [T0, T1]"
+    return kept
+
+
+def select_groups(snaps: list[dict]) -> tuple[list[tuple[str, list[dict]]], int]:
+    """Keep fully-observed windows; count pre-coverage opens as excluded."""
+    included: list[tuple[str, list[dict]]] = []
+    excluded = 0
+    for cid, group in group_by_cid(snaps):
+        start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
+        if start_ts >= T0 - 1:
+            included.append((cid, group))
+        else:
+            excluded += 1
+    assert included, "no fully-observed windows in scope"
+    return included, excluded
+
+
+def summarize(params: BacktestParams, groups: list[tuple[str, list[dict]]]) -> dict:
+    """Simulate each included window and aggregate pair/settle/exit totals."""
+    pairs = settles = exits = no_event = 0
+    gross_cents = fees_cents = 0.0
+    reentries = 0
+    per_series: dict[str, dict] = {}
+    windows: list[dict] = []
+    for cid, group in groups:
+        w = _simulate_window(group, params)
+        reentries += w.reentry_count
+        gross_cents += w.pnl_cents
+        fees_cents += w.fees_cents
+        single_leg = (w.filled_up and not w.filled_down) or (w.filled_down and not w.filled_up)
+        if w.pair_captured:
+            kind = "pair"
+            pairs += 1
+        elif w.exit_taken:
+            kind = "exit"
+            exits += 1
+        elif single_leg:
+            kind = "settle"
+            settles += 1
+        else:
+            kind = "no_event"
+            no_event += 1
+        start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
+        windows.append({
+            "series": w.series,
+            "window_start": int(start_ts),
+            "market_slug": f"{w.slug}",
+            "kind": kind,
+            "pnl_cents": w.pnl_cents,
+            "gross_usd": round(w.pnl_cents * SHARES / 100.0, 4),
+            "entry_up": w.entry_price_up,
+            "entry_down": w.entry_price_down,
+            "exit_price": w.exit_price,
+            "settlement_mid": w.settlement_mid,
+            "is_partial": w.is_partial,
+        })
+        s = per_series.setdefault(w.series, {"windows": 0, "pairs": 0, "settles": 0,
+                                             "exits": 0, "gross_cents": 0.0})
+        s["windows"] += 1
+        s["gross_cents"] = round(s["gross_cents"] + w.pnl_cents, 4)
+        if kind == "pair":
+            s["pairs"] += 1
+        elif kind == "settle":
+            s["settles"] += 1
+        elif kind == "exit":
+            s["exits"] += 1
+    assert reentries == 0, f"re-entry fired {reentries}x despite max_reentries=0"
+    events = pairs + settles + exits
+    gross_usd = round(gross_cents * SHARES / 100.0, 4)
+    return {
+        "n_included_windows": len(groups),
+        "pairs": pairs,
+        "settles": settles,
+        "exits": exits,
+        "no_event_windows": no_event,
+        "n_events": events,
+        "replay_gross_cents": round(gross_cents, 4),
+        "replay_fees_cents": round(fees_cents, 4),
+        "replay_gross_usd": gross_usd,
+        "expectancy_usd_per_event": round(gross_usd / events, 4) if events else 0.0,
+        "per_series": per_series,
+        "windows": windows,
+    }
+
+
+def main() -> None:
+    """Run the scoped replay legs and write replay_totals.json."""
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    snaps = load_scoped_snaps()
+    groups, excluded = select_groups(snaps)
+    legs: dict[str, dict] = {}
+    for fill_model, gates_on in (("tape", True), ("book", True),
+                                 ("tape", False), ("book", False)):
+        params = build_params(fill_model, gates_on)
+        assert_config_mirror(params, fill_model, gates_on)
+        totals = summarize(params, groups)
+        totals["params_hash"] = params.params_hash()
+        legs[f"{fill_model}_{'gates' if gates_on else 'nogates'}"] = totals
+        print(f"[{fill_model}/{'gates' if gates_on else 'nogates'}] "
+              f"windows={totals['n_included_windows']} pairs={totals['pairs']} "
+              f"settles={totals['settles']} exits={totals['exits']} "
+              f"gross_usd={totals['replay_gross_usd']}")
+    out_payload = {
+        "verdict_leg": "tape_gates",
+        "legs": legs,
+        "scope": {
+            "ticks_file": TICKS_FILE.name,
+            "universe": list(UNIVERSE),
+            "t0_utc": "2026-09-12T00:00:00Z",
+            "t1_utc": "2026-09-12T09:10:58Z",
+            "n_snaps_scoped": len(snaps),
+            "n_excluded_pre_coverage_windows": excluded,
+        },
+        "accounting": (
+            "gross pnl_cents per share x 5 shares / 100 = USD; "
+            "engine taker fees tracked separately in replay_fees_cents and "
+            "EXCLUDED from the paper comparison (paper books pairs/settles gross)."
+        ),
+    }
+    out = OUT_DIR / "replay_totals.json"
+    out.write_text(json.dumps(out_payload, indent=1), encoding="utf-8")
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
