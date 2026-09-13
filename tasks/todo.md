@@ -1,8 +1,9 @@
-# Todo: Issue #146 — replay cross-check (shadow night vs official backtest)
+# Todo: Issue #160 — Fix paper sim settles mark naked legs to 0.50
 
-- [x] Task 0: Branch + baseline (`add/146-replay-cross-check`, engine test baseline)
-- [x] Task 1: Tick integrity gate (`verify_tick_data` on ticks_2026-09-12.jsonl)
-- [x] Task 2: Exact-config replay driver (engine core, mirror config, scoped range)
-- [x] Task 3: Scoped shadow baseline (55 in-coverage events, +$5.265 expected)
-- [x] Task 4: Comparison + bias verdict (20% rule: |Δ| > $1.053 → follow-up)
-- [x] Task 5: Publish (issue comment + follow-up #160 + engine test gate green)
+- [x] Task 0: Baseline & Red Test Setup (`tests/test_live_trader.py`)
+- [x] Task 1: Bid Maintenance & Latching in `MarketLiveState` (`strategy/live_trader.py`)
+- [x] Task 2: Mark-to-Book & Binary Complement Settle Logic in `_handle_window_rollover` (`strategy/live_trader.py`)
+- [x] Task 3: Fail-Loud Safety Guard & Audit Logging (`strategy/live_trader.py`)
+- [x] Task 4: Snapshot Telemetry Export (`scripts/shadow_ev_pilot.py`)
+- [x] Task 5: Comprehensive Unit & Regression Tests in `tests/test_live_trader.py`
+- [x] Task 6: Entry-Fill Validation & Model Delta Documentation (`docs/ev-paper-settle-validation.md`)

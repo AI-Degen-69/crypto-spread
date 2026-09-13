@@ -630,6 +630,12 @@ class MarketLiveState:
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
     spread: Optional[float] = None
+
+    # Latched book prices for expiry valuation & boundary resilience (issue #160)
+    last_valid_up_bid: Optional[float] = None
+    last_valid_down_bid: Optional[float] = None
+    last_valid_up_ask: Optional[float] = None
+    last_valid_down_ask: Optional[float] = None
     
     # Strategy orders
     resting_up: float = 0.48
@@ -1771,9 +1777,17 @@ class LiveTraderEngine:
             if m.up_token == token_id:
                 m.up_bid = best_b
                 m.up_ask = best_a
+                if best_b is not None and best_b > 0:
+                    m.last_valid_up_bid = best_b
+                if best_a is not None and best_a > 0:
+                    m.last_valid_up_ask = best_a
             elif m.down_token == token_id:
                 m.down_bid = best_b
                 m.down_ask = best_a
+                if best_b is not None and best_b > 0:
+                    m.last_valid_down_bid = best_b
+                if best_a is not None and best_a > 0:
+                    m.last_valid_down_ask = best_a
             else:
                 continue
 
@@ -3875,6 +3889,15 @@ class LiveTraderEngine:
         mstate.down_bid = dbook.get("best_bid")
         mstate.down_ask = dbook.get("best_ask")
 
+        if mstate.up_bid is not None and mstate.up_bid > 0:
+            mstate.last_valid_up_bid = mstate.up_bid
+        if mstate.up_ask is not None and mstate.up_ask > 0:
+            mstate.last_valid_up_ask = mstate.up_ask
+        if mstate.down_bid is not None and mstate.down_bid > 0:
+            mstate.last_valid_down_bid = mstate.down_bid
+        if mstate.down_ask is not None and mstate.down_ask > 0:
+            mstate.last_valid_down_ask = mstate.down_ask
+
         # Compute synthetic mid
         if mstate.up_bid is not None and mstate.up_ask is not None:
             up_mid = (mstate.up_bid + mstate.up_ask) / 2.0
@@ -4894,6 +4917,56 @@ class LiveTraderEngine:
                 slug, tel.get("round"), mid, latency_ms, drift,
             )
 
+    def _resolve_exit_bid(self, mstate: MarketLiveState, side: str) -> Tuple[float, str]:
+        """Resolve executable exit bid price for a naked leg at window rollover.
+
+        Order of resolution (issue #160):
+        1. Direct book bid: mstate.up_bid / mstate.down_bid if present and > 0.
+        2. Binary complement: 1.0 - opposite_ask or 1.0 - opposite_bid.
+        3. Latched valid book bid: last seen valid positive bid on this leg.
+        4. Latched binary complement: 1.0 - last seen valid opposite quote.
+        5. Synthetic mid: derived mid if present and not exactly default 0.50.
+
+        If all resolution stages fail (e.g. mock test fixture with zero book data),
+        raises RuntimeError rather than silently assuming 0.50.
+        """
+        side_norm = side.upper()
+        if side_norm == "UP":
+            if mstate.up_bid is not None and mstate.up_bid > 0:
+                return round(mstate.up_bid, 4), "direct_bid"
+            if mstate.down_ask is not None and 0.0 < mstate.down_ask <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.down_ask)), 4), "complement_ask"
+            if mstate.down_bid is not None and 0.0 < mstate.down_bid <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.down_bid)), 4), "complement_bid"
+            if mstate.last_valid_up_bid is not None and mstate.last_valid_up_bid > 0:
+                return round(mstate.last_valid_up_bid, 4), "latched_bid"
+            if mstate.last_valid_down_ask is not None and 0.0 < mstate.last_valid_down_ask <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.last_valid_down_ask)), 4), "latched_complement_ask"
+            if mstate.last_valid_down_bid is not None and 0.0 < mstate.last_valid_down_bid <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.last_valid_down_bid)), 4), "latched_complement_bid"
+            if mstate.mid is not None and 0.0 < mstate.mid < 1.0 and abs(mstate.mid - 0.50) > 1e-4:
+                return round(mstate.mid, 4), "mid_fallback"
+        elif side_norm == "DOWN":
+            if mstate.down_bid is not None and mstate.down_bid > 0:
+                return round(mstate.down_bid, 4), "direct_bid"
+            if mstate.up_ask is not None and 0.0 < mstate.up_ask <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.up_ask)), 4), "complement_ask"
+            if mstate.up_bid is not None and 0.0 < mstate.up_bid <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.up_bid)), 4), "complement_bid"
+            if mstate.last_valid_down_bid is not None and mstate.last_valid_down_bid > 0:
+                return round(mstate.last_valid_down_bid, 4), "latched_bid"
+            if mstate.last_valid_up_ask is not None and 0.0 < mstate.last_valid_up_ask <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.last_valid_up_ask)), 4), "latched_complement_ask"
+            if mstate.last_valid_up_bid is not None and 0.0 < mstate.last_valid_up_bid <= 1.0:
+                return round(max(0.0001, min(0.9999, 1.0 - mstate.last_valid_up_bid)), 4), "latched_complement_bid"
+            if mstate.mid is not None and 0.0 < mstate.mid < 1.0 and abs(mstate.mid - 0.50) > 1e-4:
+                return round(1.0 - mstate.mid, 4), "mid_fallback"
+        else:
+            raise ValueError(f"Unknown side: {side}")
+
+        log.critical("[%s] Window Rollover FAILED: No valid market book or latched quote for %s leg", mstate.slug, side)
+        raise RuntimeError(f"[{mstate.slug}] No executable book mark available for {side} leg settle at rollover")
+
     def _handle_window_rollover(self, mstate: MarketLiveState, now: float, new_cid: str = ""):
         """Cleanly settle unresolved positions when window expires and roll to next."""
         # Reconcile any pending stop-exit order before rollover
@@ -4931,20 +5004,27 @@ class LiveTraderEngine:
             fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
             fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
             settle_pnl = 0.0
+            sources = []
+            exit_px = None
             if mstate.filled_up:
-                bid = mstate.up_bid or 0.50
+                bid, src = self._resolve_exit_bid(mstate, "UP")
                 settle_pnl += (bid - fill_up) * self.shares
+                sources.append(f"UP={bid:.4f} ({src})")
+                exit_px = bid
             if mstate.filled_down:
-                bid = mstate.down_bid or 0.50
+                bid, src = self._resolve_exit_bid(mstate, "DOWN")
                 settle_pnl += (bid - fill_dn) * self.shares
+                sources.append(f"DN={bid:.4f} ({src})")
+                exit_px = bid if exit_px is None else round((exit_px + (1.0 - bid)) / 2.0, 4)
 
             mstate.realized_pnl_usd += settle_pnl
             mstate.unrealized_pnl_usd = 0.0
             mstate.total_pnl_usd = mstate.realized_pnl_usd
             mstate.trades_count += 1
-            log.info("[%s] Window Rollover Settled PnL: $%.2f", mstate.slug, settle_pnl)
+            log.info("[%s] Window Rollover Settled PnL: $%.2f via %s", mstate.slug, settle_pnl, ", ".join(sources))
 
             cost_basis = max(0.01, (fill_up if mstate.filled_up else fill_dn) * self.shares)
+            notes_str = f"Window expired, auto-settled via {', '.join(sources)}"
             with self._engine_lock:
                 self.trades.append(TradeEvent(
                     id=f"{mstate.slug}_{int(now)}",
@@ -4955,10 +5035,10 @@ class LiveTraderEngine:
                     shares=self.shares,
                     entry_price_up=fill_up if mstate.filled_up else None,
                     entry_price_down=fill_dn if mstate.filled_down else None,
-                    exit_price=mstate.mid,
+                    exit_price=exit_px if exit_px is not None else mstate.mid,
                     pnl_usd=round(settle_pnl, 3),
                     pnl_pct=round((settle_pnl / cost_basis) * 100.0, 1),
-                    notes="Window expired, position auto-settled",
+                    notes=notes_str,
                     market_slug=mstate.market_slug or "",
                 ))
                 self._save_persisted_trades()
@@ -5025,6 +5105,10 @@ class LiveTraderEngine:
             mstate.rest_dn_ts = None
             mstate.last_bids_up = {}
             mstate.last_bids_down = {}
+            mstate.last_valid_up_bid = None
+            mstate.last_valid_down_bid = None
+            mstate.last_valid_up_ask = None
+            mstate.last_valid_down_ask = None
             mstate.fill_telemetry_done_up = False
             mstate.fill_telemetry_done_down = False
             mstate.first_seen_start_ts = None

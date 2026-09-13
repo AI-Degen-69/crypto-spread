@@ -1,41 +1,22 @@
-# CONSTRAINTS.md — Issue #146: replay cross-check (shadow night vs official backtest)
+# CONSTRAINTS.md — Issue #160: Fix paper sim settles mark naked legs to 0.50
 
 ## Quality Gates & Hard Thresholds
 
 ### 1. Test Suite Integrity
-- **Pass Rate**: 100% for the touched gate —
-  `python -m pytest tests/test_backtest_engine.py -q` fully green before and after.
-- **New behavior needs tests**: the replay driver asserts its own config
-  mirror (params hash) and scope filter (universe + time range) before totals
-  are accepted; no silent empty-replay (n_events > 0 required).
-- **Anti-Cheat**: no touching existing fixtures/expectations; no skipped
-  tests, no weakened assertions, no linter suppressions. Engine math and
-  classification constants byte-identical — this issue changes NO production code.
+- **Zero Regressions**: 100% pass rate on `python -m pytest tests/test_live_trader.py -q` (123+ tests) and the full test suite (`python -m pytest -q`).
+- **New Behavior Tests**: Explicit tests for:
+  - Mark-to-book execution with true bid values.
+  - Complement bid calculation (`1.0 - opposite_ask`) when direct bid is empty.
+  - Latched bid persistence when book is temporarily wiped at rollover.
+  - Anti-fallback verification: bid-less / book-less fixture fails loud or raises without silently defaulting to 0.50.
+- **Anti-Cheat**: Strictly forbid disabling tests, deleting assertions, or suppressing linter checks.
 
-### 2. Behavior & Scope Boundaries
-- **Read-only production code**: `backtest/`, `server/`, `scripts/backtest.py`,
-  `scripts/sweep_backtest.py`, `strategy/` NOT modified. Known warts
-  (`scripts/backtest.py --help` crash, missing --entry-delay/--entry-band CLI
-  flags) are documented, NOT fixed here.
-- **Exact-config mirror**: every `BacktestParams` field set from the shadow
-  `final.json` params (§1 mapping in `tasks/plan.md`); any field that cannot
-  be mirrored is disclosed in the verdict, never silently defaulted.
-- **Scoped honesty**: only the 55 in-coverage events are compared; the 11
-  pre-coverage/boundary events are reported separately, never folded into replay totals.
-- **Units**: cents↔USD normalization explicit in-artifact before any verdict.
-- **No new dependencies** (stdlib + existing stack only). New files limited to
-  `scripts/replay_shadow_check.py` + `replay_comparison/` artifacts.
-- **No live money, no re-running the shadow, no order-flow changes.**
+### 2. Settle & Math Constraints
+- **Zero Silent 0.50 Marks**: No settle calculation can silently substitute `0.50` when books exist. If no book or latched quote exists, the engine must raise an exception or log a CRITICAL failure with an explicit unmarkable status.
+- **Bounds Invariant**: Any calculated settle mark must strictly satisfy `0.0001 <= mark <= 0.9999`.
+- **Auditability**: Every `TradeEvent` with action `WINDOW_SETTLE` must log the method used to establish the exit mark (`direct_bid`, `complement_ask`, `latched_bid`, or `dislocated_error`).
 
-### 3. Verdict Discipline
-- **20% rule**: |replay − shadow| > $1.053 on scoped realized P&L ($5.265)
-  mandates a follow-up finding issue — never silently accepted.
-- Every comparison cell traceable to `trades.jsonl` or replay JSON.
-- Verdict states magnitude + direction (validated / optimistic by X /
-  pessimistic by X) plus known model deltas (tape vs touch, chase, re-entry).
-
-### 4. Perf & Dependencies
-- **Perf**: single-file replay over `ticks_2026-09-12.jsonl` (700MB) — the
-  source file streams via `iter_ticks`; only universe- and time-scoped snaps
-  (~29k) are retained in memory. Expected runtime: minutes, not hours.
-- **Dependencies**: none new.
+### 3. Dependencies & Code Boundaries
+- **No External Dependencies**: Stdlib and existing packages (`fastapi`, `uvicorn`, `requests`, `pytest`) only.
+- **No Production Breakage**: Code edits limited to `strategy/live_trader.py`, `scripts/shadow_ev_pilot.py`, and test files.
+- **Replay Cross-Check**: Re-running the scoped comparison driver must confirm settle distortion drops from 100% to under 20% of scoped paper P&L.

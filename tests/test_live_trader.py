@@ -3407,3 +3407,124 @@ def test_reentry_telemetry_distinguishes_chased_fill():
     assert engine.reentry_stats["passive_fills"] == 1
 
 
+# ==============================================================================
+# Issue #160: Mark-to-book expiry settlement & anti-silent-0.50
+# ==============================================================================
+
+def test_rollover_settle_mark_to_book_replaces_silent_50():
+    """Issue #160: Window rollover must mark naked legs to true book bid or complement, never silent 0.50."""
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets["btc-up-or-down-5m"]
+    m.condition_id = "0xold_cid"
+    m.filled_up = True
+    m.fill_price_up = 0.47
+    m.resting_up = 0.47
+    # Real market was a blowout loss: UP bid is empty/missing, DOWN ask is 0.99
+    m.up_bid = None
+    m.down_ask = 0.99
+    # Settle at rollover
+    engine._handle_window_rollover(m, time.time(), new_cid="0xnew_cid")
+    
+    trade = [t for t in engine.trades if t.action == "WINDOW_SETTLE"][-1]
+    # Defective behavior booked: (0.50 - 0.47) * 5 = +0.150
+    # True behavior must book: mark = 1.0 - 0.99 = 0.01 -> (0.01 - 0.47) * 5 = -2.300
+    assert trade.exit_price != 0.50, "Settle must not silently fall back to 0.50"
+    assert trade.exit_price == pytest.approx(0.01, abs=1e-4)
+    assert trade.pnl_usd == pytest.approx(-2.30, abs=0.01)
+    assert "complement_ask" in trade.notes
+
+
+def test_rollover_settle_direct_bid_up_and_down():
+    """Direct book bids are used when present and non-empty."""
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets["eth-up-or-down-5m"]
+    m.condition_id = "0xeth_cid"
+    m.filled_up = True
+    m.fill_price_up = 0.42
+    m.up_bid = 0.01
+    m.down_ask = 0.99
+    engine._handle_window_rollover(m, time.time(), new_cid="0xeth_next")
+    trade_up = [t for t in engine.trades if t.action == "WINDOW_SETTLE"][-1]
+    assert trade_up.exit_price == pytest.approx(0.01, abs=1e-4)
+    assert trade_up.pnl_usd == pytest.approx((0.01 - 0.42) * 5, abs=1e-3)
+    assert "direct_bid" in trade_up.notes
+
+    # Now test DOWN side
+    m2 = engine.markets["sol-up-or-down-5m"]
+    m2.condition_id = "0xsol_cid"
+    m2.filled_down = True
+    m2.fill_price_down = 0.45
+    m2.down_bid = 0.95
+    engine._handle_window_rollover(m2, time.time(), new_cid="0xsol_next")
+    trade_dn = [t for t in engine.trades if t.action == "WINDOW_SETTLE"][-1]
+    assert trade_dn.exit_price == pytest.approx(0.95, abs=1e-4)
+    assert trade_dn.pnl_usd == pytest.approx((0.95 - 0.45) * 5, abs=1e-3)
+    assert "direct_bid" in trade_dn.notes
+
+
+def test_rollover_settle_latched_bid_when_book_wiped_at_boundary():
+    """When boundary poll wipes book to empty/None, engine falls back to latched valid bids."""
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets["xrp-up-or-down-5m"]
+    m.condition_id = "0xxrp_cid"
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    # Earlier tick latched a real executable bid
+    m.last_valid_up_bid = 0.02
+    # Boundary poll cleared bids to None
+    m.up_bid = None
+    m.down_ask = None
+    engine._handle_window_rollover(m, time.time(), new_cid="0xxrp_next")
+    trade = [t for t in engine.trades if t.action == "WINDOW_SETTLE"][-1]
+    assert trade.exit_price == pytest.approx(0.02, abs=1e-4)
+    assert trade.pnl_usd == pytest.approx((0.02 - 0.48) * 5, abs=1e-3)
+    assert "latched_bid" in trade.notes
+
+
+def test_rollover_settle_fails_loud_on_empty_books():
+    """Anti-cheat / safety gate: Settle must raise RuntimeError instead of silently using 0.50."""
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets["bnb-up-or-down-5m"]
+    m.condition_id = "0xbnb_cid"
+    m.filled_up = True
+    m.fill_price_up = 0.46
+    # No books, no latched state, default 0.50 mid
+    m.up_bid = None
+    m.down_bid = None
+    m.up_ask = None
+    m.down_ask = None
+    m.last_valid_up_bid = None
+    m.last_valid_down_bid = None
+    m.last_valid_up_ask = None
+    m.last_valid_down_ask = None
+    m.mid = 0.50
+
+    with pytest.raises(RuntimeError, match="No executable book mark available"):
+        engine._handle_window_rollover(m, time.time(), new_cid="0xbnb_next")
+
+
+def test_shadow_snapshot_exports_book_bids():
+    """Issue #160: snapshot() in shadow_ev_pilot exports book prices and latched bids."""
+    from scripts.shadow_ev_pilot import snapshot
+    engine = LiveTraderEngine(load_persisted=False)
+    slug = "btc-up-or-down-5m"
+    m = engine.markets[slug]
+    m.up_bid = 0.48
+    m.up_ask = 0.52
+    m.down_bid = 0.47
+    m.down_ask = 0.51
+    m.last_valid_up_bid = 0.48
+    m.last_valid_down_bid = 0.47
+
+    snap = snapshot(engine)
+    mkt = snap["markets"][slug]
+    assert mkt["up_bid"] == 0.48
+    assert mkt["up_ask"] == 0.52
+    assert mkt["down_bid"] == 0.47
+    assert mkt["down_ask"] == 0.51
+    assert mkt["last_valid_up_bid"] == 0.48
+    assert mkt["last_valid_down_bid"] == 0.47
+
+
+
+
