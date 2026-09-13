@@ -1112,6 +1112,7 @@ class UnifiedStreamBridge:
         on_book_update: Optional[Callable[[str, Dict[float, float], Dict[float, float]], None]] = None,
         on_order_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_rtds_tick: Optional[Callable[[str, int, float], None]] = None,
+        on_trade: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """Initialize unified stream bridge with callbacks."""
         self.symbols = symbols or RTDS_SYMBOLS
@@ -1120,10 +1121,11 @@ class UnifiedStreamBridge:
         self.on_book_update_ext = on_book_update
         self.on_order_event_ext = on_order_event
         self.on_rtds_tick = on_rtds_tick
+        self.on_trade_ext = on_trade
 
         self.binance = BinanceDirectWSClient(symbols=self.binance_symbols, on_spot_tick=self._handle_binance_spot_tick)
         self.rtds = RTDSStreamClient(symbols=self.symbols, on_spot_tick=self._handle_rtds_spot_tick)
-        self.clob = CLOBMarketWSClient(on_book_update=self._handle_book_update)
+        self.clob = CLOBMarketWSClient(on_book_update=self._handle_book_update, on_trade=self._handle_trade)
         self.user = UserSpecStreamClient(on_order_event=self._handle_order_event)
 
         self.is_running: bool = False
@@ -1211,6 +1213,15 @@ class UnifiedStreamBridge:
         """Backward-compatible alias for spot tick handling."""
         self._handle_binance_spot_tick(symbol, ts, price)
 
+    def _handle_trade(self, trade: Dict[str, Any]) -> None:
+        """Handle incoming last_trade_price print from CLOB market socket."""
+        if self.on_trade_ext:
+            try:
+                self.on_trade_ext(trade)
+            except Exception as e:
+                log.debug("on_trade callback failed: %s", e)
+        self._broadcast(stream_id="trades", data=trade)
+
     def _handle_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
         """Handle incoming book snapshot/delta and broadcast envelope."""
         if self.on_book_update_ext:
@@ -1294,7 +1305,7 @@ class UnifiedStreamBridge:
         try:
             self._binance_task = self._loop.create_task(self.binance.run())
             self._rtds_task = self._loop.create_task(self.rtds.run())
-            clob_task = self._loop.create_task(self.clob.run())
+            clob_task = self._loop.create_task(self.clob.run_direct())
             user_task = self._loop.create_task(self.user.run())
             self._tasks = [self._binance_task, self._rtds_task, clob_task, user_task]
             self._loop.run_until_complete(asyncio.gather(*self._tasks, return_exceptions=True))

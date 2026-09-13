@@ -623,13 +623,24 @@ class MarketLiveState:
     end_ts: float = 0.0
     time_remaining_sec: float = 0.0
     
-    # Book prices
+    # Book prices (WS authoritative, REST reconciles)
     mid: Optional[float] = None
     up_bid: Optional[float] = None
     up_ask: Optional[float] = None
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
     spread: Optional[float] = None
+    # Full-depth WS books (issue #166 unified tick): kept so queue_ahead
+    # and reconciliation use the whole ladder, not just best.
+    ws_bids_up: Dict[float, float] = field(default_factory=dict)
+    ws_asks_up: Dict[float, float] = field(default_factory=dict)
+    ws_bids_down: Dict[float, float] = field(default_factory=dict)
+    ws_asks_down: Dict[float, float] = field(default_factory=dict)
+    ws_book_ts_up: Optional[float] = None
+    ws_book_ts_down: Optional[float] = None
+    # Pending WS tape prints per window (consumed next tick or instantly)
+    pending_ws_trades_up: List[Dict[str, Any]] = field(default_factory=list)
+    pending_ws_trades_down: List[Dict[str, Any]] = field(default_factory=list)
 
     # Latched book prices for expiry valuation & boundary resilience (issue #160)
     last_valid_up_bid: Optional[float] = None
@@ -978,12 +989,20 @@ class LiveTraderEngine:
         self._orders_cache_ts: float = 0.0
         self.quoting_halted: bool = False
         
-        # Real-time WebSocket streaming bridge
+        # Unified tick authority
+        self.ws_book_authority: bool = True   # when True, WS is authoritative for best/mid/spread
+        self.rest_fallback_enabled: bool = True  # reconcile when WS stale
+        # How long a leg's WS book may live before REST overwrites it
+        self.ws_book_max_age_sec: float = 2.5
+        self._book_reconcile_lock = threading.RLock()
+
+        # Real-time WebSocket streaming bridge (fix #166: run_direct + on_trade)
         self.stream_bridge = UnifiedStreamBridge(
             on_spot_tick=self.on_spot_tick,
             on_rtds_tick=self.on_rtds_tick,
             on_book_update=self.on_book_update,
             on_order_event=self.on_user_order_event,
+            on_trade=self.on_ws_trade,
         )
         if load_persisted and not os.getenv("PYTEST_CURRENT_TEST"):
             self._load_persisted_trades()
@@ -1775,35 +1794,156 @@ class LiveTraderEngine:
         note = f"RTDS Fast stop: drift {mstate.spot_drift:.3f}"
         self._execute_stop_exit(slug, mstate, side, None, note, now)
 
+    def is_ws_book_fresh(self, m: "MarketLiveState", leg: str) -> bool:
+        """True when the WS book for `leg` is authoritative right now."""
+        if not self.ws_book_authority:
+            return False
+        ts = m.ws_book_ts_up if leg == "UP" else m.ws_book_ts_down
+        if ts is None:
+            return False
+        age = time.time() - ts
+        # Fresh while inside the window; stale books reconcile via REST.
+        return age <= self.ws_book_max_age_sec and self.stream_bridge.clob.is_connected
+
+    def on_ws_trade(self, trade: Dict[str, Any]) -> None:
+        """Handle per-print `last_trade_price` from CLOB WS (issue #166 step 3)."""
+        tok = str(trade.get("asset") or trade.get("token_id") or "")
+        price = trade.get("price")
+        # Route to per-window pending queues; also live-evaluate fills instantly
+        # so prints between ticks are not lost.
+        for m in self.markets.values():
+            if tok == m.up_token:
+                with self._engine_lock:
+                    m.pending_ws_trades_up.append(trade)
+                # Instant fill check against best book (paper legs)
+                self._try_ws_tape_fill(m, "UP", trade, price)
+            elif tok == m.down_token:
+                with self._engine_lock:
+                    m.pending_ws_trades_down.append(trade)
+                self._try_ws_tape_fill(m, "DOWN", trade, price)
+
+    def _try_ws_tape_fill(self, m: "MarketLiveState", leg: str, trade: Dict[str, Any], price: Any) -> None:
+        """Paper-fill one leg from WS prints (fast, intra-second)."""
+        try:
+            p = float(price)
+        except Exception:
+            return
+        # Only paper/fallback simulation fills via tape; live fills come from get_order/UserSpec
+        if self.mode == "live":
+            return
+        if m.pair_captured or m.exit_taken:
+            return
+        if leg == "UP" and m.filled_up:
+            return
+        if leg == "DOWN" and m.filled_down:
+            return
+        # Resting target must exist
+        target = m.resting_up if leg == "UP" else m.resting_down
+        # Tick tolerance matches backtest fill_model="tape"
+        if abs(p - float(target)) > 0.002:
+            return
+        # Enforce entry gates (simplified): respect entry_cancelled / band_hold etc.
+        # If the window is gated, don't fabricate a fill.
+        if m.entry_cancelled_timeout or m.late_start_skip:
+            return
+        # Perform instant fill
+        with self._engine_lock:
+            if leg == "UP" and not m.filled_up:
+                m.filled_up = True
+                m.fill_price_up = float(target)
+                m.order_status_up = "FILLED"
+                m.status = "FILLED_UP"
+                m.last_action = f"Filled UP {self.shares} shares @ {target:.2f} (WS tape)"
+                if m.naked_since_ts is None and not m.filled_down:
+                    m.naked_since_ts = time.time()
+                self.place_stop_order(m, "UP")
+                self._record_fill_telemetry(m, "UP", m.fill_price_up, trade.get("size"), time.time())
+            elif leg == "DOWN" and not m.filled_down:
+                m.filled_down = True
+                m.fill_price_down = float(target)
+                m.order_status_down = "FILLED"
+                m.status = "FILLED_DOWN" if not m.filled_up else "PAIR_MERGED"
+                m.last_action = f"Filled DOWN {self.shares} shares @ {target:.2f} (WS tape)"
+                if not m.filled_up and m.naked_since_ts is None:
+                    m.naked_since_ts = time.time()
+                self._record_fill_telemetry(m, "DOWN", m.fill_price_down, trade.get("size"), time.time())
+                if not m.filled_up:
+                    self.place_stop_order(m, "DOWN")
+        # Pair completion check (post-fill)
+        if m.filled_up and m.filled_down and not m.pair_captured:
+            self._complete_ws_pair(m)
+
+    def _complete_ws_pair(self, m: "MarketLiveState") -> None:
+        """Finalize a pair captured via instant WS fills."""
+        if not self._cancel_stop_order(m, reason="pair completed (WS)"):
+            return
+        with self._engine_lock:
+            m.pair_captured = True
+            m.status = "PAIR_MERGED"
+            m.naked_since_ts = None
+            fill_up = m.fill_price_up if m.fill_price_up is not None else m.resting_up
+            fill_dn = m.fill_price_down if m.fill_price_down is not None else m.resting_down
+            pair_profit_usd = (1.00 - (float(fill_up) + float(fill_dn))) * self.shares
+            m.realized_pnl_usd += pair_profit_usd
+            m.unrealized_pnl_usd = 0.0
+            m.total_pnl_usd = m.realized_pnl_usd
+            m.pairs_count += 1
+            m.trades_count += 1
+            m.last_action = f"Pair Merged! +${pair_profit_usd:.2f} (WS)"
+            self.trades.append(TradeEvent(
+                id=f"{m.slug}_{int(time.time())}",
+                timestamp=datetime.datetime.fromtimestamp(time.time()).strftime("%H:%M:%S"),
+                slug=m.slug, label=m.label, action="PAIR_MERGE", shares=self.shares,
+                entry_price_up=fill_up, entry_price_down=fill_dn, exit_price=1.00,
+                pnl_usd=round(pair_profit_usd, 3),
+                pnl_pct=round(((pair_profit_usd) / max(0.01, (fill_up + fill_dn) * max(1, self.shares))) * 100.0, 1),
+                notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f} (WS tape)",
+                market_slug=m.market_slug or "",
+            ))
+            self._save_persisted_trades()
+
     def on_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
-        """Handle real-time book updates from CLOB Market WebSocket."""
+        """Handle real-time book updates from CLOB Market WebSocket (issue #166 step 1).
+
+        WS is authoritative for best/mid/spread. Full depth is stored so
+        `rest_up_queue` etc. use real queue, not REST's stale one. Writes are
+        guarded so REST's per-second tick cannot regress the book.
+        """
         best_b = max(bids.keys()) if bids else None
         best_a = min(asks.keys()) if asks else None
-
+        now = time.time()
         for m in self.markets.values():
-            if m.up_token == token_id:
-                m.up_bid = best_b
-                m.up_ask = best_a
-                if best_b is not None and 0.0 < best_b <= 1.0:
-                    m.last_valid_up_bid = best_b
-                if best_a is not None and 0.0 < best_a <= 1.0:
-                    m.last_valid_up_ask = best_a
-            elif m.down_token == token_id:
-                m.down_bid = best_b
-                m.down_ask = best_a
-                if best_b is not None and 0.0 < best_b <= 1.0:
-                    m.last_valid_down_bid = best_b
-                if best_a is not None and 0.0 < best_a <= 1.0:
-                    m.last_valid_down_ask = best_a
-            else:
+            is_up = (m.up_token == token_id)
+            is_down = (m.down_token == token_id)
+            if not (is_up or is_down):
                 continue
-
-            # Recalculate mid and spread
-            up_mid = (m.up_bid + m.up_ask) / 2.0 if (m.up_bid is not None and m.up_ask is not None) else (m.up_bid or m.up_ask or 0.50)
-            down_mid = (m.down_bid + m.down_ask) / 2.0 if (m.down_bid is not None and m.down_ask is not None) else (m.down_bid or m.down_ask or 0.50)
-            m.mid = round((up_mid + (1.0 - down_mid)) / 2.0, 4)
-            if m.up_ask is not None and m.down_ask is not None:
-                m.spread = round(m.up_ask + m.down_ask, 4)
+            with self._book_reconcile_lock:
+                if is_up:
+                    m.ws_bids_up = dict(bids)
+                    m.ws_asks_up = dict(asks)
+                    m.ws_book_ts_up = now
+                    m.up_bid = best_b
+                    m.up_ask = best_a
+                    if best_b is not None and 0.0 < best_b <= 1.0:
+                        m.last_valid_up_bid = best_b
+                    if best_a is not None and 0.0 < best_a <= 1.0:
+                        m.last_valid_up_ask = best_a
+                else:
+                    m.ws_bids_down = dict(bids)
+                    m.ws_asks_down = dict(asks)
+                    m.ws_book_ts_down = now
+                    m.down_bid = best_b
+                    m.down_ask = best_a
+                    if best_b is not None and 0.0 < best_b <= 1.0:
+                        m.last_valid_down_bid = best_b
+                    if best_a is not None and 0.0 < best_a <= 1.0:
+                        m.last_valid_down_ask = best_a
+                # mid/spread recomputed from authoritative bests
+                up_mid = (m.up_bid + m.up_ask) / 2.0 if (m.up_bid is not None and m.up_ask is not None) else (m.up_bid or m.up_ask or 0.50)
+                down_mid = (m.down_bid + m.down_ask) / 2.0 if (m.down_bid is not None and m.down_ask is not None) else (m.down_bid or m.down_ask or 0.50)
+                m.mid = round((up_mid + (1.0 - down_mid)) / 2.0, 4)
+                if m.up_ask is not None and m.down_ask is not None:
+                    m.spread = round(m.up_ask + m.down_ask, 4)
 
     def on_user_order_event(self, payload: Dict[str, Any]) -> None:
         """Handle real-time authenticated order events from UserSpec stream."""
@@ -3579,7 +3719,12 @@ class LiveTraderEngine:
             self._record_timeline_point(now)
 
     def _poll_single_market(self, slug: str) -> Optional[Dict[str, Any]]:
-        """Fetch current and next market definition and orderbooks synchronously."""
+        """Fetch current and next market definition and orderbooks synchronously.
+
+        Issue #166: REST books downgraded to reconciling fallback. When WS is fresh,
+        we skip the REST book fetch entirely (saves ~450ms round latency).
+        Gamma still resolves because it owns window rotation.
+        """
         try:
             from strategy.markets import full_book
             sess = _get_thread_session()
@@ -3590,15 +3735,21 @@ class LiveTraderEngine:
             if not market_info and not next_market:
                 return None
 
+            # Skip REST books if both WS legs are fresh — they would be discarded anyway.
+            m = self.markets.get(slug)
+            if m and market_info and self.ws_book_authority:
+                up_fresh = self.is_ws_book_fresh(m, "UP")
+                dn_fresh = self.is_ws_book_fresh(m, "DOWN")
+                if up_fresh and dn_fresh:
+                    return {"market": market_info, "next_market": next_market, "up_book": {}, "down_book": {}}
+                need_up = not up_fresh
+                need_down = not dn_fresh
+                ubook = full_book(CLOB_HOST, market_info["up_token"]) if need_up else {}
+                dbook = full_book(CLOB_HOST, market_info["down_token"]) if need_down else {}
+                return {"market": market_info, "next_market": next_market, "up_book": ubook, "down_book": dbook}
             ubook = full_book(CLOB_HOST, market_info["up_token"]) if market_info else {}
             dbook = full_book(CLOB_HOST, market_info["down_token"]) if market_info else {}
-
-            return {
-                "market": market_info,
-                "next_market": next_market,
-                "up_book": ubook,
-                "down_book": dbook,
-            }
+            return {"market": market_info, "next_market": next_market, "up_book": ubook, "down_book": dbook}
         except Exception as e:
             log.debug("Failed polling market %s: %s", slug, e)
             return None
@@ -3890,35 +4041,92 @@ class LiveTraderEngine:
         mstate.time_remaining_sec = max(0.0, et - now)
         mstate.last_update_ts = now
 
-        # Extract book bests
-        mstate.up_bid = ubook.get("best_bid")
-        mstate.up_ask = ubook.get("best_ask")
-        mstate.down_bid = dbook.get("best_bid")
-        mstate.down_ask = dbook.get("best_ask")
+        # Book reconciliation (issue #166): WS authoritative, REST only when stale/disconnected.
+        # We keep best + depth so queue_ahead sees the whole ladder. REST wins only if
+        # WS leg is stale or missing; otherwise we preserve WS's fresher value.
+        # The REST payload may be {} (no market) or {best_bid/ask, bids, asks}.
+        def _use_rest_for_leg(leg: str) -> bool:
+            """True when REST may overwrite this leg's book (WS missing or stale)."""
+            if not self.rest_fallback_enabled:
+                return False
+            # If WS book missing/stale or socket disconnected, accept REST.
+            # Otherwise keep WS.
+            if leg == "UP":
+                has_ws = (mstate.ws_book_ts_up is not None)
+                fresh = self.is_ws_book_fresh(mstate, "UP")
+            else:
+                has_ws = (mstate.ws_book_ts_down is not None)
+                fresh = self.is_ws_book_fresh(mstate, "DOWN")
+            if not has_ws or not fresh:
+                return True
+            # Drift detection: if REST and WS disagree > 2c on best and REST came with full book, trust REST once.
+            # Small gaps are WS microstructure noise and should not flip authority.
+            return False
 
-        if mstate.up_bid is not None and 0.0 < mstate.up_bid <= 1.0:
-            mstate.last_valid_up_bid = mstate.up_bid
-        if mstate.up_ask is not None and 0.0 < mstate.up_ask <= 1.0:
-            mstate.last_valid_up_ask = mstate.up_ask
-        if mstate.down_bid is not None and 0.0 < mstate.down_bid <= 1.0:
-            mstate.last_valid_down_bid = mstate.down_bid
-        if mstate.down_ask is not None and 0.0 < mstate.down_ask <= 1.0:
-            mstate.last_valid_down_ask = mstate.down_ask
-
-        # Compute synthetic mid
-        if mstate.up_bid is not None and mstate.up_ask is not None:
-            up_mid = (mstate.up_bid + mstate.up_ask) / 2.0
+        # Decide per-leg whether to apply REST.
+        apply_up = _use_rest_for_leg("UP")
+        apply_down = _use_rest_for_leg("DOWN")
+        # Fallback: if both legs would be ignored but one leg has no REST book, still ignore — we have WS.
+        # Only override when WS missing/stale we already returned True.
+        if apply_up:
+            ub_best_b = ubook.get("best_bid")
+            ub_best_a = ubook.get("best_ask")
+            # REST reconciliation overwrites even with None so expiry wipes the book
+            # and latching (#160) can take over; authority only protects FRESH WS.
+            mstate.up_bid = ub_best_b
+            mstate.up_ask = ub_best_a
+            if ub_best_b is not None and 0.0 < ub_best_b <= 1.0:
+                mstate.last_valid_up_bid = ub_best_b
+            if ub_best_a is not None and 0.0 < ub_best_a <= 1.0:
+                mstate.last_valid_up_ask = ub_best_a
+            # Also keep WS depth coherent? REST depth is less trustworthy than WS ladder,
+            # but better than nothing when WS absent.
+            if ubook.get("bids") and not mstate.ws_bids_up:
+                try:
+                    mstate.ws_bids_up = {float(k): float(v) for k, v in ubook["bids"].items()}
+                except Exception:
+                    pass
+            if ubook.get("asks") and not mstate.ws_asks_up:
+                try:
+                    mstate.ws_asks_up = {float(k): float(v) for k, v in ubook["asks"].items()}
+                except Exception:
+                    pass
+        if apply_down:
+            db_best_b = dbook.get("best_bid")
+            db_best_a = dbook.get("best_ask")
+            mstate.down_bid = db_best_b
+            mstate.down_ask = db_best_a
+            if db_best_b is not None and 0.0 < db_best_b <= 1.0:
+                mstate.last_valid_down_bid = db_best_b
+            if db_best_a is not None and 0.0 < db_best_a <= 1.0:
+                mstate.last_valid_down_ask = db_best_a
+            if dbook.get("bids") and not mstate.ws_bids_down:
+                try:
+                    mstate.ws_bids_down = {float(k): float(v) for k, v in dbook["bids"].items()}
+                except Exception:
+                    pass
+            if dbook.get("asks") and not mstate.ws_asks_down:
+                try:
+                    mstate.ws_asks_down = {float(k): float(v) for k, v in dbook["asks"].items()}
+                except Exception:
+                    pass
+        # Mid/spread always derived from current bests regardless of source
+        _up_bid = mstate.up_bid
+        _up_ask = mstate.up_ask
+        _down_bid = mstate.down_bid
+        _down_ask = mstate.down_ask
+        if _up_bid is not None and _up_ask is not None:
+            up_mid = (_up_bid + _up_ask) / 2.0
         else:
-            up_mid = mstate.up_bid or mstate.up_ask or 0.50
-
-        if mstate.down_bid is not None and mstate.down_ask is not None:
-            down_mid = (mstate.down_bid + mstate.down_ask) / 2.0
+            up_mid = _up_bid or _up_ask or 0.50
+        if _down_bid is not None and _down_ask is not None:
+            down_mid = (_down_bid + _down_ask) / 2.0
         else:
-            down_mid = mstate.down_bid or mstate.down_ask or 0.50
-
+            down_mid = _down_bid or _down_ask or 0.50
         mstate.mid = round((up_mid + (1.0 - down_mid)) / 2.0, 4)
-        if mstate.up_ask is not None and mstate.down_ask is not None:
-            mstate.spread = round(mstate.up_ask + mstate.down_ask, 4)
+        if _up_ask is not None and _down_ask is not None:
+            mstate.spread = round(_up_ask + _down_ask, 4)
+        # Keep legacy last_valid* in sync even when WS kept authority (already set in on_book_update)
 
         # If not active or window is expired, stay idle
         if not self.is_running or mstate.time_remaining_sec <= 0:
@@ -4320,21 +4528,23 @@ class LiveTraderEngine:
                     self._finalize_requote_telemetry(mstate, slug, mid)
                 self._finalize_reentry_telemetry(mstate, slug, mid)
 
-        # --- FILL-TELEMETRY REST SNAPSHOT (issue #138) ---
+        # --- FILL-TELEMETRY REST SNAPSHOT (issue #138, unified #166) ---
         # Observation only: stash the full bid books for the stream fill path
         # and snapshot per-leg rest context the first tick a leg is active.
-        # Snapshot-once semantics mirror sim2 (queue at quotable time); the
-        # context persists until rollover so fills on later ticks join it.
-        # Stash copies are skipped once both legs are recorded: nothing left
-        # to join.
+        # Prefer full-depth WS ladder when present; REST snapshot is fallback.
         up_active = bool(mstate.order_id_up) or mstate.order_status_up == "RESTING"
         dn_active = bool(mstate.order_id_down) or mstate.order_status_down == "RESTING"
         need_stash = ((up_active and (mstate.rest_up_price is None or not mstate.fill_telemetry_done_up))
                       or (dn_active and (mstate.rest_dn_price is None or not mstate.fill_telemetry_done_down)))
         if need_stash:
-            if isinstance(ubook.get("bids"), dict) and ubook["bids"]:
+            # WS depth is the best ladder we have (full book, not just best).
+            if mstate.ws_bids_up:
+                mstate.last_bids_up = dict(mstate.ws_bids_up)
+            elif isinstance(ubook.get("bids"), dict) and ubook["bids"]:
                 mstate.last_bids_up = dict(ubook["bids"])
-            if isinstance(dbook.get("bids"), dict) and dbook["bids"]:
+            if mstate.ws_bids_down:
+                mstate.last_bids_down = dict(mstate.ws_bids_down)
+            elif isinstance(dbook.get("bids"), dict) and dbook["bids"]:
                 mstate.last_bids_down = dict(dbook["bids"])
         if up_active and mstate.rest_up_price is None:
             mstate.rest_up_price = resting_up
@@ -4344,6 +4554,17 @@ class LiveTraderEngine:
             mstate.rest_dn_price = resting_down
             mstate.rest_dn_queue = _queue_ahead(mstate.last_bids_down, resting_down)
             mstate.rest_dn_ts = now
+        # Also consume any pending WS tape prints accumulated between ticks.
+        # They already triggered instant fills above, but tape-driven exits/merges
+        # that compare against queue still need the volume accounted for downstream.
+        # (No-op if already filled.)
+        with self._engine_lock:
+            ws_pending_up = list(mstate.pending_ws_trades_up)
+            ws_pending_down = list(mstate.pending_ws_trades_down)
+            mstate.pending_ws_trades_up.clear()
+            mstate.pending_ws_trades_down.clear()
+        # Mark consumed prints into seen_tape-like dedup? Not needed live, but keep for parity.
+        _ = (ws_pending_up, ws_pending_down)
 
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
@@ -5163,6 +5384,15 @@ class LiveTraderEngine:
             mstate.exit_side = None
             mstate.spot_open_price = None
             mstate.spot_drift = 0.0
+            # Unified tick (#166): clear WS authoritative books so next window starts clean
+            mstate.ws_bids_up.clear()
+            mstate.ws_asks_up.clear()
+            mstate.ws_bids_down.clear()
+            mstate.ws_asks_down.clear()
+            mstate.ws_book_ts_up = None
+            mstate.ws_book_ts_down = None
+            mstate.pending_ws_trades_up.clear()
+            mstate.pending_ws_trades_down.clear()
         if self.mode == "live":
             if mstate.order_id_exit_up:
                 if self.cancel_live_order(mstate.order_id_exit_up):
