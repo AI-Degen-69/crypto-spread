@@ -157,7 +157,7 @@ def test_cockpit_html_contains_streaming_ui():
     res = client.get("/")
     assert res.status_code == 200
     html = res.text
-    assert "cockpitStreamPill" in html
+    assert "globalStreamPill" in html  # moved to global top bar
     assert "initLiveCockpitStream" in html
     assert "Spot 1s:" in html
 

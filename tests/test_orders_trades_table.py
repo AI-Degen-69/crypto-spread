@@ -1301,7 +1301,7 @@ def test_reconcile_cockpit_toasts():
     elements['toastContainer'] = container;
 
     // Elements required by renderCockpitUI
-    ['cockpitStatusPill', 'cockpitModePill', 'cockpitStreamPill', 'btnCockpitToggle',
+    ['cockpitStatusPill', 'cockpitModePill', 'globalStreamPill', 'cockpitStreamPill', 'btnCockpitToggle',
      'cockpitRealizedPnl', 'cockpitRealizedSub', 'cockpitPortfolioVal', 'cockpitWinRate',
      'cockpitTradesSummary', 'cockpitPairsCount', 'cockpitStopsCount', 'cockpitExposure',
      'cockpitMarketGrid', 'cockpitActiveMarketsBadge', 'cockpitOrdersBody', 'otOrdersCount',
