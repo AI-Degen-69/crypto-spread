@@ -13,6 +13,7 @@ import datetime
 import json
 import logging
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass, asdict, field
@@ -84,6 +85,16 @@ SERIES_TO_SYMBOL = {
 
 RTDS_SYMBOLS = ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 BINANCE_SYMBOLS = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt"]
+
+# CLOB market channel (issue #165). The REST tape at 1 poll/s drops every
+# intra-second print; this socket is the only source that sees all of them.
+CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+CLOB_WS_PING_INTERVAL = 10.0      # venue keepalive: text "PING" -> "PONG"
+CLOB_WS_BACKOFF_BASE = 1.0
+CLOB_WS_BACKOFF_FACTOR = 2.0
+CLOB_WS_BACKOFF_MAX = 30.0
+CLOB_WS_RECV_TIMEOUT = 1.0        # recv poll slice, so stop()/rotation land fast
+CLOB_WS_JITTER_PCT = 0.25         # de-synchronizes reconnect storms
 
 
 
@@ -369,20 +380,60 @@ class BinanceDirectWSClient:
 
 
 class CLOBMarketWSClient:
-    """Connects to Polymarket CLOB Market WebSocket and maintains order books."""
+    """Connects to Polymarket CLOB Market WebSocket and maintains order books.
+
+    Two transports share the same reducers:
+    - `run()` subscribes through the polymarket SDK (`MarketSpec`).
+    - `run_direct()` opens `CLOB_WS_URL` with `websockets` and drives the raw
+      frame protocol itself — subscription frame, 10s `"PING"` keepalive,
+      exponential-backoff reconnects. This is the transport the tick collector
+      uses, because it also captures `last_trade_price` prints into a
+      thread-safe buffer that `drain_trades()` hands to the collector thread.
+    """
 
     def __init__(
         self,
         token_ids: Optional[List[str]] = None,
         on_book_update: Optional[Callable[[str, Dict[float, float], Dict[float, float]], None]] = None,
+        on_trade: Optional[Callable[[Dict[str, Any]], None]] = None,
+        ws_url: str = CLOB_WS_URL,
+        ping_interval: float = CLOB_WS_PING_INTERVAL,
+        backoff_base: float = CLOB_WS_BACKOFF_BASE,
+        backoff_max: float = CLOB_WS_BACKOFF_MAX,
+        connect_factory: Optional[Callable[..., Any]] = None,
     ):
         """Initialize CLOB Market WebSocket client."""
-        self.token_ids: List[str] = token_ids or []
+        self.token_ids: List[str] = sorted(set(token_ids)) if token_ids else []
         self._tokens_version: int = 0
         self.on_book_update = on_book_update
+        self.on_trade = on_trade
+        self.ws_url = ws_url
+        self.ping_interval = float(ping_interval)
+        self.backoff_base = float(backoff_base)
+        self.backoff_max = float(backoff_max)
+        self._connect_factory = connect_factory
         self.books: Dict[str, Dict[str, Any]] = {}
+        self.top_of_book: Dict[str, Dict[str, Optional[float]]] = {}
+        self.tick_sizes: Dict[str, float] = {}
         self.is_connected: bool = False
+        self.reconnect_count: int = 0
+        self.trades_captured: int = 0
+        self.last_ping_ts: float = 0.0
+        self.last_pong_ts: float = 0.0
+        self._trade_buffer: Dict[str, List[Dict[str, Any]]] = {}
+        self._buffer_lock = threading.Lock()
         self._stop_event = asyncio.Event()
+
+    @property
+    def tokens_version(self) -> int:
+        """Monotonic counter bumped whenever the subscribed token set changes."""
+        return self._tokens_version
+
+    @property
+    def drain_ready(self) -> bool:
+        """True while at least one streamed print is waiting to be drained."""
+        with self._buffer_lock:
+            return any(self._trade_buffer.values())
 
     def apply_book_snapshot(self, token_id: str, raw_bids: List[Any], raw_asks: List[Any]) -> None:
         """Full replacement of local book state from snapshot."""
@@ -447,11 +498,228 @@ class CLOBMarketWSClient:
         if self.on_book_update:
             self.on_book_update(token_id, book["bids"], book["asks"])
 
+    def apply_best_bid_ask(self, token_id: str, best_bid: Optional[float], best_ask: Optional[float]) -> None:
+        """Record the venue's own top-of-book quote for a token."""
+        self.top_of_book[token_id] = {"best_bid": best_bid, "best_ask": best_ask}
+
+    def record_trade(self, token_id: str, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Parse one `last_trade_price` event into the per-token trade buffer.
+
+        A row that does not parse is dropped, never raised: one malformed print
+        must not take the socket (and with it the whole tape) down.
+        """
+        try:
+            price = float(event.get("price"))
+            size = float(event.get("size") or 0.0)
+        except (TypeError, ValueError):
+            log.debug("skipping unparseable trade print: %s", event)
+            return None
+
+        raw_ts = event.get("timestamp", event.get("ts"))
+        try:
+            ts = int(float(raw_ts))
+        except (TypeError, ValueError):
+            ts = int(time.time() * 1000)
+
+        trade = {
+            "asset": token_id,
+            "price": price,
+            "size": size,
+            "side": str(event.get("side") or "").upper(),
+            "ts": ts,
+            "hash": str(event.get("transaction_hash") or event.get("hash") or ""),
+        }
+        with self._buffer_lock:
+            self._trade_buffer.setdefault(token_id, []).append(trade)
+            self.trades_captured += 1
+        if self.on_trade:
+            try:
+                self.on_trade(trade)
+            except Exception as e:
+                log.debug("on_trade callback failed: %s", e)
+        return trade
+
+    def drain_trades(self, token_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Pop buffered prints for one token, or for every token when None."""
+        with self._buffer_lock:
+            if token_id is not None:
+                return self._trade_buffer.pop(token_id, [])
+            drained: List[Dict[str, Any]] = []
+            for tid in list(self._trade_buffer):
+                drained.extend(self._trade_buffer.pop(tid))
+            return drained
+
+    def handle_raw_message(self, raw: str | bytes | None) -> None:
+        """Reduce one raw frame from the market channel into local state."""
+        if raw is None:
+            return
+        if isinstance(raw, (bytes, bytearray)):
+            raw = bytes(raw).decode("utf-8", "replace")
+        text = str(raw).strip()
+        if not text:
+            return
+        if text.upper() == "PONG":
+            self.last_pong_ts = time.time()
+            return
+        if text.upper() == "PING":
+            return
+        try:
+            msg = json.loads(text)
+        except Exception:
+            log.debug("non-JSON CLOB frame dropped: %.80s", text)
+            return
+        events = msg if isinstance(msg, list) else [msg]
+        for ev in events:
+            if isinstance(ev, dict):
+                self._handle_event(ev)
+
+    def _handle_event(self, ev: Dict[str, Any]) -> None:
+        """Dispatch a single decoded market-channel event."""
+        ev_type = str(ev.get("event_type") or ev.get("type") or "").lower()
+        token_id = str(ev.get("asset_id") or ev.get("token_id") or "").strip()
+        if not ev_type or not token_id:
+            return
+
+        if ev_type == "book":
+            self.apply_book_snapshot(token_id, ev.get("bids") or [], ev.get("asks") or [])
+        elif ev_type == "price_change":
+            for change in (ev.get("changes") or ev.get("price_changes") or []):
+                if not isinstance(change, dict):
+                    continue
+                try:
+                    price = float(change.get("price"))
+                    size = float(change.get("size") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                self.apply_price_change(token_id, str(change.get("side") or "BUY"), price, size)
+        elif ev_type == "last_trade_price":
+            self.record_trade(token_id, ev)
+        elif ev_type == "best_bid_ask":
+            def _opt_float(key: str) -> Optional[float]:
+                """Parse an optional decimal-string quote field."""
+                try:
+                    return float(ev.get(key))
+                except (TypeError, ValueError):
+                    return None
+            self.apply_best_bid_ask(token_id, _opt_float("best_bid"), _opt_float("best_ask"))
+        elif ev_type == "tick_size_change":
+            try:
+                self.tick_sizes[token_id] = float(ev.get("new_tick_size") or ev.get("tick_size"))
+            except (TypeError, ValueError):
+                pass
+
     def update_tokens(self, new_tokens: List[str]) -> None:
         """Update subscribed token IDs."""
         if set(new_tokens) != set(self.token_ids):
             self.token_ids = sorted(list(set(new_tokens)))
             self._tokens_version += 1
+
+    def subscription_payload(self) -> str:
+        """Build the market-channel subscription frame for the current tokens."""
+        return json.dumps({"assets_ids": list(self.token_ids), "type": "market"})
+
+    def next_backoff(self, current: float) -> float:
+        """Advance the reconnect backoff one step, capped at `backoff_max`."""
+        return min(current * CLOB_WS_BACKOFF_FACTOR, self.backoff_max)
+
+    def jittered(self, delay: float) -> float:
+        """Spread a backoff delay by up to `CLOB_WS_JITTER_PCT` upward."""
+        return delay * (1.0 + random.random() * CLOB_WS_JITTER_PCT)
+
+    async def _wait_stop(self, timeout: float) -> bool:
+        """Sleep up to `timeout`, returning True if stop was signalled first."""
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _ping_loop(self, ws: Any) -> None:
+        """Send the venue's text `"PING"` keepalive every `ping_interval`."""
+        while not self._stop_event.is_set():
+            if await self._wait_stop(self.ping_interval):
+                return
+            try:
+                await ws.send("PING")
+                self.last_ping_ts = time.time()
+            except Exception as e:
+                log.debug("CLOB PING failed: %s", e)
+                return
+
+    async def _session(self, ws: Any) -> bool:
+        """Run one connected session. True = ended cleanly (stop or rotation)."""
+        await ws.send(self.subscription_payload())
+        subscribed_version = self._tokens_version
+        ping_task = asyncio.create_task(self._ping_loop(ws))
+        try:
+            while not self._stop_event.is_set():
+                if self._tokens_version != subscribed_version:
+                    return True
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=CLOB_WS_RECV_TIMEOUT)
+                except asyncio.TimeoutError:
+                    continue
+                self.handle_raw_message(msg)
+            return True
+        finally:
+            ping_task.cancel()
+            try:
+                await ping_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug("CLOB ping task ended: %s", e)
+
+    async def run_direct(self) -> None:
+        """Drive the raw market-channel socket with reconnects until stopped."""
+        connect = self._connect_factory
+        if connect is None:
+            if not WEBSOCKETS_AVAILABLE or websockets is None:
+                log.warning("websockets package not available; CLOB direct WS disabled")
+                return
+            connect = websockets.connect
+
+        backoff = self.backoff_base
+        while not self._stop_event.is_set():
+            if not self.token_ids:
+                if await self._wait_stop(0.5):
+                    break
+                continue
+
+            clean = False
+            try:
+                async with connect(self.ws_url, ping_interval=None, close_timeout=5) as ws:
+                    self.is_connected = True
+                    backoff = self.backoff_base
+                    log.info("CLOB market WS connected: %d tokens", len(self.token_ids))
+                    clean = await self._session(ws)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.debug("CLOB market WS session ended: %s", e)
+            finally:
+                self.is_connected = False
+
+            if self._stop_event.is_set():
+                break
+            if clean:
+                continue  # token rotation: resubscribe immediately, no penalty
+            self.reconnect_count += 1
+            if await self._wait_stop(self.jittered(backoff)):
+                break
+            backoff = self.next_backoff(backoff)
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return socket health and capture counters."""
+        return {
+            "ws_connected": self.is_connected,
+            "token_count": len(self.token_ids),
+            "reconnects": self.reconnect_count,
+            "trades_captured": self.trades_captured,
+            "last_ping_ts": self.last_ping_ts,
+            "last_pong_ts": self.last_pong_ts,
+            "books_tracked": len(self.books),
+        }
 
     async def run(self) -> None:
         """Connect to CLOB Market WebSocket and process messages."""
@@ -506,6 +774,115 @@ class CLOBMarketWSClient:
     def stop(self) -> None:
         """Signal market WebSocket client to stop."""
         self._stop_event.set()
+
+
+class CLOBStreamCollectorBridge:
+    """Runs `CLOBMarketWSClient.run_direct()` on a daemon thread for sync callers.
+
+    The tick collector is a synchronous 1-second loop; the market socket is
+    async and must stay connected between polls. This bridge owns the event
+    loop and exposes only thread-safe calls, so `poll_once` can drain prints
+    that arrived between two ticks without touching asyncio at all.
+    """
+
+    def __init__(
+        self,
+        token_ids: Optional[List[str]] = None,
+        ws_url: str = CLOB_WS_URL,
+        ping_interval: float = CLOB_WS_PING_INTERVAL,
+        connect_factory: Optional[Callable[..., Any]] = None,
+        on_trade: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
+        """Initialize the background CLOB stream collector bridge."""
+        self.client = CLOBMarketWSClient(
+            token_ids=token_ids,
+            on_trade=on_trade,
+            ws_url=ws_url,
+            ping_interval=ping_interval,
+            connect_factory=connect_factory,
+        )
+        self.is_running: bool = False
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_ready = threading.Event()
+        self._lock = threading.Lock()
+
+    @property
+    def is_connected(self) -> bool:
+        """True while the market socket is connected."""
+        return bool(self.client.is_connected)
+
+    def start(self) -> None:
+        """Start the daemon thread running the market socket."""
+        with self._lock:
+            if self.is_running:
+                return
+            self.is_running = True
+            self._loop_ready.clear()
+            self._thread = threading.Thread(
+                target=self._worker_main, daemon=True, name="CLOBStreamCollectorBridge")
+            self._thread.start()
+            self._loop_ready.wait(timeout=5.0)
+
+    def _worker_main(self) -> None:
+        """Worker thread entry point owning the socket's event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        # Re-arm on this loop: the ctor builds the event with no loop running.
+        self.client._stop_event = asyncio.Event()
+        self._loop_ready.set()
+        try:
+            self._loop.run_until_complete(self.client.run_direct())
+        except Exception as e:
+            log.debug("CLOB stream bridge loop ended: %s", e)
+        finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            self._loop.close()
+            self.client.is_connected = False
+            self.is_running = False
+
+    def update_subscribed_tokens(self, token_ids: List[str]) -> None:
+        """Sync the subscribed token set (triggers resubscribe when changed)."""
+        self.client.update_tokens(list(token_ids))
+
+    def drain_trades_for_token(self, token_id: str) -> List[Dict[str, Any]]:
+        """Pop every print buffered for one token since the last drain."""
+        return self.client.drain_trades(token_id)
+
+    def drain_all_trades(self) -> List[Dict[str, Any]]:
+        """Pop every buffered print across all subscribed tokens."""
+        return self.client.drain_trades()
+
+    def get_book_for_token(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Return a copy of the streamed book for a token, or None."""
+        book = self.client.books.get(token_id)
+        return dict(book) if book else None
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return socket health, capture counters and runner state."""
+        status = self.client.get_status()
+        status["is_running"] = self.is_running
+        return status
+
+    def stop(self) -> None:
+        """Stop the socket and join the worker thread."""
+        with self._lock:
+            if not self.is_running:
+                return
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(self.client.stop)
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=5.0)
+            self.is_running = False
+            self.client.is_connected = False
 
 
 class UserSpecStreamClient:
