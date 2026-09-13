@@ -349,11 +349,15 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                 stats["tape_captured_ws"] = stats.get("tape_captured_ws", 0) + len(tape_list)
             except Exception as e:
                 tape_err = f"ws_tape:{e}"
-        if not tape_list:
+        # Fall back per token, not per snapshot: one leg printing on the socket
+        # must not suppress the other leg's REST tape for that second.
+        streamed = {t["asset"] for t in tape_list}
+        missing = [t for t in (w["up_token"], w["down_token"]) if t not in streamed]
+        if missing:
             try:
                 tape_map = recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT)
                 ws_levels = w.get("ws_levels") or {}
-                for tok in (w["up_token"], w["down_token"]):
+                for tok in missing:
                     for p, s in tape_map.get(tok, {}).items():
                         if f"{tok}:{float(p):.4f}" in ws_levels:
                             continue  # already printed by the socket

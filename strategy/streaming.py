@@ -102,6 +102,9 @@ CLOB_WS_JITTER_PCT = 0.25         # de-synchronizes reconnect storms
 # bound on a process that runs for days.
 CLOB_WS_TRADE_BUFFER_MAX = 5000
 CLOB_WS_FAILURE_WARN_EVERY = 10   # escalate a feed that never comes back
+# A socket can stay open while the venue stops answering. `ping_interval=None`
+# disables the library's own heartbeat, so this is the only liveness signal.
+CLOB_WS_PONG_TIMEOUT_FACTOR = 3.0
 
 
 
@@ -439,6 +442,7 @@ class CLOBMarketWSClient:
         self.ws_url = ws_url
         self.ping_interval = float(ping_interval)
         self.recv_timeout = float(recv_timeout)
+        self.pong_timeout = self.ping_interval * CLOB_WS_PONG_TIMEOUT_FACTOR
         self.backoff_base = float(backoff_base)
         self.backoff_max = float(backoff_max)
         self._connect_factory = connect_factory
@@ -454,6 +458,8 @@ class CLOBMarketWSClient:
         self.last_pong_ts: float = 0.0
         self._trade_buffer: Dict[str, List[Dict[str, Any]]] = {}
         self._buffer_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._token_set: frozenset = frozenset(self.token_ids)
         self._stop_event = asyncio.Event()
 
     @property
@@ -472,11 +478,13 @@ class CLOBMarketWSClient:
         bids: Dict[float, float] = {}
         asks: Dict[float, float] = {}
 
+        # A quoted "NaN"/"Infinity" survives json.loads as a plain string and
+        # only becomes non-finite here, past the decoder's constant guard.
         for b in raw_bids:
             try:
                 p = float(b["price"] if isinstance(b, dict) else getattr(b, "price", 0))
                 s = float(b["size"] if isinstance(b, dict) else getattr(b, "size", 0))
-                if s > 0:
+                if _valid_quote(p) and _valid_size(s) and s > 0:
                     bids[p] = s
             except Exception:
                 continue
@@ -485,7 +493,7 @@ class CLOBMarketWSClient:
             try:
                 p = float(a["price"] if isinstance(a, dict) else getattr(a, "price", 0))
                 s = float(a["size"] if isinstance(a, dict) else getattr(a, "size", 0))
-                if s > 0:
+                if _valid_quote(p) and _valid_size(s) and s > 0:
                     asks[p] = s
             except Exception:
                 continue
@@ -493,46 +501,60 @@ class CLOBMarketWSClient:
         best_bid = max(bids.keys()) if bids else None
         best_ask = min(asks.keys()) if asks else None
 
-        self.books[token_id] = {
-            "bids": bids,
-            "asks": asks,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "last_updated": time.time(),
-        }
+        with self._state_lock:
+            self.books[token_id] = {
+                "bids": bids,
+                "asks": asks,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "last_updated": time.time(),
+            }
 
         if self.on_book_update:
             self.on_book_update(token_id, bids, asks)
 
     def apply_price_change(self, token_id: str, side: str, price: float, size: float) -> None:
         """Incremental level mutation."""
-        if token_id not in self.books:
-            self.books[token_id] = {
+        with self._state_lock:
+            book = self.books.setdefault(token_id, {
                 "bids": {},
                 "asks": {},
                 "best_bid": None,
                 "best_ask": None,
                 "last_updated": time.time(),
-            }
+            })
+            side_dict = book["bids"] if side.upper() in ("BUY", "BID") else book["asks"]
 
-        book = self.books[token_id]
-        side_dict = book["bids"] if side.upper() in ("BUY", "BID") else book["asks"]
+            if size <= 0:
+                side_dict.pop(price, None)
+            else:
+                side_dict[price] = size
 
-        if size <= 0:
-            side_dict.pop(price, None)
-        else:
-            side_dict[price] = size
-
-        book["best_bid"] = max(book["bids"].keys()) if book["bids"] else None
-        book["best_ask"] = min(book["asks"].keys()) if book["asks"] else None
-        book["last_updated"] = time.time()
+            book["best_bid"] = max(book["bids"].keys()) if book["bids"] else None
+            book["best_ask"] = min(book["asks"].keys()) if book["asks"] else None
+            book["last_updated"] = time.time()
+            bids, asks = book["bids"], book["asks"]
 
         if self.on_book_update:
-            self.on_book_update(token_id, book["bids"], book["asks"])
+            self.on_book_update(token_id, bids, asks)
 
     def apply_best_bid_ask(self, token_id: str, best_bid: Optional[float], best_ask: Optional[float]) -> None:
         """Record the venue's own top-of-book quote for a token."""
-        self.top_of_book[token_id] = {"best_bid": best_bid, "best_ask": best_ask}
+        with self._state_lock:
+            self.top_of_book[token_id] = {"best_bid": best_bid, "best_ask": best_ask}
+
+    def book_snapshot(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Return a book isolated from further worker-thread mutation.
+
+        The nested level maps are rebuilt under the lock: a shallow copy would
+        still hand the caller the live dicts that `apply_price_change` mutates,
+        which can raise "dictionary changed size during iteration" mid-read.
+        """
+        with self._state_lock:
+            book = self.books.get(token_id)
+            if not book:
+                return None
+            return {**book, "bids": dict(book["bids"]), "asks": dict(book["asks"])}
 
     def record_trade(self, token_id: str, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse one `last_trade_price` event into the per-token trade buffer.
@@ -619,6 +641,12 @@ class CLOBMarketWSClient:
         token_id = str(ev.get("asset_id") or ev.get("token_id") or "").strip()
         if not ev_type or not token_id:
             return
+        # A frame can still be in flight for a token that rotated out while the
+        # recv() was pending; without this it would re-create the very buffer
+        # and book entries update_tokens just dropped, and nothing would ever
+        # clean them again. An unsubscribed client (no tokens) filters nothing.
+        if self._token_set and token_id not in self._token_set:
+            return
 
         if ev_type == "book":
             self.apply_book_snapshot(token_id, ev.get("bids") or [], ev.get("asks") or [])
@@ -662,16 +690,18 @@ class CLOBMarketWSClient:
             return
         dropped = set(self.token_ids) - set(new_tokens)
         self.token_ids = sorted(set(new_tokens))
+        self._token_set = frozenset(self.token_ids)
         self._tokens_version += 1
         if not dropped:
             return
         with self._buffer_lock:
             for tid in dropped:
                 self._trade_buffer.pop(tid, None)
-        for tid in dropped:
-            self.books.pop(tid, None)
-            self.top_of_book.pop(tid, None)
-            self.tick_sizes.pop(tid, None)
+        with self._state_lock:
+            for tid in dropped:
+                self.books.pop(tid, None)
+                self.top_of_book.pop(tid, None)
+                self.tick_sizes.pop(tid, None)
 
     def subscription_payload(self) -> str:
         """Build the market-channel subscription frame for the current tokens."""
@@ -692,6 +722,17 @@ class CLOBMarketWSClient:
             return True
         except asyncio.TimeoutError:
             return False
+
+    def _pong_expired(self) -> bool:
+        """True once the venue has stopped answering a keepalive it did answer.
+
+        The deadline only arms after the first `PONG`: a venue that never sends
+        one at all would otherwise put the client in an endless reconnect loop,
+        and a failed `PING` send is already caught by the ping task dying.
+        """
+        if self.last_pong_ts <= 0.0:
+            return False
+        return (time.time() - self.last_pong_ts) > self.pong_timeout
 
     async def _ping_loop(self, ws: Any) -> None:
         """Send the venue's text `"PING"` keepalive every `ping_interval`."""
@@ -714,6 +755,13 @@ class CLOBMarketWSClient:
             while not self._stop_event.is_set():
                 if self._tokens_version != subscribed_version:
                     return True
+                if ping_task.done():
+                    log.warning("CLOB market WS keepalive stopped; reconnecting")
+                    return False
+                if self._pong_expired():
+                    log.warning("CLOB market WS PONG overdue (>%.0fs); reconnecting",
+                                self.pong_timeout)
+                    return False
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=self.recv_timeout)
                 except asyncio.TimeoutError:
@@ -935,9 +983,8 @@ class CLOBStreamCollectorBridge:
         return self.client.drain_trades()
 
     def get_book_for_token(self, token_id: str) -> Optional[Dict[str, Any]]:
-        """Return a copy of the streamed book for a token, or None."""
-        book = self.client.books.get(token_id)
-        return dict(book) if book else None
+        """Return a book snapshot isolated from the worker thread, or None."""
+        return self.client.book_snapshot(token_id)
 
     def get_status(self) -> Dict[str, Any]:
         """Return socket health, capture counters and runner state."""

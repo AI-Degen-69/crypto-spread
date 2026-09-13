@@ -38,13 +38,17 @@ from strategy.streaming import (
 class FakeWS:
     """Scripted websocket: replays `frames`, then blocks until stopped."""
 
-    def __init__(self, frames: list[str], fail_after: bool = False):
+    def __init__(self, frames: list[str], fail_after: bool = False,
+                 fail_send_after: int | None = None):
         self.frames = list(frames)
         self.sent: list[str] = []
         self.fail_after = fail_after
+        self.fail_send_after = fail_send_after
         self.closed = False
 
     async def send(self, msg: str) -> None:
+        if self.fail_send_after is not None and len(self.sent) >= self.fail_send_after:
+            raise ConnectionError("send on a half-open socket")
         self.sent.append(msg)
 
     async def recv(self) -> str:
@@ -388,6 +392,98 @@ def test_token_rotation_resubscribes_without_a_backoff_penalty():
     assert json.loads(second.sent[0])["assets_ids"] == ["tok_b"]
 
 
+def test_book_snapshot_quotes_are_validated():
+    """A quoted "NaN" survives json.loads as a string and only breaks here."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": "tok",
+        "bids": [{"price": "NaN", "size": "10"}, {"price": "0.48", "size": "Infinity"},
+                 {"price": "1.7", "size": "10"}, {"price": "0.47", "size": "5"}],
+        "asks": [{"price": "Infinity", "size": "10"}, {"price": "0.53", "size": "8"}],
+    }))
+    book = client.books["tok"]
+    assert book["bids"] == {0.47: 5.0}
+    assert book["asks"] == {0.53: 8.0}
+    assert book["best_bid"] == 0.47 and book["best_ask"] == 0.53
+
+
+def test_book_snapshot_is_isolated_from_further_mutation():
+    """A caller reading a book must not see it change under them."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.48", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    snap = client.book_snapshot("tok")
+    client.apply_price_change("tok", "BUY", 0.49, 25.0)
+
+    assert snap["bids"] == {0.48: 10.0}
+    assert client.books["tok"]["bids"] == {0.48: 10.0, 0.49: 25.0}
+    assert client.book_snapshot("absent") is None
+
+
+def test_frames_for_rotated_out_tokens_are_dropped():
+    """A frame in flight past a rotation must not resurrect purged state."""
+    client = CLOBMarketWSClient(token_ids=["tok_new"])
+    client.handle_raw_message(_trade_frame("tok_old", "0.5", "10"))
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": "tok_old",
+        "bids": [{"price": "0.4", "size": "1"}], "asks": [],
+    }))
+    assert client.drain_trades("tok_old") == []
+    assert "tok_old" not in client.books
+
+    client.handle_raw_message(_trade_frame("tok_new", "0.5", "10"))
+    assert len(client.drain_trades("tok_new")) == 1
+
+
+def test_session_reconnects_when_the_keepalive_dies():
+    """A half-open socket that rejects PING must be dropped, not held open."""
+    first = FakeWS([], fail_send_after=1)   # subscription lands, PING fails
+    second = FakeWS([])
+    connector = FakeConnector([first, second])
+    client = CLOBMarketWSClient(token_ids=["tok"], connect_factory=connector,
+                                ping_interval=0.01, recv_timeout=0.02,
+                                backoff_base=0.01, backoff_max=0.02)
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if len(connector.calls) >= 2:
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(drive())
+    assert len(connector.calls) >= 2
+    assert client.reconnect_count >= 1
+
+
+def test_session_reconnects_when_pong_goes_overdue():
+    """A venue that stops answering is a dead feed even if the socket is open."""
+    connector = FakeConnector([FakeWS([]), FakeWS([])])
+    client = CLOBMarketWSClient(token_ids=["tok"], connect_factory=connector,
+                                ping_interval=5.0, recv_timeout=0.02,
+                                backoff_base=0.01, backoff_max=0.02)
+    client.last_pong_ts = time.time() - 3600.0  # answered once, long ago
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if len(connector.calls) >= 2:
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(drive())
+    assert len(connector.calls) >= 2
+    assert client.reconnect_count >= 1
+    # A feed that never PONGed at all must not be torn down on this rule.
+    fresh = CLOBMarketWSClient()
+    assert fresh.last_pong_ts == 0.0
+    assert fresh._pong_expired() is False
+
+
 def test_drain_trades_is_thread_safe():
     """Concurrent producers and drainers never lose or duplicate a print."""
     client = CLOBMarketWSClient()
@@ -603,6 +699,26 @@ def test_poll_once_deduplicates_repeated_ws_prints(collector, tmp_path):
     tape = _read_snaps(tmp_path)[0]["tape_delta"]
     assert len(tape) == 1
     assert stats["tape_captured_ws"] == 1
+
+
+def test_rest_fallback_is_per_token_not_per_snapshot(collector, tmp_path,
+                                                     monkeypatch):
+    """One leg printing on the socket must not mute the other leg's REST tape."""
+    monkeypatch.setattr(
+        collector, "recent_trades",
+        lambda cid, seen, limit=200: {"tok_dn": {0.55: 4.0}},
+    )
+    bridge = StubBridge({
+        "tok_up": [{"asset": "tok_up", "price": 0.46, "size": 30.0,
+                    "side": "BUY", "ts": 1700000000000, "hash": "0xa"}],
+    })
+    stats: dict = {}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    tape = _read_snaps(tmp_path)[0]["tape_delta"]
+    assert {t["asset"] for t in tape} == {"tok_up", "tok_dn"}
+    assert stats["tape_captured_ws"] == 1
+    assert stats["tape_captured_rest"] == 1
 
 
 def test_poll_once_falls_back_to_rest_when_ws_disconnected(collector, tmp_path,
