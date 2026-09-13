@@ -1121,3 +1121,56 @@ def test_one_authoritative_leg_does_not_cover_the_other(collector, tmp_path):
     snaps = _read_snaps(tmp_path)
     assets = [t["asset"] for t in snaps[-1]["tape_delta"]]
     assert assets == ["tok_dn"], f"authoritative leg leaked REST rows: {assets}"
+
+
+def test_both_tape_sources_failing_reports_both_errors(collector, tmp_path,
+                                                       monkeypatch):
+    """A socket failure must not mask a REST failure in the same tick."""
+    def boom_drain(bridge, w, now):
+        """The socket drain blows up."""
+        raise RuntimeError("drain died")
+
+    def boom_rest(cid, seen, limit=200):
+        """...and so does the REST fallback."""
+        raise RuntimeError("rest died")
+
+    monkeypatch.setattr(collector, "drain_ws_tape", boom_drain)
+    monkeypatch.setattr(collector, "recent_trades", boom_rest)
+    collector.poll_once(tmp_path, False, {}, ws_bridge=StubBridge({}))
+
+    err = _read_snaps(tmp_path)[0]["err"]
+    assert "ws_tape:" in err and "drain died" in err
+    assert "tape:" in err and "rest died" in err
+
+
+def test_the_warmup_clock_does_not_start_before_the_socket_connects(
+        collector, tmp_path):
+    """A bridge that is not up yet is not listening, so nothing is subscribed."""
+    down = StubBridge({}, connected=False)
+    collector.poll_once(tmp_path, False, {}, ws_bridge=down)
+
+    w = collector.windows["0xCID"]
+    assert w["ws_ready_at"] == {}, "clock started against time the feed never spent"
+
+    up = StubBridge({}, connected=True)
+    collector.poll_once(tmp_path, False, {}, ws_bridge=up)
+    assert set(w["ws_ready_at"]) == {"tok_up", "tok_dn"}
+
+
+def test_duplicate_series_slugs_are_rejected(monkeypatch):
+    """Two workers sharing a gamma-cache key would race; reject it up front."""
+    import scripts.collect_ticks as ct
+
+    monkeypatch.setattr(ct, "SERIES", [
+        ("btc-up-or-down-5m", 300, "BTC 5m"),
+        ("btc-up-or-down-5m", 900, "BTC 15m"),
+    ])
+    with pytest.raises(ValueError, match="duplicate series slugs"):
+        ct.assert_unique_series_slugs()
+
+
+def test_the_real_slate_has_unique_slugs():
+    """The shipped SERIES must satisfy the invariant the fan-out relies on."""
+    import scripts.collect_ticks as ct
+
+    ct.assert_unique_series_slugs()

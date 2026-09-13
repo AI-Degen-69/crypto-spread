@@ -126,6 +126,23 @@ WS_REST_DEDUP_TTL = 60.0
 WS_TOKEN_WARMUP = 5.0
 WS_AUTHORITY_HORIZON = 90.0
 
+def assert_unique_series_slugs() -> None:
+    """Fail loudly at import if two series share a slug.
+
+    The poll fan-out writes `_gamma_cache` from worker threads without a lock,
+    and that is only safe because each worker owns a distinct slug key. A
+    duplicate slug would turn a config typo into a silent cross-thread
+    overwrite, so it is rejected here rather than discovered in the data.
+    """
+    slugs = [slug for slug, _dur, _label in SERIES]
+    dupes = sorted({s for s in slugs if slugs.count(s) > 1})
+    if dupes:
+        raise ValueError(f"duplicate series slugs would race the gamma cache: {dupes}")
+
+
+assert_unique_series_slugs()
+
+
 # Per-cid state: { cid: {series, slug, start_ts, end_ts, up_token, down_token,
 #                         seen_tape, seen_ws, ws_levels, ws_ready_at,
 #                         ws_last_print, snap_count, label, duration, mids,
@@ -261,7 +278,8 @@ def reset_gamma_cache() -> None:
     _gamma_cache.clear()
 
 
-def resolve_series_market(series_slug: str, now: Optional[float] = None):
+def resolve_series_market(series_slug: str, now: Optional[float] = None
+                          ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """`fetch_live_for_series` behind a per-window cache. Same (info, err) shape.
 
     A failure is never cached: gamma erroring once must not blind the collector
@@ -475,9 +493,15 @@ def fetch_series_books(series_slug: str, duration: int, label: str, now: float,
                        stagger: float = 0.0) -> SeriesFetch:
     """Resolve one series and fetch both of its books. Safe to run off-thread.
 
-    Touches no module-level collector state and writes no files, so the ten
-    series can run at once without a lock. `stagger` spreads the slate's first
-    requests instead of firing them as one burst (Plan D2/D4).
+    Writes no files and touches neither `windows` nor `stats`. It does write
+    `_gamma_cache` via `resolve_series_market`, and runs without a lock only
+    because the slate gives each worker its own key: one job per SERIES entry,
+    and `poll_once` blocks on the whole round before the next one starts, so no
+    two workers ever write the same slug. `assert_unique_series_slugs` at import
+    time is what keeps that invariant true rather than assumed.
+
+    `stagger` spreads the slate's first requests instead of firing them as one
+    burst (Plan D2/D4).
     """
     _ramp(stagger)
     try:
@@ -627,7 +651,10 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
         info = fetched.info
         ub, db = fetched.up_book, fetched.down_book
         ub_err, db_err = ub.get("err"), db.get("err")
-        tape_err = pend.err or fetch_err
+        # Both tape sources can fail in the same tick. `or` would report only
+        # the socket's error and drop the REST one, which is worse than the
+        # pre-#167 behaviour where the REST handler ran last and always won.
+        tape_err = "; ".join(e for e in (pend.err, fetch_err) if e)
         if missing and tape_map:
             ws_levels = w.get("ws_levels") or {}
             for tok in missing:
@@ -679,12 +706,16 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     if ws_bridge is not None:
         try:
             ws_bridge.update_subscribed_tokens(sorted(set(active_tokens)))
-            # Start the warm-up clock only once a token is actually subscribed:
-            # a window opened this tick was not being listened to during it.
-            for w in windows.values():
-                ready = w.setdefault("ws_ready_at", {})
-                for tok in (w["up_token"], w["down_token"]):
-                    ready.setdefault(tok, now)
+            # Start the warm-up clock only once a token is both subscribed AND
+            # the socket is actually up: a window opened this tick was not being
+            # listened to during it, and a bridge that has not connected yet is
+            # not listening at all. Stamping early would age the clock against
+            # wall time the feed never spent delivering.
+            if ws_connected:
+                for w in windows.values():
+                    ready = w.setdefault("ws_ready_at", {})
+                    for tok in (w["up_token"], w["down_token"]):
+                        ready.setdefault(tok, now)
         except Exception as e:
             errs.append(f"ws_sync:{e}")
 
