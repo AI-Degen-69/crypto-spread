@@ -61,7 +61,7 @@ what let them drift; it would drift again.
   *Verify:* new `tests/test_param_registry.py` — every `BacktestParams` field
   appears exactly once; bounds match `__post_init__` validation.
 
-- [ ] **2. `[Backend/Logic]` `stop_loss_enabled` in the engine.** Add to
+- [x] **2. `[Backend/Logic]` `stop_loss_enabled` in the engine.** Add to
   `BacktestParams` (default `True` = today). When `False`, `_simulate_window`
   holds a filled naked leg to settlement instead of taking the stop exit —
   mirroring `live_trader.py:1395`.

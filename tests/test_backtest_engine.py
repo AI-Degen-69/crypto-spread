@@ -858,3 +858,81 @@ def test_reentry_deferred_until_delay_expiry():
         entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
     assert w0.pair_captured is True
 
+
+# ===========================================================================
+# Issue #164: stop_loss_enabled — mirrors LiveTraderEngine
+# ===========================================================================
+
+def _drift_window(start_ts=1_760_000_000.0, duration=300):
+    """One window where UP fills, then the mid drifts down past any stop."""
+    snaps = []
+    # tick 0: both sides quotable at 0.50, nothing filled yet
+    mids = [0.50, 0.50, 0.42, 0.38, 0.35, 0.33]
+    for i, m in enumerate(mids):
+        up_bid, up_ask = round(m - 0.01, 3), round(m + 0.01, 3)
+        dn_bid, dn_ask = round(1 - m - 0.01, 3), round(1 - m + 0.01, 3)
+        # after the first tick the UP ask collapses onto our resting bid
+        if i == 1:
+            up_ask = 0.47
+        snaps.append({
+            "ts": start_ts + i, "cid": "0xstop", "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m", "start_ts": start_ts,
+            "end_ts": start_ts + duration, "duration": duration, "mid": m,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": dn_bid, "best_ask": dn_ask,
+                          "bids": {str(dn_bid): 500.0}, "asks": {str(dn_ask): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def _params(**kw):
+    base = dict(offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
+                fill_model="book", entry_timeout_pct=0.0,
+                max_start_elapsed_pct=0.0, exit_reversal=0.0,
+                exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    base.update(kw)
+    return BacktestParams(**base)
+
+
+def test_stop_loss_enabled_defaults_to_the_previous_behaviour():
+    """True is today: a naked leg past the threshold stops out."""
+    assert BacktestParams().stop_loss_enabled is True
+    w = _simulate_window(_drift_window(), _params())
+    assert w.exit_taken is True, "the drift stop no longer fires by default"
+    assert w.exit_side == "up"
+
+
+def test_disabling_the_stop_holds_the_naked_leg_to_settlement():
+    """`patient_band_maker` runs with stop_loss_enabled=False.
+
+    Same ticks, same thresholds — the only difference is the knob. The leg
+    must ride the drift instead of being sold into it.
+    """
+    w = _simulate_window(_drift_window(), _params(stop_loss_enabled=False))
+    assert w.exit_taken is False, "the stop fired with stop_loss_enabled=False"
+    assert w.filled_up is True, "the leg should still have filled"
+
+
+def test_the_knob_changes_pnl_rather_than_only_a_flag():
+    """A flag that flips without moving P&L would prove nothing."""
+    on = _simulate_window(_drift_window(), _params())
+    off = _simulate_window(_drift_window(), _params(stop_loss_enabled=False))
+    assert on.pnl_cents != off.pnl_cents, (
+        "disabling the stop left P&L unchanged — the gate is not on the path "
+        "that books the exit")
+
+
+def test_disabling_the_stop_does_not_suppress_pairing():
+    """Only the stop is gated; a window that pairs must still pair."""
+    snaps = _drift_window()
+    # collapse the DOWN ask too, so both legs fill and the pair merges
+    snaps[1]["down_book"]["best_ask"] = 0.47
+    w = _simulate_window(snaps, _params(stop_loss_enabled=False))
+    assert w.pair_captured is True, "pairing broke when the stop was disabled"
+
+
+def test_stop_loss_enabled_is_part_of_the_params_hash():
+    """Sweep caches key on the hash; two strategies must not collide."""
+    assert _params().params_hash() != _params(stop_loss_enabled=False).params_hash()

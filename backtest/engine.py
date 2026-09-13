@@ -162,6 +162,13 @@ class BacktestParams:
     # preserve the current behavior exactly.
     entry_delay_sec: float = 0.0
     entry_band: float = 0.0
+    # Issue #164: mirrors LiveTraderEngine.stop_loss_enabled. False holds a
+    # filled naked leg to settlement/rollover instead of stopping it out, which
+    # is how `patient_band_maker` actually trades. The backtest previously had
+    # to fake that by setting exit thresholds so wide they never tripped — a
+    # different mechanism for the same intent, so neither proved the other.
+    # True preserves current behaviour exactly.
+    stop_loss_enabled: bool = True
 
     # ── param grouping metadata ──────────────────────────────────────────────
     # Separates operator-controlled (live-replicable) knobs from execution
@@ -195,6 +202,8 @@ class BacktestParams:
              "$", (0.0, 0.50), ("backtest", "cockpit")),
             ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
              "$", None, ("backtest", "cockpit")),
+            ("stop_loss_enabled", "Stop Loss Enabled", "Off holds a filled naked leg to settlement instead of stopping out",
+             "bool", None, ("backtest", "cockpit")),
             ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
              "$", (0.0, 0.50), ("backtest", "cockpit")),
         ],
@@ -680,7 +689,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # if the live book no longer meets the entry gate. Check exit
             # BEFORE updating the reversal flag, otherwise the crossing tick
             # sets the flag and the exit is suppressed.
-            if (filled_up and not filled_down and max_down >= exit_thr
+            if (params.stop_loss_enabled
+                    and filled_up and not filled_down and max_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
                 bb_up = ub.get("best_bid")
                 if bb_up is not None:
@@ -690,7 +700,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     pnl_cents += (bb_up - resting_up) * 100.0
                     fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                     break
-            if (filled_down and not filled_up and max_up >= exit_thr
+            if (params.stop_loss_enabled
+                    and filled_down and not filled_up and max_up >= exit_thr
                     and not reversal_seen_up and not exit_taken):
                 bb_dn = db.get("best_bid")
                 if bb_dn is not None:
@@ -760,7 +771,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Check BEFORE we update the reversal flag this tick so the crossing
         # tick is the exit tick (otherwise the flag toggles the same tick and
         # the exit is suppressed).
-        if (filled_up and not filled_down and max_down >= exit_thr
+        if (params.stop_loss_enabled
+                and filled_up and not filled_down and max_down >= exit_thr
                 and not reversal_seen_down and not exit_taken):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
@@ -770,7 +782,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_up - resting_up) * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
-        if (filled_down and not filled_up and max_up >= exit_thr
+        if (params.stop_loss_enabled
+                and filled_down and not filled_up and max_up >= exit_thr
                 and not reversal_seen_up and not exit_taken):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:
