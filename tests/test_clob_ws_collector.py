@@ -640,6 +640,7 @@ def collector(monkeypatch):
     import scripts.collect_ticks as ct
 
     ct.windows.clear()
+    ct.reset_gamma_cache()
     monkeypatch.setattr(ct, "SERIES", [("btc-up-or-down-5m", 300, "BTC 5m")])
     monkeypatch.setattr(ct, "fetch_live_for_series", lambda slug: ({
         "conditionId": "0xCID", "slug": "btc-updown-5m-1",
@@ -653,6 +654,7 @@ def collector(monkeypatch):
     monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
     yield ct
     ct.windows.clear()
+    ct.reset_gamma_cache()
 
 
 def _read_snaps(out_dir: Path) -> list[dict]:

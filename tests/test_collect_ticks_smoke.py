@@ -7,6 +7,7 @@ import gzip
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -239,3 +240,124 @@ def test_run_dir_for_ticks_layout(tmp_path: Path):
     assert ct.run_dir_for(tmp_path / "ticks") == tmp_path
     assert ct.run_dir_for(tmp_path / "custom") == tmp_path / "custom"
 
+
+# --- Issue #167 T1: gamma market resolution cache -------------------------
+
+def _market(cid: str = "0xC1", end_ts: float = 2000.0) -> dict:
+    """Minimal resolved-market dict shaped like fetch_live_for_series output."""
+    return {
+        "conditionId": cid, "slug": f"slug-{cid}",
+        "start_ts": end_ts - 300.0, "end_ts": end_ts,
+        "up_token": f"{cid}-UP", "down_token": f"{cid}-DOWN",
+        "series": "btc-up-or-down-5m",
+    }
+
+
+@pytest.fixture
+def gamma(monkeypatch):
+    """Count fetch_live_for_series calls with a scripted queue of results."""
+    import scripts.collect_ticks as ct
+
+    ct.reset_gamma_cache()
+    state = {"calls": 0, "queue": [(_market(), None)]}
+
+    def fake_fetch(series_slug: str):
+        """Pop the next scripted result, repeating the last one forever."""
+        state["calls"] += 1
+        if len(state["queue"]) > 1:
+            return state["queue"].pop(0)
+        return state["queue"][0]
+
+    monkeypatch.setattr(ct, "fetch_live_for_series", fake_fetch)
+    yield state
+    ct.reset_gamma_cache()
+
+
+def test_gamma_cache_serves_within_window(gamma):
+    """A second resolve inside the same window issues no second HTTP fetch."""
+    import scripts.collect_ticks as ct
+
+    first, err1 = ct.resolve_series_market("btc-up-or-down-5m", now=1000.0)
+    second, err2 = ct.resolve_series_market("btc-up-or-down-5m", now=1001.0)
+    assert err1 is None and err2 is None
+    assert first["conditionId"] == second["conditionId"] == "0xC1"
+    assert gamma["calls"] == 1
+
+
+def test_gamma_cache_reresolves_after_end_ts(gamma):
+    """Once the window rolls the cached market must not be served again."""
+    import scripts.collect_ticks as ct
+
+    gamma["queue"] = [(_market("0xOLD", end_ts=2000.0), None),
+                      (_market("0xNEW", end_ts=2300.0), None)]
+    assert ct.resolve_series_market("btc-up-or-down-5m", now=1900.0)[0]["conditionId"] == "0xOLD"
+    got, _ = ct.resolve_series_market("btc-up-or-down-5m", now=2001.0)
+    assert got["conditionId"] == "0xNEW"
+    assert gamma["calls"] == 2
+
+
+def test_gamma_cache_reresolves_after_max_age(gamma):
+    """A bounded max age forces a re-resolve even while the window is open."""
+    import scripts.collect_ticks as ct
+
+    far = _market("0xC1", end_ts=1_000_000.0)
+    gamma["queue"] = [(far, None)]
+    ct.resolve_series_market("btc-up-or-down-5m", now=1000.0)
+    ct.resolve_series_market("btc-up-or-down-5m", now=1000.0 + ct.GAMMA_CACHE_MAX_AGE - 1.0)
+    assert gamma["calls"] == 1
+    ct.resolve_series_market("btc-up-or-down-5m", now=1000.0 + ct.GAMMA_CACHE_MAX_AGE + 1.0)
+    assert gamma["calls"] == 2
+
+
+def test_gamma_cache_does_not_cache_failure(gamma):
+    """A gamma error is never stored, so the next tick retries the lookup."""
+    import scripts.collect_ticks as ct
+
+    gamma["queue"] = [(None, "gamma err boom"), (_market("0xOK"), None)]
+    info, err = ct.resolve_series_market("btc-up-or-down-5m", now=1000.0)
+    assert info is None and err == "gamma err boom"
+    info, err = ct.resolve_series_market("btc-up-or-down-5m", now=1000.5)
+    assert err is None and info["conditionId"] == "0xOK"
+    assert gamma["calls"] == 2
+
+
+def test_gamma_cache_picks_up_replaced_market(gamma):
+    """A market swapped mid-window is adopted once the cache entry ages out."""
+    import scripts.collect_ticks as ct
+
+    gamma["queue"] = [(_market("0xA", end_ts=1_000_000.0), None),
+                      (_market("0xB", end_ts=1_000_000.0), None)]
+    assert ct.resolve_series_market("btc-up-or-down-5m", now=1000.0)[0]["conditionId"] == "0xA"
+    later = 1000.0 + ct.GAMMA_CACHE_MAX_AGE + 1.0
+    assert ct.resolve_series_market("btc-up-or-down-5m", now=later)[0]["conditionId"] == "0xB"
+
+
+def test_poll_once_uses_the_gamma_cache(monkeypatch, tmp_path):
+    """poll_once must resolve through the cache, not call the fetcher per tick."""
+    import scripts.collect_ticks as ct
+
+    ct.reset_gamma_cache()
+    ct.windows.clear()
+    calls = {"n": 0}
+
+    def fake_fetch(series_slug: str):
+        """Return a live market for the first series only, counting calls."""
+        calls["n"] += 1
+        if series_slug != ct.SERIES[0][0]:
+            return None, "no live"
+        return _market("0xPOLL", end_ts=time.time() + 300.0), None
+
+    monkeypatch.setattr(ct, "fetch_live_for_series", fake_fetch)
+    monkeypatch.setattr(ct, "full_book", lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok})
+    monkeypatch.setattr(ct, "recent_trades", lambda cid, seen, limit=200: {})
+
+    stats: dict = {}
+    ct.poll_once(tmp_path, False, stats)
+    after_first = calls["n"]
+    ct.poll_once(tmp_path, False, stats)
+    # Only the nine failing series re-resolve; the cached live one does not.
+    assert calls["n"] - after_first == len(ct.SERIES) - 1
+    ct.reset_gamma_cache()
+    ct.windows.clear()

@@ -166,6 +166,42 @@ def fetch_live_for_series(series_slug: str):
     }, None
 
 
+# Gamma re-resolves a market whose conditionId, tokens and end_ts cannot change
+# until the window rolls, so the lookup was repeated ~390ms per tick for an
+# answer that was already known (issue #167). The cache is bounded in time, not
+# just by end_ts: a market replaced or cancelled mid-window is still picked up
+# within GAMMA_CACHE_MAX_AGE instead of being pinned for the whole window.
+GAMMA_CACHE_MAX_AGE = 30.0
+
+# { series_slug: (resolved_at_ts, market_info) }
+_gamma_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def reset_gamma_cache() -> None:
+    """Drop every cached market resolution (process restart / test isolation)."""
+    _gamma_cache.clear()
+
+
+def resolve_series_market(series_slug: str, now: Optional[float] = None):
+    """`fetch_live_for_series` behind a per-window cache. Same (info, err) shape.
+
+    A failure is never cached: gamma erroring once must not blind the collector
+    to that series until the entry would have expired anyway.
+    """
+    if now is None:
+        now = time.time()
+    cached = _gamma_cache.get(series_slug)
+    if cached is not None:
+        resolved_at, info = cached
+        if now < info["end_ts"] and (now - resolved_at) < GAMMA_CACHE_MAX_AGE:
+            return info, None
+    info, err = fetch_live_for_series(series_slug)
+    if info is None:
+        return None, err
+    _gamma_cache[series_slug] = (now, info)
+    return info, None
+
+
 def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
     """Append one tick line to run/ticks/ticks_<day>.jsonl[.gz]; returns path."""
     suffix = ".jsonl.gz" if gzip else ".jsonl"
@@ -299,7 +335,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     active_tokens: list[str] = []
 
     for series_slug, duration, label in SERIES:
-        info, err = fetch_live_for_series(series_slug)
+        info, err = resolve_series_market(series_slug, now)
         if not info:
             errs.append(f"{series_slug}:{err}")
             continue
