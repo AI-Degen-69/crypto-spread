@@ -1,8 +1,8 @@
 # EV Research Report — SPREAD-2 Parameter, Market & Timeframe Sweep
 
-**Date:** 2026-09-11 · **Dataset:** `run/ticks/` — 2,430 condition windows, ~265k snapshots, 5 collection days (2026-08-31, 09-07, 09-08, 09-09, 09-11) · **Engine:** `backtest/engine.py` semantics, replayed tick-for-tick by a parity-verified fast simulator (`run/sweeps/ev_lab.py`, **6,840 window-checks × 12 configs, 0 mismatches**).
+**Date:** 2026-09-11 · **Dataset:** `run/ticks/` — 2,430 condition windows, ~265k snapshots, 5 collection days (2026-08-31, 09-07, 09-08, 09-09, 09-11) · **Engine:** `backtest/engine.py` semantics, replayed tick-for-tick by a parity-verified fast simulator (`research/sweeps/ev_lab.py`, **6,840 window-checks × 12 configs, 0 mismatches**).
 
-Every result below is **settlement-corrected**: the stock engine silently books 0 PnL when a naked leg's final bid is missing (book empty at settlement); an audit (`run/sweeps/audit_settlement.py`) showed those 79 windows *all* lost (−39.3¢ true), and "marked" windows were 89 wins / 3 losses vs the true 88/83. Without this correction every hold-to-settle config looks ~40% better than reality. All fees = Polymarket crypto taker 0.07·p·(1−p) on exits and settlement marks; maker fills free.
+Every result below is **settlement-corrected**: the stock engine silently books 0 PnL when a naked leg's final bid is missing (book empty at settlement); an audit (`research/sweeps/audit_settlement.py`) showed those 79 windows *all* lost (−39.3¢ true), and "marked" windows were 89 wins / 3 losses vs the true 88/83. Without this correction every hold-to-settle config looks ~40% better than reality. All fees = Polymarket crypto taker 0.07·p·(1−p) on exits and settlement marks; maker fills free.
 
 **Statistics:** 95% bootstrap CI on mean net PnL per 5-share window (5,000 resamples), plus a day-cluster bootstrap (resampling whole days) — windows within a day are correlated, so the day-cluster lower bound is the honest one.
 
@@ -43,7 +43,7 @@ Format: pairs% = windows where both legs filled and merged · exits% = stop-loss
 
 ### 3.1 Phase 1 — 1D sensitivity on the repo baseline (tape fills, settle-corrected)
 
-Baseline = `off=0.02, q=0, pc=1.05, ex_5m=0.08, rev=0.015, tape` (per docs/backtest-optimization-results.md). 44 configs; all axes swept. Selected rows (full table in `run/sweeps/phase1_1d.json`):
+Baseline = `off=0.02, q=0, pc=1.05, ex_5m=0.08, rev=0.015, tape` (per docs/backtest-optimization-results.md). 44 configs; all axes swept. Selected rows (full table in `research/sweeps/phase1_1d.json`):
 
 | config | pairs% | exits% | win% | tot$/w | mean c | ci lo | day lo | PF | DD$ |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -109,7 +109,7 @@ Chase = after one leg fills, step the opposite quote up toward the ask, capped s
 
 ### 3.4 Phase 4 — universe selection (series × timeframe) with the best mechanical profile
 
-(chase 0.98, tape fills, off=0.03, ex=0.08; full table in `run/sweeps/phase4_universe.json`)
+(chase 0.98, tape fills, off=0.03, ex=0.08; full table in `research/sweeps/phase4_universe.json`)
 
 | universe | n | pairs% | exits% | win% | tot$/w | mean c | ci lo | day lo | PF |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -133,7 +133,7 @@ Chase = after one leg fills, step the opposite quote up toward the ask, capped s
 
 ### 3.5 Phase 5 — entry-band regime filter × delay × chase (the breakthrough)
 
-Band = at first quoted tick, require |two-sided mid − 0.50| ≤ band, else skip the window (only trade undecided markets). Tape fills, all series. Top rows (full grid in `run/sweeps/phase5_band.json`):
+Band = at first quoted tick, require |two-sided mid − 0.50| ≤ band, else skip the window (only trade undecided markets). Tape fills, all series. Top rows (full grid in `research/sweeps/phase5_band.json`):
 
 | config | pairs% | exits% | win% | tot$/w | mean c | ci lo | day lo | PF |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -202,7 +202,7 @@ The live engine already records everything needed to measure this: per-order `qu
 
 ## 6. Method notes & caveats (read before sizing)
 
-1. **Parity-verified fast simulator.** `run/sweeps/ev_lab.py` reproduces `backtest/engine.py:_simulate_window` bit-for-bit on 6,840 checks across 12 configs (pnl, fees, fills, exits, re-entry counts). Research extensions (`tapeq`, chase, delay, band) live in `run/sweeps/sim2.py` with engine-parity defaults.
+1. **Parity-verified fast simulator.** `research/sweeps/ev_lab.py` reproduces `backtest/engine.py:_simulate_window` bit-for-bit on 6,840 checks across 12 configs (pnl, fees, fills, exits, re-entry counts). Research extensions (`tapeq`, chase, delay, band) live in `research/sweeps/sim2.py` with engine-parity defaults.
 2. **Settlement correction applies to ALL configs** (engine books 0 for unmarkable naked legs; true is ±(100−entry)). The correction moved `ex=none` from +5.77¢ to −1.85¢. Any comparison that skips this is wrong.
 3. **Tape capture is degraded** (~97% of snapshots have empty tape vs ~2% when the old study ran). All fill rates here are undercounts; the *relative* ranking of configs is trustworthy, absolute PnL is a lower bound.
 4. **Two blind spots remain:** intra-second queue position (the decisive one, §4) and maker-rebate/fee-schedule variation across markets (taker 0.07 used everywhere; zero-fee scenario tested, doesn't change rankings).
@@ -214,16 +214,16 @@ The live engine already records everything needed to measure this: per-order `qu
 
 | file | content |
 |---|---|
-| `run/sweeps/ev_lab.py` | window cache builder + parity-verified fast sim + bootstrap stats |
-| `run/sweeps/sim2.py` | research extensions: tapeq, leg-chase, entry-delay, entry-band |
-| `run/sweeps/audit_settlement.py` | the settlement-marking bias audit |
-| `run/sweeps/phase1_1d.json` | 44-config 1D sensitivity results |
-| `run/sweeps/phase2_fills.json` | tapeq/fee/reentry results |
-| `run/sweeps/phase3_mech.json` | leg-chase ladder results |
-| `run/sweeps/phase4_universe.json` | per-series + delay universe results |
-| `run/sweeps/phase5_band.json` | 100-config band×delay×chase grid |
-| `run/sweeps/validate_top.json` | trade-level per-day validation of top 5 |
-| `run/sweeps/phase6_tapeq_top.json` | queue stress test of top 5 |
-| `run/sweeps/window_cache.pkl` | 2,430-window compact cache (336MB, rebuild: `python run/sweeps/ev_lab.py cache --force`) |
+| `research/sweeps/ev_lab.py` | window cache builder + parity-verified fast sim + bootstrap stats |
+| `research/sweeps/sim2.py` | research extensions: tapeq, leg-chase, entry-delay, entry-band |
+| `research/sweeps/audit_settlement.py` | the settlement-marking bias audit |
+| `research/sweeps/phase1_1d.json` | 44-config 1D sensitivity results |
+| `research/sweeps/phase2_fills.json` | tapeq/fee/reentry results |
+| `research/sweeps/phase3_mech.json` | leg-chase ladder results |
+| `research/sweeps/phase4_universe.json` | per-series + delay universe results |
+| `research/sweeps/phase5_band.json` | 100-config band×delay×chase grid |
+| `research/sweeps/validate_top.json` | trade-level per-day validation of top 5 |
+| `research/sweeps/phase6_tapeq_top.json` | queue stress test of top 5 |
+| `run/sweeps/window_cache.pkl` | 2,430-window compact cache (336MB, rebuild: `python research/sweeps/ev_lab.py cache --force`) |
 
-Reproduce any row: `python run/sweeps/phase5_band.py` (grid) or `python run/sweeps/validate_top.py` (trade-level detail).
+Reproduce any row: `python research/sweeps/phase5_band.py` (grid) or `python research/sweeps/validate_top.py` (trade-level detail).

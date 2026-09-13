@@ -1,0 +1,1392 @@
+[
+ {
+  "n": 2430,
+  "settle_corrected": 41,
+  "settle_ambiguous": 0,
+  "pairs": 172,
+  "pair_rate": 0.07078189300411522,
+  "exits": 8,
+  "exit_rate": 0.0032921810699588477,
+  "naked_settle": 52,
+  "win_rate": 0.07160493827160494,
+  "total_pnl_usd": -82.152765,
+  "mean_net_cents": -3.3807722222222223,
+  "roi_pct_per_window": -860.3149494981229,
+  "ci95_lo": -4.856910082304525,
+  "ci95_hi": -1.9714351851851855,
+  "ci95_day_lo": -12.280202531645571,
+  "ci95_day_hi": -0.7353458100558657,
+  "max_dd_usd": 84.252765,
+  "capital_usd": 954.915,
+  "outcome_decomp": {
+   "pairs": {
+    "n": 172,
+    "mean_c": 29.642441860465116,
+    "total_usd": 50.985
+   },
+   "exits": {
+    "n": 8,
+    "mean_c": -233.13593749999998,
+    "total_usd": -18.650875
+   },
+   "naked": {
+    "n": 52,
+    "mean_c": -220.16709615384616,
+    "total_usd": -114.48689
+   },
+   "no_fill": 2198
+  },
+  "profit_factor": 0.38326451690348246,
+  "sharpe_proxy": -4.546797266360857,
+  "by_series": {
+   "eth-up-or-down-5m": {
+    "n": 361,
+    "pairs": 25,
+    "exits": 2,
+    "pair_rate": 0.06925207756232687,
+    "exit_rate": 0.00554016620498615,
+    "win_rate": 0.06925207756232687,
+    "mean_net_cents": -0.8644570637119112,
+    "total_usd": -3.1206899999999997,
+    "ci95_lo_approx": -3.5696188129480753
+   },
+   "btc-up-or-down-5m": {
+    "n": 361,
+    "pairs": 16,
+    "exits": 0,
+    "pair_rate": 0.0443213296398892,
+    "exit_rate": 0.0,
+    "win_rate": 0.04709141274238227,
+    "mean_net_cents": -1.2173490304709143,
+    "total_usd": -4.39463,
+    "ci95_lo_approx": -3.822362999788461
+   },
+   "xrp-up-or-down-15m": {
+    "n": 125,
+    "pairs": 15,
+    "exits": 2,
+    "pair_rate": 0.12,
+    "exit_rate": 0.016,
+    "win_rate": 0.12,
+    "mean_net_cents": -4.219052,
+    "total_usd": -5.273815,
+    "ci95_lo_approx": -12.092522398936344
+   },
+   "sol-up-or-down-15m": {
+    "n": 125,
+    "pairs": 12,
+    "exits": 1,
+    "pair_rate": 0.096,
+    "exit_rate": 0.008,
+    "win_rate": 0.096,
+    "mean_net_cents": -4.302719999999999,
+    "total_usd": -5.378399999999999,
+    "ci95_lo_approx": -11.581789469421519
+   },
+   "eth-up-or-down-15m": {
+    "n": 125,
+    "pairs": 16,
+    "exits": 1,
+    "pair_rate": 0.128,
+    "exit_rate": 0.008,
+    "win_rate": 0.128,
+    "mean_net_cents": -4.37874,
+    "total_usd": -5.473425,
+    "ci95_lo_approx": -12.218078548439056
+   },
+   "bnb-up-or-down-15m": {
+    "n": 125,
+    "pairs": 17,
+    "exits": 0,
+    "pair_rate": 0.136,
+    "exit_rate": 0.0,
+    "win_rate": 0.136,
+    "mean_net_cents": -5.252932,
+    "total_usd": -6.566165000000001,
+    "ci95_lo_approx": -13.668352973155354
+   },
+   "btc-up-or-down-15m": {
+    "n": 125,
+    "pairs": 20,
+    "exits": 2,
+    "pair_rate": 0.16,
+    "exit_rate": 0.016,
+    "win_rate": 0.16,
+    "mean_net_cents": -5.671092,
+    "total_usd": -7.088864999999999,
+    "ci95_lo_approx": -14.615197407383524
+   },
+   "sol-up-or-down-5m": {
+    "n": 361,
+    "pairs": 18,
+    "exits": 0,
+    "pair_rate": 0.04986149584487535,
+    "exit_rate": 0.0,
+    "win_rate": 0.05263157894736842,
+    "mean_net_cents": -2.2943628808864265,
+    "total_usd": -8.28265,
+    "ci95_lo_approx": -5.415749955851336
+   },
+   "bnb-up-or-down-5m": {
+    "n": 361,
+    "pairs": 22,
+    "exits": 0,
+    "pair_rate": 0.060941828254847646,
+    "exit_rate": 0.0,
+    "win_rate": 0.060941828254847646,
+    "mean_net_cents": -4.218594182825485,
+    "total_usd": -15.229125,
+    "ci95_lo_approx": -8.22648175861487
+   },
+   "xrp-up-or-down-5m": {
+    "n": 361,
+    "pairs": 11,
+    "exits": 0,
+    "pair_rate": 0.030470914127423823,
+    "exit_rate": 0.0,
+    "win_rate": 0.030470914127423823,
+    "mean_net_cents": -5.912742382271468,
+    "total_usd": -21.345,
+    "ci95_lo_approx": -10.068957426738109
+   }
+  },
+  "by_day": {
+   "2026-09-07": {
+    "n": 135,
+    "pairs": 8,
+    "exits": 0,
+    "pair_rate": 0.05925925925925926,
+    "exit_rate": 0.0,
+    "win_rate": 0.05925925925925926,
+    "mean_net_cents": 1.7777777777777777,
+    "total_usd": 2.4,
+    "ci95_lo_approx": 0.5784496690892504
+   },
+   "2026-09-09": {
+    "n": 55,
+    "pairs": 3,
+    "exits": 0,
+    "pair_rate": 0.05454545454545454,
+    "exit_rate": 0.0,
+    "win_rate": 0.05454545454545454,
+    "mean_net_cents": -1.480290909090909,
+    "total_usd": -0.81416,
+    "ci95_lo_approx": -7.91014487310987
+   },
+   "2026-09-08": {
+    "n": 515,
+    "pairs": 33,
+    "exits": 1,
+    "pair_rate": 0.06407766990291262,
+    "exit_rate": 0.001941747572815534,
+    "win_rate": 0.06407766990291262,
+    "mean_net_cents": -1.8937912621359223,
+    "total_usd": -9.753025000000001,
+    "ci95_lo_approx": -4.541140443163036
+   },
+   "2026-09-11": {
+    "n": 75,
+    "pairs": 7,
+    "exits": 1,
+    "pair_rate": 0.09333333333333334,
+    "exit_rate": 0.013333333333333334,
+    "win_rate": 0.09333333333333334,
+    "mean_net_cents": -32.85232,
+    "total_usd": -24.63924,
+    "ci95_lo_approx": -52.81131765709161
+   },
+   "2026-08-31": {
+    "n": 1650,
+    "pairs": 121,
+    "exits": 6,
+    "pair_rate": 0.07333333333333333,
+    "exit_rate": 0.0036363636363636364,
+    "win_rate": 0.07454545454545454,
+    "mean_net_cents": -2.9906872727272726,
+    "total_usd": -49.34634,
+    "ci95_lo_approx": -4.710876980036504
+   }
+  },
+  "by_duration": {
+   "900s": {
+    "n": 625,
+    "pairs": 80,
+    "exits": 6,
+    "pair_rate": 0.128,
+    "exit_rate": 0.0096,
+    "win_rate": 0.128,
+    "mean_net_cents": -4.7649072,
+    "total_usd": -29.78067,
+    "ci95_lo_approx": -8.371585184536553
+   },
+   "300s": {
+    "n": 1805,
+    "pairs": 92,
+    "exits": 2,
+    "pair_rate": 0.05096952908587258,
+    "exit_rate": 0.00110803324099723,
+    "win_rate": 0.0520775623268698,
+    "mean_net_cents": -2.901501108033241,
+    "total_usd": -52.372095,
+    "ci95_lo_approx": -4.414787214158039
+   }
+  },
+  "by_class": {
+   "flat": {
+    "n": 357,
+    "pairs": 1,
+    "exits": 0,
+    "pair_rate": 0.0028011204481792717,
+    "exit_rate": 0.0,
+    "win_rate": 0.0028011204481792717,
+    "mean_net_cents": 0.08403361344537816,
+    "total_usd": 0.3,
+    "ci95_lo_approx": -0.08067226890756299
+   },
+   "oscillating": {
+    "n": 1504,
+    "pairs": 161,
+    "exits": 5,
+    "pair_rate": 0.10704787234042554,
+    "exit_rate": 0.003324468085106383,
+    "win_rate": 0.10704787234042554,
+    "mean_net_cents": -1.3764597739361701,
+    "total_usd": -20.701954999999998,
+    "ci95_lo_approx": -3.1092692022282122
+   },
+   "monotonic": {
+    "n": 569,
+    "pairs": 10,
+    "exits": 3,
+    "pair_rate": 0.01757469244288225,
+    "exit_rate": 0.005272407732864675,
+    "win_rate": 0.0210896309314587,
+    "mean_net_cents": -10.852514938488577,
+    "total_usd": -61.75081,
+    "ci95_lo_approx": -15.009001562312523
+   }
+  },
+  "name": "tq_off=0.03_band=0.03_d=60_ex=none",
+  "filled_windows": 232,
+  "filled_total_usd": 13.747235,
+  "by_day_usd": {
+   "2026-08-31": 6.38,
+   "2026-09-07": 2.4,
+   "2026-09-08": 6.95,
+   "2026-09-09": -0.81,
+   "2026-09-11": -1.16
+  }
+ },
+ {
+  "n": 2430,
+  "settle_corrected": 46,
+  "settle_ambiguous": 0,
+  "pairs": 242,
+  "pair_rate": 0.09958847736625515,
+  "exits": 6,
+  "exit_rate": 0.0024691358024691358,
+  "naked_settle": 54,
+  "win_rate": 0.10041152263374485,
+  "total_pnl_usd": -102.448655,
+  "mean_net_cents": -4.21599403292181,
+  "roi_pct_per_window": -774.342839218769,
+  "ci95_lo": -5.672886008230452,
+  "ci95_hi": -2.788975720164609,
+  "ci95_day_lo": -15.125005063291141,
+  "ci95_day_hi": -2.687812062256809,
+  "max_dd_usd": 103.998655,
+  "capital_usd": 1323.04,
+  "outcome_decomp": {
+   "pairs": {
+    "n": 242,
+    "mean_c": 13.289256198347108,
+    "total_usd": 32.16
+   },
+   "exits": {
+    "n": 6,
+    "mean_c": -225.12391666666664,
+    "total_usd": -13.507434999999997
+   },
+   "naked": {
+    "n": 54,
+    "mean_c": -224.2615185185185,
+    "total_usd": -121.10122
+   },
+   "no_fill": 2128
+  },
+  "profit_factor": 0.2392994780649737,
+  "sharpe_proxy": -5.736251392123962,
+  "by_series": {
+   "xrp-up-or-down-15m": {
+    "n": 125,
+    "pairs": 25,
+    "exits": 1,
+    "pair_rate": 0.2,
+    "exit_rate": 0.008,
+    "win_rate": 0.2,
+    "mean_net_cents": -1.6562799999999998,
+    "total_usd": -2.0703499999999995,
+    "ci95_lo_approx": -7.1423319786727655
+   },
+   "eth-up-or-down-5m": {
+    "n": 361,
+    "pairs": 30,
+    "exits": 2,
+    "pair_rate": 0.08310249307479224,
+    "exit_rate": 0.00554016620498615,
+    "win_rate": 0.08310249307479224,
+    "mean_net_cents": -0.6285401662049861,
+    "total_usd": -2.26903,
+    "ci95_lo_approx": -2.752085132205356
+   },
+   "bnb-up-or-down-15m": {
+    "n": 125,
+    "pairs": 27,
+    "exits": 0,
+    "pair_rate": 0.216,
+    "exit_rate": 0.0,
+    "win_rate": 0.216,
+    "mean_net_cents": -2.8752,
+    "total_usd": -3.594,
+    "ci95_lo_approx": -9.3188147429028
+   },
+   "eth-up-or-down-15m": {
+    "n": 125,
+    "pairs": 22,
+    "exits": 1,
+    "pair_rate": 0.176,
+    "exit_rate": 0.008,
+    "win_rate": 0.176,
+    "mean_net_cents": -3.2687399999999998,
+    "total_usd": -4.085925,
+    "ci95_lo_approx": -10.02680199638729
+   },
+   "btc-up-or-down-15m": {
+    "n": 125,
+    "pairs": 30,
+    "exits": 0,
+    "pair_rate": 0.24,
+    "exit_rate": 0.0,
+    "win_rate": 0.24,
+    "mean_net_cents": -3.429588,
+    "total_usd": -4.286985,
+    "ci95_lo_approx": -10.608034942710212
+   },
+   "btc-up-or-down-5m": {
+    "n": 361,
+    "pairs": 21,
+    "exits": 0,
+    "pair_rate": 0.05817174515235457,
+    "exit_rate": 0.0,
+    "win_rate": 0.060941828254847646,
+    "mean_net_cents": -1.8396024930747923,
+    "total_usd": -6.640965,
+    "ci95_lo_approx": -4.457738154678993
+   },
+   "sol-up-or-down-15m": {
+    "n": 125,
+    "pairs": 18,
+    "exits": 2,
+    "pair_rate": 0.144,
+    "exit_rate": 0.016,
+    "win_rate": 0.144,
+    "mean_net_cents": -9.039,
+    "total_usd": -11.29875,
+    "ci95_lo_approx": -17.700583964048903
+   },
+   "sol-up-or-down-5m": {
+    "n": 361,
+    "pairs": 23,
+    "exits": 0,
+    "pair_rate": 0.06371191135734072,
+    "exit_rate": 0.0,
+    "win_rate": 0.0664819944598338,
+    "mean_net_cents": -4.219570637119114,
+    "total_usd": -15.232650000000001,
+    "ci95_lo_approx": -7.724942969124093
+   },
+   "bnb-up-or-down-5m": {
+    "n": 361,
+    "pairs": 28,
+    "exits": 0,
+    "pair_rate": 0.07756232686980609,
+    "exit_rate": 0.0,
+    "win_rate": 0.07756232686980609,
+    "mean_net_cents": -7.21606648199446,
+    "total_usd": -26.05,
+    "ci95_lo_approx": -11.784200658587476
+   },
+   "xrp-up-or-down-5m": {
+    "n": 361,
+    "pairs": 18,
+    "exits": 0,
+    "pair_rate": 0.04986149584487535,
+    "exit_rate": 0.0,
+    "win_rate": 0.04986149584487535,
+    "mean_net_cents": -7.457063711911357,
+    "total_usd": -26.92,
+    "ci95_lo_approx": -11.942552976301716
+   }
+  },
+  "by_day": {
+   "2026-09-07": {
+    "n": 135,
+    "pairs": 10,
+    "exits": 0,
+    "pair_rate": 0.07407407407407407,
+    "exit_rate": 0.0,
+    "win_rate": 0.07407407407407407,
+    "mean_net_cents": 1.037037037037037,
+    "total_usd": 1.4,
+    "ci95_lo_approx": 0.3625425047338966
+   },
+   "2026-09-09": {
+    "n": 55,
+    "pairs": 4,
+    "exits": 0,
+    "pair_rate": 0.07272727272727272,
+    "exit_rate": 0.0,
+    "win_rate": 0.07272727272727272,
+    "mean_net_cents": -13.718445454545455,
+    "total_usd": -7.545145,
+    "ci95_lo_approx": -27.969076614822676
+   },
+   "2026-09-08": {
+    "n": 515,
+    "pairs": 47,
+    "exits": 2,
+    "pair_rate": 0.0912621359223301,
+    "exit_rate": 0.003883495145631068,
+    "win_rate": 0.0912621359223301,
+    "mean_net_cents": -3.8807524271844662,
+    "total_usd": -19.985875,
+    "ci95_lo_approx": -6.881446900649774
+   },
+   "2026-09-11": {
+    "n": 75,
+    "pairs": 9,
+    "exits": 1,
+    "pair_rate": 0.12,
+    "exit_rate": 0.013333333333333334,
+    "win_rate": 0.12,
+    "mean_net_cents": -30.70232,
+    "total_usd": -23.02674,
+    "ci95_lo_approx": -49.713556450662985
+   },
+   "2026-08-31": {
+    "n": 1650,
+    "pairs": 172,
+    "exits": 3,
+    "pair_rate": 0.10424242424242425,
+    "exit_rate": 0.0018181818181818182,
+    "win_rate": 0.10545454545454545,
+    "mean_net_cents": -3.229751212121212,
+    "total_usd": -53.290895,
+    "ci95_lo_approx": -4.834409581720674
+   }
+  },
+  "by_duration": {
+   "900s": {
+    "n": 625,
+    "pairs": 122,
+    "exits": 4,
+    "pair_rate": 0.1952,
+    "exit_rate": 0.0064,
+    "win_rate": 0.1952,
+    "mean_net_cents": -4.0537616000000005,
+    "total_usd": -25.33601,
+    "ci95_lo_approx": -7.1733388505256865
+   },
+   "300s": {
+    "n": 1805,
+    "pairs": 120,
+    "exits": 2,
+    "pair_rate": 0.0664819944598338,
+    "exit_rate": 0.00110803324099723,
+    "win_rate": 0.06759002770083103,
+    "mean_net_cents": -4.272168698060942,
+    "total_usd": -77.112645,
+    "ci95_lo_approx": -5.883385905427037
+   }
+  },
+  "by_class": {
+   "flat": {
+    "n": 357,
+    "pairs": 1,
+    "exits": 0,
+    "pair_rate": 0.0028011204481792717,
+    "exit_rate": 0.0,
+    "win_rate": 0.0028011204481792717,
+    "mean_net_cents": 0.08403361344537816,
+    "total_usd": 0.3,
+    "ci95_lo_approx": -0.08067226890756299
+   },
+   "oscillating": {
+    "n": 1484,
+    "pairs": 203,
+    "exits": 2,
+    "pair_rate": 0.13679245283018868,
+    "exit_rate": 0.0013477088948787063,
+    "win_rate": 0.13679245283018868,
+    "mean_net_cents": -3.2470902964959567,
+    "total_usd": -48.18682,
+    "ci95_lo_approx": -5.015178992304323
+   },
+   "monotonic": {
+    "n": 589,
+    "pairs": 38,
+    "exits": 4,
+    "pair_rate": 0.06451612903225806,
+    "exit_rate": 0.006791171477079796,
+    "win_rate": 0.06791171477079797,
+    "mean_net_cents": -9.263469439728354,
+    "total_usd": -54.561835,
+    "ci95_lo_approx": -13.166894538826053
+   }
+  },
+  "name": "tq_off=0.03_band=0.04_d=60_ch_ex=none",
+  "filled_windows": 302,
+  "filled_total_usd": 4.426345000000001,
+  "by_day_usd": {
+   "2026-08-31": 8.71,
+   "2026-09-07": 1.4,
+   "2026-09-08": 1.24,
+   "2026-09-09": -5.02,
+   "2026-09-11": -1.9
+  }
+ },
+ {
+  "n": 2430,
+  "settle_corrected": 53,
+  "settle_ambiguous": 0,
+  "pairs": 224,
+  "pair_rate": 0.09218106995884774,
+  "exits": 12,
+  "exit_rate": 0.0049382716049382715,
+  "naked_settle": 66,
+  "win_rate": 0.09300411522633745,
+  "total_pnl_usd": -106.92443999999999,
+  "mean_net_cents": -4.4001827160493825,
+  "roi_pct_per_window": -862.0575003628037,
+  "ci95_lo": -6.08664074074074,
+  "ci95_hi": -2.7623473251028803,
+  "ci95_day_lo": -16.312524050632913,
+  "ci95_day_hi": -2.695466113744076,
+  "max_dd_usd": 109.32444,
+  "capital_usd": 1240.34,
+  "outcome_decomp": {
+   "pairs": {
+    "n": 224,
+    "mean_c": 29.725446428571427,
+    "total_usd": 66.585
+   },
+   "exits": {
+    "n": 12,
+    "mean_c": -225.658875,
+    "total_usd": -27.079065
+   },
+   "naked": {
+    "n": 66,
+    "mean_c": -221.86420454545456,
+    "total_usd": -146.430375
+   },
+   "no_fill": 2128
+  },
+  "profit_factor": 0.3839960027079545,
+  "sharpe_proxy": -5.21059385508823,
+  "by_series": {
+   "eth-up-or-down-5m": {
+    "n": 361,
+    "pairs": 28,
+    "exits": 2,
+    "pair_rate": 0.07756232686980609,
+    "exit_rate": 0.00554016620498615,
+    "win_rate": 0.07756232686980609,
+    "mean_net_cents": -0.6151495844875345,
+    "total_usd": -2.22069,
+    "ci95_lo_approx": -3.335746587237552
+   },
+   "eth-up-or-down-15m": {
+    "n": 125,
+    "pairs": 21,
+    "exits": 1,
+    "pair_rate": 0.168,
+    "exit_rate": 0.008,
+    "win_rate": 0.168,
+    "mean_net_cents": -3.17874,
+    "total_usd": -3.9734249999999998,
+    "ci95_lo_approx": -11.106633467389761
+   },
+   "xrp-up-or-down-15m": {
+    "n": 125,
+    "pairs": 22,
+    "exits": 3,
+    "pair_rate": 0.176,
+    "exit_rate": 0.024,
+    "win_rate": 0.176,
+    "mean_net_cents": -4.345331999999999,
+    "total_usd": -5.431664999999999,
+    "ci95_lo_approx": -13.071976261724616
+   },
+   "btc-up-or-down-15m": {
+    "n": 125,
+    "pairs": 27,
+    "exits": 2,
+    "pair_rate": 0.216,
+    "exit_rate": 0.016,
+    "win_rate": 0.216,
+    "mean_net_cents": -5.21068,
+    "total_usd": -6.51335,
+    "ci95_lo_approx": -14.563418572060913
+   },
+   "btc-up-or-down-5m": {
+    "n": 361,
+    "pairs": 19,
+    "exits": 0,
+    "pair_rate": 0.05263157894736842,
+    "exit_rate": 0.0,
+    "win_rate": 0.055401662049861494,
+    "mean_net_cents": -2.221504155124654,
+    "total_usd": -8.019630000000001,
+    "ci95_lo_approx": -5.360826384923545
+   },
+   "sol-up-or-down-15m": {
+    "n": 125,
+    "pairs": 18,
+    "exits": 2,
+    "pair_rate": 0.144,
+    "exit_rate": 0.016,
+    "win_rate": 0.144,
+    "mean_net_cents": -6.519,
+    "total_usd": -8.14875,
+    "ci95_lo_approx": -15.433535893005786
+   },
+   "bnb-up-or-down-15m": {
+    "n": 125,
+    "pairs": 23,
+    "exits": 1,
+    "pair_rate": 0.184,
+    "exit_rate": 0.008,
+    "win_rate": 0.184,
+    "mean_net_cents": -7.354412,
+    "total_usd": -9.193015,
+    "ci95_lo_approx": -17.134282704764388
+   },
+   "sol-up-or-down-5m": {
+    "n": 361,
+    "pairs": 22,
+    "exits": 1,
+    "pair_rate": 0.060941828254847646,
+    "exit_rate": 0.002770083102493075,
+    "win_rate": 0.06371191135734072,
+    "mean_net_cents": -3.6668393351800557,
+    "total_usd": -13.23729,
+    "ci95_lo_approx": -7.351059550389821
+   },
+   "bnb-up-or-down-5m": {
+    "n": 361,
+    "pairs": 27,
+    "exits": 0,
+    "pair_rate": 0.07479224376731301,
+    "exit_rate": 0.0,
+    "win_rate": 0.07479224376731301,
+    "mean_net_cents": -6.517763157894737,
+    "total_usd": -23.529125,
+    "ci95_lo_approx": -11.319982970499947
+   },
+   "xrp-up-or-down-5m": {
+    "n": 361,
+    "pairs": 17,
+    "exits": 0,
+    "pair_rate": 0.04709141274238227,
+    "exit_rate": 0.0,
+    "win_rate": 0.04709141274238227,
+    "mean_net_cents": -7.384349030470914,
+    "total_usd": -26.6575,
+    "ci95_lo_approx": -12.098780297661216
+   }
+  },
+  "by_day": {
+   "2026-09-07": {
+    "n": 135,
+    "pairs": 10,
+    "exits": 0,
+    "pair_rate": 0.07407407407407407,
+    "exit_rate": 0.0,
+    "win_rate": 0.07407407407407407,
+    "mean_net_cents": 2.2222222222222223,
+    "total_usd": 3.0,
+    "ci95_lo_approx": 0.8919327170091209
+   },
+   "2026-09-09": {
+    "n": 55,
+    "pairs": 3,
+    "exits": 1,
+    "pair_rate": 0.05454545454545454,
+    "exit_rate": 0.01818181818181818,
+    "win_rate": 0.05454545454545454,
+    "mean_net_cents": -17.0509,
+    "total_usd": -9.377995,
+    "ci95_lo_approx": -33.36111781961446
+   },
+   "2026-09-08": {
+    "n": 515,
+    "pairs": 44,
+    "exits": 4,
+    "pair_rate": 0.0854368932038835,
+    "exit_rate": 0.007766990291262136,
+    "win_rate": 0.0854368932038835,
+    "mean_net_cents": -3.827352427184466,
+    "total_usd": -19.710865,
+    "ci95_lo_approx": -7.202221770612288
+   },
+   "2026-09-11": {
+    "n": 75,
+    "pairs": 8,
+    "exits": 1,
+    "pair_rate": 0.10666666666666667,
+    "exit_rate": 0.013333333333333334,
+    "win_rate": 0.10666666666666667,
+    "mean_net_cents": -32.45232,
+    "total_usd": -24.33924,
+    "ci95_lo_approx": -52.46083386191399
+   },
+   "2026-08-31": {
+    "n": 1650,
+    "pairs": 159,
+    "exits": 6,
+    "pair_rate": 0.09636363636363636,
+    "exit_rate": 0.0036363636363636364,
+    "win_rate": 0.09757575757575758,
+    "mean_net_cents": -3.424020606060606,
+    "total_usd": -56.496340000000004,
+    "ci95_lo_approx": -5.32391332479137
+   }
+  },
+  "by_duration": {
+   "900s": {
+    "n": 625,
+    "pairs": 111,
+    "exits": 9,
+    "pair_rate": 0.1776,
+    "exit_rate": 0.0144,
+    "win_rate": 0.1776,
+    "mean_net_cents": -5.3216328,
+    "total_usd": -33.260205,
+    "ci95_lo_approx": -9.31844368573941
+   },
+   "300s": {
+    "n": 1805,
+    "pairs": 113,
+    "exits": 3,
+    "pair_rate": 0.06260387811634349,
+    "exit_rate": 0.0016620498614958448,
+    "win_rate": 0.06371191135734072,
+    "mean_net_cents": -4.081121052631579,
+    "total_usd": -73.664235,
+    "ci95_lo_approx": -5.82805919988399
+   }
+  },
+  "by_class": {
+   "flat": {
+    "n": 357,
+    "pairs": 1,
+    "exits": 0,
+    "pair_rate": 0.0028011204481792717,
+    "exit_rate": 0.0,
+    "win_rate": 0.0028011204481792717,
+    "mean_net_cents": 0.08403361344537816,
+    "total_usd": 0.3,
+    "ci95_lo_approx": -0.08067226890756299
+   },
+   "oscillating": {
+    "n": 1501,
+    "pairs": 208,
+    "exits": 8,
+    "pair_rate": 0.13857428381079281,
+    "exit_rate": 0.005329780146568954,
+    "win_rate": 0.13857428381079281,
+    "mean_net_cents": -2.672603597601599,
+    "total_usd": -40.11578,
+    "ci95_lo_approx": -4.763752283527204
+   },
+   "monotonic": {
+    "n": 572,
+    "pairs": 15,
+    "exits": 4,
+    "pair_rate": 0.026223776223776224,
+    "exit_rate": 0.006993006993006993,
+    "win_rate": 0.02972027972027972,
+    "mean_net_cents": -11.732283216783216,
+    "total_usd": -67.10866,
+    "ci95_lo_approx": -16.07447589597438
+   }
+  },
+  "name": "tq_off=0.03_band=0.04_d=60_ex=none",
+  "filled_windows": 302,
+  "filled_total_usd": 16.20056,
+  "by_day_usd": {
+   "2026-08-31": 17.08,
+   "2026-09-07": 3.0,
+   "2026-09-08": 3.84,
+   "2026-09-09": -6.85,
+   "2026-09-11": -0.86
+  }
+ },
+ {
+  "n": 2430,
+  "settle_corrected": 11,
+  "settle_ambiguous": 0,
+  "pairs": 219,
+  "pair_rate": 0.09012345679012346,
+  "exits": 236,
+  "exit_rate": 0.097119341563786,
+  "naked_settle": 17,
+  "win_rate": 0.09012345679012346,
+  "total_pnl_usd": -195.25012999999998,
+  "mean_net_cents": -8.03498477366255,
+  "roi_pct_per_window": -1171.3965257092118,
+  "ci95_lo": -9.384130658436206,
+  "ci95_hi": -6.712725308641966,
+  "ci95_day_lo": -16.98589746835443,
+  "ci95_day_hi": -5.509080073800738,
+  "max_dd_usd": 195.57512999999963,
+  "capital_usd": 1666.815,
+  "outcome_decomp": {
+   "pairs": {
+    "n": 219,
+    "mean_c": 13.714611872146119,
+    "total_usd": 30.035
+   },
+   "exits": {
+    "n": 236,
+    "mean_c": -80.40497033898305,
+    "total_usd": -189.75573
+   },
+   "naked": {
+    "n": 17,
+    "mean_c": -208.9964705882353,
+    "total_usd": -35.5294
+   },
+   "no_fill": 1958
+  },
+  "profit_factor": 0.13331993993567176,
+  "sharpe_proxy": -11.58783741540707,
+  "by_series": {
+   "eth-up-or-down-15m": {
+    "n": 125,
+    "pairs": 25,
+    "exits": 15,
+    "pair_rate": 0.2,
+    "exit_rate": 0.12,
+    "win_rate": 0.2,
+    "mean_net_cents": -6.874148,
+    "total_usd": -8.592685,
+    "ci95_lo_approx": -12.719890709782742
+   },
+   "btc-up-or-down-15m": {
+    "n": 125,
+    "pairs": 29,
+    "exits": 21,
+    "pair_rate": 0.232,
+    "exit_rate": 0.168,
+    "win_rate": 0.232,
+    "mean_net_cents": -10.12624,
+    "total_usd": -12.6578,
+    "ci95_lo_approx": -16.9792398442463
+   },
+   "btc-up-or-down-5m": {
+    "n": 361,
+    "pairs": 24,
+    "exits": 28,
+    "pair_rate": 0.0664819944598338,
+    "exit_rate": 0.07756232686980609,
+    "win_rate": 0.0664819944598338,
+    "mean_net_cents": -3.6034653739612192,
+    "total_usd": -13.008510000000001,
+    "ci95_lo_approx": -5.651071769593695
+   },
+   "bnb-up-or-down-15m": {
+    "n": 125,
+    "pairs": 22,
+    "exits": 20,
+    "pair_rate": 0.176,
+    "exit_rate": 0.16,
+    "win_rate": 0.176,
+    "mean_net_cents": -11.981,
+    "total_usd": -14.97625,
+    "ci95_lo_approx": -19.39896500387548
+   },
+   "eth-up-or-down-5m": {
+    "n": 361,
+    "pairs": 33,
+    "exits": 22,
+    "pair_rate": 0.09141274238227147,
+    "exit_rate": 0.060941828254847646,
+    "win_rate": 0.09141274238227147,
+    "mean_net_cents": -4.414871191135734,
+    "total_usd": -15.937684999999998,
+    "ci95_lo_approx": -7.208979173607551
+   },
+   "sol-up-or-down-15m": {
+    "n": 125,
+    "pairs": 15,
+    "exits": 23,
+    "pair_rate": 0.12,
+    "exit_rate": 0.184,
+    "win_rate": 0.12,
+    "mean_net_cents": -15.029408,
+    "total_usd": -18.78676,
+    "ci95_lo_approx": -22.726526452705464
+   },
+   "xrp-up-or-down-15m": {
+    "n": 125,
+    "pairs": 12,
+    "exits": 24,
+    "pair_rate": 0.096,
+    "exit_rate": 0.192,
+    "win_rate": 0.096,
+    "mean_net_cents": -17.209563999999997,
+    "total_usd": -21.511954999999997,
+    "ci95_lo_approx": -25.400353829722427
+   },
+   "sol-up-or-down-5m": {
+    "n": 361,
+    "pairs": 19,
+    "exits": 23,
+    "pair_rate": 0.05263157894736842,
+    "exit_rate": 0.06371191135734072,
+    "win_rate": 0.05263157894736842,
+    "mean_net_cents": -6.771512465373961,
+    "total_usd": -24.44516,
+    "ci95_lo_approx": -10.125676927948113
+   },
+   "xrp-up-or-down-5m": {
+    "n": 361,
+    "pairs": 16,
+    "exits": 30,
+    "pair_rate": 0.0443213296398892,
+    "exit_rate": 0.08310249307479224,
+    "win_rate": 0.0443213296398892,
+    "mean_net_cents": -7.301526315789474,
+    "total_usd": -26.358510000000003,
+    "ci95_lo_approx": -10.541238540038073
+   },
+   "bnb-up-or-down-5m": {
+    "n": 361,
+    "pairs": 24,
+    "exits": 30,
+    "pair_rate": 0.0664819944598338,
+    "exit_rate": 0.08310249307479224,
+    "win_rate": 0.0664819944598338,
+    "mean_net_cents": -10.796347645429362,
+    "total_usd": -38.974815,
+    "ci95_lo_approx": -15.016662780885678
+   }
+  },
+  "by_day": {
+   "2026-09-09": {
+    "n": 55,
+    "pairs": 3,
+    "exits": 10,
+    "pair_rate": 0.05454545454545454,
+    "exit_rate": 0.18181818181818182,
+    "win_rate": 0.05454545454545454,
+    "mean_net_cents": -12.344136363636364,
+    "total_usd": -6.789275,
+    "ci95_lo_approx": -20.95392333593812
+   },
+   "2026-09-07": {
+    "n": 135,
+    "pairs": 10,
+    "exits": 13,
+    "pair_rate": 0.07407407407407407,
+    "exit_rate": 0.0962962962962963,
+    "win_rate": 0.07407407407407407,
+    "mean_net_cents": -5.954774074074074,
+    "total_usd": -8.038945,
+    "ci95_lo_approx": -10.13213822671225
+   },
+   "2026-09-11": {
+    "n": 75,
+    "pairs": 10,
+    "exits": 17,
+    "pair_rate": 0.13333333333333333,
+    "exit_rate": 0.22666666666666666,
+    "win_rate": 0.13333333333333333,
+    "mean_net_cents": -30.317866666666667,
+    "total_usd": -22.738400000000002,
+    "ci95_lo_approx": -46.20144438223578
+   },
+   "2026-09-08": {
+    "n": 515,
+    "pairs": 51,
+    "exits": 39,
+    "pair_rate": 0.09902912621359224,
+    "exit_rate": 0.07572815533980583,
+    "win_rate": 0.09902912621359224,
+    "mean_net_cents": -5.027268932038836,
+    "total_usd": -25.890435000000004,
+    "ci95_lo_approx": -7.413445822602604
+   },
+   "2026-08-31": {
+    "n": 1650,
+    "pairs": 145,
+    "exits": 157,
+    "pair_rate": 0.08787878787878788,
+    "exit_rate": 0.09515151515151515,
+    "win_rate": 0.08787878787878788,
+    "mean_net_cents": -7.98745909090909,
+    "total_usd": -131.793075,
+    "ci95_lo_approx": -9.624513613889274
+   }
+  },
+  "by_duration": {
+   "900s": {
+    "n": 625,
+    "pairs": 103,
+    "exits": 103,
+    "pair_rate": 0.1648,
+    "exit_rate": 0.1648,
+    "win_rate": 0.1648,
+    "mean_net_cents": -12.244072000000001,
+    "total_usd": -76.52545,
+    "ci95_lo_approx": -15.486540933881326
+   },
+   "300s": {
+    "n": 1805,
+    "pairs": 116,
+    "exits": 133,
+    "pair_rate": 0.06426592797783934,
+    "exit_rate": 0.07368421052631578,
+    "win_rate": 0.06426592797783934,
+    "mean_net_cents": -6.57754459833795,
+    "total_usd": -118.72468,
+    "ci95_lo_approx": -8.016740134761763
+   }
+  },
+  "by_class": {
+   "flat": {
+    "n": 357,
+    "pairs": 1,
+    "exits": 0,
+    "pair_rate": 0.0028011204481792717,
+    "exit_rate": 0.0,
+    "win_rate": 0.0028011204481792717,
+    "mean_net_cents": 0.056022408963585436,
+    "total_usd": 0.2,
+    "ci95_lo_approx": -0.053781512605042
+   },
+   "monotonic": {
+    "n": 627,
+    "pairs": 43,
+    "exits": 60,
+    "pair_rate": 0.0685805422647528,
+    "exit_rate": 0.09569377990430622,
+    "win_rate": 0.0685805422647528,
+    "mean_net_cents": -10.302631578947368,
+    "total_usd": -64.5975,
+    "ci95_lo_approx": -13.668829742072417
+   },
+   "oscillating": {
+    "n": 1446,
+    "pairs": 175,
+    "exits": 176,
+    "pair_rate": 0.12102351313969571,
+    "exit_rate": 0.12171507607192254,
+    "win_rate": 0.12102351313969571,
+    "mean_net_cents": -9.04928284923928,
+    "total_usd": -130.85262999999998,
+    "ci95_lo_approx": -10.791904831928274
+   }
+  },
+  "name": "tq_off=0.02_band=0.06_d=60_ch",
+  "filled_windows": 472,
+  "filled_total_usd": -168.97512999999998,
+  "by_day_usd": {
+   "2026-08-31": -113.04,
+   "2026-09-07": -8.04,
+   "2026-09-08": -18.37,
+   "2026-09-09": -6.79,
+   "2026-09-11": -22.74
+  }
+ },
+ {
+  "n": 2430,
+  "settle_corrected": 13,
+  "settle_ambiguous": 0,
+  "pairs": 261,
+  "pair_rate": 0.10740740740740741,
+  "exits": 306,
+  "exit_rate": 0.1259259259259259,
+  "naked_settle": 20,
+  "win_rate": 0.10740740740740741,
+  "total_pnl_usd": -241.39769,
+  "mean_net_cents": -9.934061316872429,
+  "roi_pct_per_window": -1187.9866042647848,
+  "ci95_lo": -11.383989711934158,
+  "ci95_hi": -8.503225102880647,
+  "ci95_day_lo": -20.63995316455696,
+  "ci95_day_hi": -6.889774169741696,
+  "max_dd_usd": 241.72268999999963,
+  "capital_usd": 2031.99,
+  "outcome_decomp": {
+   "pairs": {
+    "n": 261,
+    "mean_c": 13.729885057471265,
+    "total_usd": 35.835
+   },
+   "exits": {
+    "n": 306,
+    "mean_c": -76.4419362745098,
+    "total_usd": -233.91232499999998
+   },
+   "naked": {
+    "n": 20,
+    "mean_c": -216.60182500000002,
+    "total_usd": -43.320365
+   },
+   "no_fill": 1843
+  },
+  "profit_factor": 0.1292596482759663,
+  "sharpe_proxy": -13.193291916496147,
+  "by_series": {
+   "btc-up-or-down-5m": {
+    "n": 361,
+    "pairs": 17,
+    "exits": 21,
+    "pair_rate": 0.04709141274238227,
+    "exit_rate": 0.05817174515235457,
+    "win_rate": 0.04709141274238227,
+    "mean_net_cents": -2.597908587257618,
+    "total_usd": -9.37845,
+    "ci95_lo_approx": -4.395007380785214
+   },
+   "eth-up-or-down-15m": {
+    "n": 125,
+    "pairs": 31,
+    "exits": 23,
+    "pair_rate": 0.248,
+    "exit_rate": 0.184,
+    "win_rate": 0.248,
+    "mean_net_cents": -10.035424,
+    "total_usd": -12.54428,
+    "ci95_lo_approx": -16.513594591959986
+   },
+   "btc-up-or-down-15m": {
+    "n": 125,
+    "pairs": 35,
+    "exits": 27,
+    "pair_rate": 0.28,
+    "exit_rate": 0.216,
+    "win_rate": 0.28,
+    "mean_net_cents": -11.635048000000001,
+    "total_usd": -14.54381,
+    "ci95_lo_approx": -18.75637091190866
+   },
+   "sol-up-or-down-15m": {
+    "n": 125,
+    "pairs": 19,
+    "exits": 30,
+    "pair_rate": 0.152,
+    "exit_rate": 0.24,
+    "win_rate": 0.152,
+    "mean_net_cents": -17.250992,
+    "total_usd": -21.56374,
+    "ci95_lo_approx": -25.18635266936197
+   },
+   "eth-up-or-down-5m": {
+    "n": 361,
+    "pairs": 39,
+    "exits": 32,
+    "pair_rate": 0.10803324099722991,
+    "exit_rate": 0.0886426592797784,
+    "win_rate": 0.10803324099722991,
+    "mean_net_cents": -6.058432132963989,
+    "total_usd": -21.87094,
+    "ci95_lo_approx": -9.139881861915212
+   },
+   "bnb-up-or-down-15m": {
+    "n": 125,
+    "pairs": 29,
+    "exits": 33,
+    "pair_rate": 0.232,
+    "exit_rate": 0.264,
+    "win_rate": 0.232,
+    "mean_net_cents": -17.985744,
+    "total_usd": -22.48218,
+    "ci95_lo_approx": -26.183979725263317
+   },
+   "sol-up-or-down-5m": {
+    "n": 361,
+    "pairs": 22,
+    "exits": 25,
+    "pair_rate": 0.060941828254847646,
+    "exit_rate": 0.06925207756232687,
+    "win_rate": 0.060941828254847646,
+    "mean_net_cents": -6.946526315789473,
+    "total_usd": -25.07696,
+    "ci95_lo_approx": -10.326165202471582
+   },
+   "xrp-up-or-down-15m": {
+    "n": 125,
+    "pairs": 18,
+    "exits": 35,
+    "pair_rate": 0.144,
+    "exit_rate": 0.28,
+    "win_rate": 0.144,
+    "mean_net_cents": -22.19948,
+    "total_usd": -27.74935,
+    "ci95_lo_approx": -30.83330711617383
+   },
+   "xrp-up-or-down-5m": {
+    "n": 361,
+    "pairs": 23,
+    "exits": 40,
+    "pair_rate": 0.06371191135734072,
+    "exit_rate": 0.11080332409972299,
+    "win_rate": 0.06371191135734072,
+    "mean_net_cents": -10.667016620498615,
+    "total_usd": -38.50793,
+    "ci95_lo_approx": -14.787969465450631
+   },
+   "bnb-up-or-down-5m": {
+    "n": 361,
+    "pairs": 28,
+    "exits": 40,
+    "pair_rate": 0.07756232686980609,
+    "exit_rate": 0.11080332409972299,
+    "win_rate": 0.07756232686980609,
+    "mean_net_cents": -13.207770083102494,
+    "total_usd": -47.68005,
+    "ci95_lo_approx": -17.720668281192346
+   }
+  },
+  "by_day": {
+   "2026-09-09": {
+    "n": 55,
+    "pairs": 3,
+    "exits": 13,
+    "pair_rate": 0.05454545454545454,
+    "exit_rate": 0.23636363636363636,
+    "win_rate": 0.05454545454545454,
+    "mean_net_cents": -15.317981818181819,
+    "total_usd": -8.42489,
+    "ci95_lo_approx": -24.494209009008486
+   },
+   "2026-09-07": {
+    "n": 135,
+    "pairs": 13,
+    "exits": 18,
+    "pair_rate": 0.0962962962962963,
+    "exit_rate": 0.13333333333333333,
+    "win_rate": 0.0962962962962963,
+    "mean_net_cents": -9.330144444444445,
+    "total_usd": -12.595695000000001,
+    "ci95_lo_approx": -14.741407487239753
+   },
+   "2026-09-11": {
+    "n": 75,
+    "pairs": 12,
+    "exits": 19,
+    "pair_rate": 0.16,
+    "exit_rate": 0.25333333333333335,
+    "win_rate": 0.16,
+    "mean_net_cents": -34.72156,
+    "total_usd": -26.041169999999997,
+    "ci95_lo_approx": -51.40164460515402
+   },
+   "2026-09-08": {
+    "n": 515,
+    "pairs": 65,
+    "exits": 47,
+    "pair_rate": 0.1262135922330097,
+    "exit_rate": 0.0912621359223301,
+    "win_rate": 0.1262135922330097,
+    "mean_net_cents": -5.800015533980583,
+    "total_usd": -29.870079999999998,
+    "ci95_lo_approx": -8.460455710223984
+   },
+   "2026-08-31": {
+    "n": 1650,
+    "pairs": 168,
+    "exits": 209,
+    "pair_rate": 0.10181818181818182,
+    "exit_rate": 0.12666666666666668,
+    "win_rate": 0.10181818181818182,
+    "mean_net_cents": -9.967627575757577,
+    "total_usd": -164.465855,
+    "ci95_lo_approx": -11.72896563449876
+   }
+  },
+  "by_duration": {
+   "900s": {
+    "n": 625,
+    "pairs": 132,
+    "exits": 148,
+    "pair_rate": 0.2112,
+    "exit_rate": 0.2368,
+    "win_rate": 0.2112,
+    "mean_net_cents": -15.8213376,
+    "total_usd": -98.88336,
+    "ci95_lo_approx": -19.276923122013965
+   },
+   "300s": {
+    "n": 1805,
+    "pairs": 129,
+    "exits": 158,
+    "pair_rate": 0.07146814404432134,
+    "exit_rate": 0.08753462603878116,
+    "win_rate": 0.07146814404432134,
+    "mean_net_cents": -7.895530747922437,
+    "total_usd": -142.51433,
+    "ci95_lo_approx": -9.471419083564534
+   }
+  },
+  "by_class": {
+   "flat": {
+    "n": 357,
+    "pairs": 1,
+    "exits": 0,
+    "pair_rate": 0.0028011204481792717,
+    "exit_rate": 0.0,
+    "win_rate": 0.0028011204481792717,
+    "mean_net_cents": 0.056022408963585436,
+    "total_usd": 0.2,
+    "ci95_lo_approx": -0.053781512605042
+   },
+   "monotonic": {
+    "n": 657,
+    "pairs": 57,
+    "exits": 81,
+    "pair_rate": 0.0867579908675799,
+    "exit_rate": 0.1232876712328767,
+    "win_rate": 0.0867579908675799,
+    "mean_net_cents": -11.136121765601217,
+    "total_usd": -73.16432,
+    "ci95_lo_approx": -14.420915930084345
+   },
+   "oscillating": {
+    "n": 1416,
+    "pairs": 203,
+    "exits": 225,
+    "pair_rate": 0.14336158192090395,
+    "exit_rate": 0.15889830508474576,
+    "win_rate": 0.14336158192090395,
+    "mean_net_cents": -11.895012005649717,
+    "total_usd": -168.43337,
+    "ci95_lo_approx": -13.898471224936133
+   }
+  },
+  "name": "tq_off=0.02_band=none_d=60_ch",
+  "filled_windows": 587,
+  "filled_total_usd": -209.59769,
+  "by_day_usd": {
+   "2026-08-31": -142.97,
+   "2026-09-07": -12.6,
+   "2026-09-08": -19.57,
+   "2026-09-09": -8.42,
+   "2026-09-11": -26.04
+  }
+ }
+]
