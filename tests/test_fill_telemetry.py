@@ -606,3 +606,257 @@ def test_async_telemetry_binds_its_path_at_dispatch(monkeypatch, tmp_path):
 
     assert len(lines) == 1, "the fill did not land in the path bound at dispatch"
     assert _fill_lines(elsewhere) == [], "the line followed the global instead"
+
+
+# ============================================================================
+# Issue #173: the fill sidecar joins the socket tape, not only the REST tape
+# ============================================================================
+
+def _ws_authority(engine, slug, leg="UP", *, connected=True, warm=True,
+                  printing=True):
+    """Force the three conditions `_ws_tape_authoritative()` checks."""
+    m = engine.markets[slug]
+    engine.stream_bridge.clob.is_connected = connected
+    token = m.up_token if leg == "UP" else m.down_token
+    now = time.time()
+    engine._ws_token_ready_ts[token] = (
+        now - lt.WS_TAPE_WARMUP_SEC - 1.0 if warm else now)
+    stamp = now if printing else now - lt.WS_TAPE_AUTHORITY_HORIZON_SEC - 1.0
+    if leg == "UP":
+        m.ws_last_print_ts_up = stamp
+    else:
+        m.ws_last_print_ts_down = stamp
+    return m
+
+
+def test_issue173_ws_print_sum_matches_rest_join_semantics():
+    """The socket numerator must use the same tolerance and cutoff as REST."""
+    ledger = [
+        (0.48, 30.0, 1006.0),
+        (0.4805, 10.0, 1007.0),   # inside FILL_PRICE_TICK_TOL
+        (0.49, 99.0, 1007.0),     # outside the tick tolerance
+        (0.48, 40.0, 999.0),      # printed before the order rested
+        (0.48, -5.0, 1008.0),     # malformed size
+        ("x", 1.0, 1008.0),       # malformed price
+        (0.48, 20.0),             # malformed shape
+    ]
+    assert lt._sum_ws_prints_at_price(ledger, 0.48, 1000.0) == 40.0
+    # Same answer as the REST join on the equivalent rows.
+    rows = [{"asset": "t", "price": 0.48, "size": 30.0, "timestamp": 1006},
+            {"asset": "t", "price": 0.4805, "size": 10.0, "timestamp": 1007},
+            {"asset": "t", "price": 0.49, "size": 99.0, "timestamp": 1007}]
+    assert lt._sum_prints_at_price(rows, "t", 0.48, 1000.0) == 40.0
+
+
+def test_issue173_ws_print_sum_tolerates_garbage_input():
+    """A ledger that is not a list of triples yields 0.0, never an exception."""
+    assert lt._sum_ws_prints_at_price(None, 0.48, 0.0) == 0.0
+    assert lt._sum_ws_prints_at_price("nonsense", 0.48, 0.0) == 0.0
+    assert lt._sum_ws_prints_at_price([], 0.48, 0.0) == 0.0
+
+
+def test_issue173_socket_tape_authority_needs_all_three_conditions():
+    """Connected, warmed up, and printing recently — any one missing is False."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+
+    m = _ws_authority(engine, slug)
+    assert engine._ws_tape_authoritative(m, "UP") is True
+
+    _ws_authority(engine, slug, connected=False)
+    assert engine._ws_tape_authoritative(m, "UP") is False
+    _ws_authority(engine, slug, warm=False)
+    assert engine._ws_tape_authoritative(m, "UP") is False
+    _ws_authority(engine, slug, printing=False)
+    assert engine._ws_tape_authoritative(m, "UP") is False
+
+    # The DOWN leg has its own print clock and is not dragged along by UP.
+    _ws_authority(engine, slug, leg="UP")
+    engine._ws_token_ready_ts[m.down_token] = time.time() - 100.0
+    assert engine._ws_tape_authoritative(m, "DOWN") is False
+
+
+def test_issue173_resubscribing_a_live_token_does_not_restart_its_warmup():
+    """Rollover re-sends the same token list; that must not drop authority."""
+    engine = _paper_engine()
+    engine._mark_ws_tokens_subscribed(["tok_a", "tok_b"])
+    first = dict(engine._ws_token_ready_ts)
+    time.sleep(0.01)
+    engine._mark_ws_tokens_subscribed(["tok_a", "tok_b"])
+    assert engine._ws_token_ready_ts == first
+    # A token that leaves the active set is forgotten, so its next
+    # subscription starts a fresh warm-up rather than inheriting a stale one.
+    engine._mark_ws_tokens_subscribed(["tok_a"])
+    assert "tok_b" not in engine._ws_token_ready_ts
+
+
+def test_issue173_ws_trade_lands_in_the_ledger_and_survives_the_tick():
+    """Socket prints must outlive the pending queue the tick loop drains."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "7",
+                        "timestamp": 1006})
+    engine.on_ws_trade({"asset": m.down_token, "price": "0.50", "size": "3",
+                        "timestamp": 1007})
+    assert m.ws_tape_up == [(0.48, 7.0, 1006.0)]
+    assert m.ws_tape_down == [(0.50, 3.0, 1007.0)]
+
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1001.0)
+    assert m.pending_ws_trades_up == [], "the pending queue was not drained"
+    assert m.ws_tape_up == [(0.48, 7.0, 1006.0)], "the tick discarded the ledger"
+
+
+def test_issue173_malformed_ws_print_never_reaches_the_ledger():
+    """The socket callback thread must not raise on a junk frame."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    for bad in ({"asset": m.up_token, "price": None, "size": "5"},
+                {"asset": m.up_token, "price": "abc", "size": "5"},
+                {"asset": m.up_token, "price": "0.48", "size": "0"},
+                {"asset": m.up_token, "price": "0.48", "size": "-2"}):
+        engine.on_ws_trade(bad)
+    assert m.ws_tape_up == []
+    # A print with no usable venue stamp still counts: arrival time stands in.
+    before = time.time()
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "5"})
+    assert len(m.ws_tape_up) == 1
+    assert m.ws_tape_up[0][:2] == (0.48, 5.0)
+    assert m.ws_tape_up[0][2] >= before
+
+
+def test_issue173_ledger_is_bounded_and_drops_the_oldest_first():
+    """A hot market must not grow the ledger without limit inside one window."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    for i in range(lt.WS_TAPE_LEDGER_MAX + 25):
+        engine.on_ws_trade({"asset": m.up_token, "price": "0.48",
+                            "size": "1", "timestamp": 1000 + i})
+    assert len(m.ws_tape_up) == lt.WS_TAPE_LEDGER_MAX
+    assert m.ws_tape_up[0][2] == 1025.0, "newest prints were dropped, not oldest"
+
+
+def test_issue173_fill_joins_the_socket_tape_and_skips_rest_entirely(
+        monkeypatch, tmp_path):
+    """An authoritative socket answers `printed_size` with no REST call at all.
+
+    The canned REST tape and the seeded ledger describe the *same* two prints.
+    An implementation that merged both sources would report 120.0; picking one
+    reports 60.0, which is what makes a print seen twice impossible to
+    double-count.
+    """
+    path = _telemetry_env(monkeypatch, tmp_path)
+    rest_calls = []
+
+    def _tracked_fetch(condition_id, limit=500):
+        rest_calls.append(condition_id)
+        return [dict(r) for r in _CANNED_TAPE]
+
+    monkeypatch.setattr(lt, "_fetch_price_prints", _tracked_fetch)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = _ws_authority(engine, slug)
+    m.ws_tape_up = [(0.48, 30.0, 1006.0), (0.48, 30.0, 1008.0)]
+
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0})
+    tick2["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+
+    lines = _fill_lines(path)
+    assert len(lines) == 1
+    rec = lines[0]
+    assert rec["tape_source"] == "ws"
+    assert rec["printed_size_at_price_since_rest"] == 60.0
+    assert rec["fill_ratio"] == 0.5
+    assert rest_calls == [], "the REST tape was fetched despite socket authority"
+
+
+def test_issue173_rest_join_is_unchanged_when_the_socket_is_not_authoritative(
+        monkeypatch, tmp_path):
+    """A socket outage costs accuracy, never a line: REST behaves as before."""
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = _ws_authority(engine, slug, connected=False)
+    # Prints captured before the socket dropped must be ignored: a
+    # half-populated ledger would undercount worse than REST does.
+    m.ws_tape_up = [(0.48, 500.0, 1006.0)]
+
+    tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0})
+    tick2["up_book"]["best_ask"] = 0.47
+    engine._update_market_strategy(slug, tick2, now=1001.0)
+
+    rec = _fill_lines(path)[0]
+    assert rec["tape_source"] == "rest"
+    assert rec["printed_size_at_price_since_rest"] == 60.0
+
+
+def _seeded_ledger_engine():
+    """A market whose socket ledger holds one print on each leg."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "9",
+                        "timestamp": 1006})
+    engine.on_ws_trade({"asset": m.down_token, "price": "0.50", "size": "4",
+                        "timestamp": 1006})
+    assert m.ws_tape_up and m.ws_tape_down
+    assert m.ws_last_print_ts_up is not None
+    return engine, m
+
+
+def _assert_ledger_cleared(m):
+    assert m.ws_tape_up == []
+    assert m.ws_tape_down == []
+    assert m.ws_last_print_ts_up is None
+    assert m.ws_last_print_ts_down is None
+
+
+def test_issue173_rollover_clears_the_socket_ledger():
+    """`printed_size` is scoped to one resting order, so the ledger is too."""
+    engine, m = _seeded_ledger_engine()
+    engine._handle_window_rollover(m, 1300.0, "cid_next_173")
+    _assert_ledger_cleared(m)
+
+
+def test_issue173_reset_pnl_clears_the_socket_ledger():
+    """RESET P&L drops the rest context; the ledger that pairs with it goes too."""
+    engine, m = _seeded_ledger_engine()
+    engine.reset_pnl()
+    _assert_ledger_cleared(m)
+
+
+def test_issue173_record_defaults_to_rest_when_no_source_is_named():
+    """The builder never invents a source it was not told about."""
+    rec = lt._build_fill_record(
+        ts=1.0, slug="s", market_slug="m", condition_id="c", leg="UP",
+        chased=False, resting_price=0.48, fill_price=0.48, queue_ahead=10.0,
+        printed_size=None, filled_size=5.0, window_elapsed_sec=1.0,
+        mid_at_fill=0.5, resting_pair_cost=0.96)
+    assert rec["tape_source"] == "rest"
+    assert rec["printed_size_at_price_since_rest"] is None
+    assert rec["fill_ratio"] is None
+    assert lt._build_fill_record(
+        ts=1.0, slug="s", market_slug="m", condition_id="c", leg="UP",
+        chased=False, resting_price=None, fill_price=0.48, queue_ahead=None,
+        printed_size=None, filled_size=5.0, window_elapsed_sec=1.0,
+        mid_at_fill=None, resting_pair_cost=None,
+        tape_source="none")["tape_source"] == "none"

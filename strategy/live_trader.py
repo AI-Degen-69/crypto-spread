@@ -3606,6 +3606,13 @@ class LiveTraderEngine:
                 m.last_bids_down = {}
                 m.fill_telemetry_done_up = False
                 m.fill_telemetry_done_down = False
+                # Issue #173: the socket tape ledger is scoped to one resting
+                # order — `printed_size` means "volume at my price since I
+                # rested", and the next window rests at a new price.
+                m.ws_tape_up.clear()
+                m.ws_tape_down.clear()
+                m.ws_last_print_ts_up = None
+                m.ws_last_print_ts_down = None
                 # Issue #137: the entry-band gate resets with the other
                 # per-window gates so the next window re-evaluates it.
                 m.band_gate_evaluated = False
