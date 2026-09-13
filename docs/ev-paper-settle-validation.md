@@ -12,13 +12,13 @@ In the 11h shadow run (`runs/paper/2026-09-11_22-10_IDT`), all 10 expired naked 
 1. **Latched Book Prices**: `MarketLiveState` maintains `last_valid_up_bid`, `last_valid_down_bid`, `last_valid_up_ask`, `last_valid_down_ask`. Book clearing during window rollover no longer wipes market history.
 2. **Binary Complement Cascade (`_resolve_exit_bid`)**:
    - Priority 1: Direct executable book bid (`up_bid` / `down_bid`).
-   - Priority 2: Binary complement of opposite ask (`1.0 - down_ask` / `1.0 - up_ask`) or opposite bid.
+   - Priority 2: Binary complement of opposite ask (`1.0 - down_ask` / `1.0 - up_ask`).
    - Priority 3: Latched book bid from the most recent valid tick.
-   - Priority 4: Latched binary complement.
+   - Priority 4: Latched binary complement ask (`1.0 - last_valid_down_ask` / `1.0 - last_valid_up_ask`).
    - Priority 5: Derived synthetic mid (non-default).
    - **Fail-Loud Safety Guard**: If zero book data or history exists, the engine logs a CRITICAL error and raises a `RuntimeError`. Silent fallback to `0.50` is strictly forbidden.
 3. **Telemetry**:
-   - `scripts/shadow_ev_pilot.py:snapshot()` now exports `up_bid`, `down_bid`, `up_ask`, `down_ask`, `last_valid_up_bid`, and `last_valid_down_bid` in the per-minute `snapshots.jsonl`.
+   - `scripts/shadow_ev_pilot.py:snapshot()` now exports `up_bid`, `down_bid`, `up_ask`, `down_ask`, `last_valid_up_bid`, `last_valid_down_bid`, `last_valid_up_ask`, and `last_valid_down_ask` in the per-minute `snapshots.jsonl`.
    - Every `TradeEvent` with action `WINDOW_SETTLE` records the exact resolution source in its notes (e.g., `UP=0.0100 (complement_ask)`).
 
 ---

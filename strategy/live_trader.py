@@ -5012,7 +5012,7 @@ class LiveTraderEngine:
             exit_px: Optional[float] = None
             cost_basis = max(
                 0.01,
-                ((fill_up if mstate.filled_up else 0.0) + (fill_dn if mstate.filled_down else 0.0)) * self.shares,
+                (((fill_up or 0.0) if mstate.filled_up else 0.0) + ((fill_dn or 0.0) if mstate.filled_down else 0.0)) * self.shares,
             )
 
             try:
