@@ -2055,6 +2055,30 @@ def test_api_rebuild_windows_failure_and_busy(monkeypatch):
         osc_dash_mod._rebuild_lock.release()
 
 
+def test_api_rebuild_refused_while_collector_active(tmp_path, monkeypatch):
+    """Rebuild returns 409 while own child or external collector is writing."""
+    class DummyProc:
+        def poll(self):
+            return None
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("rebuild must not run while collector active")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(osc_dash, "_collector_proc", DummyProc())
+    res = client.post("/api/rebuild")
+    assert res.status_code == 409
+    assert res.json().get("ok") is False
+
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ts": time.time(), "lines": 10}), encoding="utf-8")
+    res = client.post("/api/rebuild")
+    assert res.status_code == 409
+    assert "external" in res.json().get("output", "")
+
+
 def test_api_rebuild_rejects_cross_origin():
     """Verify cross-origin rebuild requests are rejected."""
     res = client.post(

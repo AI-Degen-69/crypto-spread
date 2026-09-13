@@ -45,6 +45,23 @@ def test_compute_summary_skips_corrupt_rows():
     assert summary["per_series"]["btc-up-or-down-5m"]["windows"] == 1
 
 
+def test_compute_summary_coerces_string_numerics():
+    rec = finalize_window(
+        [0.50, 0.53], [1.0], _meta(series="btc-up-or-down-5m")
+    )
+    rec["touch_pair_median"] = "1.02"
+    rec["end_ts"] = "2000.0"
+    rec2 = finalize_window(
+        [0.50, 0.53], [1.0], _meta(series="btc-up-or-down-5m", cid="0xB")
+    )
+    rec2["touch_pair_median"] = "bad"
+    rec2["end_ts"] = None
+    btc = compute_summary([rec, rec2])["per_series"]["btc-up-or-down-5m"]
+    assert btc["windows"] == 2
+    assert btc["pair_cost_median"] == 1.02
+    assert len(btc["recent"]) == 2
+
+
 def test_finalize_window_schema_and_rounding():
     mids = [0.51234, 0.53456, 0.47654]
     rec = finalize_window(mids, [1.01, 1.02, 1.03], _meta())

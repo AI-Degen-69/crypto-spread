@@ -108,6 +108,13 @@ def compute_summary(windows_list: list[dict[str, Any]]) -> dict[str, Any]:
         except (ValueError, TypeError):
             return 0.0
 
+    def _number(value: Any) -> float | None:
+        """Coerce a numeric field; neutral None for corrupt values."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     summary = {}
     for series_slug, duration, label in SERIES:
         ws = per_series.get(series_slug, [])
@@ -134,14 +141,18 @@ def compute_summary(windows_list: list[dict[str, Any]]) -> dict[str, Any]:
         osc = sum(1 for w in ws if w.get("class") == "oscillating")
 
         pcs = [
-            w.get("touch_pair_median")
+            value
             for w in ws
-            if w.get("touch_pair_median") is not None
+            if (value := _number(w.get("touch_pair_median"))) is not None
         ]
         pcs_median = sorted(pcs)[len(pcs) // 2] if pcs else None
 
         # Last 10 windows, newest first
-        recent = sorted(ws, key=lambda x: x.get("end_ts", 0), reverse=True)[:10]
+        recent = sorted(
+            ws,
+            key=lambda x: _number(x.get("end_ts")) or 0.0,
+            reverse=True,
+        )[:10]
 
         summary[series_slug] = {
             "label": label,

@@ -1021,11 +1021,22 @@ def api_collector_poll_once(request: Request):
 def api_rebuild_windows(request: Request):
     """Reconstruct oscillation windows and summary from persisted tick data.
 
-    Serialized with a lock: concurrent rebuilds would race on the same
-    output files (collector appends during a rebuild replace can also drop
-    a freshly closed window — prefer rebuilding while polling is paused).
+    Refused while any collector is writing (own child or fresh external
+    manifest): a window closing mid-rebuild would be overwritten by the
+    dataset replace. Serialized with a lock across dashboard requests.
     """
     _verify_safe_origin(request)
+    global _collector_proc
+    if _collector_proc is not None and _collector_proc.poll() is None:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "output": "collector running — stop polling before rebuild"},
+        )
+    if _detect_external_collector()["live"]:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "output": "external collector live — pause it before rebuild"},
+        )
     if not _rebuild_lock.acquire(blocking=False):
         return JSONResponse(
             status_code=409, content={"ok": False, "output": "rebuild already running"}
@@ -1035,10 +1046,10 @@ def api_rebuild_windows(request: Request):
         try:
             res = subprocess.run(
                 cmd, cwd=str(ROOT), capture_output=True, text=True,
-                timeout=300, check=False,
+                timeout=60, check=False,
             )
         except subprocess.TimeoutExpired:
-            return {"ok": False, "output": "rebuild timed out after 300s"}
+            return {"ok": False, "output": "rebuild timed out after 60s"}
         except Exception as e:
             return {"ok": False, "output": f"rebuild failed to start: {e}"}
         if res.returncode == 0:
