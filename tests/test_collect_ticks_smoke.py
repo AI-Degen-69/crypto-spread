@@ -404,23 +404,31 @@ def _snaps(out_dir: Path) -> list[dict]:
 
 def test_snaps_are_written_in_series_order_despite_completion_order(slate, tmp_path):
     """Workers finish out of order; the tick file must still follow SERIES."""
+    finished: list[str] = []
+
     def slow_book(host, tok):
-        """Make the first series the slowest so completion order inverts."""
+        """Invert completion order, and record when each series actually ends."""
         time.sleep({"a": 0.25, "b": 0.1}.get(tok[0], 0.0))
+        if tok.endswith("_dn"):
+            finished.append(tok[0])
         return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
                 "malformed": 0, "token_id": tok}
 
     slate.full_book = slow_book
     slate.poll_once(tmp_path, False, {})
 
+    # The point of the test is that these two lists disagree: completion order
+    # is c, b, a, while the file must still read a, b, c. Without the inversion
+    # actually happening the ordering assertion would prove nothing.
+    assert finished == ["c", "b", "a"], f"fan-out did not invert: {finished}"
     assert [s["series"] for s in _snaps(tmp_path)] == ["a-5m", "b-5m", "c-5m"]
 
 
 def test_the_slate_is_actually_concurrent(slate, tmp_path):
     """Three 250ms series must cost about one series, not three."""
     def slow_book(host, tok):
-        """Every book takes 250ms, so a sequential round would take 1.5s."""
-        time.sleep(0.25)
+        """Every book takes 400ms, so a sequential round would take 2.4s."""
+        time.sleep(0.4)
         return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
                 "malformed": 0, "token_id": tok}
 
@@ -429,9 +437,11 @@ def test_the_slate_is_actually_concurrent(slate, tmp_path):
     slate.poll_once(tmp_path, False, {})
     elapsed = time.perf_counter() - t0
 
-    # Sequential would be 6 books x 250ms = 1.5s; concurrent is 2 x 250ms plus
-    # the stagger ramp. Assert well clear of both to stay stable on slow CI.
-    assert elapsed < 1.0, f"round took {elapsed:.2f}s, fan-out is not concurrent"
+    # Sequential would be 6 books x 400ms = 2.4s; concurrent is 2 x 400ms plus
+    # the stagger ramp, so ~0.85s. The 1.5s threshold sits 1.8x above the
+    # concurrent path and 1.6x below the sequential one, leaving margin on a
+    # loaded CI box in both directions.
+    assert elapsed < 1.5, f"round took {elapsed:.2f}s, fan-out is not concurrent"
 
 
 def test_one_failing_series_leaves_the_others_writing(slate, tmp_path):
@@ -485,6 +495,10 @@ def test_poll_executor_is_bounded_and_reused():
     first = ct.get_poll_executor()
     assert first is ct.get_poll_executor()
     assert first._max_workers == ct.MAX_POLL_WORKERS
+    # Derived from the slate, not a parallel literal: adding an 11th series
+    # must not silently serialize it behind the other ten.
+    from strategy.series import SERIES as REAL_SERIES
+    assert ct.MAX_POLL_WORKERS == len(REAL_SERIES)
     ct.shutdown_poll_executor()
     assert ct.get_poll_executor() is not first
     ct.shutdown_poll_executor()
@@ -492,20 +506,44 @@ def test_poll_executor_is_bounded_and_reused():
 
 def test_workers_are_staggered_to_keep_the_anti_burst_property(slate, tmp_path):
     """Fan-out must ramp its first requests, not fire the slate as one burst."""
-    starts: list[float] = []
+    starts: dict[str, float] = {}
 
     def timed_book(host, tok):
         """Record when each series' first request lands."""
         if tok.endswith("_up"):
-            starts.append(time.perf_counter())
+            starts[tok[0]] = time.perf_counter()
         return {"bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
                 "malformed": 0, "token_id": tok}
 
     slate.full_book = timed_book
     slate.poll_once(tmp_path, False, {})
 
-    assert len(starts) == 3
-    assert max(starts) - min(starts) >= slate.SERIES_STAGGER_SEC
+    # Assert the property that matters — later series start later — rather than
+    # an absolute gap, which is provable from the stagger formula alone and has
+    # no margin against the ~15ms sleep granularity on Windows.
+    assert list(starts) == ["a", "b", "c"]
+    assert starts["a"] < starts["b"] < starts["c"]
+
+
+def test_every_series_including_the_first_is_jittered(slate, tmp_path,
+                                                      monkeypatch):
+    """Worker 0 must jitter too, or one series never de-synchronizes."""
+    draws: list[tuple[float, float]] = []
+    real_uniform = slate.random.uniform
+
+    def spy_uniform(a, b):
+        """Record each jitter draw the workers make."""
+        draws.append((a, b))
+        return real_uniform(a, b)
+
+    monkeypatch.setattr(slate.random, "uniform", spy_uniform)
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    slate.poll_once(tmp_path, False, {})
+
+    jitter_draws = [d for d in draws if d == (0.0, slate.JITTER_SEC)]
+    assert len(jitter_draws) >= len(slate.SERIES)
 
 
 # --- Issue #167 T4: cadence telemetry and a truthful budget ---------------
@@ -569,3 +607,102 @@ def test_manifest_publishes_the_real_sampling_interval(slate, tmp_path):
     # Round time plus the sleep between rounds is what a reader actually gets.
     assert data["sampling_interval_s"] == pytest.approx(
         data["tick_ms_last"] / 1000.0 + slate.POLL_INTERVAL, abs=0.02)
+
+
+# --- Issue #167 review follow-ups: rollover, cold budget, telemetry --------
+
+def test_a_rolled_window_closes_in_the_same_tick_its_replacement_opens(
+        slate, tmp_path, monkeypatch):
+    """Cache expiry, new cid and old-window close all land in one round."""
+    swapped = {"on": False}
+
+    def rolling_gamma(slug: str):
+        """Series A rolls to a new market once `swapped` flips."""
+        if slug != "a-5m":
+            return None, "no live"
+        now = time.time()
+        if swapped["on"]:
+            return {
+                "conditionId": "0xNEW", "slug": "slug-new",
+                "start_ts": now - 1.0, "end_ts": now + 300.0,
+                "up_token": "a_up2", "down_token": "a_dn2", "series": slug,
+            }, None
+        # Already past its end: the cache must not serve it next tick.
+        return {
+            "conditionId": "0xOLD", "slug": "slug-old",
+            "start_ts": now - 300.0, "end_ts": now - 1.0,
+            "up_token": "a_up", "down_token": "a_dn", "series": slug,
+        }, None
+
+    slate.fetch_live_for_series = rolling_gamma
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+
+    slate.poll_once(tmp_path, False, {})
+    assert "0xOLD" not in slate.windows, "an already-expired window must close"
+
+    swapped["on"] = True
+    slate.poll_once(tmp_path, False, {})
+
+    assert "0xNEW" in slate.windows
+    assert "0xOLD" not in slate.windows
+    assert [s["cid"] for s in _snaps(tmp_path)] == ["0xOLD", "0xNEW"]
+
+
+def test_an_expired_market_is_never_served_from_the_cache(slate, tmp_path):
+    """poll_once must re-resolve past end_ts, not reuse the cached market."""
+    seen: list[str] = []
+
+    def expired_gamma(slug: str):
+        """Always hands back a market whose window has already ended."""
+        seen.append(slug)
+        if slug != "a-5m":
+            return None, "no live"
+        now = time.time()
+        return {
+            "conditionId": "0xEXP", "slug": "slug-exp",
+            "start_ts": now - 300.0, "end_ts": now - 1.0,
+            "up_token": "a_up", "down_token": "a_dn", "series": slug,
+        }, None
+
+    slate.fetch_live_for_series = expired_gamma
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+
+    slate.poll_once(tmp_path, False, {})
+    first = seen.count("a-5m")
+    slate.poll_once(tmp_path, False, {})
+
+    assert seen.count("a-5m") == first + 1, "expired entry was served from cache"
+
+
+def test_a_wedged_cold_start_is_still_reported(slate, tmp_path, monkeypatch):
+    """The opening round is exempt from TICK_BUDGET_MS, not from all limits."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    monkeypatch.setattr(slate, "COLD_TICK_BUDGET_MS", 0.0)
+    stats: dict = {}
+    _closed, errs = slate.poll_once(tmp_path, False, stats)
+
+    assert any(e.startswith("slow_first_tick:") for e in errs)
+    # Still not a steady-state degradation: the two signals stay distinct.
+    assert [e for e in errs if e.startswith("slow_tick:")] == []
+
+
+def test_manifest_carries_the_tape_source_split(slate, tmp_path):
+    """An operator must be able to see which source actually fed the tape."""
+    slate.full_book = lambda host, tok: {
+        "bids": {}, "asks": {}, "best_bid": 0.49, "best_ask": 0.51,
+        "malformed": 0, "token_id": tok}
+    stats = {"tape_captured_ws": 12, "tape_captured_rest": 3,
+             "tape_rest_skipped": 7}
+    slate.poll_once(tmp_path, False, stats)
+    slate.update_manifest(tmp_path, stats)
+
+    data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert data["tape_captured_ws"] == 12
+    assert data["tape_captured_rest"] == 3
+    assert data["tape_rest_skipped"] == 7

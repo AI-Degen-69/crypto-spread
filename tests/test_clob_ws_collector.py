@@ -1092,3 +1092,32 @@ def test_socket_prints_stamp_the_authority_clock(collector, tmp_path):
     w = collector.windows["0xCID"]
     assert "tok_up" in w["ws_last_print"]
     assert "tok_dn" not in w["ws_last_print"]
+
+
+def test_one_authoritative_leg_does_not_cover_the_other(collector, tmp_path):
+    """Legs desync in liveness; each must be judged on its own clocks."""
+    calls: list[str] = []
+    bridge = StubBridge({})
+    stats: dict = {}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    # UP is warm and printing; DOWN was subscribed just as long but has never
+    # spoken, so only UP can be trusted.
+    w = collector.windows["0xCID"]
+    now = time.time()
+    w["ws_ready_at"] = {"tok_up": now - 60.0, "tok_dn": now - 60.0}
+    w["ws_last_print"] = {"tok_up": now - 1.0}
+    collector.recent_trades = lambda cid, seen, limit=200: (
+        calls.append(cid) or {"tok_up": {0.44: 99.0}, "tok_dn": {0.50: 7.0}})
+    stats.pop("tape_rest_skipped", None)
+
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    assert len(calls) == 1, "the cold leg still needs its REST tape"
+    assert stats["tape_rest_skipped"] == 1, "exactly the warm leg was skipped"
+
+    # The REST response carried rows for BOTH tokens. Only the leg that asked
+    # for them may be merged, or the authoritative leg gets double-counted.
+    snaps = _read_snaps(tmp_path)
+    assets = [t["asset"] for t in snaps[-1]["tape_delta"]]
+    assert assets == ["tok_dn"], f"authoritative leg leaked REST rows: {assets}"

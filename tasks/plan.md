@@ -158,7 +158,18 @@ Warm rounds, socket connected, `tape_rest_skipped=30`, median of 5:
 
 Per-series cost falls from flat ~269 ms to 41 ms at full slate: the curve is no
 longer linear, which was the point. A full slate now costs 2.0x a single series
-instead of 10x. Effective sampling interval: ~3.8 s to ~1.4 s.
+instead of 10x.
+
+Re-measured after the Station IV review fixes, which added a start ramp to the
+tape fan-out as well as the book fan-out. That ramp costs ~40 ms:
+
+```
+cold round: 3112 ms   (COLD_TICK_BUDGET_MS 15000 ms)
+warm 10-series: 442 / 453 / 475 / 399 / 425 / 457 ms   median 448   max 475
+sampling_interval_s = 1.46
+```
+
+Effective sampling interval: ~3.8 s to ~1.46 s.
 
 Full suite: `python -m pytest -q` - 617 passed.
 

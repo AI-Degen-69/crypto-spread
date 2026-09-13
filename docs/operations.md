@@ -46,8 +46,10 @@ Per-series failure is isolated: a 429 on one CLOB call only skips that series
 for that tick (`err` field on the snap). A slow tick (>`TICK_BUDGET_MS`,
 currently 1500 ms) is logged but does not crash the loop. The opening round is
 several times slower than a warm one (cold gamma cache, cold TLS pool, socket
-still connecting); it is reported as `tick_ms_first` and not charged against
-the budget, so `--once` reads `errs=0` on a healthy connection.
+still connecting); it is reported as `tick_ms_first` and judged against the
+looser `COLD_TICK_BUDGET_MS` (15000 ms, logged as `slow_first_tick`), so
+`--once` reads `errs=0` on a healthy connection but a wedged cold start is
+still reported.
 
 ## Run a sweep
 

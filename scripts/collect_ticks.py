@@ -8,8 +8,8 @@ consumes offline.
 Cadence — read this before treating the output as a 1-second series (#167).
 A round is one pass over the whole slate, and the collector then sleeps
 POLL_INTERVAL, so the real gap between snapshots is round + POLL_INTERVAL.
-On this hardware a warm 10-series round measures ~405ms (median of 5), i.e.
-~1.4s between snapshots. It was ~2.7s (so ~3.8s between snapshots) before the
+On this hardware a warm 10-series round measures ~450ms (median of 6), i.e.
+~1.45s between snapshots. It was ~2.7s (so ~3.8s between snapshots) before the
 slate was fanned out.
 The live figure is published every tick as `sampling_interval_s` in
 manifest.json — use that, not POLL_INTERVAL, when reasoning about granularity.
@@ -78,19 +78,29 @@ JITTER_SEC = 0.010
 # The slate is polled concurrently (issue #167): ten independent series cost
 # ~269ms each and adding them up put every round over TICK_BUDGET_MS. One
 # worker per series, created once for the process, never per tick.
-MAX_POLL_WORKERS = 10
+MAX_POLL_WORKERS = len(SERIES)
 # Fan-out would otherwise fire the whole slate as a single burst, which is
 # exactly what the old per-request jitter existed to prevent (docstring D2/D4).
 # Worker i waits i * this before its first request, so the requests ramp.
 SERIES_STAGGER_SEC = 0.010
 SPREAD_OFFSET = 0.02
 TAPE_LIMIT = 200
-# Measured warm rounds after #167: 392 / 420 / 439 / 424 / 448 / 345 / 446 ms.
+# Measured warm rounds after #167: 442 / 453 / 475 / 399 / 425 / 457 ms.
 # 1500ms is ~3x that ceiling — loose enough that ordinary venue latency is not
 # reported as a fault, tight enough that losing the fan-out (~2.7s) trips it.
 # Lowered from 2000ms, which the pre-#167 round exceeded on literally every
 # tick and so reported nothing at all.
 TICK_BUDGET_MS = 1500.0
+
+# The opening round is legitimately several times slower — empty gamma cache,
+# cold TLS pool, socket still connecting — and measured 3.1s warm-process /
+# 5.8s cold-process. It gets its own, looser ceiling rather than no ceiling at
+# all: with per-request timeouts of (3.05, 5.0) a wedged DNS or a partial venue
+# outage at boot can stretch a cold round to tens of seconds, and without this
+# it would be recorded and never reported, which is the same blind spot #167
+# exists to close. Reported as `slow_first_tick` so it stays distinguishable
+# from a steady-state degradation.
+COLD_TICK_BUDGET_MS = 15000.0
 
 # Cross-source tape dedup (issue #165). The socket prints a trade the instant it
 # happens; the REST tape reports the same trade for as long as it stays in the
@@ -421,6 +431,21 @@ class SeriesFetch:
     down_book: dict = field(default_factory=dict)
 
 
+@dataclass
+class PendingTick:
+    """One series carried from the main-thread phases across the tape fan-out.
+
+    A bare tuple made every field a positional puzzle at three separate
+    unpacking sites; `SeriesFetch` above already set the pattern.
+    """
+    fetched: SeriesFetch
+    cid: str
+    window: dict
+    tape: list[dict]
+    missing: list[str]
+    err: str
+
+
 def _book_or_err(token_id: str, leg: str) -> dict:
     """Fetch one book, turning any failure into an empty book carrying `err`.
 
@@ -435,6 +460,17 @@ def _book_or_err(token_id: str, leg: str) -> dict:
                 "malformed": 0, "err": f"{leg}:{e}"}
 
 
+def _ramp(stagger: float) -> None:
+    """Hold a worker back so the slate ramps instead of firing as one burst.
+
+    Jitter is applied to every worker including index 0: guarding the sleep on
+    `stagger > 0` would leave exactly one series in the slate un-jittered on
+    every tick, which is the one series most likely to collide with itself
+    across consecutive rounds.
+    """
+    time.sleep(stagger + random.uniform(0.0, JITTER_SEC))
+
+
 def fetch_series_books(series_slug: str, duration: int, label: str, now: float,
                        stagger: float = 0.0) -> SeriesFetch:
     """Resolve one series and fetch both of its books. Safe to run off-thread.
@@ -443,8 +479,7 @@ def fetch_series_books(series_slug: str, duration: int, label: str, now: float,
     series can run at once without a lock. `stagger` spreads the slate's first
     requests instead of firing them as one burst (Plan D2/D4).
     """
-    if stagger > 0.0:
-        time.sleep(stagger + random.uniform(0.0, JITTER_SEC))
+    _ramp(stagger)
     try:
         info, err = resolve_series_market(series_slug, now)
     except Exception as e:
@@ -474,11 +509,12 @@ def fetch_slate_tapes(jobs: list[tuple[str, dict, list[str]]]
 
     Each window owns its own `seen_tape` set, so no two workers share state.
     """
-    def _one(job: tuple[str, dict, list[str]]) -> tuple[dict, str]:
+    def _one(job: tuple[int, str, dict, list[str]]) -> tuple[dict, str]:
         """Fetch one window's tape, or nothing when every leg is covered."""
-        cid, w, missing = job
+        idx, cid, w, missing = job
         if not missing:
             return {}, ""
+        _ramp(idx * SERIES_STAGGER_SEC)
         try:
             return recent_trades(cid, w["seen_tape"], limit=TAPE_LIMIT), ""
         except Exception as e:
@@ -486,7 +522,11 @@ def fetch_slate_tapes(jobs: list[tuple[str, dict, list[str]]]
 
     if not jobs:
         return []
-    return list(get_poll_executor().map(_one, jobs))
+    # Ramped like the book fan-out. This path bursts hardest exactly when it is
+    # least welcome: a reconnect clears every leg's warm-up at once, so all ten
+    # series need the tape endpoint in the same tick.
+    return list(get_poll_executor().map(
+        _one, [(i, cid, w, missing) for i, (cid, w, missing) in enumerate(jobs)]))
 
 
 def poll_once(out_dir: Path, gzip: bool, stats: dict,
@@ -523,14 +563,13 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     # Phase 2 — main thread, SERIES order: window upkeep and the socket tape.
     # Every mutation of `windows` and `stats` and every file append lives on
     # this thread, so the tick file stays ordered and needs no lock.
-    pending: list[tuple[SeriesFetch, str, dict, list[dict], list[str], str]] = []
+    pending: list[PendingTick] = []
     for fetched in fetches:
         series_slug, duration, label = fetched.series, fetched.duration, fetched.label
         info = fetched.info
         if not info:
             errs.append(f"{series_slug}:{fetched.err}")
             continue
-        ub, db = fetched.up_book, fetched.down_book
         cid = info["conditionId"]
         if cid not in windows:
             windows[cid] = {
@@ -572,22 +611,23 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                 stats["tape_rest_skipped"] = stats.get("tape_rest_skipped", 0) + 1
                 continue
             missing.append(tok)
-        pending.append((fetched, cid, w, tape_list, missing, tape_err))
+        pending.append(PendingTick(fetched, cid, w, tape_list, missing, tape_err))
 
     # Phase 3 — off-thread: only the legs the socket could not vouch for pay a
     # REST round-trip, and those run concurrently too. On a healthy feed this
     # list is usually empty and the round costs nothing.
     tape_results = fetch_slate_tapes(
-        [(cid, w, missing) for _f, cid, w, _t, missing, _e in pending])
+        [(p.cid, p.window, p.missing) for p in pending])
 
     # Phase 4 — main thread, SERIES order: merge, assemble, write.
-    for (fetched, cid, w, tape_list, missing, tape_err), (tape_map, fetch_err) in zip(
-            pending, tape_results):
+    for pend, (tape_map, fetch_err) in zip(pending, tape_results):
+        fetched, cid, w = pend.fetched, pend.cid, pend.window
+        tape_list, missing = pend.tape, pend.missing
         series_slug, duration, label = fetched.series, fetched.duration, fetched.label
         info = fetched.info
         ub, db = fetched.up_book, fetched.down_book
         ub_err, db_err = ub.get("err"), db.get("err")
-        tape_err = tape_err or fetch_err
+        tape_err = pend.err or fetch_err
         if missing and tape_map:
             ws_levels = w.get("ws_levels") or {}
             for tok in missing:
@@ -655,12 +695,12 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     # oscillation summary and queue telemetry all consume this series.
     stats["sampling_interval_s"] = round(tick_ms / 1000.0 + POLL_INTERVAL, 2)
     if "tick_ms_first" not in stats:
-        # The opening round pays for an empty gamma cache, a cold TLS pool and
-        # a socket that has not finished connecting — several times the steady
-        # cost. Budgeting it would fire slow_tick on every `--once` run, which
-        # is the exact false positive issue #167 set out to remove, so it is
-        # recorded for the operator rather than judged.
+        # Charging the opening round against TICK_BUDGET_MS would fire slow_tick
+        # on every `--once` run — the exact false positive issue #167 set out to
+        # remove — so it is judged against the looser COLD_TICK_BUDGET_MS.
         stats["tick_ms_first"] = round(tick_ms, 1)
+        if tick_ms > COLD_TICK_BUDGET_MS:
+            errs.append(f"slow_first_tick:{tick_ms:.0f}ms")
     else:
         stats["tick_ms_max"] = round(max(tick_ms, stats.get("tick_ms_max", 0.0)), 1)
         if tick_ms > TICK_BUDGET_MS:
