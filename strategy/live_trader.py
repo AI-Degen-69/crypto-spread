@@ -258,8 +258,16 @@ def _build_fill_record(*, ts: float, slug: str, market_slug: str,
                        queue_ahead: Optional[float], printed_size: Optional[float],
                        filled_size: float, window_elapsed_sec: float,
                        mid_at_fill: Optional[float],
-                       resting_pair_cost: Optional[float]) -> Dict[str, Any]:
-    """Pure record math for one entry fill (issue #138)."""
+                       resting_pair_cost: Optional[float],
+                       tape_source: str = "rest") -> Dict[str, Any]:
+    """Pure record math for one entry fill (issue #138).
+
+    `tape_source` names which tape produced `printed_size` — `"ws"`, `"rest"`,
+    or `"none"` when neither could answer (issue #173). It is never a blend:
+    the #138 analysis has to be able to stratify, because the REST tape
+    undercounts by roughly two orders of magnitude and mixing the two would
+    make `fill_ratio` mean nothing in particular.
+    """
     ratio: Optional[float] = None
     if queue_ahead is not None and printed_size is not None:
         ratio = printed_size / max(queue_ahead, 1.0)
@@ -274,6 +282,7 @@ def _build_fill_record(*, ts: float, slug: str, market_slug: str,
         "fill_price": fill_price,
         "queue_ahead_at_rest": queue_ahead,
         "printed_size_at_price_since_rest": printed_size,
+        "tape_source": tape_source,
         "filled_size": filled_size,
         "fill_ratio": ratio,
         "ratio_flagged": bool(ratio is not None and ratio > FILL_RATIO_FLAG_THRESHOLD),
@@ -1245,6 +1254,11 @@ class LiveTraderEngine:
                     rest_price = mstate.resting_up if is_up else mstate.resting_down
                     stash = mstate.last_bids_up if is_up else mstate.last_bids_down
                     rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
+                # Issue #173: copy the socket ledger here, with everything else.
+                # The worker runs on a daemon thread and must never touch live
+                # engine state, and a rollover clearing the ledger mid-join
+                # would otherwise hand it a window's worth of missing volume.
+                ws_tape = list(mstate.ws_tape_up if is_up else mstate.ws_tape_down)
                 snapshot = {
                     # Bind the sidecar path at dispatch, not at write time. The
                     # worker below runs on its own daemon thread and used to
@@ -1261,6 +1275,8 @@ class LiveTraderEngine:
                     "rest_queue": rest_queue,
                     "rest_ts": rest_ts,
                     "token": mstate.up_token if is_up else mstate.down_token,
+                    "ws_tape": ws_tape,
+                    "ws_authoritative": self._ws_tape_authoritative(mstate, leg),
                     "fill_price": fill_price,
                     "filled_size": size,
                     "window_elapsed_sec": max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else 0.0,
@@ -1290,15 +1306,29 @@ class LiveTraderEngine:
                                mid_at_fill: Optional[float],
                                resting_pair_cost: Optional[float],
                                ts: float,
+                               ws_tape: Optional[Sequence[Tuple[float, float, float]]] = None,
+                               ws_authoritative: bool = False,
                                telemetry_path: Any = None) -> None:
-        """Fetch tape, build the record, append it. Exceptions never propagate."""
+        """Join the tape, build the record, append it. Exceptions never propagate.
+
+        Issue #173: `printed_size` comes from exactly one tape. When the socket
+        was authoritative for this leg at claim time its ledger answers, and no
+        REST call is made at all — which also means a print seen on both paths
+        can never be counted twice. Otherwise the REST join runs exactly as it
+        did before, so a socket outage costs nothing but accuracy.
+        """
         try:
             printed: Optional[float] = None
-            if (resting_price is not None and rest_ts is not None
-                    and token and condition_id):
+            tape_source = "none"
+            joinable = (resting_price is not None and rest_ts is not None and token)
+            if joinable and ws_authoritative:
+                printed = _sum_ws_prints_at_price(ws_tape or [], resting_price, rest_ts)
+                tape_source = "ws"
+            elif joinable and condition_id:
                 rows = _fetch_price_prints(condition_id)
                 if rows is not None:
                     printed = _sum_prints_at_price(rows, token, resting_price, rest_ts)
+                    tape_source = "rest"
             record = _build_fill_record(
                 ts=ts,
                 slug=slug,
@@ -1314,6 +1344,7 @@ class LiveTraderEngine:
                 window_elapsed_sec=window_elapsed_sec,
                 mid_at_fill=mid_at_fill,
                 resting_pair_cost=resting_pair_cost,
+                tape_source=tape_source,
             )
             if not _append_fill_telemetry(record, telemetry_path):
                 log.warning("[%s] fill-telemetry append failed (line lost)", slug)
