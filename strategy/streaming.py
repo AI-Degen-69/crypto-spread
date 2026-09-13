@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -95,7 +96,33 @@ CLOB_WS_BACKOFF_FACTOR = 2.0
 CLOB_WS_BACKOFF_MAX = 30.0
 CLOB_WS_RECV_TIMEOUT = 1.0        # recv poll slice, so stop()/rotation land fast
 CLOB_WS_JITTER_PCT = 0.25         # de-synchronizes reconnect storms
+# Per-token print buffer ceiling. The collector drains every second, so this is
+# only reached if its loop stalls (slow REST call, GC pause) while the socket
+# keeps receiving. Dropping the oldest prints is better than growing without a
+# bound on a process that runs for days.
+CLOB_WS_TRADE_BUFFER_MAX = 5000
 
+
+
+def _reject_json_constant(name: str) -> float:
+    """Refuse the non-standard JSON literals `NaN` / `Infinity` / `-Infinity`.
+
+    `json.loads` accepts them by default, and a non-finite price would sail
+    through every `float()` guard, land in `tape_delta`, and be written into
+    the replay dataset — where NaN compares False against every threshold the
+    fill model and risk checks are built on. Raising here drops the frame.
+    """
+    raise ValueError(f"non-finite JSON constant in venue frame: {name}")
+
+
+def _valid_quote(price: float) -> bool:
+    """True for a finite price inside a binary outcome token's 0..1 domain."""
+    return math.isfinite(price) and 0.0 <= price <= 1.0
+
+
+def _valid_size(size: float) -> bool:
+    """True for a finite, non-negative size."""
+    return math.isfinite(size) and size >= 0.0
 
 
 def series_for_symbol(symbol: str) -> list[str]:
@@ -398,6 +425,7 @@ class CLOBMarketWSClient:
         on_trade: Optional[Callable[[Dict[str, Any]], None]] = None,
         ws_url: str = CLOB_WS_URL,
         ping_interval: float = CLOB_WS_PING_INTERVAL,
+        recv_timeout: float = CLOB_WS_RECV_TIMEOUT,
         backoff_base: float = CLOB_WS_BACKOFF_BASE,
         backoff_max: float = CLOB_WS_BACKOFF_MAX,
         connect_factory: Optional[Callable[..., Any]] = None,
@@ -409,6 +437,7 @@ class CLOBMarketWSClient:
         self.on_trade = on_trade
         self.ws_url = ws_url
         self.ping_interval = float(ping_interval)
+        self.recv_timeout = float(recv_timeout)
         self.backoff_base = float(backoff_base)
         self.backoff_max = float(backoff_max)
         self._connect_factory = connect_factory
@@ -418,6 +447,7 @@ class CLOBMarketWSClient:
         self.is_connected: bool = False
         self.reconnect_count: int = 0
         self.trades_captured: int = 0
+        self.trades_dropped: int = 0
         self.last_ping_ts: float = 0.0
         self.last_pong_ts: float = 0.0
         self._trade_buffer: Dict[str, List[Dict[str, Any]]] = {}
@@ -514,6 +544,9 @@ class CLOBMarketWSClient:
         except (TypeError, ValueError):
             log.debug("skipping unparseable trade print: %s", event)
             return None
+        if not _valid_quote(price) or not _valid_size(size):
+            log.debug("skipping out-of-domain trade print: %s", event)
+            return None
 
         raw_ts = event.get("timestamp", event.get("ts"))
         try:
@@ -530,8 +563,13 @@ class CLOBMarketWSClient:
             "hash": str(event.get("transaction_hash") or event.get("hash") or ""),
         }
         with self._buffer_lock:
-            self._trade_buffer.setdefault(token_id, []).append(trade)
+            buf = self._trade_buffer.setdefault(token_id, [])
+            buf.append(trade)
             self.trades_captured += 1
+            overflow = len(buf) - CLOB_WS_TRADE_BUFFER_MAX
+            if overflow > 0:
+                del buf[:overflow]
+                self.trades_dropped += overflow
         if self.on_trade:
             try:
                 self.on_trade(trade)
@@ -564,7 +602,7 @@ class CLOBMarketWSClient:
         if text.upper() == "PING":
             return
         try:
-            msg = json.loads(text)
+            msg = json.loads(text, parse_constant=_reject_json_constant)
         except Exception:
             log.debug("non-JSON CLOB frame dropped: %.80s", text)
             return
@@ -591,6 +629,8 @@ class CLOBMarketWSClient:
                     size = float(change.get("size") or 0.0)
                 except (TypeError, ValueError):
                     continue
+                if not _valid_quote(price) or not _valid_size(size):
+                    continue
                 self.apply_price_change(token_id, str(change.get("side") or "BUY"), price, size)
         elif ev_type == "last_trade_price":
             self.record_trade(token_id, ev)
@@ -609,10 +649,27 @@ class CLOBMarketWSClient:
                 pass
 
     def update_tokens(self, new_tokens: List[str]) -> None:
-        """Update subscribed token IDs."""
-        if set(new_tokens) != set(self.token_ids):
-            self.token_ids = sorted(list(set(new_tokens)))
-            self._tokens_version += 1
+        """Update subscribed token IDs, discarding state for dropped tokens.
+
+        Markets roll over every 5 or 15 minutes across 10 series, so a process
+        that ran for a day would otherwise accumulate thousands of dead token
+        keys in the buffer and book maps. Nothing drains a token once its
+        window closed, so its state is dropped with the subscription.
+        """
+        if set(new_tokens) == set(self.token_ids):
+            return
+        dropped = set(self.token_ids) - set(new_tokens)
+        self.token_ids = sorted(set(new_tokens))
+        self._tokens_version += 1
+        if not dropped:
+            return
+        with self._buffer_lock:
+            for tid in dropped:
+                self._trade_buffer.pop(tid, None)
+        for tid in dropped:
+            self.books.pop(tid, None)
+            self.top_of_book.pop(tid, None)
+            self.tick_sizes.pop(tid, None)
 
     def subscription_payload(self) -> str:
         """Build the market-channel subscription frame for the current tokens."""
@@ -656,7 +713,7 @@ class CLOBMarketWSClient:
                 if self._tokens_version != subscribed_version:
                     return True
                 try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=CLOB_WS_RECV_TIMEOUT)
+                    msg = await asyncio.wait_for(ws.recv(), timeout=self.recv_timeout)
                 except asyncio.TimeoutError:
                     continue
                 self.handle_raw_message(msg)
@@ -716,6 +773,7 @@ class CLOBMarketWSClient:
             "token_count": len(self.token_ids),
             "reconnects": self.reconnect_count,
             "trades_captured": self.trades_captured,
+            "trades_dropped": self.trades_dropped,
             "last_ping_ts": self.last_ping_ts,
             "last_pong_ts": self.last_pong_ts,
             "books_tracked": len(self.books),

@@ -180,6 +180,81 @@ def test_clob_market_handles_best_bid_ask_and_pong():
     assert client.last_pong_ts > 0.0
 
 
+def test_non_finite_prices_never_enter_the_tape():
+    """`NaN`/`Infinity` are legal to `json.loads` but must not reach the dataset.
+
+    A non-finite price passes every `float()` guard, then compares False
+    against every fill and risk threshold downstream — so the frame is dropped
+    at the decoder.
+    """
+    client = CLOBMarketWSClient()
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        client.handle_raw_message(
+            '{"event_type":"last_trade_price","asset_id":"tok","price":%s,'
+            '"size":10,"timestamp":"1700000000000"}' % literal)
+        client.handle_raw_message(
+            '{"event_type":"price_change","asset_id":"tok",'
+            '"changes":[{"price":%s,"side":"BUY","size":10}]}' % literal)
+    assert client.drain_trades() == []
+    assert client.books == {}
+    assert client.trades_captured == 0
+
+
+def test_out_of_domain_prices_and_sizes_are_rejected():
+    """A binary outcome token only trades in 0..1, and size is never negative."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(_trade_frame("tok", "1.5", "10"))
+    client.handle_raw_message(_trade_frame("tok", "-0.2", "10"))
+    client.handle_raw_message(_trade_frame("tok", "0.5", "-3"))
+    assert client.drain_trades() == []
+
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change", "asset_id": "tok",
+        "changes": [{"price": "1.4", "side": "BUY", "size": "10"}],
+    }))
+    assert client.books.get("tok", {}).get("best_bid") is None
+
+    # The boundary values are legitimate: a resolved leg prints at 0 or 1.
+    client.handle_raw_message(_trade_frame("tok", "1.0", "10"))
+    client.handle_raw_message(_trade_frame("tok", "0.0", "10"))
+    assert len(client.drain_trades("tok")) == 2
+
+
+def test_rotated_out_tokens_release_their_buffered_state():
+    """Window rollover drops a token's buffer and book — no per-day leak."""
+    client = CLOBMarketWSClient(token_ids=["tok_old"])
+    client.handle_raw_message(_trade_frame("tok_old", "0.5", "10"))
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": "tok_old",
+        "bids": [{"price": "0.49", "size": "5"}], "asks": [],
+    }))
+    assert client.books["tok_old"]["best_bid"] == 0.49
+
+    client.update_tokens(["tok_new"])
+
+    assert client.drain_trades("tok_old") == []
+    assert "tok_old" not in client._trade_buffer
+    assert "tok_old" not in client.books
+    assert client.token_ids == ["tok_new"]
+
+
+def test_trade_buffer_is_capped_and_counts_drops():
+    """A stalled drain cannot grow the buffer without bound."""
+    from strategy.streaming import CLOB_WS_TRADE_BUFFER_MAX
+
+    client = CLOBMarketWSClient()
+    overflow = 5
+    for i in range(CLOB_WS_TRADE_BUFFER_MAX + overflow):
+        client.record_trade("tok", {"price": "0.5", "size": "1",
+                                    "timestamp": "1700000000000", "hash": f"0x{i}"})
+    drained = client.drain_trades("tok")
+    assert len(drained) == CLOB_WS_TRADE_BUFFER_MAX
+    assert client.trades_dropped == overflow
+    # The oldest prints are the ones dropped; the newest survive.
+    assert drained[-1]["hash"] == f"0x{CLOB_WS_TRADE_BUFFER_MAX + overflow - 1}"
+    assert client.get_status()["trades_dropped"] == overflow
+
+
 def test_clob_market_ignores_malformed_frames():
     """Garbage frames are dropped, never raised — the collector must not die."""
     client = CLOBMarketWSClient()
@@ -279,6 +354,40 @@ def test_run_direct_reconnects_after_socket_error():
     assert prices == [0.40, 0.41]
 
 
+def test_token_rotation_resubscribes_without_a_backoff_penalty():
+    """A 5m/15m rollover must resubscribe at once, not sit out a backoff."""
+    first = FakeWS([])
+    second = FakeWS([])
+    connector = FakeConnector([first, second])
+    client = CLOBMarketWSClient(token_ids=["tok_a"], connect_factory=connector,
+                                ping_interval=5.0, recv_timeout=0.02,
+                                backoff_base=10.0, backoff_max=10.0)
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if client.is_connected:
+                break
+        client.update_tokens(["tok_b"])
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if len(connector.calls) >= 2:
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    started = time.time()
+    asyncio.run(drive())
+    elapsed = time.time() - started
+
+    assert len(connector.calls) == 2
+    # A 10s backoff would have been taken had rotation used the penalized path.
+    assert elapsed < 5.0
+    assert client.reconnect_count == 0
+    assert json.loads(second.sent[0])["assets_ids"] == ["tok_b"]
+
+
 def test_drain_trades_is_thread_safe():
     """Concurrent producers and drainers never lose or duplicate a print."""
     client = CLOBMarketWSClient()
@@ -360,6 +469,26 @@ def test_bridge_drains_trades_and_books_across_threads():
         assert bridge.get_status()["token_count"] == 2
     finally:
         bridge.stop()
+
+
+def test_bridge_stop_interrupts_a_reconnect_backoff():
+    """SIGINT during a 10s backoff must not hold the collector for 10s."""
+    bridge = CLOBStreamCollectorBridge(
+        token_ids=["tok_up"],
+        connect_factory=FakeConnector([FakeWS([], fail_after=True)]),
+        ping_interval=5.0)
+    bridge.client.backoff_base = 10.0
+    bridge.client.backoff_max = 10.0
+    bridge.start()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and bridge.client.reconnect_count < 1:
+        time.sleep(0.02)
+    assert bridge.client.reconnect_count >= 1, "never entered the backoff sleep"
+
+    started = time.time()
+    bridge.stop()
+    assert time.time() - started < 3.0
+    assert bridge.is_running is False
 
 
 def test_bridge_stop_is_idempotent():
@@ -522,21 +651,86 @@ def test_rest_fallback_does_not_replay_a_price_the_socket_already_printed(
     assert snaps[1]["tape_delta"] == [{"asset": "tok_up", "price": 0.44, "size": 9.0}]
 
 
-def test_manifest_carries_ws_telemetry(tmp_path):
-    """Manifest exposes socket health for the dashboard and the audit trail."""
+def test_ws_level_suppression_expires_after_the_ttl(collector, tmp_path,
+                                                    monkeypatch):
+    """Suppression is a TTL, not a tombstone: REST may report the level again."""
+    w = {"up_token": "tok_up", "down_token": "tok_dn",
+         "ws_levels": {"tok_up:0.4600": 1000.0, "tok_up:0.4400": 1055.0}}
+    collector.prune_ws_levels(w, 1061.0)
+    assert list(w["ws_levels"]) == ["tok_up:0.4400"]
+
+    bridge = StubBridge({
+        "tok_up": [{"asset": "tok_up", "price": 0.46, "size": 30.0,
+                    "side": "BUY", "ts": 1700000000000, "hash": "0xa"}],
+    })
+    stats: dict = {}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    # Age the socket's print past the TTL, then let REST report it again.
+    win = collector.windows["0xCID"]
+    win["ws_levels"] = {k: v - (collector.WS_REST_DEDUP_TTL + 1.0)
+                        for k, v in win["ws_levels"].items()}
+    bridge._connected = False
+    monkeypatch.setattr(collector, "recent_trades",
+                        lambda cid, seen, limit=200: {"tok_up": {0.46: 30.0}})
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+
+    snaps = _read_snaps(tmp_path)
+    assert snaps[1]["tape_delta"] == [{"asset": "tok_up", "price": 0.46, "size": 30.0}]
+
+
+def test_poll_once_telemetry_reaches_the_manifest(collector, tmp_path):
+    """End to end: poll_once fills the stats that update_manifest publishes."""
+    bridge = StubBridge({
+        "tok_up": [{"asset": "tok_up", "price": 0.46, "size": 30.0,
+                    "side": "BUY", "ts": 1700000000000, "hash": "0xa"}],
+    })
+    bridge.reconnects = 4
+    stats: dict = {"_tape_window": []}
+    collector.poll_once(tmp_path, False, stats, ws_bridge=bridge)
+    collector.update_manifest(tmp_path, stats)
+
+    data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert data["ws_connected"] is True
+    assert data["ws_reconnects"] == 4
+    assert data["tape_captured_ws"] == 1
+    assert "_tape_window" not in data
+
+
+def test_start_ws_bridge_degrades_to_rest_when_the_socket_stack_fails(
+        monkeypatch, capsys):
+    """A broken stream stack must leave a working REST-only collector."""
+    import scripts.collect_ticks as ct
+    import strategy.streaming as streaming
+
+    def _boom(*a, **k):
+        """Stand-in bridge that fails on construction."""
+        raise RuntimeError("stream stack unavailable")
+
+    monkeypatch.setattr(streaming, "CLOBStreamCollectorBridge", _boom)
+    assert ct.start_ws_bridge(disabled=False) is None
+    assert "ws bridge unavailable" in capsys.readouterr().out
+
+    # --no-ws short-circuits: the bridge is never constructed, so the failing
+    # stand-in is never reached and nothing is reported.
+    assert ct.start_ws_bridge(disabled=True) is None
+    assert capsys.readouterr().out == ""
+    ct.stop_ws_bridge(None)  # no-op, must not raise
+
+
+def test_stop_ws_bridge_survives_a_failing_bridge(capsys):
+    """A bridge that raises on stop cannot take the collector's exit down."""
     import scripts.collect_ticks as ct
 
-    stats = {"lines": 3, "ws_enabled": True, "ws_connected": True,
-             "ws_reconnects": 2, "tape_captured_ws": 41,
-             "tape_captured_rest": 5, "_tape_window": []}
-    ct.update_manifest(tmp_path, stats)
-    data = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
-    assert data["ws_enabled"] is True
-    assert data["ws_connected"] is True
-    assert data["ws_reconnects"] == 2
-    assert data["tape_captured_ws"] == 41
-    assert data["tape_captured_rest"] == 5
-    assert "_tape_window" not in data
+    class Exploding:
+        """Bridge stand-in whose stop() raises."""
+
+        def stop(self):
+            """Fail the shutdown."""
+            raise RuntimeError("thread wedged")
+
+    ct.stop_ws_bridge(Exploding())
+    assert "ws bridge shutdown error" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
