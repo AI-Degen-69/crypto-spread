@@ -6,11 +6,12 @@ dashboard `/api/backtest` uses) with the shadow's exact config mirrored,
 scoped to the shadow universe + tick-coverage overlap. Writes
 machine-readable totals for the paper-vs-replay comparison.
 
-Scope rule (see tasks/plan.md §1): a window is INCLUDED iff its start_ts is
-inside tick coverage [T0, T1]. Windows that opened before coverage are
-excluded (their opens were never observed). Trailing windows that close
-after T1 are kept — both paper (stop-time rollover) and replay (last
-in-range bid) mark them to book symmetrically.
+Scope rule: a window is INCLUDED iff its start_ts is inside tick coverage
+[T0, T1], its first snap lands within STRICT_START_DELAY_SEC of the open
+(T0-opening windows grandfathered), and no snap breaches the touch sanity
+bounds. Trailing windows that close after T1 are kept — both paper
+(stop-time rollover) and replay (last in-range bid) mark them to book
+symmetrically.
 
 Usage:
     python -m scripts.replay_shadow_check
@@ -40,10 +41,26 @@ T0 = datetime.datetime(2026, 9, 12, 0, 0, 0, tzinfo=datetime.timezone.utc).times
 T1 = datetime.datetime(2026, 9, 12, 9, 10, 58, tzinfo=datetime.timezone.utc).timestamp()
 START_TOL_SEC = 1.0
 
+# Strict full-window rule (dashboard "Strict Full Windows"): first snap lands
+# within 2s of the open. Windows opening exactly at coverage start are
+# grandfathered (their <=2.1s blind prefix is immaterial — delay-60 configs
+# never quote before 60s anyway).
+STRICT_START_DELAY_SEC = 2.0
+
+# Touch-pair sanity bounds (verify_tick_data "sane bounds"): any window with
+# a snap outside is quarantined from the comparison (dislocated/stale book).
+TOUCH_LO, TOUCH_HI = 0.50, 1.50
+
+# Pair-cost gate values: 0.98 = paper preset transcription (live-touch
+# semantics make it a near-total quote block — kept for reference);
+# 1.05 = engine default + research §5 value (dislocation filter).
+PAIR_CAPS = (0.98, 1.05)
+
 SHARES = 5
 
 
-def build_params(fill_model: str = "tape", gates_on: bool = True) -> BacktestParams:
+def build_params(fill_model: str = "tape", gates_on: bool = True,
+                 pair_cap: float = 0.98) -> BacktestParams:
     """Mirror the shadow final.json params into engine knobs (issue #146 §1).
 
     The prescribed verdict leg is fill_model="tape" with gates on. The other
@@ -53,7 +70,7 @@ def build_params(fill_model: str = "tape", gates_on: bool = True) -> BacktestPar
     return BacktestParams(
         offset=0.03,
         queue_gate=0.0,
-        pair_cost_gate=0.98,
+        pair_cost_gate=pair_cap,
         exit_thresh_by_slug={
             "default_5m": 0.05,
             "default_15m": 0.05,
@@ -90,16 +107,18 @@ def load_shadow_recorded(path: Path | None = None) -> dict:
 
 
 def assert_config_mirror(params: BacktestParams, recorded: dict,
-                         fill_model: str, gates_on: bool) -> None:
+                         fill_model: str, gates_on: bool,
+                         pair_cap: float = 0.98) -> None:
     """Fail fast if any mirrored knob drifts from the recorded shadow config.
 
     Field renames recorded -> engine: max_pair_cost -> pair_cost_gate,
     shares -> quote_shares. fill_model/queue_gate/merge_gas_usd have no recorded
     equivalent (paper fills on touch; replay-side documented choices).
+    pair_cap 1.05 is a deliberate research-§5 override, not a transcription.
     """
     pairs = [
         ("offset", recorded["offset"]),
-        ("pair_cost_gate", recorded["max_pair_cost"]),
+        ("pair_cost_gate", pair_cap),
         ("exit_reversal", recorded["exit_reversal"]),
         ("quote_shares", recorded["shares"]),
         ("entry_timeout_pct", recorded["entry_timeout_pct"]),
@@ -137,16 +156,41 @@ def load_scoped_snaps() -> list[dict]:
     return kept
 
 
-def select_groups(snaps: list[dict]) -> tuple[list[tuple[str, list[dict]]], int]:
-    """Keep fully-observed windows; count pre-coverage opens as excluded."""
+def snap_touch(snap: dict) -> float | None:
+    """Live touch pair (up_ask + dn_ask) for one snap, or None if unknowable."""
+    touch = snap.get("touch_pair")
+    try:
+        touch_f = float(touch) if touch is not None else None
+    except (TypeError, ValueError):
+        touch_f = None
+    if touch_f is not None:
+        return touch_f
+    ub, db = snap.get("up_book") or {}, snap.get("down_book") or {}
+    up_ask, dn_ask = ub.get("best_ask"), db.get("best_ask")
+    if up_ask is None or dn_ask is None:
+        return None
+    return float(up_ask) + float(dn_ask)
+
+
+def select_groups(snaps: list[dict]) -> tuple[list[tuple[str, list[dict]]], dict]:
+    """Keep fully-observed, sane-book windows; count exclusions by reason."""
     included: list[tuple[str, list[dict]]] = []
-    excluded = 0
+    excluded = {"pre_coverage": 0, "strict_late": 0, "touch_insane": 0}
     for cid, group in group_by_cid(snaps):
         start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
-        if start_ts >= T0 - START_TOL_SEC:
-            included.append((cid, group))
-        else:
-            excluded += 1
+        if start_ts < T0 - START_TOL_SEC:
+            excluded["pre_coverage"] += 1
+            continue
+        first_delay = float(group[0].get("ts", 0.0) or 0.0) - start_ts
+        grandfathered = start_ts == T0
+        if first_delay > STRICT_START_DELAY_SEC and not grandfathered:
+            excluded["strict_late"] += 1
+            continue
+        if any((t is not None and not (TOUCH_LO <= t <= TOUCH_HI))
+               for t in (snap_touch(s) for s in group)):
+            excluded["touch_insane"] += 1
+            continue
+        included.append((cid, group))
     assert included, "no fully-observed windows in scope"
     return included, excluded
 
@@ -248,21 +292,25 @@ def main() -> None:
     snaps = load_scoped_snaps()
     groups, excluded = select_groups(snaps)
     legs: dict[str, dict] = {}
-    for fill_model, gates_on in (("tape", True), ("book", True),
-                                 ("tape", False), ("book", False)):
-        params = build_params(fill_model, gates_on)
-        assert_config_mirror(params, recorded, fill_model, gates_on)
+    for fill_model, gates_on, pair_cap in (
+            ("tape", True, 0.98), ("book", True, 0.98),
+            ("tape", False, 0.98), ("book", False, 0.98),
+            ("tape", True, 1.05), ("book", True, 1.05),
+            ("tape", False, 1.05), ("book", False, 1.05)):
+        params = build_params(fill_model, gates_on, pair_cap)
+        assert_config_mirror(params, recorded, fill_model, gates_on, pair_cap)
         totals = summarize(params, groups)
         totals["params_hash"] = params.params_hash()
-        legs[f"{fill_model}_{'gates' if gates_on else 'nogates'}"] = totals
-        print(f"[{fill_model}/{'gates' if gates_on else 'nogates'}] "
+        leg = f"{fill_model}_{'gates' if gates_on else 'nogates'}_pc{pair_cap}"
+        legs[leg] = totals
+        print(f"[{leg}] "
               f"windows={totals['n_included_windows']} pairs={totals['pairs']} "
               f"settles={totals['settles']} exits={totals['exits']} "
               f"gross_usd={totals['replay_gross_usd']}")
     if sum(t["n_events"] for t in legs.values()) == 0:
         raise RuntimeError("all replay legs empty — data flow broken, refusing artifact")
     out_payload = {
-        "verdict_leg": "tape_gates",
+        "verdict_leg": "tape_gates_pc1.05",
         "legs": legs,
         "scope": {
             "ticks_file": TICKS_FILE.name,
@@ -270,8 +318,11 @@ def main() -> None:
             "universe": list(UNIVERSE),
             "t0_utc": "2026-09-12T00:00:00Z",
             "t1_utc": "2026-09-12T09:10:58Z",
+            "strict_start_delay_sec": STRICT_START_DELAY_SEC,
+            "touch_bounds": [TOUCH_LO, TOUCH_HI],
+            "pair_caps": list(PAIR_CAPS),
             "n_snaps_scoped": len(snaps),
-            "n_tick_windows_excluded_pre_coverage": excluded,
+            "n_tick_windows_excluded": excluded,
             "n_shadow_events_excluded_pre_coverage": 11,
         },
         "accounting": (

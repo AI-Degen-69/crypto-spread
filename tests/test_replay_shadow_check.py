@@ -64,8 +64,10 @@ def test_exit_covers_universe():
         assert params.exit_thresh_by_slug.get(slug) == 0.05
 
 
-def _snap(cid: str, start_ts: float) -> dict:
-    return {"cid": cid, "ts": start_ts + 2.0, "start_ts": start_ts}
+def _snap(cid: str, start_ts: float, ts_off: float = 2.0,
+          touch: float = 1.0) -> dict:
+    return {"cid": cid, "ts": start_ts + ts_off, "start_ts": start_ts,
+            "touch_pair": touch}
 
 
 def test_select_groups_splits_pre_coverage():
@@ -73,14 +75,53 @@ def test_select_groups_splits_pre_coverage():
     snaps = [_snap("old", mod.T0 - 3600.0), _snap("new", mod.T0 + 10.0)]
     included, excluded = mod.select_groups(snaps)
     assert [c for c, _ in included] == ["new"]
-    assert excluded == 1
+    assert excluded == {"pre_coverage": 1, "strict_late": 0, "touch_insane": 0}
 
 
 def test_select_groups_boundary_inclusive():
     """A window opening exactly at coverage start counts as observed."""
     included, excluded = mod.select_groups([_snap("edge", mod.T0)])
     assert [c for c, _ in included] == ["edge"]
-    assert excluded == 0
+    assert excluded == {"pre_coverage": 0, "strict_late": 0, "touch_insane": 0}
+
+
+def test_select_groups_strict_late():
+    """First snap >2s after open excludes the window (Strict rule)."""
+    snaps = [_snap("late", mod.T0 + 100.0, ts_off=30.0)]
+    included, excluded = mod.select_groups(snaps + [_snap("ok", mod.T0 + 200.0)])
+    assert [c for c, _ in included] == ["ok"]
+    assert excluded["strict_late"] == 1
+
+
+def test_select_groups_grandfathered_exact_t0_only():
+    """Grandfathering applies strictly to start_ts == T0, not boundary-adjacent starts."""
+    t0_exact = _snap("t0_exact", mod.T0, ts_off=2.1)
+    after_t0 = _snap("after_t0", mod.T0 + 0.5, ts_off=2.5)
+    before_t0 = _snap("before_t0", mod.T0 - 0.5, ts_off=2.5)
+
+    included, excluded = mod.select_groups([t0_exact, after_t0, before_t0])
+    assert [c for c, _ in included] == ["t0_exact"]
+    assert excluded["strict_late"] == 2
+    assert excluded["pre_coverage"] == 0
+
+
+def test_select_groups_touch_insane():
+    """A window with an insane touch pair is quarantined."""
+    snaps = [_snap("wild", mod.T0 + 10.0, touch=1.64),
+             _snap("wild", mod.T0 + 11.0, touch=1.01),
+             _snap("ok", mod.T0 + 20.0)]
+    included, excluded = mod.select_groups(snaps)
+    assert [c for c, _ in included] == ["ok"]
+    assert excluded["touch_insane"] == 1
+
+
+def test_pair_cap_override_documented():
+    """1.05 leg asserts against the override, not the recorded 0.98."""
+    params = mod.build_params("book", True, 1.05)
+    assert params.pair_cost_gate == 1.05
+    mod.assert_config_mirror(params, RECORDED, "book", True, 1.05)
+    with pytest.raises(AssertionError):
+        mod.assert_config_mirror(params, RECORDED, "book", True, 0.98)
 
 
 def test_select_groups_rejects_empty():
