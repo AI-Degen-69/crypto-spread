@@ -49,13 +49,61 @@ def test_registry_cannot_name_a_field_that_does_not_exist():
         "and no test covers them")
 
 
-def test_every_raw_entry_has_the_full_six_tuple_shape():
-    """A short tuple would unpack-error only when param_spec() is first called."""
+def test_every_raw_entry_has_the_expected_tuple_shape():
+    """A short tuple would unpack-error only when param_spec() is first called.
+
+    Six elements, plus an optional seventh holding per-surface bound overrides
+    for knobs whose research and live ranges legitimately differ.
+    """
     for group, entries in BacktestParams._PARAM_GROUPS.items():
         for entry in entries:
-            assert len(entry) == 6, (
+            assert len(entry) in (6, 7), (
                 f"{group} entry {entry[0]!r} has {len(entry)} elements, need 6 "
-                "(field, label, why, unit, bounds, surfaces)")
+                "(field, label, why, unit, bounds, surfaces) or 7 with "
+                "per-surface overrides")
+            if len(entry) == 7:
+                assert isinstance(entry[6], dict), (
+                    f"{group} entry {entry[0]!r}: the 7th element must map "
+                    "surface -> (low, high)")
+                assert set(entry[6]) <= set(entry[5]), (
+                    f"{group} entry {entry[0]!r} overrides a surface it does "
+                    "not declare")
+
+
+def test_every_default_lies_inside_its_own_bounds():
+    """A default outside its advertised range is a form that rejects its own value.
+
+    Caught exactly this: `pair_cost_gate` defaults to 1.05, and copying live's
+    `max_pair_cost` range of (0.50, 1.00) onto it made the registry advertise a
+    range excluding the engine's own default — every sweep in
+    `research/sweeps/` constructs it at 1.05.
+    """
+    live = BacktestParams()
+    bad = []
+    for group in SPEC.values():
+        for name, spec in group.items():
+            bounds = spec["bounds"]
+            if bounds is None:
+                continue
+            value = getattr(live, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            low, high = bounds
+            if not (low <= value <= high):
+                bad.append((name, value, bounds))
+    assert bad == [], f"defaults outside their own bounds: {bad}"
+
+
+def test_per_surface_bounds_never_widen_the_shared_range():
+    """An override exists to tighten a surface, never to loosen it."""
+    for group in SPEC.values():
+        for name, spec in group.items():
+            base = spec["bounds"]
+            for surface, b in spec.get("surface_bounds", {}).items():
+                assert base is not None, f"{name} overrides a surface but has no base bounds"
+                assert b[0] >= base[0] and b[1] <= base[1], (
+                    f"{name}[{surface}] = {b} is wider than the shared {base}")
+                assert BacktestParams.bounds_for(name, surface) == b
 
 
 def test_every_entry_carries_what_a_surface_needs_to_render_it():
@@ -80,6 +128,26 @@ def test_registered_defaults_match_the_dataclass_defaults():
             if spec["default"] != actual:
                 drift.append((name, spec["default"], actual))
     assert drift == [], f"registry default != dataclass default: {drift}"
+
+
+def test_the_registry_does_not_claim_post_init_enforces_every_bound():
+    """`bounds` describes request validation, not dataclass construction.
+
+    Review flagged the docstring as false: twelve registry-bounded fields have
+    no `__post_init__` check, and every driver in `research/sweeps/` builds
+    `BacktestParams` directly, bypassing the API clamp. Rather than add
+    validation that would reject configurations those sweeps legitimately use
+    (`pair_cost_gate=1.05` is the dataclass default *and* the research
+    baseline), the claim was corrected. This pins that it stays corrected.
+    """
+    doc = BacktestParams.param_spec.__doc__ or ""
+    assert "NOT a claim about" in doc, (
+        "param_spec's docstring no longer states that bounds are request "
+        "validation rather than dataclass validation")
+    # And the gap it describes is real: a direct construction outside bounds
+    # still succeeds, which is exactly why the wording matters.
+    low, high = BacktestParams.spec_for("pair_cost_gate")["bounds"]
+    assert BacktestParams(pair_cost_gate=high + 1.0).pair_cost_gate == high + 1.0
 
 
 @pytest.mark.parametrize("name,low,high", [

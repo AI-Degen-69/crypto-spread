@@ -2377,37 +2377,121 @@ def test_live_config_accepts_the_re_entry_time_gate():
         LiveConfigPayload(min_requote_remaining_sec=99999.0)
 
 
-@pytest.mark.parametrize("field,payload_field", [
-    ("offset", "offset"),
-    ("quote_shares", "shares"),
-    ("entry_band", "entry_band"),
-    ("entry_delay_sec", "entry_delay_sec"),
-    ("naked_leg_timeout_pct", "naked_leg_timeout_pct"),
-    ("reentry_drift_band", "reentry_drift_band"),
-    ("min_requote_remaining_sec", "min_requote_remaining_sec"),
-])
+# Registry field -> the `LiveConfigPayload` field carrying the same knob.
+# Names differ where live and research chose different words for one thing.
+REGISTRY_TO_PAYLOAD = {
+    "offset": "offset",
+    "quote_shares": "shares",
+    "pair_cost_gate": "max_pair_cost",
+    "exit_reversal": "exit_reversal",
+    "exit_thresh_naked": "exit_thresh_naked",
+    "naked_leg_timeout_pct": "naked_leg_timeout_pct",
+    "entry_timeout_pct": "entry_timeout_pct",
+    "entry_delay_sec": "entry_delay_sec",
+    "entry_band": "entry_band",
+    "reentry_drift_band": "reentry_drift_band",
+    "min_requote_remaining_sec": "min_requote_remaining_sec",
+    "reentry_min_remaining_pct": "reentry_min_remaining_pct",
+    "max_reentries_per_window": "max_reentries_per_window",
+}
+
+
+def _payload_bounds(payload_field):
+    from server.osc_dash import LiveConfigPayload
+    meta = LiveConfigPayload.model_fields[payload_field].metadata
+    return (next((m.ge for m in meta if hasattr(m, "ge")), None),
+            next((m.le for m in meta if hasattr(m, "le")), None))
+
+
+def test_every_cockpit_knob_is_mapped_to_a_payload_field():
+    """The mapping must be exhaustive, or a knob escapes the bounds check.
+
+    The first version of the bounds test listed seven fields by hand. Three
+    mismatches sat in the four it did not list — `exit_reversal`,
+    `pair_cost_gate` and `exit_thresh_naked` — and a reviewer found them, not
+    this suite. Derive the list from the registry so it cannot go stale.
+    """
+    from backtest.engine import BacktestParams
+    cockpit = {
+        name
+        for group in BacktestParams.param_spec().values()
+        for name, v in group.items()
+        if "cockpit" in v["surfaces"]
+    }
+    # `exit_thresh_by_slug` is a dict fanned out per series, not one bounded
+    # scalar; the two booleans have no numeric range to compare. Neither has a
+    # payload field this check could be applied to.
+    for no_range in ("exit_thresh_by_slug", "stop_loss_enabled", "enable_leg_chase"):
+        cockpit.discard(no_range)
+    unmapped = sorted(cockpit - set(REGISTRY_TO_PAYLOAD))
+    assert unmapped == [], (
+        f"these knobs are offered in the Cockpit but are not bounds-checked "
+        f"against the live payload: {unmapped}")
+
+
+@pytest.mark.parametrize("field,payload_field", sorted(REGISTRY_TO_PAYLOAD.items()))
 def test_registry_bounds_match_what_the_live_payload_enforces(field, payload_field):
     """A registry bound looser than the live one makes the UI lie.
 
     Found in a live DOM read: the registry advertised `quote_shares` as
     (1, 100000), so the Cockpit rendered `min="1"` over an engine that clamps
-    to 5 — the form accepted a value it would silently discard. The registry
-    is the source of truth for the *label*; it must not contradict the
-    validation the request will actually meet.
+    to 5 — the form accepted a value it would silently discard. Review then
+    found three more the same way. `applyParamSpec()` overwrites each input's
+    `min`/`max` from these bounds, so a loose bound is not cosmetic: it is a
+    form that accepts what the request will reject.
     """
-    from server.osc_dash import LiveConfigPayload
     from backtest.engine import BacktestParams
 
-    low, high = BacktestParams.spec_for(field)["bounds"]
-    meta = LiveConfigPayload.model_fields[payload_field].metadata
-    live_low = next((m.ge for m in meta if hasattr(m, "ge")), None)
-    live_high = next((m.le for m in meta if hasattr(m, "le")), None)
+    # The Cockpit's own range, which is what `applyParamSpec()` renders there
+    # and therefore what the operator's form will accept.
+    low, high = BacktestParams.bounds_for(field, "cockpit")
+    live_low, live_high = _payload_bounds(payload_field)
     if live_low is not None:
         assert low >= live_low, (
             f"{field}: registry allows {low}, live rejects below {live_low}")
     if live_high is not None:
         assert high <= live_high, (
             f"{field}: registry allows {high}, live rejects above {live_high}")
+
+
+def test_every_knob_the_cockpit_posts_is_declared_on_the_payload():
+    """Pydantic's `extra="ignore"` turns an undeclared field into a silent no-op.
+
+    Found in review: the Cockpit posted `reentry_min_remaining_pct` and
+    `max_reentries_per_window`, both dropped before the handler ran. The
+    request returned 200 and the bot kept its old re-entry limits while the
+    form showed the new ones.
+    """
+    import re
+    from server.osc_dash import LiveConfigPayload
+
+    html = client.get("/").text
+    block = re.search(r"const numeric = \{(.*?)\};", html, re.S)
+    assert block, "the Cockpit's numeric field map was not found in the page"
+    posted = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+    posted |= {"stop_loss_enabled", "enable_leg_chase"}
+    undeclared = sorted(posted - set(LiveConfigPayload.model_fields))
+    assert undeclared == [], (
+        f"the Cockpit posts these and the payload silently drops them: {undeclared}")
+
+
+def test_every_declared_payload_knob_reaches_the_engine():
+    """A field declared but never forwarded fails just as silently."""
+    import inspect
+    import re
+    from server.osc_dash import LiveConfigPayload
+    import strategy.live_trader as lt
+
+    src = inspect.getsource(__import__("server.osc_dash", fromlist=["api_live_config"]).api_live_config)
+    forwarded = set(re.findall(r"(\w+)=payload\.\w+", src))
+    accepted = set(inspect.signature(lt.LiveTraderEngine.update_config).parameters)
+    for name in ("reentry_min_remaining_pct", "max_reentries_per_window",
+                 "min_requote_remaining_sec"):
+        assert name in LiveConfigPayload.model_fields, f"{name} not declared"
+        assert name in accepted, f"update_config does not accept {name}"
+        assert name in forwarded, (
+            f"{name} is declared on the payload but never passed to "
+            "update_config — the request succeeds and changes nothing")
 
 
 def test_no_input_advertises_a_range_that_contradicts_the_registry():

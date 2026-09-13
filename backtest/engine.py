@@ -22,6 +22,7 @@ can show the gap.
 from __future__ import annotations
 import gzip
 import hashlib
+from functools import lru_cache
 import json
 import math
 from collections import defaultdict
@@ -190,9 +191,11 @@ class BacktestParams:
     # Separates operator-controlled (live-replicable) knobs from execution
     # assumptions and internal window policy so the UI and API can render them
     # in distinct sections without touching any field names or the hash contract.
-    # Each group lists (field_name, label, why, unit, bounds, surfaces).
-    # `bounds` is the (low, high) pair `__post_init__` enforces, or None for a
-    # field with no numeric range; `surfaces` names which tabs may render it.
+    # Each group lists (field_name, label, why, unit, bounds, surfaces) and
+    # optionally a 7th element: per-surface bound overrides.
+    # `bounds` is the (low, high) range the UI renders and the API clamps to —
+    # not a claim about `__post_init__`, which validates only a subset (see
+    # `param_spec`). `surfaces` names which tabs may render the knob.
     # Unknown keys silently drop so new fields don't break the grouping on a
     # missing-entry error.
     #
@@ -206,8 +209,13 @@ class BacktestParams:
              "$", (0.001, 0.49), ("backtest", "cockpit")),
             ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
              "shares", (0.0, 100000.0), ("backtest",)),
+            # Research sweeps a gate that may sit above 1.00 to disable it —
+            # the dataclass default is 1.05 — while the live engine caps
+            # `max_pair_cost` at 1.00. One global range cannot be honest about
+            # both, so the Cockpit gets the live range and the Backtest keeps
+            # the research one.
             ("pair_cost_gate", "Max Pair Cost ($)", "Your cost threshold before walking away",
-             "$", (0.0, 2.0), ("backtest", "cockpit")),
+             "$", (0.0, 2.0), ("backtest", "cockpit"), {"cockpit": (0.50, 1.00)}),
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
              "shares", (5, 10000), ("backtest", "cockpit")),
             ("max_start_delay_sec", "Max Start Delay (s)", "You decide which windows are fresh enough to enter",
@@ -227,7 +235,7 @@ class BacktestParams:
             ("enable_leg_chase", "Leg Chase Enabled", "After one leg fills, re-anchor the other toward its ask within the pair-cost cap",
              "bool", None, ("backtest", "cockpit")),
             ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
-             "$", (0.0, 0.50), ("backtest", "cockpit")),
+             "$", (0.001, 0.50), ("backtest", "cockpit")),
         ],
         "execution_assumptions": [
             ("fill_model", "Fill Model", "Not directly settable live: the book decides fills",
@@ -289,6 +297,7 @@ class BacktestParams:
         return out
 
     @classmethod
+    @lru_cache(maxsize=1)
     def param_spec(cls) -> dict[str, dict[str, dict[str, Any]]]:
         """The full definition of every knob, grouped, for UIs and validators.
 
@@ -298,25 +307,50 @@ class BacktestParams:
         from this, so a new field reaches every surface it declares and a
         label exists in exactly one place.
 
-        `bounds` is the `(low, high)` pair `__post_init__` enforces, or None
-        for a non-numeric field. `surfaces` says which tabs may show it: an
-        execution assumption like `fill_model` is not something an operator
-        sets on a live order, so it is backtest-only by design.
+        `bounds` is the `(low, high)` range the UI renders and the API clamps
+        to, or None for a non-numeric field. It is NOT a claim about
+        `__post_init__`: that validates a subset (the fractions and the two
+        patient-maker knobs) and leaves the rest unchecked, so a caller that
+        builds `BacktestParams` directly — every driver in `research/sweeps/`
+        does — can still construct a value outside these bounds. The registry
+        constrains what a *request* may ask for, not what the dataclass will
+        accept. `surfaces` says which tabs may show a knob: an execution
+        assumption like `fill_model` is not something an operator sets on a
+        live order, so it is backtest-only by design.
         """
         defaults = asdict(cls())
         out: dict[str, dict[str, dict[str, Any]]] = {}
         for group_name, entries in cls._PARAM_GROUPS.items():
             grp: dict[str, dict[str, Any]] = {}
-            for fname, label, why, unit, bounds, surfaces in entries:
+            for entry in entries:
+                fname, label, why, unit, bounds, surfaces = entry[:6]
                 if fname not in defaults:
                     continue
                 grp[fname] = {
                     "label": label, "why": why, "unit": unit,
                     "default": defaults[fname], "bounds": bounds,
                     "surfaces": tuple(surfaces),
+                    # Per-surface overrides where research and live legitimately
+                    # differ; a surface with no entry uses `bounds`.
+                    "surface_bounds": dict(entry[6]) if len(entry) > 6 else {},
                 }
             out[group_name] = grp
         return out
+
+    @classmethod
+    def bounds_for(cls, name: str, surface: str = "") -> "tuple[float, float] | None":
+        """Bounds for one knob on one surface, falling back to the shared pair.
+
+        Issue #164: a single global range cannot describe a knob whose research
+        and live meanings differ — `pair_cost_gate` sweeps above 1.00 to switch
+        the gate off, while live `max_pair_cost` stops at 1.00. Rendering one
+        range on both surfaces either blocks a legitimate sweep or shows the
+        operator a value the request will reject.
+        """
+        spec = cls.spec_for(name)
+        if surface and surface in spec.get("surface_bounds", {}):
+            return spec["surface_bounds"][surface]
+        return spec["bounds"]
 
     @classmethod
     def spec_for(cls, name: str) -> dict[str, Any]:
@@ -769,22 +803,30 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 and not pair_captured and not exit_taken
                 and resting_up is not None and resting_down is not None):
             _cap = params.pair_cost_gate
+            # No ask means nothing to anchor to, and live
+            # (`live_trader.py:4406/4421`) wraps its whole chase in
+            # `if <leg>_ask is not None`. Advancing to the cap ceiling on a
+            # blind tick would rest the leg where live never would — and under
+            # `fill_model="tape"`, which needs no ask to fill, manufacture a
+            # fill the live engine could not have produced.
             if filled_up:
-                _entry = entry_price_up if entry_price_up is not None else resting_up
-                _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
                 _ask = db.get("best_ask")
-                _target = min(_ask, _max_bid) if _ask is not None else _max_bid
-                if _target > resting_down:
-                    resting_down = round(min(0.99, max(0.01, _target)), 3)
-                    chased_leg = "down"
+                if _ask is not None:
+                    _entry = entry_price_up if entry_price_up is not None else resting_up
+                    _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                    _target = min(_ask, _max_bid)
+                    if _target > resting_down:
+                        resting_down = round(min(0.99, max(0.01, _target)), 3)
+                        chased_leg = "down"
             else:
-                _entry = entry_price_down if entry_price_down is not None else resting_down
-                _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
                 _ask = ub.get("best_ask")
-                _target = min(_ask, _max_bid) if _ask is not None else _max_bid
-                if _target > resting_up:
-                    resting_up = round(min(0.99, max(0.01, _target)), 3)
-                    chased_leg = "up"
+                if _ask is not None:
+                    _entry = entry_price_down if entry_price_down is not None else resting_down
+                    _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                    _target = min(_ask, _max_bid)
+                    if _target > resting_up:
+                        resting_up = round(min(0.99, max(0.01, _target)), 3)
+                        chased_leg = "up"
 
         if not queue_ok or not pair_cost_ok:
             # An already-filled position must still be eligible to exit even

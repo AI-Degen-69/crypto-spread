@@ -552,9 +552,27 @@ def api_params_spec():
     from backtest.engine import BacktestParams
 
     spec = BacktestParams.param_spec()
+
+    def _one(name: str, v: dict) -> dict:
+        """Serialize one knob, resolving its bounds for every surface it has.
+
+        Each tab renders the range that surface actually enforces (issue #164
+        review): research sweeps `pair_cost_gate` above 1.00 to disable the
+        gate, while live caps `max_pair_cost` at 1.00.
+        """
+        return {
+            **v,
+            "surfaces": list(v["surfaces"]),
+            "bounds_by_surface": {
+                s: list(BacktestParams.bounds_for(name, s))
+                for s in v["surfaces"]
+                if BacktestParams.bounds_for(name, s) is not None
+            },
+        }
+
     return {
         "groups": {
-            g: {n: {**v, "surfaces": list(v["surfaces"])} for n, v in entries.items()}
+            g: {n: _one(n, v) for n, v in entries.items()}
             for g, entries in spec.items()
         },
         "by_surface": {
@@ -621,6 +639,15 @@ def api_backtest(
     entry_band: float = 0.0,
     exit_thresh_naked: float = 0.0,
     naked_leg_timeout_pct: float = 0.0,
+    # Issue #164 review: these six were rendered, labelled and bounded from the
+    # registry but never reached the engine, so a researcher tuning the taker
+    # fee or the re-entry caps got results computed with the defaults instead.
+    max_start_elapsed_pct: float = 0.10,
+    reentry_min_remaining_pct: float = 0.30,
+    max_reentries_per_window: int = 1,
+    taker_fee_rate: float = 0.07,
+    tick_size: float = 0.001,
+    min_quote_shares: int = 5,
     stop_loss_enabled: bool = True,
     enable_leg_chase: bool = False,
     limit_windows: int = 0,
@@ -675,7 +702,7 @@ def api_backtest(
         pair_cost_gate=_clamp_to_spec("pair_cost_gate", pair_cost),
         exit_thresh_by_slug=exit_thresh,
         exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
-        quote_shares=size,
+        quote_shares=_clamp_to_spec("quote_shares", size),
         fill_model=fill_model,
         merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
         max_start_delay_sec=_clamp_to_spec("max_start_delay_sec", max_start_delay),
@@ -690,6 +717,14 @@ def api_backtest(
             "naked_leg_timeout_pct", naked_leg_timeout_pct),
         stop_loss_enabled=bool(stop_loss_enabled),
         enable_leg_chase=bool(enable_leg_chase),
+        max_start_elapsed_pct=_clamp_to_spec("max_start_elapsed_pct", max_start_elapsed_pct),
+        reentry_min_remaining_pct=_clamp_to_spec(
+            "reentry_min_remaining_pct", reentry_min_remaining_pct),
+        max_reentries_per_window=_clamp_to_spec(
+            "max_reentries_per_window", max_reentries_per_window),
+        taker_fee_rate=_clamp_to_spec("taker_fee_rate", taker_fee_rate),
+        tick_size=_clamp_to_spec("tick_size", tick_size),
+        min_quote_shares=_clamp_to_spec("min_quote_shares", min_quote_shares),
     )
 
     if not TICKS_DIR.exists():
@@ -1315,7 +1350,15 @@ class LiveConfigPayload(BaseModel):
     # re-entry time gate was unreachable from the dashboard. Bounds match the
     # registry entry the Backtest tab renders from.
     min_requote_remaining_sec: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
-    exit_thresh_naked: Optional[float] = Field(default=None, ge=0.001, le=0.50)
+    # Issue #164 review: the Cockpit posts these two, and pydantic's default
+    # `extra="ignore"` dropped them before the handler ran — the request
+    # returned 200 with the bot still on its old re-entry limits while the form
+    # showed what the operator thought they had set.
+    reentry_min_remaining_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_reentries_per_window: Optional[int] = Field(default=None, ge=0, le=100)
+    # 0 = off, matching `max(0.0, ...)` in the engine's own clamp; a 0.001
+    # floor here made the naked stop impossible to switch back off.
+    exit_thresh_naked: Optional[float] = Field(default=None, ge=0.0, le=0.50)
     naked_leg_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     reentry_require_pairable: Optional[bool] = None
     # Issue #137: patient undecided-band maker knobs. entry_delay_sec has no
@@ -1442,6 +1485,8 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             exit_reversal=payload.exit_reversal,
             reentry_drift_band=payload.reentry_drift_band,
             min_requote_remaining_sec=payload.min_requote_remaining_sec,
+            reentry_min_remaining_pct=payload.reentry_min_remaining_pct,
+            max_reentries_per_window=payload.max_reentries_per_window,
             exit_thresh_naked=payload.exit_thresh_naked,
             naked_leg_timeout_pct=payload.naked_leg_timeout_pct,
             reentry_require_pairable=payload.reentry_require_pairable,
@@ -3509,9 +3554,17 @@ async function applyParamSpec(root){
     const spec = paramSpecFor(el.getAttribute('data-param'));
     if(!spec) return;
     if(spec.why) el.title = spec.why;
-    if(Array.isArray(spec.bounds) && el.tagName === 'INPUT' && el.type === 'number'){
-      el.min = String(spec.bounds[0]);
-      el.max = String(spec.bounds[1]);
+    // Per-surface bounds: an id prefix tells us which tab this control is on,
+    // and each tab gets the range it actually enforces. Falling back to the
+    // shared pair would have widened the Cockpit's pair-cost input to the
+    // research range and shown values the live API rejects with a 422.
+    const surface = el.id.startsWith('cockpit') ? 'cockpit'
+                  : el.id.startsWith('bt') ? 'backtest' : '';
+    const b = (spec.bounds_by_surface && spec.bounds_by_surface[surface])
+              || spec.bounds;
+    if(Array.isArray(b) && el.tagName === 'INPUT' && el.type === 'number'){
+      el.min = String(b[0]);
+      el.max = String(b[1]);
     }
   });
 }
@@ -3822,13 +3875,20 @@ async function runBacktest(fileOverride){
     const nakedTimeout = getVal('btNakedTimeout', 0.0);
     const stopLoss = $('btStopLossEnabled') ? $('btStopLossEnabled').value : '1';
     const legChase = $('btLegChase') ? $('btLegChase').value : '0';
+    // Rendered from the registry, so they must actually reach the engine.
+    const maxStartElapsed = getVal('btMaxStartElapsed', 0.10);
+    const reentryMinPct = getVal('btReentryMinPct', 0.30);
+    const maxReentries = getVal('btMaxReentries', 1);
+    const takerFee = getVal('btTakerFee', 0.07);
+    const tickSize = getVal('btTickSize', 0.001);
+    const minShares = getVal('btMinShares', 5);
 
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}&max_start_elapsed_pct=${maxStartElapsed}&reentry_min_remaining_pct=${reentryMinPct}&max_reentries_per_window=${maxReentries}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }

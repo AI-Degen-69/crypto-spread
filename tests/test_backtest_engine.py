@@ -1214,3 +1214,55 @@ def test_the_reversal_guard_is_unchanged_when_the_naked_stop_is_not_tightened():
     assert w.exit_taken is False
     tight = _params(exit_thresh_naked=0.05)   # equal to paired: falls back
     assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
+
+
+def test_the_chase_does_not_move_a_quote_with_no_ask_to_anchor_to():
+    """Live wraps its whole chase in `if <leg>_ask is not None`.
+
+    Without that gate the backtest advanced the resting price to the pair-cost
+    ceiling on a tick where the book showed no ask at all — resting the leg
+    where the live engine never would, and under `fill_model="tape"` (which
+    needs no ask to fill) manufacturing a fill live could not have produced.
+    """
+    snaps = _chaseable_window(dn_ask=0.49, dn_ask_after=0.70)
+    for s in snaps[2:]:                      # blind the DOWN book after the fill
+        s["down_book"]["best_ask"] = None
+        s["down_book"]["asks"] = {}
+    w = _simulate_window(snaps, _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    assert w.filled_up is True, "fixture never entered"
+    assert w.chased_leg == "", (
+        f"the chase moved the DOWN leg to {w.chased_resting} with no ask on "
+        "the book — live would not have quoted at all")
+
+
+def test_the_chase_resumes_once_an_ask_reappears():
+    """The gate must skip the blind tick, not disable the chase for the window."""
+    snaps = _chaseable_window(dn_ask=0.49, dn_ask_after=0.70)
+    for s in snaps[2:5]:
+        s["down_book"]["best_ask"] = None
+        s["down_book"]["asks"] = {}
+    w = _simulate_window(snaps, _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    assert w.chased_leg == "down", "the chase never resumed after the ask returned"
+    assert w.chased_resting is not None
+
+
+def test_nothing_closes_a_naked_leg_when_both_stops_are_off():
+    """`stop_loss_enabled=False` with no timeout is newly reachable.
+
+    Neither stop can fire, so the leg must still be marked to the final book
+    rather than silently contributing nothing.
+    """
+    w = _simulate_window(_drift_window(),
+                         _params(stop_loss_enabled=False, naked_leg_timeout_pct=0.0))
+    assert w.filled_up is True and w.filled_down is False
+    assert w.exit_taken is False
+    assert w.settlement_mid is not None, (
+        "a naked leg with both stops disabled was never marked to settlement")
+    assert w.pnl_cents != 0.0, "the held leg contributed no P&L at all"
+
+
+def test_a_naked_stop_equal_to_the_paired_stop_falls_back_to_it():
+    """The `>=` boundary, not just the strictly-looser case."""
+    p = _params(exit_thresh_naked=0.05,
+                exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
+    assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
