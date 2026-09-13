@@ -459,17 +459,31 @@ def test_session_reconnects_when_the_keepalive_dies():
 
 
 def test_session_reconnects_when_pong_goes_overdue():
-    """A venue that stops answering is a dead feed even if the socket is open."""
-    connector = FakeConnector([FakeWS([]), FakeWS([])])
+    """A venue that answers once, then stops, is a dead feed even if the socket stays open.
+
+    Regression note (issue #172): this used to preset `last_pong_ts` to an hour
+    ago *before* the first connection even happened, then assert a reconnect.
+    That is indistinguishable, from `run_direct()`'s point of view, from a
+    stale timestamp left over from a previous dead session — and asserting on
+    it papered over a real deadlock: `_pong_expired()` is checked before a new
+    session's own ping/pong cycle has run at all, so honoring a pre-existing
+    stale timestamp at connect time meant a reconnect gap wider than
+    `pong_timeout` made every future session self-abort immediately, forever.
+    `run_direct()` now resets the deadline on every new connection, so this
+    test instead earns its overdue PONG within a live session: the venue
+    answers once for real, then goes quiet.
+    """
+    first = FakeWS(["PONG"])   # answers once, then falls silent
+    second = FakeWS(["PONG"])
+    connector = FakeConnector([first, second])
     client = CLOBMarketWSClient(token_ids=["tok"], connect_factory=connector,
-                                ping_interval=5.0, recv_timeout=0.02,
+                                ping_interval=0.05, recv_timeout=0.02,
                                 backoff_base=0.01, backoff_max=0.02)
-    client.last_pong_ts = time.time() - 3600.0  # answered once, long ago
 
     async def drive():
         task = asyncio.create_task(client.run_direct())
         for _ in range(300):
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)
             if len(connector.calls) >= 2:
                 break
         client.stop()

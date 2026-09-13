@@ -799,6 +799,13 @@ class CLOBMarketWSClient:
                     self.is_connected = True
                     backoff = self.backoff_base
                     self.consecutive_failures = 0
+                    # A stale last_pong_ts from the dead session must not carry
+                    # into this one: _pong_expired() is checked before the new
+                    # session's own ping/pong cycle has had any chance to run,
+                    # so a reconnect gap wider than pong_timeout (e.g. several
+                    # backed-off retries) would otherwise make every future
+                    # session self-abort on its first loop iteration forever.
+                    self.last_pong_ts = 0.0
                     log.info("CLOB market WS connected: %d tokens", len(self.token_ids))
                     clean = await self._session(ws)
             except asyncio.CancelledError:

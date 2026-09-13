@@ -491,3 +491,179 @@ def test_unified_stream_bridge_edge_cases_and_disconnection():
     assert disc_env["price"] == 80050.0  # Fallback to RTDS price
     assert disc_env["actual_price"] is None  # Does not claim stale disconnected price as actual
 
+
+# --------------------------------------------------------------------------
+# Issue #172 — live engine shares the hardened run_direct() transport
+# --------------------------------------------------------------------------
+
+class _FakeWS:
+    """Scripted websocket: replays `frames`, then blocks until stopped.
+
+    A half-open socket never raises and never sends another frame after its
+    scripted list runs out — the only way `run_direct()` can notice it has
+    gone dead is the PONG watchdog, not a connection error.
+    """
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.sent = []
+        self.closed = False
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+    async def recv(self):
+        if self.frames:
+            return self.frames.pop(0)
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    async def close(self):
+        self.closed = True
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        self.closed = True
+        return False
+
+
+class _FakeConnector:
+    """Callable standing in for `websockets.connect`; hands out fake sockets."""
+
+    def __init__(self, sockets):
+        self.sockets = list(sockets)
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if self.sockets:
+            return self.sockets.pop(0)
+        return _FakeWS([])
+
+
+def test_clob_market_ws_pong_overdue_forces_reconnect_not_a_frozen_book():
+    """A half-open socket (PONG stops arriving) reconnects instead of going quiet.
+
+    `is_connected` staying True while updates silently stop is exactly the
+    failure mode issue #172 flags for the un-hardened `run()` transport;
+    `run_direct()` must catch it via `_pong_expired()` rather than waiting on
+    a socket error that a half-open TCP connection will never raise.
+    """
+    first = _FakeWS(["PONG"])   # answers once, then goes silent forever
+    second = _FakeWS(["PONG"])
+    connector = _FakeConnector([first, second])
+    client = CLOBMarketWSClient(
+        token_ids=["tok_up"], connect_factory=connector,
+        ping_interval=0.1, recv_timeout=0.05,
+        backoff_base=0.05, backoff_max=0.1,
+    )
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        # Coarse sleeps: sub-10ms polling is unreliable on some event-loop/OS
+        # timer combinations and can make this assertion flaky.
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if len(connector.calls) >= 2:
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(drive())
+
+    assert len(connector.calls) >= 2, "PONG-overdue socket was never abandoned"
+    assert client.reconnect_count >= 1
+
+
+def test_stale_pong_from_a_dead_session_does_not_poison_the_next_one():
+    """A reconnect must not self-abort on a *previous* session's stale PONG.
+
+    `last_pong_ts` is a client-level field that outlives any one session, and
+    `_pong_expired()` is checked at the top of the loop before a fresh
+    connection's own ping/pong cycle has had any chance to run. Before this
+    fix, a reconnect gap wider than `pong_timeout` (very plausible: default
+    `backoff_max` and `pong_timeout` are both 30s, so ~5 backed-off retries
+    already exceed it) meant every future session bounced on its first loop
+    iteration forever, with no recovery short of a process restart.
+    """
+    ws = _FakeWS(["PONG", json.dumps([{
+        "event_type": "book", "asset_id": "tok_up",
+        "bids": [{"price": "0.45", "size": "10"}],
+        "asks": [{"price": "0.47", "size": "8"}],
+    }])])
+    connector = _FakeConnector([ws])
+    client = CLOBMarketWSClient(
+        token_ids=["tok_up"], connect_factory=connector,
+        ping_interval=0.05, recv_timeout=0.05,
+        backoff_base=0.05, backoff_max=0.05,
+    )
+    # As if a long-dead earlier session's PONG deadline had already lapsed.
+    client.last_pong_ts = time.time() - (client.pong_timeout * 10)
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if client.books.get("tok_up"):
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(drive())
+
+    assert client.books.get("tok_up") is not None, (
+        "session self-aborted on a stale pong before it could process any frame"
+    )
+    # It should not have needed to bounce and reconnect to get there.
+    assert len(connector.calls) == 1
+
+
+def test_unified_stream_bridge_drives_run_direct_on_its_shared_loop():
+    """`run_direct()` must behave correctly as one task among several on the
+    bridge's shared asyncio loop, not only on the collector's dedicated one.
+
+    Exercises the real `start()` -> `_worker_main()` path (the bridge's own
+    event loop, in its own thread, running clob/binance/rtds/user tasks
+    together) and proves: the hardened transport connects, a PONG-overdue
+    socket triggers a reconnect, and book updates still reach the bridge's
+    broadcast callback.
+    """
+    async def _mock_bnb(self):
+        while not self._stop_event.is_set():
+            await asyncio.sleep(0.05)
+
+    first = _FakeWS(["PONG"])            # goes half-open after the one PONG
+    second = _FakeWS([json.dumps([{
+        "event_type": "book", "asset_id": "tok_up",
+        "bids": [{"price": "0.45", "size": "10"}],
+        "asks": [{"price": "0.47", "size": "8"}],
+    }]), "PONG"])
+    connector = _FakeConnector([first, second])
+
+    book_updates = []
+    bridge = UnifiedStreamBridge(symbols=["btcusdt"], on_book_update=lambda tid, b, a: book_updates.append((tid, b, a)))
+    bridge.clob._connect_factory = connector
+    bridge.clob.ping_interval = 0.1
+    bridge.clob.pong_timeout = 0.3
+    bridge.clob.recv_timeout = 0.05
+    bridge.clob.backoff_base = 0.05
+    bridge.clob.backoff_max = 0.1
+    bridge.clob.update_tokens(["tok_up"])
+
+    with patch.object(RTDSStreamClient, "_poll_bnb_fallback", _mock_bnb):
+        bridge.start()
+        try:
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                if len(connector.calls) >= 2 and book_updates:
+                    break
+                time.sleep(0.05)
+        finally:
+            bridge.stop()
+
+    assert len(connector.calls) >= 2, "bridge's shared loop never drove a reconnect"
+    assert bridge.clob.reconnect_count >= 1
+    assert book_updates and book_updates[-1][0] == "tok_up"
+
