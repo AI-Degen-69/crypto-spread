@@ -182,7 +182,7 @@ def select_groups(snaps: list[dict]) -> tuple[list[tuple[str, list[dict]]], dict
             excluded["pre_coverage"] += 1
             continue
         first_delay = float(group[0].get("ts", 0.0) or 0.0) - start_ts
-        grandfathered = abs(start_ts - T0) <= START_TOL_SEC
+        grandfathered = start_ts == T0
         if first_delay > STRICT_START_DELAY_SEC and not grandfathered:
             excluded["strict_late"] += 1
             continue

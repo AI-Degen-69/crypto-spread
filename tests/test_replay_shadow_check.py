@@ -93,6 +93,18 @@ def test_select_groups_strict_late():
     assert excluded["strict_late"] == 1
 
 
+def test_select_groups_grandfathered_exact_t0_only():
+    """Grandfathering applies strictly to start_ts == T0, not boundary-adjacent starts."""
+    t0_exact = _snap("t0_exact", mod.T0, ts_off=2.1)
+    after_t0 = _snap("after_t0", mod.T0 + 0.5, ts_off=2.5)
+    before_t0 = _snap("before_t0", mod.T0 - 0.5, ts_off=2.5)
+
+    included, excluded = mod.select_groups([t0_exact, after_t0, before_t0])
+    assert [c for c, _ in included] == ["t0_exact"]
+    assert excluded["strict_late"] == 2
+    assert excluded["pre_coverage"] == 0
+
+
 def test_select_groups_touch_insane():
     """A window with an insane touch pair is quarantined."""
     snaps = [_snap("wild", mod.T0 + 10.0, touch=1.64),
