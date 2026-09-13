@@ -110,6 +110,21 @@ FILL_RATIO_FLAG_THRESHOLD = 10.0
 FILL_PRICE_TICK_TOL = 0.001
 TAPE_FETCH_TIMEOUT = (3.05, 5.0)
 
+# Socket tape ledger (issue #173). The REST data-api tape that `printed_size`
+# was built from saw ~1.4% of prints (#165), so the sidecar's numerator — and
+# with it `fill_ratio` — is biased low by construction. The socket already
+# delivers those prints to `on_ws_trade`; these knobs decide when its ledger is
+# trusted for a leg, mirroring `ws_leg_authoritative` in the collector
+# (`scripts/collect_ticks.py`): connected, subscribed long enough to have
+# received the snapshot, and printing recently enough to be alive.
+WS_TAPE_WARMUP_SEC = 5.0
+WS_TAPE_AUTHORITY_HORIZON_SEC = 90.0
+# One window's prints at one price level. A cap is needed because the ledger is
+# only trimmed by window rollover, and a hot market can print continuously; the
+# oldest entries are dropped first, which biases toward undercounting rather
+# than toward a silently unbounded list.
+WS_TAPE_LEDGER_MAX = 4000
+
 
 def _parse_print_ts(raw: Any) -> Optional[float]:
     """Normalize a data-api trade timestamp to epoch seconds, or None."""
@@ -144,12 +159,54 @@ def _parse_print_ts(raw: Any) -> Optional[float]:
     return None
 
 
+def _sum_ws_prints_at_price(ledger: Any, price: float, since_ts: float) -> float:
+    """Sum socket-printed size at ~= `price` with ts >= `since_ts`.
+
+    Issue #173: the same queue-burn numerator as `_sum_prints_at_price`, over
+    the socket ledger instead of the REST rows. No token filter is needed — the
+    ledger is already per leg — but the price tolerance and the `since_ts`
+    cutoff must match exactly, or a socket-sourced `fill_ratio` would not be
+    comparable to a REST-sourced one. Malformed entries are skipped, never
+    raised.
+    """
+    total = 0.0
+    if not isinstance(ledger, (list, tuple)):
+        return total
+    for entry in ledger:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        p, size, ts = entry
+        try:
+            p = float(p)
+            size = float(size)
+            ts = float(ts)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        # NaN fails every comparison, so the tolerance and sign checks below
+        # would both wave it through and one poisoned entry would turn the
+        # whole window's `printed_size` — and the `fill_ratio` built from it —
+        # into NaN. Infinities would swamp it just as badly.
+        if not (math.isfinite(p) and math.isfinite(size) and math.isfinite(ts)):
+            continue
+        if abs(p - price) > FILL_PRICE_TICK_TOL:
+            continue
+        if ts < since_ts:
+            continue
+        if size < 0:
+            continue
+        total += size
+    return total
+
+
 def _sum_prints_at_price(rows: Any, token: str, price: float,
                          since_ts: float) -> float:
     """Sum printed size at ~= `price` for `token` with ts >= `since_ts`.
 
     Issue #138: the queue-burn numerator. Tolerates the venue tick
-    (`FILL_PRICE_TICK_TOL`); malformed rows are skipped, never raised.
+    (`FILL_PRICE_TICK_TOL`); malformed rows are skipped, never raised. A
+    non-finite price or size is malformed too (issue #173): NaN fails every
+    comparison below, so it would pass both the tolerance and the sign check
+    and poison the sum for the whole window.
     """
     total = 0.0
     if not isinstance(rows, list):
@@ -163,6 +220,8 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
             p = float(t.get("price"))
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(p):
+            continue
         if abs(p - price) > FILL_PRICE_TICK_TOL:
             continue
         ts = _parse_print_ts(t.get("timestamp"))
@@ -172,7 +231,7 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
             size = float(t.get("size") or 0)
         except (TypeError, ValueError):
             continue
-        if size < 0:
+        if not math.isfinite(size) or size < 0:
             continue
         total += size
     return total
@@ -210,8 +269,16 @@ def _build_fill_record(*, ts: float, slug: str, market_slug: str,
                        queue_ahead: Optional[float], printed_size: Optional[float],
                        filled_size: float, window_elapsed_sec: float,
                        mid_at_fill: Optional[float],
-                       resting_pair_cost: Optional[float]) -> Dict[str, Any]:
-    """Pure record math for one entry fill (issue #138)."""
+                       resting_pair_cost: Optional[float],
+                       tape_source: str = "rest") -> Dict[str, Any]:
+    """Pure record math for one entry fill (issue #138).
+
+    `tape_source` names which tape produced `printed_size` — `"ws"`, `"rest"`,
+    or `"none"` when neither could answer (issue #173). It is never a blend:
+    the #138 analysis has to be able to stratify, because the REST tape
+    undercounts by roughly two orders of magnitude and mixing the two would
+    make `fill_ratio` mean nothing in particular.
+    """
     ratio: Optional[float] = None
     if queue_ahead is not None and printed_size is not None:
         ratio = printed_size / max(queue_ahead, 1.0)
@@ -226,6 +293,7 @@ def _build_fill_record(*, ts: float, slug: str, market_slug: str,
         "fill_price": fill_price,
         "queue_ahead_at_rest": queue_ahead,
         "printed_size_at_price_since_rest": printed_size,
+        "tape_source": tape_source,
         "filled_size": filled_size,
         "fill_ratio": ratio,
         "ratio_flagged": bool(ratio is not None and ratio > FILL_RATIO_FLAG_THRESHOLD),
@@ -633,6 +701,17 @@ class MarketLiveState:
     # Pending WS tape prints per window (consumed next tick or instantly)
     pending_ws_trades_up: List[Dict[str, Any]] = field(default_factory=list)
     pending_ws_trades_down: List[Dict[str, Any]] = field(default_factory=list)
+    # Socket tape ledger per leg (issue #173): `(price, size, ts)` for every
+    # print this window, kept so the fill sidecar can compute `printed_size`
+    # from the socket instead of the starved REST tape. Distinct from
+    # `pending_ws_trades_*`, which the tick loop drains and discards — this one
+    # must survive until a fill claims its telemetry line, so it is cleared
+    # only on window reset.
+    ws_tape_up: List[Tuple[float, float, float]] = field(default_factory=list)
+    ws_tape_down: List[Tuple[float, float, float]] = field(default_factory=list)
+    # Last socket print per leg, for the authority horizon.
+    ws_last_print_ts_up: Optional[float] = None
+    ws_last_print_ts_down: Optional[float] = None
 
     # Latched book prices for expiry valuation & boundary resilience (issue #160)
     last_valid_up_bid: Optional[float] = None
@@ -987,6 +1066,15 @@ class LiveTraderEngine:
         # How long a leg's WS book may live before REST overwrites it
         self.ws_book_max_age_sec: float = 2.5
         self._book_reconcile_lock = threading.RLock()
+        # When each token was first subscribed on the socket (issue #173).
+        # A token that has only just been added has not received its snapshot
+        # yet, so an empty ledger for it means "too early to tell", not "no
+        # volume printed" — and the difference decides whether the sidecar
+        # trusts the socket or falls back to REST.
+        self._ws_token_ready_ts: Dict[str, float] = {}
+        # Reconnect count last folded into the warm-up clocks above; a change
+        # means the subscription was rebuilt and every token must warm up again.
+        self._ws_reconnects_seen: int = 0
 
         # Real-time WebSocket streaming bridge (fix #166: run_direct + on_trade)
         self.stream_bridge = UnifiedStreamBridge(
@@ -1180,6 +1268,11 @@ class LiveTraderEngine:
                     rest_price = mstate.resting_up if is_up else mstate.resting_down
                     stash = mstate.last_bids_up if is_up else mstate.last_bids_down
                     rest_queue = _queue_ahead(stash, rest_price) if rest_price is not None else None
+                # Issue #173: copy the socket ledger here, with everything else.
+                # The worker runs on a daemon thread and must never touch live
+                # engine state, and a rollover clearing the ledger mid-join
+                # would otherwise hand it a window's worth of missing volume.
+                ws_tape = list(mstate.ws_tape_up if is_up else mstate.ws_tape_down)
                 snapshot = {
                     # Bind the sidecar path at dispatch, not at write time. The
                     # worker below runs on its own daemon thread and used to
@@ -1196,6 +1289,8 @@ class LiveTraderEngine:
                     "rest_queue": rest_queue,
                     "rest_ts": rest_ts,
                     "token": mstate.up_token if is_up else mstate.down_token,
+                    "ws_tape": ws_tape,
+                    "ws_authoritative": self._ws_tape_authoritative(mstate, leg),
                     "fill_price": fill_price,
                     "filled_size": size,
                     "window_elapsed_sec": max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else 0.0,
@@ -1225,15 +1320,38 @@ class LiveTraderEngine:
                                mid_at_fill: Optional[float],
                                resting_pair_cost: Optional[float],
                                ts: float,
+                               ws_tape: Optional[Sequence[Tuple[float, float, float]]] = None,
+                               ws_authoritative: bool = False,
                                telemetry_path: Any = None) -> None:
-        """Fetch tape, build the record, append it. Exceptions never propagate."""
+        """Join the tape, build the record, append it. Exceptions never propagate.
+
+        Issue #173: `printed_size` comes from exactly one tape. When the socket
+        was authoritative for this leg at claim time its ledger answers, and no
+        REST call is made at all — which also means a print seen on both paths
+        can never be counted twice. Otherwise the REST join runs exactly as it
+        did before, so a socket outage costs nothing but accuracy.
+
+        One semantic difference the two tapes cannot share: the socket ledger
+        is snapshotted when the fill claims its line, so it ends at the fill,
+        while the REST tape is fetched moments later and also carries whatever
+        printed between the fill and the fetch. The socket's cut is the tighter
+        answer to "what burned through the queue ahead of me", and the REST
+        overhang is the worker's own latency — sub-second in practice — but the
+        two numerators are not identical by construction, and `tape_source`
+        exists so an analysis can tell which one it is reading.
+        """
         try:
             printed: Optional[float] = None
-            if (resting_price is not None and rest_ts is not None
-                    and token and condition_id):
+            tape_source = "none"
+            joinable = (resting_price is not None and rest_ts is not None and token)
+            if joinable and ws_authoritative:
+                printed = _sum_ws_prints_at_price(ws_tape or [], resting_price, rest_ts)
+                tape_source = "ws"
+            elif joinable and condition_id:
                 rows = _fetch_price_prints(condition_id)
                 if rows is not None:
                     printed = _sum_prints_at_price(rows, token, resting_price, rest_ts)
+                    tape_source = "rest"
             record = _build_fill_record(
                 ts=ts,
                 slug=slug,
@@ -1249,6 +1367,7 @@ class LiveTraderEngine:
                 window_elapsed_sec=window_elapsed_sec,
                 mid_at_fill=mid_at_fill,
                 resting_pair_cost=resting_pair_cost,
+                tape_source=tape_source,
             )
             if not _append_fill_telemetry(record, telemetry_path):
                 log.warning("[%s] fill-telemetry append failed (line lost)", slug)
@@ -1786,6 +1905,64 @@ class LiveTraderEngine:
         note = f"RTDS Fast stop: drift {mstate.spot_drift:.3f}"
         self._execute_stop_exit(slug, mstate, side, None, note, now)
 
+    def _mark_ws_tokens_subscribed(self, tokens: Iterable[str]) -> None:
+        """Stamp first-subscription time per token; forget tokens that dropped.
+
+        Issue #173: the warm-up half of socket tape authority. Re-subscribing a
+        token that is already live must not restart its clock, or a rollover
+        that re-sends the same token list would knock the socket out of
+        authority for no reason.
+
+        A reconnect is the opposite case and must restart it, exactly as the
+        collector does (`scripts/collect_ticks.py`): the subscription was torn
+        down and rebuilt, so every print during the gap is gone from the
+        ledger. Without this, a socket that drops and returns is treated as
+        authoritative on its first print back — while its ledger is missing the
+        whole outage — and the REST fallback that would have caught the hole is
+        skipped, undercounting `printed_size` for every fill that rested before
+        the drop.
+        """
+        now = time.time()
+        live = {str(t) for t in tokens if t}
+        try:
+            reconnects = int(self.stream_bridge.clob.reconnect_count)
+        except (AttributeError, TypeError, ValueError):
+            reconnects = self._ws_reconnects_seen
+        with self._engine_lock:
+            if reconnects != self._ws_reconnects_seen:
+                self._ws_token_ready_ts.clear()
+                self._ws_reconnects_seen = reconnects
+            for tok in live:
+                self._ws_token_ready_ts.setdefault(tok, now)
+            for tok in [t for t in self._ws_token_ready_ts if t not in live]:
+                self._ws_token_ready_ts.pop(tok, None)
+
+    def _ws_tape_authoritative(self, m: "MarketLiveState", leg: str) -> bool:
+        """True when the socket alone can be trusted for this leg's tape.
+
+        Issue #173, mirroring `ws_leg_authoritative` in the collector
+        (`scripts/collect_ticks.py`): the socket must be connected, the token
+        must have been subscribed long enough to have received its snapshot,
+        and it must have printed recently enough that silence means "quiet
+        market" rather than "dead feed". False is the safe answer — it only
+        costs the REST call the sidecar already made before this change.
+        """
+        if not self.stream_bridge.clob.is_connected:
+            return False
+        token = m.up_token if leg == "UP" else m.down_token
+        if not token:
+            return False
+        now = time.time()
+        with self._engine_lock:
+            ready_at = self._ws_token_ready_ts.get(str(token))
+            last_print = (m.ws_last_print_ts_up if leg == "UP"
+                          else m.ws_last_print_ts_down)
+        if ready_at is None or (now - ready_at) < WS_TAPE_WARMUP_SEC:
+            return False
+        if last_print is None or (now - last_print) > WS_TAPE_AUTHORITY_HORIZON_SEC:
+            return False
+        return True
+
     def is_ws_book_fresh(self, m: "MarketLiveState", leg: str) -> bool:
         """True when the WS book for `leg` is authoritative right now."""
         if not self.ws_book_authority:
@@ -1807,12 +1984,48 @@ class LiveTraderEngine:
             if tok == m.up_token:
                 with self._engine_lock:
                     m.pending_ws_trades_up.append(trade)
+                    self._append_ws_tape(m, "UP", trade)
                 # Instant fill check against best book (paper legs)
                 self._try_ws_tape_fill(m, "UP", trade, price)
             elif tok == m.down_token:
                 with self._engine_lock:
                     m.pending_ws_trades_down.append(trade)
+                    self._append_ws_tape(m, "DOWN", trade)
                 self._try_ws_tape_fill(m, "DOWN", trade, price)
+
+    def _append_ws_tape(self, m: "MarketLiveState", leg: str, trade: Dict[str, Any]) -> None:
+        """Record one socket print in this leg's ledger. Caller holds the lock.
+
+        Issue #173: the numerator for `printed_size`. A malformed print is
+        dropped rather than raised — this runs on the socket callback thread,
+        where an exception would take the whole tape down with it. "Malformed"
+        includes non-finite: `float("nan") <= 0` is False, so a NaN size would
+        walk past the guard below and turn the window's whole sum into NaN.
+        """
+        try:
+            price = float(trade.get("price"))
+            size = float(trade.get("size") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not (math.isfinite(price) and math.isfinite(size)):
+            return
+        if size <= 0:
+            return
+        ts = _parse_print_ts(trade.get("timestamp"))
+        if ts is None:
+            # The venue's own stamp is preferred (it is what the REST rows
+            # carry, so the two sources stay joinable), but a print with no
+            # usable stamp is still real volume: fall back to arrival time.
+            ts = time.time()
+        is_up = (leg == "UP")
+        ledger = m.ws_tape_up if is_up else m.ws_tape_down
+        ledger.append((price, size, ts))
+        if len(ledger) > WS_TAPE_LEDGER_MAX:
+            del ledger[:len(ledger) - WS_TAPE_LEDGER_MAX]
+        if is_up:
+            m.ws_last_print_ts_up = time.time()
+        else:
+            m.ws_last_print_ts_down = time.time()
 
     def _try_ws_tape_fill(self, m: "MarketLiveState", leg: str, trade: Dict[str, Any], price: Any) -> None:
         """Paper-fill one leg from WS prints (fast, intra-second)."""
@@ -2850,6 +3063,7 @@ class LiveTraderEngine:
                         active_tokens.append(t)
             if active_tokens:
                 self.stream_bridge.update_market_tokens(active_tokens)
+                self._mark_ws_tokens_subscribed(active_tokens)
 
     def start(self) -> None:
         """Start the background live trading ticker."""
@@ -3435,6 +3649,13 @@ class LiveTraderEngine:
                 m.last_bids_down = {}
                 m.fill_telemetry_done_up = False
                 m.fill_telemetry_done_down = False
+                # Issue #173: the socket tape ledger is scoped to one resting
+                # order — `printed_size` means "volume at my price since I
+                # rested", and the next window rests at a new price.
+                m.ws_tape_up.clear()
+                m.ws_tape_down.clear()
+                m.ws_last_print_ts_up = None
+                m.ws_last_print_ts_down = None
                 # Issue #137: the entry-band gate resets with the other
                 # per-window gates so the next window re-evaluates it.
                 m.band_gate_evaluated = False
@@ -3735,6 +3956,7 @@ class LiveTraderEngine:
                         active_tokens.append(t)
             if active_tokens:
                 self.stream_bridge.update_market_tokens(active_tokens)
+                self._mark_ws_tokens_subscribed(active_tokens)
 
             self._record_timeline_point(now)
 
@@ -4574,17 +4796,14 @@ class LiveTraderEngine:
             mstate.rest_dn_price = resting_down
             mstate.rest_dn_queue = _queue_ahead(mstate.last_bids_down, resting_down)
             mstate.rest_dn_ts = now
-        # Also consume any pending WS tape prints accumulated between ticks.
-        # They already triggered instant fills above, but tape-driven exits/merges
-        # that compare against queue still need the volume accounted for downstream.
-        # (No-op if already filled.)
+        # Retire the pending WS prints accumulated between ticks. Each one
+        # already had its shot at an instant fill in `on_ws_trade`, and its
+        # volume now lives in this leg's `ws_tape_*` ledger (issue #173), which
+        # is what the fill sidecar reads. This queue exists only to bound
+        # per-tick work, so draining it here is the whole job.
         with self._engine_lock:
-            ws_pending_up = list(mstate.pending_ws_trades_up)
-            ws_pending_down = list(mstate.pending_ws_trades_down)
             mstate.pending_ws_trades_up.clear()
             mstate.pending_ws_trades_down.clear()
-        # Mark consumed prints into seen_tape-like dedup? Not needed live, but keep for parity.
-        _ = (ws_pending_up, ws_pending_down)
 
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
@@ -5413,6 +5632,13 @@ class LiveTraderEngine:
                 mstate.ws_book_ts_down = None
             mstate.pending_ws_trades_up.clear()
             mstate.pending_ws_trades_down.clear()
+            # The socket tape ledger is scoped to one window: `printed_size` is
+            # "volume at my resting price since I rested", and the next window
+            # rests a new order at a new price (issue #173).
+            mstate.ws_tape_up.clear()
+            mstate.ws_tape_down.clear()
+            mstate.ws_last_print_ts_up = None
+            mstate.ws_last_print_ts_down = None
         if self.mode == "live":
             if mstate.order_id_exit_up:
                 if self.cancel_live_order(mstate.order_id_exit_up):

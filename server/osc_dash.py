@@ -67,9 +67,19 @@ def _queue_verdict(low_mean: float | None, high_mean: float | None) -> str:
 
 
 def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
-    """Aggregate the fill sidecar into buckets + chased stats + verdict."""
+    """Aggregate the fill sidecar into buckets + chased stats + verdict.
+
+    Issue #173: the verdict is computed over ONE tape. `fill_ratio` means
+    "volume printed at my price divided by the queue ahead of me", and the
+    socket saw nearly every print where the REST data-api tape saw ~1.4% of
+    them (#165) — so pooling both produces a number that describes neither,
+    and the verdict derived from it is the exact bias this issue removes.
+    When the file holds socket-measured fills, they win: a smaller accurate
+    sample beats a larger biased one, and `total_fills` shows its size.
+    """
     from scripts.bucket_fills import (
-        _read_jsonl, _settlement_pnl_by_market, bucketize,
+        _read_jsonl, _settlement_pnl_by_market, bucketize, source_counts,
+        tape_source_of,
     )
     fills = _read_jsonl(fills_path)
     usable = [f for f in fills
@@ -80,7 +90,11 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
     if not usable:
         return {"empty": True, "total_fills": 0, "buckets": [],
                 "chased": {"count": 0, "mean_settle_pnl_usd": None},
+                "tape_sources": {}, "tape_source_used": None,
                 "verdict": "awaiting fills"}
+    all_counts = {k: v for k, v in source_counts(usable).items() if v}
+    used = "ws" if all_counts.get("ws") else next(iter(all_counts), None)
+    usable = [f for f in usable if tape_source_of(f) == used]
     settle = _settlement_pnl_by_market(trades_path)
     passive = [f for f in usable if not f.get("chased")]
     chased = [f for f in usable if f.get("chased")]
@@ -105,6 +119,11 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
             "mean_settle_pnl_usd": (sum(chased_pnls) / len(chased_pnls)
                                     if chased_pnls else None),
         },
+        # Every tape present in the file, and the one this verdict actually
+        # used. Both are reported so a reader can see the sample was narrowed
+        # and by how much, rather than inferring it from `total_fills`.
+        "tape_sources": all_counts,
+        "tape_source_used": used,
         "verdict": _queue_verdict(low_mean, high_mean),
     }
 
@@ -1105,6 +1124,7 @@ def api_live_queue_telemetry():
     except Exception as e:
         payload = {"empty": True, "total_fills": 0, "buckets": [],
                    "chased": {"count": 0, "mean_settle_pnl_usd": None},
+                   "tape_sources": {}, "tape_source_used": None,
                    "verdict": "awaiting fills", "error": str(e)[:200]}
     cached["ts"] = now
     cached["payload"] = payload

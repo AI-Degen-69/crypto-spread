@@ -1748,6 +1748,68 @@ def test_api_live_queue_telemetry_aggregation(tmp_path, monkeypatch):
     assert abs(means[3] - 0.05) < 1e-9
     assert body["chased"] == {"count": 1, "mean_settle_pnl_usd": 0.10}
     assert body["verdict"] == "tape-like"
+    # Issue #173: these fixture lines predate `tape_source`, so they are the
+    # REST-measured sample they always were.
+    assert body["tape_sources"] == {"rest": 5}
+    assert body["tape_source_used"] == "rest"
+
+
+def test_api_live_queue_telemetry_verdict_uses_one_tape_only(tmp_path, monkeypatch):
+    """A mixed file must not produce a verdict blended across both tapes.
+
+    Issue #173: the socket tape sees nearly every print and the REST data-api
+    tape saw ~1.4% of them (#165), so `fill_ratio` — and the verdict computed
+    from it — is comparable only within one tape. The socket-measured fills
+    win: a smaller accurate sample beats a larger biased one.
+    """
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = _telemetry_rows()
+    for r in rows[:2]:
+        r["tape_source"] = "ws"
+    _write_fills(fills, rows)
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    body = client.get("/api/live/queue_telemetry").json()
+    # Every tape in the file is reported, but only one was aggregated.
+    assert body["tape_sources"] == {"ws": 2, "rest": 3}
+    assert body["tape_source_used"] == "ws"
+    assert body["total_fills"] == 2, "the REST fills leaked into the verdict sample"
+    assert sum(b["count"] for b in body["buckets"]) <= 2
+
+
+def test_api_live_queue_telemetry_keeps_rest_when_no_socket_fills_exist(
+        tmp_path, monkeypatch):
+    """An all-REST file is internally comparable, so nothing is dropped."""
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    _write_fills(fills, _telemetry_rows())
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    body = client.get("/api/live/queue_telemetry").json()
+    assert body["tape_source_used"] == "rest"
+    assert body["total_fills"] == 5
+    assert body["verdict"] == "tape-like"
+
+
+def test_api_live_queue_telemetry_empty_payload_carries_tape_sources(tmp_path, monkeypatch):
+    """The empty shape gains the key too, so readers need no `.get` guard."""
+    fills = tmp_path / "fills.jsonl"
+    fills.write_text("", encoding="utf-8")
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", tmp_path / "nope.jsonl")
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    body = client.get("/api/live/queue_telemetry").json()
+    assert body["empty"] is True
+    assert body["tape_sources"] == {}
+    assert body["tape_source_used"] is None
 
 
 def test_api_live_queue_telemetry_verdict_transitions(tmp_path, monkeypatch):
