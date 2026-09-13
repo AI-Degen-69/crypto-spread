@@ -267,44 +267,12 @@ def test_ensure_telemetry_streaming_and_stop_decoupling(monkeypatch):
 
 
 def test_api_live_latency_stale_suppression(monkeypatch):
-    """Verify /api/live/latency returns binance_ws_connected, is_running, and suppresses stale latency."""
-    import time
+    """Retired: LIVE STREAM TELEMETRY removed — /api/live/latency is gone."""
     from fastapi.testclient import TestClient
-    from server.osc_dash import app, get_live_trader_engine
+    from server.osc_dash import app
 
-    engine = get_live_trader_engine()
-    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
     client = TestClient(app)
-
-    btc = engine.markets.get("btc-up-or-down-5m")
-    assert btc is not None
-    orig_price = btc.spot_price
-    orig_active = btc.streaming_active
-    orig_ts = btc.spot_updated_ts
-
-    try:
-        now = time.time()
-        btc.spot_price = 85000.0
-        btc.streaming_active = True
-        btc.spot_updated_ts = now - 0.2
-
-        res = client.get("/api/live/latency?series=btc-up-or-down-5m")
-        assert res.status_code == 200
-        data = res.json()
-        assert "is_running" in data
-        assert "binance_ws_connected" in data
-        assert data["latency_ms"] is not None
-        assert 0 <= data["latency_ms"] < 2000
-
-        # Stale tick (> 15 seconds old)
-        btc.spot_updated_ts = now - 45.0
-        res_stale = client.get("/api/live/latency?series=btc-up-or-down-5m")
-        assert res_stale.status_code == 200
-        data_stale = res_stale.json()
-        assert data_stale["latency_ms"] is None  # Stale latency suppressed
-    finally:
-        btc.spot_price = orig_price
-        btc.streaming_active = orig_active
-        btc.spot_updated_ts = orig_ts
+    res = client.get("/api/live/latency?series=btc-up-or-down-5m")
+    assert res.status_code == 404
 
 

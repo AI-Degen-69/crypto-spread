@@ -1111,83 +1111,6 @@ def api_live_queue_telemetry():
     return payload
 
 
-@app.get("/api/live/latency")
-def api_live_latency(series: str = "btc-up-or-down-5m"):
-    """Return real-time side-by-side stream metrics and latency lead times."""
-    from strategy.streaming import SERIES_TO_SYMBOL
-    symbol = SERIES_TO_SYMBOL.get(series, "btcusdt")
-    engine = get_live_trader_engine()
-    engine.ensure_telemetry_streaming()
-    bridge_st = engine.stream_bridge.get_status()
-
-    spot_price = None
-    actual_price = None
-    rtds_price = None
-    price_diff = None
-    price_diff_pct = None
-    spot_drift = 0.0
-    clob_mid = None
-    latency_ms = None
-    streaming_active = False
-    updated_ts = None
-
-    if series in engine.markets:
-        m = engine.markets[series]
-        spot_price = m.spot_price
-        actual_price = m.actual_price
-        rtds_price = m.rtds_price
-        price_diff = m.price_diff
-        price_diff_pct = m.price_diff_pct
-        spot_drift = m.spot_drift
-        streaming_active = m.streaming_active
-        updated_ts = m.spot_updated_ts
-        if m.up_bid is not None and m.up_ask is not None:
-            clob_mid = round((m.up_bid + m.up_ask) / 2.0, 4)
-        elif m.resting_up is not None:
-            clob_mid = m.resting_up
-
-    # Fallback to bridge prices if market price fields are not populated yet
-    if actual_price is None and bridge_st.get("binance_prices"):
-        actual_price = bridge_st["binance_prices"].get(symbol)
-    if rtds_price is None and bridge_st.get("rtds_prices"):
-        rtds_price = bridge_st["rtds_prices"].get(symbol)
-    if price_diff is None and bridge_st.get("price_diffs"):
-        price_diff = bridge_st["price_diffs"].get(symbol)
-    if price_diff_pct is None and bridge_st.get("price_diff_pcts"):
-        price_diff_pct = bridge_st["price_diff_pcts"].get(symbol)
-
-    if spot_price is None and bridge_st.get("symbols"):
-        spot_price = bridge_st["symbols"].get(symbol)
-    if spot_price is None:
-        spot_price = actual_price if actual_price is not None else rtds_price
-
-    if updated_ts:
-        raw_lat = abs(time.time() - updated_ts)
-        if raw_lat <= 15.0:
-            latency_ms = round(raw_lat * 1000.0, 1)
-
-    return {
-        "ok": True,
-        "series": series,
-        "symbol": symbol,
-        "spot_price": spot_price,
-        "actual_price": actual_price,
-        "rtds_price": rtds_price,
-        "price_diff": price_diff,
-        "price_diff_pct": price_diff_pct,
-        "spot_drift": round(spot_drift, 4),
-        "clob_mid": clob_mid,
-        "latency_ms": latency_ms,
-        "streaming_active": streaming_active,
-        "is_running": bridge_st.get("is_running", False),
-        "binance_ws_connected": bridge_st.get("binance_ws_connected", False),
-        "rtds_connected": bridge_st.get("rtds_connected", False),
-        "active_spot_source": bridge_st.get("active_spot_source", "RTDS"),
-        "clob_ws_connected": bridge_st.get("clob_ws_connected", False),
-        "updated_ts": updated_ts,
-    }
-
-
 @app.get("/api/live/stream")
 async def api_live_stream(request: Request):
     """Real-time SSE stream broadcasting versioned DashboardEnvelope events."""
@@ -2117,16 +2040,6 @@ textarea:focus-visible,
 .ot-tag-unpaired{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 .ot-tag-cancelled{background:rgba(120,135,155,0.12);color:var(--dim);border:1px solid rgba(120,135,155,0.25)}
 .card-title{font:700 12px var(--disp);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
-.telemetry-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
-@media(max-width:1000px){.telemetry-grid{grid-template-columns:repeat(2,1fr)}}
-.tel-item{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center;display:flex;flex-direction:column;gap:4px}
-.tel-lbl{font:600 9px var(--disp);letter-spacing:.07em;color:var(--faint);text-transform:uppercase}
-.tel-val{font:700 16px var(--mono);color:var(--tx)}
-.tel-badge{font:700 10px var(--disp);letter-spacing:.06em;padding:2px 8px;border-radius:99px;display:inline-block;margin:0 auto}
-.tel-badge.ok{background:rgba(51,201,181,.15);color:var(--up);border:1px solid rgba(51,201,181,.3)}
-.tel-badge.warn{background:rgba(243,186,47,.15);color:var(--gold);border:1px solid rgba(243,186,47,.3)}
-.tel-badge.err{background:rgba(240,104,77,.15);color:var(--down);border:1px solid rgba(240,104,77,.3)}
-.tel-badge.idle{background:rgba(120,135,155,.15);color:var(--dim);border:1px solid rgba(120,135,155,.3)}
 /* Floating Side Toast Notifications (Issue #81) */
 .toast-container{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:360px;width:calc(100vw - 40px);pointer-events:none}
 .toast{pointer-events:auto;background:var(--panel2);border:1px solid var(--line-hi);border-radius:8px;padding:10px 14px;color:var(--tx);font:12px/1.4 var(--body);box-shadow:0 4px 16px rgba(0,0,0,.5);display:flex;align-items:flex-start;justify-content:space-between;gap:10px;animation:toast-slide-in .25s cubic-bezier(.16,1,.3,1) forwards;transition:opacity .25s ease,transform .25s ease}
@@ -2665,20 +2578,6 @@ textarea:focus-visible,
             <button type="button" id="btnDurBoth" class="tab-btn" style="font-size:11px;padding:4px 10px" onclick="setCockpitDuration('both')">Both</button>
           </div>
         </div>
-      </div>
-    </div>
-
-    <!-- Live Stream Telemetry (RTDS vs CLOB) Card -->
-    <div class="card" id="card-stream-telemetry">
-      <div class="card-title">LIVE STREAM TELEMETRY (RTDS vs CLOB)</div>
-      <div class="telemetry-grid">
-        <div class="tel-item"><span class="tel-lbl">ACTUAL SPOT (BINANCE)</span><span class="tel-val" id="telActualPrice">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">RTDS SPOT</span><span class="tel-val" id="telSpotPrice">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">PRICE SPREAD / DIFF</span><span class="tel-val" id="telPriceDiff">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">SPOT DRIFT</span><span class="tel-val" id="telSpotDrift">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">CLOB MID</span><span class="tel-val" id="telClobMid">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">LEAD LATENCY</span><span class="tel-val" id="telLeadLatency">--</span></div>
-        <div class="tel-item"><span class="tel-lbl">FEED HEALTH</span><span class="tel-badge idle" id="telFeedStatus">IDLE</span></div>
       </div>
     </div>
 
@@ -4780,113 +4679,6 @@ async function setCockpitDuration(dur) {
   await applyCockpitConfig();
 }
 
-function renderStreamTelemetry(data) {
-  if (!data) return;
-  const actualEl = $('telActualPrice');
-  const spotEl = $('telSpotPrice');
-  const diffEl = $('telPriceDiff');
-  const driftEl = $('telSpotDrift');
-  const clobEl = $('telClobMid');
-  const latEl = $('telLeadLatency');
-  const feedEl = $('telFeedStatus');
-
-  if (actualEl) {
-    const act = data.actual_price != null ? data.actual_price : (data.source === 'BINANCE_WS' ? data.price : null);
-    if (act != null && !isNaN(Number(act))) {
-      actualEl.textContent = '$' + Number(act).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    } else if (data.actual_price !== undefined) {
-      actualEl.textContent = '--';
-    }
-  }
-
-  if (spotEl) {
-    const rtds = data.rtds_price != null ? data.rtds_price : (data.source === 'RTDS' ? data.price : data.spot_price);
-    if (rtds != null && !isNaN(Number(rtds))) {
-      spotEl.textContent = '$' + Number(rtds).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    } else if (data.spot_price !== undefined || data.rtds_price !== undefined) {
-      spotEl.textContent = '--';
-    }
-  }
-
-  if (diffEl) {
-    if (data.price_diff != null && !isNaN(Number(data.price_diff))) {
-      const d = Number(data.price_diff);
-      const formattedD = d < 0 ? `-$${Math.abs(d).toFixed(2)}` : (d > 0 ? `+$${d.toFixed(2)}` : `$${d.toFixed(2)}`);
-      let pctStr = '';
-      if (data.price_diff_pct != null && !isNaN(Number(data.price_diff_pct))) {
-        const pct = Number(data.price_diff_pct);
-        pctStr = ` (${pct > 0 ? '+' : ''}${pct.toFixed(3)}%)`;
-      }
-      diffEl.textContent = `${formattedD}${pctStr}`;
-      diffEl.style.color = d > 0 ? 'var(--up)' : d < 0 ? 'var(--down)' : 'var(--tx)';
-    } else if (data.price_diff !== undefined) {
-      diffEl.textContent = '--';
-      diffEl.style.color = 'var(--tx)';
-    }
-  }
-
-  if (driftEl) {
-    if (data.spot_drift != null && !isNaN(Number(data.spot_drift))) {
-      const d = Number(data.spot_drift);
-      driftEl.textContent = (d >= 0 ? '+' : '') + (d * 100).toFixed(2) + '%';
-      driftEl.style.color = d > 0 ? 'var(--up)' : d < 0 ? 'var(--down)' : 'var(--tx)';
-    } else {
-      driftEl.textContent = '--';
-      driftEl.style.color = 'var(--tx)';
-    }
-  }
-
-  if (clobEl) {
-    if (data.clob_mid != null && !isNaN(Number(data.clob_mid))) {
-      clobEl.textContent = (Number(data.clob_mid) * 100).toFixed(1) + '¢';
-    } else {
-      clobEl.textContent = '--';
-    }
-  }
-
-  if (latEl) {
-    if (data.latency_ms != null && !isNaN(Number(data.latency_ms)) && Number(data.latency_ms) <= 15000) {
-      const ms = Number(data.latency_ms);
-      latEl.textContent = ms.toFixed(0) + ' ms';
-      latEl.style.color = ms < 500 ? 'var(--up)' : ms < 1500 ? 'var(--gold)' : 'var(--down)';
-    } else {
-      latEl.textContent = '--';
-      latEl.style.color = 'var(--tx)';
-    }
-  }
-
-  if (feedEl) {
-    const isRunning = data.is_running !== false && (data.is_running || data.binance_ws_connected || data.rtds_connected || data.clob_ws_connected);
-    const spot = !!(data.binance_ws_connected || data.rtds_connected);
-    const clob = !!data.clob_ws_connected;
-    if (!isRunning && !spot && !clob) {
-      feedEl.textContent = 'IDLE';
-      feedEl.className = 'tel-badge idle';
-    } else if (spot && clob) {
-      feedEl.textContent = 'CONNECTED';
-      feedEl.className = 'tel-badge ok';
-    } else if (spot || clob) {
-      feedEl.textContent = 'DEGRADED';
-      feedEl.className = 'tel-badge warn';
-    } else {
-      feedEl.textContent = 'DISCONNECTED';
-      feedEl.className = 'tel-badge err';
-    }
-  }
-}
-
-async function fetchCockpitLatency() {
-  try {
-    const activeSlug = (cockpitState && cockpitState.markets && Object.keys(cockpitState.markets)[0]) || 'btc-up-or-down-5m';
-    const res = await fetch('/api/live/latency?series=' + encodeURIComponent(activeSlug), { cache: 'no-store' });
-    if (!res.ok) return;
-    const data = await res.json();
-    renderStreamTelemetry(data);
-  } catch (e) {
-    console.debug('Failed fetching live latency telemetry', e);
-  }
-}
-
 // Issue #139: PnL-per-position histogram from st.trades (session window).
 // Mean + CI-lo use the study's bootstrap statistic (2,000 resamples).
 function pnlBootstrapCiLo(values, resamples) {
@@ -4996,7 +4788,6 @@ async function fetchCockpitState() {
   } catch (e) {
     console.error('Failed fetching cockpit state', e);
   }
-  await fetchCockpitLatency();
   await fetchQueueTelemetry();
 }
 
@@ -5568,33 +5359,6 @@ function renderCockpitUI(st) {
       streamPill.textContent = '🟡 REST POLLING';
       streamPill.className = 'pill pill-flat';
       streamPill.style.color = 'var(--gold)';
-    }
-  }
-
-  // Update Live Stream Telemetry card from engine state
-  if (st && st.markets) {
-    const mkKeys = Object.keys(st.markets);
-    const targetSlug = mkKeys.find(k => k.startsWith('btc')) || mkKeys[0];
-    if (targetSlug && st.markets[targetSlug]) {
-      const m = st.markets[targetSlug];
-      const sb = st.stream_bridge || {};
-      const latencyVal = (m.spot_updated_ts && Math.abs(Date.now() - m.spot_updated_ts * 1000) <= 15000)
-        ? Math.max(0, (Date.now() - m.spot_updated_ts * 1000))
-        : null;
-      renderStreamTelemetry({
-        spot_price: m.spot_price,
-        actual_price: m.actual_price,
-        rtds_price: m.rtds_price,
-        price_diff: m.price_diff,
-        price_diff_pct: m.price_diff_pct,
-        spot_drift: m.spot_drift,
-        clob_mid: m.mid,
-        latency_ms: latencyVal,
-        is_running: sb.is_running,
-        binance_ws_connected: sb.binance_ws_connected,
-        rtds_connected: sb.rtds_connected || liveStreamConnected,
-        clob_ws_connected: sb.clob_ws_connected,
-      });
     }
   }
 
@@ -6488,7 +6252,6 @@ function initLiveCockpitStream() {
         sp.className = 'pill pill-osc';
         sp.style.color = 'var(--up)';
       }
-      fetchCockpitLatency();
     };
     liveEventSource.onmessage = (e) => {
       try {
@@ -6537,19 +6300,6 @@ function initLiveCockpitStream() {
               }
             }
 
-            const primarySlug = (targetSlugs && targetSlugs.length) ? targetSlugs[0] : (env.data.slug || Object.keys(cockpitState.markets)[0]);
-            if (primarySlug && (primarySlug.startsWith('btc') || primarySlug === Object.keys(cockpitState.markets)[0])) {
-              const pm = cockpitState.markets[primarySlug] || {};
-              renderStreamTelemetry({
-                actual_price: pm.actual_price != null ? pm.actual_price : env.data.actual_price,
-                rtds_price: pm.rtds_price != null ? pm.rtds_price : env.data.rtds_price,
-                price_diff: pm.price_diff != null ? pm.price_diff : env.data.price_diff,
-                price_diff_pct: pm.price_diff_pct != null ? pm.price_diff_pct : env.data.price_diff_pct,
-                spot_price: pm.spot_price != null ? pm.spot_price : env.data.price,
-                spot_drift: pm.spot_drift,
-                clob_mid: pm.mid,
-              });
-            }
           }
         }
       } catch (err) {
@@ -6564,7 +6314,6 @@ function initLiveCockpitStream() {
         sp.className = 'pill pill-flat';
         sp.style.color = 'var(--gold)';
       }
-      fetchCockpitLatency();
       fetchCockpitState();
       ensureCockpitPolling();
     };

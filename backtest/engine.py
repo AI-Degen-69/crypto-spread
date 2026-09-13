@@ -26,6 +26,8 @@ import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
+
+from strategy import book_math
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Iterator
 
@@ -319,32 +321,11 @@ class WindowResult:
     settlement_mid: float | None = None
 
 
-def _mid(book: dict):
-    """Compute midpoint price from orderbook best_bid / best_ask."""
-    bb, ba = book.get("best_bid"), book.get("best_ask")
-    if bb is not None and ba is not None:
-        return (bb + ba) / 2.0
-    if bb is not None:
-        return bb + 0.005
-    if ba is not None:
-        return ba - 0.005
-    return None
-
-
-def _two_sided_mid(up_book: dict, down_book: dict):
-    """Synthetic mid across both legs, or None when either leg is one-sided.
-
-    Mirrors the live engine's `mstate.mid` so the adverse-open gate agrees
-    between backtest and live (issue #92). Returning None for a one-sided book
-    keeps a thin open from being read as a real skew.
-    """
-    ubb, uba = up_book.get("best_bid"), up_book.get("best_ask")
-    dbb, dba = down_book.get("best_bid"), down_book.get("best_ask")
-    if ubb is None or uba is None or dbb is None or dba is None:
-        return None
-    up_mid = (ubb + uba) / 2.0
-    down_mid = (dbb + dba) / 2.0
-    return round((up_mid + (1.0 - down_mid)) / 2.0, 4)
+# Issue #170: these used to be local copies that disagreed with the collector
+# and the live engine on one-sided and empty books -- the books that decide
+# entries. `strategy/book_math` is now the single definition for all consumers.
+_mid = book_math.mid
+_two_sided_mid = book_math.two_sided_mid
 
 
 def _taker_fee(p: float, rate: float) -> float:
@@ -605,11 +586,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # filter, which needs a resting price to measure against.
             queue_ok = False
         else:
-            q_up = sum(sz for p, sz in (ub.get("bids") or {}).items()
-                       if float(p) >= resting_up)
-            q_dn = sum(sz for p, sz in (db.get("bids") or {}).items()
-                       if float(p) >= resting_down)
-            queue_ok = (q_up <= params.queue_gate) and (q_dn <= params.queue_gate)
+            # `queue_ahead` returns None for a book with no bids at all. That
+            # used to sum to 0.0 here and pass the gate, i.e. an absent book
+            # read as front-of-queue -- the reading issue #138 rejected in the
+            # live engine. Unknown depth now fails the gate, matching live.
+            q_up = book_math.queue_ahead(ub.get("bids"), resting_up)
+            q_dn = book_math.queue_ahead(db.get("bids"), resting_down)
+            queue_ok = (q_up is not None and q_dn is not None
+                        and q_up <= params.queue_gate
+                        and q_dn <= params.queue_gate)
 
         # Touch pair gate (0 or <= 0 disables per Maker strategy)
         up_ask = ub.get("best_ask")

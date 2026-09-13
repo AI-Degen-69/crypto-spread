@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Any, Tuple, Iterable, Sequence
 import requests
 
 from strategy.series import by_duration, SERIES, filter_series, token_for_slug
+from strategy import book_math
 from strategy.streaming import UnifiedStreamBridge, SYMBOL_TO_SERIES, SERIES_TO_SYMBOL, series_for_symbol
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
@@ -96,19 +97,10 @@ def _safe_pair_cost(up: Any, dn: Any) -> Optional[float]:
         return None
 
 
-def _queue_ahead(bids: Optional[Dict[float, float]], price: float) -> Optional[float]:
-    """Shares resting at or above `price` — our queue position at rest.
-
-    Issue #138: mirrors run/sweeps/sim2.py:_queue_ahead. An empty or missing
-    book yields None (unknown), never zero, so a degenerate book cannot
-    masquerade as front-of-queue.
-    """
-    if not bids:
-        return None
-    try:
-        return float(sum(s for p, s in bids.items() if float(p) >= price))
-    except (TypeError, ValueError):
-        return None
+# Issue #138 established the "None, never zero" rule here; issue #170 moved it
+# into `strategy/book_math` so the collector, the backtest engine and the sweep
+# lab stop disagreeing with it.
+_queue_ahead = book_math.queue_ahead
 
 
 # Per-fill queue-position telemetry (issue #138): one JSONL line per entry
@@ -1961,9 +1953,13 @@ class LiveTraderEngine:
                     if best_a is not None and 0.0 < best_a <= 1.0:
                         m.last_valid_down_ask = best_a
                 # mid/spread recomputed from authoritative bests
-                up_mid = (m.up_bid + m.up_ask) / 2.0 if (m.up_bid is not None and m.up_ask is not None) else (m.up_bid or m.up_ask or 0.50)
-                down_mid = (m.down_bid + m.down_ask) / 2.0 if (m.down_bid is not None and m.down_ask is not None) else (m.down_bid or m.down_ask or 0.50)
-                m.mid = round((up_mid + (1.0 - down_mid)) / 2.0, 4)
+                # Issue #170: one shared implementation instead of this copy
+                # and the REST-path copy below. Semantics are unchanged for
+                # now -- whether live should adopt the honest `two_sided_mid`
+                # (None for an unpriceable leg) is issue #171.
+                m.mid = book_math.two_sided_mid_with_default(
+                    {"best_bid": m.up_bid, "best_ask": m.up_ask},
+                    {"best_bid": m.down_bid, "best_ask": m.down_ask})
                 if m.up_ask is not None and m.down_ask is not None:
                     m.spread = round(m.up_ask + m.down_ask, 4)
 
@@ -4136,17 +4132,12 @@ class LiveTraderEngine:
         _up_ask = mstate.up_ask
         _down_bid = mstate.down_bid
         _down_ask = mstate.down_ask
-        if _up_bid is not None and _up_ask is not None:
-            up_mid = (_up_bid + _up_ask) / 2.0
-        else:
-            up_mid = _up_bid or _up_ask or 0.50
-        if _down_bid is not None and _down_ask is not None:
-            down_mid = (_down_bid + _down_ask) / 2.0
-        else:
-            down_mid = _down_bid or _down_ask or 0.50
-        mstate.mid = round((up_mid + (1.0 - down_mid)) / 2.0, 4)
-        if _up_ask is not None and _down_ask is not None:
-            mstate.spread = round(_up_ask + _down_ask, 4)
+        mstate.mid = book_math.two_sided_mid_with_default(
+            {"best_bid": _up_bid, "best_ask": _up_ask},
+            {"best_bid": _down_bid, "best_ask": _down_ask})
+        _pair = book_math.pair_cost(_up_ask, _down_ask)
+        if _pair is not None:
+            mstate.spread = _pair
         # Keep legacy last_valid* in sync even when WS kept authority (already set in on_book_update)
 
         # If not active or window is expired, stay idle
