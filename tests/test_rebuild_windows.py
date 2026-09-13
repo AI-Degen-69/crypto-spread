@@ -183,3 +183,47 @@ def test_rebuild_windows_integration(tmp_path: Path):
     assert win_lines[0]["cid"] == "0xAAA"
     assert win_lines[0]["class"] == "monotonic"
     assert win_lines[1]["cid"] == "0xBBB"
+
+
+def test_rebuild_matches_shared_finalize_window(tmp_path: Path):
+    """Rebuild records must equal direct strategy.windows.finalize_window output."""
+    from strategy.windows import finalize_window
+
+    ticks_dir = tmp_path / "ticks"
+    ticks_dir.mkdir()
+    raw = [
+        {"ts": 100.0, "series": "btc-up-or-down-5m", "label": "BTC 5m",
+         "duration": 300, "cid": "0xAAA", "slug": "btc-1",
+         "start_ts": 100.0, "end_ts": 400.0,
+         "mid": 0.50, "touch_pair": 1.01},
+        {"ts": 101.0, "series": "btc-up-or-down-5m", "label": "BTC 5m",
+         "duration": 300, "cid": "0xAAA", "slug": "btc-1",
+         "start_ts": 100.0, "end_ts": 400.0,
+         "mid": 0.55, "touch_pair": 1.03},
+    ]
+    f1 = ticks_dir / "ticks_2026-08-30.jsonl"
+    with open(f1, "w", encoding="utf-8") as f:
+        for t in raw:
+            f.write(json.dumps(t) + "\n")
+    f2 = ticks_dir / "ticks_2026-08-31.jsonl.gz"
+    with gzip.open(f2, "wt", encoding="utf-8") as f:
+        for t in raw:
+            f.write(json.dumps(t) + "\n")
+
+    out_win = tmp_path / "oscillation_windows.jsonl"
+    out_sum = tmp_path / "oscillation_summary.json"
+    num_files, num_windows = rebuild_windows(
+        ticks_dir=ticks_dir, out_windows=out_win, out_summary=out_sum,
+        quiet=True,
+    )
+    assert (num_files, num_windows) == (2, 1)
+
+    expected = finalize_window(
+        [0.50, 0.55, 0.50, 0.55], [1.01, 1.03, 1.01, 1.03],
+        {"series": "btc-up-or-down-5m", "label": "BTC 5m", "duration": 300,
+         "cid": "0xAAA", "slug": "btc-1", "start_ts": 100.0, "end_ts": 400.0,
+         "closed_ts": 101.0, "snaps": 4},
+    )
+    (got,) = [json.loads(line) for line in out_win.read_text(
+        encoding="utf-8").splitlines() if line.strip()]
+    assert got == expected

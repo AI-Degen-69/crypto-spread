@@ -2002,3 +2002,117 @@ def test_backtest_delay_band_ui_elements():
     assert 'id="btEntryBand"' in html
     assert 'id="btnWinningConfig"' in html
     assert "applyWinningConfig" in html
+
+
+def test_api_rebuild_windows(monkeypatch):
+    """Verify rebuild endpoint runs the rebuild script and echoes ok/output."""
+    def _mock_run(*args, **kwargs):
+        class DummyResult:
+            returncode = 0
+            stdout = "Wrote 10 windows to run/oscillation_windows.jsonl"
+            stderr = ""
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+    response = client.post("/api/rebuild")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("ok") is True
+    assert "Wrote 10 windows" in data.get("output")
+
+
+def test_api_rebuild_windows_failure_and_busy(monkeypatch):
+    """Verify rebuild surfaces subprocess failure output and serializes runs."""
+    import server.osc_dash as osc_dash_mod
+
+    def _mock_fail(*args, **kwargs):
+        class DummyResult:
+            returncode = 1
+            stdout = ""
+            stderr = "traceback: boom"
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", _mock_fail)
+    data = client.post("/api/rebuild").json()
+    assert data.get("ok") is False
+    assert "boom" in data.get("output")
+
+    def _mock_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="rebuild", timeout=300)
+
+    monkeypatch.setattr(subprocess, "run", _mock_timeout)
+    data = client.post("/api/rebuild").json()
+    assert data.get("ok") is False
+    assert "timed out" in data.get("output")
+
+    # Lock held -> 409 busy without invoking subprocess
+    osc_dash_mod._rebuild_lock.acquire()
+    try:
+        res = client.post("/api/rebuild")
+        assert res.status_code == 409
+        assert res.json().get("ok") is False
+    finally:
+        osc_dash_mod._rebuild_lock.release()
+
+
+def test_api_rebuild_refused_while_collector_active(tmp_path, monkeypatch):
+    """Rebuild returns 409 while own child or external collector is writing."""
+    class DummyProc:
+        def poll(self):
+            return None
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("rebuild must not run while collector active")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(osc_dash, "_collector_proc", DummyProc())
+    res = client.post("/api/rebuild")
+    assert res.status_code == 409
+    assert res.json().get("ok") is False
+
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"ts": time.time(), "lines": 10}), encoding="utf-8")
+    res = client.post("/api/rebuild")
+    assert res.status_code == 409
+    assert "external" in res.json().get("output", "")
+
+
+def test_api_rebuild_rejects_cross_origin():
+    """Verify cross-origin rebuild requests are rejected."""
+    res = client.post(
+        "/api/rebuild",
+        headers={"Origin": "https://malicious-site.evil.com"}
+    )
+    assert res.status_code == 403
+
+
+def test_dashboard_rebuild_stats_button_present():
+    """Dashboard exposes the Rebuild Stats button and provenance hook."""
+    html = client.get("/").text
+    assert 'id="btnRebuildStats"' in html
+    assert "function rebuildStats()" in html
+    assert 'id="provenanceLine"' in html
+
+
+def test_api_oscillation_provenance_fields(tmp_path, monkeypatch):
+    """Verify /api/oscillation exposes dataset source, freshness, and total count."""
+    monkeypatch.setattr(osc_dash, "RUN", tmp_path)
+    data = client.get("/api/oscillation").json()
+    assert data["source"] == "oscillation_windows.jsonl"
+    assert data["source_mtime"] is None
+    assert data["total_windows"] == 0
+
+    rec = {
+        "series": "btc-up-or-down-5m", "label": "BTC 5m", "duration": 300,
+        "cid": "0x1", "slug": "s", "start_ts": 1.0, "end_ts": 2.0,
+        "closed_ts": 3.0, "snaps": 10, "start_mid": 0.5, "close_mid": 0.5,
+        "max_up": 0.0, "max_down": 0.0, "min_mid": 0.5, "max_mid": 0.5,
+        "class": "flat", "touch_pair_median": 1.0, "url": "",
+    }
+    (tmp_path / "oscillation_windows.jsonl").write_text(
+        json.dumps(rec) + "\n", encoding="utf-8")
+    data2 = client.get("/api/oscillation").json()
+    assert data2["total_windows"] == 1
+    assert isinstance(data2["source_mtime"], float)

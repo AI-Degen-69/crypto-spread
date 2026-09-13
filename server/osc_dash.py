@@ -128,6 +128,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # In-memory collector process handle for UI controls
 _collector_proc: subprocess.Popen | None = None
+# Serializes POST /api/rebuild (Issue #132): concurrent rebuilds race on tmp/output files.
+_rebuild_lock = threading.Lock()
 MAX_TEST_ORDER_SHARES = 10.0
 # Manifest `ts` age below which a writer that is NOT our dashboard child
 # counts as a live external standalone collector (Issue #151).
@@ -297,8 +299,13 @@ def api_oscillation():
     summary = load_summary()
     wins = load_windows(200)
     live = load_live_snaps()
-    goals = _agg_goals(_load_all_windows())
+    all_rows = _load_all_windows()
+    goals = _agg_goals(all_rows)
     now = time.time()
+    try:
+        source_mtime = (RUN / "oscillation_windows.jsonl").stat().st_mtime
+    except OSError:
+        source_mtime = None
     return {
         "now": now,
         "summary": summary,
@@ -306,6 +313,9 @@ def api_oscillation():
         "live": live,
         "goals": goals,
         "default_goals": DEFAULT_GOALS,
+        "source": "oscillation_windows.jsonl",
+        "source_mtime": source_mtime,
+        "total_windows": len(all_rows),
     }
 
 
@@ -1005,6 +1015,49 @@ def api_collector_poll_once(request: Request):
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": "poll timed out after 60s"}
     return {"ok": res.returncode == 0, "output": res.stdout[:500]}
+
+
+@app.post("/api/rebuild")
+def api_rebuild_windows(request: Request):
+    """Reconstruct oscillation windows and summary from persisted tick data.
+
+    Refused while any collector is writing (own child or fresh external
+    manifest): a window closing mid-rebuild would be overwritten by the
+    dataset replace. Serialized with a lock across dashboard requests.
+    """
+    _verify_safe_origin(request)
+    global _collector_proc
+    if _collector_proc is not None and _collector_proc.poll() is None:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "output": "collector running — stop polling before rebuild"},
+        )
+    if _detect_external_collector()["live"]:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "output": "external collector live — pause it before rebuild"},
+        )
+    if not _rebuild_lock.acquire(blocking=False):
+        return JSONResponse(
+            status_code=409, content={"ok": False, "output": "rebuild already running"}
+        )
+    try:
+        cmd = [sys.executable, "-m", "scripts.rebuild_windows"]
+        try:
+            res = subprocess.run(
+                cmd, cwd=str(ROOT), capture_output=True, text=True,
+                timeout=60, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "output": "rebuild timed out after 60s"}
+        except Exception as e:
+            return {"ok": False, "output": f"rebuild failed to start: {e}"}
+        if res.returncode == 0:
+            return {"ok": True, "output": res.stdout[:500]}
+        detail = (res.stderr or res.stdout or "")[:500]
+        return {"ok": False, "output": detail or "rebuild failed"}
+    finally:
+        _rebuild_lock.release()
 
 
 @app.delete("/api/ticks/file")
@@ -2202,8 +2255,9 @@ textarea:focus-visible,
   <div style="display:flex;align-items:center;gap:8px">
     <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Collector: Loading...</span>
     <span id="tapeBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Tape: Loading...</span>
-    <button class="btn" id="btnToggleCollector" onclick="toggleCollector()">Start Polling (1s)</button>
+    <button class="btn" id="btnToggleCollector" onclick="toggleCollector()" title="Capture 1-second live ticks and tape into run/ticks/; closing 5m/15m windows append to the dataset">Start Polling (1s)</button>
     <button class="btn" onclick="pollOnce()">Poll Now (Once)</button>
+    <button class="btn" id="btnRebuildStats" onclick="rebuildStats()">Rebuild Stats</button>
   </div>
 </div>
 
@@ -3366,6 +3420,26 @@ async function pollOnce(){
   refreshCollectorStatus();
 }
 
+async function rebuildStats(){
+  const btn=$('btnRebuildStats');
+  if(btn) btn.disabled=true;
+  $('collectorBadge').textContent = 'Rebuilding stats...';
+  try{
+    const res=await fetch('/api/rebuild', {method:'POST'});
+    let body={}; try{body=await res.json();}catch{}
+    if(!res.ok || !body.ok){
+      $('collectorBadge').textContent = 'Rebuild failed: ' + (body.output||res.status);
+    } else {
+      tick();
+      refreshCollectorStatus();
+    }
+  }catch(e){
+    $('collectorBadge').textContent = 'Rebuild failed: ' + e;
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
 async function tick(){
   let data; try{data=await (await fetch('/api/oscillation',{cache:'no-store'})).json();}catch(e){return;}
   const sum=data.summary||{}, per=sum.per_series||{}, live=data.live||{}, wins=data.windows||[];
@@ -3386,7 +3460,11 @@ async function tick(){
     const gt=g.total||{n:0,any_2c:0,monotonic:0,oscillating:0};
     const bar=(x)=>`<div class="card" style="flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">🎯 ${x.short} — ${x.label}</div><div class="mono" style="font-size:18px;font-weight:700;margin:6px 0">${x.goal} <span style="font-size:12px;color:var(--dim)">goal</span> / ${x.n} <span style="font-size:12px;color:var(--up)">passed</span> / ${x.any2} <span style="font-size:12px;color:var(--gold)">±$0.02</span> / ${x.mono} <span style="font-size:12px;color:var(--down)">mono</span></div><div style="display:flex;gap:6px;align-items:center"><div class="bar" style="flex:1;height:8px"><div class="fill ${x.pctGoal>=100?'up':x.pctGoal>=70?'gold':'warn'}" style="width:${x.pctGoal}%"></div></div><span class="mono" style="font-size:11px;color:var(--dim)">${x.pctGoal}%</span></div><div class="mono" style="font-size:10px;color:var(--dim);margin-top:4px">oscillating ${x.osc} · flat ${g[String(x.short==='5m'?300:900)]?.flat||0} · remaining ${x.remain}</div><div style="margin-top:6px;display:flex;gap:6px;align-items:center"><span class="mono" style="font-size:10px;color:var(--dim)">Target:</span><input id="goalIn${x.short}" type="number" min="1" step="10" value="${x.goal}" style="width:90px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:500 12px var(--mono)"><button onclick="(function(){const v=parseInt(document.getElementById('goalIn${x.short}').value,10);if(v>0){localStorage.setItem('goal_${x.short==='5m'?300:900}',v);tick();}})()" style="background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:600 11px var(--disp);cursor:pointer">Save</button></div></div>`;
     const tot=`<div class="card" style="flex:0 0 180px;min-width:160px;background:var(--panel);border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center"><div style="font:700 11px var(--disp);letter-spacing:.07em;color:var(--faint)">Total</div><div class="mono" style="font-size:16px;font-weight:700;margin-top:4px">${gt.n} windows</div><div class="mono" style="font-size:10px;color:var(--dim)">${gt.any_2c} touched · ${gt.monotonic} mono · ${gt.oscillating} osc</div></div>`;
-    $('goalBar').innerHTML=`<h3>🎯 Window Capture Targets</h3><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>`;
+    const src=data.source||'oscillation_windows.jsonl';
+    const ageMin=(data.source_mtime!=null)?Math.max(0,Math.round((Date.now()/1000-data.source_mtime)/60)):'?';
+    const totClosed=(data.total_windows!=null)?data.total_windows:gt.n;
+    const prov=`<div class="mono" id="provenanceLine" style="font-size:11px;color:var(--dim);margin-top:8px">Source: ${esc(src)} · updated ${ageMin} min ago · ${totClosed} closed windows</div>`;
+    $('goalBar').innerHTML=`<h3>🎯 Window Capture Targets</h3><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>${prov}`;
   })();
 
   // Live bar

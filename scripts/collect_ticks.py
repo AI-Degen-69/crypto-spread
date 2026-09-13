@@ -27,10 +27,12 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import requests
 from strategy.markets import full_book, recent_trades
 from strategy.series import SERIES
+from strategy.windows import compute_summary, finalize_window, write_json_atomic
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "run" / "ticks"
@@ -47,8 +49,42 @@ TAPE_LIMIT = 200
 TICK_BUDGET_MS = 2000.0
 
 # Per-cid state: { cid: {series, slug, start_ts, end_ts, up_token, down_token,
-#                         seen_tape, snap_count, label, duration, jitter_jitter} }
-windows: dict[str, dict] = {}
+#                         seen_tape, snap_count, label, duration,
+#                         mids, touch_pairs} }
+windows: dict[str, dict[str, Any]] = {}
+
+
+def run_dir_for(out_dir: Path) -> Path:
+    """Resolve the dataset dir holding oscillation_windows.jsonl for a ticks out_dir."""
+    out_dir = Path(out_dir)
+    if out_dir.name == "ticks":
+        return out_dir.parent
+    return out_dir
+
+
+def write_window(rec: dict[str, Any], out_dir: Path) -> None:
+    """Append one closed-window record to <out_dir>/oscillation_windows.jsonl."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "oscillation_windows.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def refresh_summary(out_dir: Path) -> None:
+    """Recompute oscillation_summary.json from <out_dir>/oscillation_windows.jsonl."""
+    out_dir = Path(out_dir)
+    rows: list[dict[str, Any]] = []
+    f = out_dir / "oscillation_windows.jsonl"
+    if f.exists():
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+    write_json_atomic(out_dir / "oscillation_summary.json", compute_summary(rows))
 
 
 SESSION = requests.Session()
@@ -114,9 +150,9 @@ def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
     path = out_dir / f"ticks_{day_key}{suffix}"
     payload = (json.dumps(line) + "\n").encode("utf-8")
     if gzip:
-        import gzip
+        import gzip as _gzip
         with open(path, "ab") as f:
-            f.write(gzip.compress(payload))
+            f.write(_gzip.compress(payload))
     else:
         with open(path, "ab") as f:
             f.write(payload)
@@ -214,6 +250,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
                 "up_token": info["up_token"], "down_token": info["down_token"],
                 "seen_tape": set(), "snap_count": 0,
                 "label": label, "duration": duration,
+                "mids": [], "touch_pairs": [],
             }
         w = windows[cid]
 
@@ -251,6 +288,10 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
         touch_pair = None
         if ub.get("best_ask") is not None and db.get("best_ask") is not None:
             touch_pair = ub["best_ask"] + db["best_ask"]
+        if mid is not None:
+            w["mids"].append(mid)
+        if touch_pair is not None:
+            w["touch_pairs"].append(touch_pair)
         resting_up = round(mid - SPREAD_OFFSET, 3) if mid is not None else None
         resting_pair = round(1.0 - 2 * SPREAD_OFFSET, 3)
         q_up = queue_ahead(ub.get("bids", {}), resting_up) if resting_up else None
@@ -269,8 +310,6 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
             "queue_up": q_up, "queue_down": q_dn,
             "err": ub_err or db_err or tape_err or None,
         }
-        if any(rr in snap for rr in ()):
-            pass
         stats["lines"] = stats.get("lines", 0) + 1
         stats["series_seen"] = sorted(set(stats.get("series_seen", []) + [series_slug]))
         stats["day"] = day_key
@@ -287,10 +326,38 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict) -> tuple[list[str], list[s
     if tick_ms > TICK_BUDGET_MS:
         errs.append(f"slow_tick:{tick_ms:.0f}ms")
 
+    closed_now = 0
+    run_dir = run_dir_for(out_dir)
     for cid, w in list(windows.items()):
         if w["end_ts"] < now:
             closed.append(w["slug"])
+            try:
+                rec = finalize_window(
+                    [m for m in w.get("mids", []) if m is not None],
+                    [t for t in w.get("touch_pairs", []) if t is not None],
+                    {
+                        "series": w.get("series", ""),
+                        "label": w.get("label", ""),
+                        "duration": w.get("duration", 300),
+                        "cid": cid,
+                        "slug": w.get("slug", ""),
+                        "start_ts": w.get("start_ts", 0.0),
+                        "end_ts": w.get("end_ts", 0.0),
+                        "closed_ts": now,
+                        "snaps": w.get("snap_count", 0),
+                    },
+                )
+                if rec.get("class") != "no_data":
+                    write_window(rec, run_dir)
+                    closed_now += 1
+            except Exception as e:
+                errs.append(f"window:{cid}:{e}")
             del windows[cid]
+    if closed_now:
+        try:
+            refresh_summary(run_dir)
+        except Exception as e:
+            errs.append(f"summary:{e}")
     return closed, errs
 
 
