@@ -1954,9 +1954,11 @@ class LiveTraderEngine:
                         m.last_valid_down_ask = best_a
                 # mid/spread recomputed from authoritative bests
                 # Issue #170: one shared implementation instead of this copy
-                # and the REST-path copy below. Semantics are unchanged for
-                # now -- whether live should adopt the honest `two_sided_mid`
-                # (None for an unpriceable leg) is issue #171.
+                # and the REST-path copy below. Issue #171 kept the
+                # default-substitution semantics as-is (see
+                # book_math.two_sided_mid_with_default) -- adopting the
+                # honest `two_sided_mid` (None for an unpriceable leg) is
+                # deferred to #174.
                 m.mid = book_math.two_sided_mid_with_default(
                     {"best_bid": m.up_bid, "best_ask": m.up_ask},
                     {"best_bid": m.down_bid, "best_ask": m.down_ask})
