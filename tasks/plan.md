@@ -1,51 +1,103 @@
-# Plan — issue #173: socket trade prints into fill telemetry
+# Plan — issue #164: one parameter contract for Backtest and Cockpit
 
-Scope: **Standard**. Files: `strategy/live_trader.py`, `tests/test_live_trader.py`.
+**Size: Large.** Cross-cutting: `backtest/engine.py` (new simulated behaviour),
+`server/osc_dash.py` (two UIs + two API schemas), plus tests. **Type: Code +
+Design/UI.** Stack: Python 3.12 / FastAPI, `pytest` (baseline **713 passed**).
 
-## Findings that shape the plan
+## What the issue got right, and what it missed
 
-The issue's headline premise is stale. `on_trade` is already plumbed through
-`UnifiedStreamBridge` (`strategy/streaming.py:1135`) into the engine
-(`strategy/live_trader.py:997`), and socket prints already drive paper fill
-detection via `on_ws_trade` → `_try_ws_tape_fill`. What did **not** land is the
-telemetry half:
+Verified every claim against the code first — three issues this week had stale
+premises.
 
-- `_fill_telemetry_worker` derives `printed_size` only from
-  `_fetch_price_prints` — the REST data-api tape measured at ~1.4% capture in
-  issue #165 — so `printed_size_at_price_since_rest` and `fill_ratio` in
-  `run/live_fill_telemetry.jsonl` are biased low by construction.
-- The socket prints that would answer that question are collected and then
-  discarded: the tick loop drains `pending_ws_trades_up/down` into locals and
-  throws them away.
-- The record carries no source field, so the #138 analysis cannot separate a
-  socket-confirmed fill from a REST-confirmed one.
+**Stale in the issue:**
+- "`exit_reversal` is hardcoded to `0.50` in `BacktestParams`." It is
+  `exit_reversal: float = 0.02` (`backtest/engine.py:123`). The `0.50` is the
+  market midpoint it compares against, not the default.
+- "`strategy/live_trader.py:MakerConfig`." There is no `MakerConfig`. Live
+  config is `update_config()` kwargs plus `LIVE_PRESETS`.
 
-### Dedup decision (the trade-off the issue asks to settle explicitly)
+**Understated in the issue.** It names one missing engine knob. There are
+four, and the drift runs both ways:
 
-`printed_size` takes **exactly one source per record**, chosen by per-leg socket
-authority — the two are never summed. Summing is what would double-count a print
-seen on both paths, and merging a near-complete socket ledger with a ~1.4% REST
-sample inflates the numerator of `fill_ratio` by an unknown factor. The chosen
-source is recorded as `tape_source` so #138 can stratify instead of guessing.
+| knob | Backtest UI | Backtest engine | Cockpit UI | Live engine |
+|---|---|---|---|---|
+| `naked_leg_timeout_pct` | — | **absent** | ✅ | ✅ |
+| `exit_thresh_naked` | — | **absent** | ✅ | ✅ |
+| `stop_loss_enabled` | — | **absent** | preset only | ✅ |
+| `enable_leg_chase` | — | **absent** | preset only | ✅ |
+| `exit_reversal` | **absent** | ✅ | ✅ | ✅ |
+| `entry_timeout_pct` | **absent** | ✅ | ✅ | ✅ |
+| `entry_delay_sec` | ✅ | ✅ | **absent** | ✅ |
+| `entry_band` | ✅ | ✅ | **absent** | ✅ |
+| `reentry_drift_band` | ✅ | ✅ | **absent** | ✅ |
+| `min_requote_remaining_sec` | ✅ | ✅ | **absent** | ✅ |
+| `pair_cost_gate` / `max_pair_cost` | ✅ | ✅ | **absent** | ✅ |
 
-Fill *detection* needs no change: `_try_ws_tape_fill` and the REST/`get_order`
-path both gate on `filled_up`/`filled_down`, so a print seen twice fills once
-and a socket outage leaves the REST path exactly as it is today.
+The sharp one: **`patient_band_maker` sets `stop_loss_enabled=False`, and the
+backtest engine has no such knob.** The backtest expresses hold-to-settlement
+by setting exits to 0.49/0.50 — a threshold that never trips — while live
+expresses it with a boolean. Two mechanisms for one intent, neither proving the
+other. This is the same defect class as #182 finding 6, one level up.
+
+And the Cockpit has no input for `entry_delay_sec` or `entry_band` at all — the
+two knobs that *define* the winning preset. They are reachable only through the
+preset, so an operator cannot tune or even see them live.
+
+## Approach
+
+`backtest/engine.py:172` already carries `_PARAM_GROUPS`: a registry of
+`(field, label, why)`. Extend it into the single source of truth — label, unit,
+default, bounds, and which surfaces expose each knob — and have both UIs and
+both API validators read from it. Hand-matching label strings in two files is
+what let them drift; it would drift again.
 
 ## Tasks
 
-- [x] 1. `MarketLiveState` gains a bounded per-leg socket print ledger, appended
-      in `on_ws_trade` and no longer thrown away by the tick loop.
-- [x] 2. `_sum_ws_prints_at_price()` — pure numerator over the ledger, matching
-      the `FILL_PRICE_TICK_TOL` tolerance and `since_ts` semantics of
-      `_sum_prints_at_price`.
-- [x] 3. `_ws_tape_authoritative(m, leg)` — the three conditions of
-      `ws_leg_authoritative` (`scripts/collect_ticks.py:403`): socket connected,
-      token subscribed at least `WS_TAPE_WARMUP_SEC`, and a print for that token
-      within `WS_TAPE_AUTHORITY_HORIZON_SEC`.
-- [x] 4. `_record_fill_telemetry` snapshots the ledger under the engine lock;
-      `_fill_telemetry_worker` picks the source; `_build_fill_record` records
-      `tape_source`.
-- [x] 5. Tests covering: socket-sourced `printed_size`, REST fallback when the
-      socket is not authoritative, no double count across sources, ledger bound,
-      and the new record field.
+- [ ] **1. `[Backend/Logic]` Registry becomes the contract.** Extend
+  `_PARAM_GROUPS` entries to carry `unit`, `default`, `bounds`, and
+  `surfaces: {"backtest", "cockpit"}`. Add `BacktestParams.param_spec()`
+  returning it. No behaviour change.
+  *Skills:* `api-and-interface-design`, `test-driven-development`.
+  *Verify:* new `tests/test_param_registry.py` — every `BacktestParams` field
+  appears exactly once; bounds match `__post_init__` validation.
+
+- [ ] **2. `[Backend/Logic]` `stop_loss_enabled` in the engine.** Add to
+  `BacktestParams` (default `True` = today). When `False`, `_simulate_window`
+  holds a filled naked leg to settlement instead of taking the stop exit —
+  mirroring `live_trader.py:1395`.
+  *Verify:* default replay is bit-identical to master on a fixture; `False`
+  path proves the naked leg reaches settlement.
+
+- [ ] **3. `[Backend/Logic]` `naked_leg_timeout_pct` + `exit_thresh_naked`.**
+  Mirror `_naked_timeout_hit` (`live_trader.py:4045-4054`): measured from the
+  moment the leg went naked, not window open; `0.0` disables.
+  `exit_thresh_naked` defaults to `None` → falls back to `exit_thresh`.
+  *Verify:* a naked leg times out at the right tick; `0.0` changes nothing.
+
+- [ ] **4. `[Backend/Logic]` `enable_leg_chase`.** Port the chase rule already
+  proven in `research/sweeps/sim2.py` (`chase_cap`) into the canonical engine,
+  default `False` = today's behaviour.
+  *Verify:* parity against `sim2`'s chase on the same window.
+
+- [ ] **5. `[Design/UI]` Backtest tab reads the registry.** Render its inputs
+  from `param_spec()`; adds the missing `exit_reversal` and
+  `entry_timeout_pct`, plus the four new knobs. Delete hard-coded labels.
+  *Verify:* served-HTML assertions + live DOM read at `:8802`.
+
+- [ ] **6. `[Design/UI]` Cockpit tab reads the registry.** Same, adding
+  `entry_delay_sec`, `entry_band`, `reentry_drift_band`,
+  `min_requote_remaining_sec`, `max_pair_cost`. Keep the running-bot lock
+  (`cockpitParamsLockHint`) on every new input.
+  *Verify:* served-HTML + live DOM; a test asserts no shared label is
+  hard-coded outside the registry.
+
+- [ ] **7. `[Backend/Logic]` Schema sync.** `/api/backtest` and
+  `/api/live/config` validate against the registry rather than ad-hoc parsing,
+  so an out-of-range value is refused identically on both.
+  *Verify:* parametrised bounds tests per knob on both endpoints.
+
+## Improvement proposed and adopted
+
+Operator chose the registry over flat label-matching, and chose to land the
+four engine knobs now — before the post-capture backtest — so that run measures
+the configuration the bot actually executes.
