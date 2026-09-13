@@ -1159,3 +1159,58 @@ def test_the_chase_stops_once_the_pair_is_captured():
 def test_enable_leg_chase_is_part_of_the_params_hash():
     """Chased and unchased runs must not collide in a sweep cache."""
     assert _params().params_hash() != _params(enable_leg_chase=True).params_hash()
+
+
+def _blocked_exit_then_reversion():
+    """Drift past a tight naked stop while the UP book has no bid, then revert.
+
+    The missing best_bid is what makes this reachable: the exit cannot fire on
+    the crossing tick, so the drift is still on the books when the mid comes
+    back. With the round-trip guard armed at the paired threshold instead of
+    the naked one, the exit then fires into a fully recovered market.
+    """
+    start, dur = 1_760_000_000.0, 300
+    mids = [0.50, 0.50, 0.46, 0.46, 0.499, 0.499]
+    no_bid = {2, 3, 4}
+    snaps = []
+    for i, m in enumerate(mids):
+        ub, ua = round(m - 0.01, 3), (0.47 if i == 1 else round(m + 0.01, 3))
+        db, da = round(1 - m - 0.01, 3), round(1 - m + 0.01, 3)
+        up = {"best_bid": (None if i in no_bid else ub), "best_ask": ua,
+              "bids": ({} if i in no_bid else {str(ub): 500.0}),
+              "asks": {str(ua): 500.0}}
+        snaps.append({
+            "ts": start + i * 10, "cid": "0xrev", "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m", "start_ts": start, "end_ts": start + dur,
+            "duration": dur, "mid": m, "up_book": up,
+            "down_book": {"best_bid": db, "best_ask": da,
+                          "bids": {str(db): 500.0}, "asks": {str(da): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_a_tight_naked_stop_arms_the_reversal_guard_at_its_own_threshold():
+    """A round trip must suppress the stop that the round trip round-tripped.
+
+    Regression: `exit_thresh_naked` tightened the exit comparison to
+    `naked_thr` while the reversal latch still waited for the looser paired
+    `exit_thr`. A drift past 0.03 that the book could not act on, followed by a
+    full reversion to 0.499, then exited at 0.489 — selling into a recovered
+    market on a stale drift.
+    """
+    w = _simulate_window(_blocked_exit_then_reversion(),
+                         _params(exit_thresh_naked=0.03))
+    assert w.filled_up is True, "fixture never entered"
+    assert w.max_down >= 0.03, "fixture never crossed the tight stop"
+    assert w.exit_taken is False, (
+        f"stopped out at {w.exit_price} after the mid had reverted to 0.499 — "
+        "the reversal guard is armed at the paired threshold, not the naked one")
+
+
+def test_the_reversal_guard_is_unchanged_when_the_naked_stop_is_not_tightened():
+    """`naked_thr` equals `exit_thr` by default, so this path must not move."""
+    w = _simulate_window(_blocked_exit_then_reversion(), _params())
+    assert w.exit_taken is False
+    tight = _params(exit_thresh_naked=0.05)   # equal to paired: falls back
+    assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)

@@ -617,9 +617,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # monotonic, so don't exit. E.g. if max_down >= exit_thr and then mid
         # is now back within exit_reversal of 0.50, the down excursion was a
         # round-trip and the adverse drift is no longer sustained.
-        if max_down >= exit_thr and (0.50 - mid) < params.exit_reversal:
+        # Latched against `naked_thr`, not `exit_thr`, because every one of the
+        # four exit sites below requires exactly one leg filled — they are all
+        # naked exits, so the threshold that governs them is the one that must
+        # arm the round-trip guard. Tightening the stop without tightening this
+        # left a reachable hole (issue #164): a drift past `naked_thr` while the
+        # book had no best_bid blocked the exit, the mid fully reverted, and the
+        # exit then fired on the stale drift because the latch was still waiting
+        # for the looser paired threshold. `naked_thr` equals `exit_thr` unless
+        # `exit_thresh_naked` tightens it, so the default path is unchanged.
+        if max_down >= naked_thr and (0.50 - mid) < params.exit_reversal:
             reversal_seen_down = True
-        if max_up >= exit_thr and (mid - 0.50) < params.exit_reversal:
+        if max_up >= naked_thr and (mid - 0.50) < params.exit_reversal:
             reversal_seen_up = True
 
         # Adverse-open gate (issue #92): evaluated once per window against the
