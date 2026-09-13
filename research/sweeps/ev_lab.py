@@ -29,6 +29,7 @@ import random
 import statistics
 import sys
 import time
+import zlib
 from array import array
 from dataclasses import replace
 from multiprocessing import Pool
@@ -68,6 +69,39 @@ class Win:
     @property
     def first_ts(self):
         return self.ts[0] if self.ts else 0.0
+
+
+#: Bumped whenever the cached record shape changes, so `load_cache` rebuilds
+#: instead of silently feeding an old pickle to code expecting the new shape.
+CACHE_VERSION = 2
+
+SIDE_SELL = 0
+SIDE_BUY = 1
+
+
+def _classify_side(px: float, best_bid, best_ask) -> int:
+    """Classify one print as buy (1) or sell (0) from the snapshot book.
+
+    Issue #182: `sim2` documents and consumes a third tuple element for this,
+    but `build_cache` only ever stored `(px, sz)` — so `tr[2] if len(tr) > 2
+    else 0` made every print look like a sell, and under `fill_model="tapeq"`
+    a buy that lifted the ask could fill our resting bid. `phase6_tapeq_top.py`
+    runs exactly that model.
+
+    A print at or above the ask is the aggressor lifting it (buy); at or below
+    the bid is the aggressor hitting it (sell). Inside an untouched spread it
+    is unattributable, and `SIDE_SELL` is the conservative answer for a resting
+    *bid*: it keeps the print eligible to fill us, matching the pre-existing
+    default rather than quietly making fills rarer.
+    """
+    try:
+        if best_ask is not None and px >= float(best_ask) - 1e-9:
+            return SIDE_BUY
+        if best_bid is not None and px <= float(best_bid) + 1e-9:
+            return SIDE_SELL
+    except (TypeError, ValueError):
+        return SIDE_SELL
+    return SIDE_SELL
 
 
 def _compact_bids(d: dict) -> array:
@@ -142,9 +176,9 @@ def build_cache(force: bool = False) -> Path:
                     except Exception:
                         continue
                     if up_token and a == up_token:
-                        tup.append((px, sz))
+                        tup.append((px, sz, _classify_side(px, ubb, uba)))
                     elif dn_token and a == dn_token:
-                        tdn.append((px, sz))
+                        tdn.append((px, sz, _classify_side(px, dbb, dba)))
                 tape.append((tup, tdn))
             windows.append({
                 "cid": cid, "series": first.get("series", ""), "slug": first.get("slug", ""),
@@ -159,18 +193,35 @@ def build_cache(force: bool = False) -> Path:
     windows.sort(key=lambda w: w["ts"][0] if w["ts"] else 0.0)
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CACHE_PATH, "wb") as f:
-        pickle.dump(windows, f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"cached {len(windows)} windows -> {CACHE_PATH} "
+        pickle.dump({"version": CACHE_VERSION, "windows": windows}, f,
+                    protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"cached {len(windows)} windows (v{CACHE_VERSION}) -> {CACHE_PATH} "
           f"({CACHE_PATH.stat().st_size/1e6:.0f}MB, {time.perf_counter()-t0:.0f}s)")
     return CACHE_PATH
 
 
 def load_cache() -> list[Win]:
+    """Load the window cache, rebuilding it when the on-disk shape is stale.
+
+    Issue #182: the cache used to be a bare list with no version, so a pickle
+    written before trade sides were stored would load fine and every print
+    would read as a sell. A stale cache has to be rebuilt, not accepted.
+    """
     if not CACHE_PATH.exists():
         build_cache()
     with open(CACHE_PATH, "rb") as f:
         raw = pickle.load(f)
-    return [w if isinstance(w, Win) else Win(w) for w in raw]
+    version = raw.get("version") if isinstance(raw, dict) else None
+    if version != CACHE_VERSION:
+        print(f"window cache is v{version}, need v{CACHE_VERSION} — rebuilding")
+        build_cache(force=True)
+        with open(CACHE_PATH, "rb") as f:
+            raw = pickle.load(f)
+        if not isinstance(raw, dict) or raw.get("version") != CACHE_VERSION:
+            raise RuntimeError(
+                f"window cache at {CACHE_PATH} is still not v{CACHE_VERSION} "
+                "after a forced rebuild")
+    return [w if isinstance(w, Win) else Win(w) for w in raw["windows"]]
 
 
 # --------------------------------------------------------------------------
@@ -211,8 +262,34 @@ def _taker_fee(p: float, rate: float) -> float:
     return rate * p * (1.0 - p)
 
 
+#: Fields `engine._simulate_window` honours that `fast_simulate` does not.
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band")
+
+
+def _reject_unsupported_knobs(p: BacktestParams) -> None:
+    """Raise when `p` sets a knob `fast_simulate` would silently ignore."""
+    ignored = [k for k in UNSUPPORTED_KNOBS if getattr(p, k, 0.0)]
+    if ignored:
+        raise ValueError(
+            f"fast_simulate does not implement {', '.join(ignored)}; "
+            "engine._simulate_window applies them, so results would not be "
+            "comparable. Use research/sweeps/sim2.py, which implements both."
+        )
+
+
 def fast_simulate(w: Win, p: BacktestParams) -> dict:
-    """Mirror engine._simulate_window for one cached window."""
+    """Mirror engine._simulate_window for one cached window.
+
+    Raises on a parameter this simulator does not implement. `entry_delay_sec`
+    and `entry_band` are applied by `engine._simulate_window` before entry but
+    have never been implemented here, and the parity parameter sets never
+    exercised them — so the "0 mismatches across 6,840 window-checks" claim
+    silently did not cover the two knobs that define `patient_band_maker`.
+    Ignoring them returned plausible numbers for a strategy that was never
+    simulated; failing loudly is the only safe behaviour (issue #182). The
+    `sim2` research extensions do implement both — use those.
+    """
+    _reject_unsupported_knobs(p)
     duration = w.duration
     start_ts = w.start_ts
     first_ts = w.first_ts
@@ -326,9 +403,15 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                     resting_dn = round(min(0.99, max(0.01, (1.0 - r_mid) - p.offset)), 3)
 
         if p.queue_gate is not None and p.queue_gate > 0:
-            q_up = _queue_ahead(w.up_bids[i], resting_up)
-            q_dn = _queue_ahead(w.dn_bids[i], resting_dn)
-            queue_ok = (q_up <= p.queue_gate) and (q_dn <= p.queue_gate)
+            # Separate locals from the tapeq state below (issue #182). These
+            # used to write `q_up`/`q_dn`, which the tapeq block treats as
+            # "queue not yet latched" sentinels: once the gate had filled them,
+            # `q_rest_up`/`q_rest_dn` were never set, and every tapeq fill path
+            # requires them — so `fill_model="tapeq"` could not fill at all
+            # whenever `queue_gate > 0`.
+            qa_up = _queue_ahead(w.up_bids[i], resting_up)
+            qa_dn = _queue_ahead(w.dn_bids[i], resting_dn)
+            queue_ok = (qa_up <= p.queue_gate) and (qa_dn <= p.queue_gate)
         else:
             queue_ok = True
 
@@ -380,10 +463,15 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                 filled_up, can_up = True, False
             if can_dn and q_rest_dn is not None and dn_ask is not None                     and dn_ask <= (q_rest_dn - p.tick_size + 1e-6):
                 filled_dn, can_dn = True, False
-        # Tape entries are (price, size) pairs (cache stores sizes for tapeq).
+        # Tape entries are (price, size, side) triples; side is 1 for a buy
+        # that lifted the ask, which cannot fill a resting bid (issue #182).
+        # Tolerate 2-tuples so a cache written before CACHE_VERSION 2 fails
+        # at the version guard in load_cache rather than here.
         tup_now, tdn_now = w.tape[i]
         if can_up and fm in ("tape", "both", "cross", "tapeq"):
-            for tpx, tsz in tup_now:
+            for _tr in tup_now:
+                tpx, tsz = _tr[0], _tr[1]
+                tside = _tr[2] if len(_tr) > 2 else SIDE_SELL
                 if fm in ("tape", "both"):
                     if abs(tpx - resting_up) <= (p.tick_size + 1e-6):
                         filled_up, can_up = True, False
@@ -393,6 +481,8 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                         filled_up, can_up = True, False
                         break
                 else:  # tapeq
+                    if tside == SIDE_BUY:
+                        continue  # buy lifted the ask; cannot fill our bid
                     if q_rest_up is not None and tpx <= (q_rest_up - p.tick_size + 1e-6):
                         filled_up, can_up = True, False
                         break
@@ -402,7 +492,9 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                             break
                         q_up -= tsz
         if can_dn and fm in ("tape", "both", "cross", "tapeq"):
-            for tpx, tsz in tdn_now:
+            for _tr in tdn_now:
+                tpx, tsz = _tr[0], _tr[1]
+                tside = _tr[2] if len(_tr) > 2 else SIDE_SELL
                 if fm in ("tape", "both"):
                     if abs(tpx - resting_dn) <= (p.tick_size + 1e-6):
                         filled_dn, can_dn = True, False
@@ -412,6 +504,8 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                         filled_dn, can_dn = True, False
                         break
                 else:  # tapeq
+                    if tside == SIDE_BUY:
+                        continue  # buy lifted the ask; cannot fill our bid
                     if q_rest_dn is not None and tpx <= (q_rest_dn - p.tick_size + 1e-6):
                         filled_dn, can_dn = True, False
                         break
@@ -583,6 +677,55 @@ def bootstrap_ci(pnls: list[float], n_boot: int = 5000, seed: int = 7,
     return lo, hi, mean, day_lo, day_hi
 
 
+def _empty_summary() -> dict:
+    """Zero-shaped summary for a selection that matched no windows.
+
+    `summarize` used to return a bare `{"n": 0}` here, but every phase script
+    formats its report with `r['pair_rate']`, `r['ci95_lo']` and friends — so
+    one series absent from the cache (which `build_cache` rebuilds from
+    whatever tick files exist) raised `KeyError` and threw away a sweep that
+    had already finished running. Rates are 0.0 rather than None because they
+    are "0 of 0" in a report, while the CI bounds stay None: no interval was
+    estimated, and printing 0.0 there would read as a measured bound (#182).
+    """
+    return {
+        "n": 0,
+        "settle_corrected": 0, "settle_ambiguous": 0,
+        "pairs": 0, "pair_rate": 0.0,
+        "exits": 0, "exit_rate": 0.0,
+        "naked_settle": 0,
+        "win_rate": 0.0,
+        "total_pnl_usd": 0.0,
+        "mean_net_cents": 0.0,
+        "roi_pct_per_window": 0.0,
+        "ci95_lo": None, "ci95_hi": None,
+        "ci95_day_lo": None, "ci95_day_hi": None,
+        "max_dd_usd": 0.0,
+        "capital_usd": 0.0,
+        "profit_factor": 0.0,
+        "sharpe_proxy": 0.0,
+        "by_series": {}, "by_day": {}, "by_duration": {}, "by_class": {},
+        "outcome_decomp": {
+            "pairs": {"n": 0, "mean_c": 0.0, "total_usd": 0.0},
+            "exits": {"n": 0, "mean_c": 0.0, "total_usd": 0.0},
+            "naked": {"n": 0, "mean_c": 0.0, "total_usd": 0.0},
+            "no_fill": 0,
+        },
+    }
+
+
+def stable_seed(name: str) -> int:
+    """Reproducible bootstrap seed for a config name (issue #182).
+
+    `hash()` on a str is salted per process unless `PYTHONHASHSEED` is fixed,
+    so seeding the bootstrap with it made every published `ci95_*` bound
+    unreproducible by a rerun — and those bounds are the stated selection
+    criterion ("95% bootstrap CI lower bound above 0"). `zlib.crc32` is stable
+    across processes, platforms and Python versions.
+    """
+    return zlib.crc32(str(name).encode("utf-8")) & 0xFFFF
+
+
 def summarize(rows: list[dict], size: int = 5, n_boot: int = 5000, seed: int = 7,
               settle_correct: bool = True) -> dict:
     """Aggregate per-window sim rows into the report metrics.
@@ -592,7 +735,7 @@ def summarize(rows: list[dict], size: int = 5, n_boot: int = 5000, seed: int = 7
     direction). Run `audit_settlement.py` for the rationale.
     """
     if not rows:
-        return {"n": 0}
+        return _empty_summary()
     size = max(5, int(size))
     n = len(rows)
     amb = 0
@@ -630,7 +773,11 @@ def summarize(rows: list[dict], size: int = 5, n_boot: int = 5000, seed: int = 7
         "win_rate": wins / n,
         "total_pnl_usd": total / 100.0,
         "mean_net_cents": mean,
-        "roi_pct_per_window": (total / cap * 100.0) if cap > 0 else 0.0,
+        # `total` is cents (see total_pnl_usd above), `cap` is USD. Dividing
+        # one by the other without converting reported every ROI 100x too
+        # high, which is how a set of negative results read as acceptable
+        # ones (issue #182).
+        "roi_pct_per_window": ((total / 100.0) / cap * 100.0) if cap > 0 else 0.0,
         "ci95_lo": lo, "ci95_hi": hi,
         "ci95_day_lo": dlo, "ci95_day_hi": dhi,
         "max_dd_usd": dd / 100.0,
@@ -788,7 +935,7 @@ def sweep_configs(configs: list[dict], workers: int = 6, n_boot: int = 3000,
         for cfg, sel in tasks:
             params = BacktestParams(**cfg["params_kwargs"])
             s = run_config_on(sel, params, size=size, n_boot=n_boot,
-                              seed=hash(cfg["name"]) & 0xFFFF)
+                              seed=stable_seed(cfg["name"]))
             s["name"] = cfg["name"]
             s["params_kwargs"] = cfg["params_kwargs"]
             results.append(s)
@@ -811,7 +958,7 @@ def sweep_configs(configs: list[dict], workers: int = 6, n_boot: int = 3000,
         for cfg, _sel in tasks:
             rows = by_cfg[cfg["name"]]
             s = summarize(rows, size=size, n_boot=n_boot,
-                          seed=hash(cfg["name"]) & 0xFFFF, settle_correct=True)
+                          seed=stable_seed(cfg["name"]), settle_correct=True)
             s["name"] = cfg["name"]
             s["params_kwargs"] = cfg["params_kwargs"]
             results.append(s)

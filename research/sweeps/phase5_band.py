@@ -71,8 +71,11 @@ def build_tasks() -> list[dict]:
 
 def _worker(args):
     idxs, params_dict, chase_cap, delay, band = args
-    from ev_lab import load_cache
-    cache = load_cache()
+    # `_get_cache` memoises in a process-level global; `load_cache`
+    # re-unpickles ~336MB per call, and pool.map dispatches one task
+    # per shard per config (issue #182).
+    from ev_lab import _get_cache
+    cache = _get_cache()
     params = BacktestParams(**params_dict)
     return [sim2(cache[i], params, chase_cap=chase_cap or None,
                  entry_delay_sec=delay or 0.0,
@@ -95,14 +98,17 @@ def main() -> int:
                                       t.get("entry_delay_sec", 0.0),
                                       t.get("entry_band")) for sh in shards])
             rows = [r for chunk in res for r in chunk]
-            s = summarize(rows, size=5, n_boot=2000, seed=hash(t["name"]) & 0xFFFF,
+            s = summarize(rows, size=5, n_boot=2000, seed=stable_seed(t["name"]),
                           settle_correct=True)
             s["name"] = t["name"]
             s["entry_band"] = t.get("entry_band")
             s["entry_delay_sec"] = t.get("entry_delay_sec", 0.0)
             results.append(s)
 
-    results.sort(key=lambda r: -(r.get("total_pnl_usd") or -9e9))
+    # `0.0 or -9e9` is -9e9, so a break-even config sorted below every
+    # loss. Test for None explicitly (issue #182).
+    results.sort(key=lambda r: -(r["total_pnl_usd"]
+                                 if r.get("total_pnl_usd") is not None else -9e9))
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=1, default=str)
 

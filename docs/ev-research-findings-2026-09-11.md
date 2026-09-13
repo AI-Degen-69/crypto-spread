@@ -1,5 +1,20 @@
 # EV Research Report — SPREAD-2 Parameter, Market & Timeframe Sweep
 
+> ⚠️ **Superseded pending a re-run (issue #182).** Five defects were found in
+> the lab that produced this report. Two change what the numbers mean: every
+> `roi_pct_per_window` below is **100× too high** (cents divided by a USD
+> capital base), and every `ci95_*` bound is **unreproducible** (the bootstrap
+> was seeded with `hash(name)`, which Python salts per process) — and those
+> bounds are this report's own selection criterion. Three more change which
+> configurations were simulated at all: the Phase 1 baseline was the engine
+> default rather than the `ex_5m=0.08, rev=0.015` stated below, `tapeq` could
+> not fill whenever `queue_gate > 0`, and every print was classified as a sell.
+>
+> The drivers are fixed; the tables are not regenerated, because the dataset
+> below was deleted when the REST-era capture was replaced. Treat the *rankings*
+> as a hypothesis worth re-testing and the *magnitudes* as unreliable. See
+> [`research/sweeps/RESULTS-ARE-STALE.md`](../research/sweeps/RESULTS-ARE-STALE.md).
+
 **Date:** 2026-09-11 · **Dataset:** `run/ticks/` — 2,430 condition windows, ~265k snapshots, 5 collection days (2026-08-31, 09-07, 09-08, 09-09, 09-11) · **Engine:** `backtest/engine.py` semantics, replayed tick-for-tick by a parity-verified fast simulator (`research/sweeps/ev_lab.py`, **6,840 window-checks × 12 configs, 0 mismatches**).
 
 Every result below is **settlement-corrected**: the stock engine silently books 0 PnL when a naked leg's final bid is missing (book empty at settlement); an audit (`research/sweeps/audit_settlement.py`) showed those 79 windows *all* lost (−39.3¢ true), and "marked" windows were 89 wins / 3 losses vs the true 88/83. Without this correction every hold-to-settle config looks ~40% better than reality. All fees = Polymarket crypto taker 0.07·p·(1−p) on exits and settlement marks; maker fills free.

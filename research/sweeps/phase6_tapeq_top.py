@@ -46,8 +46,11 @@ def exit_dict(ex: float) -> dict:
 
 def _worker(args):
     idxs, pd, chase, delay, band = args
-    from ev_lab import load_cache
-    cache = load_cache()
+    # `_get_cache` memoises in a process-level global; `load_cache`
+    # re-unpickles ~336MB per call, and pool.map dispatches one task
+    # per shard per config (issue #182).
+    from ev_lab import _get_cache
+    cache = _get_cache()
     params = BacktestParams(**pd)
     return [sim2(cache[i], params, chase_cap=chase or None,
                  entry_delay_sec=delay or 0.0, entry_band=band if band > 0 else None)
@@ -80,7 +83,10 @@ def main() -> int:
             results.append(s)
             print(f"  simmed {name}")
 
-    results.sort(key=lambda r: -(r.get("total_pnl_usd") or -9e9))
+    # `0.0 or -9e9` is -9e9, so a break-even config sorted below every
+    # loss. Test for None explicitly (issue #182).
+    results.sort(key=lambda r: -(r["total_pnl_usd"]
+                                 if r.get("total_pnl_usd") is not None else -9e9))
     with open(Path(__file__).parent / "phase6_tapeq_top.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=1, default=str)
 
