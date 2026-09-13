@@ -167,33 +167,62 @@ class BacktestParams:
     # Separates operator-controlled (live-replicable) knobs from execution
     # assumptions and internal window policy so the UI and API can render them
     # in distinct sections without touching any field names or the hash contract.
-    # Each group lists (field_name, label, why). Unknown keys silently drop so new
-    # fields don't break the grouping on a missing-entry error.
-    _PARAM_GROUPS: ClassVar[dict[str, list[tuple[str, str, str]]]] = {
+    # Each group lists (field_name, label, why, unit, bounds, surfaces).
+    # `bounds` is the (low, high) pair `__post_init__` enforces, or None for a
+    # field with no numeric range; `surfaces` names which tabs may render it.
+    # Unknown keys silently drop so new fields don't break the grouping on a
+    # missing-entry error.
+    #
+    # Issue #164: this is the single source of truth. Backtest and Cockpit
+    # drifted — different labels for one knob, and each missing knobs the other
+    # had — because both hand-rolled their own copies. A label, unit, default or
+    # bound written anywhere else in the dashboard is a defect.
+    _PARAM_GROUPS: ClassVar[dict[str, list[tuple]]] = {
         "trading_knobs": [
-            ("offset", "Spread Offset — where you rest", "You set this live on the book"),
-            ("queue_gate", "Queue Depth — book depth filter", "You choose how many orders ahead to clear through"),
-            ("pair_cost_gate", "Max Pair Cost ($) — cost ceiling", "Your cost threshold before walking away"),
-            ("quote_shares", "Order Shares per Leg — position size", "Your sizing decision"),
-            ("max_start_delay_sec", "Max Start Delay (s) — window filter", "You decide which windows are fresh enough to enter"),
-            ("entry_delay_sec", "Entry Delay (s) — quote hold", "You hold quotes until the window matures"),
-            ("entry_band", "Entry Band — undecided-market filter", "You admit only undecided markets at entry time"),
-            ("exit_thresh_by_slug", "Exit Stop Loss Thresholds ($)", "Your stop placement — per series / duration"),
+            ("offset", "Spread Offset ($)", "You set this live on the book",
+             "$", (0.0, 0.49), ("backtest", "cockpit")),
+            ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
+             "shares", (0.0, 100000.0), ("backtest",)),
+            ("pair_cost_gate", "Max Pair Cost ($)", "Your cost threshold before walking away",
+             "$", (0.0, 2.0), ("backtest", "cockpit")),
+            ("quote_shares", "Share Size per Leg", "Your sizing decision",
+             "shares", (1, 100000), ("backtest", "cockpit")),
+            ("max_start_delay_sec", "Max Start Delay (s)", "You decide which windows are fresh enough to enter",
+             "s", (0.0, 3600.0), ("backtest",)),
+            ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
+             "s", (0.0, 3600.0), ("backtest", "cockpit")),
+            ("entry_band", "Entry Band ($ from 0.50)", "You admit only undecided markets at entry time",
+             "$", (0.0, 0.50), ("backtest", "cockpit")),
+            ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
+             "$", None, ("backtest", "cockpit")),
+            ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
+             "$", (0.0, 0.50), ("backtest", "cockpit")),
         ],
         "execution_assumptions": [
-            ("fill_model", "Fill Model — execution assumption", "Not directly settable live: the book decides fills"),
-            ("merge_gas_usd", "Gas Merge Cost (USD)", "Real cost, not a tuning knob"),
-            ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption"),
-            ("tick_size", "Tick Size", "Price granularity assumption"),
-            ("min_quote_shares", "Min Quote Shares", "Minimum order size floor"),
+            ("fill_model", "Fill Model", "Not directly settable live: the book decides fills",
+             "enum", None, ("backtest",)),
+            ("merge_gas_usd", "Gas Merge Cost ($)", "Real cost, not a tuning knob",
+             "$", (0.0, 100.0), ("backtest",)),
+            ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption",
+             "coef", (0.0, 1.0), ("backtest",)),
+            ("tick_size", "Tick Size ($)", "Price granularity assumption",
+             "$", (0.0, 1.0), ("backtest",)),
+            ("min_quote_shares", "Min Quote Shares", "Minimum order size floor",
+             "shares", (1, 100000), ("backtest",)),
         ],
         "window_policy": [
-            ("entry_timeout_pct", "Entry Timeout (% of window)", "Engine policy — mirrors live config, tuned in research"),
-            ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live"),
-            ("reentry_drift_band", "Drift Re-Entry Band", "Re-entry discipline — policy knob"),
-            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy"),
-            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy"),
-            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy"),
+            ("entry_timeout_pct", "Entry Timeout (% of window)", "Engine policy — mirrors live config, tuned in research",
+             "%", (0.0, 1.0), ("backtest", "cockpit")),
+            ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live",
+             "%", (0.0, 1.0), ("backtest",)),
+            ("reentry_drift_band", "Drift Re-Entry Band ($)", "Re-entry discipline — policy knob",
+             "$", (0.0, 0.5), ("backtest", "cockpit")),
+            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy",
+             "s", (0.0, 3600.0), ("backtest", "cockpit")),
+            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy",
+             "%", (0.0, 1.0), ("backtest", "cockpit")),
+            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy",
+             "count", (0, 100), ("backtest", "cockpit")),
         ],
     }
 
@@ -207,9 +236,10 @@ class BacktestParams:
         """
         flat = asdict(self)
         out: dict[str, dict[str, Any]] = {}
-        for group_name, fields in self._PARAM_GROUPS.items():
+        for group_name, entries in self._PARAM_GROUPS.items():
             grp: dict[str, Any] = {}
-            for fname, _label, _why in fields:
+            for entry in entries:
+                fname = entry[0]
                 if fname in flat:
                     grp[fname] = flat[fname]
             out[group_name] = grp
@@ -226,6 +256,44 @@ class BacktestParams:
             # trading_knobs section for consumers that want the whole map
             out["trading_knobs"]["_exit_thresh_by_slug"] = et
         return out
+
+    @classmethod
+    def param_spec(cls) -> dict[str, dict[str, dict[str, Any]]]:
+        """The full definition of every knob, grouped, for UIs and validators.
+
+        Issue #164: Backtest and Cockpit each hand-rolled labels, units,
+        defaults and bounds, which is how they came to disagree about the same
+        knob and to each miss knobs the other had. Both now render and validate
+        from this, so a new field reaches every surface it declares and a
+        label exists in exactly one place.
+
+        `bounds` is the `(low, high)` pair `__post_init__` enforces, or None
+        for a non-numeric field. `surfaces` says which tabs may show it: an
+        execution assumption like `fill_model` is not something an operator
+        sets on a live order, so it is backtest-only by design.
+        """
+        defaults = asdict(cls())
+        out: dict[str, dict[str, dict[str, Any]]] = {}
+        for group_name, entries in cls._PARAM_GROUPS.items():
+            grp: dict[str, dict[str, Any]] = {}
+            for fname, label, why, unit, bounds, surfaces in entries:
+                if fname not in defaults:
+                    continue
+                grp[fname] = {
+                    "label": label, "why": why, "unit": unit,
+                    "default": defaults[fname], "bounds": bounds,
+                    "surfaces": tuple(surfaces),
+                }
+            out[group_name] = grp
+        return out
+
+    @classmethod
+    def spec_for(cls, name: str) -> dict[str, Any]:
+        """One knob's spec, or KeyError naming the field that is unregistered."""
+        for grp in cls.param_spec().values():
+            if name in grp:
+                return grp[name]
+        raise KeyError(f"{name!r} is not in BacktestParams._PARAM_GROUPS")
 
     def __post_init__(self):
         """Validate parameter ranges and finite boundaries."""

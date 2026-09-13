@@ -53,7 +53,7 @@ what let them drift; it would drift again.
 
 ## Tasks
 
-- [ ] **1. `[Backend/Logic]` Registry becomes the contract.** Extend
+- [x] **1. `[Backend/Logic]` Registry becomes the contract.** Extend
   `_PARAM_GROUPS` entries to carry `unit`, `default`, `bounds`, and
   `surfaces: {"backtest", "cockpit"}`. Add `BacktestParams.param_spec()`
   returning it. No behaviour change.
