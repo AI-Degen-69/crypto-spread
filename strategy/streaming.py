@@ -101,6 +101,7 @@ CLOB_WS_JITTER_PCT = 0.25         # de-synchronizes reconnect storms
 # keeps receiving. Dropping the oldest prints is better than growing without a
 # bound on a process that runs for days.
 CLOB_WS_TRADE_BUFFER_MAX = 5000
+CLOB_WS_FAILURE_WARN_EVERY = 10   # escalate a feed that never comes back
 
 
 
@@ -446,6 +447,7 @@ class CLOBMarketWSClient:
         self.tick_sizes: Dict[str, float] = {}
         self.is_connected: bool = False
         self.reconnect_count: int = 0
+        self.consecutive_failures: int = 0
         self.trades_captured: int = 0
         self.trades_dropped: int = 0
         self.last_ping_ts: float = 0.0
@@ -748,6 +750,7 @@ class CLOBMarketWSClient:
                 async with connect(self.ws_url, ping_interval=None, close_timeout=5) as ws:
                     self.is_connected = True
                     backoff = self.backoff_base
+                    self.consecutive_failures = 0
                     log.info("CLOB market WS connected: %d tokens", len(self.token_ids))
                     clean = await self._session(ws)
             except asyncio.CancelledError:
@@ -762,6 +765,12 @@ class CLOBMarketWSClient:
             if clean:
                 continue  # token rotation: resubscribe immediately, no penalty
             self.reconnect_count += 1
+            self.consecutive_failures += 1
+            if self.consecutive_failures % CLOB_WS_FAILURE_WARN_EVERY == 0:
+                # A feed that is permanently broken (bad host, IP ban) would
+                # otherwise only show up as a manifest counter creeping upward.
+                log.warning("CLOB market WS has failed %d times in a row",
+                            self.consecutive_failures)
             if await self._wait_stop(self.jittered(backoff)):
                 break
             backoff = self.next_backoff(backoff)
@@ -772,6 +781,7 @@ class CLOBMarketWSClient:
             "ws_connected": self.is_connected,
             "token_count": len(self.token_ids),
             "reconnects": self.reconnect_count,
+            "consecutive_failures": self.consecutive_failures,
             "trades_captured": self.trades_captured,
             "trades_dropped": self.trades_dropped,
             "last_ping_ts": self.last_ping_ts,
@@ -843,6 +853,9 @@ class CLOBStreamCollectorBridge:
     that arrived between two ticks without touching asyncio at all.
     """
 
+    START_TIMEOUT = 5.0   # wait for the worker loop to come up
+    STOP_TIMEOUT = 5.0    # wait for the worker thread to unwind
+
     def __init__(
         self,
         token_ids: Optional[List[str]] = None,
@@ -880,7 +893,7 @@ class CLOBStreamCollectorBridge:
             self._thread = threading.Thread(
                 target=self._worker_main, daemon=True, name="CLOBStreamCollectorBridge")
             self._thread.start()
-            self._loop_ready.wait(timeout=5.0)
+            self._loop_ready.wait(timeout=self.START_TIMEOUT)
 
     def _worker_main(self) -> None:
         """Worker thread entry point owning the socket's event loop."""
@@ -891,8 +904,11 @@ class CLOBStreamCollectorBridge:
         self._loop_ready.set()
         try:
             self._loop.run_until_complete(self.client.run_direct())
-        except Exception as e:
-            log.debug("CLOB stream bridge loop ended: %s", e)
+        except Exception:
+            # Socket drops are retried inside run_direct(); anything reaching
+            # here killed the thread for good, and the collector would silently
+            # serve REST-only for the rest of the process. Say so loudly.
+            log.error("CLOB stream bridge thread died", exc_info=True)
         finally:
             try:
                 pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
@@ -938,7 +954,10 @@ class CLOBStreamCollectorBridge:
             if loop is not None and loop.is_running():
                 loop.call_soon_threadsafe(self.client.stop)
             if self._thread and self._thread.is_alive():
-                self._thread.join(timeout=5.0)
+                self._thread.join(timeout=self.STOP_TIMEOUT)
+                if self._thread.is_alive():
+                    log.warning("CLOB stream bridge thread did not stop within %.1fs",
+                                self.STOP_TIMEOUT)
             self.is_running = False
             self.client.is_connected = False
 

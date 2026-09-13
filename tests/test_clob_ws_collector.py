@@ -509,11 +509,15 @@ def test_bridge_stop_is_idempotent():
 class StubBridge:
     """Minimal bridge stand-in for collector integration tests."""
 
-    def __init__(self, trades: dict[str, list[dict]], connected: bool = True):
+    def __init__(self, trades: dict[str, list[dict]], connected: bool = True,
+                 is_running: bool = True):
         self.trades = {k: list(v) for k, v in trades.items()}
         self._connected = connected
+        self.is_running = is_running
         self.subscribed: list[str] = []
         self.reconnects = 0
+        self.drained: list[str] = []
+        self.stopped = False
 
     @property
     def is_connected(self) -> bool:
@@ -523,7 +527,11 @@ class StubBridge:
         self.subscribed = list(tokens)
 
     def drain_trades_for_token(self, token_id):
+        self.drained.append(token_id)
         return self.trades.pop(token_id, [])
+
+    def stop(self):
+        self.stopped = True
 
     def get_status(self):
         return {"ws_connected": self._connected, "reconnects": self.reconnects,
@@ -716,6 +724,59 @@ def test_start_ws_bridge_degrades_to_rest_when_the_socket_stack_fails(
     assert ct.start_ws_bridge(disabled=True) is None
     assert capsys.readouterr().out == ""
     ct.stop_ws_bridge(None)  # no-op, must not raise
+
+
+def test_closing_window_empties_its_socket_buffer(collector, tmp_path,
+                                                  monkeypatch):
+    """A closed window's tokens are drained before they leave the subscription."""
+    monkeypatch.setattr(collector, "fetch_live_for_series", lambda slug: ({
+        "conditionId": "0xCID", "slug": "btc-updown-5m-1",
+        "start_ts": time.time() - 300.0, "end_ts": time.time() - 1.0,
+        "up_token": "tok_up", "down_token": "tok_dn", "series": slug,
+    }, None))
+    bridge = StubBridge({})
+    collector.poll_once(tmp_path, False, {}, ws_bridge=bridge)
+
+    assert "0xCID" not in collector.windows
+    assert bridge.drained.count("tok_up") == 2  # once per poll, once on close
+    assert bridge.drained.count("tok_dn") == 2
+
+
+def test_dead_bridge_thread_is_restarted_up_to_the_cap(monkeypatch):
+    """A dead worker thread must not leave the collector REST-only for days."""
+    import scripts.collect_ticks as ct
+
+    built: list[StubBridge] = []
+
+    def _fake_start(disabled: bool = False):
+        """Hand out a fresh live stub each restart."""
+        built.append(StubBridge({}))
+        return built[-1]
+
+    monkeypatch.setattr(ct, "start_ws_bridge", _fake_start)
+
+    live = StubBridge({})
+    stats: dict = {}
+    assert ct.restart_ws_bridge_if_dead(live, stats) is live
+    assert stats.get("ws_restarts") is None
+
+    dead = StubBridge({}, is_running=False)
+    fresh = ct.restart_ws_bridge_if_dead(dead, stats)
+    assert fresh is built[-1]
+    assert dead.stopped is True
+    assert stats["ws_restarts"] == 1
+    assert stats["ws_enabled"] is True
+
+    # The cap stops a reproducible crash from thrashing restarts every second.
+    stats["ws_restarts"] = ct.MAX_WS_RESTARTS
+    still_dead = StubBridge({}, is_running=False)
+    assert ct.restart_ws_bridge_if_dead(still_dead, stats) is still_dead
+    assert stats["ws_restarts"] == ct.MAX_WS_RESTARTS
+
+    # --no-ws never resurrects the socket.
+    assert ct.restart_ws_bridge_if_dead(
+        still_dead, {"ws_restarts": 0}, disabled=True) is still_dead
+    assert ct.restart_ws_bridge_if_dead(None, {}) is None
 
 
 def test_stop_ws_bridge_survives_a_failing_bridge(capsys):

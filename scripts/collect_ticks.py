@@ -28,17 +28,25 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+from typing import TYPE_CHECKING, Any, Optional
 
 import requests
 from strategy.markets import full_book, recent_trades
 from strategy.series import SERIES
 from strategy.windows import compute_summary, finalize_window, write_json_atomic
+
+if TYPE_CHECKING:  # import only for typing: the bridge is loaded lazily below
+    from strategy.streaming import CLOBStreamCollectorBridge
+
+
+def ensure_utf8_streams() -> None:
+    """Force UTF-8 console streams so Unicode output cannot crash under cp1252."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+ensure_utf8_streams()
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "run" / "ticks"
@@ -241,7 +249,8 @@ def now_day_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def drain_ws_tape(ws_bridge: Any, w: dict, now: float) -> list[dict]:
+def drain_ws_tape(ws_bridge: "CLOBStreamCollectorBridge", w: dict[str, Any],
+                  now: float) -> list[dict]:
     """Drain streamed prints for one window's two tokens into tape rows.
 
     Deduplicated by full print identity (`asset:price:size:ts:hash`) so a
@@ -267,7 +276,7 @@ def drain_ws_tape(ws_bridge: Any, w: dict, now: float) -> list[dict]:
     return rows
 
 
-def prune_ws_levels(w: dict, now: float) -> None:
+def prune_ws_levels(w: dict[str, Any], now: float) -> None:
     """Drop socket-printed levels older than the cross-source dedup TTL."""
     ws_levels: dict = w.get("ws_levels") or {}
     cutoff = now - WS_REST_DEDUP_TTL
@@ -276,7 +285,8 @@ def prune_ws_levels(w: dict, now: float) -> None:
 
 
 def poll_once(out_dir: Path, gzip: bool, stats: dict,
-              ws_bridge: Any = None) -> tuple[list[str], list[str]]:
+              ws_bridge: "Optional[CLOBStreamCollectorBridge]" = None,
+              ) -> tuple[list[str], list[str]]:
     """One poll across all 10 series. Returns (closed_window_slugs, errors)."""
     now = time.time()
     day_key = now_day_key()
@@ -428,6 +438,16 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                     closed_now += 1
             except Exception as e:
                 errs.append(f"window:{cid}:{e}")
+            # Empty the socket buffer before the tokens drop out of the
+            # subscription next tick: nothing will ever drain them again, and a
+            # straggler print would otherwise re-create the entry for good.
+            if ws_bridge is not None:
+                try:
+                    for tok in (w.get("up_token"), w.get("down_token")):
+                        if tok:
+                            ws_bridge.drain_trades_for_token(tok)
+                except Exception as e:
+                    errs.append(f"ws_drain:{cid}:{e}")
             del windows[cid]
     if closed_now:
         try:
@@ -437,7 +457,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
     return closed, errs
 
 
-def start_ws_bridge(disabled: bool = False) -> Any:
+def start_ws_bridge(disabled: bool = False) -> "Optional[CLOBStreamCollectorBridge]":
     """Start the CLOB market stream bridge, or None when disabled/unavailable.
 
     A socket that cannot be opened is never fatal: the collector keeps running
@@ -455,7 +475,35 @@ def start_ws_bridge(disabled: bool = False) -> Any:
         return None
 
 
-def stop_ws_bridge(ws_bridge: Any) -> None:
+MAX_WS_RESTARTS = 5
+
+
+def restart_ws_bridge_if_dead(
+    ws_bridge: "Optional[CLOBStreamCollectorBridge]",
+    stats: dict,
+    disabled: bool = False,
+) -> "Optional[CLOBStreamCollectorBridge]":
+    """Rebuild the bridge if its worker thread died, up to `MAX_WS_RESTARTS`.
+
+    Socket drops are retried inside the client; a dead *thread* is a bug, and
+    without this the collector would serve REST-only for the rest of a run
+    that is meant to last days. The cap stops a reproducible crash from
+    thrashing restarts every second.
+    """
+    if disabled or ws_bridge is None or ws_bridge.is_running:
+        return ws_bridge
+    restarts = stats.get("ws_restarts", 0)
+    if restarts >= MAX_WS_RESTARTS:
+        return ws_bridge
+    stats["ws_restarts"] = restarts + 1
+    print(f"ws bridge thread died; restarting ({restarts + 1}/{MAX_WS_RESTARTS})")
+    stop_ws_bridge(ws_bridge)
+    fresh = start_ws_bridge(disabled=False)
+    stats["ws_enabled"] = fresh is not None
+    return fresh
+
+
+def stop_ws_bridge(ws_bridge: "Optional[CLOBStreamCollectorBridge]") -> None:
     """Stop the stream bridge if one is running."""
     if ws_bridge is None:
         return
@@ -469,7 +517,7 @@ def install_signal_handlers() -> None:
     """Route SIGINT/SIGTERM into the existing KeyboardInterrupt shutdown path."""
     import signal
 
-    def _raise_interrupt(signum, frame):
+    def _raise_interrupt(signum: int, frame: Any) -> None:
         """Turn a termination signal into the loop's normal exit."""
         raise KeyboardInterrupt
 
@@ -510,6 +558,7 @@ def main():
         "ws_reconnects": 0,
         "tape_captured_ws": 0,
         "tape_captured_rest": 0,
+        "ws_restarts": 0,
     }
 
     ws_bridge = start_ws_bridge(disabled=args.no_ws)
@@ -536,6 +585,7 @@ def main():
     try:
         while True:
             closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge)
+            ws_bridge = restart_ws_bridge_if_dead(ws_bridge, stats, disabled=args.no_ws)
             new_day = now_day_key()
             if new_day != current_day:
                 day_boundaries += 1
