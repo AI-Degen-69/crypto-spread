@@ -23,6 +23,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 
 import requests
+from strategy import book_math
 from strategy.series import SERIES
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -211,7 +212,7 @@ def poll_once():
         if mid is not None:
             rest = round(mid - SPREAD_OFFSET,3)
             # count bids at >= rest
-            queue_up = sum(s for p,s in ub["bids"].items() if p >= rest) if ub["bids"] else 0
+            queue_up = book_math.queue_ahead(ub["bids"], rest)
             windows[cid]["mids"].append(mid)
             if touch_pair is not None:
                 windows[cid]["touch_pairs"].append(touch_pair)

@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import requests
+from strategy import book_math
 from strategy.markets import full_book, recent_trades
 from strategy.series import SERIES
 from strategy.windows import compute_summary, finalize_window, write_json_atomic
@@ -358,23 +359,11 @@ def record_tape_sample(stats: dict, now: float, has_trades: bool, num_entries: i
     )
 
 
-def compute_mid(book: dict):
-    """Compute midpoint price from best_bid and best_ask in book dict."""
-    bb, ba = book.get("best_bid"), book.get("best_ask")
-    if bb is not None and ba is not None:
-        return (bb + ba) / 2.0
-    if bb is not None:
-        return min(1.0, bb + 0.005)
-    if ba is not None:
-        return max(0.0, ba - 0.005)
-    return None
-
-
-def queue_ahead(bids: dict, resting_price: float) -> float:
-    """Sum volume of bids with price >= resting_price (queue ahead of us)."""
-    if not bids:
-        return 0.0
-    return sum(s for p, s in bids.items() if p >= resting_price)
+# Issue #170: local copies of these disagreed with the backtest engine and the
+# live trader on one-sided and empty books. `strategy/book_math` is now the
+# single definition, so a recorded tick and a live tick are read the same way.
+compute_mid = book_math.mid
+queue_ahead = book_math.queue_ahead
 
 
 def now_day_key() -> str:
