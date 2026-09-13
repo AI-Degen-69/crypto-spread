@@ -1748,6 +1748,47 @@ def test_api_live_queue_telemetry_aggregation(tmp_path, monkeypatch):
     assert abs(means[3] - 0.05) < 1e-9
     assert body["chased"] == {"count": 1, "mean_settle_pnl_usd": 0.10}
     assert body["verdict"] == "tape-like"
+    # Issue #173: these fixture lines predate `tape_source`, so they are the
+    # REST-measured sample they always were.
+    assert body["tape_sources"] == {"rest": 5}
+
+
+def test_api_live_queue_telemetry_reports_a_mixed_tape_sample(tmp_path, monkeypatch):
+    """A verdict pooled across two tapes must not hide which tapes it used.
+
+    Issue #173: the socket tape sees nearly every print and the REST data-api
+    tape saw ~1.4% of them (#165), so a mixed sample makes `fill_ratio` — and
+    the verdict computed from it — a blend of two incompatible measurements.
+    """
+    fills = tmp_path / "fills.jsonl"
+    trades = tmp_path / "trades.jsonl"
+    rows = _telemetry_rows()
+    for r in rows[:2]:
+        r["tape_source"] = "ws"
+    _write_fills(fills, rows)
+    _write_fills(trades, _settle_rows())
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", trades)
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    body = client.get("/api/live/queue_telemetry").json()
+    assert body["tape_sources"] == {"ws": 2, "rest": 3}
+    # The aggregation itself is unchanged — only its provenance is now stated.
+    assert body["total_fills"] == 5
+    assert body["verdict"] == "tape-like"
+
+
+def test_api_live_queue_telemetry_empty_payload_carries_tape_sources(tmp_path, monkeypatch):
+    """The empty shape gains the key too, so readers need no `.get` guard."""
+    fills = tmp_path / "fills.jsonl"
+    fills.write_text("", encoding="utf-8")
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_FILE", fills)
+    monkeypatch.setattr(osc_dash, "QUEUE_TELEMETRY_TRADES_FILE", tmp_path / "nope.jsonl")
+    monkeypatch.setattr(osc_dash, "_queue_telemetry_cache",
+                        {"ts": 0.0, "payload": None})
+    body = client.get("/api/live/queue_telemetry").json()
+    assert body["empty"] is True
+    assert body["tape_sources"] == {}
 
 
 def test_api_live_queue_telemetry_verdict_transitions(tmp_path, monkeypatch):

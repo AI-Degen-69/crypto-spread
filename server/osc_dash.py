@@ -69,7 +69,7 @@ def _queue_verdict(low_mean: float | None, high_mean: float | None) -> str:
 def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
     """Aggregate the fill sidecar into buckets + chased stats + verdict."""
     from scripts.bucket_fills import (
-        _read_jsonl, _settlement_pnl_by_market, bucketize,
+        _read_jsonl, _settlement_pnl_by_market, bucketize, source_counts,
     )
     fills = _read_jsonl(fills_path)
     usable = [f for f in fills
@@ -80,7 +80,7 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
     if not usable:
         return {"empty": True, "total_fills": 0, "buckets": [],
                 "chased": {"count": 0, "mean_settle_pnl_usd": None},
-                "verdict": "awaiting fills"}
+                "tape_sources": {}, "verdict": "awaiting fills"}
     settle = _settlement_pnl_by_market(trades_path)
     passive = [f for f in usable if not f.get("chased")]
     chased = [f for f in usable if f.get("chased")]
@@ -105,6 +105,12 @@ def _compute_queue_telemetry(fills_path: Path, trades_path: Path) -> dict:
             "mean_settle_pnl_usd": (sum(chased_pnls) / len(chased_pnls)
                                     if chased_pnls else None),
         },
+        # Issue #173: which tape measured these ratios. The verdict below is
+        # only as comparable as its sample — a payload mixing socket-measured
+        # and REST-measured fills is averaging two views that disagree by
+        # roughly two orders of magnitude, and a reader has to be able to see
+        # that rather than infer it.
+        "tape_sources": {k: v for k, v in source_counts(usable).items() if v},
         "verdict": _queue_verdict(low_mean, high_mean),
     }
 
