@@ -27,9 +27,10 @@ indicting the paper fill simulator before the live micro-pilot (#143).
 - Tick coverage starts 2026-09-12T00:00:02Z (`run/ticks/ticks_2026-09-12.jsonl`,
   full-depth `up_book`/`down_book` + `tape_delta` present — engine-ready).
   `ticks_2026-09-11.jsonl` does NOT exist locally.
-- Overlap (measured): 57/66 events (45 pairs + 12 settles, +$5.665) fall
-  inside tick coverage (event epoch ≥ 1789171200); 9 events (+$1.075) are
-  pre-coverage and cannot be fill-replayed (only legacy top-of-book
+- Overlap (measured, refined in build): 55/66 events (45 pairs + 10 settles,
+  +$5.265) fall inside tick coverage AND open inside coverage
+  (event epoch in [T0, T1], window start ≥ T0 − 1s); 11 events (+$1.475) are
+  pre-coverage/boundary and cannot be fill-replayed (only legacy
   `run/observations/obs_2026-09-11.jsonl` exists — no depth, engine-incompatible).
 - Blocker resolved: #145 knobs LANDED (`BacktestParams.entry_delay_sec`,
   `entry_band`, `backtest/engine.py:161-162`); `/api/backtest` exposes them
@@ -38,9 +39,10 @@ indicting the paper fill simulator before the live micro-pilot (#143).
 ### In scope
 1. `python -m scripts.verify_tick_data run/ticks/ticks_2026-09-12.jsonl`
    integrity gate for the replayed range.
-2. Exact-config replay via direct `backtest.replay()` driver (NOT `/api/backtest`:
+2. Exact-config replay via direct engine driver (NOT `/api/backtest`:
    the API cannot set `max_reentries_per_window=0`, which the shadow used;
-   engine default is 1). Shadow→engine mapping (all other fields API- and
+   engine default is 1). The driver calls `backtest.engine._simulate_window`
+   per included window — the same per-window core `/api/backtest` uses. Shadow→engine mapping (all other fields API- and
    engine-settable): offset 0.03, entry_delay_sec 60, entry_band 0.04,
    fill_model "tape", quote_shares 5, pair_cost_gate 0.98, exit 0.05/0.05,
    exit_reversal 0.5, entry_timeout_pct 1.0, max_start_elapsed_pct 0.1,
@@ -48,9 +50,9 @@ indicting the paper fill simulator before the live micro-pilot (#143).
    reentry_min_remaining_pct 0.3, max_reentries_per_window 0, queue_gate 0,
    gas 0. Scope: shadow universe only (xrp-15m, bnb-15m, eth-5m) +
    window range 2026-09-12T00:00Z → 09:11Z.
-3. Scoped shadow baseline: same 57 in-coverage events from `trades.jsonl`.
+3. Scoped shadow baseline: same 55 in-coverage events from `trades.jsonl`.
 4. Comparison (events, pairs, settles, realized P&L, expectancy) + bias verdict;
-   >20% of shadow scoped realized P&L (|Δ| > $1.133 on $5.665) → file follow-up.
+   >20% of shadow scoped realized P&L (|Δ| > $1.053 on $5.265) → file follow-up.
 5. Post comparison table + verdict as an issue comment on #146.
 6. Gate: `python -m pytest tests/test_backtest_engine.py -q` green.
 
@@ -111,9 +113,10 @@ indicting the paper fill simulator before the live micro-pilot (#143).
 - **Files**: `runs/paper/2026-09-11_22-10_IDT/data/trades.jsonl` (read-only)
 - **Type**: Code
 - **Skill**: `test-driven-development`
-- **Description**: Filter the 66 shadow events to the 57 in-coverage events
-  (id epoch ≥ 1789171200); expected baseline: 45 pairs + 12 settles, +$5.665
-  realized. Write `shadow_scoped.json` next to the replay totals.
+- **Description**: Filter the 66 shadow events to the 55 in-coverage events
+  (event epoch in [T0, T1], window start ≥ T0 − 1s); expected baseline:
+  45 pairs + 10 settles, +$5.265 realized. Write `shadow_scoped.json`
+  next to the replay totals.
 - **Verify**: counts and P&L reproduce the pre-computed baseline exactly.
 
 ### Task 4: Comparison + bias verdict [Research]
@@ -122,7 +125,7 @@ indicting the paper fill simulator before the live micro-pilot (#143).
 - **Skill**: `source-driven-development` (cite engine + shadow sources per number)
 - **Description**: Line-by-line table replay-vs-shadow (events, pairs,
   settles, realized P&L, expectancy); verdict: validated / optimistic by X /
-  pessimistic by X; apply the 20% rule (|Δ| > $1.133 → follow-up finding).
+  pessimistic by X; apply the 20% rule (|Δ| > $1.053 → follow-up finding).
   Disclose the §1 model deltas (tape vs touch, chase, re-entry).
 - **Verify**: every table cell traceable to either `trades.jsonl` or replay
   JSON; verdict sentence states magnitude + direction.

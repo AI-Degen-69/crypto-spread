@@ -28,7 +28,7 @@
 - **No live money, no re-running the shadow, no order-flow changes.**
 
 ### 3. Verdict Discipline
-- **20% rule**: |replay − shadow| > $1.133 on scoped realized P&L ($5.665)
+- **20% rule**: |replay − shadow| > $1.053 on scoped realized P&L ($5.265)
   mandates a follow-up finding issue — never silently accepted.
 - Every comparison cell traceable to `trades.jsonl` or replay JSON.
 - Verdict states magnitude + direction (validated / optimistic by X /
