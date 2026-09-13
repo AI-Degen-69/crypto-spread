@@ -5,4 +5,4 @@
 - [x] Task 2: Exact-config replay driver (engine core, mirror config, scoped range)
 - [x] Task 3: Scoped shadow baseline (55 in-coverage events, +$5.265 expected)
 - [x] Task 4: Comparison + bias verdict (20% rule: |Δ| > $1.053 → follow-up)
-- [ ] Task 5: Publish (issue comment + follow-up if needed + engine test gate)
+- [x] Task 5: Publish (issue comment + follow-up #160 + engine test gate green)
