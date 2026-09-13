@@ -110,6 +110,21 @@ FILL_RATIO_FLAG_THRESHOLD = 10.0
 FILL_PRICE_TICK_TOL = 0.001
 TAPE_FETCH_TIMEOUT = (3.05, 5.0)
 
+# Socket tape ledger (issue #173). The REST data-api tape that `printed_size`
+# was built from saw ~1.4% of prints (#165), so the sidecar's numerator — and
+# with it `fill_ratio` — is biased low by construction. The socket already
+# delivers those prints to `on_ws_trade`; these knobs decide when its ledger is
+# trusted for a leg, mirroring `ws_leg_authoritative` in the collector
+# (`scripts/collect_ticks.py`): connected, subscribed long enough to have
+# received the snapshot, and printing recently enough to be alive.
+WS_TAPE_WARMUP_SEC = 5.0
+WS_TAPE_AUTHORITY_HORIZON_SEC = 90.0
+# One window's prints at one price level. A cap is needed because the ledger is
+# only trimmed by window rollover, and a hot market can print continuously; the
+# oldest entries are dropped first, which biases toward undercounting rather
+# than toward a silently unbounded list.
+WS_TAPE_LEDGER_MAX = 4000
+
 
 def _parse_print_ts(raw: Any) -> Optional[float]:
     """Normalize a data-api trade timestamp to epoch seconds, or None."""
@@ -633,6 +648,17 @@ class MarketLiveState:
     # Pending WS tape prints per window (consumed next tick or instantly)
     pending_ws_trades_up: List[Dict[str, Any]] = field(default_factory=list)
     pending_ws_trades_down: List[Dict[str, Any]] = field(default_factory=list)
+    # Socket tape ledger per leg (issue #173): `(price, size, ts)` for every
+    # print this window, kept so the fill sidecar can compute `printed_size`
+    # from the socket instead of the starved REST tape. Distinct from
+    # `pending_ws_trades_*`, which the tick loop drains and discards — this one
+    # must survive until a fill claims its telemetry line, so it is cleared
+    # only on window reset.
+    ws_tape_up: List[Tuple[float, float, float]] = field(default_factory=list)
+    ws_tape_down: List[Tuple[float, float, float]] = field(default_factory=list)
+    # Last socket print per leg, for the authority horizon.
+    ws_last_print_ts_up: Optional[float] = None
+    ws_last_print_ts_down: Optional[float] = None
 
     # Latched book prices for expiry valuation & boundary resilience (issue #160)
     last_valid_up_bid: Optional[float] = None
@@ -1807,12 +1833,44 @@ class LiveTraderEngine:
             if tok == m.up_token:
                 with self._engine_lock:
                     m.pending_ws_trades_up.append(trade)
+                    self._append_ws_tape(m, "UP", trade)
                 # Instant fill check against best book (paper legs)
                 self._try_ws_tape_fill(m, "UP", trade, price)
             elif tok == m.down_token:
                 with self._engine_lock:
                     m.pending_ws_trades_down.append(trade)
+                    self._append_ws_tape(m, "DOWN", trade)
                 self._try_ws_tape_fill(m, "DOWN", trade, price)
+
+    def _append_ws_tape(self, m: "MarketLiveState", leg: str, trade: Dict[str, Any]) -> None:
+        """Record one socket print in this leg's ledger. Caller holds the lock.
+
+        Issue #173: the numerator for `printed_size`. A malformed print is
+        dropped rather than raised — this runs on the socket callback thread,
+        where an exception would take the whole tape down with it.
+        """
+        try:
+            price = float(trade.get("price"))
+            size = float(trade.get("size") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if size <= 0:
+            return
+        ts = _parse_print_ts(trade.get("timestamp"))
+        if ts is None:
+            # The venue's own stamp is preferred (it is what the REST rows
+            # carry, so the two sources stay joinable), but a print with no
+            # usable stamp is still real volume: fall back to arrival time.
+            ts = time.time()
+        is_up = (leg == "UP")
+        ledger = m.ws_tape_up if is_up else m.ws_tape_down
+        ledger.append((price, size, ts))
+        if len(ledger) > WS_TAPE_LEDGER_MAX:
+            del ledger[:len(ledger) - WS_TAPE_LEDGER_MAX]
+        if is_up:
+            m.ws_last_print_ts_up = time.time()
+        else:
+            m.ws_last_print_ts_down = time.time()
 
     def _try_ws_tape_fill(self, m: "MarketLiveState", leg: str, trade: Dict[str, Any], price: Any) -> None:
         """Paper-fill one leg from WS prints (fast, intra-second)."""
@@ -4574,17 +4632,14 @@ class LiveTraderEngine:
             mstate.rest_dn_price = resting_down
             mstate.rest_dn_queue = _queue_ahead(mstate.last_bids_down, resting_down)
             mstate.rest_dn_ts = now
-        # Also consume any pending WS tape prints accumulated between ticks.
-        # They already triggered instant fills above, but tape-driven exits/merges
-        # that compare against queue still need the volume accounted for downstream.
-        # (No-op if already filled.)
+        # Retire the pending WS prints accumulated between ticks. Each one
+        # already had its shot at an instant fill in `on_ws_trade`, and its
+        # volume now lives in this leg's `ws_tape_*` ledger (issue #173), which
+        # is what the fill sidecar reads. This queue exists only to bound
+        # per-tick work, so draining it here is the whole job.
         with self._engine_lock:
-            ws_pending_up = list(mstate.pending_ws_trades_up)
-            ws_pending_down = list(mstate.pending_ws_trades_down)
             mstate.pending_ws_trades_up.clear()
             mstate.pending_ws_trades_down.clear()
-        # Mark consumed prints into seen_tape-like dedup? Not needed live, but keep for parity.
-        _ = (ws_pending_up, ws_pending_down)
 
         # --- FILL DETECTION ---
         if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
@@ -5413,6 +5468,13 @@ class LiveTraderEngine:
                 mstate.ws_book_ts_down = None
             mstate.pending_ws_trades_up.clear()
             mstate.pending_ws_trades_down.clear()
+            # The socket tape ledger is scoped to one window: `printed_size` is
+            # "volume at my resting price since I rested", and the next window
+            # rests a new order at a new price (issue #173).
+            mstate.ws_tape_up.clear()
+            mstate.ws_tape_down.clear()
+            mstate.ws_last_print_ts_up = None
+            mstate.ws_last_print_ts_down = None
         if self.mode == "live":
             if mstate.order_id_exit_up:
                 if self.cancel_live_order(mstate.order_id_exit_up):
