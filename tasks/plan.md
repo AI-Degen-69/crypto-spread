@@ -74,7 +74,7 @@ what let them drift; it would drift again.
   `exit_thresh_naked` defaults to `None` → falls back to `exit_thresh`.
   *Verify:* a naked leg times out at the right tick; `0.0` changes nothing.
 
-- [ ] **4. `[Backend/Logic]` `enable_leg_chase`.** Port the chase rule already
+- [x] **4. `[Backend/Logic]` `enable_leg_chase`.** Port the chase rule already
   proven in `research/sweeps/sim2.py` (`chase_cap`) into the canonical engine,
   default `False` = today's behaviour.
   *Verify:* parity against `sim2`'s chase on the same window.

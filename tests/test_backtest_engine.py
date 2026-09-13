@@ -1049,3 +1049,113 @@ def test_naked_timeout_is_not_suppressed_by_disabling_the_price_stop():
 def test_out_of_range_naked_knobs_are_refused(kw):
     with pytest.raises(ValueError):
         BacktestParams(**kw)
+
+
+# ===========================================================================
+# Issue #164: enable_leg_chase — mirrors live issue #123 and sim2
+# ===========================================================================
+
+def _chaseable_window(start_ts=1_760_000_000.0, duration=300,
+                      dn_ask=0.49, dn_ask_after=None, last_dn_ask=None):
+    """UP fills on tick 1; afterwards DOWN's ask is what the chase aims at.
+
+    `dn_ask` is deliberately low on the fill tick so the pair-cost entry gate
+    lets the window in at all — with a high ask throughout, nothing fills and
+    every assertion about the chase becomes vacuous. `dn_ask_after` is the ask
+    the chase then has to deal with, and `last_dn_ask` overrides the final tick.
+    """
+    after = dn_ask if dn_ask_after is None else dn_ask_after
+    snaps = []
+    n = 12
+    for i in range(n):
+        up_bid, up_ask = 0.49, (0.47 if i == 1 else 0.51)
+        a = dn_ask if i <= 1 else after
+        if last_dn_ask is not None and i == n - 1:
+            a = last_dn_ask
+        snaps.append({
+            "ts": start_ts + i * 10.0, "cid": "0xchase",
+            "series": "eth-up-or-down-5m", "slug": "eth-up-or-down-5m",
+            "start_ts": start_ts, "end_ts": start_ts + duration,
+            "duration": duration, "mid": 0.50,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": 0.47, "best_ask": a,
+                          "bids": {"0.47": 500.0}, "asks": {str(a): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_leg_chase_defaults_to_off():
+    """False is today: the passive DOWN quote never moves, so it never fills."""
+    assert BacktestParams().enable_leg_chase is False
+    w = _simulate_window(_chaseable_window(), _params())
+    assert w.filled_up is True
+    assert w.filled_down is False, "DOWN filled without the chase being enabled"
+    assert w.pair_captured is False
+
+
+def test_leg_chase_converts_a_naked_leg_into_a_pair():
+    """The whole point of the knob (live issue #123)."""
+    w = _simulate_window(_chaseable_window(), _params(enable_leg_chase=True))
+    assert w.filled_down is True, "the chase never reached the DOWN ask"
+    assert w.pair_captured is True
+
+
+def test_the_chase_never_breaches_the_pair_cost_cap():
+    """A chase that pairs above the cap is worse than no chase at all.
+
+    Asserts on `chased_resting`, not on a captured pair. Two earlier versions
+    passed with the cap deleted from the engine: one guarded on
+    `if w.pair_captured:` in a window that could not clear the entry gate, and
+    one used an ask equal to the cap, so `min()` had nothing to bite on.
+    """
+    cap = 0.98
+    # Low ask on the fill tick so the window enters; a far ask afterwards so
+    # the cap is the only thing that can stop the chase. entry_up is 0.48, so
+    # floor((0.98 - 0.48) * 100) / 100 = 0.50 is the ceiling.
+    w = _simulate_window(_chaseable_window(dn_ask=0.49, dn_ask_after=0.60),
+                         _params(enable_leg_chase=True, pair_cost_gate=cap))
+    assert w.filled_up is True, "the window never entered — fixture is vacuous"
+    assert w.chased_leg == "down", "the chase never ran"
+    assert w.chased_resting is not None
+    assert w.chased_resting <= 0.50 + 1e-9, (
+        f"chased DOWN to {w.chased_resting}, past the 0.50 the cap allows")
+    assert (w.entry_price_up + w.chased_resting) <= cap + 1e-9, (
+        f"a fill there would pair at {w.entry_price_up + w.chased_resting}, "
+        f"over the {cap} cap")
+
+
+def test_the_chase_only_raises_the_quote_never_lowers_it():
+    """Lowering would walk away from a fill already within reach."""
+    # The ask after the fill sits above what the cap allows (ceiling is
+    # floor((1.05 - 0.48) * 100) / 100 = 0.57), so the chased leg never fills
+    # and the chase keeps running — an ask the chase could reach would pair
+    # immediately and the loop would break before the drop ever happened.
+    w = _simulate_window(
+        _chaseable_window(dn_ask=0.49, dn_ask_after=0.70, last_dn_ask=0.20),
+        _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    assert w.chased_leg == "down", "the chase never ran"
+    assert w.chased_resting >= 0.57 - 1e-9, (
+        f"the resting DOWN bid followed the ask down to {w.chased_resting}")
+
+
+def test_the_chase_does_not_move_a_leg_that_already_filled():
+    """Only the unfilled leg is re-anchored; the filled one keeps its entry."""
+    snaps = _chaseable_window()
+    w = _simulate_window(snaps, _params(enable_leg_chase=True))
+    # UP filled passively at mid - offset = 0.50 - 0.02 = 0.48
+    assert w.entry_price_up == pytest.approx(0.48), (
+        f"the filled UP leg's entry moved to {w.entry_price_up}")
+
+
+def test_the_chase_stops_once_the_pair_is_captured():
+    """No further re-anchoring after both legs are filled."""
+    w = _simulate_window(_chaseable_window(), _params(enable_leg_chase=True))
+    assert w.pair_captured is True
+    assert (w.entry_price_up + w.entry_price_down) <= 1.05 + 1e-9
+
+
+def test_enable_leg_chase_is_part_of_the_params_hash():
+    """Chased and unchased runs must not collide in a sweep cache."""
+    assert _params().params_hash() != _params(enable_leg_chase=True).params_hash()

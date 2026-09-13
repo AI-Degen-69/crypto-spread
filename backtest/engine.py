@@ -179,6 +179,12 @@ class BacktestParams:
     # window open, so a late fill still gets its full horizon — is exited at
     # the book. 0 disables, which is today's behaviour.
     naked_leg_timeout_pct: float = 0.0
+    # Issue #164: mirrors LiveTraderEngine.enable_leg_chase (issue #123). Once
+    # one leg fills, the other is re-anchored each tick toward its ask, capped
+    # so the pair still costs at most `pair_cost_gate` — converting a naked leg
+    # into a pair at or under the cap instead of riding it. The quote is only
+    # ever raised, never lowered. False = off = today's behaviour.
+    enable_leg_chase: bool = False
 
     # ── param grouping metadata ──────────────────────────────────────────────
     # Separates operator-controlled (live-replicable) knobs from execution
@@ -218,6 +224,8 @@ class BacktestParams:
              "$", (0.0, 0.50), ("backtest", "cockpit")),
             ("naked_leg_timeout_pct", "Naked Leg Timeout (% of window)", "How long one filled leg may sit unpaired before you exit it",
              "%", (0.0, 1.0), ("backtest", "cockpit")),
+            ("enable_leg_chase", "Leg Chase Enabled", "After one leg fills, re-anchor the other toward its ask within the pair-cost cap",
+             "bool", None, ("backtest", "cockpit")),
             ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
              "$", (0.0, 0.50), ("backtest", "cockpit")),
         ],
@@ -433,6 +441,12 @@ class WindowResult:
     entry_price_down: float | None = None
     exit_price: float | None = None
     settlement_mid: float | None = None
+    # Issue #164: which leg the chase re-anchored ("up"/"down"/""), and the
+    # price it was last moved to. `sim2` already returned the former; the
+    # latter makes the pair-cost cap observable even when the chased leg
+    # never filled, which is exactly when a breached cap would go unnoticed.
+    chased_leg: str = ""
+    chased_resting: float | None = None
 
 
 # Issue #170: these used to be local copies that disagreed with the collector
@@ -513,6 +527,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # `_naked_timeout_hit`).
     naked_thr = params.naked_exit_thresh(slug, duration, series=series)
     naked_since_elapsed: float | None = None
+    # Which leg (if any) the chase moved, so the entry price recorded for it is
+    # the price it actually rested at when it filled, not a later chase step.
+    chased_leg = ""
 
     # Patient undecided-band maker knobs (issue #145, mirrors live issue #137).
     # `entry_delay` holds all quoting until that far into the window (0 = off);
@@ -728,6 +745,38 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 touch = up_ask + dn_ask
             pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
 
+        # --- LEG CHASE (issue #164, mirrors live issue #123 and sim2) ---
+        # One leg filled: step the other toward its ask, floored to cent
+        # precision so entry + opposite can never exceed `pair_cost_gate`. The
+        # quote is only ever raised — lowering it would walk away from a fill
+        # already within reach. Runs before fill detection so a chase and its
+        # fill can land on the same tick, as they do live.
+        #
+        # Placed ABOVE the entry gate deliberately. Completing a pair you are
+        # already half into is not a new entry, so a book that no longer meets
+        # the entry gate must not strand the open leg — the same reasoning the
+        # exit check below is placed there for.
+        if (params.enable_leg_chase and (filled_up != filled_down)
+                and not pair_captured and not exit_taken
+                and resting_up is not None and resting_down is not None):
+            _cap = params.pair_cost_gate
+            if filled_up:
+                _entry = entry_price_up if entry_price_up is not None else resting_up
+                _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                _ask = db.get("best_ask")
+                _target = min(_ask, _max_bid) if _ask is not None else _max_bid
+                if _target > resting_down:
+                    resting_down = round(min(0.99, max(0.01, _target)), 3)
+                    chased_leg = "down"
+            else:
+                _entry = entry_price_down if entry_price_down is not None else resting_down
+                _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                _ask = ub.get("best_ask")
+                _target = min(_ask, _max_bid) if _ask is not None else _max_bid
+                if _target > resting_up:
+                    resting_up = round(min(0.99, max(0.01, _target)), 3)
+                    chased_leg = "up"
+
         if not queue_ok or not pair_cost_ok:
             # An already-filled position must still be eligible to exit even
             # if the live book no longer meets the entry gate. Check exit
@@ -802,6 +851,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 filled_down = True
                 can_fill_down = False
 
+        # Latch each leg's entry price the tick it fills. Without this, a
+        # chase step after the fill would rewrite the entry the P&L is
+        # computed against (issue #164).
+        if filled_up and entry_price_up is None:
+            entry_price_up = resting_up
+        if filled_down and entry_price_down is None:
+            entry_price_down = resting_down
+
         # --- PAIR COMPLETION ---
         if filled_up and filled_down and not pair_captured and not exit_taken:
             pair_captured = True
@@ -875,9 +932,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if not filled_up and not filled_down:
                     entry_cancelled = True
 
-    if filled_up:
+    # Fallback for windows where the chase never ran: the resting price at
+    # loop end is the price the leg rested at throughout.
+    if filled_up and entry_price_up is None:
         entry_price_up = resting_up
-    if filled_down:
+    if filled_down and entry_price_down is None:
         entry_price_down = resting_down
 
     if filled_up or filled_down:
@@ -919,6 +978,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         entry_price_down=entry_price_down,
         exit_price=exit_price,
         settlement_mid=settlement_mid,
+        chased_leg=chased_leg,
+        chased_resting=(resting_down if chased_leg == "down"
+                        else resting_up if chased_leg == "up" else None),
     )
 
 
