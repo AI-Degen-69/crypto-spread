@@ -2011,6 +2011,8 @@ def test_run_backtest_aborts_previous_run():
     assert "new AbortController()" in html
     assert "{signal: ctl.signal}" in html
     assert "err.name === 'AbortError'" in html
+    assert "window._btAbort === ctl" in html
+    assert "window._btAbort !== ctl" in html
 
 
 def test_api_rebuild_windows(monkeypatch):

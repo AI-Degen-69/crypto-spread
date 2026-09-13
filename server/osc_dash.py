@@ -3650,6 +3650,7 @@ async function runBacktest(fileOverride){
     }
     const res = await fetch(url, {signal: ctl.signal});
     const data = await res.json();
+    if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
 
     $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${fileVal ? ' · [' + fileVal + ']' : ''}`;
     const ov = data.overall || {};
