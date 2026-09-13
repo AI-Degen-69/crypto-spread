@@ -954,3 +954,44 @@ def test_issue173_bucketize_without_a_filter_is_unchanged(tmp_path):
     assert table["0.00-0.25"] == 1
     assert table["0.50-1.00"] == 1
     assert table["1.00+"] == 1
+
+
+def test_issue173_non_finite_print_never_poisons_the_numerator():
+    """NaN passes every comparison, so it must be rejected by type, not by test.
+
+    A single NaN entry would make `printed_size` NaN for the whole window, and
+    `fill_ratio` with it — which is a silently wrong input to the #138
+    tape-vs-queue verdict, not a visible failure.
+    """
+    poisoned = [
+        (0.48, 30.0, 1006.0),
+        (0.48, float("nan"), 1007.0),
+        (float("nan"), 5.0, 1007.0),
+        (0.48, float("inf"), 1008.0),
+        (float("inf"), 5.0, 1008.0),
+        (0.48, 10.0, float("nan")),
+    ]
+    assert lt._sum_ws_prints_at_price(poisoned, 0.48, 1000.0) == 30.0
+    # The REST join must reject the same shapes, or the two tapes stop being
+    # comparable exactly where the socket path was built to match them.
+    rows = [{"asset": "t", "price": 0.48, "size": 30.0, "timestamp": 1006},
+            {"asset": "t", "price": 0.48, "size": float("nan"), "timestamp": 1007},
+            {"asset": "t", "price": float("nan"), "size": 5.0, "timestamp": 1007},
+            {"asset": "t", "price": 0.48, "size": float("inf"), "timestamp": 1008}]
+    assert lt._sum_prints_at_price(rows, "t", 0.48, 1000.0) == 30.0
+
+
+def test_issue173_non_finite_ws_print_never_reaches_the_ledger():
+    """The socket callback drops a non-finite print instead of storing it."""
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    for bad in ({"asset": m.up_token, "price": "0.48", "size": "nan"},
+                {"asset": m.up_token, "price": "nan", "size": "5"},
+                {"asset": m.up_token, "price": "0.48", "size": "inf"},
+                {"asset": m.up_token, "price": "inf", "size": "5"},
+                {"asset": m.up_token, "price": "0.48", "size": "-inf"}):
+        engine.on_ws_trade(bad)
+    assert m.ws_tape_up == []

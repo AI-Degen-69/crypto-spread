@@ -182,6 +182,12 @@ def _sum_ws_prints_at_price(ledger: Any, price: float, since_ts: float) -> float
             ts = float(ts)
         except (TypeError, ValueError, OverflowError):
             continue
+        # NaN fails every comparison, so the tolerance and sign checks below
+        # would both wave it through and one poisoned entry would turn the
+        # whole window's `printed_size` — and the `fill_ratio` built from it —
+        # into NaN. Infinities would swamp it just as badly.
+        if not (math.isfinite(p) and math.isfinite(size) and math.isfinite(ts)):
+            continue
         if abs(p - price) > FILL_PRICE_TICK_TOL:
             continue
         if ts < since_ts:
@@ -197,7 +203,10 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
     """Sum printed size at ~= `price` for `token` with ts >= `since_ts`.
 
     Issue #138: the queue-burn numerator. Tolerates the venue tick
-    (`FILL_PRICE_TICK_TOL`); malformed rows are skipped, never raised.
+    (`FILL_PRICE_TICK_TOL`); malformed rows are skipped, never raised. A
+    non-finite price or size is malformed too (issue #173): NaN fails every
+    comparison below, so it would pass both the tolerance and the sign check
+    and poison the sum for the whole window.
     """
     total = 0.0
     if not isinstance(rows, list):
@@ -211,6 +220,8 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
             p = float(t.get("price"))
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(p):
+            continue
         if abs(p - price) > FILL_PRICE_TICK_TOL:
             continue
         ts = _parse_print_ts(t.get("timestamp"))
@@ -220,7 +231,7 @@ def _sum_prints_at_price(rows: Any, token: str, price: float,
             size = float(t.get("size") or 0)
         except (TypeError, ValueError):
             continue
-        if size < 0:
+        if not math.isfinite(size) or size < 0:
             continue
         total += size
     return total
@@ -1959,12 +1970,16 @@ class LiveTraderEngine:
 
         Issue #173: the numerator for `printed_size`. A malformed print is
         dropped rather than raised — this runs on the socket callback thread,
-        where an exception would take the whole tape down with it.
+        where an exception would take the whole tape down with it. "Malformed"
+        includes non-finite: `float("nan") <= 0` is False, so a NaN size would
+        walk past the guard below and turn the window's whole sum into NaN.
         """
         try:
             price = float(trade.get("price"))
             size = float(trade.get("size") or 0.0)
         except (TypeError, ValueError, OverflowError):
+            return
+        if not (math.isfinite(price) and math.isfinite(size)):
             return
         if size <= 0:
             return
