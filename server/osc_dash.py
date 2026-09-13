@@ -2292,7 +2292,7 @@ textarea:focus-visible,
             <div class="form-group">
               <label>Tick File Dataset</label>
               <select id="btFileSelect">
-                <option value="">All Files / 2,820 Windows (Default)</option>
+                <option value="">All Files (Default)</option>
               </select>
             </div>
             <div class="form-group">
@@ -4069,9 +4069,12 @@ async function loadManifest(){
     if(sel && d.files){
       const currentVal = sel.value || window.selectedBacktestFile;
       sel.innerHTML = '';
+      const agg = d.aggregate || {};
+      const winRaw = (agg.total_windows||0).toLocaleString();
+      const defWinVal = (agg.windows_source === 'partial' ? '≥' : '') + winRaw;
       const defOpt = document.createElement('option');
       defOpt.value = '';
-      defOpt.textContent = 'All Files / 2,820 Windows (Default)';
+      defOpt.textContent = `All Files / ${defWinVal} Windows (Default)`;
       sel.appendChild(defOpt);
 
       for(const f of d.files){
