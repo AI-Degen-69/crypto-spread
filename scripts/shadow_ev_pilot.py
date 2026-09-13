@@ -76,6 +76,8 @@ def snapshot(eng: LiveTraderEngine) -> dict:
             "down_ask": m.get("down_ask"),
             "last_valid_up_bid": m.get("last_valid_up_bid"),
             "last_valid_down_bid": m.get("last_valid_down_bid"),
+            "last_valid_up_ask": m.get("last_valid_up_ask"),
+            "last_valid_down_ask": m.get("last_valid_down_ask"),
             "resting_up": m.get("resting_up"),
             "resting_down": m.get("resting_down"),
             "filled_up": m.get("filled_up"),
