@@ -159,6 +159,39 @@ def _parse_print_ts(raw: Any) -> Optional[float]:
     return None
 
 
+def _sum_ws_prints_at_price(ledger: Any, price: float, since_ts: float) -> float:
+    """Sum socket-printed size at ~= `price` with ts >= `since_ts`.
+
+    Issue #173: the same queue-burn numerator as `_sum_prints_at_price`, over
+    the socket ledger instead of the REST rows. No token filter is needed — the
+    ledger is already per leg — but the price tolerance and the `since_ts`
+    cutoff must match exactly, or a socket-sourced `fill_ratio` would not be
+    comparable to a REST-sourced one. Malformed entries are skipped, never
+    raised.
+    """
+    total = 0.0
+    if not isinstance(ledger, (list, tuple)):
+        return total
+    for entry in ledger:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        p, size, ts = entry
+        try:
+            p = float(p)
+            size = float(size)
+            ts = float(ts)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if abs(p - price) > FILL_PRICE_TICK_TOL:
+            continue
+        if ts < since_ts:
+            continue
+        if size < 0:
+            continue
+        total += size
+    return total
+
+
 def _sum_prints_at_price(rows: Any, token: str, price: float,
                          since_ts: float) -> float:
     """Sum printed size at ~= `price` for `token` with ts >= `since_ts`.
@@ -1013,6 +1046,12 @@ class LiveTraderEngine:
         # How long a leg's WS book may live before REST overwrites it
         self.ws_book_max_age_sec: float = 2.5
         self._book_reconcile_lock = threading.RLock()
+        # When each token was first subscribed on the socket (issue #173).
+        # A token that has only just been added has not received its snapshot
+        # yet, so an empty ledger for it means "too early to tell", not "no
+        # volume printed" — and the difference decides whether the sidecar
+        # trusts the socket or falls back to REST.
+        self._ws_token_ready_ts: Dict[str, float] = {}
 
         # Real-time WebSocket streaming bridge (fix #166: run_direct + on_trade)
         self.stream_bridge = UnifiedStreamBridge(
@@ -1811,6 +1850,48 @@ class LiveTraderEngine:
         """Trigger fast stop-loss exit market order and cancel unhedged side."""
         note = f"RTDS Fast stop: drift {mstate.spot_drift:.3f}"
         self._execute_stop_exit(slug, mstate, side, None, note, now)
+
+    def _mark_ws_tokens_subscribed(self, tokens: Iterable[str]) -> None:
+        """Stamp first-subscription time per token; forget tokens that dropped.
+
+        Issue #173: the warm-up half of socket tape authority. Re-subscribing a
+        token that is already live must not restart its clock, or a rollover
+        that re-sends the same token list would knock the socket out of
+        authority for no reason.
+        """
+        now = time.time()
+        live = {str(t) for t in tokens if t}
+        with self._engine_lock:
+            for tok in live:
+                self._ws_token_ready_ts.setdefault(tok, now)
+            for tok in [t for t in self._ws_token_ready_ts if t not in live]:
+                self._ws_token_ready_ts.pop(tok, None)
+
+    def _ws_tape_authoritative(self, m: "MarketLiveState", leg: str) -> bool:
+        """True when the socket alone can be trusted for this leg's tape.
+
+        Issue #173, mirroring `ws_leg_authoritative` in the collector
+        (`scripts/collect_ticks.py`): the socket must be connected, the token
+        must have been subscribed long enough to have received its snapshot,
+        and it must have printed recently enough that silence means "quiet
+        market" rather than "dead feed". False is the safe answer — it only
+        costs the REST call the sidecar already made before this change.
+        """
+        if not self.stream_bridge.clob.is_connected:
+            return False
+        token = m.up_token if leg == "UP" else m.down_token
+        if not token:
+            return False
+        now = time.time()
+        with self._engine_lock:
+            ready_at = self._ws_token_ready_ts.get(str(token))
+            last_print = (m.ws_last_print_ts_up if leg == "UP"
+                          else m.ws_last_print_ts_down)
+        if ready_at is None or (now - ready_at) < WS_TAPE_WARMUP_SEC:
+            return False
+        if last_print is None or (now - last_print) > WS_TAPE_AUTHORITY_HORIZON_SEC:
+            return False
+        return True
 
     def is_ws_book_fresh(self, m: "MarketLiveState", leg: str) -> bool:
         """True when the WS book for `leg` is authoritative right now."""
@@ -2908,6 +2989,7 @@ class LiveTraderEngine:
                         active_tokens.append(t)
             if active_tokens:
                 self.stream_bridge.update_market_tokens(active_tokens)
+                self._mark_ws_tokens_subscribed(active_tokens)
 
     def start(self) -> None:
         """Start the background live trading ticker."""
@@ -3793,6 +3875,7 @@ class LiveTraderEngine:
                         active_tokens.append(t)
             if active_tokens:
                 self.stream_bridge.update_market_tokens(active_tokens)
+                self._mark_ws_tokens_subscribed(active_tokens)
 
             self._record_timeline_point(now)
 
