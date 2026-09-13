@@ -1,34 +1,41 @@
-# CONSTRAINTS.md — Issue #132: collector→overview bridge + auto-rebuild
+# CONSTRAINTS.md — Issue #146: replay cross-check (shadow night vs official backtest)
 
 ## Quality Gates & Hard Thresholds
 
 ### 1. Test Suite Integrity
-- **Pass Rate**: 100% — `python -m pytest -q` fully green before and after.
-- **New behavior needs tests**: shared module (classify/finalize/summary/
-  atomic-write), collector closure path (`tmp_path`, no network), rebuild
-  endpoint (mocked subprocess + origin rejection + HTML presence +
-  provenance fields), rebuild accuracy (`.jsonl` + `.jsonl.gz` fixtures).
+- **Pass Rate**: 100% for the touched gate —
+  `python -m pytest tests/test_backtest_engine.py -q` fully green before and after.
+- **New behavior needs tests**: the replay driver asserts its own config
+  mirror (params hash) and scope filter (universe + time range) before totals
+  are accepted; no silent empty-replay (n_events > 0 required).
 - **Anti-Cheat**: no touching existing fixtures/expectations; no skipped
-  tests, no weakened assertions, no linter suppressions, no
-  `@ts-ignore`-style silencing. Classification math byte-identical
-  (base 0.50, threshold 0.02).
+  tests, no weakened assertions, no linter suppressions. Engine math and
+  classification constants byte-identical — this issue changes NO production code.
 
 ### 2. Behavior & Scope Boundaries
-- **Tick path untouched**: snap schema and `write_snap` behavior identical;
-  collector change is append-only (`mids`/`touch_pairs` accumulation).
-- **Best-effort I/O**: every new collector file op wrapped in
-  `try/except` → recorded in existing `errs` list; window-file failure
-  must not abort the poll or lose tick data; summary refresh on closure
-  only (never per-tick).
-- **Legacy freeze**: `scripts/measure_5m_oscillation.py` NOT modified.
-- **No new dependencies** (stdlib + existing stack only). No background
-  watcher in the dashboard. Every new function gets a docstring
-  (`test_docstrings.py` gate).
-- **Security**: `/api/rebuild` guarded by `_verify_safe_origin`, same as
-  `poll-once`; subprocess `cwd=ROOT`, `timeout=60`, output truncated.
+- **Read-only production code**: `backtest/`, `server/`, `scripts/backtest.py`,
+  `scripts/sweep_backtest.py`, `strategy/` NOT modified. Known warts
+  (`scripts/backtest.py --help` crash, missing --entry-delay/--entry-band CLI
+  flags) are documented, NOT fixed here.
+- **Exact-config mirror**: every `BacktestParams` field set from the shadow
+  `final.json` params (§1 mapping in `tasks/plan.md`); any field that cannot
+  be mirrored is disclosed in the verdict, never silently defaulted.
+- **Scoped honesty**: only the 57 in-coverage events are compared; the 9
+  pre-coverage events are reported separately, never folded into replay totals.
+- **Units**: cents↔USD normalization explicit in-artifact before any verdict.
+- **No new dependencies** (stdlib + existing stack only). New files limited to
+  `scripts/replay_shadow_check.py` + `replay_comparison/` artifacts.
+- **No live money, no re-running the shadow, no order-flow changes.**
 
-### 3. Perf & Dependencies
-- **Perf**: per-poll overhead O(1) appends; summary recompute only on
-  closure (file read of `oscillation_windows.jsonl`, rare event).
-  Dashboard reuses `_load_all_windows` mtime/size cache.
+### 3. Verdict Discipline
+- **20% rule**: |replay − shadow| > $1.133 on scoped realized P&L ($5.665)
+  mandates a follow-up finding issue — never silently accepted.
+- Every comparison cell traceable to `trades.jsonl` or replay JSON.
+- Verdict states magnitude + direction (validated / optimistic by X /
+  pessimistic by X) plus known model deltas (tape vs touch, chase, re-entry).
+
+### 4. Perf & Dependencies
+- **Perf**: single-file replay over `ticks_2026-09-12.jsonl` (700MB) — stream
+  via `iter_ticks`, never load whole file into memory; reuse existing engine
+  batching. Expected runtime: minutes, not hours.
 - **Dependencies**: none new.

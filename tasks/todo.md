@@ -1,10 +1,8 @@
-# Todo: Issue #132 — collector→overview bridge + auto-rebuild
+# Todo: Issue #146 — replay cross-check (shadow night vs official backtest)
 
-- [x] Task 1: Shared module `strategy/windows.py` (classify/finalize/summary/atomic-write)
-- [x] Task 2: Offline rebuild routed through shared module (signatures preserved)
-- [x] Task 3: Collector accumulates mids/touch_pairs + closes into dataset (best-effort)
-- [x] Task 4: Dashboard `POST /api/rebuild` + provenance fields in `/api/oscillation`
-- [x] Task 5: Dashboard HTML/JS — Rebuild button + badge + tooltip + live goal bar
-- [x] Task 6: Tests — shared module + collector closure + endpoint/provenance
-- [x] Task 7: Rebuild accuracy over `.jsonl` + `.jsonl.gz` fixtures
-- [x] Task 8: Full regression gate (`pytest -q` + real rebuild run)
+- [ ] Task 0: Branch + baseline (`add/146-replay-cross-check`, engine test baseline)
+- [ ] Task 1: Tick integrity gate (`verify_tick_data` on ticks_2026-09-12.jsonl)
+- [ ] Task 2: Exact-config replay driver (direct `replay()`, mirror config, scoped range)
+- [ ] Task 3: Scoped shadow baseline (57 in-coverage events, +$5.665 expected)
+- [ ] Task 4: Comparison + bias verdict (20% rule: |Δ| > $1.133 → follow-up)
+- [ ] Task 5: Publish (issue comment + follow-up if needed + engine test gate)
