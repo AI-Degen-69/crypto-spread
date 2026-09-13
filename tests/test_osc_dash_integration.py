@@ -1995,6 +1995,13 @@ def test_api_backtest_entry_delay_band_nan_falls_back_off(tmp_path, monkeypatch)
     assert d["params"]["entry_band"] == 0.0
 
 
+def test_backtest_file_dropdown_label_is_dynamic():
+    """Dropdown default label must use the live aggregate, not a hardcoded count."""
+    html = client.get("/").text
+    assert "2,820 Windows (Default)" not in html
+    assert "All Files / ${defWinVal} Windows (Default)" in html
+
+
 def test_backtest_delay_band_ui_elements():
     """Dashboard exposes delay/band inputs plus the winning-config preset."""
     html = client.get("/").text
