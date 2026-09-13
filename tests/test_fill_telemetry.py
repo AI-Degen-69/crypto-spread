@@ -995,3 +995,193 @@ def test_issue173_non_finite_ws_print_never_reaches_the_ledger():
                 {"asset": m.up_token, "price": "0.48", "size": "-inf"}):
         engine.on_ws_trade(bad)
     assert m.ws_tape_up == []
+
+
+def test_issue173_reconnect_makes_every_token_earn_its_warmup_again():
+    """A rebuilt subscription lost the gap's prints, so silence lies again.
+
+    `scripts/collect_ticks.py` wipes `ws_ready_at` whenever the reconnect count
+    moves, for exactly this reason. Without the same reset here, a socket that
+    drops and returns is authoritative on its first print back — while its
+    ledger is missing the entire outage — and the REST fallback that would have
+    caught the hole is skipped, undercounting `printed_size` for any fill that
+    rested before the drop.
+    """
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    tokens = [m.up_token, m.down_token]
+
+    engine.stream_bridge.clob.reconnect_count = 0
+    engine._mark_ws_tokens_subscribed(tokens)
+    # Backdate the clocks so warm-up is already satisfied, as it would be
+    # minutes into a live window.
+    for tok in tokens:
+        engine._ws_token_ready_ts[tok] = time.time() - 600.0
+    engine.stream_bridge.clob.is_connected = True
+    m.ws_last_print_ts_up = time.time()
+    assert engine._ws_tape_authoritative(m, "UP") is True
+
+    # The socket drops and comes back; the token list is unchanged.
+    engine.stream_bridge.clob.reconnect_count = 1
+    engine._mark_ws_tokens_subscribed(tokens)
+    m.ws_last_print_ts_up = time.time()   # first print after reconnect
+    assert engine._ws_tape_authoritative(m, "UP") is False, (
+        "the socket was trusted immediately after a reconnect, with a ledger "
+        "missing every print from the outage")
+
+    # Once the fresh subscription has warmed up, authority returns.
+    for tok in tokens:
+        engine._ws_token_ready_ts[tok] = time.time() - lt.WS_TAPE_WARMUP_SEC - 1.0
+    assert engine._ws_tape_authoritative(m, "UP") is True
+
+
+def test_issue173_reconnect_reset_survives_a_bridge_without_the_counter():
+    """A stubbed bridge must not break subscription stamping."""
+    engine = _paper_engine()
+    engine.stream_bridge.clob.reconnect_count = "not-an-int"
+    engine._mark_ws_tokens_subscribed(["tok_a"])
+    assert "tok_a" in engine._ws_token_ready_ts
+
+
+def test_issue173_socket_fill_records_its_own_print_as_the_numerator(
+        monkeypatch, tmp_path):
+    """Criterion (a) end to end: a streamed print fills the leg AND sources it.
+
+    Drives the real `on_ws_trade` -> `_try_ws_tape_fill` path rather than the
+    poll tick, so the ordering that makes this work — ledger append before the
+    fill check, both under the engine lock — is actually exercised.
+    """
+    path = _telemetry_env(monkeypatch, tmp_path)
+    rest_calls = []
+
+    def _tracked_fetch(condition_id, limit=500):
+        rest_calls.append(condition_id)
+        return [dict(r) for r in _CANNED_TAPE]
+
+    monkeypatch.setattr(lt, "_fetch_price_prints", _tracked_fetch)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = _ws_authority(engine, slug)
+    assert m.order_status_up == "RESTING" and m.resting_up == 0.48
+
+    # An earlier print at the resting price, then the one that fills the leg.
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "25",
+                        "timestamp": 1006})
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "35",
+                        "timestamp": 1008})
+
+    assert m.filled_up is True, "the streamed print never reached fill detection"
+    assert "WS tape" in m.last_action
+    rec = _fill_lines(path)[0]
+    assert rec["leg"] == "UP"
+    assert rec["tape_source"] == "ws"
+    # The first print is what filled the leg, so the claim — and the ledger
+    # snapshot taken with it — stops there. The 35 that follows is volume
+    # printed *after* the fill and is correctly outside this fill's numerator.
+    assert rec["printed_size_at_price_since_rest"] == 25.0
+    assert rest_calls == [], "REST was queried on the socket fill path"
+    # Exactly one line: the second print must not claim telemetry again.
+    assert len(_fill_lines(path)) == 1
+
+
+def test_issue173_rest_ts_missing_records_no_tape_rather_than_guessing(
+        monkeypatch, tmp_path):
+    """A fill with no rest timestamp has no window to sum over — say `none`.
+
+    A stream fill can land before any placement tick stamped `rest_ts`
+    (issue #138). `printed_size_at_price_since_rest` is defined relative to
+    that stamp, so with no stamp there is no honest numerator: substituting
+    the window start would silently change what the field means and make the
+    ratio incomparable to every other line.
+    """
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = _ws_authority(engine, slug)
+    m.ws_tape_up = [(0.48, 500.0, 1006.0)]
+    m.rest_up_ts = None   # stream fill predating any placement tick
+
+    engine._record_fill_telemetry(m, "UP", 0.48, 5.0, 1010.0)
+
+    rec = _fill_lines(path)[0]
+    assert rec["tape_source"] == "none"
+    assert rec["printed_size_at_price_since_rest"] is None
+    assert rec["fill_ratio"] is None
+
+
+def test_issue173_venue_millisecond_stamps_survive_the_whole_pipeline():
+    """Unit normalization must hold from the socket frame to the numerator.
+
+    `_sum_ws_prints_at_price` compares raw floats against `rest_ts`, which is
+    epoch seconds. A millisecond stamp that reached the ledger unnormalized
+    would sit ~1000x in the future and pass every cutoff, so the join has to
+    normalize on the way in, not on the way out.
+    """
+    engine = _paper_engine()
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = engine.markets[slug]
+    rested = 1_760_000_000                       # a realistic epoch second
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "11",
+                        "timestamp": (rested + 6) * 1_000})          # millis
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "13",
+                        "timestamp": (rested + 8) * 1_000_000})      # micros
+    engine.on_ws_trade({"asset": m.up_token, "price": "0.48", "size": "17",
+                        "timestamp": rested + 9})                    # seconds
+    assert [e[2] for e in m.ws_tape_up] == [
+        float(rested + 6), float(rested + 8), float(rested + 9)]
+    assert lt._sum_ws_prints_at_price(m.ws_tape_up, 0.48, float(rested)) == 41.0
+    # A cutoff past them excludes all three, proving the comparison runs
+    # against seconds and not against a raw millisecond integer.
+    assert lt._sum_ws_prints_at_price(
+        m.ws_tape_up, 0.48, float(rested + 10)) == 0.0
+    # And the REST join agrees on the same stamps, which is what keeps a
+    # socket-sourced ratio comparable to a REST-sourced one.
+    rows = [{"asset": "t", "price": 0.48, "size": 11.0,
+             "timestamp": (rested + 6) * 1_000},
+            {"asset": "t", "price": 0.48, "size": 13.0,
+             "timestamp": (rested + 8) * 1_000_000},
+            {"asset": "t", "price": 0.48, "size": 17.0, "timestamp": rested + 9}]
+    assert lt._sum_prints_at_price(rows, "t", 0.48, float(rested)) == 41.0
+
+
+def test_issue173_rollover_cannot_empty_a_ledger_already_handed_to_a_worker(
+        monkeypatch, tmp_path):
+    """The async worker joins the snapshot it was given, not live state.
+
+    The ledger copy is taken under the engine lock at claim time precisely so
+    a rollover landing while the daemon thread is still queued cannot erase
+    the window's volume out from under it.
+    """
+    path = _telemetry_env(monkeypatch, tmp_path)
+    engine = _paper_engine()
+    engine.fill_telemetry_async = True
+    slug = "btc-up-or-down-5m"
+    engine._update_market_strategy(
+        slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
+    m = _ws_authority(engine, slug)
+    m.ws_tape_up = [(0.48, 42.0, 1006.0)]
+
+    engine._record_fill_telemetry(m, "UP", 0.48, 5.0, 1010.0)
+    # Rollover immediately, racing the worker thread.
+    engine._handle_window_rollover(m, 1300.0, "cid_next_173")
+    assert m.ws_tape_up == []
+
+    deadline = time.time() + 5.0
+    lines = []
+    while time.time() < deadline:
+        lines = _fill_lines(path)
+        if lines:
+            break
+        time.sleep(0.02)
+    assert len(lines) == 1, "the telemetry line never landed"
+    assert lines[0]["tape_source"] == "ws"
+    assert lines[0]["printed_size_at_price_since_rest"] == 42.0

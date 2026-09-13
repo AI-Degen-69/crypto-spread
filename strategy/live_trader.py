@@ -1072,6 +1072,9 @@ class LiveTraderEngine:
         # volume printed" — and the difference decides whether the sidecar
         # trusts the socket or falls back to REST.
         self._ws_token_ready_ts: Dict[str, float] = {}
+        # Reconnect count last folded into the warm-up clocks above; a change
+        # means the subscription was rebuilt and every token must warm up again.
+        self._ws_reconnects_seen: int = 0
 
         # Real-time WebSocket streaming bridge (fix #166: run_direct + on_trade)
         self.stream_bridge = UnifiedStreamBridge(
@@ -1327,6 +1330,15 @@ class LiveTraderEngine:
         REST call is made at all — which also means a print seen on both paths
         can never be counted twice. Otherwise the REST join runs exactly as it
         did before, so a socket outage costs nothing but accuracy.
+
+        One semantic difference the two tapes cannot share: the socket ledger
+        is snapshotted when the fill claims its line, so it ends at the fill,
+        while the REST tape is fetched moments later and also carries whatever
+        printed between the fill and the fetch. The socket's cut is the tighter
+        answer to "what burned through the queue ahead of me", and the REST
+        overhang is the worker's own latency — sub-second in practice — but the
+        two numerators are not identical by construction, and `tape_source`
+        exists so an analysis can tell which one it is reading.
         """
         try:
             printed: Optional[float] = None
@@ -1900,10 +1912,26 @@ class LiveTraderEngine:
         token that is already live must not restart its clock, or a rollover
         that re-sends the same token list would knock the socket out of
         authority for no reason.
+
+        A reconnect is the opposite case and must restart it, exactly as the
+        collector does (`scripts/collect_ticks.py`): the subscription was torn
+        down and rebuilt, so every print during the gap is gone from the
+        ledger. Without this, a socket that drops and returns is treated as
+        authoritative on its first print back — while its ledger is missing the
+        whole outage — and the REST fallback that would have caught the hole is
+        skipped, undercounting `printed_size` for every fill that rested before
+        the drop.
         """
         now = time.time()
         live = {str(t) for t in tokens if t}
+        try:
+            reconnects = int(self.stream_bridge.clob.reconnect_count)
+        except (AttributeError, TypeError, ValueError):
+            reconnects = self._ws_reconnects_seen
         with self._engine_lock:
+            if reconnects != self._ws_reconnects_seen:
+                self._ws_token_ready_ts.clear()
+                self._ws_reconnects_seen = reconnects
             for tok in live:
                 self._ws_token_ready_ts.setdefault(tok, now)
             for tok in [t for t in self._ws_token_ready_ts if t not in live]:
