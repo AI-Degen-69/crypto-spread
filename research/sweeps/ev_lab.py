@@ -31,7 +31,7 @@ import sys
 import time
 import zlib
 from array import array
-from dataclasses import replace
+from dataclasses import fields, replace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -282,18 +282,60 @@ def _taker_fee(p: float, rate: float) -> float:
     return rate * p * (1.0 - p)
 
 
+#: Fields `engine._simulate_window` honours that neither research simulator
+#: implements. Issue #164 added all four to `BacktestParams`; measured on 400
+#: real windows, flipping any one of them changes nothing in `sim2`'s output.
+#: `max_start_delay_sec` predates them and has the same problem: the engine
+#: drops late-start windows at `engine.py:1083`, neither simulator here does.
+ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
+                     "naked_leg_timeout_pct", "enable_leg_chase",
+                     "max_start_delay_sec")
+
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
-UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band")
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band") + ENGINE_ONLY_KNOBS
+
+
+def _non_default_knobs(p: BacktestParams, names: tuple[str, ...]) -> list[str]:
+    """Which of `names` `p` sets away from its dataclass default.
+
+    Compared against the declared default rather than tested for truthiness,
+    because `stop_loss_enabled` defaults to `True`: a truthiness test would
+    reject every ordinary config and wave through `stop_loss_enabled=False`,
+    the one value that changes what is being simulated.
+    """
+    defaults = {f.name: f.default for f in fields(BacktestParams)}
+    return [k for k in names
+            if k in defaults and getattr(p, k, defaults[k]) != defaults[k]]
 
 
 def _reject_unsupported_knobs(p: BacktestParams) -> None:
     """Raise when `p` sets a knob `fast_simulate` would silently ignore."""
-    ignored = [k for k in UNSUPPORTED_KNOBS if getattr(p, k, 0.0)]
+    ignored = _non_default_knobs(p, UNSUPPORTED_KNOBS)
     if ignored:
         raise ValueError(
             f"fast_simulate does not implement {', '.join(ignored)}; "
             "engine._simulate_window applies them, so results would not be "
-            "comparable. Use research/sweeps/sim2.py, which implements both."
+            "comparable. Use research/sweeps/sim2.py for entry_delay_sec and "
+            "entry_band; nothing in research/ implements "
+            f"{', '.join(ENGINE_ONLY_KNOBS)}."
+        )
+
+
+def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
+    """Raise when `p` sets a knob `sim2` would silently ignore.
+
+    `sim2` takes `entry_delay_sec` and `entry_band` as its own arguments and
+    never reads the `BacktestParams` fields of the same name, so setting them
+    on the params is as silent as not implementing them at all. The four
+    `ENGINE_ONLY_KNOBS` it does not implement in any form.
+    """
+    ignored = _non_default_knobs(p, UNSUPPORTED_KNOBS)
+    if ignored:
+        raise ValueError(
+            f"sim2 ignores {', '.join(ignored)} on BacktestParams; pass "
+            "entry_delay_sec / entry_band as sim2() arguments, and note that "
+            f"{', '.join(ENGINE_ONLY_KNOBS)} are not implemented in research/ "
+            "at all — express hold-to-settlement through exit_thresh_by_slug."
         )
 
 
