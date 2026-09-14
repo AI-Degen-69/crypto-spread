@@ -2352,8 +2352,17 @@ def test_backtest_sends_the_new_knobs():
     ("exit_thresh_naked", 9.0, 0.50),
     ("reentry_drift_band", 9.0, 0.50),
 ])
-def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped):
-    """The API must refuse exactly what the engine refuses — no wider."""
+def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped, tmp_path,
+                                                    monkeypatch):
+    """The API must refuse exactly what the engine refuses — no wider.
+
+    `TICKS_DIR` is redirected because this call carries no `file=`: without it
+    `/api/backtest` replays every tick file in the real `run/ticks/`. That was
+    free when this test was written (#184) — the directory had just been
+    archived — and became a multi-minute, multi-GB replay per parameter once a
+    capture filled it. The clamp is what is under test; the replay is not.
+    """
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     r = client.get("/api/backtest", params={field: over})
     assert r.status_code == 200, f"{field}={over} produced {r.status_code}"
     from server.osc_dash import _clamp_to_spec
