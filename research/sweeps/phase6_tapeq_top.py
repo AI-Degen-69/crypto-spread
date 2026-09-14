@@ -12,13 +12,12 @@ import json
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
-from multiprocessing import get_context
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams  # noqa: E402
-from ev_lab import _get_cache, summarize, default_base_params  # noqa: E402
+from ev_lab import _get_cache, summarize, default_base_params, sweep_pool  # noqa: E402
 from sim2 import sim2  # noqa: E402
 
 TOP = [
@@ -60,9 +59,8 @@ def _worker(args):
 def main() -> int:
     cache = _get_cache()
     pos_all = list(range(len(cache)))
-    ctx = get_context("spawn")
     results = []
-    with ctx.Pool(processes=5) as pool:
+    with sweep_pool(5) as pool:
         for name, off, band, delay, chase, ex in TOP:
             pd = {k: v for k, v in asdict(replace(
                 default_base_params(), offset=off, fill_model="tapeq",

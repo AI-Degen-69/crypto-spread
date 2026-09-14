@@ -602,3 +602,123 @@ def test_no_sweep_driver_puts_a_guarded_knob_on_its_params(tmp_path):
     assert offenders == [], (
         "these drivers set a knob the research simulators ignore directly on "
         f"the params; the guard rejects them at run time: {offenders}")
+
+
+# ---------------------------------------------------------------------------
+# 15. Sweeping on a machine that cannot hold eight copies of the cache
+# ---------------------------------------------------------------------------
+
+def _tiny_cache(n=4):
+    """`n` minimal windows, enough for `fast_simulate` to return a row each."""
+    from array import array
+    book = array("d", [0.48, 100.0])
+    return [ev_lab.Win({
+        "cid": f"0x{i}", "series": "eth-up-or-down-5m",
+        "slug": "eth-up-or-down-5m", "duration": 300,
+        "start_ts": 1_760_000_000.0, "day": "2026-09-11",
+        "ts": [1_760_000_000.0], "s_mid": [0.50],
+        "up_bb": [0.49], "up_ba": [0.51], "dn_bb": [0.49], "dn_ba": [0.51],
+        "up_bids": [book], "dn_bids": [book], "tape": [([], [])],
+        "up_token": "tok_up", "dn_token": "tok_dn",
+    }) for i in range(n)]
+
+
+@contextlib.contextmanager
+def _installed_cache(windows):
+    """Put `windows` behind `_get_cache()` without touching run/sweeps."""
+    old = ev_lab._CACHE
+    ev_lab._CACHE = windows
+    try:
+        yield
+    finally:
+        ev_lab._CACHE = old
+
+
+def test_sweep_configs_serial_path_resolves_window_positions(tmp_path):
+    """The `workers <= 1` branch was broken for as long as it existed.
+
+    `tasks` carries positions into the cache, because the parallel branch ships
+    indices to workers that hold their own copy. The serial branch passed that
+    index list straight to `run_config_on`, which raised `'int' object has no
+    attribute 'duration'`. Nothing hit it while the drivers all requested 6-8
+    workers; it surfaced the moment a machine could only afford one.
+    """
+    cache = _tiny_cache()
+    with _installed_cache(cache):
+        out = ev_lab.sweep_configs(
+            [{"name": "cfg-a", "params_kwargs": {"offset": 0.02}},
+             {"name": "cfg-b", "params_kwargs": {"offset": 0.03}}],
+            workers=1, n_boot=50, size=5)
+    assert [r["name"] for r in out] == ["cfg-a", "cfg-b"]
+    assert all(r["n"] == len(cache) for r in out), \
+        "every window should reach the simulator"
+
+
+def test_sweep_configs_serial_path_honours_filters(tmp_path):
+    """Resolving positions must select the filtered windows, not the first N."""
+    cache = _tiny_cache(4)
+    cache[0].series = cache[1].series = "xrp-up-or-down-15m"
+    with _installed_cache(cache):
+        out = ev_lab.sweep_configs(
+            [{"name": "only-xrp", "params_kwargs": {},
+              "series_filter": ["xrp-up-or-down-15m"]}],
+            workers=1, n_boot=50, size=5)
+    assert out[0]["n"] == 2, "the series filter was dropped by the serial path"
+
+
+def test_safe_worker_count_never_returns_less_than_one():
+    """A pool of zero would deadlock; the floor is the serial path."""
+    assert ev_lab.safe_worker_count(8, reserve_bytes=float("inf")) == 1
+    assert ev_lab.safe_worker_count(0) == 1
+    assert ev_lab.safe_worker_count(-5) == 1
+
+
+def test_safe_worker_count_never_exceeds_the_request():
+    """It clamps down for memory; it must never invent workers."""
+    assert ev_lab.safe_worker_count(4, reserve_bytes=0.0) <= 4
+    assert ev_lab.safe_worker_count(1, reserve_bytes=0.0) == 1
+
+
+def test_safe_worker_count_falls_back_low_when_memory_is_unreadable(monkeypatch):
+    """`psutil` is not a declared dependency of this repo.
+
+    Guessing high costs a thrashing machine and a sweep that may never finish;
+    guessing low costs about 2.5s per config. So the fallback is 2, not the
+    requested 8.
+    """
+    import builtins
+    real_import = builtins.__import__
+
+    def no_psutil(name, *a, **kw):
+        if name == "psutil":
+            raise ImportError("not installed")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_psutil)
+    assert ev_lab.safe_worker_count(8) == 2
+
+
+def test_sweep_pool_runs_in_process_rather_than_spawning_one_worker():
+    """`Pool(processes=1)` is the worst of both: the parent holds the cache and
+    the single spawned worker loads a second copy, for no parallelism."""
+    with mock.patch.object(ev_lab, "safe_worker_count", return_value=1):
+        with ev_lab.sweep_pool(8) as pool:
+            assert isinstance(pool, ev_lab._SerialPool)
+            assert pool.map(lambda x: x * 2, [1, 2, 3]) == [2, 4, 6]
+
+
+def test_no_sweep_driver_hardcodes_a_worker_count_again():
+    """Each driver hardcoded 8 (or 5), sized for a far smaller dataset. Against
+    the 2026-09-14 capture that is ~14GB of window cache across the workers."""
+    import re
+    offenders = []
+    for path in sorted(SWEEPS.glob("*.py")):
+        if path.name == "ev_lab.py":
+            continue  # defines the helpers
+        src = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"(?:processes|workers)\s*=\s*(\d+)", src):
+            if int(m.group(1)) > 1:
+                offenders.append(f"{path.name}:{src[:m.start()].count(chr(10)) + 1}")
+    assert offenders == [], (
+        "these drivers size their pool without asking how much memory exists: "
+        f"{offenders} — use safe_worker_count()/sweep_pool()")

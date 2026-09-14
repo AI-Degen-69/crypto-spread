@@ -976,6 +976,77 @@ def _worker_task(args):
     return rows
 
 
+#: Resident cost of the window cache as a multiple of its pickle size.
+#: Measured on the 2026-09-14 capture: a 619MB pickle loads to 1.74GB RSS.
+CACHE_RSS_FACTOR = 2.8
+
+#: Left for the OS, the parent process, and whatever else the operator is
+#: running. Sweeping is not worth swapping the desktop out from under them.
+WORKER_RESERVE_BYTES = 2.0 * 1024 ** 3
+
+
+def safe_worker_count(requested: int, reserve_bytes: float = WORKER_RESERVE_BYTES) -> int:
+    """Clamp a worker count to what this machine can actually hold.
+
+    Every spawned worker calls `_get_cache()` and holds the *whole* window
+    cache: measured 1.74GB resident for a 619MB pickle. The drivers each
+    hardcoded 8, which was sized for a much smaller dataset -- against a 24h
+    capture that is ~14GB, and the machine thrashes instead of sweeping.
+    Workers only speed up a sweep that fits in RAM; one that does not is slower
+    than running serially, and may not finish at all.
+
+    Falls back to 2 when available memory cannot be read (`psutil` is not a
+    declared dependency of this repo), because the failure mode of guessing too
+    high is far worse than of guessing too low: a serial sweep of this dataset
+    costs about 2.5s per config.
+    """
+    requested = max(1, int(requested))
+    try:
+        import psutil  # noqa: PLC0415 - optional, soft dependency
+        available = psutil.virtual_memory().available
+    except Exception:
+        return min(requested, 2)
+    try:
+        per_worker = CACHE_PATH.stat().st_size * CACHE_RSS_FACTOR
+    except OSError:
+        return min(requested, 2)
+    if per_worker <= 0:
+        return requested
+    headroom = available - reserve_bytes
+    if not math.isfinite(headroom):
+        # `int()` raises on inf/nan rather than clamping, which would turn a
+        # sizing question into a crash mid-sweep.
+        return 1
+    return max(1, min(requested, int(headroom // per_worker)))
+
+
+class _SerialPool:
+    """Stand-in for `multiprocessing.Pool` when only one worker fits.
+
+    `Pool(processes=1)` is not the serial case. The parent already holds the
+    window cache and the single spawned worker loads its own copy, so it costs
+    twice the memory of running the tasks in-process and buys no parallelism.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def map(self, fn, iterable):
+        return [fn(x) for x in iterable]
+
+
+def sweep_pool(requested: int):
+    """A worker pool sized to fit, or an in-process stand-in when it cannot."""
+    n = safe_worker_count(requested)
+    if n <= 1:
+        return _SerialPool()
+    from multiprocessing import get_context  # noqa: PLC0415
+    return get_context("spawn").Pool(processes=n)
+
+
 def sweep_configs(configs: list[dict], workers: int = 6, n_boot: int = 3000,
                   chunk_windows: bool = True, size: int = 5) -> list[dict]:
     """Run many configs across the full cache with a process pool.
@@ -1003,8 +1074,14 @@ def sweep_configs(configs: list[dict], workers: int = 6, n_boot: int = 3000,
     results = []
     t0 = time.perf_counter()
     if workers <= 1:
-        for cfg, sel in tasks:
+        for cfg, cfg_idx in tasks:
             params = BacktestParams(**cfg["params_kwargs"])
+            # `tasks` carries positions, not windows: the parallel branch ships
+            # indices to workers that hold their own cache copy. This branch
+            # has the cache in hand and has to resolve them. Passing the index
+            # list straight through raised `'int' object has no attribute
+            # 'duration'`, which nothing hit while `workers` defaulted to 6.
+            sel = [cache[i] for i in cfg_idx]
             s = run_config_on(sel, params, size=size, n_boot=n_boot,
                               seed=stable_seed(cfg["name"]))
             s["name"] = cfg["name"]
