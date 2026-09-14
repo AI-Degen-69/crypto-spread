@@ -560,17 +560,45 @@ def test_no_backtest_param_is_silently_unread_by_the_research_simulators():
         "would report numbers for a configuration it never ran")
 
 
-def test_every_sweep_driver_still_builds_params_the_guard_accepts():
-    """The guard must not break the drivers it protects: they pass
-    `entry_delay_sec`/`entry_band` as sim2 arguments, never as fields."""
-    import re
+def test_no_sweep_driver_puts_a_guarded_knob_on_its_params(tmp_path):
+    """The guard must not break the drivers it protects.
+
+    Only the knob reaching a `BacktestParams` is fatal. Every driver today
+    routes `entry_delay_sec`/`entry_band` through a task dict and unpacks them
+    into `sim2(...)` arguments — `phase4_universe.py:75` does exactly that, and
+    a text search cannot tell it apart from the dangerous form. So this reads
+    the syntax instead: the keywords of every `BacktestParams(...)` and
+    `replace(...)` call, and the keys of any dict literal bound to a name
+    ending in `params_kwargs`.
+    """
+    import ast
+
+    guarded = set(ev_lab.UNSUPPORTED_KNOBS)
+    offenders = []
     for path in sorted(SWEEPS.glob("*.py")):
-        src = path.read_text(encoding="utf-8")
-        for knob in ev_lab.UNSUPPORTED_KNOBS:
-            # A driver assigning the knob inside a params dict/constructor.
-            bad = re.search(rf'(?<!["\'])\b{knob}\s*=(?!=)', src)
-            if bad and path.name not in ("ev_lab.py", "sim2.py"):
-                line = src[:bad.start()].count("\n") + 1
-                assert "sim2(" in src[max(0, bad.start() - 400):bad.start() + 400], (
-                    f"{path.name}:{line} sets {knob} outside a sim2() call; "
-                    "the guard will reject it at run time")
+        if path.name in ("ev_lab.py", "sim2.py"):
+            continue  # they define the guard rather than call it
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                if name in ("BacktestParams", "replace"):
+                    for kw in node.keywords:
+                        if kw.arg in guarded:
+                            offenders.append(f"{path.name}:{node.lineno} "
+                                             f"{name}(..., {kw.arg}=...)")
+            elif isinstance(node, ast.Assign):
+                if not isinstance(node.value, ast.Dict):
+                    continue
+                targets = [getattr(t, "id", "") or getattr(t, "attr", "")
+                           for t in node.targets]
+                if not any(str(t).endswith("params_kwargs") for t in targets):
+                    continue
+                for k in node.value.keys:
+                    if isinstance(k, ast.Constant) and k.value in guarded:
+                        offenders.append(f"{path.name}:{node.lineno} "
+                                         f"params_kwargs[{k.value!r}]")
+    assert offenders == [], (
+        "these drivers set a knob the research simulators ignore directly on "
+        f"the params; the guard rejects them at run time: {offenders}")

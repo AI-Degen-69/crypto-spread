@@ -31,7 +31,7 @@ import sys
 import time
 import zlib
 from array import array
-from dataclasses import fields, replace
+from dataclasses import MISSING, fields, replace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -303,7 +303,16 @@ def _non_default_knobs(p: BacktestParams, names: tuple[str, ...]) -> list[str]:
     reject every ordinary config and wave through `stop_loss_enabled=False`,
     the one value that changes what is being simulated.
     """
-    defaults = {f.name: f.default for f in fields(BacktestParams)}
+    defaults = {}
+    for f in fields(BacktestParams):
+        if f.default is not MISSING:
+            defaults[f.name] = f.default
+        elif f.default_factory is not MISSING:  # type: ignore[misc]
+            # `exit_thresh_by_slug` is one today. Without this branch `f.default`
+            # is the MISSING sentinel, which never equals the real dict — so
+            # adding such a field to the tuples would raise on every call,
+            # including at its own default.
+            defaults[f.name] = f.default_factory()  # type: ignore[misc]
     return [k for k in names
             if k in defaults and getattr(p, k, defaults[k]) != defaults[k]]
 
