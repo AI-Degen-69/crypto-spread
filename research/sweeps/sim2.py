@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from backtest.engine import BacktestParams  # noqa: E402
 from ev_lab import (  # noqa: E402
     Win, _mid_from, _two_sided, _queue_ahead, _taker_fee,
+    reject_knobs_sim2_ignores,
 )
 
 
@@ -43,7 +44,12 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     `entry_band` (research knob): at the first quoted tick, skip the window
     entirely unless |two-sided mid - 0.50| <= entry_band (undecided-market
     regime filter; stronger than the adverse-open gate, which uses exit_thr).
+
+    Both are read from these arguments, never from `p` — so a caller that sets
+    them on the `BacktestParams` instead is rejected rather than quietly
+    simulated without them.
     """
+    reject_knobs_sim2_ignores(p)
     duration = w.duration
     start_ts = w.start_ts
     first_ts = w.first_ts

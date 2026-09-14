@@ -31,7 +31,7 @@ import sys
 import time
 import zlib
 from array import array
-from dataclasses import replace
+from dataclasses import MISSING, fields, replace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -119,15 +119,33 @@ def _compact_bids(d: dict) -> array:
 
 
 def build_cache(force: bool = False) -> Path:
+    """Compact every tick file into per-window arrays, one pass, one snap at a time.
+
+    The two-pass shape this replaces parsed a whole day into ``raw[cid] ->
+    [snapshot dicts]`` before compacting any of it. Measured on this hardware the
+    parsed dicts cost **5.5x the file size in RSS** (490MB file -> 2.67GB peak),
+    so a 1GB day needed ~6GB of headroom and a 24h capture had none. Compacting
+    each snapshot as it is read drops the raw dict immediately and leaves only
+    the array-backed windows resident -- which the old shape held anyway, on top
+    of ``raw``.
+
+    Per-cid timestamps arrive ascending (the collector appends on one thread in
+    series order), so the old per-cid ``sort`` was a no-op: measured 0
+    regressions over 503,752 snapshots. Ascending order is asserted rather than
+    assumed, because misaligned parallel arrays would corrupt every downstream
+    simulation silently.
+    """
     if CACHE_PATH.exists() and not force:
         print(f"cache exists: {CACHE_PATH} (use force=True to rebuild)")
         return CACHE_PATH
     files = sorted(set(TICKS_DIR.glob("ticks_*.jsonl")) | set(TICKS_DIR.glob("ticks_*.jsonl.gz")))
-    windows: list[Win] = []
+    windows: list[dict] = []
     t0 = time.perf_counter()
     for path in files:
         day = path.stem.replace(".jsonl", "").replace("ticks_", "")
-        raw: dict[str, list[dict]] = {}
+        # Insertion-ordered by first appearance of each cid, which is the order
+        # the previous `raw.items()` loop emitted.
+        acc: dict[str, dict] = {}
         op = gzip.open if path.suffix == ".gz" else open
         with op(path, "rt", encoding="utf-8") as f:
             for line in f:
@@ -140,31 +158,40 @@ def build_cache(force: bool = False) -> Path:
                 cid = s.get("cid")
                 if not cid:
                     continue
-                raw.setdefault(cid, []).append(s)
-        n_day = 0
-        for cid, snapse in raw.items():
-            snapse.sort(key=lambda x: x.get("ts", 0.0))
-            first = snapse[0]
-            ub0 = first.get("up_book") or {}
-            db0 = first.get("down_book") or {}
-            up_token = (first.get("up_token") or ub0.get("token_id") or "").strip()
-            dn_token = (first.get("down_token") or db0.get("token_id") or "").strip()
-            ts, s_mid, up_bb, up_ba, dn_bb, dn_ba = [], [], [], [], [], []
-            up_bids, dn_bids, tape = [], [], []
-            for s in snapse:
                 ub = s.get("up_book") or {}
                 db = s.get("down_book") or {}
-                ts.append(float(s.get("ts", 0.0) or 0.0))
+                w = acc.get(cid)
+                if w is None:
+                    w = acc[cid] = {
+                        "cid": cid, "series": s.get("series", ""),
+                        "slug": s.get("slug", ""),
+                        "duration": int(s.get("duration", 0) or 0),
+                        "start_ts": float(s.get("start_ts", 0.0) or 0.0),
+                        "day": day,
+                        "up_token": (s.get("up_token") or ub.get("token_id") or "").strip(),
+                        "dn_token": (s.get("down_token") or db.get("token_id") or "").strip(),
+                        "ts": [], "s_mid": [], "up_bb": [], "up_ba": [],
+                        "dn_bb": [], "dn_ba": [], "up_bids": [], "dn_bids": [],
+                        "tape": [],
+                    }
+                up_token, dn_token = w["up_token"], w["dn_token"]
+                t = float(s.get("ts", 0.0) or 0.0)
+                if w["ts"] and t < w["ts"][-1]:
+                    raise ValueError(
+                        f"{path.name}: cid {cid} timestamp went backwards "
+                        f"({t} after {w['ts'][-1]}); the tick file is no longer "
+                        "per-cid ascending and the parallel arrays would be misaligned")
+                w["ts"].append(t)
                 m = s.get("mid")
-                s_mid.append(None if m is None else float(m))
+                w["s_mid"].append(None if m is None else float(m))
                 ubb, uba = ub.get("best_bid"), ub.get("best_ask")
                 dbb, dba = db.get("best_bid"), db.get("best_ask")
-                up_bb.append(None if ubb is None else float(ubb))
-                up_ba.append(None if uba is None else float(uba))
-                dn_bb.append(None if dbb is None else float(dbb))
-                dn_ba.append(None if dba is None else float(dba))
-                up_bids.append(_compact_bids(ub.get("bids") or {}))
-                dn_bids.append(_compact_bids(db.get("bids") or {}))
+                w["up_bb"].append(None if ubb is None else float(ubb))
+                w["up_ba"].append(None if uba is None else float(uba))
+                w["dn_bb"].append(None if dbb is None else float(dbb))
+                w["dn_ba"].append(None if dba is None else float(dba))
+                w["up_bids"].append(_compact_bids(ub.get("bids") or {}))
+                w["dn_bids"].append(_compact_bids(db.get("bids") or {}))
                 tup, tdn = [], []
                 for tr in s.get("tape_delta") or []:
                     a = str(tr.get("asset", "")).strip()
@@ -179,17 +206,10 @@ def build_cache(force: bool = False) -> Path:
                         tup.append((px, sz, _classify_side(px, ubb, uba)))
                     elif dn_token and a == dn_token:
                         tdn.append((px, sz, _classify_side(px, dbb, dba)))
-                tape.append((tup, tdn))
-            windows.append({
-                "cid": cid, "series": first.get("series", ""), "slug": first.get("slug", ""),
-                "duration": int(first.get("duration", 0) or 0),
-                "start_ts": float(first.get("start_ts", 0.0) or 0.0),
-                "day": day, "ts": ts, "s_mid": s_mid, "up_bb": up_bb, "up_ba": up_ba,
-                "dn_bb": dn_bb, "dn_ba": dn_ba, "up_bids": up_bids, "dn_bids": dn_bids,
-                "tape": tape, "up_token": up_token, "dn_token": dn_token,
-            })
-            n_day += 1
-        print(f"  {path.name}: {n_day} windows ({time.perf_counter()-t0:.0f}s elapsed)")
+                w["tape"].append((tup, tdn))
+        windows.extend(acc.values())
+        print(f"  {path.name}: {len(acc)} windows ({time.perf_counter()-t0:.0f}s elapsed)")
+        acc.clear()
     windows.sort(key=lambda w: w["ts"][0] if w["ts"] else 0.0)
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CACHE_PATH, "wb") as f:
@@ -262,18 +282,69 @@ def _taker_fee(p: float, rate: float) -> float:
     return rate * p * (1.0 - p)
 
 
+#: Fields `engine._simulate_window` honours that neither research simulator
+#: implements. Issue #164 added all four to `BacktestParams`; measured on 400
+#: real windows, flipping any one of them changes nothing in `sim2`'s output.
+#: `max_start_delay_sec` predates them and has the same problem: the engine
+#: drops late-start windows at `engine.py:1083`, neither simulator here does.
+ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
+                     "naked_leg_timeout_pct", "enable_leg_chase",
+                     "max_start_delay_sec")
+
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
-UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band")
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band") + ENGINE_ONLY_KNOBS
+
+
+def _non_default_knobs(p: BacktestParams, names: tuple[str, ...]) -> list[str]:
+    """Which of `names` `p` sets away from its dataclass default.
+
+    Compared against the declared default rather than tested for truthiness,
+    because `stop_loss_enabled` defaults to `True`: a truthiness test would
+    reject every ordinary config and wave through `stop_loss_enabled=False`,
+    the one value that changes what is being simulated.
+    """
+    defaults = {}
+    for f in fields(BacktestParams):
+        if f.default is not MISSING:
+            defaults[f.name] = f.default
+        elif f.default_factory is not MISSING:  # type: ignore[misc]
+            # `exit_thresh_by_slug` is one today. Without this branch `f.default`
+            # is the MISSING sentinel, which never equals the real dict — so
+            # adding such a field to the tuples would raise on every call,
+            # including at its own default.
+            defaults[f.name] = f.default_factory()  # type: ignore[misc]
+    return [k for k in names
+            if k in defaults and getattr(p, k, defaults[k]) != defaults[k]]
 
 
 def _reject_unsupported_knobs(p: BacktestParams) -> None:
     """Raise when `p` sets a knob `fast_simulate` would silently ignore."""
-    ignored = [k for k in UNSUPPORTED_KNOBS if getattr(p, k, 0.0)]
+    ignored = _non_default_knobs(p, UNSUPPORTED_KNOBS)
     if ignored:
         raise ValueError(
             f"fast_simulate does not implement {', '.join(ignored)}; "
             "engine._simulate_window applies them, so results would not be "
-            "comparable. Use research/sweeps/sim2.py, which implements both."
+            "comparable. Use research/sweeps/sim2.py for entry_delay_sec and "
+            "entry_band; nothing in research/ implements "
+            f"{', '.join(ENGINE_ONLY_KNOBS)}."
+        )
+
+
+def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
+    """Raise when `p` sets a knob `sim2` would silently ignore.
+
+    `sim2` takes `entry_delay_sec` and `entry_band` as its own arguments and
+    never reads the `BacktestParams` fields of the same name, so setting them
+    on the params is as silent as not implementing them at all. The four
+    `ENGINE_ONLY_KNOBS` it does not implement in any form.
+    """
+    ignored = _non_default_knobs(p, UNSUPPORTED_KNOBS)
+    if ignored:
+        raise ValueError(
+            f"sim2 ignores {', '.join(ignored)} on BacktestParams; pass "
+            "entry_delay_sec / entry_band as sim2() arguments, and note that "
+            f"{', '.join(ENGINE_ONLY_KNOBS)} are not implemented in research/ "
+            "at all — express hold-to-settlement through exit_thresh_by_slug."
         )
 
 

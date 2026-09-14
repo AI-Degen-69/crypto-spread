@@ -8,9 +8,13 @@ Everything here runs without `run/sweeps/window_cache.pkl` — that cache is
 derived from `run/ticks/`, both are gitignored, and neither exists on a clean
 checkout or in CI.
 """
+import contextlib
 import importlib.util
+import json
 import sys
+import weakref
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -320,3 +324,281 @@ def test_pool_workers_use_the_memoised_cache_getter():
         if "def _worker" in src and "load_cache()" in src:
             offenders.append(name)
     assert offenders == [], f"worker re-unpickles the cache in {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# 13. build_cache streams instead of buffering a whole day
+# ---------------------------------------------------------------------------
+
+def _snap(cid, ts, *, up_tok="U", dn_tok="D", mid=0.5, up_bid=0.47, up_ask=0.53,
+          dn_bid=0.46, dn_ask=0.52, prints=()):
+    """One collector tick line for `cid`, in the on-disk shape."""
+    return {
+        "cid": cid, "series": "eth-up-or-down-5m", "slug": f"{cid}-slug",
+        "duration": 300, "start_ts": 1000.0, "ts": ts, "mid": mid,
+        "up_token": up_tok, "down_token": dn_tok,
+        "up_book": {"token_id": up_tok, "best_bid": up_bid, "best_ask": up_ask,
+                    "bids": {"0.47": 120.0, "0.40": 55.0, "0.01": 9.0}},
+        "down_book": {"token_id": dn_tok, "best_bid": dn_bid, "best_ask": dn_ask,
+                      "bids": {"0.46": 80.0}},
+        "tape_delta": [{"asset": a, "price": p, "size": s} for a, p, s in prints],
+    }
+
+
+def _write_ticks(tmp_path, day, snaps):
+    d = tmp_path / "ticks"
+    d.mkdir(exist_ok=True)
+    p = d / f"ticks_{day}.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        for s in snaps:
+            f.write(json.dumps(s) + "\n")
+    return d
+
+
+@contextlib.contextmanager
+def _cache_dirs(tmp_path, ticks_dir):
+    """Point the lab's module-level paths at a scratch tree for one build."""
+    old_ticks, old_cache = ev_lab.TICKS_DIR, ev_lab.CACHE_PATH
+    ev_lab.TICKS_DIR = ticks_dir
+    ev_lab.CACHE_PATH = tmp_path / "sweeps" / "window_cache.pkl"
+    try:
+        yield ev_lab.CACHE_PATH
+    finally:
+        ev_lab.TICKS_DIR, ev_lab.CACHE_PATH = old_ticks, old_cache
+
+
+def test_build_cache_does_not_hold_a_whole_day_of_parsed_snapshots(tmp_path):
+    """The defect this pins: the old two-pass shape parsed an entire day into
+    `raw[cid] -> [snapshot dicts]` before compacting any of it.
+
+    Measured on the real 490MB tick file that cost **3.34GB of peak RSS** —
+    5.7x the file — so a 1GB day needed ~7GB of headroom that a 16GB machine
+    running the collector, the dashboard and a browser does not have. The
+    streamed shape measured 0.59GB on the same file.
+
+    Peak RSS is not assertable in CI, so the invariant is tested directly:
+    how many parsed snapshots are alive at once. It must not grow with the
+    number of snapshots in the file.
+    """
+    n_snaps = 200
+    snaps = [_snap(f"c{i % 4}", 1000.0 + i) for i in range(n_snaps)]
+    ticks = _write_ticks(tmp_path, "2026-09-13", snaps)
+
+    class _Tracked(dict):
+        """A dict that can be weakly referenced, so liveness is observable.
+
+        `dict` sets `__hash__` to None, and an unhashable value cannot enter a
+        WeakSet — the resulting TypeError lands inside `build_cache`'s
+        `except Exception: continue`, which skips every line and yields an
+        empty cache rather than a failure. Identity hashing is also the right
+        semantics here: liveness is per object, not per value.
+        """
+
+        __hash__ = object.__hash__
+
+    live = weakref.WeakSet()
+    high_water = []
+    real_loads = ev_lab.json.loads
+    real_compact = ev_lab._compact_bids
+
+    def loads(s, *a, **kw):
+        obj = _Tracked(real_loads(s, *a, **kw))
+        live.add(obj)
+        return obj
+
+    def compact(d):
+        # Sampled once per book, i.e. twice per snapshot, mid-build.
+        high_water.append(len(live))
+        return real_compact(d)
+
+    with mock.patch.object(ev_lab.json, "loads", loads), \
+            mock.patch.object(ev_lab, "_compact_bids", compact), \
+            _cache_dirs(tmp_path, ticks):
+        ev_lab.build_cache(force=True)
+
+    assert high_water, "the build never parsed a snapshot"
+    # A streaming build drops each snapshot before reading the next, so only a
+    # handful are ever alive. The buffering shape reached `n_snaps`.
+    assert max(high_water) < n_snaps // 4, (
+        f"up to {max(high_water)} of {n_snaps} parsed snapshots were alive at "
+        "once; build_cache is buffering the day again")
+
+
+def test_build_cache_output_survives_the_streaming_rewrite(tmp_path):
+    """Every field the sweep reads, on a file with interleaved windows."""
+    snaps = [
+        _snap("a", 1000.0, prints=[("U", 0.53, 7.0), ("D", 0.30, 2.0)]),
+        _snap("b", 1000.5),
+        _snap("a", 1001.0, prints=[("U", 0.47, 3.0)]),
+        _snap("b", 1001.5),
+    ]
+    ticks = _write_ticks(tmp_path, "2026-09-13", snaps)
+    with _cache_dirs(tmp_path, ticks):
+        ev_lab.build_cache(force=True)
+        wins = ev_lab.load_cache()
+
+    assert [w.cid for w in wins] == ["a", "b"], "first-appearance order changed"
+    a, b = wins
+    assert a.day == "2026-09-13" and a.series == "eth-up-or-down-5m"
+    assert a.duration == 300 and a.start_ts == 1000.0
+    assert a.up_token == "U" and a.dn_token == "D"
+    # Parallel arrays stay aligned and carry only this cid's snapshots.
+    assert a.ts == [1000.0, 1001.0] and b.ts == [1000.5, 1001.5]
+    assert a.s_mid == [0.5, 0.5]
+    assert a.up_bb == [0.47, 0.47] and a.up_ba == [0.53, 0.53]
+    assert a.dn_bb == [0.46, 0.46] and a.dn_ba == [0.52, 0.52]
+    # `_compact_bids` drops levels below BOOK_MIN_PX and sorts descending.
+    assert list(a.up_bids[0]) == [0.47, 120.0, 0.40, 55.0]
+    # Prints route to the leg that owns the token, and carry a real side:
+    # 0.53 lifts the ask (buy), 0.47 hits the bid (sell).
+    up0, dn0 = a.tape[0]
+    assert up0 == [(0.53, 7.0, ev_lab.SIDE_BUY)]
+    assert dn0 == [(0.30, 2.0, ev_lab.SIDE_SELL)]
+    assert a.tape[1][0] == [(0.47, 3.0, ev_lab.SIDE_SELL)]
+    assert b.tape == [([], []), ([], [])]
+
+
+def test_build_cache_rejects_a_tick_file_that_is_not_per_cid_ascending(tmp_path):
+    """Streaming appends in file order, so it relies on per-cid ascending ts.
+
+    That holds today (0 regressions over 503,752 real snapshots) because the
+    collector appends on one thread. If it ever stops holding, the parallel
+    arrays would be silently misaligned and every simulation would read the
+    wrong book for a timestamp — so the build has to fail loudly instead.
+    """
+    snaps = [_snap("a", 1000.0), _snap("a", 999.0)]
+    ticks = _write_ticks(tmp_path, "2026-09-13", snaps)
+    with _cache_dirs(tmp_path, ticks):
+        with pytest.raises(ValueError, match="went backwards"):
+            ev_lab.build_cache(force=True)
+
+
+# ---------------------------------------------------------------------------
+# 14. sim2 rejects the knobs it silently ignored
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kwargs", [
+    {"stop_loss_enabled": False},
+    {"exit_thresh_naked": 0.03},
+    {"naked_leg_timeout_pct": 0.5},
+    {"enable_leg_chase": True},
+    {"max_start_delay_sec": 5.0},
+])
+def test_sim2_rejects_knobs_no_research_simulator_implements(kwargs):
+    """Issue #164 put four knobs on `BacktestParams` that `sim2` never reads.
+
+    Measured before the guard: flipping any of them left `sim2`'s output
+    identical across 400 real windows. `patient_band_maker` *is*
+    `stop_loss_enabled=False`, so a sweep configured that way would have
+    reported numbers for a strategy with a stop loss still armed — exactly the
+    defect #182 fixed for `entry_delay_sec`/`entry_band`, reopened by #164.
+    `max_start_delay_sec` is older and has the same gap (`engine.py:1083`).
+    """
+    from backtest.engine import BacktestParams
+    with pytest.raises(ValueError, match="sim2 ignores"):
+        ev_lab.reject_knobs_sim2_ignores(BacktestParams(**kwargs))
+
+
+def test_sim2_rejects_its_own_arguments_set_on_the_params_instead():
+    """`sim2` takes these as arguments and never reads the fields of the same
+    name, so setting them on the params is as silent as not implementing them."""
+    from backtest.engine import BacktestParams
+    for kwargs in ({"entry_delay_sec": 60.0}, {"entry_band": 0.04}):
+        with pytest.raises(ValueError, match="sim2 ignores"):
+            ev_lab.reject_knobs_sim2_ignores(BacktestParams(**kwargs))
+
+
+def test_sim2_itself_enforces_the_guard():
+    """Asserting on the helper alone would pass even if nothing called it."""
+    sim2 = _load("sim2").sim2
+    from backtest.engine import BacktestParams
+    w = _one_tick_window()
+    with pytest.raises(ValueError, match="sim2 ignores"):
+        sim2(w, BacktestParams(stop_loss_enabled=False))
+    # The supported path is untouched: defaults simulate, and the two research
+    # knobs still work when passed as arguments.
+    assert isinstance(sim2(w, BacktestParams()), dict)
+    assert isinstance(sim2(w, BacktestParams(), entry_delay_sec=60.0,
+                           entry_band=0.04), dict)
+
+
+def test_the_guard_compares_against_defaults_not_truthiness():
+    """`stop_loss_enabled` defaults to True, so `if getattr(p, k)` — the shape
+    the guard had — would reject every ordinary config and wave through
+    `stop_loss_enabled=False`, the one value that changes the simulation."""
+    from backtest.engine import BacktestParams
+    ev_lab.reject_knobs_sim2_ignores(BacktestParams(stop_loss_enabled=True))
+    ev_lab._reject_unsupported_knobs(BacktestParams(stop_loss_enabled=True))
+    with pytest.raises(ValueError):
+        ev_lab.reject_knobs_sim2_ignores(BacktestParams(stop_loss_enabled=False))
+
+
+def test_no_backtest_param_is_silently_unread_by_the_research_simulators():
+    """Exhaustiveness: a knob added to `BacktestParams` must either be read
+    here or be declared unsupported. Otherwise the next #164 repeats this."""
+    import dataclasses
+    import re
+    from backtest.engine import BacktestParams
+
+    src = ((SWEEPS / "sim2.py").read_text(encoding="utf-8")
+           + (SWEEPS / "ev_lab.py").read_text(encoding="utf-8"))
+    exempt = {
+        # Read through `p.exit_thresh(slug, duration, series=...)`, not by name.
+        "exit_thresh_by_slug",
+        # Declared in the engine's registry but applied nowhere, engine
+        # included — so it is not a research/engine divergence to guard.
+        "min_quote_shares",
+    }
+    unread = [
+        f.name for f in dataclasses.fields(BacktestParams)
+        if f.name not in ev_lab.UNSUPPORTED_KNOBS and f.name not in exempt
+        and not re.search(rf"\bp\.{f.name}\b", src)
+    ]
+    assert not unread, (
+        f"{unread} are on BacktestParams but read by neither research "
+        "simulator and not listed in UNSUPPORTED_KNOBS; a sweep setting one "
+        "would report numbers for a configuration it never ran")
+
+
+def test_no_sweep_driver_puts_a_guarded_knob_on_its_params(tmp_path):
+    """The guard must not break the drivers it protects.
+
+    Only the knob reaching a `BacktestParams` is fatal. Every driver today
+    routes `entry_delay_sec`/`entry_band` through a task dict and unpacks them
+    into `sim2(...)` arguments — `phase4_universe.py:75` does exactly that, and
+    a text search cannot tell it apart from the dangerous form. So this reads
+    the syntax instead: the keywords of every `BacktestParams(...)` and
+    `replace(...)` call, and the keys of any dict literal bound to a name
+    ending in `params_kwargs`.
+    """
+    import ast
+
+    guarded = set(ev_lab.UNSUPPORTED_KNOBS)
+    offenders = []
+    for path in sorted(SWEEPS.glob("*.py")):
+        if path.name in ("ev_lab.py", "sim2.py"):
+            continue  # they define the guard rather than call it
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                if name in ("BacktestParams", "replace"):
+                    for kw in node.keywords:
+                        if kw.arg in guarded:
+                            offenders.append(f"{path.name}:{node.lineno} "
+                                             f"{name}(..., {kw.arg}=...)")
+            elif isinstance(node, ast.Assign):
+                if not isinstance(node.value, ast.Dict):
+                    continue
+                targets = [getattr(t, "id", "") or getattr(t, "attr", "")
+                           for t in node.targets]
+                if not any(str(t).endswith("params_kwargs") for t in targets):
+                    continue
+                for k in node.value.keys:
+                    if isinstance(k, ast.Constant) and k.value in guarded:
+                        offenders.append(f"{path.name}:{node.lineno} "
+                                         f"params_kwargs[{k.value!r}]")
+    assert offenders == [], (
+        "these drivers set a knob the research simulators ignore directly on "
+        f"the params; the guard rejects them at run time: {offenders}")
