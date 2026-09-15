@@ -18,7 +18,9 @@ def test_menu_script_exists():
     assert "Show-SystemStatus" in content
     assert "Host-Dashboard" in content
     assert "Stop-DashboardProcess" in content
-    assert "Start-PriceMonitor" in content
+    assert "Invoke-CollectorPollOnce" in content
+    assert "Invoke-RebuildStats" in content
+    assert "NoReload" in content
     assert "dash.pids.json" in content
     assert "8802" in content
 
