@@ -1956,3 +1956,352 @@ def test_orders_group_has_shared_market_key():
 
 
 
+# --- Issue #193: Stats Summary hero figures computed from live oscillation data ---
+
+_OSC_JS_PRELUDE = """
+// Minimal browser stubs so the served script can be evaluated under Node.
+const setInterval = () => 0;
+const clearInterval = () => {};
+const setTimeout = () => 0;
+const clearTimeout = () => {};
+const fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+const EventSource = class { constructor() {} addEventListener() {} close() {} };
+const makeElem = () => ({
+  classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+  addEventListener: () => {},
+  querySelectorAll: () => [],
+  value: ''
+});
+const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
+globalThis.window = window;
+const document = { getElementById: makeElem, querySelectorAll: () => [] };
+const localStorage = {
+  _data: {},
+  getItem(k) { return this._data[k] || null; },
+  setItem(k, v) { this._data[k] = String(v); }
+};
+"""
+
+
+def _served_script() -> str:
+    """Return the JS body of the served SPA, ready to eval under Node."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    return html[start + len("<script>"):end]
+
+
+def _run_node(body: str, sentinel: str) -> None:
+    """Evaluate the served script plus `body` under Node and require `sentinel`."""
+    import subprocess
+
+    harness = _OSC_JS_PRELUDE + _served_script() + body
+    res = subprocess.run(
+        [NODE_BIN], input=harness, capture_output=True, text=True, encoding="utf-8", timeout=10
+    )
+    assert res.returncode == 0, f"Node harness failed: {res.stderr}\n{res.stdout}"
+    assert sentinel in res.stdout
+
+
+@requires_node
+def test_compute_oscillation_headline_js():
+    """computeOscillationHeadline aggregates per_series without ever yielding NaN."""
+    body = """
+    if (typeof computeOscillationHeadline !== 'function') throw new Error('computeOscillationHeadline missing');
+
+    // 1. Populated: two 5m series + one 15m series.
+    const populated = {
+      'btc-up-or-down-5m':  { label: 'BTC 5m',  duration: 300, windows: 100, oscillating: 70 },
+      'eth-up-or-down-5m':  { label: 'ETH 5m',  duration: 300, windows: 100, oscillating: 74 },
+      'btc-up-or-down-15m': { label: 'BTC 15m', duration: 900, windows:  50, oscillating: 40 }
+    };
+    const r = computeOscillationHeadline(populated);
+    if (r.ok !== true) throw new Error('populated should be ok');
+    if (r.totalWindows !== 250) throw new Error('totalWindows should be 250, got ' + r.totalWindows);
+    if (r.windows5m !== 200) throw new Error('windows5m should be 200, got ' + r.windows5m);
+    if (r.windows15m !== 50) throw new Error('windows15m should be 50, got ' + r.windows15m);
+    if (Math.abs(r.overallPct - 73.6) > 1e-9) throw new Error('overallPct should be 73.6, got ' + r.overallPct);
+    if (Math.abs(r.pct5m - 72) > 1e-9) throw new Error('pct5m should be 72, got ' + r.pct5m);
+    if (Math.abs(r.pct15m - 80) > 1e-9) throw new Error('pct15m should be 80, got ' + r.pct15m);
+
+    // 2. Empty summary (oscillation_summary.json absent): no data, no zeros.
+    for (const empty of [{}, null, undefined]) {
+      const e = computeOscillationHeadline(empty);
+      if (e.ok !== false) throw new Error('empty should not be ok');
+      if (e.totalWindows !== 0) throw new Error('empty totalWindows should be 0');
+      if (e.overallPct !== null || e.pct5m !== null || e.pct15m !== null) {
+        throw new Error('empty percentages must be null, got ' + JSON.stringify(e));
+      }
+    }
+
+    // 3. Zero-denominator bucket yields null, never NaN.
+    const zeroBucket = {
+      'btc-up-or-down-5m':  { duration: 300, windows: 10, oscillating: 5 },
+      'btc-up-or-down-15m': { duration: 900, windows: 0,  oscillating: 0 }
+    };
+    const z = computeOscillationHeadline(zeroBucket);
+    if (z.pct15m !== null) throw new Error('empty 15m bucket must be null, got ' + z.pct15m);
+    if (Number.isNaN(z.pct15m)) throw new Error('pct15m must never be NaN');
+    if (Math.abs(z.pct5m - 50) > 1e-9) throw new Error('pct5m should be 50, got ' + z.pct5m);
+
+    // 4. Malformed entries default to 0 and must not throw.
+    const malformed = {
+      'a': { duration: 300, windows: 10 },
+      'b': { duration: 900 },
+      'c': null
+    };
+    const m = computeOscillationHeadline(malformed);
+    if (m.totalWindows !== 10) throw new Error('malformed totalWindows should be 10, got ' + m.totalWindows);
+    if (m.pct5m !== 0) throw new Error('missing oscillating should count as 0, got ' + m.pct5m);
+    if (m.pct15m !== null) throw new Error('durationless bucket should be null, got ' + m.pct15m);
+
+    // 5. An unknown duration counts toward the total but toward neither bucket.
+    const odd = { 'x': { duration: 60, windows: 8, oscillating: 4 } };
+    const o = computeOscillationHeadline(odd);
+    if (o.totalWindows !== 8) throw new Error('unknown duration must count in total');
+    if (o.pct5m !== null || o.pct15m !== null) throw new Error('unknown duration must not land in a bucket');
+
+    // 6. A field that is PRESENT but corrupt is not a measured zero. Folding it
+    // to 0 would render "0.0% oscillating" off garbage input, which is exactly
+    // the measured-looking-but-false claim this issue exists to remove.
+    for (const junk of ['bad', null, true, {}, [], NaN, Infinity, -1]) {
+      const c = computeOscillationHeadline({
+        'btc-up-or-down-5m': { duration: 300, windows: 10, oscillating: junk }
+      });
+      if (c.pct5m !== null) {
+        throw new Error('corrupt oscillating ' + JSON.stringify(junk) + ' must not render a percentage, got ' + c.pct5m);
+      }
+      if (c.totalWindows !== 0) {
+        throw new Error('corrupt entry must not contribute windows, got ' + c.totalWindows);
+      }
+      if (c.ok !== false) throw new Error('an all-corrupt summary is not ok');
+    }
+
+    // Corrupt `windows` must not silently shrink the denominator either.
+    for (const junk of ['bad', null, Infinity, -5]) {
+      const c = computeOscillationHeadline({
+        'btc-up-or-down-5m':  { duration: 300, windows: junk, oscillating: 5 },
+        'btc-up-or-down-15m': { duration: 900, windows: 50,  oscillating: 40 }
+      });
+      if (c.totalWindows !== 50) throw new Error('corrupt windows must be excluded, got ' + c.totalWindows);
+      if (c.pct5m !== null) throw new Error('corrupt 5m bucket must stay null, got ' + c.pct5m);
+      if (Math.abs(c.pct15m - 80) > 1e-9) throw new Error('a clean sibling entry must still aggregate, got ' + c.pct15m);
+    }
+
+    // A numeric string is unambiguous and stays usable.
+    const strNums = computeOscillationHeadline({ 'a': { duration: 300, windows: '10', oscillating: '7' } });
+    if (Math.abs(strNums.pct5m - 70) > 1e-9) throw new Error('numeric strings should parse, got ' + strNums.pct5m);
+
+    // A genuine measured zero still reports as 0.0%, not as absent data.
+    const trueZero = computeOscillationHeadline({ 'a': { duration: 300, windows: 10, oscillating: 0 } });
+    if (trueZero.pct5m !== 0) throw new Error('a real 0 must survive as 0, got ' + trueZero.pct5m);
+
+    console.log('OSC_HEADLINE_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node(body, "OSC_HEADLINE_TESTS_PASSED")
+
+
+@requires_node
+def test_oscillation_hero_formatters_js():
+    """formatOscPct / formatOscAsOf render an em dash rather than NaN or a fake zero."""
+    body = """
+    if (typeof formatOscPct !== 'function') throw new Error('formatOscPct missing');
+    if (typeof formatOscAsOf !== 'function') throw new Error('formatOscAsOf missing');
+
+    if (formatOscPct(74.1666) !== '74.2%') throw new Error('rounding mismatch: ' + formatOscPct(74.1666));
+    if (formatOscPct(0) !== '0.0%') throw new Error('a real zero must still render: ' + formatOscPct(0));
+    if (formatOscPct(100) !== '100.0%') throw new Error('100 mismatch: ' + formatOscPct(100));
+    for (const bad of [null, undefined, NaN, Infinity, -Infinity, 'abc']) {
+      const out = formatOscPct(bad);
+      if (out !== '\u2014') throw new Error('expected em dash for ' + String(bad) + ', got ' + out);
+    }
+
+    if (formatOscAsOf(0) !== '\u2014') throw new Error('ts 0 must render em dash');
+    for (const bad of [null, undefined, NaN, 'abc']) {
+      if (formatOscAsOf(bad) !== '\u2014') throw new Error('expected em dash for ' + String(bad));
+    }
+    const stamped = formatOscAsOf(1789489501.54343);
+    if (stamped === '\u2014') throw new Error('a real ts must render a stamp');
+    if (!/\d{4}/.test(stamped)) throw new Error('stamp should carry a year, got ' + stamped);
+
+    console.log('OSC_FORMATTER_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node(body, "OSC_FORMATTER_TESTS_PASSED")
+
+
+_OSC_DOM_PRELUDE = """
+// Same stubs as _OSC_JS_PRELUDE, but getElementById returns a registry of
+// elements so a test can read back what the renderer wrote.
+const setInterval = () => 0;
+const clearInterval = () => {};
+const setTimeout = () => 0;
+const clearTimeout = () => {};
+let fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+const EventSource = class { constructor() {} addEventListener() {} close() {} };
+const elements = {};
+function getOrCreate(id) {
+  if (!elements[id]) {
+    elements[id] = {
+      id, textContent: '', innerHTML: '', value: '',
+      style: {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      addEventListener: () => {},
+      querySelectorAll: () => []
+    };
+  }
+  return elements[id];
+}
+const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
+globalThis.window = window;
+const document = { getElementById: getOrCreate, querySelectorAll: () => [] };
+const localStorage = {
+  _data: {},
+  getItem(k) { return this._data[k] || null; },
+  setItem(k, v) { this._data[k] = String(v); }
+};
+"""
+
+
+def _run_node_dom(body: str, sentinel: str) -> None:
+    """Evaluate the served script plus `body` against an element registry."""
+    import subprocess
+
+    harness = _OSC_DOM_PRELUDE + _served_script() + body
+    res = subprocess.run(
+        [NODE_BIN], input=harness, capture_output=True, text=True, encoding="utf-8", timeout=10
+    )
+    assert res.returncode == 0, f"Node DOM harness failed: {res.stderr}\n{res.stdout}"
+    assert sentinel in res.stdout
+
+
+@requires_node
+def test_render_oscillation_hero_dom():
+    """renderOscillationHero fills every slot live, and falls back to em dashes when empty."""
+    body = """
+    if (typeof renderOscillationHero !== 'function') throw new Error('renderOscillationHero missing');
+    const SLOTS = ['oscHeroOverallPct','oscHeroTotalWindows','oscHeroPct5m','oscHeroPct15m','oscHeroAsOf'];
+    const DASH = '\u2014';
+
+    // 1. Populated payload writes real figures into every slot.
+    renderOscillationHero({
+      ts: 1789489501.54343,
+      per_series: {
+        'btc-up-or-down-5m':  { duration: 300, windows: 100, oscillating: 70 },
+        'eth-up-or-down-5m':  { duration: 300, windows: 100, oscillating: 74 },
+        'btc-up-or-down-15m': { duration: 900, windows:  50, oscillating: 40 }
+      }
+    });
+    for (const id of SLOTS) {
+      const txt = elements[id].textContent;
+      if (!txt || txt === DASH) throw new Error(id + ' should hold a live value, got ' + JSON.stringify(txt));
+      if (txt.includes('NaN')) throw new Error(id + ' rendered NaN: ' + txt);
+    }
+    if (elements['oscHeroOverallPct'].textContent !== '73.6%') throw new Error('overall mismatch: ' + elements['oscHeroOverallPct'].textContent);
+    if (elements['oscHeroPct5m'].textContent !== '72.0%') throw new Error('5m mismatch: ' + elements['oscHeroPct5m'].textContent);
+    if (elements['oscHeroPct15m'].textContent !== '80.0%') throw new Error('15m mismatch: ' + elements['oscHeroPct15m'].textContent);
+    if (elements['oscHeroTotalWindows'].textContent !== '250') throw new Error('total mismatch: ' + elements['oscHeroTotalWindows'].textContent);
+
+    // Thousands separator on a realistic count.
+    renderOscillationHero({ ts: 1, per_series: { a: { duration: 300, windows: 3613, oscillating: 2679 } } });
+    if (elements['oscHeroTotalWindows'].textContent !== '3,613') throw new Error('expected thousands separator, got ' + elements['oscHeroTotalWindows'].textContent);
+
+    // 2. Empty shape load_summary() returns when the file is missing.
+    renderOscillationHero({ ts: 0, per_series: {} });
+    for (const id of SLOTS) {
+      if (elements[id].textContent !== DASH) throw new Error(id + ' should be an em dash when empty, got ' + JSON.stringify(elements[id].textContent));
+    }
+
+    // 3. Must not throw on a missing or malformed summary.
+    renderOscillationHero(undefined);
+    renderOscillationHero(null);
+    renderOscillationHero({});
+    for (const id of SLOTS) {
+      if (elements[id].textContent !== DASH) throw new Error(id + ' should stay an em dash, got ' + JSON.stringify(elements[id].textContent));
+    }
+
+    console.log('OSC_HERO_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node_dom(body, "OSC_HERO_DOM_TESTS_PASSED")
+
+
+@requires_node
+def test_render_summary_charts_feeds_the_hero():
+    """Verify renderSummaryCharts() actually wires its payload into the hero card.
+
+    Calling renderOscillationHero() directly proves the renderer works but not
+    that anything calls it, so dropping the call site -- or passing `d` instead
+    of `d.summary` -- would otherwise ship green with the card frozen on dashes.
+    """
+    body = """
+    // Stub the two endpoints renderSummaryCharts() consumes, and count the
+    // oscillation hits so a second fetch (CONSTRAINTS.md section 5) shows up.
+    let oscFetches = 0;
+    fetch = (url) => {
+      if (String(url).includes('/api/oscillation')) {
+        oscFetches++;
+        return Promise.resolve({ ok: true, json: async () => ({
+          summary: {
+            ts: 1789489501.54343,
+            per_series: {
+              'btc-up-or-down-5m':  { label: 'BTC 5m',  duration: 300, windows: 100, oscillating: 70 },
+              'btc-up-or-down-15m': { label: 'BTC 15m', duration: 900, windows:  50, oscillating: 40 }
+            }
+          }
+        })});
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ hist_max: {}, hist_start: {}, rows: [] }) });
+    };
+    globalThis.Chart = class { constructor() {} destroy() {} static getChart() { return null; } };
+
+    renderSummaryCharts().then(() => {
+      if (elements['oscHeroOverallPct'].textContent !== '73.3%') {
+        throw new Error('hero not fed by renderSummaryCharts, got ' + JSON.stringify(elements['oscHeroOverallPct'].textContent));
+      }
+      if (elements['oscHeroTotalWindows'].textContent !== '150') {
+        throw new Error('total mismatch: ' + elements['oscHeroTotalWindows'].textContent);
+      }
+      if (elements['oscHeroAsOf'].textContent === '\u2014') throw new Error('as-of stamp not rendered');
+      if (oscFetches !== 1) throw new Error('expected exactly 1 /api/oscillation fetch, got ' + oscFetches);
+      console.log('SUMMARY_CHARTS_WIRING_TESTS_PASSED');
+      process.exit(0);
+    }).catch(e => { console.error(String(e)); process.exit(1); });
+    """
+    _run_node_dom(body, "SUMMARY_CHARTS_WIRING_TESTS_PASSED")
+
+
+@requires_node
+def test_render_oscillation_hero_survives_a_missing_slot():
+    """Verify a missing element id neither throws nor aborts the remaining slots.
+
+    The DOM stub auto-creates every id on lookup, so without forcing a null the
+    `if(el)` guard in renderOscillationHero is never actually exercised.
+    """
+    body = """
+    // One slot goes missing, as it would after a markup rename.
+    const realGet = document.getElementById;
+    document.getElementById = (id) => (id === 'oscHeroPct15m' ? null : realGet(id));
+
+    let threw = null;
+    try {
+      renderOscillationHero({
+        ts: 1789489501.54343,
+        per_series: { 'btc-up-or-down-5m': { duration: 300, windows: 100, oscillating: 70 } }
+      });
+    } catch (e) { threw = String(e); }
+    document.getElementById = realGet;
+
+    if (threw) throw new Error('a missing slot must not throw, got ' + threw);
+    // The slots after the missing one must still have been written.
+    if (elements['oscHeroPct5m'].textContent !== '70.0%') throw new Error('5m not rendered: ' + elements['oscHeroPct5m'].textContent);
+    if (elements['oscHeroAsOf'].textContent === '\u2014') throw new Error('render aborted before the as-of stamp');
+
+    console.log('OSC_HERO_MISSING_SLOT_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node_dom(body, "OSC_HERO_MISSING_SLOT_TESTS_PASSED")

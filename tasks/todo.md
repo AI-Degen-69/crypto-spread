@@ -1,29 +1,34 @@
-# TODO — issue #191: settle naked legs the book cannot mark
+# TODO — issue #193: Stats Summary hero cards reflect live oscillation data
 
-Branch: `fix/settle-unmarked-naked-191` · Baseline: 856 passed
-Spec: `SPEC.md` · Gates: `CONSTRAINTS.md` · Detail: `tasks/plan.md`
+Branch: `fix/summary-hero-live-data-193`. Full detail in `tasks/plan.md`.
 
-- [x] **T0** Comment on issue #191 correcting the Impact claim: the sweep
-      headline is already settlement-corrected by `ev_lab.summarize`; the bug
-      is confined to `backtest/engine.py`.
-- [x] **T1** `[Debug]` Two failing tests in `tests/test_backtest_engine.py`:
-      unmarked losing leg books `-43.00c` via the latched bid, unmarked winning
-      leg books the full win. Must be RED first.
-- [x] **T2** `[Backend/Logic]` Pin the untouched paths: marked leg, pair
-      capture, stop-out, and the `unresolved` abstention. Green before and after.
-- [x] **T3** `[Backend/Logic]` Port `_resolve_exit_bid` stages 1-4 into
-      `resolve_naked_settlement`, then redeem, then abstain. Add
-      `settled_unmarked` and `settle_source` to `WindowResult` and the export.
-- [x] **T4** `[Backend/Logic]` One test per ladder stage plus live's two
-      validity edges (bid exactly `0.0`, opposite ask outside `(0.0, 1.0]`).
-- [x] **T5** `[Research/Audit]` Add the corrected-bias line to
-      `audit_settlement.py` alongside the raw one; note the engine-only scope in
-      `RESULTS-ARE-STALE.md`.
-- [x] Full suite green (`python -m pytest -q`), then hand off to
-      `/iv-review-build-and-pr`.
+- [x] **T0** Branch off `master`: `git checkout -b fix/summary-hero-live-data-193`
+- [x] **T1** `[Debug/Logic]` Node-harness test for `computeOscillationHeadline`
+      (populated / empty / zero-denominator / missing-field), then implement it
+      pure in `server/osc_dash.py`
+- [x] **T2** `[Debug/Logic]` Tests + implementation for `formatOscPct` and
+      `formatOscAsOf` (em-dash on null/NaN/Infinity/ts=0)
+- [x] **T3** `[Design/UI]` Replace the Research Conclusion card literals with the
+      five em-dash placeholder spans; tests assert literals gone + ids present
+- [x] **T4** `[Design/UI]` `renderOscillationHero(summary)` + call it from
+      `renderSummaryCharts()` reusing the existing fetch; DOM test for populated
+      and empty payloads
+- [x] **T5** `[Design/UI]` Stop-loss card provenance line — **decided: option A**
+      (`SPEC.md` section 6)
+- [x] **T6** `[Gate]` `python -m pytest -q tests/test_osc_dash_integration.py tests/test_orders_trades_table.py`,
+      then `python -m pytest -q` (898 passed, 82s), then verify the committed tree
+      matches what was tested
 
-**Operator decision:** adopted. `resolve_redemption` lives in
-`backtest/engine.py`; `ev_lab` and `sim2` import it and their P&L is unchanged.
+## Decisions
 
-**Result:** 870 passed (baseline 856 + 14 new). `audit_settlement.py` bias went
-from -395.56$ to +7.17$ at size 5.
+- **Stop-loss card provenance — A (locked 2026-09-15).** No document in the repo
+  produces those thresholds, and `docs/ev-research-findings-2026-09-11.md:36`
+  argues the opposite. The card declares itself an unsourced static heuristic and
+  points at that newer research. Numbers untouched.
+
+## Build result (Station III, 2026-09-15)
+
+- Branch `fix/summary-hero-live-data-193`, 3 commits: `ad63ec1` (pure helpers),
+  `9266394` (hero markup + wiring), `fef1c39` (stop-loss provenance).
+- Targeted gate: 150 passed. Full suite: **898 passed**, 82s, 0 failures.
+- Note: the suite is 898 tests, not the ~390 recorded in the planning instinct.

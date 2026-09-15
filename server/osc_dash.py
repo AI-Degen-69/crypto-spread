@@ -2609,12 +2609,13 @@ textarea:focus-visible,
   <!-- TAB 3: STATISTICAL ANALYSIS & DISTRIBUTIONS -->
   <div id="tab-summary" class="tab-content">
     <div class="hero" style="display:grid;grid-template-columns:1.2fr .8fr;gap:12px;margin-bottom:12px">
-      <div class="card" style="border-top:2px solid var(--up)">
+      <div class="card" style="border-top:2px solid var(--up)" aria-live="polite" aria-atomic="true">
         <h3>Research Conclusion — SPREAD-2</h3>
-        <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0">74% of Windows Are Oscillating</div>
+        <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0"><span id="oscHeroOverallPct">—</span> of Windows Are Oscillating</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
-          Across 2,820+ empirical windows measured in 5m and 15m: on 5m <b>73% oscillating</b> — both sides quoted dynamically at <code>mid - offset</code> (e.g. $0.48 on 50¢ mid, $0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b>80% oscillating</b>.
+          Across <span id="oscHeroTotalWindows" class="mono">—</span> empirical windows measured in 5m and 15m: on 5m <b id="oscHeroPct5m">—</b> oscillating — both sides quoted dynamically at <code>mid - offset</code> (e.g. $0.48 on 50¢ mid, $0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b id="oscHeroPct15m">—</b> oscillating.
         </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:8px">Computed from <code>oscillation_summary.json</code> · as of <span id="oscHeroAsOf" class="mono">—</span></div>
       </div>
       <div class="card" style="border-top:2px solid var(--gold)">
         <h3>Recommended Stop-Loss Thresholds</h3>
@@ -2624,6 +2625,9 @@ textarea:focus-visible,
           <div><b style="color:var(--gold)">SOL 5m:</b> Stop +$0.11 (Exit @ $0.61)</div>
           <div><b style="color:var(--up)">ETH/BNB/XRP 5m:</b> Stop +$0.12 (Exit @ $0.62)</div>
           <div><b>15m General:</b> Stop +$0.13</div>
+        </div>
+        <div id="stopLossProvenance" style="font-size:11px;color:var(--dim);margin-top:10px;line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
+          Not computed from the live dataset — a static heuristic with no surviving sweep behind it, unlike the card on the left. The newest study, <code>docs/ev-research-findings-2026-09-11.md</code> (2026-09-11, itself provisional pending #182), reached the opposite conclusion: stop-loss exits were its largest PnL destroyer, and it recommends holding to settlement instead.
         </div>
       </div>
     </div>
@@ -3034,6 +3038,73 @@ const timeBarFraction=(rem, dur)=>{
   else if (remainSec <= 60 || frac <= 0.10) barColor = 'var(--gold)';
   return { fillPct: Math.round(frac * 1000) / 10, barColor };
 };
+// Issue #193: the Stats Summary hero used to state its figures as hardcoded
+// numerals, so it drifted further from the data on every collector run. These
+// three helpers recompute the headline from the /api/oscillation payload. They
+// are pure -- no DOM, no fetch -- so the Node harness can call them directly.
+// Sum windows/oscillating across every series and split by duration
+// (300 = 5m, 900 = 15m). A bucket with no windows yields null, never NaN and
+// never a 0% that reads as a measured result.
+const OSC_DUR_5M = 300;
+const OSC_DUR_15M = 900;
+// An absent field means zero -- the summary omits counts it never measured.
+// A field that is *present* but not a finite, non-negative number is corrupt,
+// and folding it to zero would render a measured-looking "0.0%" from garbage.
+// Drop that entry from the aggregation instead, so its bucket stays an em dash.
+function measureCount(v){
+  if(v===undefined) return 0;
+  if(typeof v!=='number' && typeof v!=='string') return null;
+  const n=Number(v);
+  return (isFinite(n) && n>=0) ? n : null;
+}
+function computeOscillationHeadline(perSeries){
+  const rate=(osc,win)=> win>0 ? (osc/win)*100 : null;
+  let tW=0,tO=0,w5=0,o5=0,w15=0,o15=0;
+  for(const entry of Object.values(perSeries||{})){
+    if(!entry || typeof entry!=='object') continue;
+    const win=measureCount(entry.windows);
+    const osc=measureCount(entry.oscillating);
+    if(win===null || osc===null) continue;
+    tW+=win; tO+=osc;
+    if(Number(entry.duration)===OSC_DUR_5M){ w5+=win; o5+=osc; }
+    else if(Number(entry.duration)===OSC_DUR_15M){ w15+=win; o15+=osc; }
+  }
+  return {
+    ok: tW>0,
+    totalWindows: tW,
+    windows5m: w5,
+    windows15m: w15,
+    overallPct: rate(tO,tW),
+    pct5m: rate(o5,w5),
+    pct15m: rate(o15,w15)
+  };
+}
+// One decimal place, or an em dash when there is nothing to report. A genuine
+// 0% still renders as 0.0% -- only absent data becomes the dash.
+function formatOscPct(v){
+  const n=Number(v);
+  if(v===null||v===undefined||!isFinite(n)) return '—';
+  return n.toFixed(1)+'%';
+}
+// Render summary.ts so a stale oscillation_summary.json is visible rather than
+// silently presented as current. Matches the stamp format used for tick files.
+function formatOscAsOf(ts){
+  const n=Number(ts);
+  if(!ts||!isFinite(n)||n<=0) return '—';
+  return new Date(n*1000).toLocaleString('en-US');
+}
+// Write the computed headline into the Stats Summary hero. Every lookup is
+// guarded: a missing slot must not abort the rest of the render.
+function renderOscillationHero(summary){
+  const s = summary || {};
+  const h = computeOscillationHeadline(s.per_series);
+  const put=(id,text)=>{ const el=$(id); if(el) el.textContent=text; };
+  put('oscHeroOverallPct', formatOscPct(h.overallPct));
+  put('oscHeroTotalWindows', h.ok ? h.totalWindows.toLocaleString() : '—');
+  put('oscHeroPct5m', formatOscPct(h.pct5m));
+  put('oscHeroPct15m', formatOscPct(h.pct15m));
+  put('oscHeroAsOf', formatOscAsOf(s.ts));
+}
 // Issue #100: two-way visual link. Hovering a market card highlights its Open
 // Orders group and vice versa, via the shared data-market key.
 function setMarketHighlight(key,on){
@@ -4184,6 +4255,7 @@ function destroyChartInstance(canvasId){
 
 async function renderSummaryCharts(){
   const d=await (await fetch('/api/oscillation',{cache:'no-store'})).json();
+  renderOscillationHero(d.summary);
   const sum=d.summary.per_series||{};
   const order=['BTC 5m','ETH 5m','BNB 5m','SOL 5m','XRP 5m','BTC 15m','ETH 15m','BNB 15m','SOL 15m','XRP 15m'];
   const osc=[], mono=[];
