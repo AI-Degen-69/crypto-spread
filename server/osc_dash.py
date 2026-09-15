@@ -2181,7 +2181,10 @@ textarea:focus-visible,
 .ot-tab-btn.active .ot-count{background:rgba(51,201,181,0.2);color:var(--up)}
 .ot-pane{display:none;position:relative}
 .ot-pane.active{display:block}
-.ot-pane .tbl thead th{position:sticky;top:0;z-index:3;background:var(--panel);box-shadow:0 1px 0 var(--line)}
+.ot-pane-scroll{max-height:min(560px,65vh);overflow-y:auto;position:relative;border-radius:6px;transition:max-height .2s ease}
+.ot-pane-scroll.ot-expanded{max-height:85vh!important}
+.ot-pane .tbl thead th{position:sticky;top:0;z-index:10;background:var(--panel);box-shadow:0 1px 0 var(--line);padding:7px 8px}
+.ot-pane .tbl td{padding:6px 8px;font-size:12px}
 .ot-row-cancelled td{color:var(--dim)!important}
 .ot-cell-cancelled{color:var(--dim)!important}
 .ot-row-cancelled td a{color:var(--dim)!important}
@@ -2920,12 +2923,13 @@ textarea:focus-visible,
         <div style="display:flex;align-items:center;gap:6px">
           <span id="cockpitOrdersCount" style="display:none">0</span>
           <span id="cockpitPositionsCount" style="display:none">0</span>
+          <button class="btn" id="otHeightToggleBtn" style="font-size:11px;padding:4px 10px" onclick="toggleOtHeight()" title="Expand tables to full cockpit height" aria-expanded="false">⛶ Expand</button>
           <button class="btn" style="font-size:11px;padding:4px 10px" onclick="fetchCockpitState()">🔄 Refresh</button>
         </div>
       </div>
 
       <!-- Tab 1: Open Orders -->
-      <div id="otPaneOrders" class="ot-pane active" style="max-height:280px;overflow-y:auto">
+      <div id="otPaneOrders" class="ot-pane active ot-pane-scroll" style="max-height:min(560px,65vh);overflow-y:auto">
         <table class="tbl" id="cockpitOrdersTable">
           <thead>
             <tr>
@@ -2947,7 +2951,7 @@ textarea:focus-visible,
       </div>
 
       <!-- Tab 2: Positions -->
-      <div id="otPanePositions" class="ot-pane" style="max-height:280px;overflow-y:auto">
+      <div id="otPanePositions" class="ot-pane ot-pane-scroll" style="max-height:min(560px,65vh);overflow-y:auto">
         <table class="tbl" id="cockpitPositionsTable">
           <thead>
             <tr>
@@ -2968,7 +2972,7 @@ textarea:focus-visible,
       </div>
 
       <!-- Tab 3: Closed Trades -->
-      <div id="otPaneTrades" class="ot-pane" style="max-height:300px;overflow-y:auto">
+      <div id="otPaneTrades" class="ot-pane ot-pane-scroll" style="max-height:min(560px,65vh);overflow-y:auto">
         <table class="tbl" id="cockpitTradesTable">
           <thead>
             <tr>
@@ -3350,6 +3354,37 @@ function switchOtTab(tabName) {
     if (btn) btn.classList.toggle('active', t === tabName);
     if (pane) pane.classList.toggle('active', t === tabName);
   });
+}
+
+// Orders & Trades Height Toggle (Issue #133)
+let otHeightExpanded = false;
+try {
+  otHeightExpanded = typeof localStorage !== 'undefined'
+    && localStorage.getItem('crypto-spread-ot-height') === 'expanded';
+} catch (e) {
+  console.warn('Orders & Trades height preference is unavailable', e);
+}
+
+function applyOtHeight(isExpanded) {
+  otHeightExpanded = !!isExpanded;
+  try { if (typeof localStorage !== 'undefined') localStorage.setItem('crypto-spread-ot-height', otHeightExpanded ? 'expanded' : 'standard'); } catch (e) {}
+  const panes = ['otPaneOrders', 'otPanePositions', 'otPaneTrades'];
+  panes.forEach(id => {
+    const el = $(id);
+    if (el) el.classList.toggle('ot-expanded', otHeightExpanded);
+  });
+  const btn = $('otHeightToggleBtn');
+  if (btn) {
+    btn.innerHTML = otHeightExpanded ? '🗗 Standard' : '⛶ Expand';
+    btn.title = otHeightExpanded ? 'Switch to standard view height' : 'Expand tables to full cockpit height';
+    if (typeof btn.setAttribute === 'function') {
+      btn.setAttribute('aria-expanded', otHeightExpanded ? 'true' : 'false');
+    }
+  }
+}
+
+function toggleOtHeight() {
+  applyOtHeight(!otHeightExpanded);
 }
 
 function formatSignedMoneyPct(dollarVal, pctVal) {
@@ -6779,6 +6814,7 @@ function initLiveCockpitStream() {
 applyParamSpec();
 setupBacktestInputListeners();
 switchOtTab(activeOtTab);
+applyOtHeight(otHeightExpanded);
 initSidebarState();
 
 // Initialize real-time streams and polls
