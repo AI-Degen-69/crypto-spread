@@ -48,9 +48,15 @@ It matters where this did and did not apply:
 `research/sweeps/audit_settlement.py` measures both. Its
 `bias (true - engine)` line is the raw historical finding and is kept
 unchanged; the `bias (true - fixed)` line runs the same windows through the
-shared resolver and lands at **+7.17$** against the raw **-395.56$**. The
-residual is the handful of windows where the audit's `s_mid` direction and the
-resolver's book-mid direction disagree.
+engine's full settlement ladder and lands at **-2.88$** against the raw
+**-395.56$**. The residual is the gap between a latched mark and true
+redemption, plus the handful of windows where the audit's `s_mid` direction and
+the resolver's book-mid direction disagree.
+
+The same run reports which stage resolved each window:
+`{'direct_bid': 170, 'latched_bid': 179, 'redeemed': 2}`. In this capture the
+ladder almost always finds a stale bid to mark against; outright redemption is
+the rare fallback, not the common path.
 
 ## Why they were not regenerated
 

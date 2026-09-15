@@ -73,6 +73,8 @@ The change is bounded to exactly one code path:
 - `[Backend/Logic]` → `python -m pytest -q tests/test_backtest_engine.py tests/test_sweep_backtest.py`
 - `[Research/Audit]` → `python research/sweeps/audit_settlement.py`. It must
   keep printing the raw uncorrected bias (the evidence in #191) **and** add a
-  corrected line measured through the shared resolver, which must land at
-  approximately 0. Replacing the raw line rather than adding to it is a defect.
+  corrected line measured through `resolve_naked_settlement` — the engine's
+  full ladder, not its redemption fallback alone, which would compare
+  redemption against redemption and report a near-zero bias by construction.
+  Replacing the raw line rather than adding to it is a defect.
 - Full suite (`python -m pytest -q`) before every commit.
