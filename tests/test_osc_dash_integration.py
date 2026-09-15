@@ -1865,34 +1865,26 @@ def test_api_live_queue_telemetry_empty_state(tmp_path, monkeypatch):
 
 
 def test_cockpit_queue_and_pnl_panels_in_html():
-    """Cockpit page carries the queue-telemetry panel and histogram shells."""
+    """Cockpit page has queuePanel and pnlHistPanel removed from DOM to prioritize orders & trades table height."""
     res = client.get("/")
     assert res.status_code == 200
     html = res.text
-    # Queue panel: verdict, SVG wrap, table fallback, fetch + render hooks.
-    assert "queuePanel" in html
-    assert "queueVerdict" in html
-    assert "queueSvgWrap" in html
-    assert "queueFallback" in html
+    assert 'id="queuePanel"' not in html
+    assert 'id="pnlHistPanel"' not in html
+    assert 'id="orders-trades-card"' in html
     assert "fetchQueueTelemetry" in html
     assert "renderQueuePanel" in html
 
 
 def test_cockpit_pnl_histogram_render_hook_in_html():
-    """Histogram render, stats math, and session-window honesty in the page."""
+    """Histogram math functions remain in page script while DOM panels are pruned."""
     res = client.get("/")
     assert res.status_code == 200
     html = res.text
-    assert "pnlHistSvgWrap" in html
-    assert "pnlHistStats" in html
-    assert "pnlHistFallback" in html
     assert "renderPnlHistogram" in html
     assert "pnlBootstrapCiLo" in html
     assert "freedmanDiaconisBins" in html
     assert "session window" in html
-    assert "zero-PnL" in html or "zero pnl" in html.lower()
-    # Explicit empty states, never a blank box.
-    assert "awaiting fills" in html
 
 
 def test_api_live_queue_telemetry_rejects_bad_ratios(tmp_path, monkeypatch):
@@ -1936,13 +1928,13 @@ def test_api_live_queue_telemetry_chased_without_settlement(tmp_path, monkeypatc
 
 
 def test_cockpit_panels_inside_cockpit_tab():
-    """Queue + PnL cards live inside tab-cockpit, not after it."""
+    """Orders & Trades card lives inside tab-cockpit, queue/pnl panels removed."""
     html = client.get("/").text
     tab = html.index('id="tab-cockpit"')
     toast = html.index('id="toastContainer"')
-    assert tab < html.index('id="queuePanel"') < toast
-    assert tab < html.index('id="pnlHistPanel"') < toast
-    assert "No closed trades yet" in html
+    assert tab < html.index('id="orders-trades-card"') < toast
+    assert 'id="queuePanel"' not in html
+    assert 'id="pnlHistPanel"' not in html
 
 
 def _write_delay_fixture(tmp_path):
