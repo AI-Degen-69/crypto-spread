@@ -48,7 +48,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `run/` is in `.gitignore`; missing `run/*.jsonl` means collector hasn't run — dashboard shows empty state, not an error.
 - Collector uses a pooled `requests.Session` with `(3.05, 5.0)` timeouts (connect, read) and `max_retries=0` — failed markets are skipped for that poll, not retried.
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
-- Context files: `AGENTS.md` (this file) is the canonical project rules; `CLAUDE.md` carries the Claude-facing subset; `CONSTRAINTS.md` holds the active issue's quality gates; `SPEC.md` the architecture. No `opencode.json` exists.
+- Context files: `AGENTS.md` (this file) is the canonical project rules; `CLAUDE.md` carries the Claude-facing subset; `CONSTRAINTS.md` and `SPEC.md` are per-issue working files holding the active issue's quality gates and specification — neither is a standing architecture document, and both go stale the moment their issue merges (see §5 of `docs/git-workflow.md`). No `opencode.json` exists.
 - Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard.
 
 ## GBrain search guidance

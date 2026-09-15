@@ -4,9 +4,14 @@
 
 - `AGENTS.md` — canonical project rules: stack, commands, repo structure, gotchas.
   Load it first; it wins on conflict with this file.
-- `CONSTRAINTS.md` — active-issue quality & architectural gates (currently
-  issue #95 drift re-entry); treat as binding while that branch is live.
-- `SPEC.md` — architecture.
+- `CONSTRAINTS.md` — the active issue's quality & architectural gates.
+- `SPEC.md` — the active issue's specification, not the project architecture.
+
+  Both are **per-issue working files**, rewritten by each issue's Station II
+  and binding only while that issue's branch is live (`docs/git-workflow.md`
+  §5). They currently carry issue #191, which is merged and closed — so nothing
+  in them binds until the next issue claims them. Read the title line before
+  trusting the contents.
 
 This file only carries the Claude-facing additions (gbrain routing below); keep
 project facts in `AGENTS.md` so the two do not drift.
