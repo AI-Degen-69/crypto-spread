@@ -27,3 +27,6 @@ ten-bankrolls/
 .dev-port
 *.patch
 diff.diff
+
+# one-off agent handoff notes — local scratch, never part of the repo
+/HANDOFF.md
