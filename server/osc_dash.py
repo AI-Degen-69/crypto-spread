@@ -1050,25 +1050,13 @@ def api_collector_status():
     """Return status of the background tick collector, today's ticks, and tape empty-rate health."""
     global _collector_proc
     running = _collector_proc is not None and _collector_proc.poll() is None
-    # Count total tick lines collected today. Large daily files (1GB+)
-    # used to be scanned line-by-line here (~5s), blocking the single
-    # worker on every 3s dashboard poll — so estimate from size like
-    # /api/ticks/manifest already does (20MB+ threshold, ~950B/line).
+    # Count total tick lines collected today
     today_ticks = 0
-    today_ticks_estimated = False
     today_file = (
         TICKS_DIR / f"ticks_{time.strftime('%Y-%m-%d', time.gmtime())}.jsonl"
     )
     if today_file.exists():
-        try:
-            _today_size = today_file.stat().st_size
-            if _today_size >= 20_000_000:
-                today_ticks = int(_today_size / 950)
-                today_ticks_estimated = True
-            else:
-                today_ticks = _count_lines_fast(today_file)
-        except OSError:
-            pass
+        today_ticks = _count_lines_fast(today_file)
 
     tape_empty_rate = None
     tape_recent_empty_rate = None
@@ -1099,7 +1087,6 @@ def api_collector_status():
         "external": ext["live"] and not running,
         "manifest_age_sec": ext["manifest_age_sec"],
         "total_ticks_collected": today_ticks,
-        "total_ticks_estimated": today_ticks_estimated,
         "tape_empty_rate": tape_empty_rate,
         "tape_recent_empty_rate": tape_recent_empty_rate,
         "tape_entries_total": tape_entries_total,
@@ -1168,14 +1155,11 @@ def api_collector_poll_once(request: Request):
 
 @app.post("/api/rebuild")
 def api_rebuild_windows(request: Request):
-    """Start a background rebuild of windows + summary from persisted ticks.
+    """Reconstruct oscillation windows and summary from persisted tick data.
 
     Refused while any collector is writing (own child or fresh external
     manifest): a window closing mid-rebuild would be overwritten by the
     dataset replace. Serialized with a lock across dashboard requests.
-    Returns immediately with {"started": true}; poll GET /api/rebuild/status
-    for per-file progress — a multi-GB rebuild takes minutes, far past any
-    sane HTTP timeout.
     """
     _verify_safe_origin(request)
     global _collector_proc
@@ -1193,159 +1177,23 @@ def api_rebuild_windows(request: Request):
         return JSONResponse(
             status_code=409, content={"ok": False, "output": "rebuild already running"}
         )
-    _rebuild_state.update({
-        "status": "running",
-        "started_at": time.time(),
-        "finished_at": None,
-        "files_total": 0,
-        "files_done": 0,
-        "current_file": "",
-        "output": "",
-    })
     try:
-        t = threading.Thread(target=_run_rebuild_bg, daemon=True)
-        t.start()
-    except Exception as e:
-        _rebuild_state.update({
-            "status": "error", "finished_at": time.time(),
-            "output": f"rebuild thread failed to start: {e}"[:500],
-        })
-        _rebuild_lock.release()
-        return JSONResponse(
-            status_code=500, content={"ok": False, "output": "rebuild thread failed to start"},
-        )
-    return {"ok": True, "started": True, "status": "running"}
-
-
-# --- Background rebuild job (Issue: 60s timeout on multi-GB tick stores) ---
-# POST /api/rebuild starts a daemon thread and returns at once; the thread
-# streams the script's stdout for REBUILD_PROGRESS lines and records the
-# outcome here. GET /api/rebuild/status serves this dict + elapsed time.
-# The lock stays held for the whole run (released in the worker's finally),
-# so concurrent starts still get a 409.
-_REBUILD_TIMEOUT_SEC = 1800.0
-# NOTE: single-process only. With >1 uvicorn worker each process has its own
-# lock + state, so two workers could rebuild at once. This dashboard always
-# runs one worker; revisit with a file lock if that changes.
-_rebuild_state_lock = threading.Lock()
-_rebuild_state: dict[str, Any] = {
-    "status": "idle",
-    "started_at": None,
-    "finished_at": None,
-    "files_total": 0,
-    "files_done": 0,
-    "current_file": "",
-    "output": "",
-}
-
-
-def _set_rebuild_state(**fields: Any) -> None:
-    """Thread-safe update of the background rebuild state."""
-    with _rebuild_state_lock:
-        _rebuild_state.update(fields)
-
-
-def _run_rebuild_bg() -> None:
-    """Run the rebuild subprocess, streaming per-file progress into state."""
-    cmd = [sys.executable, "-m", "scripts.rebuild_windows"]
-    tail: collections.deque = collections.deque(maxlen=5)
-    rc = 1
-    try:
+        cmd = [sys.executable, "-m", "scripts.rebuild_windows"]
         try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1,
+            res = subprocess.run(
+                cmd, cwd=str(ROOT), capture_output=True, text=True,
+                timeout=60, check=False,
             )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "output": "rebuild timed out after 60s"}
         except Exception as e:
-            _set_rebuild_state(
-                status="error", finished_at=time.time(),
-                output=f"rebuild failed to start: {e}"[:500],
-            )
-            return
-        if proc.stdout is None:
-            _set_rebuild_state(
-                status="error", finished_at=time.time(),
-                output="rebuild stdout unavailable",
-            )
-            return
-        # Hard cap via timer: fires (and kills) even while blocked reading
-        # a quiet pipe, unlike a deadline checked only between output lines.
-        timed_out = False
-
-        def _kill_on_timeout() -> None:
-            nonlocal timed_out
-            timed_out = True
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-        timer = threading.Timer(_REBUILD_TIMEOUT_SEC, _kill_on_timeout)
-        try:
-            timer.start()
-            for line in proc.stdout:
-                line = line.rstrip()
-                tail.append(line)
-                if line.startswith("REBUILD_PROGRESS"):
-                    parts = line.split()
-                    try:
-                        done_s, total_s = parts[1].split("/")
-                        _set_rebuild_state(
-                            files_done=int(done_s),
-                            files_total=int(total_s),
-                            current_file=parts[2] if len(parts) > 2 else "",
-                        )
-                    except (ValueError, IndexError):
-                        pass
-            if timed_out:
-                tail.append(
-                    f"rebuild timed out after {int(_REBUILD_TIMEOUT_SEC)}s"
-                )
-                rc = 1
-            else:
-                try:
-                    rc = proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                    rc = proc.wait(timeout=30)
-        except Exception as e:
-            tail.append(f"rebuild error: {e}"[:200])
-            rc = 1
-        finally:
-            timer.cancel()
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
-        out = "\n".join(tail)[-500:]
-        if rc == 0 and not timed_out:
-            _set_rebuild_state(
-                status="done", finished_at=time.time(), output=out,
-            )
-        else:
-            _set_rebuild_state(
-                status="error", finished_at=time.time(),
-                output=out or "rebuild failed",
-            )
+            return {"ok": False, "output": f"rebuild failed to start: {e}"}
+        if res.returncode == 0:
+            return {"ok": True, "output": res.stdout[:500]}
+        detail = (res.stderr or res.stdout or "")[:500]
+        return {"ok": False, "output": detail or "rebuild failed"}
     finally:
         _rebuild_lock.release()
-
-
-@app.get("/api/rebuild/status")
-def api_rebuild_status() -> dict[str, Any]:
-    """Current background rebuild state: running/done/error + file progress."""
-    with _rebuild_state_lock:
-        st = dict(_rebuild_state)
-    if st["status"] == "running" and st["started_at"]:
-        st["elapsed_sec"] = round(time.time() - st["started_at"], 1)
-    elif st["started_at"] and st["finished_at"]:
-        st["elapsed_sec"] = round(st["finished_at"] - st["started_at"], 1)
-    else:
-        st["elapsed_sec"] = 0.0
-    return st
 
 
 @app.delete("/api/ticks/file")
@@ -3810,7 +3658,7 @@ async function refreshCollectorStatus(){
     isCollectorActive = st.running;
     const src = st.source || (st.running ? 'child' : 'none');
     const cb = $('collectorBadge');
-    const ticks = (st.total_ticks_estimated ? '~' : '') + (st.total_ticks_collected||0).toLocaleString();
+    const ticks = (st.total_ticks_collected||0).toLocaleString();
     // A standalone collector is the normal way to run a long capture, so it
     // reads as healthy green like any other running writer. Amber here used to
     // suggest something was wrong; the only thing that differs is who owns the
@@ -3885,52 +3733,23 @@ async function pollOnce(){
 }
 
 async function rebuildStats(){
-  // Background rebuild: POST starts the job at once, then poll
-  // /api/rebuild/status every 2s and animate the button in place
-  // (spinner + % + elapsed) until it lands.
   const btn=$('btnRebuildStats');
-  const badge=$('collectorBadge');
-  const restore=()=>{
-    if(!btn) return;
-    btn.disabled=false;
-    btn.classList.remove('thinking');
-    btn.innerHTML = btn.dataset.orig || 'Rebuild Stats';
-  };
-  if(btn){
-    if(!btn.dataset.orig) btn.dataset.orig = btn.innerHTML;
-    btn.disabled=true;
-    btn.classList.add('thinking');
-  }
-  const fail=(msg)=>{
-    if(badge) badge.textContent = 'Rebuild failed: ' + msg;
-    restore();
-  };
-  let started=false;
+  if(btn) btn.disabled=true;
+  $('collectorBadge').textContent = 'Rebuilding stats...';
   try{
     const res=await fetch('/api/rebuild', {method:'POST'});
     let body={}; try{body=await res.json();}catch{}
-    if(!res.ok || !body.ok){ fail(body.output||res.status); return; }
-    started=true;
-  }catch(e){ fail(e); return; }
-  if(!started){ restore(); return; }
-  const t0=Date.now();
-  const timer=setInterval(async ()=>{
-    let st={};
-    try{ st=await (await fetch('/api/rebuild/status',{cache:'no-store'})).json(); }
-    catch{ return; }
-    const el=(Date.now()-t0)/1000;
-    const mm=Math.floor(el/60), ss=String(Math.floor(el%60)).padStart(2,'0');
-    const pct=(st.files_total>0) ? Math.round(100*st.files_done/st.files_total) : 0;
-    const label='Rebuilding… '+pct+'% <span class="spinner"></span> '+mm+':'+ss;
-    if(btn) btn.innerHTML=label;
-    if(badge) badge.textContent='Rebuilding stats… '+pct+'% ('+(st.current_file||'…')+')';
-    if(st.status==='done' || st.status==='error'){
-      clearInterval(timer);
-      restore();
-      if(st.status==='done'){ tick(); refreshCollectorStatus(); }
-      else if(badge) badge.textContent='Rebuild failed: '+(st.output||'unknown');
+    if(!res.ok || !body.ok){
+      $('collectorBadge').textContent = 'Rebuild failed: ' + (body.output||res.status);
+    } else {
+      tick();
+      refreshCollectorStatus();
     }
-  }, 2000);
+  }catch(e){
+    $('collectorBadge').textContent = 'Rebuild failed: ' + e;
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
 
 async function tick(){

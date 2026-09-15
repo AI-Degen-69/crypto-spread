@@ -3,11 +3,13 @@
 # (c:\Users\Tiger\Agents\Projects\AI Trading\crypto-spread).
 #
 # Usage:
-#   .\scripts\crypto-spread-menu.ps1          # interactive menu
-#   .\scripts\crypto-spread-menu.ps1 status   # [1] system status telemetry
-#   .\scripts\crypto-spread-menu.ps1 open     # [2] host & open dashboard (background)
-#   .\scripts\crypto-spread-menu.ps1 stop     # [3] stop dashboard & clean up processes
-#   .\scripts\crypto-spread-menu.ps1 compare  # [4] live Binance spot vs CLOB book monitor
+#   .\scripts\crypto-spread-menu.ps1          # single-key menu: press once, runs, exits
+#   .\scripts\crypto-spread-menu.ps1 status   # [S] system status telemetry
+#   .\scripts\crypto-spread-menu.ps1 open     # [1] start dashboard, restart if live on :8802
+#   .\scripts\crypto-spread-menu.ps1 stop     # [2] stop dashboard & clean up processes
+#   .\scripts\crypto-spread-menu.ps1 poll     # [3] single collector poll (one sample now)
+#   .\scripts\crypto-spread-menu.ps1 rebuild  # [4] rebuild windows + summary from run/ticks
+#   .\scripts\crypto-spread-menu.ps1 dev      # start dashboard in dev mode (with --reload)
 #
 
 #Requires -Version 7.0
@@ -268,6 +270,8 @@ function Show-SystemStatus {
             $coll = Invoke-RestMethod -Uri "$DashUrl/api/collector/status" -UseBasicParsing -TimeoutSec 3
             if ($coll.running) {
                 Csm-Ok "Collector RUNNING (PID $($coll.pid), Today Ticks: $($coll.total_ticks_collected))"
+            } elseif ($coll.source -eq "external") {
+                Csm-Ok "Collector EXTERNAL standalone writer (Today Ticks: $($coll.total_ticks_collected))"
             } else {
                 Write-ProfileInfo -Message "Collector" -Detail "IDLE (Today Ticks: $($coll.total_ticks_collected))"
             }
@@ -304,35 +308,27 @@ function Show-SystemStatus {
     }
     Write-Host ""
 }
-
 # ── Host Dashboard Action ──
 function Host-Dashboard {
+    param([switch]$NoReload)
+    # [1] always ends with a fresh dashboard: a live one on :8802 is stopped first.
     $inst = Get-DashInstance
-    if ($null -ne $inst) {
-        Csm-Ok "Dashboard already running (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
-        return $true
-    }
-    if (Test-Port) {
+    if (($null -ne $inst) -or ((Test-Port) -and (Test-DashboardServer))) {
+        Csm-Step "Dashboard already live on :8802 — restarting for a clean state..."
+        Stop-DashboardProcess | Out-Null
+        Start-Sleep -Milliseconds 500
+    } elseif (Test-Port) {
         $portPid = Get-PortPid
-        if (Test-DashboardServer) {
-            # Any terminal from anywhere can adopt a verified dashboard.
-            # Auto-adopt (same as crypto-spread-isolated.ps1) so a stale/missing
-            # run/dash.pids.json never orphans a live dashboard.
-            if (Adopt-DashboardInstance -ExpectedPid $portPid) {
-                $inst = Get-DashInstance
-                Csm-Ok "Adopted dashboard (PID $($inst.pid), up $(Format-Uptime $inst.proc.StartTime))."
-                return $true
-            }
-            Csm-Ok "Dashboard is serving on ${DashUrl} (PID $portPid, adoption record write failed but port is verified)."
-            return $true
-        }
         Csm-Fail "Port $Port occupied: PID $portPid does NOT answer as a crypto-spread dashboard. Free the port manually first."
         return $false
     }
     
-    Csm-Step "Launching dashboard (python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port $Port --reload)..."
+    $uvArgs = @("-m", "uvicorn", "server.osc_dash:app", "--host", "127.0.0.1", "--port", "$Port")
+    if (-not $NoReload) { $uvArgs += "--reload" }
+    $mode = if ($NoReload) { "stable, no --reload" } else { "dev, --reload" }
+    Csm-Step "Launching dashboard ($mode) (python $($uvArgs -join ' '))..."
     $dash = Start-Process -FilePath "python" `
-        -ArgumentList "-m", "uvicorn", "server.osc_dash:app", "--host", "127.0.0.1", "--port", "$Port", "--reload" `
+        -ArgumentList $uvArgs `
         -WorkingDirectory $ProjectPath -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $OutLog `
         -RedirectStandardError  $ErrLog
@@ -422,19 +418,70 @@ function Stop-DashboardProcess {
     return $true
 }
 
-function Start-PriceMonitor {
-    param([string[]]$MonitorArgs)
-    $env:PYTHONIOENCODING = "utf-8"
-    $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectPath;$env:PYTHONPATH" } else { $ProjectPath }
-    Csm-Banner -Title "CRYPTO SPREAD — LIVE BINANCE SPOT vs CLOB BOOK MONITOR" -Subtitle "Side-by-Side Real-Time Tick Stream & Latency Audit"
-    Csm-Step "Starting live stream monitor (python -X utf8 -m scripts.monitor_stream_latency $($MonitorArgs -join ' '))..."
-    Write-Host ""
-    Push-Location $ProjectPath
-    try {
-        & python -X utf8 -m scripts.monitor_stream_latency @MonitorArgs
-    } finally {
-        Pop-Location
+# ── Collector / Tick Actions ──
+function Invoke-CollectorPollOnce {
+    <# [3] Capture one sample across all series right now (dashboard must be live). #>
+    if (-not (Test-DashboardServer)) {
+        Csm-Fail "Dashboard not serving on ${DashUrl}. Start it first ([1])."
+        return $false
     }
+    Csm-Step "Requesting single collector poll..."
+    try {
+        $r = Invoke-RestMethod -Uri "$DashUrl/api/collector/poll-once" -Method Post -UseBasicParsing -TimeoutSec 90
+        if ($r.ok) { Csm-Ok "Poll done. $($r.output)"; return $true }
+        Csm-Fail "Poll failed. $($r.output)"
+        return $false
+    } catch {
+        Csm-Fail "Poll request failed ($_)."
+        return $false
+    }
+}
+
+function Invoke-RebuildStats {
+    <# [4] Rebuild oscillation windows + summary from run/ticks in the
+       background (refused while any collector writes). Polls progress. #>
+    if (-not (Test-DashboardServer)) {
+        Csm-Fail "Dashboard not serving on ${DashUrl}. Start it first ([1])."
+        return $false
+    }
+    Csm-Step "Starting background rebuild from run/ticks..."
+    try {
+        $r = Invoke-RestMethod -Uri "$DashUrl/api/rebuild" -Method Post -UseBasicParsing -TimeoutSec 15
+        if (-not $r.ok) {
+            Csm-Fail "Rebuild refused. $($r.output)"
+            return $false
+        }
+    } catch {
+        $detail = $_.ErrorDetails.Message
+        if (-not $detail) { $detail = "$_" }
+        Csm-Fail "Rebuild failed. $detail"
+        return $false
+    }
+    $deadline = (Get-Date).AddSeconds(1800)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        try {
+            $st = Invoke-RestMethod -Uri "$DashUrl/api/rebuild/status" -UseBasicParsing -TimeoutSec 10
+        } catch {
+            Csm-Warn "Lost contact with dashboard while polling rebuild status."
+            return $false
+        }
+        $pct = if ($st.files_total -gt 0) { [int](100 * $st.files_done / $st.files_total) } else { 0 }
+        Write-Host ("`r  Rebuilding... {0}% ({1}/{2} files, {3}s)  " -f $pct, $st.files_done, $st.files_total, [int]$st.elapsed_sec) -NoNewline
+        if ($st.status -eq "done") {
+            Write-Host ""
+            Csm-Ok "Rebuild done in $([int]$st.elapsed_sec)s. $($st.output)"
+            return $true
+        }
+        if ($st.status -eq "error") {
+            Write-Host ""
+            Csm-Fail "Rebuild failed. $($st.output)"
+            return $false
+        }
+    }
+    Write-Host ""
+    Csm-Fail "Rebuild still running after 30min — check $DashUrl/api/rebuild/status."
+    return $false
 }
 
 # ── Menu Grid Renderer (spread-hunter-menu style) ──
@@ -448,13 +495,14 @@ function Show-MenuGrid {
     Write-Host ""
 
     $groups = @(
-        @{ Header = "🟢 DASHBOARD & TELEMETRY"; Items = @(
-            @{ K = "1"; Icon = "≡"; IconColor = "Info";      V = "Check System Status";        D = "System telemetry, collector status & tick store metrics" }
-            @{ K = "2"; Icon = "▶"; IconColor = "Success";   V = "Host & Open Dashboard";     D = "Hosts background dashboard on :8802 & opens browser" }
-            @{ K = "3"; Icon = "■"; IconColor = "Error";     V = "Stop Dashboard Process";     D = "Stops dashboard process tree & frees port 8802" }
+        @{ Header = "🟢 DASHBOARD"; Items = @(
+            @{ K = "1"; Icon = "▶"; IconColor = "Success";   V = "Start / Restart Dashboard"; D = "Fresh stable dashboard on :8802 (no --reload) & opens browser" }
+            @{ K = "2"; Icon = "■"; IconColor = "Error";     V = "Stop Dashboard Process";     D = "Stops dashboard process tree & frees port 8802" }
+            @{ K = "S"; Icon = "≡"; IconColor = "Info";      V = "Check System Status";        D = "System telemetry, collector status & tick store metrics" }
         ) }
-        @{ Header = "⚡ REAL-TIME MONITORING"; Items = @(
-            @{ K = "4"; Icon = "◈"; IconColor = "Highlight"; V = "Spot vs CLOB Monitor";      D = "Side-by-side Binance spot vs Polymarket CLOB book ticks stream" }
+        @{ Header = "🟡 COLLECTOR & TICKS"; Items = @(
+            @{ K = "3"; Icon = "◈"; IconColor = "Highlight"; V = "Collector Poll Once";       D = "Capture a single sample across all series right now" }
+            @{ K = "4"; Icon = "↻"; IconColor = "Info";      V = "Rebuild Stats From Ticks";   D = "Rebuild oscillation windows + summary from run/ticks" }
         ) }
     )
 
@@ -475,14 +523,15 @@ function Show-MenuGrid {
 function Invoke-MenuAction {
     param([string]$Key)
     switch ($Key) {
-        "1" { Show-SystemStatus }
-        "2" { Host-Dashboard }
-        "3" { Stop-DashboardProcess }
-        "4" { Start-PriceMonitor }
+        "1" { Host-Dashboard -NoReload }
+        "2" { Stop-DashboardProcess }
+        "3" { Invoke-CollectorPollOnce }
+        "4" { Invoke-RebuildStats }
+        "s" { Show-SystemStatus }
         "q" { Csm-Step "Exiting Control Center."; exit 0 }
         default {
-            Csm-Warn "Invalid selection: '$Key' (choose 1-4, or q)."
-            Start-Sleep -Seconds 1
+            Csm-Warn "Invalid selection: '$Key' (choose 1-4, S, or q)."
+            exit 1
         }
     }
 }
@@ -491,52 +540,60 @@ function Invoke-MenuAction {
 if ($Action -ne "") {
     $actionMap = @{
         "1"            = "1"
-        "status"       = "1"
-        "get"          = "1"
+        "start"        = "1"
+        "restart"      = "1"
+        "open"         = "1"
+        "host"         = "1"
+        "dash"         = "1"
+        "dashboard"    = "1"
+        "stable"       = "1"
         "2"            = "2"
-        "open"         = "2"
-        "host"         = "2"
-        "dash"         = "2"
-        "dashboard"    = "2"
+        "stop"         = "2"
+        "clean"        = "2"
+        "kill"         = "2"
         "3"            = "3"
-        "stop"         = "3"
-        "clean"        = "3"
-        "kill"         = "3"
+        "poll"         = "3"
+        "poll-once"    = "3"
+        "sample"       = "3"
         "4"            = "4"
-        "compare"      = "4"
-        "monitor"      = "4"
-        "stream"       = "4"
+        "rebuild"      = "4"
+        "stats"        = "4"
+        "s"            = "s"
+        "status"       = "s"
+        "get"          = "s"
+        "dev"          = "dev"
+        "reload"       = "dev"
     }
     $key = $Action.Trim().ToLower()
     if ($actionMap.ContainsKey($key)) { $key = $actionMap[$key] }
 
     switch ($key) {
-        "1" { Show-SystemStatus; exit 0 }
-        "2" { if (Host-Dashboard) { exit 0 } else { exit 1 } }
-        "3" { if (Stop-DashboardProcess) { exit 0 } else { exit 1 } }
-        "4" { Start-PriceMonitor -MonitorArgs $Remaining; exit 0 }
+        "1" { if (Host-Dashboard -NoReload) { exit 0 } else { exit 1 } }
+        "2" { if (Stop-DashboardProcess) { exit 0 } else { exit 1 } }
+        "3" { if (Invoke-CollectorPollOnce) { exit 0 } else { exit 1 } }
+        "4" { if (Invoke-RebuildStats) { exit 0 } else { exit 1 } }
+        "s" { Show-SystemStatus; exit 0 }
+        "dev" { if (Host-Dashboard) { exit 0 } else { exit 1 } }
         default {
-            Csm-Fail "Unknown action '$Action'. Valid actions: status, open, stop, compare"
+            Csm-Fail "Unknown action '$Action'. Valid actions: open, stop, poll, rebuild, status, dev"
             exit 1
         }
     }
 }
 
-# Interactive loop
-while ($true) {
-    Csm-Banner -Title "CRYPTO SPREAD — CONTROL CENTER" -Subtitle "5m/15m SPREAD-2 Capture Operations"
-    Show-MenuGrid
-    Write-Host "  Select " -ForegroundColor (Get-ProfileColor -Name Text) -NoNewline
-    Write-Host "[1-4, q]" -ForegroundColor (Get-ProfileColor -Name Command) -NoNewline
-    Write-Host " › " -ForegroundColor (Get-ProfileColor -Name Highlight) -NoNewline
+# Single-shot picker: one keypress runs immediately, no Enter, then exit.
+Csm-Banner -Title "CRYPTO SPREAD — CONTROL CENTER" -Subtitle "5m/15m SPREAD-2 Capture Operations"
+Show-MenuGrid
+Write-Host "  Press a key " -ForegroundColor (Get-ProfileColor -Name Text) -NoNewline
+Write-Host "[1-4, S, q]" -ForegroundColor (Get-ProfileColor -Name Command) -NoNewline
+Write-Host " › " -ForegroundColor (Get-ProfileColor -Name Highlight) -NoNewline
+try {
+    $choice = [System.Console]::ReadKey($true).KeyChar.ToString().ToLower()
+    Write-Host $choice
+} catch {
     $choice = Read-Host
-    if ($null -eq $choice) { exit 0 }
-    $choice = $choice.Trim().ToLower()
-    if ($choice -eq "") { exit 0 }
-    Invoke-MenuAction $choice
-
-    Write-Host ""
-    Write-Host "  Press Enter to return to main menu..." -ForegroundColor (Get-ProfileColor -Name Neutral)
-    $null = Read-Host
 }
+if ([string]::IsNullOrWhiteSpace($choice)) { exit 0 }
+Invoke-MenuAction $choice.Trim().ToLower()
+exit 0
 

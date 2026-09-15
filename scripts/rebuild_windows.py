@@ -168,9 +168,22 @@ def rebuild_windows(
         )
 
     if not quiet:
-        print(f"Found {len(tick_files)} tick files in {ticks_dir}")
+        print(f"Found {len(tick_files)} tick files in {ticks_dir}", flush=True)
 
-    windows = build_windows_from_ticks(iter_ticks(tick_files))
+    def _iter_with_progress() -> Iterable[dict[str, Any]]:
+        """Yield ticks file-by-file, reporting REBUILD_PROGRESS after each one.
+
+        The dashboard runs this as a background job and streams stdout, so a
+        slow multi-GB rebuild shows real per-file progress instead of silence
+        until the final line.
+        """
+        total = len(tick_files)
+        for i, path in enumerate(tick_files, 1):
+            yield from iter_ticks([path])
+            if not quiet:
+                print(f"REBUILD_PROGRESS {i}/{total} {path.name}", flush=True)
+
+    windows = build_windows_from_ticks(_iter_with_progress())
 
     write_lines_atomic(
         Path(out_windows), [json.dumps(w) for w in windows]
