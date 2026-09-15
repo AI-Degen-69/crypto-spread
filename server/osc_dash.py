@@ -3837,7 +3837,8 @@ async function tick(){
     const labelStr = esc(String(w.label||''));
     const fmtHM=t=>t?new Date(t*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'-';
     const rangeStr=`${fmtHM(w.start_ts)}-${fmtHM(w.end_ts)}`;
-    tbl+=`<tr><td style="font-weight:700"><a href="${esc(w.url||'#')}" target="_blank" rel="noopener">${esc(marketName(w.series||w.label||''))}<div style="font-size:10.5px;color:var(--faint);font-weight:400;font-variant-numeric:tabular-nums">${rangeStr}</div></a></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (+${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td></tr>`;
+    const resPill = cm==null?'-':(cm>=0.50?pill('pill-osc','UP'):pill('pill-mono','DOWN'));
+    tbl+=`<tr><td style="font-weight:700"><a href="${esc(w.url||'#')}" target="_blank" rel="noopener">${esc(marketName(w.series||w.label||''))}<div style="font-size:10.5px;color:var(--faint);font-weight:400;font-variant-numeric:tabular-nums">${rangeStr}</div></a></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (+${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td>${resPill}</td></tr>`;
   }
   tbl+='</tbody></table></div>';
   $('windowsTableWrap').innerHTML=tbl;
