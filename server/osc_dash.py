@@ -2181,8 +2181,8 @@ textarea:focus-visible,
 .ot-tab-btn.active .ot-count{background:rgba(51,201,181,0.2);color:var(--up)}
 .ot-pane{display:none;position:relative}
 .ot-pane.active{display:block}
-.ot-pane-scroll{max-height:min(560px,65vh);overflow-y:auto;position:relative;border-radius:6px;transition:max-height .2s ease}
-.ot-pane-scroll.ot-expanded{max-height:85vh!important}
+.ot-pane-scroll{max-height:min(680px,72vh);overflow-y:auto;position:relative;border-radius:6px;transition:max-height .2s ease}
+.ot-pane-scroll.ot-expanded{max-height:88vh!important}
 .ot-pane .tbl thead th{position:sticky;top:0;z-index:10;background:var(--panel);box-shadow:0 1px 0 var(--line);padding:7px 8px}
 .ot-pane .tbl td{padding:6px 8px;font-size:12px}
 .ot-row-cancelled td{color:var(--dim)!important}
@@ -2929,7 +2929,7 @@ textarea:focus-visible,
       </div>
 
       <!-- Tab 1: Open Orders -->
-      <div id="otPaneOrders" class="ot-pane active ot-pane-scroll" style="max-height:min(560px,65vh);overflow-y:auto">
+      <div id="otPaneOrders" class="ot-pane active ot-pane-scroll" style="max-height:min(680px,72vh);overflow-y:auto">
         <table class="tbl" id="cockpitOrdersTable">
           <thead>
             <tr>
@@ -2951,7 +2951,7 @@ textarea:focus-visible,
       </div>
 
       <!-- Tab 2: Positions -->
-      <div id="otPanePositions" class="ot-pane ot-pane-scroll" style="max-height:min(560px,65vh);overflow-y:auto">
+      <div id="otPanePositions" class="ot-pane ot-pane-scroll" style="max-height:min(680px,72vh);overflow-y:auto">
         <table class="tbl" id="cockpitPositionsTable">
           <thead>
             <tr>
@@ -2972,7 +2972,7 @@ textarea:focus-visible,
       </div>
 
       <!-- Tab 3: Closed Trades -->
-      <div id="otPaneTrades" class="ot-pane ot-pane-scroll" style="max-height:min(560px,65vh);overflow-y:auto">
+      <div id="otPaneTrades" class="ot-pane ot-pane-scroll" style="max-height:min(680px,72vh);overflow-y:auto">
         <table class="tbl" id="cockpitTradesTable">
           <thead>
             <tr>
@@ -2990,30 +2990,6 @@ textarea:focus-visible,
             <tr><td colspan="8" style="text-align:center;color:var(--dim);padding:20px">No closed trades recorded in this session.</td></tr>
           </tbody>
         </table>
-      </div>
-      <!-- Issue #139: Queue Telemetry + PnL Distribution (inside tab-cockpit) -->
-      <div class="card" id="queuePanel" style="margin-top:12px">
-        <h3 style="margin:0 0 10px">
-          <span>📊 Queue Telemetry (tape vs tapeq)</span>
-          <span id="queueVerdict" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">awaiting fills</span>
-        </h3>
-        <div id="queueSvgWrap" style="width:100%;min-height:150px"></div>
-        <details id="queueFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
-          <summary style="cursor:pointer">Data table</summary>
-          <div id="queueFallback"></div>
-        </details>
-      </div>
-
-      <div class="card" id="pnlHistPanel" style="margin-top:12px">
-        <h3 style="margin:0 0 10px">
-          <span>📈 PnL per Position</span>
-          <span id="pnlHistStats" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">No closed trades yet</span>
-        </h3>
-        <div id="pnlHistSvgWrap" style="width:100%;min-height:150px"></div>
-        <details id="pnlHistFallbackWrap" style="margin-top:8px;font-size:11px;color:var(--dim)">
-          <summary style="cursor:pointer">Data table</summary>
-          <div id="pnlHistFallback"></div>
-        </details>
       </div>
     </div>
   </div>
@@ -5245,6 +5221,7 @@ async function fetchCockpitState() {
 
 // Issue #139: queue-telemetry panel (tape vs tapeq evidence as it accumulates).
 async function fetchQueueTelemetry() {
+  if (!$('queueSvgWrap')) return;
   try {
     const res = await fetch('/api/live/queue_telemetry', { cache: 'no-store' });
     if (res.ok) renderQueuePanel(await res.json());

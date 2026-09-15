@@ -2340,7 +2340,7 @@ def test_orders_trades_container_height_expanded():
         tag_end = html.find(">", pane_idx)
         tag_str = html[pane_idx:tag_end]
         assert "ot-pane-scroll" in tag_str, f"{pane_id} missing ot-pane-scroll class"
-        assert "min(560px,65vh)" in tag_str or "min(560px, 65vh)" in tag_str, f"{pane_id} missing 560px height"
+        assert "min(680px,72vh)" in tag_str or "min(680px, 72vh)" in tag_str, f"{pane_id} missing 680px height"
         # Verify old cramped heights are gone
         assert "max-height:280px" not in tag_str and "max-height: 280px" not in tag_str
         assert "max-height:300px" not in tag_str and "max-height: 300px" not in tag_str
@@ -2361,8 +2361,8 @@ def test_sticky_headers_and_row_density_css():
 
     # Pane scroll rules
     assert ".ot-pane-scroll{" in html
-    assert "min(560px,65vh)" in html or "min(560px, 65vh)" in html
-    assert ".ot-pane-scroll.ot-expanded{max-height:85vh!important}" in html
+    assert "min(680px,72vh)" in html or "min(680px, 72vh)" in html
+    assert ".ot-pane-scroll.ot-expanded{max-height:88vh!important}" in html
 
 
 @requires_node
