@@ -3821,9 +3821,14 @@ async function tick(){
     const openUp = sm==null?'-':fmtPrice(sm);
     const openDown = sm==null?'-':fmtPrice(1-sm);
     const upHigh = mx==null?'-':fmtPrice(mx);
-    const upExc = fmtPrice(w.max_up||0);
+    // Entry-relative excursion (exit-opportunity signal): distance from OPEN,
+    // not from the fixed 0.50 base. Highlight at the $0.05 exit level.
+    const upDelta = (mx==null||sm==null)?null:(mx-sm);
+    const downDelta = (mn==null||sm==null)?null:(sm-mn);
+    const fmtDelta=d=>d==null?'-':((d<0?'-':'+')+fmtPrice(Math.abs(d)));
+    const upExc = upDelta==null?'-':`<span class="price-up"${upDelta>=0.05?' style="font-weight:800"':''}>${fmtDelta(upDelta)}</span>`;
     const downHigh = mn==null?'-':fmtPrice(1-mn);
-    const downExc = fmtPrice(w.max_down||0);
+    const downExc = downDelta==null?'-':`<span class="price-down"${downDelta>=0.05?' style="font-weight:800"':''}>${fmtDelta(downDelta)}</span>`;
     const o = sm==null?50:sm*100, c = cm==null?o:cm*100, h = mx==null?o:mx*100, l = mn==null?o:mn*100;
     const bodyLeft = Math.min(o,c), bodyW = Math.abs(c-o);
     const wickLeft = l, wickW = h-l;
