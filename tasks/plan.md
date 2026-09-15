@@ -1,74 +1,88 @@
-# Plan — Issue #155: Redesign Recent Windows table (entry-relative MAX UP/DOWN, RESULT pill, hyperlink SERIES cell)
+# Plan — Issue #200: Menu Collector status shows Could not query even while dashboard collector is running
 
-- **Issue:** https://github.com/AI-Degen-69/crypto-spread/issues/155
-- **Branch:** `feat/recent-windows-redesign-155` (off `master`)
-- **Size tier:** **Small** — 1 application file (`server/osc_dash.py`, Recent Windows render block ~lines 3817–3838) + 1 new test file (`tests/test_recent_windows_table.py`). No schema change, no new endpoint, no new dependency; all record fields (`start_mid`, `close_mid`, `min_mid`, `max_mid`, `start_ts`, `end_ts`, `url`) already exist on the window record (`scripts/measure_5m_oscillation.py:241-260`, `scripts/rebuild_windows.py:79-127`).
-- **Task type:** **Design/UI** (table columns, pills, hyperlinks, highlight states) + **Code** (JS render logic inside `FULL_APP_HTML`, HTML-string regression tests).
-- **Stack detected:** Python 3.12 / FastAPI (`server/osc_dash.py`), embedded SPA in `FULL_APP_HTML`, Chart.js already loaded; tests via `pytest` + `fastapi.testclient` HTML-string assertions (pattern: `tests/test_orders_trades_table.py`).
-- **Verification mode:** Automated tests (`python -m pytest tests/test_recent_windows_table.py tests/test_osc_dash_integration.py -q`, then full `python -m pytest -q`). The table renders client-side in JS, so tests assert on JS-source fragments inside `GET /` HTML.
-- **interview-me:** Skipped. Requirements were fully clear from the issue — explicit formulas (`max_mid - start_mid`, `start_mid - min_mid`, `close_mid >= 0.50`), explicit column add/drop list, explicit files, explicit acceptance criteria.
-- **Line-number drift note:** The issue cites `server/osc_dash.py:3398/3415/3273`, but the current file renders the Recent Windows table at ~lines 3817–3838 and `marketName()` at line 3594. Tasks below use actual locations.
+- **Issue:** https://github.com/AI-Degen-69/crypto-spread/issues/200
+- **Branch:** `fix/collector-status-reliability-200` (off `master`)
+- **Size tier:** **Small** — 2 application files (`server/osc_dash.py`, `scripts/crypto-spread-menu.ps1`) + tests. Root cause is a per-request O(n) file scan + a 3s menu timeout + a swallowed exception, not a capture-engine bug.
+- **Task type:** **Bug fix** (reliability + performance + error reporting).
+- **Stack detected:** Python 3.12 / FastAPI (`server/osc_dash.py`), PowerShell 7 (`scripts/crypto-spread-menu.ps1`), pytest (`tests/test_osc_dash_integration.py`).
+- **Verification mode:** Automated tests — targeted `python -m pytest tests/test_osc_dash_integration.py -q` per task, then full `python -m pytest -q` before PR. No network/VPN dependency.
+- **interview-me:** Skipped — issue already contains exact files/lines, suspected contributors, and acceptance criteria; no ambiguous requirement.
+- **Line-number drift note:** Issue cites `server/osc_dash.py:1048-1094` / `:357-366` / `:3654-3712` / `scripts/crypto-spread-menu.ps1:268-279`; current HEAD matches those ranges within the 1048/357/3654 windows — tasks use actual symbols (`api_collector_status`, `_count_lines_fast`, `refreshCollectorStatus`).
 
 ## Skills prescribed per task
 
 | Domain | Skill |
 | --- | --- |
 | Planning | `spec-driven-development`, `constraint-driven-development`, `api-and-interface-design`, `planning-and-task-breakdown` |
-| UI & Layout | `frontend-ui-engineering` (project tokens only: `var(--up)`/`var(--down)`, `price-up`/`price-down`, `pill()` styles, `tabular-nums`; text labels with every color signal) |
-| Build & Quality | `test-driven-development`, `code-review-and-quality` |
+| Build & Quality | `test-driven-development`, `debugging-and-error-recovery`, `code-review-and-quality` |
+| Performance | `performance-optimization` |
+| Git & Ship | `git-workflow-and-versioning` |
 
 ---
 
 ## Concise spec (embedded — Small tier, no SPEC.md rewrite)
 
-**Goal:** MAX UP/DOWN answer the trader's question ("how far from my OPEN entry — did it reach the 5¢ exit?") instead of re-rendering the candle high/low against the fixed 0.50 base; resolution becomes visible via RESULT; SERIES cell absorbs the link.
+**Goal:** `GET /api/collector/status` and the menu's `Collector:` status line stay trustworthy while the collector is actively writing a growing tick file.
+
+**Root causes (per issue):**
+1. `api_collector_status` calls `_count_lines_fast(today_file)` on every request — full streaming read that slows as the file grows (up to 1 GB+), while `api_ticks_manifest` already avoids this with size-based estimation / verify-cache and the code comment at `server/osc_dash.py:369-375` warns against unbounded scans.
+2. Menu query uses `TimeoutSec 3` and a `catch` without `$_` (`Csm-Warn "Collector: Could not query /api/collector/status"`), so timeout vs refused vs HTTP error are indistinguishable — unlike the Trading Engine block two lines above which prints `($_)`.
+3. Dashboard `refreshCollectorStatus()` has `catch{}` empty, so a slow/failed status is invisible in-browser while the menu surfaces it as a failure.
 
 **Contracts (locked before build):**
-- C1 — Header: `Series | Open UP/DOWN | Max UP | Max DOWN | Candle | Class | Result` (7 columns; `Window` and `Link` headers deleted).
-- C2 — MAX UP = `max_mid - start_mid`, MAX DOWN = `start_mid - min_mid`, rendered with `fmtPrice()` as `+$0.XX`; any null input renders `-` (never `NaN`); highlight emphasis (existing `price-up`/`price-down`) only when delta ≥ 0.05.
-- C3 — RESULT: `close_mid == null` → `-`; `close_mid >= 0.50` → green UP pill; else red DOWN pill. Reuses `pill()` helper styling; text label always present (never color alone).
-- C4 — SERIES cell: `marketName(series)` (`BTC 15m`) + small-font 24h `HH:MM-HH:MM` range derived from `start_ts`/`end_ts`; the whole cell is `<a href="url" target="_blank" rel="noopener">` with URL through `esc()`. Slug-hash text and standalone `Open ↗` link cell deleted.
-- C5 — OPEN UP/DOWN, CANDLE, CLASS byte-for-byte behavior unchanged (row keeps column order otherwise).
+- C1 — `GET /api/collector/status` must not run an unbounded per-request scan on a large today's tick file. For files ≥20 MB (same constant as `api_ticks_manifest`), return `int(size / 950)` (bytes 950 heuristic) exactly as that endpoint does; for smaller files, either a one-shot scan or a ≤10s TTL cache is acceptable. `total_ticks_collected` may be an estimate on large files; the field name does not change and tests must accept estimated values.
+- C2 — Menu Collector failure message must interpolate the real exception (`$_`), e.g. `Csm-Warn "Collector: Could not query /api/collector/status ($_)` — matching `scripts/crypto-spread-menu.ps1:259`. The static-only string must disappear.
+- C3 — Menu query timeout must not be *shorter* than the worst-case status latency on a large file. Either raise the Collector query timeout (e.g. 10s) or keep 3s only when paired with a fast endpoint from C1; the fix must make the pair consistent.
+- C4 — `refreshCollectorStatus` empty `catch{}` must become a visible/logged catch (e.g. `catch(e){ console.warn(...) }` or similar) so a flaky endpoint is observable in devtools.
+- C5 — Behavior outside scope does not change: collector capture/tape, badge styling, and `/api/live/state` semantics are untouched.
 
-**Edge cases:** null `start_mid`/`max_mid`/`min_mid` → `-`; null `close_mid` → `-`; missing `url` → existing `esc(w.url||'#')` fallback preserved; `start_ts`/`end_ts` missing → `-` range (current `startTs` fallback pattern).
-
-**Out of scope:** window record schema, `classify_window`, backtest, collector, any non-dashboard code.
+**Out of scope:** `scripts/collect_ticks.py`, tape handling, CLOB, badge styling, `run/` artifacts.
 
 ---
 
 ## Tasks
 
-### T1 — [x] `[Design/UI]` Header + SERIES cell: hyperlink + time range, drop WINDOW/LINK columns
-- **Domain:** `[Design/UI]`
-- **Target Files:** `server/osc_dash.py` (~lines 3818, 3835)
-- **Skill:** `frontend-ui-engineering`
-- **Description:**
-  - Rewrite the `<thead>` row to the 7-column C1 contract (delete `<th>Window</th>` and `<th>Link</th>`, add `<th>Result</th>`).
-  - Rewrite the SERIES `<td>`: `<a>` wrapping `marketName(w.series||w.label||'')` + `<div>` small-font `HH:MM-HH:MM` range from `start_ts`/`end_ts` (24h, `toLocaleTimeString`-style as today); delete the slug-hash text cell and the trailing `Open ↗` link cell.
-- **Verification:** New tests in `tests/test_recent_windows_table.py` asserting the 7-column header exists in `GET /` HTML and `<th>Window</th>` / `<th>Link</th>` / `Open ↗` row-link cell are gone.
+### T1 — [Code] Cheap tick count for `GET /api/collector/status`
 
-### T2 — [x] `[Design/UI]` Entry-relative MAX UP/DOWN + ≥$0.05 highlight
-- **Domain:** `[Design/UI]`
-- **Target Files:** `server/osc_dash.py` (~lines 3820–3826, 3835)
-- **Skill:** `frontend-ui-engineering`
-- **Description:**
-  - Replace `w.max_up`/`w.max_down` (0.50-based) excursion with entry-relative deltas per C2 (`mx-sm`, `sm-mn`), keeping `upHigh`/`downHigh` absolute price display.
-  - Apply highlight emphasis only at delta ≥ 0.05; null-safe (`-` on any null input).
-- **Verification:** Tests asserting the render source contains the entry-relative computation and the `0.05` threshold, plus a pure-JS-threshold check via Node if available (else string-assert); manual check: 0.54-open/0.55-high fixture shows +$0.01.
-
-### T3 — [x] `[Design/UI]` RESULT pill column
-- **Domain:** `[Design/UI]`
-- **Target Files:** `server/osc_dash.py` (~line 3835)
-- **Skill:** `frontend-ui-engineering`
-- **Description:**
-  - Add the RESULT `<td>` per C3 (green UP / red DOWN / `-`), reusing the `pill()` helper classes; place after Class cell.
-- **Verification:** Tests asserting UP/DOWN/`-` pill logic fragments exist in `GET /` HTML.
-
-### T4 — [x] `[Code]` Regression test file + full-suite gate
 - **Domain:** `[Code]`
-- **Target Files:** `tests/test_recent_windows_table.py`
+- **Target Files:** `server/osc_dash.py` (`api_collector_status`, nearby `_count_lines_fast` usage)
+- **Skill:** `performance-optimization`
+- **Description:**
+  - Change `api_collector_status` to avoid per-request full scan of today's tick file. For `size >= 20_000_000` return `int(size / 950)` (same heuristic/constant as `api_ticks_manifest`). For smaller files, a direct count or a ≤10s TTL-cached count is acceptable; prefer reusing the existing 950 heuristic pattern.
+  - Keep all other fields (`running`, `pid`, `source`, `external`, `manifest_age_sec`, `tape_*`) byte-for-byte, and keep response shape/tests green.
+- **Verification:**
+  - New/updated test in `tests/test_osc_dash_integration.py` that asserts `api_collector_status` returns successfully and `total_ticks_collected` is consistent with size-based estimate when a large tmp file is present; existing collector-status tests still pass.
+  - Manual reasoning: `GET /api/collector/status` no longer calls `_count_lines_fast` path for large files.
+
+### T2 — [Code] Menu Collector status: surface failure reason + align timeout
+
+- **Domain:** `[Code]`
+- **Target Files:** `scripts/crypto-spread-menu.ps1` (Collector status query block)
 - **Skill:** `test-driven-development`
 - **Description:**
-  - Create `tests/test_recent_windows_table.py` following the `test_orders_trades_table.py` pattern (`TestClient GET /`, HTML-string assertions) covering C1–C4 acceptance criteria.
-  - Run targeted gate, then `tests/test_osc_dash_integration.py`, then full `python -m pytest -q` — 0 failures.
-- **Verification:** `python -m pytest tests/test_recent_windows_table.py tests/test_osc_dash_integration.py -q` green, then full suite green.
+  - Change `Csm-Warn "Collector: Could not query /api/collector/status"` to include `$_` (e.g. `"Collector: Could not query /api/collector/status ($_)`), matching the Trading Engine query pattern at line ~259.
+  - Align the Collector query `TimeoutSec` with reliability needs — raise from `3` to `10` (or at minimum `5`) so it is consistent with the now-fast endpoint from T1; keep the Trading Engine timeout unchanged unless needed (out of scope to widen beyond status).
+- **Verification:**
+  - String-assert test (or `rg` check in PR review) that the collector `catch` block contains `$_` and no longer equals the static-only string; HTML/PS1 content test acceptable.
+  - `python -m pytest tests/test_osc_dash_integration.py -q` passes.
+
+### T3 — [Code] Dashboard `refreshCollectorStatus` empty-catch visibility
+
+- **Domain:** `[Code]`
+- **Target Files:** `server/osc_dash.py` (`refreshCollectorStatus` JS function)
+- **Skill:** `code-review-and-quality`
+- **Description:**
+  - Replace `}catch{}` / `catch{}` empty block with a logged variant, e.g. `}catch(e){ console.warn('refreshCollectorStatus failed', e); }` (or equivalent that leaves browser console evidence). No change to badge logic on success.
+- **Verification:**
+  - String-assert test that rendered `GET /` HTML no longer contains the empty `catch{}` at that function and contains a console warning/log path.
+  - `python -m pytest tests/test_osc_dash_integration.py -q` passes.
+
+### T4 — [Code] Regression gate + full-suite green
+
+- **Domain:** `[Code]`
+- **Target Files:** `tests/test_osc_dash_integration.py` (and any new helper)
+- **Skill:** `test-driven-development`
+- **Description:**
+  - Add the assertions listed in T1–T3 (or augment existing `test_api_collector_status_*` / `test_collector_status_source_matrix` groups) covering the three acceptance criteria: fast status on large file, `$_` in menu failure message, no empty catch in rendered SPA.
+  - Run `python -m pytest tests/test_osc_dash_integration.py -q` then `python -m pytest -q` to 0 failures.
+- **Verification:** Both targeted and full gates pass; no `skip`/`xfail`/`noqa`.
