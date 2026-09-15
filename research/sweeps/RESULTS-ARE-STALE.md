@@ -24,6 +24,34 @@ rev=0.015`; `fill_model="tapeq"` could not fill at all whenever `queue_gate >
 0`; and every print was classified as a sell, so buys that lifted the ask could
 fill a resting bid under tapeq.
 
+## One defect that is NOT in these files — and where it does live (issue #191)
+
+`backtest/engine.py` valued a naked leg carried to window close from the held
+side's final `best_bid` alone and booked `0.00c` when that bid was absent. A
+losing contract loses its bid side before expiry, so the omission only dropped
+losses: over the 2026-09-13 → 2026-09-15 capture, 181 naked windows went
+unmarked and **all 181 were losers**, a -395.56$ bias at size 5.
+
+It matters where this did and did not apply:
+
+- **The sweep tables here were never affected.** `ev_lab.fast_simulate` and
+  `sim2.sim2` already flagged the case (`naked_none`) and recorded the
+  redemption value, and `summarize` applies it by default
+  (`settle_correct=True`). Every `phase*.json` number is settlement-corrected.
+  They are stale for the reasons above, not for this one.
+- **Any `scripts/backtest.py` output produced before issue #191 is invalid**
+  for a hold-to-settle config (`ex=none`, or any run where a naked leg reaches
+  window close). That CLI goes through `backtest/engine.py`, which had no
+  correction at all. The symptom to recognise in an old report: a series with
+  `0.0%` pair rate *and* `0.0%` exit rate that still shows positive P&L.
+
+`research/sweeps/audit_settlement.py` measures both. Its
+`bias (true - engine)` line is the raw historical finding and is kept
+unchanged; the `bias (true - fixed)` line runs the same windows through the
+shared resolver and lands at **+7.17$** against the raw **-395.56$**. The
+residual is the handful of windows where the audit's `s_mid` direction and the
+resolver's book-mid direction disagree.
+
 ## Why they were not regenerated
 
 Regenerating requires `run/sweeps/window_cache.pkl`, which is built from

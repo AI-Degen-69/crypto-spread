@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backtest.engine import BacktestParams
+from backtest.engine import BacktestParams, resolve_redemption
 from ev_lab import _get_cache, fast_simulate, default_base_params, _mid_from
 
 
@@ -28,6 +28,7 @@ def main() -> int:
     true_wins = true_losses = 0
     pnl_engine_list = []
     pnl_true_list = []
+    pnl_fixed_list = []
     bias_windows = []
 
     for w in cache:
@@ -82,13 +83,25 @@ def main() -> int:
             engine_mark_none += 1
             engine_pnl = 0.0
             bias_windows.append((w.cid, w.day, w.series, held_up, resting, true_pnl, won))
+            # What the shared resolver books for the same window (issue #191).
+            # `fast_simulate` deliberately keeps recording the raw zero and
+            # leaves the correction to `summarize(settle_correct=True)`, so the
+            # fixed figure is reconstructed here the same way the summarizer
+            # reconstructs it -- through the one definition in
+            # `backtest.engine`, never a local copy of the rule.
+            _won, delta = resolve_redemption(
+                w.up_bb[-1], w.up_ba[-1], w.dn_bb[-1], w.dn_ba[-1],
+                held_up, resting)
+            fixed_pnl = delta if _won is not None else 0.0
         else:
             engine_pnl = (last_bid - resting) * 100.0
+            fixed_pnl = engine_pnl
             if engine_pnl > 0:
                 engine_mark_wins += 1
             else:
                 engine_mark_losses += 1
         pnl_engine_list.append(engine_pnl)
+        pnl_fixed_list.append(fixed_pnl)
 
     n = len(pnl_engine_list)
     # `pnl_*_list` holds cents for ONE contract. Dividing by 100 gives the
@@ -108,6 +121,13 @@ def main() -> int:
           f"(total {sum(pnl_true_list)*to_usd:+.2f}$ at size {size})")
     print(f"bias (true - engine) total: "
           f"{(sum(pnl_true_list)-sum(pnl_engine_list))*to_usd:+.2f}$ at size {size}")
+    # The raw line above is the evidence in issue #191 and stays as it is. The
+    # two below measure the same windows through the settlement resolver, and
+    # are what should now land at roughly zero.
+    print(f"fixed  mean pnl/naked window: {statistics.fmean(pnl_fixed_list):+.2f}c "
+          f"(total {sum(pnl_fixed_list)*to_usd:+.2f}$ at size {size})")
+    print(f"bias (true - fixed)  total: "
+          f"{(sum(pnl_true_list)-sum(pnl_fixed_list))*to_usd:+.2f}$ at size {size}")
     if bias_windows:
         tot = sum(b[5] for b in bias_windows)
         print(f"unmarked windows: {len(bias_windows)}, "
