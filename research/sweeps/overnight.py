@@ -107,7 +107,16 @@ def main(argv: list[str]) -> int:
     after = dataset_size()
     verdict = ""
     sb = SWEEPS / "selection_bias.json"
-    if sb.exists():
+    if rc != 0:
+        # The 2026-09-15 run reported a "Verdict" built from the PREVIOUS
+        # night's selection_bias.json after the step itself had failed -- a
+        # stale number presented as a fresh result, which is worse than no
+        # number at all.
+        verdict = (
+            "\n## Verdict\n\nNONE — the selection-bias step failed "
+            f"(rc={rc}). Any `selection_bias.json` on disk is from an earlier "
+            "run and is deliberately not reported here.\n")
+    elif sb.exists():
         try:
             d = json.loads(sb.read_text(encoding="utf-8"))
             p = d.get("p_family_wise")
