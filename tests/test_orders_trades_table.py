@@ -2146,10 +2146,26 @@ const EventSource = class { constructor() {} addEventListener() {} close() {} };
 const elements = {};
 function getOrCreate(id) {
   if (!elements[id]) {
+    const classes = new Set();
+    const attrs = {};
     elements[id] = {
       id, textContent: '', innerHTML: '', value: '',
       style: {},
-      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        toggle: (c, force) => {
+          if (force !== undefined) {
+            if (force) classes.add(c); else classes.delete(c);
+            return force;
+          }
+          if (classes.has(c)) { classes.delete(c); return false; }
+          classes.add(c); return true;
+        },
+        contains: (c) => classes.has(c)
+      },
+      setAttribute: (k, v) => { attrs[k] = String(v); },
+      getAttribute: (k) => (attrs[k] !== undefined ? attrs[k] : null),
       addEventListener: () => {},
       querySelectorAll: () => []
     };
@@ -2362,6 +2378,11 @@ def test_orders_trades_height_toggle_and_localstorage():
       throw new Error('localStorage expected standard, got ' + localStorage.getItem('crypto-spread-ot-height'));
     }
     if (otHeightExpanded !== false) throw new Error('otHeightExpanded should be false');
+    if (elements['otPaneOrders'].classList.contains('ot-expanded')) throw new Error('otPaneOrders should not be ot-expanded');
+    if (elements['otPanePositions'].classList.contains('ot-expanded')) throw new Error('otPanePositions should not be ot-expanded');
+    if (elements['otPaneTrades'].classList.contains('ot-expanded')) throw new Error('otPaneTrades should not be ot-expanded');
+    if (!elements['otHeightToggleBtn'].innerHTML.includes('Expand')) throw new Error('btn label should show Expand');
+    if (elements['otHeightToggleBtn'].getAttribute('aria-expanded') !== 'false') throw new Error('aria-expanded should be false');
 
     // 2. Toggle to expanded
     toggleOtHeight();
@@ -2369,6 +2390,11 @@ def test_orders_trades_height_toggle_and_localstorage():
       throw new Error('localStorage expected expanded, got ' + localStorage.getItem('crypto-spread-ot-height'));
     }
     if (otHeightExpanded !== true) throw new Error('otHeightExpanded should be true');
+    if (!elements['otPaneOrders'].classList.contains('ot-expanded')) throw new Error('otPaneOrders should be ot-expanded');
+    if (!elements['otPanePositions'].classList.contains('ot-expanded')) throw new Error('otPanePositions should be ot-expanded');
+    if (!elements['otPaneTrades'].classList.contains('ot-expanded')) throw new Error('otPaneTrades should be ot-expanded');
+    if (!elements['otHeightToggleBtn'].innerHTML.includes('Standard')) throw new Error('btn label should show Standard');
+    if (elements['otHeightToggleBtn'].getAttribute('aria-expanded') !== 'true') throw new Error('aria-expanded should be true');
 
     // 3. Toggle back to standard
     toggleOtHeight();
@@ -2376,6 +2402,11 @@ def test_orders_trades_height_toggle_and_localstorage():
       throw new Error('localStorage expected standard, got ' + localStorage.getItem('crypto-spread-ot-height'));
     }
     if (otHeightExpanded !== false) throw new Error('otHeightExpanded should be false');
+    if (elements['otPaneOrders'].classList.contains('ot-expanded')) throw new Error('otPaneOrders should not be ot-expanded');
+    if (elements['otPanePositions'].classList.contains('ot-expanded')) throw new Error('otPanePositions should not be ot-expanded');
+    if (elements['otPaneTrades'].classList.contains('ot-expanded')) throw new Error('otPaneTrades should not be ot-expanded');
+    if (!elements['otHeightToggleBtn'].innerHTML.includes('Expand')) throw new Error('btn label should show Expand');
+    if (elements['otHeightToggleBtn'].getAttribute('aria-expanded') !== 'false') throw new Error('aria-expanded should be false');
 
     console.log('OT_HEIGHT_TOGGLE_TESTS_PASSED');
     process.exit(0);

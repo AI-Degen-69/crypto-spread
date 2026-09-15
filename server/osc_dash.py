@@ -3357,7 +3357,13 @@ function switchOtTab(tabName) {
 }
 
 // Orders & Trades Height Toggle (Issue #133)
-let otHeightExpanded = (typeof localStorage !== 'undefined' && localStorage.getItem('crypto-spread-ot-height') === 'expanded');
+let otHeightExpanded = false;
+try {
+  otHeightExpanded = typeof localStorage !== 'undefined'
+    && localStorage.getItem('crypto-spread-ot-height') === 'expanded';
+} catch (e) {
+  console.warn('Orders & Trades height preference is unavailable', e);
+}
 
 function applyOtHeight(isExpanded) {
   otHeightExpanded = !!isExpanded;
