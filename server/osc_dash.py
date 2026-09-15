@@ -3034,6 +3034,50 @@ const timeBarFraction=(rem, dur)=>{
   else if (remainSec <= 60 || frac <= 0.10) barColor = 'var(--gold)';
   return { fillPct: Math.round(frac * 1000) / 10, barColor };
 };
+// Issue #193: the Stats Summary hero used to state its figures as hardcoded
+// numerals, so it drifted further from the data on every collector run. These
+// three helpers recompute the headline from the /api/oscillation payload. They
+// are pure -- no DOM, no fetch -- so the Node harness can call them directly.
+// Sum windows/oscillating across every series and split by duration
+// (300 = 5m, 900 = 15m). A bucket with no windows yields null, never NaN and
+// never a 0% that reads as a measured result.
+const OSC_DUR_5M = 300;
+const OSC_DUR_15M = 900;
+function computeOscillationHeadline(perSeries){
+  const rate=(osc,win)=> win>0 ? (osc/win)*100 : null;
+  let tW=0,tO=0,w5=0,o5=0,w15=0,o15=0;
+  for(const entry of Object.values(perSeries||{})){
+    if(!entry || typeof entry!=='object') continue;
+    const win=Number(entry.windows)||0;
+    const osc=Number(entry.oscillating)||0;
+    tW+=win; tO+=osc;
+    if(Number(entry.duration)===OSC_DUR_5M){ w5+=win; o5+=osc; }
+    else if(Number(entry.duration)===OSC_DUR_15M){ w15+=win; o15+=osc; }
+  }
+  return {
+    ok: tW>0,
+    totalWindows: tW,
+    windows5m: w5,
+    windows15m: w15,
+    overallPct: rate(tO,tW),
+    pct5m: rate(o5,w5),
+    pct15m: rate(o15,w15)
+  };
+}
+// One decimal place, or an em dash when there is nothing to report. A genuine
+// 0% still renders as 0.0% -- only absent data becomes the dash.
+function formatOscPct(v){
+  const n=Number(v);
+  if(v===null||v===undefined||!isFinite(n)) return '—';
+  return n.toFixed(1)+'%';
+}
+// Render summary.ts so a stale oscillation_summary.json is visible rather than
+// silently presented as current. Matches the stamp format used for tick files.
+function formatOscAsOf(ts){
+  const n=Number(ts);
+  if(!ts||!isFinite(n)||n<=0) return '—';
+  return new Date(n*1000).toLocaleString('en-US');
+}
 // Issue #100: two-way visual link. Hovering a market card highlights its Open
 // Orders group and vice versa, via the shared data-market key.
 function setMarketHighlight(key,on){
