@@ -3815,7 +3815,7 @@ async function tick(){
   $('seriesGrid').innerHTML=grid;
 
   // Recent windows table
-  let tbl='<div class="card"><h3 style="font-size:13px">Recent Windows — 50/50 Open (Click for Polymarket)</h3><table class="tbl"><thead><tr><th>Series</th><th>Window</th><th>Open UP / DOWN</th><th style="color:var(--up)">Max UP</th><th style="color:var(--down)">Max DOWN</th><th>Candle</th><th>Class</th><th>Link</th></tr></thead><tbody>';
+  let tbl='<div class="card"><h3 style="font-size:13px">Recent Windows — 50/50 Open (Click for Polymarket)</h3><table class="tbl"><thead><tr><th>Series</th><th>Open UP / DOWN</th><th style="color:var(--up)">Max UP</th><th style="color:var(--down)">Max DOWN</th><th>Candle</th><th>Class</th><th>Result</th></tr></thead><tbody>';
   for(const w of wins.slice(0,60)){
     const sm = w.start_mid, cm=w.close_mid, mx=w.max_mid, mn=w.min_mid;
     const openUp = sm==null?'-':fmtPrice(sm);
@@ -3830,9 +3830,9 @@ async function tick(){
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
     const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div>    <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Range ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · Close ${fmtPrice(cm)}</div></div>`;
     const labelStr = esc(String(w.label||''));
-    const slugStr = esc(String(w.slug||'').slice(-14));
-    const startTs = w.start_ts ? new Date(w.start_ts*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '-';
-    tbl+=`<tr><td style="font-weight:700">${esc(marketName(w.series||w.label||''))}</td><td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${slugStr}<div style="font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums">${startTs}</div></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (+${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td><a href="${esc(w.url||'#')}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700">Open ↗</a></td></tr>`;
+    const fmtHM=t=>t?new Date(t*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'-';
+    const rangeStr=`${fmtHM(w.start_ts)}-${fmtHM(w.end_ts)}`;
+    tbl+=`<tr><td style="font-weight:700"><a href="${esc(w.url||'#')}" target="_blank" rel="noopener">${esc(marketName(w.series||w.label||''))}<div style="font-size:10.5px;color:var(--faint);font-weight:400;font-variant-numeric:tabular-nums">${rangeStr}</div></a></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (+${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td></tr>`;
   }
   tbl+='</tbody></table></div>';
   $('windowsTableWrap').innerHTML=tbl;
