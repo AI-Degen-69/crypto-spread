@@ -46,8 +46,19 @@ def log(msg: str) -> None:
     print(line, end="", flush=True)
 
 
-def collector_pids() -> list[int]:
-    """PIDs of running `collect_ticks` processes, newest last."""
+def collector_pids() -> list[int] | None:
+    """PIDs of running `collect_ticks` processes, or None if unknowable.
+
+    The distinction is the whole point. This used to return `[]` both when
+    there was genuinely no collector and when the probe itself failed, and the
+    caller treated `[]` as "start another one". On 2026-09-15 the machine slept,
+    the probe returned a nonsense timeout, and the watchdog started a second
+    collector against a live one. Two processes appended to the same tick file
+    and produced 2,799 per-cid timestamp regressions -- the exact corruption
+    `build_cache` now refuses to load.
+
+    An unknown state is not a dead state. The caller does nothing on None.
+    """
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -56,8 +67,11 @@ def collector_pids() -> list[int]:
              "ForEach-Object { $_.ProcessId }"],
             capture_output=True, text=True, timeout=30)
     except Exception as e:  # a failed probe must not kill the watchdog
-        log(f"pid probe failed: {e}")
-        return []
+        log(f"pid probe failed ({e}); state unknown, taking no action")
+        return None
+    if out.returncode != 0:
+        log(f"pid probe rc={out.returncode}; state unknown, taking no action")
+        return None
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
@@ -113,7 +127,16 @@ def main(argv: list[str]) -> int:
     while True:
         try:
             pids = collector_pids()
-            if not pids:
+            if pids is None:
+                pass  # probe failed; never act on a state we could not read
+            elif len(pids) > 1:
+                # Two writers append interleaved lines to one tick file and
+                # corrupt it. Keep the newest and stop the rest immediately.
+                keep = pids[-1]
+                log(f"DUPLICATES: {pids}; keeping {keep}")
+                for pid in pids[:-1]:
+                    kill(pid)
+            elif not pids:
                 log("DOWN: no collect_ticks process")
                 start_collector()
                 restarts += 1
