@@ -106,9 +106,16 @@ class Recorder:
         self._fh = None
         self._lock = threading.Lock()
         self.counts: Dict[str, int] = {}
-        #: token -> last written (best_bid, best_ask), so a repeated quote is
-        #: not written again. This is the difference between 14 GB/day and
-        #: something that fits.
+        #: token -> last written (best_bid, best_ask) as FLOATS, so a repeated
+        #: quote is not written again. This is the difference between 14 GB/day
+        #: and something that fits.
+        #:
+        #: Floats because both branches share this map and the venue is not
+        #: consistent about its own encoding: a `price_change` reports an ask
+        #: of `"1"` where a `book` snapshot yields `1.0`. Keyed on the raw
+        #: strings the two never matched, so every `book` that merely repeated
+        #: the preceding quote was written again, and the file carried two
+        #: spellings of the same number for consumers to normalize.
         self._last: Dict[str, tuple] = {}
         self.total = 0
         self.started = time.time()
@@ -146,8 +153,11 @@ class Recorder:
                 if not isinstance(c, dict):
                     continue
                 tok = str(c.get("asset_id") or "").strip()
-                bb, ba = c.get("best_bid"), c.get("best_ask")
-                if not tok or bb is None or ba is None:
+                if not tok:
+                    continue
+                try:
+                    bb, ba = float(c.get("best_bid")), float(c.get("best_ask"))
+                except (TypeError, ValueError):
                     continue
                 if self._last.get(tok) == (bb, ba):
                     continue        # top of book unchanged; nothing to learn
@@ -170,13 +180,12 @@ class Recorder:
             bb_f, ba_f = best("bids", max), best("asks", min)
             if bb_f is None or ba_f is None:
                 return
-            key = (str(bb_f), str(ba_f))
-            if self._last.get(tok) == key:
+            if self._last.get(tok) == (bb_f, ba_f):
                 return
-            self._last[tok] = key
+            self._last[tok] = (bb_f, ba_f)
             out.append(json.dumps(
                 {"rx": round(now, 6), "mono": round(mono, 6), "et": "snap",
-                 "tok": tok, "bb": key[0], "ba": key[1], "vts": venue},
+                 "tok": tok, "bb": bb_f, "ba": ba_f, "vts": venue},
                 separators=(",", ":")))
         else:
             return
