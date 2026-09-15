@@ -985,7 +985,27 @@ CACHE_RSS_FACTOR = 2.8
 WORKER_RESERVE_BYTES = 2.0 * 1024 ** 3
 
 
-def safe_worker_count(requested: int, reserve_bytes: float = WORKER_RESERVE_BYTES) -> int:
+#: Worker count used when the machine cannot be measured at all. Low on
+#: purpose: guessing high costs a thrashing machine and a sweep that may never
+#: finish, guessing low costs about 2.5s per config.
+UNMEASURABLE_WORKERS = 2
+
+
+def available_memory_bytes() -> float | None:
+    """Free RAM in bytes, or None when it cannot be read.
+
+    `psutil` is not a declared dependency of this repo and is absent from CI,
+    so this is a soft probe rather than an import at module scope.
+    """
+    try:
+        import psutil  # noqa: PLC0415 - optional, soft dependency
+        return float(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def safe_worker_count(requested: int, reserve_bytes: float = WORKER_RESERVE_BYTES,
+                      available_bytes: float | None = None) -> int:
     """Clamp a worker count to what this machine can actually hold.
 
     Every spawned worker calls `_get_cache()` and holds the *whole* window
@@ -995,21 +1015,22 @@ def safe_worker_count(requested: int, reserve_bytes: float = WORKER_RESERVE_BYTE
     Workers only speed up a sweep that fits in RAM; one that does not is slower
     than running serially, and may not finish at all.
 
-    Falls back to 2 when available memory cannot be read (`psutil` is not a
-    declared dependency of this repo), because the failure mode of guessing too
-    high is far worse than of guessing too low: a serial sweep of this dataset
-    costs about 2.5s per config.
+    `available_bytes` is injectable so the arithmetic can be tested without
+    depending on the machine the tests run on. Passing nothing probes the real
+    one. This is not hypothetical tidiness: the first version of these tests
+    asserted on sizing that CI never reached, because CI has neither `psutil`
+    nor a window cache, and they passed locally for a reason that had nothing
+    to do with what they claimed to check.
     """
     requested = max(1, int(requested))
-    try:
-        import psutil  # noqa: PLC0415 - optional, soft dependency
-        available = psutil.virtual_memory().available
-    except Exception:
-        return min(requested, 2)
+    available = (available_memory_bytes() if available_bytes is None
+                 else float(available_bytes))
+    if available is None:
+        return min(requested, UNMEASURABLE_WORKERS)
     try:
         per_worker = CACHE_PATH.stat().st_size * CACHE_RSS_FACTOR
     except OSError:
-        return min(requested, 2)
+        return min(requested, UNMEASURABLE_WORKERS)
     if per_worker <= 0:
         return requested
     headroom = available - reserve_bytes
