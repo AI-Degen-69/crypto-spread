@@ -3816,6 +3816,8 @@ async function tick(){
 
   // Recent windows table
   let tbl='<div class="card"><h3 style="font-size:13px">Recent Windows — 50/50 Open (Click for Polymarket)</h3><table class="tbl"><thead><tr><th>Series</th><th>Open UP / DOWN</th><th style="color:var(--up)">Max UP</th><th style="color:var(--down)">Max DOWN</th><th>Candle</th><th>Class</th><th>Result</th></tr></thead><tbody>';
+  const fmtDelta=d=>d==null?'-':((d<0?'-':'+')+fmtPrice(Math.abs(d)));
+  const fmtHM=t=>(t==null||t==='')?'-':new Date(t*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
   for(const w of wins.slice(0,60)){
     const sm = w.start_mid, cm=w.close_mid, mx=w.max_mid, mn=w.min_mid;
     const openUp = sm==null?'-':fmtPrice(sm);
@@ -3825,7 +3827,6 @@ async function tick(){
     // not from the fixed 0.50 base. Highlight at the $0.05 exit level.
     const upDelta = (mx==null||sm==null)?null:(mx-sm);
     const downDelta = (mn==null||sm==null)?null:(sm-mn);
-    const fmtDelta=d=>d==null?'-':((d<0?'-':'+')+fmtPrice(Math.abs(d)));
     const upExc = upDelta==null?'-':`<span class="price-up"${upDelta>=0.05?' style="font-weight:800"':''}>${fmtDelta(upDelta)}</span>`;
     const downHigh = mn==null?'-':fmtPrice(1-mn);
     const downExc = downDelta==null?'-':`<span class="price-down"${downDelta>=0.05?' style="font-weight:800"':''}>${fmtDelta(downDelta)}</span>`;
@@ -3834,10 +3835,10 @@ async function tick(){
     const wickLeft = l, wickW = h-l;
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
     const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div>    <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Range ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · Close ${fmtPrice(cm)}</div></div>`;
-    const fmtHM=t=>t?new Date(t*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'-';
-    const rangeStr=`${fmtHM(w.start_ts)}-${fmtHM(w.end_ts)}`;
+    const rangeStr=(w.start_ts==null&&w.end_ts==null)?'-':`${fmtHM(w.start_ts)}-${fmtHM(w.end_ts)}`;
     const resPill = cm==null?'-':(cm>=0.50?pill('pill-osc','UP'):pill('pill-mono','DOWN'));
-    tbl+=`<tr><td style="font-weight:700"><a href="${esc(w.url||'#')}" target="_blank" rel="noopener">${esc(marketName(w.series||w.label||''))}<div style="font-size:10.5px;color:var(--faint);font-weight:400;font-variant-numeric:tabular-nums">${rangeStr}</div></a></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (+${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (+${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td>${resPill}</td></tr>`;
+    const safeUrl=(typeof w.url==='string'&&w.url.startsWith('https://'))?esc(w.url):'#';
+    tbl+=`<tr><td style="font-weight:700"><a href="${safeUrl}" target="_blank" rel="noopener">${esc(marketName(w.series||w.label||''))}<div style="font-size:10.5px;color:var(--faint);font-weight:400;font-variant-numeric:tabular-nums">${esc(rangeStr)}</div></a></td><td><span class="price-up">${openUp}</span> | <span class="price-down">${openDown}</span></td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-up">${upHigh}</span> (${upExc})</td><td class="mono" style="font-variant-numeric:tabular-nums"><span class="price-down">${downHigh}</span> (${downExc})</td><td>${candle}</td><td>${clsPill(w.class)}</td><td>${resPill}</td></tr>`;
   }
   tbl+='</tbody></table></div>';
   $('windowsTableWrap').innerHTML=tbl;
