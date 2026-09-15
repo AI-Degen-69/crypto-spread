@@ -132,3 +132,19 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
     assert p.fill_model == "tape"
     assert p.exit_thresh_by_slug["default_5m"] == 0.49
     assert p.exit_thresh_by_slug["default_15m"] == 0.50
+
+
+def test_help_renders_instead_of_crashing(capsys):
+    """`--help` must print usage, not die formatting its own help strings.
+
+    argparse runs every help string through `% params`, so a bare `%` in the
+    text is read as a format spec: `10% (0 disables)` raised
+    `ValueError: unsupported format character '('`. The crash hid the whole
+    flag list from anyone running the CLI for the first time.
+    """
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--entry-timeout" in out
+    assert "10% (0 disables)" in out
