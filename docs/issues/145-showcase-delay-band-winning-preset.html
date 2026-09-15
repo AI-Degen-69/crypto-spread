@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Showcase #145 — Delay/Band Knobs + Winning Preset</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--txt:#e6edf3;--dim:#8b949e;--up:#3fb950;--gold:#d29922;--blue:#58a6ff;--down:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:"Segoe UI",Arial,sans-serif;line-height:1.7}
+.wrap{max-width:900px;margin:0 auto;padding:28px 18px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+h1{font-size:26px;margin:6px 0}h2{font-size:19px;color:var(--gold);margin:0 0 10px}
+.meta{color:var(--dim);font-size:14px}.meta a{color:var(--blue)}
+.pill{display:inline-block;padding:2px 12px;border-radius:20px;font-size:13px;font-weight:700}
+.ok{background:rgba(63,185,80,.15);color:var(--up);border:1px solid var(--up)}
+.flow{display:flex;gap:10px;align-items:stretch;margin:12px 0;flex-wrap:wrap}
+.box{flex:1;min-width:220px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#0d1117}
+.box h3{margin:0 0 6px;font-size:15px}.before h3{color:var(--down)}.after h3{color:var(--up)}
+.box ul{margin:6px 0;padding-right:18px;font-size:14px}
+.arrow{align-self:center;font-size:26px;color:var(--gold)}
+code{background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:13px;direction:ltr;display:inline-block}
+table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:right}
+th{background:#0d1117;color:var(--gold)}
+.step{background:#0d1117;border:1px solid var(--line);border-right:4px solid var(--blue);border-radius:8px;padding:10px 14px;margin:10px 0;font-size:15px}
+.step b{color:var(--blue)}
+footer{color:var(--dim);font-size:13px;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+<div><span class="pill ok">MERGED ✅</span></div>
+<h1>🎛️ Delay / Band Knobs + כפתור Winning-Config</h1>
+<div class="meta">
+Issue <a href="https://github.com/AI-Degen-69/crypto-spread/issues/145">#145</a> ·
+PR <a href="https://github.com/AI-Degen-69/crypto-spread/pull/156">#156</a> ·
+קומיט <code>33f078f</code> · ענף <code>feat/backtest-delay-band-145</code> (נמחק)
+</div>
+</div>
+
+<div class="card">
+<h2>📖 תכל'ס — מה הבעיה ומה נבנה</h2>
+<p>קונפיג ה-EV המנצח (דיליי 60 שניות + כניסה רק לשוק "מתלבט" + החזקה לסוף) עבד ב-live ובמחקר — אבל מנוע הבק-טסט הרשמי לא הכיר את שני הכפתורים האלה, אז אי אפשר היה לשחזר אותו רשמית. עכשיו המנוע, ה-API והדשבורד מדברים באותה שפה, וכפתור 🏆 אחד ממלא את כל הקונפיג המנצח.</p>
+</div>
+
+<div class="card">
+<h2>🔀 לפני / אחרי</h2>
+<div class="flow">
+<div class="box before"><h3>❌ לפני</h3>
+<ul><li>בק-טסט מצטט מ-t=0, אין דיליי</li><li>אין סינון "שוק מתלבט"</li><li>שחזור הקונפיג המנצח — ידני ושביר</li><li><code>/api/backtest</code> בלי הפרמטרים</li></ul>
+</div>
+<div class="arrow">◀</div>
+<div class="box after"><h3>✅ אחרי</h3>
+<ul><li><code>entry_delay_sec</code> — החזקת ציטוטים עד 60s</li><li><code>entry_band</code> — רק mid ליד 0.50</li><li>כפתור 🏆 ממלא: 0.03 / 60 / 0.04 / tape / 0.98 / 5</li><li>API + סליידרים + preset — הכול מסונכרן</li></ul>
+</div>
+</div>
+<table>
+<tr><th>רכיב</th><th>מה נוסף</th></tr>
+<tr><td>מנוע (<code>backtest/engine.py</code>)</td><td>שדות + ולידציה + לוגיקת delay/band זהה ל-live</td></tr>
+<tr><td>API (<code>/api/backtest</code>)</td><td><code>entry_delay_sec</code> / <code>entry_band</code> עם clamps ו-fallback ל-0</td></tr>
+<tr><td>דשבורד</td><td>שני inputs + חיווט URL + reset + כפתור preset</td></tr>
+<tr><td>טסטים</td><td>17 חדשים — 511/511 ירוקים ✅</td></tr>
+</table>
+</div>
+
+<div class="card">
+<h2>🕹️ בדיקה ידנית ב-2 צעדים</h2>
+<div class="step"><b>צעד 1 — כפתור הקסם:</b> הרימו דשבורד (<code>python -m uvicorn server.osc_dash:app --port 8802</code>), עברו לטאב Backtest, לחצו <b>🏆 Winning config</b> — ודאו שהשדות מתמלאים (Offset 0.03, Delay 60, Band 0.04, Fill=Tape, Pair 0.98, Size 5) והסוויפ רץ לבד.</div>
+<div class="step"><b>צעד 2 — השוואת delay:</b> הריצו סוויפ רגיל, רשמו את % ה-pairs; לחצו 🏆 שוב והשוו — עם delay+band אמורים לראות פחות חלונות נכנסים אך (בתקווה) איכותיים יותר. ב-API: הוסיפו <code>&amp;entry_delay_sec=60&amp;entry_band=0.04</code> וודאו שהתשובה מהדהדת אותם ב-<code>params</code>.</div>
+</div>
+
+<div class="card">
+<h2>🛡️ מה הסקירה תפסה (בונוס)</h2>
+<p>CodeRabbit מצא 2 באגים אמיתיים שתוקנו לפני המיזוג: re-entry שעקף delay (תוקן — דחיית grant) ו-listeners חסרים ל-Enter בשדות החדשים. 0 דחיות — כל ההערות התקבלו.</p>
+</div>
+
+<footer>Station VIII showcase · Issue #145 · PR #156 · נוצר 2026-09-13 · הבא בתור: replay ליל ה-shadow (#146) דרך המנוע הרשמי</footer>
+
+</div>
+</body>
+</html>

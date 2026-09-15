@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Showcase #152 — Tick-file audit: keep today, quarantine, repair</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a2230; --line:#2a3a52; --txt:#e8eef6; --mut:#9fb0c7;
+          --grn:#3fd68c; --ylw:#f5c542; --red:#ff6b6b; --acc:#5aa9ff; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--txt); font-family:"Segoe UI",Arial,sans-serif;
+         margin:0; padding:32px 16px; line-height:1.7; }
+  .wrap { max-width:900px; margin:auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:24px 28px; margin-bottom:20px; }
+  h1 { font-size:1.6em; margin:0 0 4px; }
+  h2 { font-size:1.2em; color:var(--acc); margin:0 0 12px; }
+  .badge { display:inline-block; padding:2px 12px; border-radius:20px; font-size:.85em; font-weight:bold; }
+  .merged { background:#123f2a; color:var(--grn); border:1px solid var(--grn); }
+  .meta { color:var(--mut); font-size:.92em; }
+  a { color:var(--acc); }
+  table { width:100%; border-collapse:collapse; font-size:.9em; margin-top:8px; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:right; }
+  th { background:#222e44; }
+  .flow { display:flex; gap:12px; align-items:stretch; margin:12px 0; flex-wrap:wrap; }
+  .box { flex:1; min-width:220px; background:#101824; border:1px solid var(--line);
+         border-radius:10px; padding:14px; }
+  .box b { display:block; margin-bottom:6px; }
+  .arrow { align-self:center; font-size:1.6em; color:var(--acc); }
+  .ok { color:var(--grn); } .warn { color:var(--ylw); } .bad { color:var(--red); }
+  ol li { margin-bottom:8px; }
+  code { background:#0a0f16; padding:1px 6px; border-radius:6px; font-size:.88em; }
+  .foot { color:var(--mut); font-size:.85em; text-align:center; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <h1>🎨 Showcase — Issue #152: Tick-file audit</h1>
+    <div><span class="badge merged">MERGED · PR #154</span></div>
+    <p class="meta">
+      Issue: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/152">#152 — Tick-file audit: keep today, quarantine fragments, repair 09-11</a><br>
+      PR: <a href="https://github.com/AI-Degen-69/crypto-spread/pull/154">#154 — chore(152): tick-file audit keep-today quarantine-repair</a><br>
+      Commit: <code>7f73822</code> · ענף <code>chore/152-tick-file-audit</code> (נמחק אחרי המיזוג)
+    </p>
+    <p><b>תקציר:</b> תיקיית ה-ticks הכילה 6 קבצים מעורבים — ימים מלאים, פרגמנטים וקובץ FAIL אחד —
+    שחסמו בקטסטים אמינים. בסיום: סט נשמר אחד (היום בלבד, 1,730 חלונות, replay ירוק), 5 קבצים בהסגר הפיך,
+    אפס מחיקות, אפס עריכות של מקורות.</p>
+  </div>
+
+  <div class="card">
+    <h2>📦 לפני / אחרי</h2>
+    <div class="flow">
+      <div class="box">
+        <b>⬅ לפני</b>
+        <span class="bad">●</span> 6 קבצים מעורבים ב-<code>run/ticks/</code><br>
+        <span class="bad">●</span> 09-11 ב-FAIL (12 שורות פגומות)<br>
+        <span class="bad">●</span> חלונות Dashboard מ-09-01 (2,940, מיושן)<br>
+        <span class="warn">●</span> בקטסטים על תערובת לא-מוגדרת
+      </div>
+      <div class="arrow">⟵</div>
+      <div class="box">
+        <b>אחרי ➡</b>
+        <span class="ok">●</span> <code>run/ticks/</code>: ‏09-12 בלבד (WARN, 0 פגומים)<br>
+        <span class="ok">●</span> 5 קבצים ב-<code>quarantine/</code> (הפיך)<br>
+        <span class="ok">●</span> חלונות נבנו מהיום: 1,730 (snapshot)<br>
+        <span class="ok">●</span> גיבוי הנגזרות ב-<code>backup_pre152/</code>
+      </div>
+    </div>
+    <table>
+      <tr><th>קובץ בהסגר</th><th>bytes</th><th>שורות</th><th>חלונות</th></tr>
+      <tr><td>08-31 (רזרבה)</td><td>579,547,109</td><td>198,444</td><td>1,650</td></tr>
+      <tr><td>09-07</td><td>36,674,255</td><td>11,540</td><td>135</td></tr>
+      <tr><td>09-08</td><td>177,456,514</td><td>48,766</td><td>515</td></tr>
+      <tr><td>09-09</td><td>19,226,297</td><td>5,880</td><td>55</td></tr>
+      <tr><td>09-11 (כמו שהוא)</td><td>271,262,468</td><td>90,732 + 12 פגומות</td><td>598</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>💡 הסבר פשוט (ELI5 למבוגרים)</h2>
+    <p>הבוט אוסף כל שנייה "צילום" של ספרי ההזמנות — אלה קבצי ה-ticks. עם הזמן הצטברו שם ימים שלמים
+    ליד קטעים של שעה, ואחד הקבצים הכיל 12 שורות שבורות (שברי-כתיבה משני כותבים במקביל — אותה תקלה מ-#151).
+    בקטסט שרץ על תערובת כזו משקר בשקט. אז עשינו סדר בארון: מה שנשאר על המדף זה רק היום הנקי,
+    השאר עבר לקופסת "הסגר" עם תווית — שום דבר לא נזרק, ושום מקור לא נערך. כעת כל בקטסט ו-#132 (הרענון האוטומטי)
+    בונים על נתונים ידועים ומדידים.</p>
+  </div>
+
+  <div class="card">
+    <h2>🕹️ בדיקה ידנית ב-2 צעדים</h2>
+    <ol>
+      <li><b>פתחו את הדשבורד</b> (<code>server/osc_dash.py</code> על <code>:8802</code>, עמוד ה-oscillation) —
+      וודאו בעיניים שמונה החלונות מסתכם ב-<b>1,730</b> מהיום בלבד, לא 2,940 מיושנים.</li>
+      <li><b>פתחו את תיקיית <code>run/ticks/</code> בסייר הקבצים</b> — וודאו שהיא מכילה רק את
+      <code>ticks_2026-09-12.jsonl</code> (+ manifest), ותת-תיקיית <code>quarantine/</code> עם 5 הקבצים המוסגרים.</li>
+    </ol>
+  </div>
+
+  <div class="foot">נוצר ב-Station VIII · crypto-spread · 2026-09-13</div>
+</div>
+</body>
+</html>

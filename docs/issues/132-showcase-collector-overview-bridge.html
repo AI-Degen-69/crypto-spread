@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Showcase #132 — גשר Collector → Overview</title>
+<style>
+:root{--bg:#0f141b;--panel:#182030;--panel2:#1f2a3f;--line:#2b3a52;--tx:#e8eef6;--dim:#93a1b5;--up:#3fd68c;--gold:#e8b23f;--down:#ef6a6a;--link:#7cc4ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.7 system-ui,"Segoe UI",Arial}
+.wrap{max-width:960px;margin:0 auto;padding:32px 20px 64px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:16px 0}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:19px;margin:26px 0 8px;color:var(--gold)}
+.sub{color:var(--dim);font-size:14px}a{color:var(--link)}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.fact{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:14px}
+.fact b{display:block;font-size:12px;color:var(--dim);font-weight:600}
+.pill{display:inline-block;background:var(--up);color:#06281a;font-weight:700;border-radius:20px;padding:2px 14px;font-size:14px}
+.flow{display:flex;gap:0;align-items:stretch;margin:12px 0;flex-wrap:wrap}
+.box{flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:14px}
+.box h3{margin:0 0 6px;font-size:15px}
+.arrow{align-self:center;padding:0 10px;font-size:22px;color:var(--gold)}
+.bad{border-top:3px solid var(--down)}.good{border-top:3px solid var(--up)}
+code{background:#0b1017;border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:13px;direction:ltr;display:inline-block}
+ol.steps{padding-right:20px}ol.steps li{margin:10px 0}
+.tag{font-size:12px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="pill">MERGED ✓</span>
+  <h1>גשר Collector ←→ Overview ‏(#132)</h1>
+  <div class="sub">Issue <a href="https://github.com/AI-Degen-69/crypto-spread/issues/132">#132</a> · PR <a href="https://github.com/AI-Degen-69/crypto-spread/pull/157">#157</a> · commit <code>50f0b5b</code></div>
+
+  <div class="card facts">
+    <div class="fact"><b>הבעיה במשפט</b>ה-collector אסף ticks אבל מחק חלונות סגורים מהזיכרון — הדשבורד נתקע על 2,940 חלונות סטטיים.</div>
+    <div class="fact"><b>הפתרון במשפט</b>סגירת חלון כותבת רשומה + מרעננת summary; מודול shared מסנכרן collector ו-rebuild; כפתור rebuild בדשבורד.</div>
+    <div class="fact"><b>קבצים</b><code>strategy/windows.py</code> חדש · <code>collect_ticks.py</code> · <code>rebuild_windows.py</code> · <code>osc_dash.py</code> · 17 טסטים חדשים</div>
+    <div class="fact"><b>בטיחות</b>מתמטיקת סיווג ללא שינוי · I/O best-effort · rebuild נדחה (409) בזמן polling · 528 טסטים ירוקים</div>
+  </div>
+
+  <h2>⬅️ לפני / אחרי ➡️</h2>
+  <div class="card">
+    <div class="flow">
+      <div class="box bad"><h3>🔴 לפני</h3>ticks זורמים ל-<code>run/ticks/</code> ✓<br>חלון נסגר → נמחק מהזיכרון ✗<br>overview: <b>2,940 קפוא</b> · אין provenance · rebuild ידני בטרמינל</div>
+      <div class="arrow">⟵</div>
+      <div class="box good"><h3>🟢 אחרי</h3>חלון נסגר → רשומה + summary מתרענן ✓<br>באדג' provenance: מקור · freshness · ספירה ✓<br>כפתור <b>Rebuild Stats</b> בדשבורד ✓</div>
+    </div>
+    <div class="tag">מקור אמת יחיד: <code>strategy/windows.py</code> (classify / finalize / summary / atomic-write) — collector ו-rebuild מייצרים output זהה-בייט.</div>
+  </div>
+
+  <h2>💡 הסבר פשוט (ELI5 למבוגרים)</h2>
+  <div class="card">
+    דמיינו קופה שרושמת כל עסקה (ticks) אבל בסוף כל שעה זורקת את הסיכום לפח — הקופה הראשית מציגה תמיד את אותו מספר ישן.
+    התיקון: בסגירת כל חלון 5/15 דקות נכתב סיכום שורה + טבלת סיכום מתרעננת, והמסך הראשי מראה מאיפה הנתונים, ממתי הם, וכמה חלונות נסגרו —
+    עם כפתור בנייה-מחדש בלחיצה אחת. אם האיסוף החי רץ, הבנייה-מחדש מסרבת בנימוס (409) כדי לא לדרוס רשומה טרייה.
+  </div>
+
+  <h2>🕹️ בדיקה ידנית ב-2 צעדים (לראות בעיניים)</h2>
+  <div class="card">
+    <ol class="steps">
+      <li><b>פתחו את הדשבורד</b> ב-<code>http://127.0.0.1:8802</code> → בטאב Live חפשו את שורת ה-provenance מתחת ל-“Window Capture Targets” (קובץ מקור · לפני X דקות · N חלונות סגורים) ואת כפתור <b>Rebuild Stats</b> ב-header. לחצו עליו וראו שהבאדג' מתעדכן — לחיצה כפולה לא מריצה פעמיים.</li>
+      <li><b>הפעילו polling</b> ב-“Start Polling (1s)” (שימו לב ל-tooltip שמסביר לאן הולכים הנתונים), המתינו לסגירת חלון 5 דקות, וראו שהמונה הכולל עולה <b>בלי</b> rebuild ידני. עצרו את ה-polling לפני rebuild יזום — אחרת תקבלו 409 מנומס.</li>
+    </ol>
+  </div>
+  <div class="tag">נוצר בתחנה VIII · ענף <code>feat/132-collector-overview-bridge</code> (נמחק אחרי המיזוג) · סקירת CodeRabbit: 3 הערות, כולן ACCEPT ותוקנו.</div>
+</div>
+</body>
+</html>

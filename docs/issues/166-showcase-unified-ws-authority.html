@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue #166 | Unified WS Tick Authority</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #55d6c2;
+      --amber: #f4b860;
+      --red: #f17c78;
+      --green: #79d99b;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #183441 0, transparent 38%),
+                  radial-gradient(circle at 90% 15%, #2a2534 0, transparent 32%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(2rem, 4.5vw, 3.2rem); margin: 10px 0 16px; line-height: 1.2; }
+    h2 { font-size: 1.5rem; margin: 0 0 14px; }
+    h3 { font-size: 1.05rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(121,217,155,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(121,217,155,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(85,214,194,.07); }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(241,124,120,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(121,217,155,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+    .flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 18px; }
+    .step { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(121,217,155,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected b { color: var(--green); }
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .78rem; font-weight: 700; }
+    .badge-green { background: rgba(121,217,155,.15); color: var(--green); border: 1px solid rgba(121,217,155,.35); }
+    .badge-red { background: rgba(241,124,120,.12); color: var(--red); border: 1px solid rgba(241,124,120,.32); }
+    .badge-cyan { background: rgba(85,214,194,.12); color: var(--cyan); border: 1px solid rgba(85,214,194,.3); }
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid, .flow { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <span class="status-merged">מוזג לענף הראשי (master)</span>
+      <h1>Issue #166: טיק מאוחד — ה-WebSocket הופך למקור האמת</h1>
+      <p>הבוט והקולקטור כתבו לאותם שדות ספר בשני קצבים — ה-REST דרס כל שנייה את הספר הטרי של ה-WebSocket והחזיר את ה-mid אחורה בזמן. עכשיו יש כביש אחד: ה-WS סמכותי כשהוא טרי, ה-REST רק מתקן.</p>
+      <div class="facts">
+        <div class="fact"><b>Issue מקושר</b><a href="https://github.com/AI-Degen-69/crypto-spread/issues/166">#166 · סגור ומוזג</a></div>
+        <div class="fact"><b>Pull Request</b><a href="https://github.com/AI-Degen-69/crypto-spread/pull/169">#169 · מוזג (Squash) 🟢</a></div>
+      </div>
+    </section>
+
+    <!-- ELI5 Plain Hebrew Metaphor -->
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: מה השתנה?</h2>
+      <p>
+        דמיינו דשבורד של רכב שמתעדכן בלי הפסקה מהחיישן המהיר (ה-WebSocket), אבל פעם בשנייה מישהו מצלם אותו בטלפון ישן (REST) ומדביק את התמונה הישנה על הדשבורד.
+        המחוג קופץ אחורה — והנהג מקבל החלטה על מספר שכבר לא נכון.
+        התיקון: <b>החיישן המהיר הוא מקור האמת</b> — התמונה הישנה רק בודקת אם החיישן נרדם, ואז היא מחליפה אותו עד שהוא חוזר.
+        על הדרך, הבוט מסיע עכשיו על אותו כביש מוקשח שהקולקטור נוסע עליו, ושומע גם כל הדפסה (trade) בזמן אמת — כך שגם הבוט, גם הקולקטור וגם הבקטסט קוראים מאותו טיק.
+      </p>
+    </section>
+
+    <!-- Before vs After -->
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid">
+        <article class="compare before">
+          <h3>🔴 לפני השינוי:</h3>
+          <ul>
+            <li>WS ו-REST כתבו לאותם 6 שדות (best/mid/spread) בלי נעילה — <span class="badge badge-red">mid חוזר אחורה 1Hz</span></li>
+            <li>הבוט רץ על <code class="ltr">CLOBMarketWSClient.run()</code> הישן — בלי PONG watchdog ובלי backoff מוקשח</li>
+            <li>אין feed של הדפסות בבוט — <code class="ltr">on_trade</code> לא מחובר, זיהוי פילים עדיין דרך REST</li>
+            <li>ה-REST יורה בכל טיק על כל ספר — ~450ms מיותר כשה-WS כבר טרי</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי השינוי:</h3>
+          <ul>
+            <li>טיק אחד מאוחד: WS סמכותי ל-best/mid/spread + <b>full-depth</b> (כל הסולם), REST רק <span class="badge badge-green">reconcile כש-WS מיושן</span></li>
+            <li><code class="ltr">run_direct()</code> מוקשח — PING 10s, PONG watchdog ×3, backoff אקספוננציאלי + jitter</li>
+            <li>הדפסות WS ממלאות paper תוך-שנייה (tolerance 0.002) וסוגרות זוג אטומית</li>
+            <li>כש-WS טרי, ה-REST מדלג על <code class="ltr">full_book</code> — החיסכון חוזר ללטנסי של הסבב</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- 3-Step Visual Flow Cards -->
+    <section class="panel">
+      <h2>⚡ זרימת התהליך החדש</h2>
+      <div class="flow">
+        <div class="step">
+          <div class="num">01 · קלט / טריגר</div>
+          <h3>ספר והדפסות מ-WSS בזמן אמת</h3>
+          <p>הבורסה דוחפת <code class="ltr">book / price_change / last_trade_price</code> דרך <code class="ltr">wss://ws-subscriptions-clob.polymarket.com/ws/market</code>. ה-bridge מפיץ <code class="ltr">on_book_update</code> + <code class="ltr">on_trade</code> לכל החלונות.</p>
+        </div>
+        <div class="step">
+          <div class="num">02 · עיבוד ולוגיקה</div>
+          <h3>WS סמכותי, REST מאמת</h3>
+          <p><code class="ltr">on_book_update</code> כותב depth מלא תחת <code class="ltr">_book_reconcile_lock</code>. ב-<code class="ltr">_update_market_strategy</code> ה-REST נכתב רק אם ה-leg לא טרי או מנותק — אחרת הוא מתעלם.</p>
+        </div>
+        <div class="step">
+          <div class="num">03 · תוצאה מאומתת</div>
+          <h3>החלטה מאותו טיק בכל מקום</h3>
+          <p>queue-ahead וטלמטריה מעדיפים סולם WS; הדפסת WS ממלאת paper מיד וסוגרת זוג אטומית; בוט = קולקטור = בקטסט — אותה סמנטיקה.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Architecture Diagram: WS vs REST and the Bot -->
+    <section class="panel">
+      <h2>🗺️ תרשים ארכיטקטורה — WS מול REST והחיבור לבוט</h2>
+      <p>מי מדבר עם מי, באיזה קצב, ובאיזה כיוון זורם המידע. ה-WS חי ודוחף, ה-REST שואל פעם בשנייה — והבוט מחליט לפי כלל אחד ברור.</p>
+      <style>
+        .arch-wrap { background: #0a141c; border: 1px solid #25404e; border-radius: 16px; padding: 18px; overflow: auto; }
+        .arch { width: 100%; min-width: 760px; }
+        .arch svg { width: 100%; height: auto; display: block; }
+        .arch-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: .88rem; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+        .arch-note { margin-top: 10px; color: var(--muted); font-size: .88rem; }
+        .arch-note b { color: var(--ink); }
+        .arch-toggle { display: flex; gap: 8px; margin: 14px 0 10px; }
+        .arch-btn {
+          border: 1px solid #3a5a66; background: #122631; color: var(--ink);
+          border-radius: 999px; padding: 6px 14px; font-weight: 700; font-size: .85rem; cursor: pointer;
+        }
+        .arch-btn.active { background: rgba(85,214,194,.15); border-color: rgba(85,214,194,.45); color: var(--cyan); }
+        .arch-caption { color: var(--muted); font-size: .9rem; margin-top: 6px; }
+      </style>
+      <div class="arch-toggle" role="tablist" aria-label="WS vs REST diagram mode">
+        <button class="arch-btn active" data-arch="now" role="tab" aria-selected="true">אחרי — טיק מאוחד</button>
+        <button class="arch-btn" data-arch="before" role="tab" aria-selected="false">לפני — דריסה</button>
+      </div>
+      <div class="arch-wrap" id="archWrap">
+        <div class="arch" id="archNow" aria-label="Unified WS tick — authority diagram">
+          <!-- AFTER: unified authority -->
+          <svg viewBox="0 0 980 560" role="img" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrowCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 9 5 L 0 10 z" fill="#55d6c2" /></marker>
+              <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 9 5 L 0 10 z" fill="#f4b860" /></marker>
+              <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 9 5 L 0 10 z" fill="#f17c78" /></marker>
+              <marker id="arrowMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 9 5 L 0 10 z" fill="#9aabb8" /></marker>
+              <linearGradient id="gradBot" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#143441"/><stop offset="100%" stop-color="#1b2f3a"/></linearGradient>
+              <linearGradient id="gradBridge" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#163a46"/><stop offset="100%" stop-color="#1a2e38"/></linearGradient>
+            </defs>
+            <!-- Title -->
+            <text x="490" y="28" text-anchor="middle" font-size="13" font-weight="800" fill="#9aabb8" letter-spacing="0.06em">POLYMARKET VENUE  —  BOT TICK AUTHORITY (AFTER)</text>
+            <!-- Venue box -->
+            <rect x="22" y="48" width="936" height="96" rx="14" fill="none" stroke="#2a4a58" stroke-dasharray="8 6" />
+            <text x="42" y="70" font-size="11" font-weight="800" fill="#7fb7c6" letter-spacing="0.08em">VENUE — CLOB + Gamma</text>
+            <!-- CLOB WSS -->
+            <rect x="44" y="82" width="280" height="48" rx="12" fill="#0f2a33" stroke="#2d6a78" />
+            <text x="184" y="100" text-anchor="middle" font-size="12" font-weight="800" fill="#55d6c2">CLOB Market WSS</text>
+            <text x="184" y="118" text-anchor="middle" font-size="10.5" fill="#9aabb8">wss://ws-subscriptions-clob…/ws/market</text>
+            <!-- REST APIs -->
+            <rect x="360" y="82" width="260" height="48" rx="12" fill="#2a2416" stroke="#7a5a28" />
+            <text x="490" y="100" text-anchor="middle" font-size="12" font-weight="800" fill="#f4b860">REST APIs (poll 1Hz)</text>
+            <text x="490" y="118" text-anchor="middle" font-size="10.5" fill="#c9b896">Gamma + CLOB /book + /trades</text>
+            <!-- Spot/RTDS hint -->
+            <rect x="656" y="82" width="280" height="48" rx="12" fill="#1a2530" stroke="#2a4a58" />
+            <text x="796" y="100" text-anchor="middle" font-size="12" font-weight="800" fill="#9aabb8">RTDS / Spot (telemetry)</text>
+            <text x="796" y="118" text-anchor="middle" font-size="10.5" fill="#9aabb8">לא חלק מהחלטת ה-tick</text>
+            <!-- Bridge -->
+            <rect x="260" y="178" width="460" height="72" rx="14" fill="url(#gradBridge)" stroke="#3a7a82" />
+            <text x="490" y="202" text-anchor="middle" font-size="13" font-weight="800" fill="#55d6c2">UnifiedStreamBridge  +  run_direct()</text>
+            <text x="490" y="221" text-anchor="middle" font-size="10.5" fill="#9aabb8">PING 10s · PONG watchdog ×3 · backoff+jitter · tick_size_change</text>
+            <text x="490" y="238" text-anchor="middle" font-size="10.5" fill="#79d99b">on_book_update  →  on_trade (last_trade_price)</text>
+            <!-- Bot core -->
+            <rect x="220" y="286" width="540" height="170" rx="16" fill="url(#gradBot)" stroke="#4ab8a6" stroke-width="1.4" />
+            <text x="490" y="310" text-anchor="middle" font-size="13" font-weight="800" fill="#eaf1f6">LiveTraderEngine  —  The Bot</text>
+            <text x="490" y="328" text-anchor="middle" font-size="10.5" fill="#9aabb8">MarketLiveState per window  ·  ws_bids/asks + ws_book_ts  ·  _book_reconcile_lock</text>
+            <!-- Decision diamond-ish -->
+            <rect x="360" y="348" width="260" height="44" rx="10" fill="#0e2a22" stroke="#3ea890" />
+            <text x="490" y="366" text-anchor="middle" font-size="11" font-weight="800" fill="#79d99b">החלטת סמכות: WS טרי?  →  WS  :  REST</text>
+            <text x="490" y="383" text-anchor="middle" font-size="10" fill="#9aabb8">fresh = age ≤ 2.5s && connected  ·  REST מחליף גם depth</text>
+            <!-- Bot sub-lanes -->
+            <rect x="244" y="406" width="156" height="38" rx="10" fill="#112a2e" stroke="#2d6a78" />
+            <text x="322" y="421" text-anchor="middle" font-size="11" font-weight="700" fill="#55d6c2">Fills &amp; Pair</text>
+            <text x="322" y="436" text-anchor="middle" font-size="10" fill="#9aabb8">_try_ws_tape_fill → pair</text>
+            <rect x="412" y="406" width="156" height="38" rx="10" fill="#112a2e" stroke="#2d6a78" />
+            <text x="490" y="421" text-anchor="middle" font-size="11" font-weight="700" fill="#55d6c2">Queue &amp; Telemetry</text>
+            <text x="490" y="436" text-anchor="middle" font-size="10" fill="#9aabb8">prefers WS ladder</text>
+            <rect x="580" y="406" width="156" height="38" rx="10" fill="#112a2e" stroke="#2d6a78" />
+            <text x="658" y="421" text-anchor="middle" font-size="11" font-weight="700" fill="#55d6c2">Orders &amp; Risk</text>
+            <text x="658" y="436" text-anchor="middle" font-size="10" fill="#9aabb8">place / cancel / stop</text>
+            <!-- Consumers -->
+            <rect x="44" y="486" width="280" height="52" rx="12" fill="#122631" stroke="#2d6a78" />
+            <text x="184" y="506" text-anchor="middle" font-size="11" font-weight="800" fill="#eaf1f6">Collector</text>
+            <text x="184" y="522" text-anchor="middle" font-size="10.5" fill="#9aabb8">writes ticks/*.jsonl (same tick)</text>
+            <rect x="360" y="486" width="260" height="52" rx="12" fill="#122631" stroke="#2d6a78" />
+            <text x="490" y="506" text-anchor="middle" font-size="11" font-weight="800" fill="#eaf1f6">Dashboard :8802</text>
+            <text x="490" y="522" text-anchor="middle" font-size="10.5" fill="#9aabb8">live mid/spread/queue</text>
+            <rect x="656" y="486" width="280" height="52" rx="12" fill="#122631" stroke="#2d6a78" />
+            <text x="796" y="506" text-anchor="middle" font-size="11" font-weight="800" fill="#eaf1f6">Backtest</text>
+            <text x="796" y="522" text-anchor="middle" font-size="10.5" fill="#9aabb8">replays same ticks</text>
+            <!-- Arrows: venue -> bridge (WS push) -->
+            <path d="M 184 130 L 184 162 L 420 178" fill="none" stroke="#55d6c2" stroke-width="2.2" marker-end="url(#arrowCyan)" />
+            <text x="232" y="162" font-size="10" font-weight="700" fill="#55d6c2">PUSH (event)</text>
+            <!-- Arrows: venue -> bot (REST poll) -->
+            <path d="M 490 130 L 490 178" fill="none" stroke="#f4b860" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrowAmber)" />
+            <text x="500" y="158" font-size="10" font-weight="700" fill="#f4b860">POLL 1Hz</text>
+            <!-- Bridge -> Bot (authoritative + tape) -->
+            <path d="M 490 250 L 490 286" fill="none" stroke="#55d6c2" stroke-width="2.6" marker-end="url(#arrowCyan)" />
+            <text x="502" y="272" font-size="10" font-weight="800" fill="#55d6c2">BOOK+TAPE · authoritative</text>
+            <!-- REST -> Bot (reconcile only) -->
+            <path d="M 620 148 L 700 220 L 700 286 L 620 312" fill="none" stroke="#f4b860" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrowAmber)" />
+            <text x="712" y="230" font-size="10" font-weight="700" fill="#f4b860">reconcile only</text>
+            <text x="712" y="244" font-size="9.5" fill="#c9b896">if stale / disconnected</text>
+            <!-- Bot -> consumers -->
+            <path d="M 300 456 L 184 486" fill="none" stroke="#79d99b" stroke-width="1.7" marker-end="url(#arrowMuted)" />
+            <path d="M 490 456 L 490 486" fill="none" stroke="#79d99b" stroke-width="1.7" marker-end="url(#arrowMuted)" />
+            <path d="M 680 456 L 796 486" fill="none" stroke="#79d99b" stroke-width="1.7" marker-end="url(#arrowMuted)" />
+            <!-- Skips REST books when fresh -->
+            <rect x="612" y="156" width="132" height="22" rx="8" fill="#1a2e22" stroke="#3a6a4a" />
+            <text x="678" y="172" text-anchor="middle" font-size="9.5" font-weight="700" fill="#79d99b">skips REST books</text>
+          </svg>
+        </div>
+        <div class="arch" id="archBefore" hidden aria-label="Before — overwrite bug diagram">
+          <!-- BEFORE: overwrite bug -->
+          <svg viewBox="0 0 980 560" role="img" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrowCyan2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 9 5 L 0 10 z" fill="#55d6c2" /></marker>
+              <marker id="arrowRed2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 9 5 L 0 10 z" fill="#f17c78" /></marker>
+            </defs>
+            <text x="490" y="28" text-anchor="middle" font-size="13" font-weight="800" fill="#9aabb8" letter-spacing="0.06em">BEFORE  —  RACE &amp; REGRESSION (BUG)</text>
+            <rect x="22" y="48" width="936" height="96" rx="14" fill="none" stroke="#5a3a3a" stroke-dasharray="8 6" />
+            <text x="42" y="70" font-size="11" font-weight="800" fill="#f17c78" letter-spacing="0.08em">VENUE — CLOB + Gamma</text>
+            <rect x="44" y="82" width="280" height="48" rx="12" fill="#2a1e1e" stroke="#7a3a3a" />
+            <text x="184" y="100" text-anchor="middle" font-size="12" font-weight="800" fill="#f17c78">WSS (fragile run)</text>
+            <text x="184" y="118" text-anchor="middle" font-size="10.5" fill="#c9a0a0">best only · drifts</text>
+            <rect x="360" y="82" width="260" height="48" rx="12" fill="#2a2416" stroke="#7a5a28" />
+            <text x="490" y="100" text-anchor="middle" font-size="12" font-weight="800" fill="#f4b860">REST 1Hz (authoritative)</text>
+            <text x="490" y="118" text-anchor="middle" font-size="10.5" fill="#c9b896">overwrites 6 fields</text>
+            <rect x="656" y="82" width="280" height="48" rx="12" fill="#1a2530" stroke="#2a4a58" />
+            <text x="796" y="100" text-anchor="middle" font-size="12" font-weight="800" fill="#9aabb8">No trade feed</text>
+            <text x="796" y="118" text-anchor="middle" font-size="10.5" fill="#9aabb8">on_trade not wired</text>
+            <!-- Bot -->
+            <rect x="220" y="178" width="540" height="150" rx="16" fill="#2a1e1e" stroke="#7a3a3a" stroke-width="1.4" />
+            <text x="490" y="202" text-anchor="middle" font-size="13" font-weight="800" fill="#f9d0d0">LiveTraderEngine — conflicted tick</text>
+            <text x="490" y="220" text-anchor="middle" font-size="10.5" fill="#c9a0a0">WS + REST write to same best/mid/spread — no lock</text>
+            <!-- Collision -->
+            <rect x="340" y="238" width="300" height="54" rx="12" fill="#3a1e1e" stroke="#f17c78" />
+            <text x="490" y="258" text-anchor="middle" font-size="12" font-weight="800" fill="#f17c78">COLLISION — mid regresses 1Hz</text>
+            <text x="490" y="276" text-anchor="middle" font-size="10.5" fill="#e8b0b0">WS fresh → REST stale overwrites → decision on old price</text>
+            <!-- Outcomes -->
+            <rect x="44" y="360" width="290" height="64" rx="12" fill="#1a2530" stroke="#3a4a5a" />
+            <text x="189" y="382" text-anchor="middle" font-size="11" font-weight="800" fill="#f17c78">Queue from REST (stale)</text>
+            <text x="189" y="400" text-anchor="middle" font-size="10.5" fill="#9aabb8">rest_up_queue off by levels</text>
+            <rect x="360" y="360" width="260" height="64" rx="12" fill="#1a2530" stroke="#3a4a5a" />
+            <text x="490" y="382" text-anchor="middle" font-size="11" font-weight="800" fill="#f17c78">No intra-second fills</text>
+            <text x="490" y="400" text-anchor="middle" font-size="10.5" fill="#9aabb8">paper fills only on next tick</text>
+            <rect x="646" y="360" width="290" height="64" rx="12" fill="#1a2530" stroke="#3a4a5a" />
+            <text x="791" y="382" text-anchor="middle" font-size="11" font-weight="800" fill="#f17c78">Bot ≠ Collector ≠ Backtest</text>
+            <text x="791" y="400" text-anchor="middle" font-size="10.5" fill="#9aabb8">three different tick meanings</text>
+            <!-- Arrows into collision -->
+            <path d="M 184 130 L 184 178 L 360 250" fill="none" stroke="#55d6c2" stroke-width="2" marker-end="url(#arrowCyan2)" />
+            <path d="M 490 130 L 490 238" fill="none" stroke="#f17c78" stroke-width="2.4" marker-end="url(#arrowRed2)" />
+            <text x="464" y="172" font-size="10" font-weight="700" fill="#f17c78">blind overwrite</text>
+            <!-- Fix callout -->
+            <rect x="220" y="452" width="540" height="48" rx="12" fill="#0e2a22" stroke="#3ea890" />
+            <text x="490" y="472" text-anchor="middle" font-size="11" font-weight="800" fill="#79d99b">FIX → single authority (WS), REST = reconcile + depth replace, atomic locks</text>
+            <text x="490" y="488" text-anchor="middle" font-size="10" fill="#9aabb8">This is what the AFTER diagram implements</text>
+          </svg>
+        </div>
+      </div>
+      <div class="arch-legend" aria-hidden="true">
+        <span class="legend-item"><span class="legend-dot" style="background:#55d6c2"></span> WS push (event-driven)</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#f4b860"></span> REST poll (1Hz, sampled)</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#79d99b"></span> authoritative / verified</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#f17c78"></span> overwrite / stale</span>
+      </div>
+      <p class="arch-caption" id="archCaption">מצב: <b>אחרי</b> — ה-WebSocket דוחף ספר מלא והדפסות דרך <code class="ltr">UnifiedStreamBridge.run_direct()</code>; הבוט כותב רק מ-WS, וה-REST מחליף רק leg מיושן (גיל &gt; 2.5s או מנותק) וגם אז מחליף את כל הסולם. הקולקטור, הדשבורד והבקטסט צורכים את אותו טיק.</p>
+      <div class="arch-note">
+        <b>איך לקרוא את החיצים:</b> חץ רציף = דחיפה רציפה (WS), חץ מקווקו = דגימה (REST). בעיגול האמצעי מתקבלת ההחלטה per-leg: אם ה-leg טרי — WS נשאר; אם לא — REST נכנס ומחליף גם את עומק הספר כדי שה-queue לא יישאר מיושן.
+      </div>
+      <script>
+        (function() {
+          var btns = document.querySelectorAll("[data-arch]");
+          var now = document.getElementById("archNow");
+          var before = document.getElementById("archBefore");
+          var cap = document.getElementById("archCaption");
+          var captions = {
+            now: "מצב: <b>אחרי</b> — ה-WebSocket דוחף ספר מלא והדפסות דרך <code class=\"ltr\">UnifiedStreamBridge.run_direct()</code>; הבוט כותב רק מ-WS, וה-REST מחליף רק leg מיושן (גיל &gt; 2.5s או מנותק) וגם אז מחליף את כל הסולם. הקולקטור, הדשבורד והבקטסט צורכים את אותו טיק.",
+            before: "מצב: <b>לפני</b> — שני כותבים לאותם 6 שדות בלי נעילה; ה-REST הדורס החזיר mid אחורה פעם בשנייה, הסולם ל-queue היה מיושן, ולא היה feed הדפסות — אותה החלטה התקבלה על מחירים שונים בבוט, בקולקטור ובבקטסט."
+          };
+          btns.forEach(function(b) {
+            b.addEventListener("click", function() {
+              var mode = b.getAttribute("data-arch");
+              btns.forEach(function(x){ x.classList.remove("active"); x.setAttribute("aria-selected","false"); });
+              b.classList.add("active"); b.setAttribute("aria-selected","true");
+              if (mode === "before") { now.hidden = true; before.hidden = false; }
+              else { before.hidden = true; now.hidden = false; }
+              cap.innerHTML = captions[mode];
+            });
+          });
+        })();
+      </script>
+    </section>
+
+    <!-- Review Fixes Spotlight -->
+    <section class="panel">
+      <h2>🔍 מה CodeRabbit תיקן לפני המיזוג</h2>
+      <p>סקירת CodeRabbit מצאה 5 חולשות אמיתיות — כולן תוקנו בקומיט אחד לפני המיזוג:</p>
+      <div class="flow">
+        <div class="step">
+          <div class="num">01 · בטיחות</div>
+          <h3>חריגות צרות + guards למילוי</h3>
+          <p><code class="ltr">except Exception</code> הוצר ל-<code class="ltr">TypeError/ValueError/OverflowError</code>; מילוי tape דורש <code class="ltr">RESTING + order_id</code> תחת <code class="ltr">_engine_lock</code>.</p>
+        </div>
+        <div class="step">
+          <div class="num">02 · אטומיות</div>
+          <h3>זוג נסגר פעם אחת בלבד</h3>
+          <p>מיזוג הטיקר ו-<code class="ltr">_complete_ws_pair</code> דורשים recheck של <code class="ltr">pair_captured</code> תחת lock יחיד — אין PnL כפול.</p>
+        </div>
+        <div class="step">
+          <div class="num">03 · סנכרון</div>
+          <h3>ריקונסילציה ו-rollover נעולים</h3>
+          <p>freshness נבדק מחדש תחת <code class="ltr">_book_reconcile_lock</code>; tokens נבדקים שוב ב-<code class="ltr">on_book_update</code>; ניקוי WS ב-rollover תחת lock.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Hands-on Verification with 1-Click Copy -->
+    <section class="panel">
+      <h2>🕹️ מדריך בדיקה ידנית (Touch &amp; See)</h2>
+      <p>בדיקה מהירה להוכחת השינוי בעיניים — בלי להריץ סוויטות טסטים:</p>
+
+      <h3>1. לפתוח את הדשבורד ולראות שהטיק חי</h3>
+      <p>הרצת הדשבורד ופתיחת מסך ה-live:</p>
+      <div class="code-row">
+        <pre class="code">python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</pre>
+        <button class="copy-btn" data-copy="python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802">העתק</button>
+      </div>
+      <div class="code-row">
+        <pre class="code">http://127.0.0.1:8802/</pre>
+        <button class="copy-btn" data-copy="http://127.0.0.1:8802/">העתק</button>
+      </div>
+      <div class="expected">
+        <b>מה אמורים לראות:</b> הדשבורד נטען; כשמנוע חי רץ, שדה ה-mid/spread מתעדכן ברציפות (WS) ולא קופץ אחורה כל שנייה — הסולם שמוצג הוא ה-WS המלא.
+      </div>
+
+      <h3>2. לפתוח את קובץ ה-ticks ולהוכיח שה-tape מגיע מ-WS</h3>
+      <p>פתיחת ה-JSONL האחרון שנכתב ע״י הקולקטור:</p>
+      <div class="code-row">
+        <pre class="code">run/ticks/ticks_YYYY-MM-DD.jsonl</pre>
+        <button class="copy-btn" data-copy="run/ticks/ticks_YYYY-MM-DD.jsonl">העתק</button>
+      </div>
+      <div class="expected">
+        <b>מה אמורים לראות:</b> בכל שורה יש <code class="ltr">bids/asks</code> מלאים + <code class="ltr">tape_delta</code> עם הדפסות WS; ה-<code class="ltr">manifest.json</code> לידו מראה <code class="ltr">ws_connected: true</code> ו-<code class="ltr">tape_captured_ws</code> גבוה — הבקטסט קורא בדיוק את אותו טיק שהבוט ראה.
+      </div>
+
+      <h3>3. להריץ בקטסט על אותו dataset (אותה מתודולוגיה)</h3>
+      <p>שיחזור חלונות מה-ticks שהקולקטור כתב:</p>
+      <div class="code-row">
+        <pre class="code">python -m scripts.backtest run/ticks --offset 0.02 --queue 50</pre>
+        <button class="copy-btn" data-copy="python -m scripts.backtest run/ticks --offset 0.02 --queue 50">העתק</button>
+      </div>
+      <div class="expected">
+        <b>מה אמורים לראות:</b> הבקטסט מדווח fills וזוגות שנגזרו מאותם <code class="ltr">tape_delta</code> בדיוק — הוכחה שהבוט והבקטסט חולקים את אותו מנגנון טיק (WS ספר + WS הדפסות, REST רק לגיבוי).
+      </div>
+    </section>
+
+    <!-- Impacted Files -->
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>קובץ</th>
+            <th>תפקיד והשפעה</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>strategy/live_trader.py</code></td>
+            <td>לב השינוי — <b>MarketLiveState</b> שומר סולמות WS מלאים + חותמות טריות; <code class="ltr">on_book_update</code> סמכותי תחת lock; <code class="ltr">_update_market_strategy</code> עושה reconcile רק ל-leg מיושן; <code class="ltr">on_ws_trade / _try_ws_tape_fill</code> עם guards ומילוי אטומי; ניקוי WS ב-rollover.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>strategy/streaming.py</code></td>
+            <td>הגשר המוקשח — <code class="ltr">UnifiedStreamBridge</code> חושף <code class="ltr">on_trade</code> ומריץ <code class="ltr">CLOBMarketWSClient.run_direct()</code> (PONG watchdog + backoff + jitter) במקום <code class="ltr">run()</code> הישן.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issue #166 · Pull Request #169 מוזג בהצלחה · 349 הוספות · 87 מחיקות · 2 קבצים
+    </footer>
+  </main>
+
+  <script>
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>
