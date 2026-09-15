@@ -2609,7 +2609,7 @@ textarea:focus-visible,
   <!-- TAB 3: STATISTICAL ANALYSIS & DISTRIBUTIONS -->
   <div id="tab-summary" class="tab-content">
     <div class="hero" style="display:grid;grid-template-columns:1.2fr .8fr;gap:12px;margin-bottom:12px">
-      <div class="card" style="border-top:2px solid var(--up)">
+      <div class="card" style="border-top:2px solid var(--up)" aria-live="polite" aria-atomic="true">
         <h3>Research Conclusion — SPREAD-2</h3>
         <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0"><span id="oscHeroOverallPct">—</span> of Windows Are Oscillating</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.6">

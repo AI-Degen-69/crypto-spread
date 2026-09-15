@@ -2106,7 +2106,7 @@ const setInterval = () => 0;
 const clearInterval = () => {};
 const setTimeout = () => 0;
 const clearTimeout = () => {};
-const fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+let fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
 const EventSource = class { constructor() {} addEventListener() {} close() {} };
 const elements = {};
 function getOrCreate(id) {
@@ -2193,3 +2193,80 @@ def test_render_oscillation_hero_dom():
     process.exit(0);
     """
     _run_node_dom(body, "OSC_HERO_DOM_TESTS_PASSED")
+
+
+@requires_node
+def test_render_summary_charts_feeds_the_hero():
+    """Verify renderSummaryCharts() actually wires its payload into the hero card.
+
+    Calling renderOscillationHero() directly proves the renderer works but not
+    that anything calls it, so dropping the call site -- or passing `d` instead
+    of `d.summary` -- would otherwise ship green with the card frozen on dashes.
+    """
+    body = """
+    // Stub the two endpoints renderSummaryCharts() consumes, and count the
+    // oscillation hits so a second fetch (CONSTRAINTS.md section 5) shows up.
+    let oscFetches = 0;
+    fetch = (url) => {
+      if (String(url).includes('/api/oscillation')) {
+        oscFetches++;
+        return Promise.resolve({ ok: true, json: async () => ({
+          summary: {
+            ts: 1789489501.54343,
+            per_series: {
+              'btc-up-or-down-5m':  { label: 'BTC 5m',  duration: 300, windows: 100, oscillating: 70 },
+              'btc-up-or-down-15m': { label: 'BTC 15m', duration: 900, windows:  50, oscillating: 40 }
+            }
+          }
+        })});
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ hist_max: {}, hist_start: {}, rows: [] }) });
+    };
+    globalThis.Chart = class { constructor() {} destroy() {} static getChart() { return null; } };
+
+    renderSummaryCharts().then(() => {
+      if (elements['oscHeroOverallPct'].textContent !== '73.3%') {
+        throw new Error('hero not fed by renderSummaryCharts, got ' + JSON.stringify(elements['oscHeroOverallPct'].textContent));
+      }
+      if (elements['oscHeroTotalWindows'].textContent !== '150') {
+        throw new Error('total mismatch: ' + elements['oscHeroTotalWindows'].textContent);
+      }
+      if (elements['oscHeroAsOf'].textContent === '\u2014') throw new Error('as-of stamp not rendered');
+      if (oscFetches !== 1) throw new Error('expected exactly 1 /api/oscillation fetch, got ' + oscFetches);
+      console.log('SUMMARY_CHARTS_WIRING_TESTS_PASSED');
+      process.exit(0);
+    }).catch(e => { console.error(String(e)); process.exit(1); });
+    """
+    _run_node_dom(body, "SUMMARY_CHARTS_WIRING_TESTS_PASSED")
+
+
+@requires_node
+def test_render_oscillation_hero_survives_a_missing_slot():
+    """Verify a missing element id neither throws nor aborts the remaining slots.
+
+    The DOM stub auto-creates every id on lookup, so without forcing a null the
+    `if(el)` guard in renderOscillationHero is never actually exercised.
+    """
+    body = """
+    // One slot goes missing, as it would after a markup rename.
+    const realGet = document.getElementById;
+    document.getElementById = (id) => (id === 'oscHeroPct15m' ? null : realGet(id));
+
+    let threw = null;
+    try {
+      renderOscillationHero({
+        ts: 1789489501.54343,
+        per_series: { 'btc-up-or-down-5m': { duration: 300, windows: 100, oscillating: 70 } }
+      });
+    } catch (e) { threw = String(e); }
+    document.getElementById = realGet;
+
+    if (threw) throw new Error('a missing slot must not throw, got ' + threw);
+    // The slots after the missing one must still have been written.
+    if (elements['oscHeroPct5m'].textContent !== '70.0%') throw new Error('5m not rendered: ' + elements['oscHeroPct5m'].textContent);
+    if (elements['oscHeroAsOf'].textContent === '\u2014') throw new Error('render aborted before the as-of stamp');
+
+    console.log('OSC_HERO_MISSING_SLOT_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node_dom(body, "OSC_HERO_MISSING_SLOT_TESTS_PASSED")

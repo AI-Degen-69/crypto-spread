@@ -2601,7 +2601,9 @@ def test_summary_hero_element_ids_present():
         assert placeholder == "\u2014", (
             f"{elem_id} must ship an em dash placeholder, got {placeholder!r}"
         )
-    assert "renderOscillationHero" in html
+    # The wiring itself is exercised by test_render_summary_charts_feeds_the_hero;
+    # pin the call site here so a silent rename is caught in the served markup too.
+    assert "renderOscillationHero(d.summary);" in html
 
 def test_stoploss_card_declares_static_provenance():
     """Verify the stop-loss card marks itself non-computed and names its provenance."""
@@ -2615,3 +2617,13 @@ def test_stoploss_card_declares_static_provenance():
     assert "Not computed" in note
     # ...and name the newest research, which reached the opposite conclusion.
     assert "ev-research-findings-2026-09-11" in note
+
+def test_summary_hero_announces_async_updates():
+    """Verify the hero card is a live region: its figures arrive after first paint."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    card_start = html.index('<h3>Research Conclusion') - 400
+    card = html[card_start:html.index("oscHeroAsOf")]
+    assert 'aria-live="polite"' in card, "async-populated hero figures need a live region"
+    assert 'aria-atomic="true"' in card, "the sentence should be announced whole, not word by word"
