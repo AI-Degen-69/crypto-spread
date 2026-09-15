@@ -49,6 +49,9 @@ def log(msg: str) -> None:
 def collector_pids() -> list[int] | None:
     """PIDs of running `collect_ticks` processes, or None if unknowable.
 
+    Order is whatever the OS query returns; it is NOT sorted by start time, so
+    callers must not read any element as "the newest".
+
     The distinction is the whole point. This used to return `[]` both when
     there was genuinely no collector and when the probe itself failed, and the
     caller treated `[]` as "start another one". On 2026-09-15 the machine slept,
@@ -131,10 +134,15 @@ def main(argv: list[str]) -> int:
                 pass  # probe failed; never act on a state we could not read
             elif len(pids) > 1:
                 # Two writers append interleaved lines to one tick file and
-                # corrupt it. Keep the newest and stop the rest immediately.
-                keep = pids[-1]
-                log(f"DUPLICATES: {pids}; keeping {keep}")
-                for pid in pids[:-1]:
+                # corrupt it, so all but one must go. Which one survives does
+                # not matter for the data -- the file is already interleaved by
+                # the time this is noticed, and every survivor writes the same
+                # stream from here on. `collector_pids()` does not order by
+                # start time, so this keeps one arbitrarily rather than
+                # claiming to keep the newest.
+                keep = pids[0]
+                log(f"DUPLICATES: {pids}; keeping {keep}, stopping the rest")
+                for pid in pids[1:]:
                     kill(pid)
             elif not pids:
                 log("DOWN: no collect_ticks process")
