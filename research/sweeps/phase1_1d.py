@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams
-from ev_lab import _get_cache, sweep_configs, default_base_params
+from ev_lab import _get_cache, sweep_configs, default_base_params, safe_worker_count
 
 OUT = Path(__file__).resolve().parent / "phase1_1d.json"
 
@@ -86,7 +86,7 @@ def main() -> int:
     print(f"windows: {len(cache)}")
     cfgs = build_configs()
     print(f"configs: {len(cfgs)}")
-    results = sweep_configs(cfgs, workers=8, n_boot=2000, size=5)
+    results = sweep_configs(cfgs, workers=safe_worker_count(8), n_boot=2000, size=5)
     # `0.0 or -9e9` is -9e9, so a break-even config sorted below every
     # loss. Test for None explicitly (issue #182).
     results.sort(key=lambda r: -(r["total_pnl_usd"]

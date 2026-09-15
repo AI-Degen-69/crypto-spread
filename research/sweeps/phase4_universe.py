@@ -10,13 +10,12 @@ import json
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
-from multiprocessing import get_context
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams  # noqa: E402
-from ev_lab import _get_cache, summarize, default_base_params, stable_seed  # noqa: E402
+from ev_lab import _get_cache, summarize, default_base_params, stable_seed, sweep_pool  # noqa: E402
 from sim2 import sim2  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "phase4_universe.json"
@@ -112,9 +111,8 @@ def main() -> int:
     tasks = build_tasks()
     print(f"windows: {len(cache)}  tasks: {len(tasks)}")
 
-    ctx = get_context("spawn")
     results = []
-    with ctx.Pool(processes=8) as pool:
+    with sweep_pool(8) as pool:
         for t in tasks:
             pd = {k: v for k, v in asdict(t["params"]).items()}
             if t.get("series_filter"):
