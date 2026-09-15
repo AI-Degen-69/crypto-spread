@@ -686,51 +686,75 @@ def _sized_cache(tmp_path, mb: float):
         ev_lab.CACHE_PATH = old
 
 
-def test_safe_worker_count_never_returns_less_than_one(tmp_path):
-    """A pool of zero would deadlock; the floor is the serial path."""
-    with _sized_cache(tmp_path, 8):
-        assert ev_lab.safe_worker_count(8, reserve_bytes=float("inf")) == 1
-        assert ev_lab.safe_worker_count(0) == 1
-        assert ev_lab.safe_worker_count(-5) == 1
+@contextlib.contextmanager
+def _sized_cache(tmp_path, mb: float):
+    """Point `CACHE_PATH` at a real file of a known size.
 
-
-def test_safe_worker_count_never_exceeds_the_request(tmp_path):
-    """It clamps down for memory; it must never invent workers."""
-    with _sized_cache(tmp_path, 1):   # tiny cache: memory is not the binding limit
-        assert ev_lab.safe_worker_count(4, reserve_bytes=0.0) == 4
-        assert ev_lab.safe_worker_count(1, reserve_bytes=0.0) == 1
-
-
-def test_safe_worker_count_clamps_to_what_memory_allows(tmp_path):
-    """The arithmetic itself, on a cache too large to hold many copies of."""
-    with _sized_cache(tmp_path, 1024):            # 1GB -> ~2.87GB resident each
-        import psutil
-        avail = psutil.virtual_memory().available
-        per = 1024 * 1024 * 1024 * ev_lab.CACHE_RSS_FACTOR
-        expected = max(1, min(8, int((avail - 0.0) // per)))
-        assert ev_lab.safe_worker_count(8, reserve_bytes=0.0) == expected
-
-
-def test_safe_worker_count_falls_back_low_when_the_cache_is_absent(tmp_path):
-    """No cache means no way to size a worker, so it must not guess high.
-
-    This is the state of every clean checkout and of CI.
+    Without this the sizing arithmetic is never reached on a machine with no
+    `run/sweeps/window_cache.pkl` — `CACHE_PATH.stat()` raises and the function
+    returns its fallback instead. That is every clean checkout and all of CI,
+    where the cache is gitignored and derived. A test asserting on the
+    arithmetic has to supply a cache rather than assume one.
     """
+    p = tmp_path / "window_cache.pkl"
+    p.write_bytes(b"\0" * int(mb * 1024 * 1024))
     old = ev_lab.CACHE_PATH
-    ev_lab.CACHE_PATH = tmp_path / "does_not_exist.pkl"
+    ev_lab.CACHE_PATH = p
     try:
-        assert ev_lab.safe_worker_count(8) == 2
+        yield p
     finally:
         ev_lab.CACHE_PATH = old
 
 
-def test_safe_worker_count_falls_back_low_when_memory_is_unreadable(monkeypatch):
-    """`psutil` is not a declared dependency of this repo.
+def test_safe_worker_count_never_returns_less_than_one(tmp_path):
+    """A pool of zero would deadlock; the floor is the serial path."""
+    with _sized_cache(tmp_path, 8):
+        assert ev_lab.safe_worker_count(
+            8, reserve_bytes=float("inf"), available_bytes=64e9) == 1
+        assert ev_lab.safe_worker_count(0, available_bytes=64e9) == 1
+        assert ev_lab.safe_worker_count(-5, available_bytes=64e9) == 1
+
+
+def test_safe_worker_count_never_exceeds_the_request(tmp_path):
+    """It clamps down for memory; it must never invent workers."""
+    with _sized_cache(tmp_path, 1):    # tiny cache: memory is not the limit
+        assert ev_lab.safe_worker_count(
+            4, reserve_bytes=0.0, available_bytes=64e9) == 4
+        assert ev_lab.safe_worker_count(
+            1, reserve_bytes=0.0, available_bytes=64e9) == 1
+
+
+def test_safe_worker_count_clamps_to_what_memory_allows(tmp_path):
+    """The arithmetic itself, on injected memory rather than this machine's.
+
+    Injected because the first version of this test asserted on sizing that CI
+    never reached — CI has neither `psutil` nor a window cache, so the function
+    returned its fallback and the assertion passed locally for a reason that
+    had nothing to do with what it claimed to check.
+    """
+    with _sized_cache(tmp_path, 1024):          # 1GB pickle -> ~2.87GB each
+        per = 1024 * 1024 * 1024 * ev_lab.CACHE_RSS_FACTOR
+        # Room for exactly three copies, and not a fourth.
+        assert ev_lab.safe_worker_count(
+            8, reserve_bytes=0.0, available_bytes=per * 3.5) == 3
+        assert ev_lab.safe_worker_count(
+            8, reserve_bytes=0.0, available_bytes=per * 0.9) == 1
+
+
+def test_safe_worker_count_falls_back_low_when_memory_cannot_be_read(tmp_path):
+    """`psutil` is absent from CI, so the probe has to be allowed to fail.
 
     Guessing high costs a thrashing machine and a sweep that may never finish;
-    guessing low costs about 2.5s per config. So the fallback is 2, not the
-    requested 8.
+    guessing low costs about 2.5s per config.
     """
+    with _sized_cache(tmp_path, 8):
+        with mock.patch.object(ev_lab, "available_memory_bytes",
+                               return_value=None):
+            assert ev_lab.safe_worker_count(8) == ev_lab.UNMEASURABLE_WORKERS
+
+
+def test_available_memory_probe_survives_a_missing_psutil():
+    """The probe reports "unknown" rather than raising into the caller."""
     import builtins
     real_import = builtins.__import__
 
@@ -739,8 +763,19 @@ def test_safe_worker_count_falls_back_low_when_memory_is_unreadable(monkeypatch)
             raise ImportError("not installed")
         return real_import(name, *a, **kw)
 
-    monkeypatch.setattr(builtins, "__import__", no_psutil)
-    assert ev_lab.safe_worker_count(8) == 2
+    with mock.patch.object(builtins, "__import__", no_psutil):
+        assert ev_lab.available_memory_bytes() is None
+
+
+def test_safe_worker_count_falls_back_low_when_the_cache_is_absent(tmp_path):
+    """No cache means no way to size a worker: every clean checkout, and CI."""
+    old = ev_lab.CACHE_PATH
+    ev_lab.CACHE_PATH = tmp_path / "does_not_exist.pkl"
+    try:
+        assert ev_lab.safe_worker_count(
+            8, available_bytes=64e9) == ev_lab.UNMEASURABLE_WORKERS
+    finally:
+        ev_lab.CACHE_PATH = old
 
 
 def test_sweep_pool_runs_in_process_rather_than_spawning_one_worker():
