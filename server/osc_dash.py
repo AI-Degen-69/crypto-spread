@@ -3834,7 +3834,6 @@ async function tick(){
     const wickLeft = l, wickW = h-l;
     const bodyColor = c>=o ? 'var(--up)' : 'var(--down)';
     const candle = `<div class="candle-wrap"><div class="candle-bar"><div class="candle-wick" style="left:${wickLeft}%;width:${wickW}%;"></div><div class="candle-body" style="left:${bodyLeft}%;width:${Math.max(2,bodyW)}%;background:${bodyColor};border:1px solid ${bodyColor}"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--faint);opacity:.6"></div></div>    <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Range ${fmtPrice(mx!=null&&mn!=null?mx-mn:0)} · Close ${fmtPrice(cm)}</div></div>`;
-    const labelStr = esc(String(w.label||''));
     const fmtHM=t=>t?new Date(t*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'-';
     const rangeStr=`${fmtHM(w.start_ts)}-${fmtHM(w.end_ts)}`;
     const resPill = cm==null?'-':(cm>=0.50?pill('pill-osc','UP'):pill('pill-mono','DOWN'));
