@@ -2573,3 +2573,32 @@ def test_every_registry_control_has_an_id_the_surface_detection_understands():
     assert stray == [], (
         "these registry-driven controls have ids applyParamSpec() cannot map "
         f"to a surface, so they get the shared bounds: {stray}")
+
+
+# --- Issue #193: Stats Summary hero cards reflect live oscillation data ---
+
+def test_summary_hero_literals_removed():
+    """Verify the Stats Summary hero no longer states oscillation figures as literals."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    for stale in ("2,820+", "74% of Windows Are Oscillating", "73% oscillating", "80% oscillating"):
+        assert stale not in html, f"stale hardcoded figure still served: {stale!r}"
+
+
+def test_summary_hero_element_ids_present():
+    """Verify the hero card ships the live slots, each with an em dash placeholder."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    for elem_id in ("oscHeroOverallPct", "oscHeroTotalWindows", "oscHeroPct5m", "oscHeroPct15m", "oscHeroAsOf"):
+        assert f'id="{elem_id}"' in html, f"missing live slot: {elem_id}"
+        # The static markup must ship a neutral placeholder, never a stale
+        # numeral: read the element's text whatever other attributes it carries.
+        tag_open = html.index(f'id="{elem_id}"')
+        text_start = html.index(">", tag_open) + 1
+        placeholder = html[text_start:html.index("<", text_start)]
+        assert placeholder == "\u2014", (
+            f"{elem_id} must ship an em dash placeholder, got {placeholder!r}"
+        )
+    assert "renderOscillationHero" in html

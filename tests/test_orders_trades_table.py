@@ -2097,3 +2097,99 @@ def test_oscillation_hero_formatters_js():
     process.exit(0);
     """
     _run_node(body, "OSC_FORMATTER_TESTS_PASSED")
+
+
+_OSC_DOM_PRELUDE = """
+// Same stubs as _OSC_JS_PRELUDE, but getElementById returns a registry of
+// elements so a test can read back what the renderer wrote.
+const setInterval = () => 0;
+const clearInterval = () => {};
+const setTimeout = () => 0;
+const clearTimeout = () => {};
+const fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+const EventSource = class { constructor() {} addEventListener() {} close() {} };
+const elements = {};
+function getOrCreate(id) {
+  if (!elements[id]) {
+    elements[id] = {
+      id, textContent: '', innerHTML: '', value: '',
+      style: {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      addEventListener: () => {},
+      querySelectorAll: () => []
+    };
+  }
+  return elements[id];
+}
+const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
+globalThis.window = window;
+const document = { getElementById: getOrCreate, querySelectorAll: () => [] };
+const localStorage = {
+  _data: {},
+  getItem(k) { return this._data[k] || null; },
+  setItem(k, v) { this._data[k] = String(v); }
+};
+"""
+
+
+def _run_node_dom(body: str, sentinel: str) -> None:
+    """Evaluate the served script plus `body` against an element registry."""
+    import subprocess
+
+    harness = _OSC_DOM_PRELUDE + _served_script() + body
+    res = subprocess.run(
+        [NODE_BIN], input=harness, capture_output=True, text=True, encoding="utf-8", timeout=10
+    )
+    assert res.returncode == 0, f"Node DOM harness failed: {res.stderr}\n{res.stdout}"
+    assert sentinel in res.stdout
+
+
+@requires_node
+def test_render_oscillation_hero_dom():
+    """renderOscillationHero fills every slot live, and falls back to em dashes when empty."""
+    body = """
+    if (typeof renderOscillationHero !== 'function') throw new Error('renderOscillationHero missing');
+    const SLOTS = ['oscHeroOverallPct','oscHeroTotalWindows','oscHeroPct5m','oscHeroPct15m','oscHeroAsOf'];
+    const DASH = '\u2014';
+
+    // 1. Populated payload writes real figures into every slot.
+    renderOscillationHero({
+      ts: 1789489501.54343,
+      per_series: {
+        'btc-up-or-down-5m':  { duration: 300, windows: 100, oscillating: 70 },
+        'eth-up-or-down-5m':  { duration: 300, windows: 100, oscillating: 74 },
+        'btc-up-or-down-15m': { duration: 900, windows:  50, oscillating: 40 }
+      }
+    });
+    for (const id of SLOTS) {
+      const txt = elements[id].textContent;
+      if (!txt || txt === DASH) throw new Error(id + ' should hold a live value, got ' + JSON.stringify(txt));
+      if (txt.includes('NaN')) throw new Error(id + ' rendered NaN: ' + txt);
+    }
+    if (elements['oscHeroOverallPct'].textContent !== '73.6%') throw new Error('overall mismatch: ' + elements['oscHeroOverallPct'].textContent);
+    if (elements['oscHeroPct5m'].textContent !== '72.0%') throw new Error('5m mismatch: ' + elements['oscHeroPct5m'].textContent);
+    if (elements['oscHeroPct15m'].textContent !== '80.0%') throw new Error('15m mismatch: ' + elements['oscHeroPct15m'].textContent);
+    if (elements['oscHeroTotalWindows'].textContent !== '250') throw new Error('total mismatch: ' + elements['oscHeroTotalWindows'].textContent);
+
+    // Thousands separator on a realistic count.
+    renderOscillationHero({ ts: 1, per_series: { a: { duration: 300, windows: 3613, oscillating: 2679 } } });
+    if (elements['oscHeroTotalWindows'].textContent !== '3,613') throw new Error('expected thousands separator, got ' + elements['oscHeroTotalWindows'].textContent);
+
+    // 2. Empty shape load_summary() returns when the file is missing.
+    renderOscillationHero({ ts: 0, per_series: {} });
+    for (const id of SLOTS) {
+      if (elements[id].textContent !== DASH) throw new Error(id + ' should be an em dash when empty, got ' + JSON.stringify(elements[id].textContent));
+    }
+
+    // 3. Must not throw on a missing or malformed summary.
+    renderOscillationHero(undefined);
+    renderOscillationHero(null);
+    renderOscillationHero({});
+    for (const id of SLOTS) {
+      if (elements[id].textContent !== DASH) throw new Error(id + ' should stay an em dash, got ' + JSON.stringify(elements[id].textContent));
+    }
+
+    console.log('OSC_HERO_DOM_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node_dom(body, "OSC_HERO_DOM_TESTS_PASSED")

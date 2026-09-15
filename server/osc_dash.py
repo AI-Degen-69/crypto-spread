@@ -2611,10 +2611,11 @@ textarea:focus-visible,
     <div class="hero" style="display:grid;grid-template-columns:1.2fr .8fr;gap:12px;margin-bottom:12px">
       <div class="card" style="border-top:2px solid var(--up)">
         <h3>Research Conclusion — SPREAD-2</h3>
-        <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0">74% of Windows Are Oscillating</div>
+        <div style="font:700 24px var(--mono);color:var(--up);margin:4px 0"><span id="oscHeroOverallPct">—</span> of Windows Are Oscillating</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
-          Across 2,820+ empirical windows measured in 5m and 15m: on 5m <b>73% oscillating</b> — both sides quoted dynamically at <code>mid - offset</code> (e.g. $0.48 on 50¢ mid, $0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b>80% oscillating</b>.
+          Across <span id="oscHeroTotalWindows" class="mono">—</span> empirical windows measured in 5m and 15m: on 5m <b id="oscHeroPct5m">—</b> oscillating — both sides quoted dynamically at <code>mid - offset</code> (e.g. $0.48 on 50¢ mid, $0.96/pair) are filled and merged for +$0.04/share profit. On 15m <b id="oscHeroPct15m">—</b> oscillating.
         </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:8px">Computed from <code>oscillation_summary.json</code> · as of <span id="oscHeroAsOf" class="mono">—</span></div>
       </div>
       <div class="card" style="border-top:2px solid var(--gold)">
         <h3>Recommended Stop-Loss Thresholds</h3>
@@ -3077,6 +3078,18 @@ function formatOscAsOf(ts){
   const n=Number(ts);
   if(!ts||!isFinite(n)||n<=0) return '—';
   return new Date(n*1000).toLocaleString('en-US');
+}
+// Write the computed headline into the Stats Summary hero. Every lookup is
+// guarded: a missing slot must not abort the rest of the render.
+function renderOscillationHero(summary){
+  const s = summary || {};
+  const h = computeOscillationHeadline(s.per_series);
+  const put=(id,text)=>{ const el=$(id); if(el) el.textContent=text; };
+  put('oscHeroOverallPct', formatOscPct(h.overallPct));
+  put('oscHeroTotalWindows', h.ok ? h.totalWindows.toLocaleString() : '—');
+  put('oscHeroPct5m', formatOscPct(h.pct5m));
+  put('oscHeroPct15m', formatOscPct(h.pct15m));
+  put('oscHeroAsOf', formatOscAsOf(s.ts));
 }
 // Issue #100: two-way visual link. Hovering a market card highlights its Open
 // Orders group and vice versa, via the shared data-market key.
@@ -4228,6 +4241,7 @@ function destroyChartInstance(canvasId){
 
 async function renderSummaryCharts(){
   const d=await (await fetch('/api/oscillation',{cache:'no-store'})).json();
+  renderOscillationHero(d.summary);
   const sum=d.summary.per_series||{};
   const order=['BTC 5m','ETH 5m','BNB 5m','SOL 5m','XRP 5m','BTC 15m','ETH 15m','BNB 15m','SOL 15m','XRP 15m'];
   const osc=[], mono=[];
