@@ -1188,3 +1188,108 @@ def test_the_real_slate_has_unique_slugs():
     import scripts.collect_ticks as ct
 
     ct.assert_unique_series_slugs()
+
+
+# ---------------------------------------------------------------------------
+# Issue #188: the venue's real `price_change` shape
+# ---------------------------------------------------------------------------
+
+#: Captured verbatim from the live market socket on 2026-09-15. Recorded rather
+#: than invented, because the test that existed before this one used a frame
+#: shape the venue never sends -- a top-level `asset_id` with a `changes` key --
+#: so the code was written to match the fixture and both were wrong together
+#: while agreeing with each other.
+CAPTURED_PRICE_CHANGE = {
+    "market": "0x36e7402aa951bc191e5f3380981d63cf5ea325e7ad699c80d2955ab5706602af",
+    "price_changes": [
+        {
+            "asset_id": "5949168580672789881355692646945014192146674827215874979386802930780984398807",
+            "price": "0.94", "size": "61", "side": "BUY",
+            "hash": "5684515f57635da69335cdf82a783fa70d9e700f",
+            "best_bid": "0.99", "best_ask": "1",
+        },
+        {
+            "asset_id": "74086961480240447773681594032582397183438133454033538203498975718604505324075",
+            "price": "0.06", "size": "61", "side": "SELL",
+            "hash": "c570bc0aab728cf08ef9251d66feb74c7e514fa6",
+            "best_bid": "0", "best_ask": "0.01",
+        },
+    ],
+    "timestamp": "1789469652658",
+    "event_type": "price_change",
+}
+
+UP_TOK = CAPTURED_PRICE_CHANGE["price_changes"][0]["asset_id"]
+DN_TOK = CAPTURED_PRICE_CHANGE["price_changes"][1]["asset_id"]
+
+
+def test_the_captured_frame_really_has_no_top_level_token():
+    """Pins the premise. If the venue ever adds one, this test says so loudly
+    rather than letting the routing quietly become redundant."""
+    assert "asset_id" not in CAPTURED_PRICE_CHANGE
+    assert "token_id" not in CAPTURED_PRICE_CHANGE
+    assert all("asset_id" in c for c in CAPTURED_PRICE_CHANGE["price_changes"])
+
+
+def test_venue_price_change_updates_every_leg_it_names():
+    """One frame carries both legs of a market; both books must move.
+
+    Before the fix this frame was discarded whole: `_handle_event` read the
+    token from the top level, found none, and returned before reaching the
+    price_change branch. Measured live, 2,873 of 2,873 frames were dropped and
+    `apply_price_change` was never called.
+    """
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps(CAPTURED_PRICE_CHANGE))
+
+    assert UP_TOK in client.books, "the up leg never reached the book"
+    assert DN_TOK in client.books, "the down leg never reached the book"
+    assert client.books[UP_TOK]["bids"][0.94] == 61.0
+    assert client.books[DN_TOK]["asks"][0.06] == 61.0
+
+
+def test_venue_price_change_records_the_exchanges_own_top_of_book():
+    """Each entry reports `best_bid`/`best_ask`; that is the venue's view and
+    does not depend on whatever this client has reconstructed locally."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps(CAPTURED_PRICE_CHANGE))
+    assert client.top_of_book[UP_TOK] == {"best_bid": 0.99, "best_ask": 1.0}
+    assert client.top_of_book[DN_TOK] == {"best_bid": 0.0, "best_ask": 0.01}
+
+
+def test_venue_price_change_still_honours_the_subscription_filter():
+    """A frame naming a token this client did not subscribe to is ignored for
+    that token only — the sibling leg in the same frame still applies."""
+    client = CLOBMarketWSClient(token_ids=[UP_TOK])
+    client.handle_raw_message(json.dumps(CAPTURED_PRICE_CHANGE))
+    assert UP_TOK in client.books
+    assert DN_TOK not in client.books, "an unsubscribed token was written"
+
+
+def test_price_change_with_a_size_of_zero_deletes_the_level():
+    """Deletion has to survive the new routing, not just insertion."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot(UP_TOK, [{"price": "0.48", "size": "100"}],
+                               [{"price": "0.53", "size": "80"}])
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": UP_TOK, "price": "0.50",
+                           "side": "BUY", "size": "25"}],
+    }))
+    assert client.books[UP_TOK]["best_bid"] == 0.50
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": UP_TOK, "price": "0.50",
+                           "side": "BUY", "size": "0"}],
+    }))
+    assert client.books[UP_TOK]["best_bid"] == 0.48
+
+
+def test_a_frame_with_no_usable_token_anywhere_is_dropped_quietly():
+    """The guard that was too broad must still reject what it was aimed at."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"price": "0.50", "side": "BUY", "size": "25"}],
+    }))
+    assert client.books == {}
