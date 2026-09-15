@@ -1,103 +1,136 @@
-# Plan — issue #164: one parameter contract for Backtest and Cockpit
+# Plan — issue #191: settle naked legs the book cannot mark
 
-**Size: Large.** Cross-cutting: `backtest/engine.py` (new simulated behaviour),
-`server/osc_dash.py` (two UIs + two API schemas), plus tests. **Type: Code +
-Design/UI.** Stack: Python 3.12 / FastAPI, `pytest` (baseline **713 passed**).
+**Size: Standard.** 3 code files plus tests and one research doc. **Type:
+Debug + Backend/Logic.** Stack: Python 3.12 / FastAPI, `pytest`
+(baseline **856 passed**). No UI surface is touched, so no design skills apply.
 
-## What the issue got right, and what it missed
+Branch: `fix/settle-unmarked-naked-191`.
+Specification: **`SPEC.md`**. Quality gates: **`CONSTRAINTS.md`**.
 
-Verified every claim against the code first — three issues this week had stale
-premises.
+## Two things the issue body got wrong, found while planning
 
-**Stale in the issue:**
-- "`exit_reversal` is hardcoded to `0.50` in `BacktestParams`." It is
-  `exit_reversal: float = 0.02` (`backtest/engine.py:123`). The `0.50` is the
-  market midpoint it compares against, not the default.
-- "`strategy/live_trader.py:MakerConfig`." There is no `MakerConfig`. Live
-  config is `update_config()` kwargs plus `LIVE_PRESETS`.
+Verified every claim against the code first.
 
-**Understated in the issue.** It names one missing engine knob. There are
-four, and the drift runs both ways:
+**1. The sweep results are not affected.** The issue claims every `ex=none`
+number in `research/sweeps/` is inflated, including the +37.38$ headline in
+`overnight_report.md`. Not accurate — the research layer already carries this
+correction. `ev_lab.fast_simulate` and `sim2.sim2` both detect the empty-bid
+case, set `naked_none`, and record `settle_won` / `settle_delta`;
+`ev_lab.summarize` applies it by default (`settle_correct=True`) and
+`phase5_band.py:100` passes it explicitly. The bug is confined to
+`backtest/engine.py` — the production replay behind `scripts/backtest.py`,
+which has no `naked_none` concept at all. That is exactly why the faithful CLI
+replay showed series with 0.0% pair rate *and* 0.0% exit rate still returning
+positive P&L. Corrected in a comment on the issue (T0, done).
 
-| knob | Backtest UI | Backtest engine | Cockpit UI | Live engine |
-|---|---|---|---|---|
-| `naked_leg_timeout_pct` | — | **absent** | ✅ | ✅ |
-| `exit_thresh_naked` | — | **absent** | ✅ | ✅ |
-| `stop_loss_enabled` | — | **absent** | preset only | ✅ |
-| `enable_leg_chase` | — | **absent** | preset only | ✅ |
-| `exit_reversal` | **absent** | ✅ | ✅ | ✅ |
-| `entry_timeout_pct` | **absent** | ✅ | ✅ | ✅ |
-| `entry_delay_sec` | ✅ | ✅ | **absent** | ✅ |
-| `entry_band` | ✅ | ✅ | **absent** | ✅ |
-| `reentry_drift_band` | ✅ | ✅ | **absent** | ✅ |
-| `min_requote_remaining_sec` | ✅ | ✅ | **absent** | ✅ |
-| `pair_cost_gate` / `max_pair_cost` | ✅ | ✅ | **absent** | ✅ |
+**2. The proposed fix was weaker than what already exists.** The issue proposes
+redeeming at 1/0 from the final mid. But issue #160 already shipped
+`LiveTrader._resolve_exit_bid` (`strategy/live_trader.py:5386-5438`) — a
+five-stage resolution ladder that *raises* rather than assume a price. The
+backtest stops at stage 1 and books zero on failure. So this is a **parity gap
+against the reference implementation**, not a missing feature, and the fix is to
+port the ladder rather than invent a second rule.
 
-The sharp one: **`patient_band_maker` sets `stop_loss_enabled=False`, and the
-backtest engine has no such knob.** The backtest expresses hold-to-settlement
-by setting exits to 0.49/0.50 — a threshold that never trips — while live
-expresses it with a boolean. Two mechanisms for one intent, neither proving the
-other. This is the same defect class as #182 finding 6, one level up.
+On the worked example (held DOWN leg resting 0.470, final `DOWN: bid None`,
+`UP: ask None`, final mid 0.995):
 
-And the Cockpit has no input for `entry_delay_sec` or `entry_band` at all — the
-two knobs that *define* the winning preset. They are reachable only through the
-preset, so an operator cannot tune or even see them live.
+| Path | Mark | Booked |
+|---|---|---|
+| engine today | none | **0.00c** |
+| live's ladder | stage 3, latched DOWN bid 0.04 | **-43.00c** |
+| redemption only | DOWN settles 0.00 | **-47.00c** |
 
-## Approach
+The design in `SPEC.md` uses the ladder first and falls back to redemption only
+when all four stages fail — strictly closer to live, and strictly more
+conservative than redeeming straight to 0.
 
-`backtest/engine.py:172` already carries `_PARAM_GROUPS`: a registry of
-`(field, label, why)`. Extend it into the single source of truth — label, unit,
-default, bounds, and which surfaces expose each knob — and have both UIs and
-both API validators read from it. Hand-matching label strings in two files is
-what let them drift; it would drift again.
+## Improvement pass — one shared resolver instead of a third copy
+
+The last-mid/redemption arithmetic already exists **twice**, inline and
+near-identically, in `ev_lab.fast_simulate` and `sim2.sim2`. A third copy inside
+`_simulate_window` is how issue #182 happened: the audit and the simulator each
+grew their own anchor rule and disagreed by ~40% in the script whose job was to
+correct a bias.
+
+Proposed: one exported function in `backtest/engine.py` —
+
+```python
+def resolve_naked_settlement(
+    snaps: list[dict], held_up: bool, resting: float,
+) -> tuple[float | None, float, str]:
+    """(mark, delta_cents, source) for a naked leg at window close.
+
+    source in {direct_bid, complement_ask, latched_bid,
+               latched_complement_ask, redeemed, unresolved}.
+    `mark` is None for redeemed/unresolved (no closing trade, so no fee).
+    """
+```
+
+`_simulate_window` calls it; `ev_lab` and `sim2` import it and keep returning
+`settle_won` / `settle_delta` for `summarize` exactly as today — their P&L
+unchanged, only the duplicated arithmetic disappears. Three call sites, one
+definition.
+
+*Operator decision required before T3 — adopt, defer, or drop.* T1, T2, T4 and
+T5 are unaffected either way.
 
 ## Tasks
 
-- [x] **1. `[Backend/Logic]` Registry becomes the contract.** Extend
-  `_PARAM_GROUPS` entries to carry `unit`, `default`, `bounds`, and
-  `surfaces: {"backtest", "cockpit"}`. Add `BacktestParams.param_spec()`
-  returning it. No behaviour change.
-  *Skills:* `api-and-interface-design`, `test-driven-development`.
-  *Verify:* new `tests/test_param_registry.py` — every `BacktestParams` field
-  appears exactly once; bounds match `__post_init__` validation.
+### T0 — `[Docs]` Correct the issue body ✅ done
+- Comment posted on #191 correcting the Impact claim.
 
-- [x] **2. `[Backend/Logic]` `stop_loss_enabled` in the engine.** Add to
-  `BacktestParams` (default `True` = today). When `False`, `_simulate_window`
-  holds a filled naked leg to settlement instead of taking the stop exit —
-  mirroring `live_trader.py:1395`.
-  *Verify:* default replay is bit-identical to master on a fixture; `False`
-  path proves the naked leg reaches settlement.
+### T1 — `[Debug]` Pin the bug with two failing tests
+- **Files:** `tests/test_backtest_engine.py`
+- Build the worked example: DOWN fills at 0.470, UP never fills, DOWN's final
+  `best_bid` is `None`, latched DOWN bid 0.04, final mid 0.995. Assert the
+  window books `-43.00c`, not `0.00c`. Mirror it for a winning unmarked leg.
+- **Skill:** `test-driven-development`. **Verify:** both tests **fail** on the
+  current engine. Red is the deliverable.
 
-- [x] **3. `[Backend/Logic]` `naked_leg_timeout_pct` + `exit_thresh_naked`.**
-  Mirror `_naked_timeout_hit` (`live_trader.py:4045-4054`): measured from the
-  moment the leg went naked, not window open; `0.0` disables.
-  `exit_thresh_naked` defaults to `None` → falls back to `exit_thresh`.
-  *Verify:* a naked leg times out at the right tick; `0.0` changes nothing.
+### T2 — `[Backend/Logic]` Pin the paths that must not move
+- **Files:** `tests/test_backtest_engine.py`
+- One test per untouched path: held leg with a real final bid keeps its exact
+  `pnl_cents` / `fees_cents` / `settlement_mid`; a pair-captured window is
+  unchanged; a stopped-out window is unchanged; a window with no usable
+  reference mid still books `0.00c` and reports `settle_source == "unresolved"`.
+- **Skill:** `test-driven-development`. **Verify:** green on master, still green
+  after T3.
 
-- [x] **4. `[Backend/Logic]` `enable_leg_chase`.** Port the chase rule already
-  proven in `research/sweeps/sim2.py` (`chase_cap`) into the canonical engine,
-  default `False` = today's behaviour.
-  *Verify:* parity against `sim2`'s chase on the same window.
+### T3 — `[Backend/Logic]` Port the ladder into the engine
+- **Files:** `backtest/engine.py` (`resolve_naked_settlement`,
+  `_simulate_window` at 1023-1035, `WindowResult`, the `trades_sample` dict at
+  ~1136); plus `research/sweeps/ev_lab.py` and `research/sweeps/sim2.py` if the
+  shared-resolver improvement is adopted.
+- Mirror `_resolve_exit_bid` stages 1-4 against `window_snaps`, then redeem from
+  the final mid, then abstain. Add `settled_unmarked: bool` and
+  `settle_source: str` to `WindowResult` and the export. No taker fee on a
+  redemption.
+- **Skill:** `source-driven-development`, `incremental-implementation`.
+- **Verify:** `python -m pytest -q tests/test_backtest_engine.py tests/test_sweep_backtest.py`, then the full suite.
 
-- [x] **5. `[Design/UI]` Backtest tab reads the registry.** Render its inputs
-  from `param_spec()`; adds the missing `exit_reversal` and
-  `entry_timeout_pct`, plus the four new knobs. Delete hard-coded labels.
-  *Verify:* served-HTML assertions + live DOM read at `:8802`.
+### T4 — `[Backend/Logic]` One test per ladder stage
+- **Files:** `tests/test_backtest_engine.py`
+- Force each stage in turn (`direct_bid`, `complement_ask`, `latched_bid`,
+  `latched_complement_ask`, `redeemed`, `unresolved`) and assert both the P&L
+  and the reported `settle_source`. Include the two validity edges live
+  enforces: a held-leg bid of exactly `0.0` falls through, and an opposite ask
+  outside `(0.0, 1.0]` falls through.
+- **Skill:** `test-driven-development`. **Verify:** targeted file green.
 
-- [x] **6. `[Design/UI]` Cockpit tab reads the registry.** Same, adding
-  `entry_delay_sec`, `entry_band`, `reentry_drift_band`,
-  `min_requote_remaining_sec`, `max_pair_cost`. Keep the running-bot lock
-  (`cockpitParamsLockHint`) on every new input.
-  *Verify:* served-HTML + live DOM; a test asserts no shared label is
-  hard-coded outside the registry.
+### T5 — `[Research/Audit]` Close the loop on the evidence
+- **Files:** `research/sweeps/audit_settlement.py`,
+  `research/sweeps/RESULTS-ARE-STALE.md`
+- Add a corrected-bias line to the audit **alongside** the existing raw line —
+  the raw number is the evidence in #191 and must survive. Note in
+  `RESULTS-ARE-STALE.md` that pre-fix `scripts/backtest.py` output for
+  hold-to-settle configs is invalid, and that the sweep JSONs were already
+  corrected by `summarize`.
+- **Skill:** `documentation-and-adrs`.
+- **Verify:** `python research/sweeps/audit_settlement.py` — corrected bias
+  approximately 0, raw bias printed and unchanged.
 
-- [x] **7. `[Backend/Logic]` Schema sync.** `/api/backtest` and
-  `/api/live/config` validate against the registry rather than ad-hoc parsing,
-  so an out-of-range value is refused identically on both.
-  *Verify:* parametrised bounds tests per knob on both endpoints.
+## Estimate
 
-## Improvement proposed and adopted
-
-Operator chose the registry over flat label-matching, and chose to land the
-four engine knobs now — before the post-capture backtest — so that run measures
-the configuration the bot actually executes.
+About 3 hours: ~45 min on T1/T2 fixtures, ~45 min on T3 (the ladder is four
+stages plus two fallbacks), ~45 min on T4, ~20 min on T5, ~30 min for the full
+suite and PR.

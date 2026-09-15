@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import statistics
 import sys
+from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backtest.engine import BacktestParams
+from backtest.engine import BacktestParams, resolve_naked_settlement
 from ev_lab import _get_cache, fast_simulate, default_base_params, _mid_from
 
 
@@ -28,6 +29,8 @@ def main() -> int:
     true_wins = true_losses = 0
     pnl_engine_list = []
     pnl_true_list = []
+    pnl_fixed_list = []
+    fixed_sources: Counter[str] = Counter()
     bias_windows = []
 
     for w in cache:
@@ -78,6 +81,17 @@ def main() -> int:
             true_losses += 1
             true_pnl = (0.0 - resting) * 100.0
         pnl_true_list.append(true_pnl)
+        # What the fixed engine actually books for this window (issue #191).
+        # The full ladder, not just its redemption fallback: a window whose
+        # held bid vanished usually still has a latched quote or an opposite
+        # ask to mark against, and the engine marks there rather than redeeming.
+        # Measuring the fallback alone would compare redemption against
+        # redemption and report a near-zero bias by construction.
+        _snaps = [{"up_book": {"best_bid": w.up_bb[k], "best_ask": w.up_ba[k]},
+                   "down_book": {"best_bid": w.dn_bb[k], "best_ask": w.dn_ba[k]}}
+                  for k in range(len(w.ts))]
+        _mark, fixed_pnl, src = resolve_naked_settlement(_snaps, held_up, resting)
+        fixed_sources[src] += 1
         if last_bid is None:
             engine_mark_none += 1
             engine_pnl = 0.0
@@ -89,6 +103,7 @@ def main() -> int:
             else:
                 engine_mark_losses += 1
         pnl_engine_list.append(engine_pnl)
+        pnl_fixed_list.append(fixed_pnl)
 
     n = len(pnl_engine_list)
     # `pnl_*_list` holds cents for ONE contract. Dividing by 100 gives the
@@ -108,11 +123,18 @@ def main() -> int:
           f"(total {sum(pnl_true_list)*to_usd:+.2f}$ at size {size})")
     print(f"bias (true - engine) total: "
           f"{(sum(pnl_true_list)-sum(pnl_engine_list))*to_usd:+.2f}$ at size {size}")
+    # The raw line above is the evidence in issue #191 and stays as it is. The
+    # two below measure the same windows through the settlement resolver, and
+    # are what should now land at roughly zero.
+    print(f"fixed  mean pnl/naked window: {statistics.fmean(pnl_fixed_list):+.2f}c "
+          f"(total {sum(pnl_fixed_list)*to_usd:+.2f}$ at size {size})")
+    print(f"bias (true - fixed)  total: "
+          f"{(sum(pnl_true_list)-sum(pnl_fixed_list))*to_usd:+.2f}$ at size {size}")
+    print("fixed by settle_source:", dict(fixed_sources))
     if bias_windows:
         tot = sum(b[5] for b in bias_windows)
         print(f"unmarked windows: {len(bias_windows)}, "
               f"their true total pnl: {tot*to_usd:+.2f}$ at size {size}")
-        from collections import Counter
         print("unmarked by won/lost:",
               Counter("won" if b[6] else "lost" for b in bias_windows))
         print("unmarked by day:", Counter(b[1] for b in bias_windows))

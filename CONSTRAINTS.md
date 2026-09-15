@@ -1,58 +1,80 @@
-# CONSTRAINTS.md — Issue #164: one parameter contract for Backtest and Cockpit
+# CONSTRAINTS.md — Issue #191: settle naked legs the book cannot mark
 
-Binding while `feat/unify-params-164` is live.
+Binding while `fix/settle-unmarked-naked-191` is live.
+Specification: `SPEC.md`. Task breakdown: `tasks/plan.md`.
 
 ## 1. Test suite integrity
 
 - **Zero regressions.** `python -m pytest -q` must be green before and after
-  every task. Current baseline: **713 passed**.
-- Every new knob ships with tests for its *off* value proving prior behaviour
-  is byte-identical, and for its *on* value proving the new behaviour.
+  every task. Current baseline: **856 passed**.
 - **Anti-cheat.** No `skip`, `xfail`, deleted assertion, loosened tolerance, or
   silenced linter to make a task pass. If a test blocks the change, the change
   is wrong until argued otherwise in the PR.
+- The two tests named in `SPEC.md` §5.1 and §5.2 must **fail on master** before
+  the fix and pass after it. Write them first.
 
-## 2. Simulation compatibility (the expensive one)
+## 2. Bounded behaviour change
 
-Adding engine knobs changes simulated P&L. That is accepted for this issue, but
-bounded:
+This issue deliberately changes simulated P&L, because today's number is wrong.
+The change is bounded to exactly one code path:
 
-- **Defaults must reproduce today's results exactly.** Every new
-  `BacktestParams` field defaults to the value that preserves current
-  behaviour (`naked_leg_timeout_pct=0.0`, `stop_loss_enabled=True`,
-  `enable_leg_chase=False`, `exit_thresh_naked=None` → falls back to
-  `exit_thresh`). A replay with default params must produce an identical
-  `params_hash`-keyed result to master for the same input.
-- A test must pin that: same ticks, default params, identical per-window P&L
-  against a recorded fixture.
+- **Only the unmarked branch moves.** A window whose held leg has a real final
+  `best_bid` must produce byte-identical `pnl_cents`, `fees_cents`,
+  `exit_price`, and `settlement_mid` to master. A test must pin this.
+- Pair-captured windows, stopped-out windows, and zero-fill windows are
+  untouched.
+- **No taker fee on a redemption.** A redeemed leg is never sold. The
+  0.50-mark naked fee charged on entry stays; a second fee on the settled leg
+  is a defect. Marked settlements (ladder stages 1-4) keep today's fee
+  behaviour — see `SPEC.md` §7.
+- **Abstain rather than guess.** No usable reference mid, or a reference mid of
+  exactly 0.50, keeps the current `0.00c` and reports `unresolved`. Booking a
+  coin flip is worse than booking nothing.
 
-## 3. Live engine is read-only here
+## 3. Live is the reference implementation
 
-- `strategy/live_trader.py` execution logic is **not** modified. Live is the
-  reference implementation; the backtest moves toward it, never the reverse.
-- Cockpit UI may gain inputs for knobs `update_config()` already accepts. It
-  may not gain a knob the live engine does not implement.
+- `strategy/live_trader.py` is **not** modified. Its `_resolve_exit_bid` ladder
+  (issue #160) is the contract this issue ports; the backtest moves toward
+  live, never the reverse.
+- The engine's stages 1-4 must match live's validity rules exactly, including
+  the edges: a bid is valid only in `0.0 < bid <= 1.0`, and the binary
+  complement is built from the opposite **ask**, never the opposite bid. Live
+  documents why; reproducing the rule with different bounds is a defect even if
+  the tests pass.
+- No change to venue logic, order routing, or `scripts/collect_ticks.py` — a
+  continuous capture is running and a restart loses the run.
 
-## 4. The registry is the only source of truth
+## 4. One definition of the settlement rule
 
-- After this issue, a shared parameter's label, unit, default, and bounds exist
-  in exactly one place. A second hard-coded copy of any of those in
-  `server/osc_dash.py` is a defect.
-- A test must fail if a surface renders a shared knob whose label does not come
-  from the registry.
+- `backtest/engine.py`, `research/sweeps/ev_lab.py`, and
+  `research/sweeps/sim2.py` must not each carry their own copy of the
+  redemption arithmetic. Issue #182 was caused by exactly this divergence
+  between the audit and the simulator.
+- After this issue the rule exists in one function, imported by the others. A
+  second inline copy is a defect.
+- Every settlement outcome is attributable: `settle_source` is recorded on
+  `WindowResult` and exported, so a stale latched mark is distinguishable from
+  a fresh quote in the results.
 
 ## 5. Scope fences
 
 - No new external dependencies.
-- No change to venue logic, settlement, or order routing.
-- `scripts/collect_ticks.py` is **untouched** — a 24h capture is running and a
-  restart loses the continuous run.
-- Research artifacts under `research/sweeps/` stay stale-marked; this issue does
-  not regenerate them (see `research/sweeps/RESULTS-ARE-STALE.md`).
+- No regeneration of `research/sweeps/*.json`. The stale marker stays; this
+  issue appends to `research/sweeps/RESULTS-ARE-STALE.md`.
+- No change to the sweep pipeline's headline numbers: `ev_lab.summarize`
+  already applies the correction via `settle_correct=True`. This issue fixes
+  the engine, not the summarizer. Applying the correction in both places would
+  double-count.
+- The fee-model question raised in `SPEC.md` §7 is **deferred**, not solved
+  here. Changing `BacktestParams` semantics is out of scope.
 
 ## 6. Verification mode per task type
 
-- `[Backend/Logic]` → `python -m pytest -q tests/test_backtest_engine.py tests/test_live_trader.py`
-- `[Design/UI]` → served-HTML assertions in `tests/test_osc_dash_integration.py`
-  plus a live DOM read against `http://127.0.0.1:8802` before the task is called done.
-- Full suite before every commit.
+- `[Backend/Logic]` → `python -m pytest -q tests/test_backtest_engine.py tests/test_sweep_backtest.py`
+- `[Research/Audit]` → `python research/sweeps/audit_settlement.py`. It must
+  keep printing the raw uncorrected bias (the evidence in #191) **and** add a
+  corrected line measured through `resolve_naked_settlement` — the engine's
+  full ladder, not its redemption fallback alone, which would compare
+  redemption against redemption and report a near-zero bias by construction.
+  Replacing the raw line rather than adding to it is a defect.
+- Full suite (`python -m pytest -q`) before every commit.

@@ -1,144 +1,151 @@
-# SPEC.md — Issue #167: Poll round takes ~2.7s against a 1s cadence
+# SPEC.md — Issue #191: Backtest books 0 for naked legs it cannot mark
 
 ## 1. Goal
-Bring one full 10-series round of `scripts/collect_ticks.py` inside `TICK_BUDGET_MS`
-on a normal connection, so `slow_tick` stops firing on every tick and becomes a real
-degradation signal. Where a round genuinely cannot be made fast enough, state the
-achievable cadence honestly in the docstring and in `manifest.json` instead of
-raising the budget to silence the warning.
+Give `backtest/engine.py` the same rollover-settlement discipline the live engine
+already has. A naked leg carried to window close must be worth something — a
+resolved mark, or its redemption value — never a silent `0.00c` chosen because
+the book happened to be empty at the final poll.
 
 ## 2. Background & Evidence
-- The collector docstring claims a "Same 1-second poll cadence" and `POLL_INTERVAL`
-  is `1.0`, but a measured round takes ~2691 ms, so the real sampling interval is
-  round + sleep = ~3.8 s.
-- `poll_once` compares the round against `TICK_BUDGET_MS = 2000.0` and appends
-  `slow_tick:<ms>` to `errs`. Because the condition is true every tick, an operator
-  sees a permanent `errs=1` on `--once`, and a genuinely slow round is
-  indistinguishable from the baseline.
-- Measured scaling is exactly linear at ~269 ms per series (267 / 527 / 1344 /
-  2691 ms for 1 / 2 / 5 / 10 series), which proves the slate is polled strictly
-  sequentially with no concurrency.
-- Per-series cost is four sequential HTTP round-trips — gamma `fetch_live_for_series`
-  ~39 ms, `full_book(up)` ~90 ms, `full_book(down)` ~94 ms, `recent_trades` ~97 ms —
-  plus two jitter sleeps of 0-10 ms. That is 40 HTTP round-trips per tick.
-- This predates issue #165. The WebSocket collector neither caused the problem nor
-  addresses it, but it does make the REST tape call redundant most seconds, which
-  this issue can now exploit.
+
+`_simulate_window` marks a still-open naked leg from the last snapshot's
+`best_bid` (`backtest/engine.py:1023-1035`). Both branches are guarded by
+`is not None`. A losing contract loses its bid side before expiry — nobody bids
+on something settling at zero — so the guard fails, neither branch runs, and the
+window contributes `0.00c` instead of the loss of the stake. Winners keep a bid
+near 1.00 and are always booked. The error is one-directional by construction
+and does not average out with more data.
+
+`research/sweeps/audit_settlement.py` over the 3-day capture (2026-09-13 →
+2026-09-15):
+
+```
+naked-settle windows: 351
+engine mark: wins=169 losses=1 none-marked(0 pnl)=181
+true settlement: wins=169 losses=182
+bias (true - engine) total: -395.56$ at size 5
+unmarked by won/lost: Counter({'lost': 181})
+```
+
+181 unmarked windows, **181 of them losers — 100%**.
+
+**Live already solved this.** Issue #160 shipped
+`LiveTrader._resolve_exit_bid` (`strategy/live_trader.py:5386-5438`), a
+five-stage ladder that raises `RuntimeError` rather than assume a price:
+
+1. direct book bid on the held leg
+2. binary complement ask: `1.0 - opposite_ask`
+3. latched last-valid book bid on the held leg
+4. latched binary complement ask
+5. synthetic leg mid, only when a book update was observed and the mid is not
+   exactly 0.50
+
+The backtest never received the same treatment. It still stops at stage 1 and
+books zero on failure. That is the whole defect: **a parity gap against the
+reference implementation**, not a missing feature.
+
+Worked example — `sol-up-or-down-5m`, 2026-09-13, 204 samples over 299s, held
+DOWN leg resting at 0.470, final ticks `DOWN: bid None ask 0.01` /
+`UP: bid 0.99 ask None`, final mid 0.995:
+
+| Path | Mark | Booked |
+|---|---|---|
+| engine today | none (`best_bid is None`) | **0.00c** |
+| live's ladder | stage 3, latched DOWN bid 0.04 | **-43.00c** |
+| true redemption | DOWN settles 0.00 | **-47.00c** |
 
 ## 3. In Scope
 
-### 3.1 Cache the gamma market resolution per window
-File: `scripts/collect_ticks.py`
+### 3.1 Port the live resolution ladder into the engine
+Add a resolver to `backtest/engine.py` that mirrors `_resolve_exit_bid` stages
+1-4 against `window_snaps`: final held-leg bid, `1.0 - final opposite ask`, last
+valid held-leg bid seen anywhere in the window, `1.0 - last valid opposite ask`.
+Stage 5 (synthetic mid) is replaced by 3.2, because a replay knows the outcome
+and a live engine at rollover does not.
 
-- `fetch_live_for_series` re-resolves a market whose `conditionId`, `slug`, tokens,
-  `start_ts` and `end_ts` cannot change until the window rolls.
-- Introduce a process-local cache keyed by series slug, holding the resolved market
-  plus the wall-clock time it was resolved.
-- Invalidate on: (a) `now >= end_ts` — the window rolled and a new market must be
-  resolved; (b) a bounded max age, so a mid-window market replacement or a cancelled
-  market is still picked up rather than pinned for the whole window.
-- Never cache a failure. A gamma error must re-resolve on the next tick.
-- Expected saving: 10 HTTP calls and ~390 ms per tick.
+### 3.2 Redeem when the ladder cannot resolve
+Where no stage yields a mark, resolve the held side's outcome from the last
+observed mid and book redemption directly: mid above 0.5 means the held side
+settles at 1.00, otherwise 0.00; P&L is `(settlement - resting) * 100`. This is
+the rule `audit_settlement.py` already applies, so the audit and the engine
+cannot diverge. **No taker fee on a redemption** — there is no closing trade.
 
-### 3.2 Gate the REST tape on socket authority
-File: `scripts/collect_ticks.py`
+### 3.3 Abstain instead of guessing
+When there is no usable reference mid at all, or the reference mid is exactly
+0.50, the window keeps `0.00c` and is not flagged as settled. Live raises here;
+a replay over historical ticks cannot usefully raise, so it abstains and makes
+the abstention countable.
 
-- After #165, `recent_trades` is called for any leg that produced no socket rows this
-  second. On a healthy socket that is most legs most seconds, because most seconds
-  genuinely have no trades — so the call is pure latency for an empty result.
-- Only fall back to REST for a leg when the socket is not demonstrably authoritative
-  for it: the bridge is disconnected, or it has been connected for less than a
-  warm-up period, or it has delivered no print for this window within a bounded
-  recency horizon.
-- The existing `WS_REST_DEDUP_TTL` cross-source dedup continues to govern correctness
-  when the REST path does run; this change is only about when the call is worth
-  making at all.
-- Expected saving: up to ~970 ms per tick on a healthy socket.
+### 3.4 Make the outcome observable
+Add `settled_unmarked: bool` and a `settle_source: str` (`direct_bid`,
+`complement_ask`, `latched_bid`, `latched_complement_ask`, `redeemed`,
+`unresolved`) to `WindowResult`, and surface both in the per-window export at
+`backtest/engine.py:1136`. A sweep must be able to separate "closed at a real
+quote" from "redeemed" from "abstained" without re-deriving it.
 
-### 3.3 Bounded concurrent fan-out across the slate
-Files: `scripts/collect_ticks.py`, `strategy/markets.py`
-
-- The 10 series are fully independent and already isolated per-series for failures.
-- Split `poll_once` into a pure per-series fetch step and a main-thread commit step:
-  - **Fetch (worker thread, no shared mutable state):** resolve the market via the
-    cache, fetch both books, optionally fetch the REST tape. Returns a plain result
-    object carrying the books, the raw tape map and any per-series error string.
-  - **Commit (main thread, sequential in `SERIES` order):** create or update the
-    `windows` entry, drain the socket tape, dedup, build the snap, update `stats`,
-    append the line to disk, close finished windows.
-- All mutation of `windows` and `stats`, and every file append, stays on the main
-  thread, so snapshot ordering in `ticks_<day>.jsonl` is unchanged and no lock is
-  needed around the tick file.
-- Concurrency is bounded by an explicit `max_workers`, and the executor is created
-  once for the process rather than per tick.
-- `strategy/markets._SESSION` currently pools 8 connections. The pool must be sized
-  to at least the number of in-flight requests the fan-out can produce, or urllib3
-  discards and re-handshakes connections and the change loses its own benefit.
-- Anti-burst behaviour is preserved. The per-request jitter exists to stop
-  synchronized 30-rps bursts at window boundaries (module docstring D2/D4). Under
-  fan-out, jitter between two calls inside one worker no longer de-synchronizes
-  anything, so it is replaced by a bounded per-worker start stagger that keeps the
-  same anti-burst property across the slate.
-- Expected result: ~2.7 s collapses to roughly one series' latency.
-
-### 3.4 Tell the truth about the cadence
-File: `scripts/collect_ticks.py`
-
-- Re-measure the round after 3.1-3.3 and set `TICK_BUDGET_MS` from the measurement
-  with headroom, not from a wish.
-- Correct the module docstring. The stated "1-second poll cadence" and the stated
-  "0-80ms per-request jitter" (the constant is `JITTER_SEC = 0.010`, i.e. 0-10 ms)
-  must both match the code.
-- Publish the observed cadence in `manifest.json` so downstream consumers of
-  `run/ticks/*.jsonl` stop assuming 1 s granularity: last and peak round duration,
-  and the effective sampling interval.
-- Remove the dead `deadline` local in `poll_once` (assigned, never read).
+### 3.5 One definition of the rule
+The last-mid/redemption arithmetic already exists twice, inline and
+near-identically, in `research/sweeps/ev_lab.py` and `research/sweeps/sim2.py`.
+A third inline copy is how issue #182 happened. The rule lands in one exported
+function in `backtest/engine.py`; `ev_lab` and `sim2` import it and keep
+returning `settle_won` / `settle_delta` for `summarize` unchanged.
 
 ## 4. Out of Scope
-- Serving the order book from the #165 socket instead of REST `full_book`. This is
-  the largest remaining cost (~184 ms of the ~269 ms per series) but it changes the
-  provenance of the replay dataset and needs its own correctness campaign. See §7.
-- Any change to the tick record schema, to `backtest/engine.py`, or to the dashboard.
-- Changing `POLL_INTERVAL` semantics beyond documenting the real interval.
-- Changing the WebSocket client itself (`strategy/streaming.py`).
+- `strategy/live_trader.py`. Live is the reference implementation; the backtest
+  moves toward it, never the reverse. Its ladder is not modified, re-tuned, or
+  refactored by this issue.
+- `ev_lab.summarize`'s `settle_correct` path. It already applies the correction
+  by default and `research/sweeps/phase5_band.py` passes it explicitly, so the
+  sweep headline numbers are already settlement-corrected. Touching it would
+  double-count.
+- Regenerating any `research/sweeps/*.json`. The stale marker stays.
+- `scripts/collect_ticks.py` — a continuous capture is running.
+- Venue logic, order routing, the tick schema, and the dashboard.
 
 ## 5. Acceptance Criteria
-1. A full 10-series round completes inside `TICK_BUDGET_MS` on a normal connection,
-   measured and shown — or `TICK_BUDGET_MS` and the docstring state the real
-   achievable cadence, justified by the measurement. The budget is never simply
-   raised to silence the warning.
-2. `slow_tick` is absent from `errs` on a healthy `--once` run and still present when
-   a round genuinely degrades, proved by a test that forces a slow round.
-3. Bounded concurrency only. No unbounded thread creation, no per-tick executor, and
-   the anti-burst stagger the jitter existed for is preserved.
-4. Zero change to the tick schema: `scripts/verify_tick_data.py` passes on freshly
-   collected output.
-5. The real sampling interval is visible to an operator in `manifest.json` and stated
-   correctly in the module docstring.
-6. Snapshot write order within a tick is unchanged (`SERIES` order), and one series
-   failing still leaves the other nine writing normally.
+1. A window where one leg fills and the held side's final `best_bid` is `None`
+   books the resolved loss, not `0.00c`, proved by a test that fails on master.
+2. A mirrored test proves a winning unmarked leg books the full win.
+3. A window whose held leg has a real final `best_bid` produces byte-identical
+   `pnl_cents`, `fees_cents`, `exit_price` and `settlement_mid` to master.
+   Pair-captured and stopped-out windows are likewise unchanged.
+4. Each ladder stage has a test that forces exactly that stage and asserts the
+   `settle_source` it reports, including `redeemed` and `unresolved`.
+5. `research/sweeps/audit_settlement.py` keeps printing the raw uncorrected
+   bias — it is the evidence in #191 — and adds a corrected line measured
+   through the shared resolver that lands at approximately 0.
+6. `python -m pytest -q` green against the 856-test baseline.
+7. `research/sweeps/RESULTS-ARE-STALE.md` records that pre-fix
+   `scripts/backtest.py` output for hold-to-settle configs is invalid, and that
+   the sweep JSONs were already corrected by `summarize`.
 
 ## 6. Edge Cases
-- Gamma returns a different `conditionId` mid-window (market replaced): the bounded
-  cache age must let the collector pick it up.
-- The window rolls between the cache read and the book fetch: the snap is stamped
-  with the resolved `end_ts`, and the window closes on the next tick as it does today.
-- The socket connects and then goes silent because the market genuinely has no
-  trades: this must not be mistaken for a dead socket and must not permanently
-  suppress REST.
-- The socket drops mid-round: legs already fetched keep their result, and the next
-  tick sees `ws_connected=False` so REST resumes for every leg.
-- A worker raises: that series records an `err` on its snap or an entry in `errs`,
-  and the remaining series still write.
-- Fewer series than workers, or a single-series run: the fan-out must behave
-  identically to the sequential path.
+- **Both legs filled (pair captured).** Untouched. The resolver is only reached
+  when exactly one leg filled and no exit fired.
+- **Opposite ask is 0.0 or above 1.0.** Rejected, exactly as live rejects it;
+  the ladder falls through to the next stage rather than synthesizing a mark of
+  1.00 or a negative one.
+- **Held leg has a bid of 0.0.** Live treats `0.0 < bid <= 1.0` as the validity
+  window, so a literal `0.0` bid is not a mark — it falls through. The engine
+  must match, or a zero-bid window books the same silent zero under a new name.
+- **Final mid exactly 0.50.** Ambiguous. Abstain, book `0.00c`, report
+  `unresolved`.
+- **Window with no snapshots, or no two-sided mid on either book.** No reference
+  mid exists; abstain rather than defaulting to 0.50.
+- **Latched values from early in the window.** The latched stages scan backward
+  for the last *valid* quote, which may be many ticks old. That is accepted —
+  live accepts it too — but it is why `settle_source` must be recorded, so a
+  stale mark is visible in the results rather than indistinguishable from a
+  fresh one.
+- **Redemption and fees.** The 0.50-mark naked fee already charged on entry
+  stays. No second fee is charged on a redemption.
 
-## 7. Deferred Proposal — socket-served books
-`CLOBStreamCollectorBridge.get_book_for_token()` already exposes the book state the
-#165 client maintains from `book` snapshots and `price_change` deltas. Serving
-snapshots from it would remove the two `full_book` calls — about 68% of the remaining
-per-series cost — and would raise book freshness from once-per-round to every venue
-update. It is deferred, not dropped, because the replay dataset's integrity depends
-on the book being right: it needs proof that delta application, `tick_size_change`
-handling and post-reconnect resynchronization reconstruct the REST book exactly,
-which is a cross-check campaign of its own.
+## 7. Deferred Proposal — reconcile the fee model for marked settlements
+Stages 1-4 produce a mark and the engine charges a taker fee on it, modelling a
+sale. Stage 3.2 produces a redemption and charges nothing. For a hold-to-settle
+config (`ex=none`) the leg is never actually sold, so charging a close fee on a
+resolved mark arguably overstates cost by up to 7 bps of the mark. Deciding this
+properly means separating "the strategy closes at rollover" from "the strategy
+redeems", which is a `BacktestParams` semantics change and its own issue. This
+issue keeps today's fee behaviour on the marked path so the change stays bounded
+to the silent zero.
