@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--filter-partial", action="store_true",
                     help="shorthand to filter late-started partial windows (>5s delay)")
     ap.add_argument("--entry-timeout", type=float, default=0.10,
-                    help="cancel unfilled entry quotes once N fraction of window elapsed, e.g. 0.10 for 10% (0 disables)")
+                    help="cancel unfilled entry quotes once N fraction of window elapsed, e.g. 0.10 for 10%% (0 disables)")
     # The winning preset is defined by these two knobs as much as by --offset,
     # so without them the CLI could only replay a different strategy than the
     # one the bot runs, and the tape-vs-book comparison proved nothing about it.
