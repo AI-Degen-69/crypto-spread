@@ -670,26 +670,6 @@ def test_sweep_configs_serial_path_honours_filters(tmp_path):
 def _sized_cache(tmp_path, mb: float):
     """Point `CACHE_PATH` at a real file of a known size.
 
-    Without this the sizing arithmetic is never reached on a machine that has
-    no `run/sweeps/window_cache.pkl` — `CACHE_PATH.stat()` raises and the
-    function returns its fallback instead. That is every clean checkout and all
-    of CI, where the cache is gitignored and derived. Tests that assert on the
-    arithmetic have to supply a cache rather than assume one.
-    """
-    p = tmp_path / "window_cache.pkl"
-    p.write_bytes(b"\0" * int(mb * 1024 * 1024))
-    old = ev_lab.CACHE_PATH
-    ev_lab.CACHE_PATH = p
-    try:
-        yield p
-    finally:
-        ev_lab.CACHE_PATH = old
-
-
-@contextlib.contextmanager
-def _sized_cache(tmp_path, mb: float):
-    """Point `CACHE_PATH` at a real file of a known size.
-
     Without this the sizing arithmetic is never reached on a machine with no
     `run/sweeps/window_cache.pkl` — `CACHE_PATH.stat()` raises and the function
     returns its fallback instead. That is every clean checkout and all of CI,
