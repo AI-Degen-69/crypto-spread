@@ -666,17 +666,62 @@ def test_sweep_configs_serial_path_honours_filters(tmp_path):
     assert out[0]["n"] == 2, "the series filter was dropped by the serial path"
 
 
-def test_safe_worker_count_never_returns_less_than_one():
+@contextlib.contextmanager
+def _sized_cache(tmp_path, mb: float):
+    """Point `CACHE_PATH` at a real file of a known size.
+
+    Without this the sizing arithmetic is never reached on a machine that has
+    no `run/sweeps/window_cache.pkl` — `CACHE_PATH.stat()` raises and the
+    function returns its fallback instead. That is every clean checkout and all
+    of CI, where the cache is gitignored and derived. Tests that assert on the
+    arithmetic have to supply a cache rather than assume one.
+    """
+    p = tmp_path / "window_cache.pkl"
+    p.write_bytes(b"\0" * int(mb * 1024 * 1024))
+    old = ev_lab.CACHE_PATH
+    ev_lab.CACHE_PATH = p
+    try:
+        yield p
+    finally:
+        ev_lab.CACHE_PATH = old
+
+
+def test_safe_worker_count_never_returns_less_than_one(tmp_path):
     """A pool of zero would deadlock; the floor is the serial path."""
-    assert ev_lab.safe_worker_count(8, reserve_bytes=float("inf")) == 1
-    assert ev_lab.safe_worker_count(0) == 1
-    assert ev_lab.safe_worker_count(-5) == 1
+    with _sized_cache(tmp_path, 8):
+        assert ev_lab.safe_worker_count(8, reserve_bytes=float("inf")) == 1
+        assert ev_lab.safe_worker_count(0) == 1
+        assert ev_lab.safe_worker_count(-5) == 1
 
 
-def test_safe_worker_count_never_exceeds_the_request():
+def test_safe_worker_count_never_exceeds_the_request(tmp_path):
     """It clamps down for memory; it must never invent workers."""
-    assert ev_lab.safe_worker_count(4, reserve_bytes=0.0) <= 4
-    assert ev_lab.safe_worker_count(1, reserve_bytes=0.0) == 1
+    with _sized_cache(tmp_path, 1):   # tiny cache: memory is not the binding limit
+        assert ev_lab.safe_worker_count(4, reserve_bytes=0.0) == 4
+        assert ev_lab.safe_worker_count(1, reserve_bytes=0.0) == 1
+
+
+def test_safe_worker_count_clamps_to_what_memory_allows(tmp_path):
+    """The arithmetic itself, on a cache too large to hold many copies of."""
+    with _sized_cache(tmp_path, 1024):            # 1GB -> ~2.87GB resident each
+        import psutil
+        avail = psutil.virtual_memory().available
+        per = 1024 * 1024 * 1024 * ev_lab.CACHE_RSS_FACTOR
+        expected = max(1, min(8, int((avail - 0.0) // per)))
+        assert ev_lab.safe_worker_count(8, reserve_bytes=0.0) == expected
+
+
+def test_safe_worker_count_falls_back_low_when_the_cache_is_absent(tmp_path):
+    """No cache means no way to size a worker, so it must not guess high.
+
+    This is the state of every clean checkout and of CI.
+    """
+    old = ev_lab.CACHE_PATH
+    ev_lab.CACHE_PATH = tmp_path / "does_not_exist.pkl"
+    try:
+        assert ev_lab.safe_worker_count(8) == 2
+    finally:
+        ev_lab.CACHE_PATH = old
 
 
 def test_safe_worker_count_falls_back_low_when_memory_is_unreadable(monkeypatch):
