@@ -513,6 +513,50 @@ class CLOBMarketWSClient:
         if self.on_book_update:
             self.on_book_update(token_id, bids, asks)
 
+    def _handle_price_change(self, ev: Dict[str, Any]) -> None:
+        """Apply one `price_change` frame, resolving the token per entry.
+
+        The venue sends `price_changes: [{asset_id, price, size, side,
+        best_bid, best_ask}, ...]` with no token at the frame level, and a
+        single frame routinely carries entries for BOTH legs of a market. The
+        older `{asset_id, changes: [...]}` shape is still accepted, so a frame
+        that does name its token at the top level keeps working.
+
+        Each entry also reports the venue's own `best_bid`/`best_ask`. Those are
+        recorded as well: they are the exchange's view of the top of book, and
+        depend on nothing this client has managed to reconstruct locally.
+        """
+        entries = ev.get("price_changes") or ev.get("changes") or []
+        frame_token = str(ev.get("asset_id") or ev.get("token_id") or "").strip()
+        for change in entries:
+            if not isinstance(change, dict):
+                continue
+            token_id = str(change.get("asset_id") or frame_token or "").strip()
+            if not token_id:
+                continue
+            if self._token_set and token_id not in self._token_set:
+                continue
+            try:
+                price = float(change.get("price"))
+                size = float(change.get("size") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if not _valid_quote(price) or not _valid_size(size):
+                continue
+            self.apply_price_change(token_id, str(change.get("side") or "BUY"),
+                                    price, size)
+
+            def _opt(key: str) -> Optional[float]:
+                """Parse an optional decimal-string quote carried on the entry."""
+                try:
+                    return float(change.get(key))
+                except (TypeError, ValueError):
+                    return None
+
+            bb, ba = _opt("best_bid"), _opt("best_ask")
+            if bb is not None or ba is not None:
+                self.apply_best_bid_ask(token_id, bb, ba)
+
     def apply_price_change(self, token_id: str, side: str, price: float, size: float) -> None:
         """Incremental level mutation."""
         with self._state_lock:
@@ -638,8 +682,17 @@ class CLOBMarketWSClient:
     def _handle_event(self, ev: Dict[str, Any]) -> None:
         """Dispatch a single decoded market-channel event."""
         ev_type = str(ev.get("event_type") or ev.get("type") or "").lower()
+        if not ev_type:
+            return
+        # A `price_change` frame carries no top-level token: the venue puts an
+        # `asset_id` on each entry of `price_changes` instead. Routed before the
+        # token guard below, which discarded every such frame -- measured 2,873
+        # frames in 30s, 2,873 dropped, 0 calls to `apply_price_change` (#188).
+        if ev_type == "price_change":
+            self._handle_price_change(ev)
+            return
         token_id = str(ev.get("asset_id") or ev.get("token_id") or "").strip()
-        if not ev_type or not token_id:
+        if not token_id:
             return
         # A frame can still be in flight for a token that rotated out while the
         # recv() was pending; without this it would re-create the very buffer
@@ -650,18 +703,6 @@ class CLOBMarketWSClient:
 
         if ev_type == "book":
             self.apply_book_snapshot(token_id, ev.get("bids") or [], ev.get("asks") or [])
-        elif ev_type == "price_change":
-            for change in (ev.get("changes") or ev.get("price_changes") or []):
-                if not isinstance(change, dict):
-                    continue
-                try:
-                    price = float(change.get("price"))
-                    size = float(change.get("size") or 0.0)
-                except (TypeError, ValueError):
-                    continue
-                if not _valid_quote(price) or not _valid_size(size):
-                    continue
-                self.apply_price_change(token_id, str(change.get("side") or "BUY"), price, size)
         elif ev_type == "last_trade_price":
             self.record_trade(token_id, ev)
         elif ev_type == "best_bid_ask":
