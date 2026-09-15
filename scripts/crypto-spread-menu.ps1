@@ -267,7 +267,7 @@ function Show-SystemStatus {
     Write-ProfileSection -Title "Tick Collector Engine"
     if ($isListening) {
         try {
-            $coll = Invoke-RestMethod -Uri "$DashUrl/api/collector/status" -UseBasicParsing -TimeoutSec 3
+            $coll = Invoke-RestMethod -Uri "$DashUrl/api/collector/status" -UseBasicParsing -TimeoutSec 10
             if ($coll.running) {
                 Csm-Ok "Collector RUNNING (PID $($coll.pid), Today Ticks: $($coll.total_ticks_collected))"
             } elseif ($coll.source -eq "external") {
@@ -280,7 +280,7 @@ function Show-SystemStatus {
                 Write-ProfileKeyValue -Key "Tape Empty Rate" -Value "$emptyPct%" -Style "Info" -KeyWidth 22
             }
         } catch {
-            Csm-Warn "Collector: Could not query /api/collector/status"
+            Csm-Warn "Collector: Could not query /api/collector/status ($_)"
         }
     } else {
         Write-ProfileNeutral -Message "Collector" -Detail "OFFLINE (Start dashboard to inspect)"
