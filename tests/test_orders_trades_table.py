@@ -2305,3 +2305,80 @@ def test_render_oscillation_hero_survives_a_missing_slot():
     process.exit(0);
     """
     _run_node_dom(body, "OSC_HERO_MISSING_SLOT_TESTS_PASSED")
+
+
+def test_orders_trades_container_height_expanded():
+    """Verify Issue #133: otPane containers use expanded min(560px, 65vh) height and ot-pane-scroll class."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Verify toggle button exists in header
+    assert 'id="otHeightToggleBtn"' in html
+    assert 'toggleOtHeight()' in html
+
+    # Verify ot-pane-scroll class is present on all 3 panes
+    for pane_id in ("otPaneOrders", "otPanePositions", "otPaneTrades"):
+        pane_idx = html.find(f'id="{pane_id}"')
+        assert pane_idx != -1, f"Missing {pane_id}"
+        tag_end = html.find(">", pane_idx)
+        tag_str = html[pane_idx:tag_end]
+        assert "ot-pane-scroll" in tag_str, f"{pane_id} missing ot-pane-scroll class"
+        assert "min(560px,65vh)" in tag_str or "min(560px, 65vh)" in tag_str, f"{pane_id} missing 560px height"
+        # Verify old cramped heights are gone
+        assert "max-height:280px" not in tag_str and "max-height: 280px" not in tag_str
+        assert "max-height:300px" not in tag_str and "max-height: 300px" not in tag_str
+
+
+def test_sticky_headers_and_row_density_css():
+    """Verify Issue #133: CSS rules for sticky headers, expanded mode, and compact row density."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Sticky header rule with solid background
+    assert ".ot-pane .tbl thead th{position:sticky;top:0" in html
+    assert "background:var(--panel)" in html
+
+    # Row density rule
+    assert ".ot-pane .tbl td{padding:6px 8px;font-size:12px}" in html
+
+    # Pane scroll rules
+    assert ".ot-pane-scroll{" in html
+    assert "min(560px,65vh)" in html or "min(560px, 65vh)" in html
+    assert ".ot-pane-scroll.ot-expanded{max-height:85vh!important}" in html
+
+
+@requires_node
+def test_orders_trades_height_toggle_and_localstorage():
+    """Verify Issue #133: toggleOtHeight & applyOtHeight toggle expanded class and persist in localStorage."""
+    body = """
+    if (typeof toggleOtHeight !== 'function') throw new Error('toggleOtHeight missing');
+    if (typeof applyOtHeight !== 'function') throw new Error('applyOtHeight missing');
+
+    // 1. Initial state standard
+    applyOtHeight(false);
+    if (localStorage.getItem('crypto-spread-ot-height') !== 'standard') {
+      throw new Error('localStorage expected standard, got ' + localStorage.getItem('crypto-spread-ot-height'));
+    }
+    if (otHeightExpanded !== false) throw new Error('otHeightExpanded should be false');
+
+    // 2. Toggle to expanded
+    toggleOtHeight();
+    if (localStorage.getItem('crypto-spread-ot-height') !== 'expanded') {
+      throw new Error('localStorage expected expanded, got ' + localStorage.getItem('crypto-spread-ot-height'));
+    }
+    if (otHeightExpanded !== true) throw new Error('otHeightExpanded should be true');
+
+    // 3. Toggle back to standard
+    toggleOtHeight();
+    if (localStorage.getItem('crypto-spread-ot-height') !== 'standard') {
+      throw new Error('localStorage expected standard, got ' + localStorage.getItem('crypto-spread-ot-height'));
+    }
+    if (otHeightExpanded !== false) throw new Error('otHeightExpanded should be false');
+
+    console.log('OT_HEIGHT_TOGGLE_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node_dom(body, "OT_HEIGHT_TOGGLE_TESTS_PASSED")
+
