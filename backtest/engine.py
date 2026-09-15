@@ -516,7 +516,7 @@ def _taker_fee(p: float, rate: float) -> float:
     return rate * p * (1.0 - p)
 
 
-def _quote(x) -> float | None:
+def _quote(x: object) -> float | None:
     """A price usable as an executable mark, or None.
 
     Mirrors the validity window `LiveTrader._resolve_exit_bid` enforces
@@ -524,6 +524,12 @@ def _quote(x) -> float | None:
     `0.0` is how a venue spells "no bid", not a bid of zero — Polymarket's
     tick size makes a genuine zero unquotable — so it must fall through to the
     next resolution stage rather than be marked against.
+
+    Deliberately stricter than `_mid`, which folds a `0.0` into the midpoint
+    like any other price. The two are asked different questions: this one asks
+    "can the leg be sold here", where a sentinel zero is no answer at all, and
+    `_mid` asks "which way did the window go", where a quote pinned at zero is
+    strong evidence on its own.
     """
     try:
         v = float(x)
@@ -539,7 +545,7 @@ def _clamp_mark(p: float) -> float:
     return round(max(0.0001, min(0.9999, p)), 4)
 
 
-def resolve_redemption(up_bid, up_ask, down_bid, down_ask,
+def resolve_redemption(up_book: dict | None, down_book: dict | None,
                        held_up: bool, resting: float) -> tuple[bool | None, float]:
     """`(held_side_won, delta_cents)` for a naked leg carried to expiry.
 
@@ -550,16 +556,23 @@ def resolve_redemption(up_bid, up_ask, down_bid, down_ask,
     either book, or a mid of exactly 0.50 — because booking a coin flip would
     replace one wrong number with another.
 
+    Takes the two books rather than four loose prices: every caller already has
+    them in this shape, and four same-typed `float | None` positionals would
+    let a transposed up/down pair type-check and silently invert the answer.
+
+    The `== 0.5` test is exact on purpose. Live's own stage-5 uses a 1e-4
+    tolerance, but this rule is also what `summarize(settle_correct=True)` has
+    been applying to every sweep result, and widening the abstention band here
+    would move published numbers rather than fix them (issue #191 scope fence).
+
     This is the single definition of the rule. `research/sweeps/ev_lab.py` and
     `research/sweeps/sim2.py` each carried their own copy; issue #182 was
     caused by exactly that kind of divergence between the audit and the
     simulator, so a second copy is a defect (issue #191).
     """
-    held = _mid({"best_bid": up_bid, "best_ask": up_ask} if held_up
-                else {"best_bid": down_bid, "best_ask": down_ask})
+    held = _mid(up_book if held_up else down_book)
     if held is None:
-        opp = _mid({"best_bid": down_bid, "best_ask": down_ask} if held_up
-                   else {"best_bid": up_bid, "best_ask": up_ask})
+        opp = _mid(down_book if held_up else up_book)
         held = None if opp is None else (1.0 - opp)
     if held is None or held == 0.5:
         return None, 0.0
@@ -567,8 +580,9 @@ def resolve_redemption(up_bid, up_ask, down_bid, down_ask,
     return won, ((1.0 - resting) if won else -resting) * 100.0
 
 
-# Ordered resolution stages, named so a result says how it was reached rather
-# than leaving a stale latched mark indistinguishable from a fresh quote.
+# Every value `resolve_naked_settlement` can report, in resolution order, so a
+# result says how it was reached rather than leaving a stale latched mark
+# indistinguishable from a fresh quote. The last entry is the abstention.
 SETTLE_SOURCES = ("direct_bid", "complement_ask", "latched_bid",
                   "latched_complement_ask", "redeemed", "unresolved")
 
@@ -592,7 +606,7 @@ def resolve_naked_settlement(snaps: list[dict], held_up: bool,
     181 unmarked windows in the 3-day capture, 181 were losers (issue #191).
     """
     if not snaps:
-        return None, 0.0, "unresolved"
+        return None, 0.0, SETTLE_SOURCES[-1]
     held_key = "up_book" if held_up else "down_book"
     opp_key = "down_book" if held_up else "up_book"
     last = snaps[-1]
@@ -622,13 +636,10 @@ def resolve_naked_settlement(snaps: list[dict], held_up: bool,
             mark = _clamp_mark(1.0 - latched_opp)
             return mark, (mark - resting) * 100.0, "latched_complement_ask"
 
-    ub = last.get("up_book") or {}
-    db = last.get("down_book") or {}
-    won, delta = resolve_redemption(ub.get("best_bid"), ub.get("best_ask"),
-                                    db.get("best_bid"), db.get("best_ask"),
+    won, delta = resolve_redemption(last.get("up_book"), last.get("down_book"),
                                     held_up, resting)
     if won is None:
-        return None, 0.0, "unresolved"
+        return None, 0.0, SETTLE_SOURCES[-1]
     return None, delta, "redeemed"
 
 

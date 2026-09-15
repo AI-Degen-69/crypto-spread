@@ -90,7 +90,8 @@ def main() -> int:
             # reconstructs it -- through the one definition in
             # `backtest.engine`, never a local copy of the rule.
             _won, delta = resolve_redemption(
-                w.up_bb[-1], w.up_ba[-1], w.dn_bb[-1], w.dn_ba[-1],
+                {"best_bid": w.up_bb[-1], "best_ask": w.up_ba[-1]},
+                {"best_bid": w.dn_bb[-1], "best_ask": w.dn_ba[-1]},
                 held_up, resting)
             fixed_pnl = delta if _won is not None else 0.0
         else:

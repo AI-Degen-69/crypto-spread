@@ -361,7 +361,8 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
                 naked_none = True
                 resting = resting_up if held_side == "up" else resting_dn
                 settle_won, settle_delta = resolve_redemption(
-                    w.up_bb[-1], w.up_ba[-1], w.dn_bb[-1], w.dn_ba[-1],
+                    {"best_bid": w.up_bb[-1], "best_ask": w.up_ba[-1]},
+                    {"best_bid": w.dn_bb[-1], "best_ask": w.dn_ba[-1]},
                     held_side == "up", resting)
 
     if n_mids == 0:
