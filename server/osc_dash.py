@@ -2626,6 +2626,9 @@ textarea:focus-visible,
           <div><b style="color:var(--up)">ETH/BNB/XRP 5m:</b> Stop +$0.12 (Exit @ $0.62)</div>
           <div><b>15m General:</b> Stop +$0.13</div>
         </div>
+        <div id="stopLossProvenance" style="font-size:11px;color:var(--dim);margin-top:10px;line-height:1.5;border-top:1px solid var(--line);padding-top:8px">
+          Not computed from the live dataset — a static heuristic with no surviving sweep behind it, unlike the card on the left. The newest study, <code>docs/ev-research-findings-2026-09-11.md</code> (2026-09-11, itself provisional pending #182), reached the opposite conclusion: stop-loss exits were its largest PnL destroyer, and it recommends holding to settlement instead.
+        </div>
       </div>
     </div>
     <div class="grid">

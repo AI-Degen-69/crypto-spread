@@ -2602,3 +2602,16 @@ def test_summary_hero_element_ids_present():
             f"{elem_id} must ship an em dash placeholder, got {placeholder!r}"
         )
     assert "renderOscillationHero" in html
+
+def test_stoploss_card_declares_static_provenance():
+    """Verify the stop-loss card marks itself non-computed and names its provenance."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert 'id="stopLossProvenance"' in html
+    start = html.index('id="stopLossProvenance"')
+    note = html[start:start + 600]
+    # It must say it is not computed from the live dataset...
+    assert "Not computed" in note
+    # ...and name the newest research, which reached the opposite conclusion.
+    assert "ev-research-findings-2026-09-11" in note
