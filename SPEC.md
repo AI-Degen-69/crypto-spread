@@ -101,10 +101,19 @@ No change to `switchTab()` (`server/osc_dash.py:3504`).
 | `oscHeroPct5m` | 5m oscillating % |
 | `oscHeroPct15m` | 15m oscillating % |
 | `oscHeroAsOf` | rendered `summary.ts` |
-| `stopLossProvenance` | provenance line on the stop-loss card |
 
-Every one of these ships in the static markup with the literal placeholder `—`,
-so the card is honest before the first fetch resolves and in the empty-data case.
+Every one of the five live slots above ships in the static markup with the
+literal placeholder `—`, so the card is honest before the first fetch resolves
+and in the empty-data case.
+
+One further id is **not** a live slot and is exempt from that rule:
+
+| id | Content |
+| --- | --- |
+| `stopLossProvenance` | the stop-loss card's provenance line — static prose, never rewritten by script |
+
+Its static text must state that the card is **not computed** from the live
+dataset and name the document in §6; it must not be replaced by a placeholder.
 
 ## 5. Acceptance criteria
 
@@ -122,7 +131,8 @@ so the card is honest before the first fetch resolves and in the empty-data case
       gone and the ids are present; a Node-harness test exercises
       `computeOscillationHeadline` against populated and empty inputs.
 - [ ] `python -m pytest -q tests/test_osc_dash_integration.py tests/test_orders_trades_table.py` passes.
-- [ ] `python -m pytest -q` passes (full suite, ~390 tests).
+- [ ] `python -m pytest -q` passes (full suite; 901 tests as measured on this
+      branch — the count grows, the zero-failures requirement does not).
 
 ## 6. Stop-loss card provenance — DECIDED: option A (operator, 2026-09-15)
 

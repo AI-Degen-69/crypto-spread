@@ -2064,6 +2064,41 @@ def test_compute_oscillation_headline_js():
     if (o.totalWindows !== 8) throw new Error('unknown duration must count in total');
     if (o.pct5m !== null || o.pct15m !== null) throw new Error('unknown duration must not land in a bucket');
 
+    // 6. A field that is PRESENT but corrupt is not a measured zero. Folding it
+    // to 0 would render "0.0% oscillating" off garbage input, which is exactly
+    // the measured-looking-but-false claim this issue exists to remove.
+    for (const junk of ['bad', null, true, {}, [], NaN, Infinity, -1]) {
+      const c = computeOscillationHeadline({
+        'btc-up-or-down-5m': { duration: 300, windows: 10, oscillating: junk }
+      });
+      if (c.pct5m !== null) {
+        throw new Error('corrupt oscillating ' + JSON.stringify(junk) + ' must not render a percentage, got ' + c.pct5m);
+      }
+      if (c.totalWindows !== 0) {
+        throw new Error('corrupt entry must not contribute windows, got ' + c.totalWindows);
+      }
+      if (c.ok !== false) throw new Error('an all-corrupt summary is not ok');
+    }
+
+    // Corrupt `windows` must not silently shrink the denominator either.
+    for (const junk of ['bad', null, Infinity, -5]) {
+      const c = computeOscillationHeadline({
+        'btc-up-or-down-5m':  { duration: 300, windows: junk, oscillating: 5 },
+        'btc-up-or-down-15m': { duration: 900, windows: 50,  oscillating: 40 }
+      });
+      if (c.totalWindows !== 50) throw new Error('corrupt windows must be excluded, got ' + c.totalWindows);
+      if (c.pct5m !== null) throw new Error('corrupt 5m bucket must stay null, got ' + c.pct5m);
+      if (Math.abs(c.pct15m - 80) > 1e-9) throw new Error('a clean sibling entry must still aggregate, got ' + c.pct15m);
+    }
+
+    // A numeric string is unambiguous and stays usable.
+    const strNums = computeOscillationHeadline({ 'a': { duration: 300, windows: '10', oscillating: '7' } });
+    if (Math.abs(strNums.pct5m - 70) > 1e-9) throw new Error('numeric strings should parse, got ' + strNums.pct5m);
+
+    // A genuine measured zero still reports as 0.0%, not as absent data.
+    const trueZero = computeOscillationHeadline({ 'a': { duration: 300, windows: 10, oscillating: 0 } });
+    if (trueZero.pct5m !== 0) throw new Error('a real 0 must survive as 0, got ' + trueZero.pct5m);
+
     console.log('OSC_HEADLINE_TESTS_PASSED');
     process.exit(0);
     """

@@ -3047,13 +3047,24 @@ const timeBarFraction=(rem, dur)=>{
 // never a 0% that reads as a measured result.
 const OSC_DUR_5M = 300;
 const OSC_DUR_15M = 900;
+// An absent field means zero -- the summary omits counts it never measured.
+// A field that is *present* but not a finite, non-negative number is corrupt,
+// and folding it to zero would render a measured-looking "0.0%" from garbage.
+// Drop that entry from the aggregation instead, so its bucket stays an em dash.
+function measureCount(v){
+  if(v===undefined) return 0;
+  if(typeof v!=='number' && typeof v!=='string') return null;
+  const n=Number(v);
+  return (isFinite(n) && n>=0) ? n : null;
+}
 function computeOscillationHeadline(perSeries){
   const rate=(osc,win)=> win>0 ? (osc/win)*100 : null;
   let tW=0,tO=0,w5=0,o5=0,w15=0,o15=0;
   for(const entry of Object.values(perSeries||{})){
     if(!entry || typeof entry!=='object') continue;
-    const win=Number(entry.windows)||0;
-    const osc=Number(entry.oscillating)||0;
+    const win=measureCount(entry.windows);
+    const osc=measureCount(entry.oscillating);
+    if(win===null || osc===null) continue;
     tW+=win; tO+=osc;
     if(Number(entry.duration)===OSC_DUR_5M){ w5+=win; o5+=osc; }
     else if(Number(entry.duration)===OSC_DUR_15M){ w15+=win; o15+=osc; }
