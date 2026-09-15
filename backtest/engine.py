@@ -494,6 +494,12 @@ class WindowResult:
     # never filled, which is exactly when a breached cap would go unnoticed.
     chased_leg: str = ""
     chased_resting: float | None = None
+    # Issue #191: how a naked leg carried to window close was valued, and
+    # whether that value came from anything other than its own final bid.
+    # Without this a stale latched mark and a fresh quote are indistinguishable
+    # in the results, and an abstention looks identical to a flat window.
+    settled_unmarked: bool = False
+    settle_source: str = ""
 
 
 # Issue #170: these used to be local copies that disagreed with the collector
@@ -508,6 +514,122 @@ def _taker_fee(p: float, rate: float) -> float:
     if p is None or p <= 0 or p >= 1:
         return 0.0
     return rate * p * (1.0 - p)
+
+
+def _quote(x) -> float | None:
+    """A price usable as an executable mark, or None.
+
+    Mirrors the validity window `LiveTrader._resolve_exit_bid` enforces
+    (issue #160): a quote is only a mark inside `0.0 < p <= 1.0`. A literal
+    `0.0` is how a venue spells "no bid", not a bid of zero — Polymarket's
+    tick size makes a genuine zero unquotable — so it must fall through to the
+    next resolution stage rather than be marked against.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or not (0.0 < v <= 1.0):
+        return None
+    return v
+
+
+def _clamp_mark(p: float) -> float:
+    """Clamp a synthesized mark away from the unquotable ends, as live does."""
+    return round(max(0.0001, min(0.9999, p)), 4)
+
+
+def resolve_redemption(up_bid, up_ask, down_bid, down_ask,
+                       held_up: bool, resting: float) -> tuple[bool | None, float]:
+    """`(held_side_won, delta_cents)` for a naked leg carried to expiry.
+
+    The binary redeems at 1 or 0, so a leg nobody will quote is still worth
+    something. Direction comes from the held side's own final mid, falling back
+    to the complement of the opposite side's mid when the held book prices
+    nothing at all. `(None, 0.0)` when the window names no winner — no mid on
+    either book, or a mid of exactly 0.50 — because booking a coin flip would
+    replace one wrong number with another.
+
+    This is the single definition of the rule. `research/sweeps/ev_lab.py` and
+    `research/sweeps/sim2.py` each carried their own copy; issue #182 was
+    caused by exactly that kind of divergence between the audit and the
+    simulator, so a second copy is a defect (issue #191).
+    """
+    held = _mid({"best_bid": up_bid, "best_ask": up_ask} if held_up
+                else {"best_bid": down_bid, "best_ask": down_ask})
+    if held is None:
+        opp = _mid({"best_bid": down_bid, "best_ask": down_ask} if held_up
+                   else {"best_bid": up_bid, "best_ask": up_ask})
+        held = None if opp is None else (1.0 - opp)
+    if held is None or held == 0.5:
+        return None, 0.0
+    won = held > 0.5
+    return won, ((1.0 - resting) if won else -resting) * 100.0
+
+
+# Ordered resolution stages, named so a result says how it was reached rather
+# than leaving a stale latched mark indistinguishable from a fresh quote.
+SETTLE_SOURCES = ("direct_bid", "complement_ask", "latched_bid",
+                  "latched_complement_ask", "redeemed", "unresolved")
+
+
+def resolve_naked_settlement(snaps: list[dict], held_up: bool,
+                             resting: float) -> tuple[float | None, float, str]:
+    """`(mark, delta_cents, source)` for a naked leg at window close.
+
+    Ports `LiveTrader._resolve_exit_bid` (issue #160) into the replay: the held
+    leg's own final bid, then the binary complement of the opposite ask, then
+    the last valid quote of each seen anywhere in the window. Live's fifth
+    stage — a synthetic mid — is replaced by outright redemption, because a
+    replay knows how the window ended and a live engine at rollover does not.
+
+    `mark` is None for `redeemed` and `unresolved`: neither is a closing trade,
+    so neither carries a taker fee.
+
+    Before this existed the engine stopped after the first stage and booked
+    `0.00c` when it failed. A losing contract loses its bid side before expiry
+    while a winning one keeps a bid near 1.00, so the omission ran one way: of
+    181 unmarked windows in the 3-day capture, 181 were losers (issue #191).
+    """
+    if not snaps:
+        return None, 0.0, "unresolved"
+    held_key = "up_book" if held_up else "down_book"
+    opp_key = "down_book" if held_up else "up_book"
+    last = snaps[-1]
+    last_held = last.get(held_key) or {}
+    last_opp = last.get(opp_key) or {}
+
+    bid = _quote(last_held.get("best_bid"))
+    if bid is not None:
+        return bid, (bid - resting) * 100.0, "direct_bid"
+
+    # The complement is built from the opposite ASK, never the opposite bid:
+    # `1 - ask_opp` synthesizes a bid on this leg, which is what closing a long
+    # has to cross. `1 - bid_opp` would synthesize an ask (live, issue #160).
+    opp_ask = _quote(last_opp.get("best_ask"))
+    if opp_ask is not None:
+        mark = _clamp_mark(1.0 - opp_ask)
+        return mark, (mark - resting) * 100.0, "complement_ask"
+
+    for s in reversed(snaps):
+        latched = _quote((s.get(held_key) or {}).get("best_bid"))
+        if latched is not None:
+            return latched, (latched - resting) * 100.0, "latched_bid"
+
+    for s in reversed(snaps):
+        latched_opp = _quote((s.get(opp_key) or {}).get("best_ask"))
+        if latched_opp is not None:
+            mark = _clamp_mark(1.0 - latched_opp)
+            return mark, (mark - resting) * 100.0, "latched_complement_ask"
+
+    ub = last.get("up_book") or {}
+    db = last.get("down_book") or {}
+    won, delta = resolve_redemption(ub.get("best_bid"), ub.get("best_ask"),
+                                    db.get("best_bid"), db.get("best_ask"),
+                                    held_up, resting)
+    if won is None:
+        return None, 0.0, "unresolved"
+    return None, delta, "redeemed"
 
 
 def _classify(mids: list[float]) -> str:
@@ -554,6 +676,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     entry_price_down = None
     exit_price = None
     settlement_mid = None
+    settled_unmarked = False
+    settle_source = ""
     exit_taken = False
     exit_side = ""
     pair_captured = False
@@ -1015,24 +1139,27 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     if filled_up or filled_down:
         if (filled_up and not filled_down) or (filled_down and not filled_up):
             fees_cents += _taker_fee(0.50, params.taker_fee_rate) * 100.0
-        # Mark any still-open naked leg to the final observed price so the
-        # window's P&L reflects settlement. Use the last snap's best_bid for
-        # the held side (executable quote). Charge the taker fee only on the
-        # actual close; preserve pair-capture and exit behavior above.
-        if not pair_captured and not exit_taken:
-            last = window_snaps[-1] if window_snaps else {}
-            lb = (last.get("up_book") or {}).get("best_bid")
-            db_bid = (last.get("down_book") or {}).get("best_bid")
-            if filled_up and not filled_down and lb is not None:
-                exit_price = lb
-                settlement_mid = lb
-                pnl_cents += (lb - resting_up) * 100.0
-                fees_cents += _taker_fee(lb, params.taker_fee_rate) * 100.0
-            elif filled_down and not filled_up and db_bid is not None:
-                exit_price = db_bid
-                settlement_mid = db_bid
-                pnl_cents += (db_bid - resting_down) * 100.0
-                fees_cents += _taker_fee(db_bid, params.taker_fee_rate) * 100.0
+        # Value any still-open naked leg at window close (issue #191). This
+        # used to stop at the held side's final best_bid and book 0.00c when it
+        # was absent — which is precisely when the leg was worthless, so every
+        # such window dropped a full loss and kept every win. The ladder in
+        # `resolve_naked_settlement` mirrors live's `_resolve_exit_bid` and
+        # redeems when no stage resolves. Taker fee is charged only on a real
+        # mark; a redemption is not a closing trade. Pair-capture and exit
+        # behaviour above are untouched.
+        if not pair_captured and not exit_taken and (filled_up != filled_down):
+            _resting = resting_up if filled_up else resting_down
+            if _resting is not None:
+                mark, delta, src = resolve_naked_settlement(
+                    window_snaps, filled_up, _resting)
+                settle_source = src
+                if src != "unresolved":
+                    pnl_cents += delta
+                    settled_unmarked = src != "direct_bid"
+                if mark is not None:
+                    exit_price = mark
+                    settlement_mid = mark
+                    fees_cents += _taker_fee(mark, params.taker_fee_rate) * 100.0
 
     return WindowResult(
         cid=cid, series=series, slug=slug, duration=duration,
@@ -1054,6 +1181,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         chased_leg=chased_leg,
         chased_resting=(resting_down if chased_leg == "down"
                         else resting_up if chased_leg == "up" else None),
+        settled_unmarked=settled_unmarked,
+        settle_source=settle_source,
     )
 
 
@@ -1134,6 +1263,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "exit_price": w.exit_price,
             "exit_side": w.exit_side,
             "settlement_mid": w.settlement_mid,
+            "settled_unmarked": w.settled_unmarked,
+            "settle_source": w.settle_source,
             "pnl_cents": round(w.pnl_cents, 2),
             "exit_reason": exit_info,
             "start_delay_sec": w.start_delay_sec,

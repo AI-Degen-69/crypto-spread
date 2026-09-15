@@ -44,6 +44,7 @@ from backtest.engine import (  # noqa: E402
     _simulate_window,
     group_by_cid,
     iter_ticks,
+    resolve_redemption,
 )
 
 TICKS_DIR = ROOT / "run" / "ticks"
@@ -657,19 +658,9 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                 # summarizer's correction (direction from the last observed mid).
                 naked_none = True
                 resting = resting_up if held_side == "up" else resting_dn
-                if held_side == "up":
-                    ref = _mid_from(w.up_bb[-1], w.up_ba[-1])
-                    if ref is None:
-                        dm = _mid_from(w.dn_bb[-1], w.dn_ba[-1])
-                        ref = (1.0 - dm) if dm is not None else None
-                else:
-                    ref = _mid_from(w.dn_bb[-1], w.dn_ba[-1])
-                    if ref is None:
-                        um = _mid_from(w.up_bb[-1], w.up_ba[-1])
-                        ref = (1.0 - um) if um is not None else None
-                if ref is not None and ref != 0.5:
-                    settle_won = ref > 0.5
-                    settle_delta = (1.0 - resting) * 100.0 if settle_won else (-resting) * 100.0
+                settle_won, settle_delta = resolve_redemption(
+                    w.up_bb[-1], w.up_ba[-1], w.dn_bb[-1], w.dn_ba[-1],
+                    held_side == "up", resting)
 
     if n_mids == 0:
         cls = "no_data"

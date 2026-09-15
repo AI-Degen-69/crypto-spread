@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backtest.engine import BacktestParams  # noqa: E402
+from backtest.engine import BacktestParams, resolve_redemption  # noqa: E402
 from ev_lab import (  # noqa: E402
     Win, _mid_from, _two_sided, _queue_ahead, _taker_fee,
     reject_knobs_sim2_ignores,
@@ -360,19 +360,9 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
                  (filled_dn and not filled_up and db_bid is None):
                 naked_none = True
                 resting = resting_up if held_side == "up" else resting_dn
-                if held_side == "up":
-                    ref = _mid_from(w.up_bb[-1], w.up_ba[-1])
-                    if ref is None:
-                        dm = _mid_from(w.dn_bb[-1], w.dn_ba[-1])
-                        ref = (1.0 - dm) if dm is not None else None
-                else:
-                    ref = _mid_from(w.dn_bb[-1], w.dn_ba[-1])
-                    if ref is None:
-                        um = _mid_from(w.up_bb[-1], w.up_ba[-1])
-                        ref = (1.0 - um) if um is not None else None
-                if ref is not None and ref != 0.5:
-                    settle_won = ref > 0.5
-                    settle_delta = (1.0 - resting) * 100.0 if settle_won else (-resting) * 100.0
+                settle_won, settle_delta = resolve_redemption(
+                    w.up_bb[-1], w.up_ba[-1], w.dn_bb[-1], w.dn_ba[-1],
+                    held_side == "up", resting)
 
     if n_mids == 0:
         cls = "no_data"

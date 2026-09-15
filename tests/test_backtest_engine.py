@@ -1290,3 +1290,268 @@ def test_a_naked_leg_always_reaches_the_naked_threshold_check():
     assert continues == ["not filled_up and not filled_down"], (
         "the gate-failure branch's exit condition changed; a naked leg may no "
         f"longer reach the naked_thr check: {continues}")
+
+
+# ===========================================================================
+# Issue #191: a naked leg the book cannot mark must still settle
+#
+# `_simulate_window` used to mark a still-open naked leg from the last snap's
+# `best_bid` alone. A losing contract loses its bid side before expiry --
+# nobody bids on something settling at zero -- so the mark was skipped and the
+# window booked 0.00c instead of the loss. Winners keep a bid near 1.00 and
+# were always booked, so the error only ever ran one way.
+#
+# Live solved this in issue #160 with `LiveTrader._resolve_exit_bid`, a
+# resolution ladder that raises rather than assume a price. These tests pin the
+# same ladder in the backtest, plus the redemption and abstention a replay can
+# do that a live engine at rollover cannot.
+# ===========================================================================
+
+SETTLE_CID = "0xSETTLE"
+SETTLE_SLUG = "eth-up-or-down-5m"
+SETTLE_SERIES = "eth-up-or-down-5m"
+SETTLE_START = 1_760_000_000.0
+
+
+def _settle_snap(i: int, mid: float, up_bid, up_ask, dn_bid, dn_ask) -> dict:
+    """One raw tick with every book side under the test's direct control.
+
+    `snap()` derives the books from a mid, which is exactly what these tests
+    cannot use: the whole subject is what happens when one side of one book is
+    absent.
+    """
+    return {
+        "ts": SETTLE_START + i * 40.0, "iso": "x",
+        "series": SETTLE_SERIES, "slug": SETTLE_SLUG, "cid": SETTLE_CID,
+        "duration": 300, "label": "ETH 5m",
+        "start_ts": SETTLE_START, "end_ts": SETTLE_START + 300.0,
+        "t_rem": 300.0 - i * 40.0,
+        "up_token": UP_TOKEN, "down_token": DN_TOKEN,
+        "up_book": {"token_id": UP_TOKEN, "bids": {}, "asks": {},
+                    "best_bid": up_bid, "best_ask": up_ask, "malformed": 0},
+        "down_book": {"token_id": DN_TOKEN, "bids": {}, "asks": {},
+                      "best_bid": dn_bid, "best_ask": dn_ask, "malformed": 0},
+        "tape_delta": [], "mid": mid, "touch_pair": 0.99,
+        "resting_pair": 0.96, "queue_up": 0.0, "queue_down": 0.0, "err": None,
+    }
+
+
+def _settle_params(**kw) -> BacktestParams:
+    """Hold-to-settle params: book fills, both stops off, no entry timeout.
+
+    This is the `ex=none` shape the sweep ran -- the only configuration in
+    which a naked leg reaches window close still open.
+    """
+    base = dict(offset=0.02, fill_model="book", pair_cost_gate=1.05,
+                entry_timeout_pct=0.0, stop_loss_enabled=False,
+                naked_leg_timeout_pct=0.0)
+    base.update(kw)
+    return BacktestParams(**base)
+
+
+def _held_down_window(final_dn_bid=None, final_up_ask=None,
+                      latched_dn_bid=0.04, latched_up_ask=0.96) -> list[dict]:
+    """The worked example from issue #191, as ticks.
+
+    DOWN fills at 0.470 on tick 1 and the market then runs to UP. DOWN's bid
+    disappears before expiry; the caller decides what survives on the final
+    tick and what the ladder can latch onto from tick 6.
+    """
+    return [
+        _settle_snap(0, 0.51, 0.505, 0.515, 0.485, 0.495),
+        _settle_snap(1, 0.55, 0.545, 0.600, 0.400, 0.460),   # DOWN fills @ 0.470
+        _settle_snap(2, 0.62, 0.615, 0.625, 0.375, 0.385),
+        _settle_snap(3, 0.74, 0.735, 0.745, 0.255, 0.265),
+        _settle_snap(4, 0.86, 0.855, 0.865, 0.135, 0.145),
+        _settle_snap(5, 0.92, 0.915, 0.925, 0.075, 0.085),
+        _settle_snap(6, 0.955, 0.950, latched_up_ask, latched_dn_bid, 0.05),
+        _settle_snap(7, 0.995, 0.990, final_up_ask, final_dn_bid, 0.01),
+    ]
+
+
+def test_a_losing_naked_leg_with_no_final_bid_books_the_loss():
+    """Issue #191: the bid vanishing is not the position vanishing.
+
+    Held DOWN rests at 0.470 and the window closes at mid 0.995, so the leg is
+    worthless. Its final bid is gone and so is the opposite ask, which used to
+    mean the window contributed exactly nothing. The ladder still has the last
+    valid DOWN bid of 0.04 to mark against.
+    """
+    w = _simulate_window(_held_down_window(), _settle_params())
+    assert w.filled_down is True and w.filled_up is False
+    assert w.pair_captured is False and w.exit_taken is False
+    assert w.pnl_cents == pytest.approx((0.04 - 0.470) * 100.0), (
+        "the held DOWN leg booked no loss at all")
+    assert w.settled_unmarked is True
+    assert w.settle_source == "latched_bid"
+
+
+def test_a_winning_naked_leg_the_ladder_cannot_mark_redeems_at_one():
+    """The mirror: no bid, no complement, nothing latched -- but it won.
+
+    UP is quoted ask-only all window and DOWN bid-only, so every stage of the
+    ladder fails. The window still ends at an UP mid of 0.985, so the leg
+    redeems at 1.00 rather than contributing nothing. A redemption is not a
+    trade, so no taker fee is charged on it.
+    """
+    snaps = [
+        _settle_snap(0, 0.49, None, 0.460, 0.510, None),   # UP fills @ 0.470
+        _settle_snap(1, 0.60, None, 0.610, 0.390, None),
+        _settle_snap(2, 0.80, None, 0.810, 0.190, None),
+        _settle_snap(3, 0.99, None, 0.990, 0.010, None),
+    ]
+    p = _settle_params()
+    w = _simulate_window(snaps, p)
+    assert w.filled_up is True and w.filled_down is False
+    assert w.pnl_cents == pytest.approx((1.0 - 0.470) * 100.0), (
+        "a winning naked leg with an unmarkable book booked nothing")
+    assert w.settled_unmarked is True
+    assert w.settle_source == "redeemed"
+    assert w.fees_cents == pytest.approx(_taker_fee(0.50, p.taker_fee_rate) * 100.0), (
+        "a redemption is not a closing trade and must not carry a taker fee")
+
+
+def test_a_markable_naked_leg_keeps_the_price_it_always_had():
+    """Issue #191 moves the unmarked branch only.
+
+    A held leg whose final bid is still on the book is marked to that bid,
+    charged the same taker fee, and reports the same `settlement_mid` as
+    before. If this moves, the fix changed something it was not asked to.
+    """
+    p = _settle_params()
+    w = _simulate_window(_held_down_window(final_dn_bid=0.30, final_up_ask=0.71), p)
+    assert w.filled_down is True and w.filled_up is False
+    assert w.pnl_cents == pytest.approx((0.30 - 0.470) * 100.0)
+    assert w.settlement_mid == 0.30
+    assert w.fees_cents == pytest.approx(
+        (_taker_fee(0.50, p.taker_fee_rate) + _taker_fee(0.30, p.taker_fee_rate)) * 100.0)
+
+
+def test_a_captured_pair_never_reaches_the_settlement_ladder():
+    """Both legs filled: the window is closed by the pair, not by settlement."""
+    snaps = [
+        _settle_snap(0, 0.50, 0.495, 0.470, 0.495, 0.470),   # both fill @ 0.48
+        _settle_snap(1, 0.99, 0.990, None, None, 0.010),
+    ]
+    w = _simulate_window(snaps, _settle_params())
+    assert w.pair_captured is True
+    assert w.pnl_cents == pytest.approx((1.00 - 0.48 - 0.48) * 100.0)
+
+
+def test_a_stopped_out_leg_never_reaches_the_settlement_ladder():
+    """An exit already closed the position at a real price."""
+    p = _settle_params(stop_loss_enabled=True,
+                       exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05,
+                                            "eth-up-or-down-5m": 0.05})
+    w = _simulate_window(_held_down_window(), p)
+    assert w.exit_taken is True and w.exit_side == "down"
+    assert w.settlement_mid is None, "a stopped-out leg was settled a second time"
+
+
+def test_an_undecided_window_abstains_instead_of_guessing():
+    """A last mid of exactly 0.50 names no winner, so nothing is booked.
+
+    Booking a coin flip would replace one wrong number with another. Live
+    raises here; a replay over historical ticks cannot usefully raise, so it
+    keeps the zero and says so.
+    """
+    snaps = [
+        _settle_snap(0, 0.50, None, 0.480, 0.520, None),   # UP fills @ 0.480
+        _settle_snap(1, 0.50, None, 0.505, 0.495, None),
+        _settle_snap(2, 0.50, None, 0.505, 0.495, None),
+    ]
+    w = _simulate_window(snaps, _settle_params())
+    assert w.filled_up is True and w.filled_down is False
+    assert w.pnl_cents == 0.0
+    assert w.settlement_mid is None
+
+
+# --- issue #191: one test per resolution stage -----------------------------
+
+def test_stage_one_marks_the_held_leg_own_final_bid():
+    w = _simulate_window(_held_down_window(final_dn_bid=0.30, final_up_ask=0.71),
+                         _settle_params())
+    assert w.settle_source == "direct_bid"
+    assert w.settled_unmarked is False, (
+        "a leg marked to its own live bid was not settled unmarked")
+
+
+def test_stage_two_synthesizes_a_bid_from_the_opposite_ask():
+    """`1 - ask_opp` is a bid on this leg, which is what closing a long crosses.
+
+    `1 - bid_opp` would synthesize an ask and overstate what the leg fetches;
+    live documents the distinction in `_resolve_exit_bid` (issue #160).
+    """
+    w = _simulate_window(_held_down_window(final_dn_bid=None, final_up_ask=0.98),
+                         _settle_params())
+    assert w.settle_source == "complement_ask"
+    assert w.settlement_mid == pytest.approx(0.02)
+    assert w.pnl_cents == pytest.approx((0.02 - 0.470) * 100.0)
+
+
+def test_stage_three_falls_back_to_the_last_bid_the_leg_ever_had():
+    w = _simulate_window(_held_down_window(), _settle_params())
+    assert w.settle_source == "latched_bid"
+    assert w.settlement_mid == pytest.approx(0.04)
+
+
+def test_stage_four_falls_back_to_the_last_opposite_ask():
+    """DOWN is quoted ask-only all window, so no DOWN bid was ever latched."""
+    snaps = [
+        _settle_snap(0, 0.51, 0.505, 0.515, None, 0.460),   # DOWN fills @ 0.470
+        _settle_snap(1, 0.70, 0.695, 0.900, None, 0.310),
+        _settle_snap(2, 0.99, 0.990, None, None, 0.010),
+    ]
+    w = _simulate_window(snaps, _settle_params())
+    assert w.filled_down is True and w.filled_up is False
+    assert w.settle_source == "latched_complement_ask"
+    assert w.settlement_mid == pytest.approx(1.0 - 0.900)
+    assert w.pnl_cents == pytest.approx((0.10 - 0.470) * 100.0)
+
+
+def test_stage_five_redeems_when_no_quote_resolves():
+    w = _simulate_window([
+        _settle_snap(0, 0.49, None, 0.460, 0.510, None),
+        _settle_snap(1, 0.99, None, 0.990, 0.010, None),
+    ], _settle_params())
+    assert w.settle_source == "redeemed"
+    assert w.settlement_mid is None, "a redemption has no executable mark"
+
+
+def test_an_unresolved_window_is_recorded_as_such():
+    w = _simulate_window([
+        _settle_snap(0, 0.50, None, 0.480, 0.520, None),
+        _settle_snap(1, 0.50, None, 0.505, 0.495, None),
+    ], _settle_params())
+    assert w.pnl_cents == 0.0
+    assert w.settle_source == "unresolved"
+    assert w.settled_unmarked is False, (
+        "an abstention is not a settlement and must not be counted as one")
+
+
+# --- issue #191: the two validity edges live enforces ----------------------
+
+def test_a_zero_bid_is_no_bid_and_falls_through():
+    """`0.0` is how a venue spells an empty side, not a bid of zero.
+
+    Polymarket's tick size makes a genuine 0.0 bid unquotable, so marking
+    against it would book a full loss on a data artifact. Live rejects it with
+    `0.0 < bid <= 1.0`; so does this.
+    """
+    w = _simulate_window(_held_down_window(final_dn_bid=0.0, final_up_ask=0.98),
+                         _settle_params())
+    assert w.settle_source == "complement_ask"
+    assert w.settlement_mid == pytest.approx(0.02)
+
+
+def test_an_opposite_ask_outside_the_price_range_is_not_a_complement():
+    """Live bounds the complement source at `0.0 < ask <= 1.0`; so does this.
+
+    An ask of 1.5 is a malformed quote — its complement would be a negative
+    mark. (A malformed 0.0 cannot be used for this test: an ask that low fills
+    the resting UP leg on the spot and the window stops being naked.)
+    """
+    w = _simulate_window(_held_down_window(final_dn_bid=None, final_up_ask=1.5),
+                         _settle_params())
+    assert w.settle_source == "latched_bid"
+    assert w.settlement_mid == pytest.approx(0.04)
