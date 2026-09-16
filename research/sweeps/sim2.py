@@ -22,6 +22,7 @@ Rows returned are compatible with ev_lab.summarize().
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -38,16 +39,17 @@ from ev_lab import (  # noqa: E402
 
 
 def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
-         entry_delay_sec: float = 0.0, entry_band: float | None = None) -> dict:
+         entry_delay_sec: float = 0.0,
+         quote_range: tuple[float, float] = (0.10, 0.90)) -> dict:
     """Simulate one cached window with queue-aware fills and optional leg chase.
 
     `entry_delay_sec > 0` delays quoting until that much of the window has
     elapsed (research knob: lets the opening queue drain and the adverse open
     resolve; classification uses the full path, quoting the delayed part).
 
-    `entry_band` (research knob): at the first quoted tick, skip the window
-    entirely unless |two-sided mid - 0.50| <= entry_band (undecided-market
-    regime filter; stronger than the adverse-open gate, which uses exit_thr).
+    `quote_range` (research knob, default (0.10, 0.90)): at each tick, quote
+    only if two-sided mid is within [quote_lo, quote_hi]. Replaces the deleted
+    `entry_band` and adverse-open gates.
 
     Both are read from these arguments, never from `p` — so a caller that sets
     them on the `BacktestParams` instead is rejected rather than quietly
@@ -59,6 +61,15 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     loss, and the engine refuses one — the simulator must too.
     """
     reject_knobs_sim2_ignores(p)
+    if (
+        not isinstance(quote_range, tuple)
+        or len(quote_range) != 2
+        or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in quote_range)
+        or not (0.0 <= quote_range[0] < quote_range[1] <= 1.0)
+    ):
+        raise ValueError(
+            f"quote_range must be a tuple of (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range}"
+        )
     if chase_cap is not None and (
         isinstance(chase_cap, bool)
         or not isinstance(chase_cap, (int, float))
@@ -142,42 +153,10 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
         if max_up >= exit_thr and (mid - 0.50) < p.exit_reversal:
             reversal_up = True
 
-        if not gate_evaluated and not late_start:
-            om = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
-            if om is not None:
-                gate_evaluated = True
-                if entry_band is not None and entry_band > 0:
-                    # regime filter: quote only undecided markets
-                    if abs(om - 0.50) > entry_band:
-                        entry_cancelled = True
-                elif abs(om - 0.50) >= exit_thr:
-                    entry_cancelled = True
-                    adverse_skipped = True
-
-        if (adverse_skipped and not filled_up and not filled_dn
-                and reentry_count < p.max_reentries_per_window):
-            remaining = max(0.0, duration - elapsed) if duration > 0 else 0.0
-            min_remaining = p.min_requote_remaining_sec
-            if duration > 0 and p.reentry_min_remaining_pct is not None \
-                    and 0.0 < p.reentry_min_remaining_pct <= 1.0:
-                min_remaining = min(min_remaining, p.reentry_min_remaining_pct * duration)
-            rm = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
-            drift = abs(rm - 0.50) if rm is not None else None
-            if (rm is not None and p.reentry_drift_band is not None
-                    and p.reentry_drift_band > 0
-                    and remaining >= min_remaining
-                    and drift <= min(p.reentry_drift_band, exit_thr)
-                    and drift < exit_thr):
-                entry_cancelled = False
-                adverse_skipped = False
-                reentry_count += 1
-                r_mid = w.s_mid[i] if w.s_mid[i] is not None else rm
-                if not filled_up:
-                    resting_up = round(min(0.99, max(0.01, r_mid - p.offset)), 3)
-                    requoted_now = True
-                if not filled_dn:
-                    resting_dn = round(min(0.99, max(0.01, (1.0 - r_mid) - p.offset)), 3)
-                    requoted_now = True
+        # Issue #228: per-tick quote_range replaces entry_band and adverse_open
+        om = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
+        if not orders_live and (om is None or not (quote_range[0] <= om <= quote_range[1])):
+            continue
 
         if p.queue_gate is not None and p.queue_gate > 0:
             qa_up = _queue_ahead(w.up_bids[i], resting_up)

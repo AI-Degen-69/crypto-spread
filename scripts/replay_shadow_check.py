@@ -85,12 +85,7 @@ def build_params(gates_on: bool = True,
         max_start_delay_sec=0.0,
         entry_timeout_pct=1.0,
         max_start_elapsed_pct=0.1,
-        reentry_drift_band=0.015,
-        min_requote_remaining_sec=300.0,
-        reentry_min_remaining_pct=0.3,
-        max_reentries_per_window=0,
         entry_delay_sec=60.0 if gates_on else 0.0,
-        entry_band=0.04 if gates_on else 0.0,
     )
 
 
@@ -123,12 +118,7 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
         ("quote_shares", recorded["shares"]),
         ("entry_timeout_pct", recorded["entry_timeout_pct"]),
         ("max_start_elapsed_pct", recorded["max_start_elapsed_pct"]),
-        ("reentry_drift_band", recorded["reentry_drift_band"]),
-        ("min_requote_remaining_sec", recorded["min_requote_remaining_sec"]),
-        ("reentry_min_remaining_pct", recorded["reentry_min_remaining_pct"]),
-        ("max_reentries_per_window", recorded["max_reentries_per_window"]),
         ("entry_delay_sec", recorded["entry_delay_sec"] if gates_on else 0.0),
-        ("entry_band", recorded["entry_band"] if gates_on else 0.0),
     ]
     for field, want in pairs:
         got = getattr(params, field)

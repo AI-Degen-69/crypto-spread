@@ -62,12 +62,13 @@ python -m scripts.backtest run/ticks/ticks_2026-08-29.jsonl --out run\backtest\b
 
 Dash:
 ```
-http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=0.99
+http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=0.99&quote_lo=0.10&quote_hi=0.90
 http://127.0.0.1:8802/api/ticks/manifest
 ```
 
 CLI flags map 1:1 to `BacktestParams` fields — `--offset`, `--queue`,
 `--pair-cost` (the `max_pair_cost` chase ceiling, 0.50-1.00),
+`--quote-lo` and `--quote-hi` (bounds on quotable two-sided mid, 0.00-1.00),
 `--exit <slug>=<thresh>` (repeatable), `--exit-default-5m`,
 `--exit-default-15m`, `--size`, `--gas`.
 

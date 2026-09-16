@@ -297,7 +297,7 @@ ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
 #: The first three are implemented by `sim2` as its own call arguments, so
 #: setting them on the params is silent rather than unimplemented --
 #: `max_pair_cost` is `sim2`'s `chase_cap` argument (issue #227).
-UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band",
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "quote_range",
                      "max_pair_cost") + ENGINE_ONLY_KNOBS
 
 
@@ -331,7 +331,7 @@ def _reject_unsupported_knobs(p: BacktestParams) -> None:
             f"fast_simulate does not implement {', '.join(ignored)}; "
             "engine._simulate_window applies them, so results would not be "
             "comparable. Use research/sweeps/sim2.py for entry_delay_sec, "
-            "entry_band and max_pair_cost (its `chase_cap` argument); nothing "
+            "quote_range and max_pair_cost (its `chase_cap` argument); nothing "
             f"in research/ implements {', '.join(ENGINE_ONLY_KNOBS)}."
         )
 
@@ -339,7 +339,7 @@ def _reject_unsupported_knobs(p: BacktestParams) -> None:
 def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
     """Raise when `p` sets a knob `sim2` would silently ignore.
 
-    `sim2` takes `entry_delay_sec`, `entry_band` and the chase ceiling as its
+    `sim2` takes `entry_delay_sec`, `quote_range` and the chase ceiling as its
     own arguments -- the ceiling under the name `chase_cap` -- and never reads
     the `BacktestParams` fields behind them, so setting one on the params is as
     silent as not implementing it at all. The `ENGINE_ONLY_KNOBS` it does not
@@ -349,7 +349,7 @@ def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
     if ignored:
         raise ValueError(
             f"sim2 ignores {', '.join(ignored)} on BacktestParams; pass "
-            "entry_delay_sec / entry_band / max_pair_cost (as `chase_cap`) "
+            "entry_delay_sec / quote_range / max_pair_cost (as `chase_cap`) "
             f"as sim2() arguments, and note that {', '.join(ENGINE_ONLY_KNOBS)} "
             "are not implemented in research/ at all — express "
             "hold-to-settlement through exit_thresh_by_slug."
@@ -442,43 +442,10 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
         if max_up >= exit_thr and (mid - 0.50) < p.exit_reversal:
             reversal_up = True
 
-        if not gate_evaluated and not late_start:
-            om = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
-            if om is not None:
-                gate_evaluated = True
-                if abs(om - 0.50) >= exit_thr:
-                    entry_cancelled = True
-                    adverse_skipped = True
-
-        if (adverse_skipped and not filled_up and not filled_dn
-                and reentry_count < p.max_reentries_per_window):
-            cutoff = (p.entry_timeout_pct * duration
-                      if (p.entry_timeout_pct is not None
-                          and 0.0 < p.entry_timeout_pct < 1.0 and duration > 0)
-                      else None)
-            remaining = max(0.0, duration - elapsed) if duration > 0 else 0.0
-            min_remaining = p.min_requote_remaining_sec
-            if duration > 0 and p.reentry_min_remaining_pct is not None \
-                    and 0.0 < p.reentry_min_remaining_pct <= 1.0:
-                min_remaining = min(min_remaining, p.reentry_min_remaining_pct * duration)
-            rm = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
-            drift = abs(rm - 0.50) if rm is not None else None
-            if (rm is not None and p.reentry_drift_band is not None
-                    and p.reentry_drift_band > 0
-                    and remaining >= min_remaining
-                    and (cutoff is None or elapsed < cutoff)
-                    and drift <= min(p.reentry_drift_band, exit_thr)
-                    and drift < exit_thr):
-                entry_cancelled = False
-                adverse_skipped = False
-                reentry_count += 1
-                r_mid = w.s_mid[i] if w.s_mid[i] is not None else rm
-                if not filled_up:
-                    resting_up = round(min(0.99, max(0.01, r_mid - p.offset)), 3)
-                    requoted_now = True
-                if not filled_dn:
-                    resting_dn = round(min(0.99, max(0.01, (1.0 - r_mid) - p.offset)), 3)
-                    requoted_now = True
+        # Issue #228: per-tick quote_range replaces adverse_open and re-entry
+        om = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
+        if not orders_live and (om is None or not (p.quote_range[0] <= om <= p.quote_range[1])):
+            continue
 
         if p.queue_gate is not None and p.queue_gate > 0:
             qa_up = _queue_ahead(w.up_bids[i], resting_up)
@@ -875,8 +842,6 @@ def default_base_params() -> BacktestParams:
         merge_gas_usd=0.0, taker_fee_rate=0.07,
         quote_shares=5, entry_timeout_pct=0.0,
         max_start_elapsed_pct=0.0,
-        reentry_drift_band=0.0, min_requote_remaining_sec=0.0,
-        reentry_min_remaining_pct=0.0, max_reentries_per_window=0,
     )
 
 

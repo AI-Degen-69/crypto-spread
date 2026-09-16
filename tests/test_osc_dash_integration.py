@@ -194,7 +194,6 @@ def test_no_hebrew_characters_in_dashboard():
     assert len(hebrew_lines) == 0, f"Found {len(hebrew_lines)} lines with Hebrew in osc_dash.py: {hebrew_lines[:5]}"
 
 
-
 def test_api_oscillation():
     """Verify oscillation payload returns summary, windows, live snapshots, and goals."""
     response = client.get("/api/oscillation")
@@ -446,7 +445,6 @@ def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
     assert d["tape_alert"] is True
 
 
-
 def test_collector_status_large_tick_file_uses_size_estimate(tmp_path, monkeypatch):
     """Issue #200: large today's tick file uses size//950 estimate, not a full scan."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
@@ -520,7 +518,6 @@ def test_collector_status_external_only(tmp_path, monkeypatch):
     assert d["running"] is False
 
 
-
 def test_collector_start_refused_while_external_live(tmp_path, monkeypatch):
     """Issue #151: Start returns 409 with a reason and spawns nothing."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
@@ -541,7 +538,6 @@ def test_collector_start_refused_while_external_live(tmp_path, monkeypatch):
     assert body.get("ok") is False
     assert body.get("source") == "external"
     assert "external" in body.get("error", "").lower()
-
 
 
 def test_collector_status_source_matrix(tmp_path, monkeypatch):
@@ -601,7 +597,6 @@ def test_collector_status_source_matrix(tmp_path, monkeypatch):
         osc_dash._collector_proc = None
 
 
-
 def test_api_backtest_simulation(tmp_path, monkeypatch):
     """Verify backtest simulation on an isolated deterministic 4-window fixture."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
@@ -643,17 +638,13 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert "trades_sample" in data
     assert len(data["trades_sample"]) == 4
     assert data["n_windows"] == 4
-    # Drift-skip re-entry telemetry is present (0 here: no adverse-open skips in
-    # this healthy fixture) at both the overall and per-series levels.
-    assert "reentry_count" in data["overall"]
-    assert data["overall"]["reentry_count"] == 0
-    assert "reentry_pnl_cents" in data["overall"]
-    assert data["overall"]["reentry_pnl_cents"] == 0.0
+    # Issue #228: the re-entry mechanism is deleted, so the summary carries
+    # no re-entry telemetry at either level.
+    assert "reentry_count" not in data["overall"]
+    assert "reentry_pnl_cents" not in data["overall"]
     btc_series = data["per_series"]["btc-up-or-down-5m"]
-    assert "reentry_count" in btc_series
-    assert "reentry_pnl_cents" in btc_series
-    assert btc_series["reentry_count"] == 0
-    assert btc_series["reentry_pnl_cents"] == 0.0
+    assert "reentry_count" not in btc_series
+    assert "reentry_pnl_cents" not in btc_series
 
     # There is no fill model to select (issue #226). An old bookmark that
     # still carries one is ignored rather than rejected, and runs the one rule.
@@ -661,80 +652,6 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
         "/api/backtest?file=fake_round.jsonl&offset=0.02&fill_model=cross")
     assert res_legacy.status_code == 200
     assert "fill_model" not in res_legacy.json()["params"]
-
-
-def test_api_backtest_reentry_telemetry(tmp_path, monkeypatch):
-    """A drift-skipped window that reverts reports recovered windows in the API."""
-    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
-    fake_file = tmp_path / "fake_reentry.jsonl"
-    cid = "0xRE_000"
-    # t=1000: adverse open (two-sided mid 0.35 -> drift 0.15 >= 0.05)
-    # latches the drift gate. t=1011: mid back at 0.50 (21s in, inside the 30s
-    # entry-timeout cutoff) with both legs filling at the 0.48 resting price.
-    ticks = [
-        _make_fake_tick(1000.0, cid, "btc-updown-5m-2000", "btc-up-or-down-5m", 0.35),
-        _make_fake_tick(1011.0, cid, "btc-updown-5m-2000", "btc-up-or-down-5m", 0.50,
-                        tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100},
-                              {"asset": f"{cid}_dn", "price": 0.48, "size": 100}]),
-    ]
-    with open(fake_file, "w", encoding="utf-8") as f:
-        for t in ticks:
-            f.write(json.dumps(t) + "\n")
-
-    data = client.get(
-        "/api/backtest?file=fake_reentry.jsonl"
-    ).json()
-    assert data["n_windows"] == 1
-    assert data["overall"]["reentry_count"] == 1
-    assert data["overall"]["reentry_pnl_cents"] == pytest.approx(20.0, abs=1e-6)
-    btc = data["per_series"]["btc-up-or-down-5m"]
-    assert btc["windows"] == 1
-    assert btc["reentry_count"] == 1
-    assert btc["reentry_pnl_cents"] == pytest.approx(20.0, abs=1e-6)
-
-
-def test_api_backtest_reentry_knob_a_b(tmp_path, monkeypatch):
-    """The re-entry query knobs flip behavior: band 0 or a huge requote minimum disable."""
-    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
-    fake_file = tmp_path / "fake_reentry_knobs.jsonl"
-    cid = "0xRE_001"
-    ticks = [
-        _make_fake_tick(1000.0, cid, "btc-updown-5m-2001", "btc-up-or-down-5m", 0.35),
-        # Mid reverts to 0.499 (drift 0.001): inside the default 0.015 band but
-        # outside band 0, so "re-entry off" is distinguishable from "on".
-        _make_fake_tick(1011.0, cid, "btc-updown-5m-2001", "btc-up-or-down-5m", 0.499,
-                        tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100},
-                              {"asset": f"{cid}_dn", "price": 0.48, "size": 100}]),
-    ]
-    with open(fake_file, "w", encoding="utf-8") as f:
-        for t in ticks:
-            f.write(json.dumps(t) + "\n")
-
-    base = "/api/backtest?file=fake_reentry_knobs.jsonl"
-
-    # Default band 0.015 + 60s minimum: the skipped window is recovered.
-    on = client.get(base).json()
-    assert on["overall"]["reentry_count"] == 1
-    assert on["params"]["reentry_drift_band"] == 0.015
-    assert on["params"]["min_requote_remaining_sec"] == 300.0
-
-    # Band 0 (re-entry off): the same window stays skipped.
-    off = client.get(base + "&reentry_drift_band=0").json()
-    assert off["overall"]["reentry_count"] == 0
-
-    # The time gate is now the tighter of `min_requote_remaining_sec` and
-    # `reentry_min_remaining_pct` of the window (issue #95), so raising the absolute
-    # knob alone can no longer block a window that still has 30% of itself left --
-    # which is the whole point of the change for 5m markets. Blocking by time is
-    # covered against the engine directly in
-    # tests/test_entry_timeout.py::test_backtest_no_reentry_below_min_requote_remaining_sec.
-    still_on = client.get(base + "&min_requote_remaining_sec=300").json()
-    assert still_on["overall"]["reentry_count"] == 1
-
-    # Out-of-range band is clamped into 0..0.5 and echoed back.
-    clamped = client.get(base + "&reentry_drift_band=0.9").json()
-    assert clamped["params"]["reentry_drift_band"] == 0.5
-    assert clamped["params"]["min_requote_remaining_sec"] == 300.0
 
 
 def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monkeypatch):
@@ -1564,31 +1481,6 @@ def test_api_live_config_entry_timeout_pct():
         engine.mode = orig_mode
 
 
-def test_api_live_config_reentry_drift_band():
-    """Verify reentry_drift_band (issue #95) is exposed and settable at runtime."""
-    engine = osc_dash.get_live_trader_engine()
-    engine.is_running = False
-    orig_band = engine.reentry_drift_band
-    orig_mode = engine.mode
-    engine.mode = "paper"
-    try:
-        state = client.get("/api/live/state").json()
-        assert abs(state["params"]["reentry_drift_band"] - orig_band) < 1e-9
-        assert state["params"]["min_requote_remaining_sec"] == engine.min_requote_remaining_sec
-        assert state["params"]["max_reentries_per_window"] == engine.max_reentries_per_window
-
-        res = client.post("/api/live/config", json={"reentry_drift_band": 0.02})
-        assert res.status_code == 200
-        assert abs(res.json()["params"]["reentry_drift_band"] - 0.02) < 1e-9
-        assert abs(engine.reentry_drift_band - 0.02) < 1e-9
-
-        # Out of range is rejected by the payload model, not silently clamped.
-        assert client.post("/api/live/config", json={"reentry_drift_band": 0.9}).status_code == 422
-    finally:
-        engine.update_config(reentry_drift_band=orig_band)
-        engine.mode = orig_mode
-
-
 def test_api_live_config_exit_reversal():
     """Issue #111: exit_reversal is exposed in /api/live/config and settable.
 
@@ -1630,15 +1522,13 @@ def test_api_live_config_naked_leg_knobs():
 
     exit_thresh_naked normalizes whole cents like exit_thresh (3 -> 0.03);
     naked_leg_timeout_pct normalizes whole percentages above 1 to fractions
-    (70 -> 0.70); reentry_require_pairable round-trips as a bool. All three
-    appear in /api/live/state params.
+    (70 -> 0.70). Both appear in /api/live/state params.
     """
     engine = osc_dash.get_live_trader_engine()
     orig_running = engine.is_running
     engine.is_running = False
     orig_naked = engine.exit_thresh_naked
     orig_timeout = engine.naked_leg_timeout_pct
-    orig_pairable = engine.reentry_require_pairable
     orig_mode = engine.mode
     engine.mode = "paper"
     try:
@@ -1646,13 +1536,11 @@ def test_api_live_config_naked_leg_knobs():
         res = client.post("/api/live/config", json={
             "exit_thresh_naked": 0.04,
             "naked_leg_timeout_pct": 0.8,
-            "reentry_require_pairable": False,
         })
         assert res.status_code == 200
         params = res.json()["params"]
         assert abs(params["exit_thresh_naked"] - 0.04) < 1e-9
         assert abs(params["naked_leg_timeout_pct"] - 0.8) < 1e-9
-        assert params["reentry_require_pairable"] is False
 
         # Cents normalization: 3 -> 0.03; percentage: 70 -> 0.70.
         res_norm = client.post("/api/live/config", json={
@@ -1673,53 +1561,65 @@ def test_api_live_config_naked_leg_knobs():
         engine.update_config(
             exit_thresh_naked=orig_naked,
             naked_leg_timeout_pct=orig_timeout,
-            reentry_require_pairable=orig_pairable,
         )
         engine.mode = orig_mode
         engine.is_running = orig_running
 
 
-def test_api_live_config_patient_band_preset():
-    """Issue #137: patient_band_maker preset is selectable and echoed in state.
+def test_api_live_config_quote_range():
+    """Issue #228: the Cockpit sets the quotable range; inverted pairs get 400."""
+    engine = osc_dash.get_live_trader_engine()
+    orig_running = engine.is_running
+    engine.is_running = False
+    orig_range = tuple(engine.quote_range)
+    orig_mode = engine.mode
+    engine.mode = "paper"
+    try:
+        res = client.post("/api/live/config", json={"quote_range": [0.20, 0.80]})
+        assert res.status_code == 200
+        assert res.json()["params"]["quote_range"] == [0.20, 0.80]
+        assert engine.quote_range == (0.20, 0.80)
 
-    Applies offset 0.03, band 0.04, delay 60s, no stop, chase cap 0.98, and
-    the pilot universe; unknown presets are rejected with 400.
+        # Each end clamps to the price domain.
+        res = client.post("/api/live/config", json={"quote_range": [-1.0, 99.0]})
+        assert res.status_code == 200
+        assert res.json()["params"]["quote_range"] == [0.0, 1.0]
+
+        # Inverted is refused, not silently reordered.
+        assert client.post("/api/live/config", json={"quote_range": [0.80, 0.20]}).status_code == 400
+    finally:
+        engine.update_config(quote_range=list(orig_range))
+        engine.mode = orig_mode
+        engine.is_running = orig_running
+
+
+def test_api_live_config_patient_band_preset_deleted():
+    """Issue #228: patient_band_maker preset was deleted with the band gate;
+    requesting it returns 400.
     """
     engine = osc_dash.get_live_trader_engine()
     orig_running = engine.is_running
     engine.is_running = False
     orig_mode = engine.mode
     engine.mode = "paper"
-    orig_params = dict(engine.get_state()["params"])
-    orig_markets = [s[0] for s in engine.selected_series]
-    orig_active_preset = engine.active_preset
+    orig_delay = engine.entry_delay_sec
+    orig_range = engine.quote_range
+    orig_stop_loss = engine.stop_loss_enabled
     try:
         res = client.post("/api/live/config", json={"preset": "patient_band_maker"})
-        assert res.status_code == 200
-        body = res.json()
-        params = body["params"]
-        assert abs(params["offset"] - 0.03) < 1e-9
-        assert abs(params["entry_band"] - 0.04) < 1e-9
-        assert abs(params["entry_delay_sec"] - 60.0) < 1e-9
-        assert params["stop_loss_enabled"] is False
-        assert abs(params["max_pair_cost"] - 0.98) < 1e-9
-        assert body["active_preset"] == "patient_band_maker"
-        assert set(body["selected_series"]) == {
-            "xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"}
-
-        state = client.get("/api/live/state").json()
-        assert state["active_preset"] == "patient_band_maker"
+        assert res.status_code == 400
+        assert "Unknown preset 'patient_band_maker'" in (res.json().get("error") or res.json().get("detail", ""))
 
         # Individual knobs stay settable without a preset.
         res_knobs = client.post("/api/live/config", json={
             "entry_delay_sec": 30,
-            "entry_band": 0.03,
+            "quote_range": [0.20, 0.80],
             "stop_loss_enabled": True,
         })
         assert res_knobs.status_code == 200
         params = res_knobs.json()["params"]
         assert abs(params["entry_delay_sec"] - 30.0) < 1e-9
-        assert abs(params["entry_band"] - 0.03) < 1e-9
+        assert params["quote_range"] == [0.20, 0.80]
         assert params["stop_loss_enabled"] is True
 
         # Unknown preset rejected, config untouched.
@@ -1729,18 +1629,9 @@ def test_api_live_config_patient_band_preset():
         assert client.post(
             "/api/live/config", json={"entry_delay_sec": 99999}).status_code == 422
     finally:
-        engine.update_config(
-            offset=orig_params["offset"],
-            exit_thresh=orig_params["exit_thresh"],
-            shares=orig_params["shares"],
-            entry_delay_sec=orig_params["entry_delay_sec"],
-            entry_band=orig_params["entry_band"],
-            stop_loss_enabled=orig_params["stop_loss_enabled"],
-            max_pair_cost=orig_params["max_pair_cost"],
-            selected_markets=orig_markets,
-            # Restore a preset latch the manual knob posts above cleared.
-            preset=orig_active_preset if orig_active_preset else None,
-        )
+        engine.entry_delay_sec = orig_delay
+        engine.quote_range = orig_range
+        engine.stop_loss_enabled = orig_stop_loss
         engine.mode = orig_mode
         engine.is_running = orig_running
 
@@ -2017,35 +1908,51 @@ def _write_delay_fixture(tmp_path):
     return fake
 
 
-def test_api_backtest_entry_delay_band_passthrough(tmp_path, monkeypatch):
+def test_api_backtest_entry_delay_range_passthrough(tmp_path, monkeypatch):
     """Delay=60 holds quotes past the only tape prints; echo carries knobs."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _write_delay_fixture(tmp_path)
     base = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02").json()
     assert base["overall"]["pairs"] == 1
+    assert base["params"]["quote_lo"] == 0.10
+    assert base["params"]["quote_hi"] == 0.90
     delayed = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02"
-                         "&entry_delay_sec=60&entry_band=0.04").json()
+                         "&entry_delay_sec=60&quote_lo=0.20&quote_hi=0.80").json()
     assert delayed["overall"]["pairs"] == 0
     assert delayed["params"]["entry_delay_sec"] == 60.0
-    assert delayed["params"]["entry_band"] == 0.04
+    assert delayed["params"]["quote_lo"] == 0.20
+    assert delayed["params"]["quote_hi"] == 0.80
 
 
-def test_api_backtest_entry_delay_band_clamps(tmp_path, monkeypatch):
-    """Out-of-range knobs clamp like the live config (3600 / 0.50)."""
+def test_api_backtest_quote_range_clamps(tmp_path, monkeypatch):
+    """Each range end clamps to the price domain; an inverted pair falls back."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _write_delay_fixture(tmp_path)
-    d = client.get("/api/backtest?file=fake_delay.jsonl&entry_delay_sec=9999&entry_band=9").json()
-    assert d["params"]["entry_delay_sec"] == 3600.0
-    assert d["params"]["entry_band"] == 0.50
+    d = client.get("/api/backtest?file=fake_delay.jsonl&quote_lo=-1&quote_hi=99").json()
+    assert d["params"]["quote_lo"] == 0.0
+    assert d["params"]["quote_hi"] == 1.0
+    inv = client.get("/api/backtest?file=fake_delay.jsonl&quote_lo=0.80&quote_hi=0.20").json()
+    assert inv["params"]["quote_lo"] == 0.10
+    assert inv["params"]["quote_hi"] == 0.90
 
 
-def test_api_backtest_entry_delay_band_nan_falls_back_off(tmp_path, monkeypatch):
-    """Non-finite knobs fall back to off (0.0), never to the boundary."""
+def test_api_backtest_quote_range_nan_falls_back(tmp_path, monkeypatch):
+    """Non-finite ends fall back to the default range, never to a boundary."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _write_delay_fixture(tmp_path)
-    d = client.get("/api/backtest?file=fake_delay.jsonl&entry_delay_sec=nan&entry_band=inf").json()
-    assert d["params"]["entry_delay_sec"] == 0.0
-    assert d["params"]["entry_band"] == 0.0
+    d = client.get("/api/backtest?file=fake_delay.jsonl&quote_lo=nan&quote_hi=inf").json()
+    assert d["params"]["quote_lo"] == 0.10
+    assert d["params"]["quote_hi"] == 0.90
+
+
+def test_api_backtest_ignores_retired_gate_keys(tmp_path, monkeypatch):
+    """Old bookmarks carrying the deleted gates run the default range (issue #226 precedent)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_delay_fixture(tmp_path)
+    d = client.get("/api/backtest?file=fake_delay.jsonl&entry_band=0.04"
+                   "&reentry_drift_band=0&min_requote_remaining_sec=0").json()
+    assert d["params"]["quote_lo"] == 0.10
+    assert d["params"]["quote_hi"] == 0.90
 
 
 def test_backtest_file_dropdown_label_is_dynamic():
@@ -2055,13 +1962,14 @@ def test_backtest_file_dropdown_label_is_dynamic():
     assert "All Files / ${defWinVal} Windows (Default)" in html
 
 
-def test_backtest_delay_band_ui_elements():
-    """Dashboard exposes delay/band inputs plus the winning-config preset."""
+def test_backtest_delay_range_ui_elements():
+    """Dashboard exposes delay plus the two quotable-range inputs."""
     html = client.get("/").text
     assert 'id="btEntryDelay"' in html
-    assert 'id="btEntryBand"' in html
-    assert 'id="btnWinningConfig"' in html
-    assert "applyWinningConfig" in html
+    assert 'id="btQuoteLo"' in html
+    assert 'id="btQuoteHi"' in html
+    assert 'id="btEntryBand"' not in html
+    assert "applyWinningConfig" not in html
 
 
 def test_run_backtest_aborts_previous_run():
@@ -2359,11 +2267,14 @@ def test_no_knob_is_rendered_on_a_surface_it_is_not_marked_for():
     assert leaked == [], f"knobs rendered where the registry forbids them: {leaked}"
 
 
-def test_the_two_knobs_that_define_the_winning_preset_are_settable_live():
-    """The Cockpit had no input for either; they were reachable only by preset."""
+def test_the_quotable_range_is_settable_on_both_tabs():
+    """Issue #228: each tab renders the two range inputs bound to one knob."""
     html = client.get("/").text
-    assert 'id="cockpitEntryDelay"' in html
-    assert 'id="cockpitEntryBand"' in html
+    assert 'id="cockpitQuoteLo"' in html
+    assert 'id="cockpitQuoteHi"' in html
+    assert 'id="btQuoteLo"' in html
+    assert 'id="btQuoteHi"' in html
+    assert 'id="cockpitEntryBand"' not in html
     assert 'id="cockpitStopLossEnabled"' in html
 
 
@@ -2395,16 +2306,15 @@ def test_the_old_drifted_wordings_are_gone():
 def test_backtest_sends_the_new_knobs():
     html = client.get("/").text
     for q in ("exit_reversal=", "entry_timeout_pct=", "exit_thresh_naked=",
-              "naked_leg_timeout_pct=", "stop_loss_enabled=", "enable_leg_chase="):
+              "naked_leg_timeout_pct=", "stop_loss_enabled=", "enable_leg_chase=",
+              "quote_lo=", "quote_hi="):
         assert q in html, f"the Backtest run URL never sends {q}"
 
 
 @pytest.mark.parametrize("field,over,clamped", [
-    ("entry_band", 99.0, 0.50),
     ("entry_delay_sec", 999999.0, 3600.0),
     ("naked_leg_timeout_pct", 5.0, 1.0),
     ("exit_thresh_naked", 9.0, 0.50),
-    ("reentry_drift_band", 9.0, 0.50),
 ])
 def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped, tmp_path,
                                                     monkeypatch):
@@ -2453,19 +2363,21 @@ def test_the_pair_cost_query_alias_clamps_to_the_engine_range(sent, clamped,
 def test_clamp_falls_back_to_the_default_on_non_finite_input():
     """NaN compares False against every bound, so min/max would pass it through."""
     from server.osc_dash import _clamp_to_spec
-    assert _clamp_to_spec("entry_band", float("nan")) == 0.0
     assert _clamp_to_spec("entry_delay_sec", float("inf")) == 0.0
-    assert _clamp_to_spec("entry_band", "not a number") == 0.0
+    # Unregistered names pass through untouched — the retired band gate is no
+    # longer clamped anywhere, so a stale caller gets its own value back.
+    assert _clamp_to_spec("entry_band", 0.04) == 0.04
 
 
-def test_live_config_accepts_the_re_entry_time_gate():
-    """`update_config()` always took it; the payload model never declared it."""
+def test_live_config_accepts_the_quotable_range():
+    """Issue #228: `quote_range` is declared on the payload and reaches the engine."""
     from server.osc_dash import LiveConfigPayload
-    assert "min_requote_remaining_sec" in LiveConfigPayload.model_fields
-    p = LiveConfigPayload(min_requote_remaining_sec=120.0)
-    assert p.min_requote_remaining_sec == pytest.approx(120.0)
-    with pytest.raises(Exception):
-        LiveConfigPayload(min_requote_remaining_sec=99999.0)
+    assert "quote_range" in LiveConfigPayload.model_fields
+    p = LiveConfigPayload(quote_range=[0.20, 0.80])
+    assert p.quote_range == [0.20, 0.80]
+    assert "min_requote_remaining_sec" not in LiveConfigPayload.model_fields
+    assert "reentry_drift_band" not in LiveConfigPayload.model_fields
+    assert "entry_band" not in LiveConfigPayload.model_fields
 
 
 # Registry field -> the `LiveConfigPayload` field carrying the same knob.
@@ -2479,11 +2391,7 @@ REGISTRY_TO_PAYLOAD = {
     "naked_leg_timeout_pct": "naked_leg_timeout_pct",
     "entry_timeout_pct": "entry_timeout_pct",
     "entry_delay_sec": "entry_delay_sec",
-    "entry_band": "entry_band",
-    "reentry_drift_band": "reentry_drift_band",
-    "min_requote_remaining_sec": "min_requote_remaining_sec",
-    "reentry_min_remaining_pct": "reentry_min_remaining_pct",
-    "max_reentries_per_window": "max_reentries_per_window",
+    "quote_range": "quote_range",
 }
 
 
@@ -2576,13 +2484,20 @@ def test_every_declared_payload_knob_reaches_the_engine():
     src = inspect.getsource(__import__("server.osc_dash", fromlist=["api_live_config"]).api_live_config)
     forwarded = set(re.findall(r"(\w+)=payload\.\w+", src))
     accepted = set(inspect.signature(lt.LiveTraderEngine.update_config).parameters)
-    for name in ("reentry_min_remaining_pct", "max_reentries_per_window",
-                 "min_requote_remaining_sec"):
+    for name in ("offset", "entry_delay_sec", "quote_range",
+                 "exit_thresh_naked", "naked_leg_timeout_pct"):
         assert name in LiveConfigPayload.model_fields, f"{name} not declared"
         assert name in accepted, f"update_config does not accept {name}"
         assert name in forwarded, (
             f"{name} is declared on the payload but never passed to "
             "update_config — the request succeeds and changes nothing")
+    # Issue #228: the retired gates must not be declared anymore — pydantic's
+    # `extra="ignore"` would turn a Cockpit post into a silent no-op.
+    for name in ("entry_band", "reentry_drift_band",
+                 "min_requote_remaining_sec", "reentry_min_remaining_pct",
+                 "max_reentries_per_window", "reentry_require_pairable"):
+        assert name not in LiveConfigPayload.model_fields, (
+            f"{name} is still declared after its mechanism was deleted")
 
 
 def test_no_input_advertises_a_range_that_contradicts_the_registry():
@@ -2613,11 +2528,11 @@ def test_param_spec_hands_out_a_copy_not_the_cache():
 
 def test_spec_for_hands_out_a_copy_too():
     """The single-knob accessor is the one used per-request; same rule."""
-    s = BacktestParams.spec_for("entry_band")
+    s = BacktestParams.spec_for("quote_range")
     s["label"] = "POISONED"
     s["surfaces"] = ()
-    again = BacktestParams.spec_for("entry_band")
-    assert again["label"] == "Entry Band ($ from 0.50)"
+    again = BacktestParams.spec_for("quote_range")
+    assert again["label"] == "Quotable Range (mid lo/hi)"
     assert "cockpit" in again["surfaces"]
 
 
@@ -2774,28 +2689,11 @@ def test_reset_restores_the_stop_loss_toggle():
     """resetBtParams must not leave the group hidden with default values."""
     html = client.get("/").text
     fn_start = html.index("function resetBtParams()")
-    fn = html[fn_start:html.index("function applyWinningConfig", fn_start)]
+    fn = html[fn_start:html.index("\n}", fn_start)]
     assert "$('btStopLossEnabled').checked = true;" in fn
     assert "toggleStopLossInputs();" in fn
-
-
-def test_winning_config_states_hold_to_settle_instead_of_faking_it():
-    """The preset must turn the stop loss off, not hide it behind 0.49 stops.
-
-    `max_down`/`max_up` are drift from 0.50, so a 0.49 threshold is reachable in
-    an extreme window — the preset would then take a stop it claims never to
-    take. `stop_loss_enabled=0` is the exact statement.
-    """
-    html = client.get("/").text
-    fn_start = html.index("function applyWinningConfig()")
-    fn = html[fn_start:html.index("\n}", fn_start)]
-    for stale in ('"0.49"', '"0.50"'):
-        assert stale not in fn, (
-            f"the preset still fakes hold-to-settle with a {stale} stop")
-    assert "$('btStopLossEnabled').checked = false;" in fn
-    assert "toggleStopLossInputs();" in fn
-    assert "'btStopLossEnabled'" in fn.split("\n")[1], (
-        "the toggle belongs in the required-ids guard, or the preset can half apply")
+    assert "$('btQuoteLo').value = \"0.10\";" in fn
+    assert "$('btQuoteHi').value = \"0.90\";" in fn
 
 
 # --- Issue #201: the same grouping on the Live Cockpit ---

@@ -161,34 +161,14 @@ def generate_sensitivity_grid(
     offsets = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040]
     for off in offsets:
         if off != base.offset:
-            p = BacktestParams(
-                offset=off,
-                queue_gate=base.queue_gate,
-                max_pair_cost=base.max_pair_cost,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, offset=off)
             grid.append((f"offset={off:.3f}", p))
 
     # 3. Queue gate variations
     queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
     for q in queues:
         if q != base.queue_gate:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=q,
-                max_pair_cost=base.max_pair_cost,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, queue_gate=q)
             grid.append((f"queue={q:.0f}", p))
 
     # 4. Exit threshold variations
@@ -198,34 +178,14 @@ def generate_sensitivity_grid(
         ex_dict["default_5m"] = e
         ex_dict["btc-up-or-down-5m"] = max(0.05, e - 0.03)
         ex_dict["sol-up-or-down-5m"] = max(0.06, e - 0.01)
-        p = BacktestParams(
-            offset=base.offset,
-            queue_gate=base.queue_gate,
-            max_pair_cost=base.max_pair_cost,
-            exit_thresh_by_slug=ex_dict,
-            exit_reversal=base.exit_reversal,
-            quote_shares=base.quote_shares,
-            merge_gas_usd=base.merge_gas_usd,
-            taker_fee_rate=base.taker_fee_rate,
-            max_start_delay_sec=base.max_start_delay_sec,
-        )
+        p = replace(base, exit_thresh_by_slug=ex_dict)
         grid.append((f"exit_5m={e:.2f}", p))
 
     # 5. Exit reversal variations (issue #110: 0.005 steps over 0.010-0.030)
     reversals = [0.010, 0.015, 0.020, 0.025, 0.030]
     for r in reversals:
         if r != base.exit_reversal:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=base.queue_gate,
-                max_pair_cost=base.max_pair_cost,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=r,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, exit_reversal=r)
             grid.append((f"exit_rev={r:.3f}", p))
 
     # 6. Pair cost gate variations
@@ -235,37 +195,18 @@ def generate_sensitivity_grid(
     pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
     for pc in pair_costs:
         if pc != base.max_pair_cost:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=base.queue_gate,
-                max_pair_cost=pc,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, max_pair_cost=pc)
             grid.append((f"pair_cost={pc:.2f}", p))
 
-    # 7. Drift-skip re-entry band (issue #95). 0 disables re-entry; values span
-    # tighter and wider than the 0.015 default (all inside exit_thresh 0.05).
-    reentry_bands = [0.000, 0.005, 0.010, 0.015, 0.020, 0.030, 0.050]
-    for b in reentry_bands:
-        if b != base.reentry_drift_band:
-            # Clone the full baseline so a custom `base` keeps every other field
-            # (entry_timeout_pct, reentry_min_remaining_pct, ...) — only the knob
-            # under test changes.
-            p = replace(base, reentry_drift_band=b)
-            grid.append((f"reentry_band={b:.3f}", p))
-
-    # 8. Minimum window seconds left for re-entry (issue #95). 0 disables the
-    # time guard; larger values restrict re-entry to earlier reverts.
-    requote_mins = [0.0, 15.0, 30.0, 60.0, 120.0, 240.0]
-    for rm in requote_mins:
-        if rm != base.min_requote_remaining_sec:
-            p = replace(base, min_requote_remaining_sec=rm)
-            grid.append((f"requote_min={rm:.0f}", p))
+    # 7. Quote range (issue #228). Varies the quotable mid bounds.
+    quote_ranges = [
+        (0.00, 1.00), (0.05, 0.95), (0.10, 0.90), (0.15, 0.85),
+        (0.20, 0.80), (0.25, 0.75), (0.30, 0.70),
+    ]
+    for qr in quote_ranges:
+        if qr != base.quote_range:
+            p = replace(base, quote_range=qr)
+            grid.append((f"quote_range={qr[0]:.2f}-{qr[1]:.2f}", p))
 
     return grid
 
@@ -274,7 +215,7 @@ def generate_sensitivity_grid(
 #: "Baseline" row plus rows whose label starts with one of these prefixes.
 SENSITIVITY_AXES = (
     "offset", "queue", "exit_5m", "exit_rev", "pair_cost",
-    "reentry_band", "requote_min",
+    "quote_range",
 )
 
 
@@ -296,22 +237,20 @@ def generate_joint_grid(
     queues: Sequence[float] = (0.0, 25.0, 50.0, 100.0),
     exit_5ms: Sequence[float] = (0.08, 0.10, 0.12, 0.14),
     exit_reversals: Sequence[float] = (0.015, 0.020),
-    reentry_bands: Sequence[float] = (0.0, 0.015, 0.030),
-    requote_mins: Sequence[float] = (60.0,),
+    quote_ranges: Sequence[tuple[float, float]] = (
+        (0.05, 0.95), (0.10, 0.90), (0.15, 0.85), (0.20, 0.80)
+    ),
     max_start_delay: float = 0.0,
     size: int = 5,
 ) -> list[tuple[str, BacktestParams]]:
     """Generate multi-dimensional Cartesian grid across controllable parameters.
 
-    `reentry_bands` / `requote_mins` (issue #95) sweep the drift-skip re-entry
-    knobs; band 0 disables re-entry, requote 0 disables the time guard. Defaults
-    keep re-entry on/off at a tight and a wide band against the fixed 60s
-    requote minimum so the CLI grid quantifies re-entry value by default.
+    `quote_ranges` (issue #228) sweeps the quotable two-sided mid bounds.
     """
     size = max(5, int(size))
     grid: list[tuple[str, BacktestParams]] = []
-    for off, q, e5, rev, rb, rm in itertools.product(
-            offsets, queues, exit_5ms, exit_reversals, reentry_bands, requote_mins):
+    for off, q, e5, rev, qr in itertools.product(
+            offsets, queues, exit_5ms, exit_reversals, quote_ranges):
         ex_dict = {
             "default_5m": e5,
             "default_15m": round(e5 + 0.01, 2),
@@ -320,7 +259,7 @@ def generate_joint_grid(
             "btc-up-or-down-15m": round(e5 + 0.01, 2),
             "sol-up-or-down-15m": round(e5 + 0.01, 2),
         }
-        label = f"off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_rb={rb:.3f}_rq={rm:.0f}"
+        label = f"off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_qr={qr[0]:.2f}-{qr[1]:.2f}"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
@@ -331,9 +270,7 @@ def generate_joint_grid(
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             max_start_delay_sec=max_start_delay,
-            reentry_drift_band=rb,
-            min_requote_remaining_sec=rm,
-            max_reentries_per_window=1,
+            quote_range=qr,
         )
         grid.append((label, p))
     return grid
@@ -356,11 +293,13 @@ def generate_random_grid(
     # old [1.01 .. 1.10] sweep is five values the engine now refuses. Same
     # five-point shape, inside the legal range.
     pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
-    reentry_bands = [0.000, 0.005, 0.010, 0.015, 0.020, 0.030, 0.050]
-    requote_mins = [0.0, 15.0, 30.0, 60.0, 120.0, 240.0]
+    quote_ranges = [
+        (0.00, 1.00), (0.05, 0.95), (0.10, 0.90), (0.15, 0.85),
+        (0.20, 0.80), (0.25, 0.75), (0.30, 0.70),
+    ]
 
     grid: list[tuple[str, BacktestParams]] = []
-    seen: set[tuple[float, float, float, float, float, float, float]] = set()
+    seen: set[tuple[float, float, float, float, float, tuple[float, float]]] = set()
     for _ in range(count * 5):
         if len(grid) >= count:
             break
@@ -369,9 +308,8 @@ def generate_random_grid(
         e5 = rng.choice(exit_5ms)
         rev = rng.choice(exit_reversals)
         pc = rng.choice(pair_costs)
-        rb = rng.choice(reentry_bands)
-        rm = rng.choice(requote_mins)
-        key = (off, q, e5, rev, pc, rb, rm)
+        qr = rng.choice(quote_ranges)
+        key = (off, q, e5, rev, pc, qr)
         if key in seen:
             continue
         seen.add(key)
@@ -384,7 +322,7 @@ def generate_random_grid(
             "btc-up-or-down-15m": round(e5 + 0.01, 2),
             "sol-up-or-down-15m": round(e5 + 0.01, 2),
         }
-        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_rb={rb:.3f}_rq={rm:.0f}"
+        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_qr={qr[0]:.2f}-{qr[1]:.2f}"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
@@ -395,9 +333,7 @@ def generate_random_grid(
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             max_start_delay_sec=max_start_delay,
-            reentry_drift_band=rb,
-            min_requote_remaining_sec=rm,
-            max_reentries_per_window=1,
+            quote_range=qr,
         )
         grid.append((label, p))
     return grid

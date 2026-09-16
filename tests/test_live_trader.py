@@ -1166,36 +1166,6 @@ def test_paper_mode_dynamic_open_positions():
     assert engine.get_open_positions() == []
 
 
-def test_adverse_open_drift_gate():
-    """Verify market entry is skipped when initial drift from 0.50 exceeds exit threshold."""
-    engine = LiveTraderEngine(load_persisted=False)
-    engine.is_running = True
-    engine.mode = "paper"
-    engine.offset = 0.02
-    engine.exit_thresh = 0.05
-    engine.shares = 5
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    poll_data = {
-        "market": {
-            "conditionId": "cid_drifted",
-            "slug": "btc-updown-5m-drifted",
-            "up_token": "tok_up",
-            "down_token": "tok_dn",
-            "start_ts": now - 5.0,  # 5s elapsed < 30s cutoff
-            "end_ts": now + 295.0,
-        },
-        "up_book": {"best_bid": 0.34, "best_ask": 0.36},
-        "down_book": {"best_bid": 0.64, "best_ask": 0.66},
-    }
-    engine._update_market_strategy(slug, poll_data, now)
-    m = engine.markets[slug]
-    assert m.filled_up is False
-    assert m.filled_down is False
-    assert m.entry_cancelled_timeout is True
-    assert m.status in ("DRIFT_SKIPPED", "TIMEOUT_NO_FILL")
-
-
 def test_reset_pnl_clears_open_positions():
     """Verify reset_pnl clears open positions and resets market fill states."""
     engine = LiveTraderEngine(load_persisted=False)
@@ -1799,7 +1769,6 @@ def test_live_trader_divergence_edge_cases():
     assert m.price_diff_pct is None
 
 
-
 # ============================================================================
 # Issue #92: adverse-open drift gate must be a window-open snapshot
 # ============================================================================
@@ -1832,8 +1801,8 @@ def _drift_engine() -> LiveTraderEngine:
     return engine
 
 
-def test_adverse_gate_ignores_one_sided_book_at_open():
-    """A one-sided book yields a synthetic mid that must not latch the drift gate,
+def test_one_sided_book_at_open_holds_quotes_without_cancelling():
+    """A one-sided book yields a synthetic mid that holds quoting without latching a skip,
     and under #207 an unpriceable leg holds quoting until both sides exist."""
     engine = _drift_engine()
     slug = "btc-up-or-down-5m"
@@ -1861,7 +1830,7 @@ def test_adverse_gate_ignores_one_sided_book_at_open():
     assert m.order_status_down == "RESTING"
 
 
-def test_adverse_gate_not_reevaluated_after_window_open():
+def test_drift_after_a_healthy_open_never_cancels_resting_quotes():
     """Once a window opens near 0.50, later live drift must not cancel resting bids."""
     engine = _drift_engine()
     slug = "btc-up-or-down-5m"
@@ -1888,797 +1857,55 @@ def test_adverse_gate_not_reevaluated_after_window_open():
     assert m.order_status_down == "RESTING"
 
 
-def test_adverse_gate_fires_on_genuine_two_sided_open_drift():
-    """A two-sided book already skewed past exit_thresh at open still skips entry."""
-    engine = _drift_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    engine._update_market_strategy(slug, _drift_poll_data(
-        now,
-        {"best_bid": 0.33, "best_ask": 0.35},
-        {"best_bid": 0.64, "best_ask": 0.66},
-    ), now)
-    m = engine.markets[slug]
-    assert m.entry_cancelled_timeout is True
-    assert m.status == "DRIFT_SKIPPED"
-    assert f"{engine.exit_thresh:.2f}" in m.last_action
+# Issue #228: the #95 re-entry tests stood here (gate, grants, telemetry,
+# stats, file). Removed with the behaviour; the quotable range is covered by
+# tests/test_quote_range_parity.py (T3).
 
 
-def test_adverse_gate_snapshot_resets_on_window_rollover():
-    """The opening snapshot is per-window and must be cleared on rollover."""
-    engine = _drift_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    engine._update_market_strategy(slug, _drift_poll_data(
-        now,
-        {"best_bid": 0.33, "best_ask": 0.35},
-        {"best_bid": 0.64, "best_ask": 0.66},
-    ), now)
-    m = engine.markets[slug]
-    assert m.adverse_open is True
-    assert m.open_gate_evaluated is True
 
-    engine._handle_window_rollover(m, now + 300.0, "cid_92_next")
-    assert m.adverse_open is False
-    assert m.open_gate_evaluated is False
-    assert m.open_mid is None
-    assert m.open_drift == 0.0
-
-
-# ============================================================================
-# Issue #95: re-entry into a drift-skipped window when the mid reverts
-# ============================================================================
-
-# Books used by the re-entry tests. `_ADVERSE_*` opens the window at mid ~0.345
-# (drift 0.155 >= exit_thresh), `_REVERTED_*` puts it back at mid 0.50 with asks
-# above the 0.48 resting price so nothing fills, and `_PARTIAL_*` reverts only as
-# far as mid 0.45 -- a real recovery that is still outside `reentry_drift_band`.
-_ADVERSE_UP = {"best_bid": 0.33, "best_ask": 0.35}
-_ADVERSE_DN = {"best_bid": 0.64, "best_ask": 0.66}
-_REVERTED_UP = {"best_bid": 0.49, "best_ask": 0.51}
-_REVERTED_DN = {"best_bid": 0.49, "best_ask": 0.51}
-_PARTIAL_UP = {"best_bid": 0.44, "best_ask": 0.46}
-_PARTIAL_DN = {"best_bid": 0.54, "best_ask": 0.56}
-
-
-def _reentry_engine() -> LiveTraderEngine:
-    """Drift engine at stock settings: re-entry works on 5m out of the box.
-
-    The re-entry time gate is `min(min_requote_remaining_sec, 30% of the window)`,
-    so a 5m window needs 90s left and a 15m window 270s. Issue #89's shared
-    `min_requote_remaining_sec` is the absolute ceiling and is not overridden here.
-    """
-    return _drift_engine()
-
-
-def _skip_window_on_adverse_open(engine, slug: str, now: float):
-    """Drive one tick with an adverse opening book and assert the gate latched."""
-    engine._update_market_strategy(slug, _drift_poll_data(now, _ADVERSE_UP, _ADVERSE_DN), now)
-    m = engine.markets[slug]
-    assert m.adverse_open is True
-    assert m.status == "DRIFT_SKIPPED"
-    return m
-
-
-def test_reentry_zero_band_disables_reentry_even_at_exact_mid():
-    """`reentry_drift_band == 0` means disabled: a mid of exactly 0.50 must NOT re-enter.
-
-    Without the non-positive-band guard the drift-0 tick would pass `drift <= band`
-    and place orders despite the documented "0 = off" semantics.
-    """
-    engine = _reentry_engine()
-    engine.reentry_drift_band = 0.0
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.adverse_open is True
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
-
-
-def test_update_config_accepts_max_reentries_per_window():
-    """update_config exposes the per-window cap like the other re-entry knobs."""
+def test_update_config_quote_range_roundtrip_and_refusals():
+    """Issue #228: quote_range round-trips through update_config; each end
+    clamps to the price domain, and an inverted or degenerate pair is refused."""
     engine = _drift_engine()
     engine.is_running = False  # parameter changes are rejected while running
-    res = engine.update_config(max_reentries_per_window=3)
-    assert engine.max_reentries_per_window == 3
-    assert res["params"]["max_reentries_per_window"] == 3
+    assert engine.quote_range == (0.10, 0.90)
+
+    res = engine.update_config(quote_range=(0.20, 0.80))
+    assert engine.quote_range == (0.20, 0.80)
+    assert res["params"]["quote_range"] == [0.20, 0.80]
+
+    engine.update_config(quote_range=(-0.50, 1.50))
+    assert engine.quote_range == (0.0, 1.0)
+
+    for bad in [
+        (0.80, 0.20), (0.50, 0.50), (0.10,), (True, 0.90), (0.10, False),
+        (float("nan"), 0.90), (0.10, float("inf")), 123, "not-a-range",
+    ]:
+        with pytest.raises(ValueError):
+            engine.update_config(quote_range=bad)
+
+    # Atomicity: invalid quote_range aborts before any fields are modified
+    orig_offset = engine.offset
+    with pytest.raises(ValueError):
+        engine.update_config(offset=0.045, quote_range=(0.80, 0.20))
+    assert engine.offset == orig_offset
+
+    # None is "unspecified" like every other knob — the range is untouched.
+    engine.update_config(quote_range=None)
+    assert engine.quote_range == (0.0, 1.0)
 
-    engine.update_config(max_reentries_per_window=-2)
-    assert engine.max_reentries_per_window == 0
-
-
-def test_reentry_after_mid_reverts_inside_band():
-    """A drift-skipped window re-quotes once the mid comes back near 0.50."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    # 60s in: mid back at 0.50, 239s of the window still left.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.entry_cancelled_timeout is False
-    assert m.adverse_open is False
-    assert m.reentry_count == 1
-    assert m.status == "QUOTING"
-    assert m.order_status_up == "RESTING"
-    assert m.order_status_down == "RESTING"
-
-
-def test_reentry_preserves_opening_snapshot_and_reports_drift():
-    """Re-entry keeps the original open snapshot and says so in last_action."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    open_mid, open_drift = m.open_mid, m.open_drift
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.open_mid == open_mid
-    assert m.open_drift == open_drift
-    assert m.reentry_mid == pytest.approx(0.50, abs=1e-6)
-    assert m.reentry_drift == pytest.approx(0.0, abs=1e-6)
-    assert "re-enter" in m.last_action.lower()
-    assert f"{open_drift:.3f}" in m.last_action
-
-
-def test_no_reentry_while_mid_stays_outside_band():
-    """A partial recovery that is still outside the band leaves the window skipped."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _PARTIAL_UP, _PARTIAL_DN), now + 60.0)
-
-    assert m.entry_cancelled_timeout is True
-    assert m.adverse_open is True
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
-
-
-def test_no_reentry_for_entry_timeout_cancelled_window():
-    """An entry-timeout cancel is not a drift skip and is never re-entered."""
-    engine = _reentry_engine()
-    engine.entry_timeout_pct = 0.10          # 30s cutoff on a 300s window
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    # Healthy open, so the adverse gate never latches.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now)
-    m = engine.markets[slug]
-    assert m.adverse_open is False
-
-    # 41s in: past the entry timeout, nothing filled -> cancelled.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 40.0)
-    assert m.status == "TIMEOUT_NO_FILL"
-    assert m.entry_cancelled_timeout is True
-
-    # Mid is squarely inside the band, but the cancel reason was the timeout.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 50.0)
-    assert m.status == "TIMEOUT_NO_FILL"
-    assert m.entry_cancelled_timeout is True
-    assert m.reentry_count == 0
-
-
-def test_no_reentry_for_late_start_skipped_window():
-    """The issue #96 late-start skip is also not a drift skip."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    # First tick the engine ever sees for this window lands 41s in (cutoff 30s).
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 40.0)
-    m = engine.markets[slug]
-    assert m.late_start_skip is True
-    assert m.status == "LATE_START_SKIPPED"
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 50.0)
-    assert m.status == "LATE_START_SKIPPED"
-    assert m.entry_cancelled_timeout is True
-    assert m.reentry_count == 0
-
-
-def _force_drift_skip_state(m):
-    """Put a market into the exact state a drift skip leaves behind.
-
-    The natural scenarios below cannot isolate the `late_start_skip` /
-    `is_late_start` guards, because in a genuine late-start or timeout cancel
-    `adverse_open` is never latched -- so `_maybe_reenter_drift_skipped` returns on
-    its first condition and the guard under test is never reached. Forcing the
-    drift-skip state makes that first condition pass, leaving exactly one reason
-    re-entry can still be refused.
-    """
-    m.adverse_open = True
-    m.entry_cancelled_timeout = True
-    m.open_mid = 0.345
-    m.open_drift = 0.155
-    m.open_gate_evaluated = True
-    m.order_id_up = None
-    m.order_id_down = None
-    m.order_status_up = "CANCELLED"
-    m.order_status_down = "CANCELLED"
-
-
-def test_late_start_skip_blocks_reentry_even_when_the_gate_latched():
-    """Isolates the `late_start_skip` guard: every other condition is satisfied."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 40.0)
-    m = engine.markets[slug]
-    assert m.late_start_skip is True
-
-    _force_drift_skip_state(m)
-    m.status = "DRIFT_SKIPPED"
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.reentry_count == 0
-    assert m.late_start_skip is True
-
-
-def test_entry_timeout_blocks_reentry_even_when_the_gate_latched():
-    """Isolates the `is_late_start` guard: every other condition is satisfied."""
-    engine = _reentry_engine()
-    engine.entry_timeout_pct = 0.10          # 30s cutoff on a 300s window
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now)
-    m = engine.markets[slug]
-
-    _force_drift_skip_state(m)
-    m.status = "DRIFT_SKIPPED"
-    # 60s in: past the 30s entry timeout, but 239s still remain and the mid is
-    # squarely inside the band, so only `is_late_start` can refuse re-entry.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.reentry_count == 0
-
-
-def test_no_reentry_on_a_one_sided_book():
-    """A one-sided book yields a synthetic mid that is not evidence of a revert."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug,
-        _drift_poll_data(now, {"best_bid": 0.49, "best_ask": None}, _REVERTED_DN),
-        now + 60.0)
-
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
-
-
-def test_no_reentry_once_a_leg_has_filled():
-    """A window with an open leg is past entry; re-entry must not re-quote it."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    m.filled_up = True
-    m.fill_price_up = 0.48
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.reentry_count == 0
-
-
-def test_no_reentry_when_too_little_window_remains():
-    """A fill with under the effective time gate left has no time to pair."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    # 250s in: only 49s left, below the 90s a 5m window needs.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 250.0)
-
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
-    assert m.entry_cancelled_timeout is True
-
-
-def test_reentry_capped_per_window():
-    """max_reentries_per_window bounds how often one window can be re-entered."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert m.reentry_count == 1
-
-    # Force the window back into a drift skip, as a second adverse excursion would.
-    m.adverse_open = True
-    m.entry_cancelled_timeout = True
-    m.status = "DRIFT_SKIPPED"
-    m.order_id_up = None
-    m.order_id_down = None
-    m.order_status_up = "CANCELLED"
-    m.order_status_down = "CANCELLED"
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 120.0)
-
-    assert m.reentry_count == 1
-    assert m.status == "DRIFT_SKIPPED"
-    assert m.entry_cancelled_timeout is True
-
-
-def test_reentry_works_on_5m_at_stock_settings():
-    """A 5m window re-enters with no knob changes: the gate scales to the window.
-
-    Issue #89's `min_requote_remaining_sec` is 300s -- a whole 5m window -- so an
-    absolute gate made re-entry impossible on exactly the markets the issue's
-    evidence table shows reverting. The effective gate is the tighter of that knob
-    and `reentry_min_remaining_pct` of the window, i.e. 90s on a 5m window.
-    """
-    engine = _drift_engine()
-    assert engine.min_requote_remaining_sec == 300.0
-    assert engine.reentry_min_remaining_pct == 0.30
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    # 60s in: 239s left, far past the 90s a 5m window needs.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.reentry_count == 1
-    assert m.status == "QUOTING"
-
-
-def test_reentry_gate_scales_with_window_duration():
-    """The effective gate is the tighter of the shared knob and the percentage.
-
-    Issue #124: with `reentry_require_pairable` on (default), the gate also has a
-    floor of (1 - naked_leg_timeout_pct) of the window -- the horizon a fresh
-    entry needs to pair before the naked timeout would fire. On a 5m window at
-    stock settings that floor is (1 - 0.70) * 300 = 90s, matching the 30% gate.
-    """
-    engine = _drift_engine()
-    assert engine._reentry_min_remaining_sec(300.0) == 90.0     # 5m  -> max(30%, 30% pairable)
-    assert engine._reentry_min_remaining_sec(900.0) == 270.0    # 15m -> max(30%, 30% pairable)
-
-    # The shared knob stays the ceiling: it can only tighten the gate, never loosen
-    # it, so issue #89's post-merge re-quoting keeps its own 300s meaning.
-    engine.min_requote_remaining_sec = 30.0
-    assert engine._reentry_min_remaining_sec(300.0) == 90.0
-
-    # With the pairable gate off, the old #95 semantics return: the shared knob
-    # and the percentage alone decide.
-    engine.reentry_require_pairable = False
-    assert engine._reentry_min_remaining_sec(300.0) == 30.0
-
-
-def test_reentry_refused_just_below_the_5m_gate_and_allowed_just_above():
-    """The 90s boundary on a 5m window is enforced on the tick, not approximately."""
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-
-    below = _reentry_engine()
-    m_below = _skip_window_on_adverse_open(below, slug, now)
-    # end_ts is now + 299, so a tick at +220 leaves 79s -- under the 90s gate.
-    below._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 220.0)
-    assert m_below.reentry_count == 0
-    assert m_below.status == "DRIFT_SKIPPED"
-
-    above = _reentry_engine()
-    m_above = _skip_window_on_adverse_open(above, slug, now)
-    # A tick at +200 leaves 99s -- over the gate.
-    above._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 200.0)
-    assert m_above.reentry_count == 1
-
-
-def test_reentry_band_can_never_exceed_the_gate_it_undoes():
-    """A band wider than `exit_thresh` must not re-enter at the gate's own drift."""
-    engine = _reentry_engine()
-    engine.reentry_drift_band = 0.40          # far looser than exit_thresh 0.05
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    # Mid 0.44: inside the configured 0.40 band, but drift 0.06 is past exit_thresh.
-    engine._update_market_strategy(
-        slug,
-        _drift_poll_data(now, {"best_bid": 0.43, "best_ask": 0.45},
-                         {"best_bid": 0.55, "best_ask": 0.57}),
-        now + 60.0)
-
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
-
-
-def test_update_config_clamps_reentry_band_to_exit_thresh():
-    """The configured band is reported at the value that is actually enforced."""
-    engine = LiveTraderEngine(load_persisted=False)
-    engine.is_running = False
-    engine.mode = "paper"
-    engine.exit_thresh = 0.05
-
-    engine.update_config(reentry_drift_band=0.40)
-    assert engine.reentry_drift_band == 0.05
-
-    # Lowering exit_thresh tightens an already-set band with it.
-    engine.update_config(exit_thresh=0.01)
-    assert engine.reentry_drift_band == 0.01
-
-
-# --- Issue #95 milestone 1: re-entry observability ---
-
-def test_reentry_seeds_a_telemetry_record():
-    """Re-entry records what it decided on, keeping the original open snapshot."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    tel = m.reentry_telemetry
-    assert isinstance(tel, dict)
-    assert tel["reentry_index"] == 1
-    assert tel["open_mid"] == m.open_mid
-    assert tel["open_drift"] == pytest.approx(m.open_drift, abs=1e-4)
-    assert tel["reentry_mid"] == pytest.approx(0.50, abs=1e-4)
-    assert tel["quoted"] == {"up": m.resting_up, "down": m.resting_down}
-    assert tel["remaining_sec"] >= tel["min_remaining_sec"]
-    assert tel["outcome"] is None
-
-
-def test_reentry_telemetry_finalises_once_both_legs_rest():
-    """The record captures the mid and latency at the moment the quotes rest."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    assert m.order_status_up == "RESTING"
-    assert m.order_status_down == "RESTING"
-    tel = m.reentry_telemetry
-    assert tel["mid_at_resting"] == pytest.approx(0.50, abs=1e-4)
-    assert tel["latency_ms"] is not None and tel["latency_ms"] >= 0
-    assert tel["resting_drift"] == pytest.approx(0.0, abs=1e-4)
-
-
-def test_no_telemetry_when_the_window_never_reenters():
-    """A window that stays skipped writes nothing."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _PARTIAL_UP, _PARTIAL_DN), now + 60.0)
-
-    assert m.reentry_count == 0
-    assert m.reentry_telemetry is None
-    assert engine._flush_reentry_event(m) is None
-    assert engine.reentry_stats["reentries"] == 0
-
-
-def test_rollover_stamps_the_outcome_and_clears_the_record():
-    """The outcome is captured before the rollover reset wipes the fill flags."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    # One leg filled, the other never did -- the case the milestone exists to count.
-    m.filled_up = True
-    m.fill_price_up = 0.48
-
-    engine._handle_window_rollover(m, now + 300.0, "cid_95_obs")
-
-    assert m.reentry_telemetry is None
-    assert engine.reentry_stats["reentries"] == 1
-    assert engine.reentry_stats["reached_book"] == 1
-    assert engine.reentry_stats["single_leg"] == 1
-    assert engine.reentry_stats["paired"] == 0
-
-
-def test_reentry_stats_appear_in_get_state_and_reset_with_pnl():
-    """The operator can read the tally from the state payload, and RESET clears it."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    engine._handle_window_rollover(m, now + 300.0, "cid_95_obs")
-
-    stats = engine.get_state()["reentry_stats"]
-    assert stats["reentries"] == 1
-
-    engine.is_running = False
-    engine.reset_pnl()
-    assert engine.get_state()["reentry_stats"]["reentries"] == 0
-    assert engine.markets[slug].reentry_telemetry is None
-
-
-def test_reentry_flush_writes_no_file_under_pytest():
-    """The suite must never append to the operator's run/ directory."""
-    from strategy.live_trader import REENTRY_FILE
-
-    existed = REENTRY_FILE.exists()
-    before = REENTRY_FILE.stat().st_mtime_ns if existed else None
-
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    record = engine._flush_reentry_event(m)
-
-    assert record is not None
-    assert REENTRY_FILE.exists() is existed
-    if existed:
-        assert REENTRY_FILE.stat().st_mtime_ns == before
-
-
-def _live_reentry_engine(up_ok=True, down_ok=True):
-    """Live-mode drift engine whose leg placement can be made to fail per side.
-
-    Paper mode rests both legs on the same tick, so the finalizer's "not yet on the
-    book" arms and its slippage warning are only reachable in live mode with one
-    leg unplaced.
-    """
-    engine = _reentry_engine()
-    engine.mode = "live"
-    placed = {"up": up_ok, "down": down_ok}
-
-    def _place(token, price, shares, side):
-        ok = placed["up"] if token == "tok_up" else placed["down"]
-        return {"order_id": f"live_{token}"} if ok else None
-
-    engine.place_live_quote = _place
-    engine.get_clob_client = lambda: None
-    engine._placed = placed
-    return engine
-
-
-def test_finalizer_waits_until_both_legs_are_on_the_book():
-    """One leg unplaced leaves the record open; it completes when the other lands."""
-    engine = _live_reentry_engine(up_ok=True, down_ok=False)
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert m.reentry_count == 1
-    assert m.order_status_down != "RESTING"
-    assert m.reentry_telemetry["mid_at_resting"] is None
-
-    # DOWN can be placed now, and the mid has run to ~0.44 in the meantime.
-    engine._placed["down"] = True
-    engine._update_market_strategy(
-        slug,
-        _drift_poll_data(now, {"best_bid": 0.43, "best_ask": 0.45},
-                         {"best_bid": 0.55, "best_ask": 0.57}),
-        now + 70.0)
-
-    tel = m.reentry_telemetry
-    assert tel["mid_at_resting"] == pytest.approx(0.44, abs=1e-4)
-    assert tel["resting_drift"] == pytest.approx(0.06, abs=1e-4)
-    assert tel["resting_drift"] > engine.offset
-
-
-def test_flush_counts_a_record_that_never_reached_the_book():
-    """reached_book stays 0 when neither leg was ever placed."""
-    engine = _live_reentry_engine(up_ok=False, down_ok=False)
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert m.reentry_telemetry["mid_at_resting"] is None
-
-    engine._handle_window_rollover(m, now + 300.0, "cid_95_nobook")
-
-    assert engine.reentry_stats["reentries"] == 1
-    assert engine.reentry_stats["reached_book"] == 0
-    assert engine.reentry_stats["no_fill"] == 1
-
-
-@pytest.mark.parametrize("mutate,expected,exit_side", [
-    (lambda m: setattr(m, "pair_captured", True), "paired", ""),
-    (lambda m: (setattr(m, "exit_taken", True), setattr(m, "exit_side", "UP")), "exited", "UP"),
-    (lambda m: (setattr(m, "filled_up", True), setattr(m, "filled_down", True)),
-     "both_no_merge", ""),
-])
-def test_flush_records_every_outcome(mutate, expected, exit_side):
-    """Each outcome name maps to its own counter and lands in the record."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    mutate(m)
-
-    record = engine._flush_reentry_event(m)
-
-    assert record["outcome"] == expected
-    assert record["exit_side"] == exit_side
-    assert engine.reentry_stats[expected] == 1
-    assert engine.reentry_stats["reentries"] == 1
-
-
-def test_finalizer_is_idempotent_across_later_ticks():
-    """A later tick must not re-stamp a record that already reached the book."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    first = dict(m.reentry_telemetry)
-
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _PARTIAL_UP, _PARTIAL_DN), now + 70.0)
-
-    tel = m.reentry_telemetry
-    assert tel["mid_at_resting"] == first["mid_at_resting"]
-    assert tel["latency_ms"] == first["latency_ms"]
-    assert tel["resting_drift"] == first["resting_drift"]
-
-
-def test_stop_then_start_keeps_the_record_for_the_real_outcome():
-    """Stopping mid-window must not write a premature outcome.
-
-    `start()` resumes the same window without resetting per-window state, and the
-    re-entry gate cannot reseed the record (`adverse_open` is already cleared), so
-    a flush on stop would record "no_fill" and swallow the pair that follows.
-    """
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-
-    engine.stop()
-    assert m.reentry_telemetry is not None
-    assert engine.reentry_stats["reentries"] == 0
-
-    # Same window resumes and pairs.
     engine.is_running = True
-    m.filled_up = True
-    m.filled_down = True
-    m.pair_captured = True
-    engine._handle_window_rollover(m, now + 300.0, "cid_95_resume")
-
-    assert engine.reentry_stats["reentries"] == 1
-    assert engine.reentry_stats["paired"] == 1
-    assert engine.reentry_stats["no_fill"] == 0
+    with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
+        engine.update_config(quote_range=(0.10, 0.90))
 
 
-def test_flush_writes_one_json_line_and_survives_a_write_failure(tmp_path, monkeypatch):
-    """The real JSONL path: valid JSON, no perf_start, and a failure cannot crash it."""
-    import json
-
-    import strategy.live_trader as lt
-
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr(lt, "RUN_DIR", tmp_path)
-    monkeypatch.setattr(lt, "REENTRY_FILE", tmp_path / "reentry_events.jsonl")
-
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    engine._flush_reentry_event(m)
-
-    lines = (tmp_path / "reentry_events.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    row = json.loads(lines[0])
-    assert "perf_start" not in row
-    assert row["outcome"] == "no_fill"
-    assert row["filled_up"] is False
-    assert "realized_pnl_usd" in row
-
-    # A directory where the file should be makes the append raise; the flush must
-    # still return the record and still count it.
-    blocked = tmp_path / "blocked.jsonl"
-    blocked.mkdir()
-    monkeypatch.setattr(lt, "REENTRY_FILE", blocked)
-    engine2 = _reentry_engine()
-    m2 = _skip_window_on_adverse_open(engine2, slug, now)
-    engine2._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert engine2._flush_reentry_event(m2) is not None
-    assert engine2.reentry_stats["reentries"] == 1
-
-
-def test_paired_reentry_survives_a_later_requote_round():
-    """A re-quote round must not overwrite the re-entry's own outcome.
-
-    `_maybe_requote_after_merge()` (issue #89) clears `filled_up`, `filled_down`
-    and `pair_captured` to open the next round. The re-entry record is flushed at
-    rollover, so without freezing the terminal state a paired re-entry would be
-    recorded as `no_fill`.
-    """
-    engine = _reentry_engine()
-    engine.min_requote_remaining_sec = 60.0
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert m.reentry_count == 1
-
-    # The re-entry pairs.
-    m.filled_up = True
-    m.filled_down = True
-    m.pair_captured = True
-
-    # Enough window left, so a fresh re-quote round opens and wipes the flags.
-    m.time_remaining_sec = 200.0
-    assert engine._maybe_requote_after_merge(m, slug, 0.50, now + 90.0) is True
-    assert m.pair_captured is False
-    assert m.filled_up is False
-
-    engine._handle_window_rollover(m, now + 300.0, "cid_95_requote")
-
-    assert engine.reentry_stats["paired"] == 1
-    assert engine.reentry_stats["no_fill"] == 0
-
-
-def test_reentry_count_clears_on_rollover_and_reset():
-    """Per-window re-entry state resets with the rest of the window state."""
-    engine = _reentry_engine()
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-    m = _skip_window_on_adverse_open(engine, slug, now)
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert m.reentry_count == 1
-
-    engine._handle_window_rollover(m, now + 300.0, "cid_95_next")
-    assert m.reentry_count == 0
-    assert m.reentry_mid is None
-    assert m.reentry_drift is None
-
-    m.reentry_count = 3
-    m.reentry_mid = 0.50
-    m.reentry_drift = 0.001
-    engine.is_running = False
-    engine.reset_pnl()
-    assert m.reentry_count == 0
-    assert m.reentry_mid is None
-    assert m.reentry_drift is None
+def test_zeroed_skip_tallies_appear_in_get_state():
+    """Issue #228: with both gates and re-entry deleted, the operator-facing
+    tallies sit at zero. The keys stay until T4 removes them from the payload."""
+    engine = _drift_engine()
+    state = engine.get_state()
+    assert state["reentry_stats"]["reentries"] == 0
+    assert state["band_skip_stats"]["band_skips"] == 0
 
 
 # --- Issue #97: deterministic Open Orders ranking ---
@@ -2896,15 +2123,13 @@ def test_requote_dynamic_anchor_math():
     now = time.time()
     market = _fifteen_minute_market(now)
 
-    # Benign open snapshot at 0.50 so the drift gate stays out of the way.
+    # Benign open at 0.50, inside the quotable range, so nothing holds placement.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.49, "best_ask": 0.51},
         "down_book": {"best_bid": 0.49, "best_ask": 0.51},
     }, now)
     m = engine.markets[slug]
-    assert m.open_gate_evaluated is True
-    assert m.adverse_open is False
 
     # Skewed books (mid 0.60) whose asks still touch the 0.48 static anchor.
     engine._update_market_strategy(slug, {
@@ -2946,9 +2171,9 @@ def test_initial_entry_anchors_to_live_mid():
     now = time.time()
     market = _fifteen_minute_market(now)
 
-    # Opening snapshot at mid 0.54: drifted enough to tell 0.52 from the old
-    # 0.48, but inside exit_thresh so the adverse-open gate (#92) lets the
-    # window through. Both asks sit above their own leg's anchor, so nothing
+    # Opening at mid 0.54: drifted enough to tell 0.52 from the old
+    # 0.48, but inside the quotable range so placement is never held.
+    # Both asks sit above their own leg's anchor, so nothing
     # fills and the prices the engine actually quoted stay observable.
     engine._update_market_strategy(slug, {
         "market": market,
@@ -2960,10 +2185,9 @@ def test_initial_entry_anchors_to_live_mid():
     assert m.resting_up == round(0.54 - engine.offset, 3) == 0.52
     assert m.resting_down == round((1.0 - 0.54) - engine.offset, 3) == 0.44
 
-    # Context: this is the opening round on a window the gates admitted, and the
+    # Context: this is the opening round on a window nothing held, and the
     # prices above are what was actually quoted, not merely computed.
     assert m.requote_round == 0, "still the opening round, not a re-quote"
-    assert m.open_gate_evaluated is True and m.adverse_open is False
     assert m.filled_up is False and m.filled_down is False
     assert m.order_status_up == "RESTING" and m.order_status_down == "RESTING"
 
@@ -3471,46 +2695,6 @@ def test_naked_timeout_not_fired_before_horizon_or_disabled():
     assert m.exit_taken is False
 
 
-def test_reentry_pairable_gate_blocks_late_reentry():
-    """Re-entry inside the pairable horizon is blocked while the flag is on."""
-    slug = "btc-up-or-down-5m"
-    now = 1000.0
-
-    def make():
-        engine = LiveTraderEngine(load_persisted=False)
-        engine.naked_leg_timeout_pct = 0.70
-        engine.reentry_require_pairable = True
-        return engine
-
-    engine = _drift_engine()
-    engine.naked_leg_timeout_pct = 0.50   # horizon: (1-0.50)*300 = 150s > 90s gate
-    engine.reentry_require_pairable = True
-    m = _skip_window_on_adverse_open(engine, slug, now)
-
-    # 100s left: past the 90s #95 gate but inside the 150s pairable horizon.
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 199.0)
-    assert m.reentry_count == 0
-    assert m.status == "DRIFT_SKIPPED"
-
-    # Flag off restores #95 semantics: 100s left passes the 90s gate alone.
-    engine.reentry_require_pairable = False
-    engine._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 200.0)
-    assert m.reentry_count == 1
-    assert m.status == "QUOTING"
-
-    # A second engine with the flag on and plenty of window left re-enters.
-    engine2 = _drift_engine()
-    engine2.naked_leg_timeout_pct = 0.50
-    engine2.reentry_require_pairable = True
-    m2 = _skip_window_on_adverse_open(engine2, slug, now)
-    engine2._update_market_strategy(
-        slug, _drift_poll_data(now, _REVERTED_UP, _REVERTED_DN), now + 60.0)
-    assert m2.reentry_count == 1
-    assert m2.status == "QUOTING"
-
-
 def test_update_config_naked_knobs_roundtrip_and_clamp():
     """New #124 knobs round-trip through update_config with clamping."""
     engine = LiveTraderEngine(load_persisted=False)
@@ -3755,47 +2939,6 @@ def test_update_config_leg_chase_knobs():
     engine.is_running = True
     with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
         engine.update_config(max_pair_cost=0.96)
-
-
-def test_reentry_telemetry_distinguishes_chased_fill():
-    """Reentry telemetry records chased_fill and updates reentry_stats counters."""
-    engine = LiveTraderEngine(load_persisted=False)
-    mstate = engine.markets["btc-up-or-down-5m"]
-    mstate.reentry_telemetry = {
-        "reentry_count": 1,
-        "reentry_mid": 0.50,
-        "mid_at_resting": 0.50,
-        "perf_start": time.perf_counter(),
-    }
-    mstate.filled_up = True
-    mstate.filled_down = True
-    mstate.pair_captured = True
-    mstate.chased_fill = True
-
-    record = engine._flush_reentry_event(mstate)
-    assert record is not None
-    assert record["outcome"] == "paired"
-    assert record["chased_fill"] is True
-    assert engine.reentry_stats["chased_fills"] == 1
-    assert engine.reentry_stats["passive_fills"] == 0
-
-    # Test passive merge
-    mstate.reentry_telemetry = {
-        "reentry_count": 2,
-        "reentry_mid": 0.50,
-        "mid_at_resting": 0.50,
-        "perf_start": time.perf_counter(),
-    }
-    mstate.filled_up = True
-    mstate.filled_down = True
-    mstate.pair_captured = True
-    mstate.chased_fill = False
-
-    record2 = engine._flush_reentry_event(mstate)
-    assert record2 is not None
-    assert record2["chased_fill"] is False
-    assert engine.reentry_stats["chased_fills"] == 1
-    assert engine.reentry_stats["passive_fills"] == 1
 
 
 # ==============================================================================
@@ -4056,7 +3199,6 @@ def test_unpriceable_book_yields_none_mid_and_no_drift():
     assert m.mid is None
     assert m.max_up_drift == 0.0
     assert m.max_down_drift == 0.0
-    assert m.open_gate_evaluated is False
     assert not m.order_id_up and not m.order_id_down
 
 
@@ -4065,7 +3207,6 @@ def test_unpriceable_book_prevents_quoting():
     engine = LiveTraderEngine(load_persisted=False)
     engine.is_running = True
     engine.entry_delay_sec = 0.0
-    engine.entry_band = 0.0
     slug = "eth-up-or-down-5m"
     now = time.time()
     fake_market = LiveMarket(
@@ -4533,20 +3674,3 @@ def test_stop_exit_uses_the_resolver_ladder_not_a_constant():
     assert engine.trades[-1].exit_price == pytest.approx(0.38, abs=1e-6)
 
 
-def test_reentry_is_refused_without_a_mid():
-    """An unpriceable book cannot be judged against the drift band, so no re-entry.
-
-    Invariant 0 (#224): the substituted 0.50 was the one value `abs(mid - 0.50)
-    < band` could never reject.
-    """
-    engine = _clock_engine()
-    slug = "btc-up-or-down-5m"
-    now = time.time()
-    m = engine.markets[slug]
-    m.adverse_open = True
-    m.entry_cancelled_timeout = True
-    m.mid = None
-
-    assert not engine._maybe_reenter_drift_skipped(
-        m, slug, None, 200.0, 300.0, True, False, now, 0.48, 0.48)
-    assert m.reentry_count == 0

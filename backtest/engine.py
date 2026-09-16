@@ -141,33 +141,16 @@ class BacktestParams:
     # LiveTraderEngine.max_start_elapsed_pct. 0 disables.
     max_start_elapsed_pct: float = 0.10
     # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
-    # re-entered once the replay mid reverts within `reentry_drift_band` of 0.50
-    # with at least `min_requote_remaining_sec` left to pair two legs. Only the
-    # gate sets `adverse_skipped` in `_simulate_window`; entry-timeout and
-    # late-start cancels are never re-entered. Defaults are byte-identical to
-    # `LiveTraderEngine.__init__`. 0 disables the respective guard.
-    reentry_drift_band: float = 0.015
-    # Mirrors LiveTraderEngine.DEFAULT_MIN_REQUOTE_REMAINING_SEC (issue #89), which
-    # issue #95 shares rather than defining a second knob with the same meaning. At
-    # 300s a 5m window can never clear the gate, so only 15m windows re-enter until
-    # an operator lowers it; the tests set it explicitly to exercise the rule.
-    min_requote_remaining_sec: float = 300.0
-    # Re-entry time gate as a fraction of the window, mirroring
-    # LiveTraderEngine.reentry_min_remaining_pct. The effective gate is the tighter
-    # of this and `min_requote_remaining_sec`, so a 5m replay needs 90s left and a
-    # 15m one 270s. 0 or >= 1.0 falls back to the absolute knob alone.
-    reentry_min_remaining_pct: float = 0.30
-    # How many times one window may be recovered by re-entry. 1 keeps a market
-    # oscillating across the band from thrashing the book for a whole window;
-    # 0 disables re-entry outright. Mirrors LiveTraderEngine.
-    max_reentries_per_window: int = 1
     # Patient undecided-band maker knobs (issue #145, mirrors issue #137 live
     # semantics). `entry_delay_sec` holds all quoting until that many seconds
-    # into the window (0 = off); `entry_band` only admits windows whose
-    # two-sided mid is still near 0.50 at entry time (0 = off). Defaults
-    # preserve the current behavior exactly.
+    # into the window (0 = off). Defaults preserve the current behavior exactly.
     entry_delay_sec: float = 0.0
-    entry_band: float = 0.0
+    # Issue #228: the one quotable range, replacing `entry_band` and the
+    # adverse-open gate (`docs/engine-decision-rules.md` §6). A structural
+    # limit, not a tuning knob (ADR-0003): inside it the window is quoted,
+    # outside it placement holds for that tick only — evaluated every tick on
+    # the two-sided mid, never latched. Inclusive on both ends.
+    quote_range: tuple[float, float] = (0.10, 0.90)
     # Issue #164: mirrors LiveTraderEngine.stop_loss_enabled. False holds a
     # filled naked leg to settlement/rollover instead of stopping it out, which
     # is how `patient_band_maker` actually trades. The backtest previously had
@@ -226,8 +209,11 @@ class BacktestParams:
              "s", (0.0, 3600.0), ("backtest",)),
             ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
              "s", (0.0, 3600.0), ("backtest", "cockpit")),
-            ("entry_band", "Entry Band ($ from 0.50)", "You admit only undecided markets at entry time",
-             "$", (0.0, 0.50), ("backtest", "cockpit")),
+            # Issue #228: structural limit (ADR-0003) replacing the band and
+            # the adverse-open gate. Bounds are the price domain itself; the
+            # dashboard renders two inputs (lo/hi), not one knob.
+            ("quote_range", "Quotable Range (mid lo/hi)", "You quote only while the two-sided mid is inside this range",
+             "$", (0.0, 1.0), ("backtest", "cockpit")),
             ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
              "$", None, ("backtest", "cockpit")),
             ("stop_loss_enabled", "Stop Loss Enabled", "Off holds a filled naked leg to settlement instead of stopping out",
@@ -256,14 +242,9 @@ class BacktestParams:
              "%", (0.0, 1.0), ("backtest", "cockpit")),
             ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live",
              "%", (0.0, 1.0), ("backtest",)),
-            ("reentry_drift_band", "Drift Re-Entry Band ($)", "Re-entry discipline — policy knob",
-             "$", (0.0, 0.5), ("backtest", "cockpit")),
-            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy",
-             "s", (0.0, 3600.0), ("backtest", "cockpit")),
-            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy",
-             "%", (0.0, 1.0), ("backtest", "cockpit")),
-            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy",
-             "count", (0, 100), ("backtest", "cockpit")),
+            # Issue #228: the re-entry rows stood here. Removed with the
+            # mechanism; the fields stay inert until T5 removes them with
+            # their last senders (scripts, sims).
         ],
     }
 
@@ -386,26 +367,6 @@ class BacktestParams:
                 raise ValueError(
                     f"max_start_elapsed_pct must be between 0.0 and 1.0, got {self.max_start_elapsed_pct}"
                 )
-        if self.reentry_drift_band is not None:
-            if not math.isfinite(self.reentry_drift_band) or not (0.0 <= self.reentry_drift_band <= 0.5):
-                raise ValueError(
-                    f"reentry_drift_band must be between 0.0 and 0.5, got {self.reentry_drift_band}"
-                )
-        if self.min_requote_remaining_sec is not None:
-            if not math.isfinite(self.min_requote_remaining_sec) or self.min_requote_remaining_sec < 0:
-                raise ValueError(
-                    f"min_requote_remaining_sec must be >= 0, got {self.min_requote_remaining_sec}"
-                )
-        if self.reentry_min_remaining_pct is not None:
-            if not math.isfinite(self.reentry_min_remaining_pct) or not (0.0 <= self.reentry_min_remaining_pct <= 1.0):
-                raise ValueError(
-                    f"reentry_min_remaining_pct must be between 0.0 and 1.0, got {self.reentry_min_remaining_pct}"
-                )
-        if self.max_reentries_per_window is not None:
-            if self.max_reentries_per_window < 0:
-                raise ValueError(
-                    f"max_reentries_per_window must be >= 0, got {self.max_reentries_per_window}"
-                )
         if self.entry_delay_sec is not None:
             if not math.isfinite(self.entry_delay_sec) or not (0.0 <= self.entry_delay_sec <= 3600.0):
                 raise ValueError(
@@ -436,11 +397,26 @@ class BacktestParams:
                 raise ValueError(
                     f"naked_leg_timeout_pct must be between 0.0 and 1.0, got {self.naked_leg_timeout_pct}"
                 )
-        if self.entry_band is not None:
-            if not math.isfinite(self.entry_band) or not (0.0 <= self.entry_band <= 0.50):
-                raise ValueError(
-                    f"entry_band must be between 0.0 and 0.50, got {self.entry_band}"
-                )
+        # Issue #228: a structural limit, enforced here and not only at the API
+        # clamp (the #227 pattern). Every driver in `research/sweeps/` builds
+        # this dataclass directly. No "off": a (lo, hi) pair with
+        # 0.0 <= lo < hi <= 1.0, inclusive on both ends (the range judges the
+        # market, and a boundary mid is inside).
+        qr = self.quote_range
+        if (
+            not isinstance(qr, (tuple, list))
+            or len(qr) != 2
+            or isinstance(qr[0], bool)
+            or isinstance(qr[1], bool)
+            or not isinstance(qr[0], (int, float))
+            or not isinstance(qr[1], (int, float))
+            or not math.isfinite(qr[0])
+            or not math.isfinite(qr[1])
+            or not (0.0 <= qr[0] < qr[1] <= 1.0)
+        ):
+            raise ValueError(
+                f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {qr!r}"
+            )
 
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
         """Return the exit threshold for a given market slug, series, and window duration."""
@@ -498,9 +474,10 @@ class WindowResult:
     start_delay_sec: float = 0.0
     is_partial: bool = False
     err: str = ""
-    # Drift-skip re-entry (issue #95): how many times this window was recovered
-    # by the re-entry rule after the adverse-open gate skipped it. 0 = the gate
-    # never fired or the window stayed skipped. Mirrors live `reentry_count`.
+    # Issue #228: the re-entry mechanism is deleted, so no window is ever
+    # recovered and this is always 0. The field stays until T5 removes its
+    # last readers (dashboard summary, sim2); deleting it now would break
+    # every consumer that still aggregates it.
     reentry_count: int = 0
     entry_price_up: float | None = None
     entry_price_down: float | None = None
@@ -781,16 +758,17 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # the price it actually rested at when it filled, not a later chase step.
     chased_leg = ""
 
-    # Patient undecided-band maker knobs (issue #145, mirrors live issue #137).
-    # `entry_delay` holds all quoting until that far into the window (0 = off);
-    # `entry_band` admits only undecided markets at entry time (0 = off).
+    # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
+    # holds all quoting until that far into the window (0 = off).
     # Resting quotes anchor at the first mid AT/AFTER delay expiry (sim2
     # research-sim parity: sim2 anchors from its cached window mids, same
     # one-sided source as `s["mid"]` here); with delay 0 that is the first
     # valid snapshot, exactly as before. Explicit None handling matches the
     # validator (`__post_init__` owns range/finiteness for constructed params).
+    # Issue #228: the entry band is deleted and the range below is judged on
+    # the anchor's own two-sided mid.
     entry_delay = 0.0 if params.entry_delay_sec is None else params.entry_delay_sec
-    entry_band = 0.0 if params.entry_band is None else params.entry_band
+    quote_lo, quote_hi = params.quote_range
     resting_up: float | None = None
     resting_down: float | None = None
     # Whether a quote has actually been exposed to the book (issue #225). The
@@ -801,19 +779,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # the mid at placement time and not one carried over from before whatever
     # was holding placement cleared.
     orders_live = False
-    band_gate_evaluated = False
 
     entry_cancelled = False
-    adverse_gate_evaluated = False
-    # Drift-skip re-entry (issue #95): only the adverse-open gate sets this, so a
-    # timeout or late-start cancel is never resurrected. Mirrors the live
-    # engine's `mstate.adverse_open` distinction.
-    adverse_skipped = False
-    reentry_count = 0
     # Late start (issue #96): the replay's first snapshot for this window already
     # lands past max_start_elapsed_pct, so the window's open was never observed.
-    # Skip it entirely -- no entry, and no adverse-open snapshot from a mid-window
-    # mid -- matching LiveTraderEngine's late_start_skip.
+    # Skip it entirely -- no entry. Matches LiveTraderEngine's late_start_skip.
     late_start = bool(
         params.max_start_elapsed_pct
         and params.max_start_elapsed_pct > 0
@@ -860,11 +830,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # 1. Repriced on every tick until the quote is actually live, so the
         #    price that reaches the book is the mid at placement time. The old
         #    `if resting_up is None` anchored once at delay expiry and never
-        #    again: whenever anything held placement -- an unevaluated band, a
-        #    failing queue or pair-cost gate, a cancelled window later
-        #    re-entered -- live kept tracking the mid while this stayed frozen
-        #    on a mid from ticks ago. They agreed only when placement happened
-        #    on the very tick the delay expired.
+        #    again: whenever anything held placement -- a failing queue gate,
+        #    a cancelled window later re-entered -- live kept tracking the
+        #    mid while this stayed frozen on a mid from ticks ago. They
+        #    agreed only when placement happened on the very tick the delay
+        #    expired.
         #
         # 2. The anchor is the two-sided mid and nothing else. `s["mid"]` is the
         #    collector's up-leg reading and survives a one-sided down book, so
@@ -929,93 +899,20 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if adverse_drift_up >= naked_thr and _excursion_up < params.exit_reversal:
                     reversal_seen_up = True
 
-        # Adverse-open gate (issue #92): evaluated once per window against the
-        # first snapshot quoting two sides on both legs, so backtest and live
-        # agree on which windows are entered. `adverse_skipped` records that the
-        # cancel reason was the drift gate (issue #95), so it is the only cancel
-        # the re-entry rule below may undo.
-        if not adverse_gate_evaluated and not late_start:
-            open_mid = _two_sided_mid(ub, db)
-            if open_mid is not None:
-                adverse_gate_evaluated = True
-                if abs(open_mid - 0.50) >= exit_thr:
-                    entry_cancelled = True
-                    adverse_skipped = True
-                    # The adverse gate owns windows it claims (mirrors live):
-                    # the band gate never evaluates them.
-                    band_gate_evaluated = True
-
-        # Post-delay entry band (issue #145, mirrors live issue #137): once the
-        # entry delay has expired, the first tick with a two-sided book checks
-        # |mid - 0.50| against `entry_band` (0 = off). A failure latches the
-        # window cancelled; the re-entry rule below only undoes adverse-gate
-        # skips, so a band skip is final, matching live. While the band is
-        # armed but unevaluated, placement is held too (`band_hold`, same as
-        # live). In adverse-owned or late-start windows `entry_cancelled` is
-        # already latched, so the hold changes nothing there — fills are
-        # blocked either way; the hold only matters for live-healthy windows.
-        if entry_band > 0 and delay_expired and not band_gate_evaluated:
-            band_mid = _two_sided_mid(ub, db)
-            if band_mid is not None:
-                band_gate_evaluated = True
-                if abs(band_mid - 0.50) > entry_band:
-                    entry_cancelled = True
-        band_hold = entry_band > 0 and delay_expired and not band_gate_evaluated
-
-        # Drift-skip re-entry (issue #95): a gate-skipped window is re-entered on
-        # a later tick once the mid is back within `reentry_drift_band` of 0.50.
-        # Mirrors `LiveTraderEngine._maybe_reenter_drift_skipped`: the skip must
-        # have been the gate (`adverse_skipped`), the entry-timeout cutoff must
-        # not have passed, at least `min_requote_remaining_sec` must remain to
-        # pair two legs, and the per-window cap applies. Re-entry also waits
-        # for delay expiry (issue #145): live holds ALL quoting — including
-        # post-re-entry quotes — while `entry_delay_pending`, so granting
-        # earlier would anchor and fill before the configured delay. The
-        # grant is deferred, not dropped: `adverse_skipped` persists, so a
-        # later post-delay tick can still recover the window.
-        if (adverse_skipped and not filled_up and not filled_down
-                and delay_expired
-                and reentry_count < params.max_reentries_per_window):
-            entry_timeout_cutoff = (
-                params.entry_timeout_pct * window_length
-                if (0.0 < params.entry_timeout_pct < 1.0 and window_length > 0)
-                else None
-            )
-            remaining = max(0.0, window_length - elapsed) if window_length > 0 else 0.0
-            min_remaining = params.min_requote_remaining_sec
-            if window_length > 0 and 0.0 < params.reentry_min_remaining_pct <= 1.0:
-                min_remaining = min(min_remaining,
-                                    params.reentry_min_remaining_pct * window_length)
-            # Measured with `_two_sided_mid`, the same metric the gate above used --
-            # `mid` here is the up leg alone, and undoing a two-sided skip with a
-            # one-sided reading lets a leg-imbalanced book clear the band while the
-            # real drift is still past `exit_thresh`. None means one leg is
-            # one-sided, which is not evidence the skew has closed.
-            reentry_mid = _two_sided_mid(ub, db)
-            # `reentry_drift_band == 0` is documented as "disabled"; without the
-            # positive-band guard a two-sided mid of exactly 0.50 has drift 0 and
-            # would pass the `<= band` test below, mirroring the live engine's guard.
-            if (reentry_mid is not None
-                    and params.reentry_drift_band > 0
-                    and remaining >= min_remaining
-                    and (entry_timeout_cutoff is None or elapsed < entry_timeout_cutoff)
-                    and abs(reentry_mid - 0.50) <= min(params.reentry_drift_band, exit_thr)
-                    and abs(reentry_mid - 0.50) < exit_thr):
-                entry_cancelled = False
-                adverse_skipped = False
-                reentry_count += 1
-                # Re-entry bypasses the entry band entirely (mirrors live,
-                # which marks the band evaluated when re-entry is granted).
-                band_gate_evaluated = True
-                if not filled_up or not filled_down:
-                    # Issue #225: the re-quote anchors on the same two-sided mid
-                    # the re-entry test just passed, not on `s["mid"]`. Judging
-                    # the book with one number and then pricing off another is
-                    # how a one-sided leg used to get quoted anyway.
-                    if not filled_up:
-                        resting_up = round(min(0.99, max(0.01, reentry_mid - params.offset)), 3)
-                    if not filled_down:
-                        resting_down = round(min(0.99, max(0.01, (1.0 - reentry_mid) - params.offset)), 3)
+        # --- QUOTABLE RANGE (issue #228) ---
+        # One range, judged every tick on the anchor's own two-sided mid and
+        # latching nothing (operator-approved: no second mid computation). A
+        # mid outside [quote_lo, quote_hi] holds placement for that tick only
+        # (`range_hold`, same shape as `no_book_hold`): an already-resting
+        # quote stands because it is on the venue, and a filled leg's chase
+        # and exits are not entry. No two-sided mid means no judgement — the
+        # existing `no_book_hold` covers that tick. A market that leaves the
+        # range and returns is quoted again in the same window.
+        range_hold = (
+            (not orders_live)
+            and anchor_mid is not None
+            and (anchor_mid < quote_lo or anchor_mid > quote_hi)
+        )
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
@@ -1145,7 +1042,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
         quotable = (resting_up is not None and resting_down is not None
-                    and not band_hold and not no_book_hold)
+                    and not range_hold and not no_book_hold)
         can_fill_up = (not filled_up) and (not entry_cancelled or filled_down) and quotable
         can_fill_down = (not filled_down) and (not entry_cancelled or filled_up) and quotable
         # A quote that is not live yet is being *placed* on this tick, so it
@@ -1307,7 +1204,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         start_delay_sec=start_delay_sec,
         is_partial=is_partial,
         err=err,
-        reentry_count=reentry_count,
+        # Issue #228: the re-entry mechanism is deleted, so this is always
+        # 0 (the field itself goes in T5 with its last readers).
+        reentry_count=0,
         entry_price_up=entry_price_up,
         entry_price_down=entry_price_down,
         exit_price=exit_price,

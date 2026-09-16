@@ -632,18 +632,15 @@ def api_backtest(
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
     entry_timeout_pct: float = 0.10,
-    reentry_drift_band: float = 0.015,
-    min_requote_remaining_sec: float = 300.0,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
     entry_delay_sec: float = 0.0,
-    entry_band: float = 0.0,
     exit_thresh_naked: float = 0.0,
     naked_leg_timeout_pct: float = 0.0,
     # Issue #164 review: these six were rendered, labelled and bounded from the
     # registry but never reached the engine, so a researcher tuning the taker
     # fee or the re-entry caps got results computed with the defaults instead.
     max_start_elapsed_pct: float = 0.10,
-    reentry_min_remaining_pct: float = 0.30,
-    max_reentries_per_window: int = 1,
     taker_fee_rate: float = 0.07,
     tick_size: float = 0.001,
     min_quote_shares: int = 5,
@@ -672,23 +669,33 @@ def api_backtest(
     if filter_partial and max_start_delay <= 0:
         max_start_delay = 5.0
 
-    # Drift-skip re-entry (issue #95) query knobs, clamped like the live
-    # engine's update_config: band 0 disables re-entry, 0 <= band <= 0.50.
-    reentry_drift_band = max(0.0, min(0.50, reentry_drift_band))
-    min_requote_remaining_sec = max(0.0, min_requote_remaining_sec)
+    # Quotable range (issue #228), clamped like the live engine's
+    # update_config: each end to the price domain. An inverted or degenerate
+    # pair has no clamp order that preserves "lo < hi" without inventing a
+    # range the operator never asked for, so it falls back to the default —
+    # the same "fall back, never pass through" rule as the non-finite
+    # fallbacks below. Non-finite input (nan/inf) falls back the same way.
+    try:
+        f_lo, f_hi = float(quote_lo), float(quote_hi)
+        if not (math.isfinite(f_lo) and math.isfinite(f_hi)):
+            _lo, _hi = 0.10, 0.90
+        else:
+            _lo = max(0.0, min(1.0, f_lo))
+            _hi = max(0.0, min(1.0, f_hi))
+    except (TypeError, ValueError):
+        _lo, _hi = 0.10, 0.90
+    if not (_lo < _hi):
+        _lo, _hi = 0.10, 0.90
+    quote_lo, quote_hi = _lo, _hi
 
-    # Patient maker knobs (issue #145), clamped like LiveConfigPayload:
-    # delay 0..3600 (a delay past the window simply never quotes),
-    # band 0..0.50 (0 = off). Non-finite input (nan/inf) falls back to off —
-    # min/max comparisons against NaN silently yield the boundary otherwise.
+    # Patient maker knob (issue #145), clamped like LiveConfigPayload:
+    # delay 0..3600 (a delay past the window simply never quotes).
+    # Non-finite input (nan/inf) falls back to off — min/max comparisons
+    # against NaN silently yield the boundary otherwise.
     if not math.isfinite(entry_delay_sec):
         entry_delay_sec = 0.0
     else:
         entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
-    if not math.isfinite(entry_band):
-        entry_band = 0.0
-    else:
-        entry_band = max(0.0, min(0.50, entry_band))
 
     # Issue #164: every numeric knob is clamped to the bounds the registry
     # advertises, so the API refuses exactly what the engine refuses and what
@@ -705,21 +712,14 @@ def api_backtest(
         merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
         max_start_delay_sec=_clamp_to_spec("max_start_delay_sec", max_start_delay),
         entry_timeout_pct=_clamp_to_spec("entry_timeout_pct", entry_timeout_pct),
-        reentry_drift_band=_clamp_to_spec("reentry_drift_band", reentry_drift_band),
-        min_requote_remaining_sec=_clamp_to_spec(
-            "min_requote_remaining_sec", min_requote_remaining_sec),
+        quote_range=(quote_lo, quote_hi),
         entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
-        entry_band=_clamp_to_spec("entry_band", entry_band),
         exit_thresh_naked=_clamp_to_spec("exit_thresh_naked", exit_thresh_naked),
         naked_leg_timeout_pct=_clamp_to_spec(
             "naked_leg_timeout_pct", naked_leg_timeout_pct),
         stop_loss_enabled=bool(stop_loss_enabled),
         enable_leg_chase=bool(enable_leg_chase),
         max_start_elapsed_pct=_clamp_to_spec("max_start_elapsed_pct", max_start_elapsed_pct),
-        reentry_min_remaining_pct=_clamp_to_spec(
-            "reentry_min_remaining_pct", reentry_min_remaining_pct),
-        max_reentries_per_window=_clamp_to_spec(
-            "max_reentries_per_window", max_reentries_per_window),
         taker_fee_rate=_clamp_to_spec("taker_fee_rate", taker_fee_rate),
         tick_size=_clamp_to_spec("tick_size", tick_size),
         min_quote_shares=_clamp_to_spec("min_quote_shares", min_quote_shares),
@@ -777,10 +777,9 @@ def api_backtest(
                 "size": size,
                 "gas": params.merge_gas_usd,
                 "max_start_delay": params.max_start_delay_sec,
-                "reentry_drift_band": params.reentry_drift_band,
-                "min_requote_remaining_sec": params.min_requote_remaining_sec,
+                "quote_lo": quote_lo,
+                "quote_hi": quote_hi,
                 "entry_delay_sec": params.entry_delay_sec,
-                "entry_band": params.entry_band,
             },
             "params_groups": gp,
             "overall": {
@@ -854,8 +853,6 @@ def api_backtest(
             "monotonic": 0,
             "flat": 0,
             "total_pnl_cents": 0.0,
-            "reentry_count": 0,
-            "reentry_pnl_cents": 0.0,
         }
     )
 
@@ -888,9 +885,6 @@ def api_backtest(
         elif w.class_label == "flat":
             a["flat"] += 1
         a["total_pnl_cents"] += win_pnl
-        if w.reentry_count > 0:
-            a["reentry_count"] += 1
-            a["reentry_pnl_cents"] += win_pnl
 
         exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
         trades_sample.append({
@@ -916,8 +910,6 @@ def api_backtest(
     total_pairs = sum(a["pairs"] for a in per_series_raw.values())
     total_exits = sum(a["exits"] for a in per_series_raw.values())
     total_pnl = sum(a["total_pnl_cents"] for a in per_series_raw.values())
-    total_reentry_count = sum(a["reentry_count"] for a in per_series_raw.values())
-    total_reentry_pnl = sum(a["reentry_pnl_cents"] for a in per_series_raw.values())
 
     entered_windows = sum(1 for w in per_window if getattr(w, "entered", False) or w.filled_up or w.filled_down)
     overall = {
@@ -944,8 +936,6 @@ def api_backtest(
         "profitable_pairs": profitable_pairs,
         "profitable_exits": profitable_exits,
         "unfilled_windows": unfilled_windows,
-        "reentry_count": total_reentry_count,
-        "reentry_pnl_cents": round(total_reentry_pnl, 2),
     }
 
     per_series_out = {}
@@ -960,8 +950,6 @@ def api_backtest(
                 "monotonic": 0,
                 "flat": 0,
                 "total_pnl_cents": 0.0,
-                "reentry_count": 0,
-                "reentry_pnl_cents": 0.0,
             },
         )
         n = a["windows"]
@@ -976,8 +964,6 @@ def api_backtest(
             "avg_pnl_cents": round(a["total_pnl_cents"] / n, 2) if n else 0.0,
             "oscillating": a["oscillating"],
             "monotonic": a["monotonic"],
-            "reentry_count": a["reentry_count"],
-            "reentry_pnl_cents": round(a["reentry_pnl_cents"], 2),
         }
 
     gp = params.grouped_params()
@@ -994,10 +980,9 @@ def api_backtest(
             "size": size,
             "gas": gas,
             "max_start_delay_sec": max_start_delay,
-            "reentry_drift_band": round(reentry_drift_band, 4),
-            "min_requote_remaining_sec": round(min_requote_remaining_sec, 2),
+            "quote_lo": quote_lo,
+            "quote_hi": quote_hi,
             "entry_delay_sec": entry_delay_sec,
-            "entry_band": entry_band,
         },
         "params_groups": gp,
         "n_snaps": n_snaps,
@@ -1352,32 +1337,25 @@ class LiveConfigPayload(BaseModel):
     durations: Optional[list[int]] = None
     entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     exit_reversal: Optional[float] = Field(default=None, ge=0.001, le=0.50)
-    reentry_drift_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
-    # Issue #164: `update_config()` has always accepted this, but the payload
-    # model never declared it — so the Cockpit could not send it and the
-    # re-entry time gate was unreachable from the dashboard. Bounds match the
-    # registry entry the Backtest tab renders from.
-    min_requote_remaining_sec: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
-    # Issue #164 review: the Cockpit posts these two, and pydantic's default
-    # `extra="ignore"` dropped them before the handler ran — the request
-    # returned 200 with the bot still on its old re-entry limits while the form
-    # showed what the operator thought they had set.
-    reentry_min_remaining_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    max_reentries_per_window: Optional[int] = Field(default=None, ge=0, le=100)
+    # Issue #228: the re-entry payload fields stood here. Removed with the
+    # mechanism; the engine still accepts the knobs (inert) until T5.
     # 0 = off, matching `max(0.0, ...)` in the engine's own clamp; a 0.001
     # floor here made the naked stop impossible to switch back off.
     exit_thresh_naked: Optional[float] = Field(default=None, ge=0.0, le=0.50)
     naked_leg_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    reentry_require_pairable: Optional[bool] = None
-    # Issue #137: patient undecided-band maker knobs. entry_delay_sec has no
-    # upper bound (a delay past the window simply never quotes); entry_band
-    # matches the engine's 0..0.50 clamp; max_pair_cost matches 0.50..1.00.
+    # Issue #137: patient entry delay. entry_delay_sec has no
+    # upper bound (a delay past the window simply never quotes).
+    # (Issue #228: the entry_band field stood here. Removed with the band
+    # gate; the engine still accepts the knob, inert, until T5.)
     preset: Optional[str] = None
     # No upper bound would let a typo (or inf) silently never quote, since a
     # delay past the window end never expires. 3600s is 4x the longest 900s
     # window — anything larger is rejected at the boundary instead.
     entry_delay_sec: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
-    entry_band: Optional[float] = Field(default=None, ge=0.0, le=0.50)
+    # Issue #228: the quotable range, replacing the band and the adverse-open
+    # gate. Two ends in one field — the Cockpit renders two inputs and posts
+    # the pair; `update_config` clamps each end and refuses an inverted pair.
+    quote_range: Optional[list[float]] = None
     stop_loss_enabled: Optional[bool] = None
     enable_leg_chase: Optional[bool] = None
     max_pair_cost: Optional[float] = Field(default=None, ge=0.50, le=1.00)
@@ -1491,17 +1469,12 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             durations=payload.durations,
             entry_timeout_pct=payload.entry_timeout_pct,
             exit_reversal=payload.exit_reversal,
-            reentry_drift_band=payload.reentry_drift_band,
-            min_requote_remaining_sec=payload.min_requote_remaining_sec,
-            reentry_min_remaining_pct=payload.reentry_min_remaining_pct,
-            max_reentries_per_window=payload.max_reentries_per_window,
             exit_thresh_naked=payload.exit_thresh_naked,
             naked_leg_timeout_pct=payload.naked_leg_timeout_pct,
-            reentry_require_pairable=payload.reentry_require_pairable,
             enable_leg_chase=payload.enable_leg_chase,
             max_pair_cost=payload.max_pair_cost,
             entry_delay_sec=payload.entry_delay_sec,
-            entry_band=payload.entry_band,
+            quote_range=payload.quote_range,
             stop_loss_enabled=payload.stop_loss_enabled,
             preset=payload.preset,
         )
@@ -2402,8 +2375,12 @@ textarea:focus-visible,
               <input type="number" min="0" max="3600" step="1" id="btEntryDelay" data-param="entry_delay_sec" value="0">
             </div>
             <div class="form-group">
-              <label data-param-label="entry_band"></label>
-              <input type="number" min="0" max="0.5" step="0.005" id="btEntryBand" data-param="entry_band" value="0">
+              <label for="btQuoteLo">Quotable Range Lo</label>
+              <input type="number" min="0" max="1" step="0.05" id="btQuoteLo" data-param="quote_range" value="0.10">
+            </div>
+            <div class="form-group">
+              <label for="btQuoteHi">Quotable Range Hi</label>
+              <input type="number" min="0" max="1" step="0.05" id="btQuoteHi" data-param="quote_range" value="0.90">
             </div>
             <div class="form-group">
               <label for="btPairCost" data-param-label="max_pair_cost"></label>
@@ -2442,14 +2419,6 @@ textarea:focus-visible,
             <div class="form-group">
               <label data-param-label="quote_shares"></label>
               <input type="number" min="5" step="1" id="btSize" data-param="quote_shares" value="5">
-            </div>
-            <div class="form-group">
-              <label data-param-label="reentry_min_remaining_pct"></label>
-              <input type="number" min="0" max="1" step="0.05" id="btReentryMinPct" data-param="reentry_min_remaining_pct" value="0.30">
-            </div>
-            <div class="form-group">
-              <label data-param-label="max_reentries_per_window"></label>
-              <input type="number" min="0" max="100" step="1" id="btMaxReentries" data-param="max_reentries_per_window" value="1">
             </div>
             <div class="form-group">
               <label data-param-label="max_start_elapsed_pct"></label>
@@ -2524,37 +2493,10 @@ textarea:focus-visible,
           </div>
         </div>
 
-        <!-- ── 3. WINDOW POLICY (research knobs) ─────────────────────────── -->
-        <div class="bt-section">
-          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecPolicyBody" onclick="toggleBtSection(this,'btSecPolicyBody')">
-            <span class="bt-section-dot bt-section-dot-blue"></span>
-            <span>Window Policy — internal engine policy, mirrors live config</span>
-            <span class="bt-section-chevron" aria-hidden="true">▾</span>
-          </button>
-          <div class="bt-section-body" id="btSecPolicyBody">
-          <div class="bt-section-desc">
-            These are engine policy knobs. They have a live counterpart in the
-            trader config, but tuning them here is research work — for example
-            how long a window must have left before you allow a re-entry, or how
-            wide a drift band you tolerate.
-          </div>
-          <div class="form-grid" style="margin-top:6px">
-            <div class="form-group">
-              <label>Drift Re-Entry Band (0 = off)</label>
-              <input type="number" min="0" max="0.5" step="0.005" id="btReentryBand" data-param="reentry_drift_band" value="0.015">
-            </div>
-            <div class="form-group">
-              <label data-param-label="min_requote_remaining_sec"></label>
-              <input type="number" min="0" step="5" id="btRequoteMin" data-param="min_requote_remaining_sec" value="300">
-            </div>
-          </div>
-          </div>
-        </div>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
-        <button class="btn" id="btnWinningConfig" onclick="applyWinningConfig()">🏆 Winning config</button>
       </div>
     </div>
 
@@ -2566,7 +2508,6 @@ textarea:focus-visible,
         <div class="box" title="Proportion of windows where safety stop exit was triggered on adverse drift"><div class="lbl">Exit Stop Rate ℹ️</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
         <div class="box" title="Maximum peak-to-trough equity drawdown"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
         <div class="box" title="Proportion of windows with net positive P&L (merged pairs + profitable exits)"><div class="lbl">Win Rate ℹ️</div><div class="val" id="btWinRate">0.0%</div><div class="sub" id="btWinsCount">0 / 0 profitable</div></div>
-        <div class="box" title="Windows recovered by re-entry rule after initial adverse-open skip"><div class="lbl">Drift Re-Entry</div><div class="val" id="btReentry" style="color:var(--dim)">—</div><div class="sub" id="btReentryPnl">Windows recovered after drift skip</div></div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -2757,13 +2698,6 @@ textarea:focus-visible,
           <input type="number" min="0" max="100" step="5" id="cockpitNakedTimeout" data-param="naked_leg_timeout_pct" value="70" placeholder="0 = off" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label>Re-entry must be pairable</label>
-          <select id="cockpitReentryPairable">
-            <option value="true" selected>Yes — gate late re-entry</option>
-            <option value="false">No — issue #95 behavior</option>
-          </select>
-        </div>
-        <div class="form-group">
           <label data-param-label="exit_reversal"></label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitReversal" data-param="exit_reversal" value="0.02" oninput="validateCockpitInputs()">
         </div>
@@ -2776,28 +2710,16 @@ textarea:focus-visible,
           <input type="number" min="0" max="3600" step="5" id="cockpitEntryDelay" data-param="entry_delay_sec" value="0" placeholder="0 = off" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label data-param-label="entry_band"></label>
-          <input type="number" min="0" max="0.5" step="0.005" id="cockpitEntryBand" data-param="entry_band" value="0" placeholder="0 = off" oninput="validateCockpitInputs()">
+          <label for="cockpitQuoteLo">Quotable Range Lo</label>
+          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteLo" data-param="quote_range" value="0.10" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label for="cockpitQuoteHi">Quotable Range Hi</label>
+          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteHi" data-param="quote_range" value="0.90" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="max_pair_cost"></label>
           <input type="number" min="0.5" max="1" step="0.005" id="cockpitPairCost" data-param="max_pair_cost" value="0.99" placeholder="max pair cost" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="reentry_drift_band"></label>
-          <input type="number" min="0" max="0.5" step="0.005" id="cockpitReentryBand" data-param="reentry_drift_band" value="0.015" placeholder="0 = off" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="min_requote_remaining_sec"></label>
-          <input type="number" min="0" max="3600" step="10" id="cockpitRequoteMin" data-param="min_requote_remaining_sec" value="300" placeholder="seconds" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="reentry_min_remaining_pct"></label>
-          <input type="number" min="0" max="1" step="0.05" id="cockpitReentryMinPct" data-param="reentry_min_remaining_pct" value="0.30" placeholder="0 = off" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="max_reentries_per_window"></label>
-          <input type="number" min="0" max="100" step="1" id="cockpitMaxReentries" data-param="max_reentries_per_window" value="1" placeholder="0 = no re-entry" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="enable_leg_chase"></label>
@@ -4018,10 +3940,9 @@ async function runBacktest(fileOverride){
     const gas = getVal('btGas', 0.0);
 
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
-    const reentryBand = getVal('btReentryBand', 0.015);
-    const requoteMin = getVal('btRequoteMin', 300.0);
+    const quoteLo = getVal('btQuoteLo', 0.10);
+    const quoteHi = getVal('btQuoteHi', 0.90);
     const entryDelay = getVal('btEntryDelay', 0.0);
-    const entryBand = getVal('btEntryBand', 0.0);
     // Issue #164: knobs the live engine has always had, now simulated too.
     const exitReversal = getVal('btExitReversal', 0.02);
     const entryTimeout = getVal('btEntryTimeout', 0.10);
@@ -4031,8 +3952,6 @@ async function runBacktest(fileOverride){
     const legChase = $('btLegChase') ? $('btLegChase').value : '0';
     // Rendered from the registry, so they must actually reach the engine.
     const maxStartElapsed = getVal('btMaxStartElapsed', 0.10);
-    const reentryMinPct = getVal('btReentryMinPct', 0.30);
-    const maxReentries = getVal('btMaxReentries', 1);
     const takerFee = getVal('btTakerFee', 0.07);
     const tickSize = getVal('btTickSize', 0.001);
     const minShares = getVal('btMinShares', 5);
@@ -4042,7 +3961,7 @@ async function runBacktest(fileOverride){
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}&max_start_elapsed_pct=${maxStartElapsed}&reentry_min_remaining_pct=${reentryMinPct}&max_reentries_per_window=${maxReentries}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_sec=${entryDelay}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}&max_start_elapsed_pct=${maxStartElapsed}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -4065,11 +3984,6 @@ async function runBacktest(fileOverride){
     if ($('btWinsCount')) {
       $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
     }
-    const reentryCount = ov.reentry_count || 0;
-    const reentryPnl = ov.reentry_pnl_cents || 0;
-    $('btReentry').textContent = reentryCount > 0 ? `${reentryCount} recovered` : '—';
-    $('btReentry').style.color = reentryCount > 0 ? 'var(--up)' : 'var(--dim)';
-    $('btReentryPnl').textContent = reentryCount > 0 ? fmtUsd(reentryPnl, true) : 'Windows recovered after drift skip';
 
     // Equity Curve Chart
     const eqData = data.equity_curve || [];
@@ -4082,7 +3996,7 @@ async function runBacktest(fileOverride){
     if ($('btEquityWarning')) {
       if (!hasFills) {
         if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
-          $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry band / delay / pair cost).`;
+          $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry delay).`;
         } else {
           $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Check tape data density for this dataset.';
         }
@@ -4137,12 +4051,11 @@ async function runBacktest(fileOverride){
       + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
       + '<th>Total P&L ($)</th>'
       + '<th>Avg / Window ($)</th>'
-      + '<th>Recovered</th>'
       + '<th title="Price excursion >= 2c in both directions vs 50c mid. Market oscillation does not guarantee limit order fills.">Oscillating ℹ️</th>'
       + '<th>Monotonic</th>'
       + '</tr></thead><tbody>';
     for(const [k,v] of Object.entries(data.per_series||{})){
-      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums;color:${(v.reentry_count||0)>0?'var(--up)':'var(--dim)'}">${(v.reentry_count||0)>0 ? v.reentry_count + ' (' + fmtUsd(v.reentry_pnl_cents||0,true) + ')' : '—'}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
+      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
     }
     stbl+='</tbody></table>';
     $('btSeriesTableWrap').innerHTML=stbl;
@@ -4298,47 +4211,11 @@ function resetBtParams(){
   $('btSize').value = "5";
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
-  if ($('btReentryBand')) $('btReentryBand').value = "0.015";
-  if ($('btRequoteMin')) $('btRequoteMin').value = "300";
+  if ($('btQuoteLo')) $('btQuoteLo').value = "0.10";
+  if ($('btQuoteHi')) $('btQuoteHi').value = "0.90";
   if ($('btEntryDelay')) $('btEntryDelay').value = "0";
-  if ($('btEntryBand')) $('btEntryBand').value = "0";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
-  runBacktest();
-}
-
-// Winning config preset (issue #145): the EV-research-winning setup —
-// offset 0.03, delay 60s, band 0.04, tape fills, pair cost 0.98, size 5,
-// hold-to-settle (stop loss off, issue #201). The remaining replay
-// inputs are pinned to dashboard defaults (queue 0, gas 0, no partial
-// filter, re-entry band 0.015, re-quote-min 300) so the button is a
-// reproducible 1-click config, then auto-runs the backtest. Aborts without
-// running if any required input is missing (no half-applied state).
-function applyWinningConfig(){
-  const required = ['btOffset','btQueue','btPairCost','btStopLossEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
-  for (const id of required) { if (!$(id)) return; }
-  $('btOffset').value = "0.03";
-  $('btQueue').value = "0";
-  $('btEntryDelay').value = "60";
-  $('btEntryBand').value = "0.04";
-  $('btPairCost').value = "0.98";
-  $('btSize').value = "5";
-  // Issue #201: the preset is hold-to-settle. It used to express that with
-  // 0.49/0.50 stops — a threshold drift can still technically reach — so it now
-  // states it directly via the stop-loss toggle and leaves the thresholds at
-  // their dashboard defaults for when the operator switches stops back on.
-  $('btExit5m').value = "0.05";
-  $('btExit15m').value = "0.05";
-  $('btExitBtc').value = "0.05";
-  $('btExitSol').value = "0.05";
-  if ($('btStopLossEnabled')) {
-    $('btStopLossEnabled').checked = false;
-    toggleStopLossInputs();
-  }
-  $('btGas').value = "0.00";
-  $('btMaxStartDelay').value = "0";
-  $('btReentryBand').value = "0.015";
-  $('btRequoteMin').value = "300";
   runBacktest();
 }
 
@@ -5071,12 +4948,19 @@ function updateCockpitParamsLockUI(locked) {
   const paramIds = [
     'cockpitOffset',
     'cockpitExit',
+    'cockpitExitNaked',
+    'cockpitNakedTimeout',
     // Issue #201: applyCockpitConfig() returns early while the bot runs, so a
     // switch left interactive here would hide the stop group and never reach
     // /api/live/config — a lie about what the engine is doing.
     'cockpitStopLossEnabled',
     'cockpitExitReversal',
     'cockpitShares',
+    'cockpitEntryDelay',
+    'cockpitQuoteLo',
+    'cockpitQuoteHi',
+    'cockpitPairCost',
+    'cockpitLegChase',
     'cockpitMode',
     'cockpitEntryTimeout',
     'cockpitWallet',
@@ -5642,6 +5526,26 @@ function validateCockpitInputs() {
     }
   }
 
+  // 6. Quotable Range: each end in [0, 1] and lo < hi (issue #228).
+  const quoteLoEl = $('cockpitQuoteLo');
+  const quoteHiEl = $('cockpitQuoteHi');
+  if (quoteLoEl && quoteHiEl) {
+    const loRaw = quoteLoEl.value.trim();
+    const hiRaw = quoteHiEl.value.trim();
+    const lo = parseFloat(loRaw);
+    const hi = parseFloat(hiRaw);
+    const ok = loRaw !== '' && hiRaw !== '' && !isNaN(lo) && !isNaN(hi)
+      && lo >= 0 && lo <= 1 && hi >= 0 && hi <= 1 && lo < hi;
+    for (const el of [quoteLoEl, quoteHiEl]) {
+      if (ok) {
+        el.classList.remove('input-invalid');
+      } else {
+        el.classList.add('input-invalid');
+      }
+    }
+    if (!ok) allValid = false;
+  }
+
   const applyBtn = $('btnApplyParams');
   if (applyBtn && !areCockpitFiltersLocked()) {
     applyBtn.disabled = !allValid;
@@ -5719,28 +5623,27 @@ async function applyCockpitConfig() {
   // percentage normalized to a fraction server-side.
   const nakedEl = $('cockpitExitNaked');
   const nakedTimeoutEl = $('cockpitNakedTimeout');
-  const pairableEl = $('cockpitReentryPairable');
   if (nakedEl && nakedEl.value) {
     body.exit_thresh_naked = parseFloat(nakedEl.value);
   }
   if (nakedTimeoutEl && nakedTimeoutEl.value !== '' && !isNaN(parseFloat(nakedTimeoutEl.value))) {
     body.naked_leg_timeout_pct = Math.min(100, Math.max(0, parseFloat(nakedTimeoutEl.value))) / 100.0;
   }
-  if (pairableEl) {
-    body.reentry_require_pairable = pairableEl.value === 'true';
+  // Issue #228: the quotable range is two ends in one knob. Read off the two
+  // dedicated inputs and post the pair; `update_config` clamps each end and
+  // refuses an inverted pair (400, surfaced by the error path below).
+  const quoteLoEl = $('cockpitQuoteLo');
+  const quoteHiEl = $('cockpitQuoteHi');
+  if (quoteLoEl && quoteHiEl
+      && quoteLoEl.value !== '' && quoteHiEl.value !== ''
+      && !isNaN(parseFloat(quoteLoEl.value)) && !isNaN(parseFloat(quoteHiEl.value))) {
+    body.quote_range = [parseFloat(quoteLoEl.value), parseFloat(quoteHiEl.value)];
   }
   // Issue #164: knobs the live engine has always accepted but the Cockpit
-  // never offered — entry_delay_sec and entry_band among them, which is what
-  // `patient_band_maker` is made of. An operator could apply the preset but
-  // not see or tune the two values that define it.
+  // never offered — entry_delay_sec among them.
   const numeric = {
     entry_delay_sec: 'cockpitEntryDelay',
-    entry_band: 'cockpitEntryBand',
     max_pair_cost: 'cockpitPairCost',
-    reentry_drift_band: 'cockpitReentryBand',
-    min_requote_remaining_sec: 'cockpitRequoteMin',
-    reentry_min_remaining_pct: 'cockpitReentryMinPct',
-    max_reentries_per_window: 'cockpitMaxReentries',
   };
   for (const [field, elId] of Object.entries(numeric)) {
     const el = $(elId);
@@ -5843,7 +5746,8 @@ function renderCockpitUI(st) {
       if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
       if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
       if ($('cockpitNakedTimeout') && st.params.naked_leg_timeout_pct != null) $('cockpitNakedTimeout').value = Math.round(st.params.naked_leg_timeout_pct * 100);
-      if ($('cockpitReentryPairable') && st.params.reentry_require_pairable != null) $('cockpitReentryPairable').value = String(!!st.params.reentry_require_pairable);
+      if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
+      if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
     if ($('cockpitWallet') && st.wallet_address != null) {
       $('cockpitWallet').value = st.wallet_address;
@@ -5863,7 +5767,8 @@ function renderCockpitUI(st) {
       if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
       if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
       if ($('cockpitNakedTimeout') && st.params.naked_leg_timeout_pct != null) $('cockpitNakedTimeout').value = Math.round(st.params.naked_leg_timeout_pct * 100);
-      if ($('cockpitReentryPairable') && st.params.reentry_require_pairable != null) $('cockpitReentryPairable').value = String(!!st.params.reentry_require_pairable);
+      if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
+      if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
   } else if (st.is_running && st.selected_series) {
     syncCockpitFiltersFromState(st);
@@ -6757,7 +6662,7 @@ function setupBacktestInputListeners(){
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol',
     'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
-    'btReentryBand', 'btRequoteMin', 'btEntryDelay', 'btEntryBand'
+    'btQuoteLo', 'btQuoteHi', 'btEntryDelay'
   ];
 
   inputIds.forEach(id => {

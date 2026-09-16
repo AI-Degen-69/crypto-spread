@@ -1,7 +1,7 @@
 """CLI-level tests for `scripts/backtest.py`.
 
-The winning preset (`patient_band_maker`) is defined by `entry_delay_sec` and
-`entry_band` as much as by `offset`, so a CLI that silently defaulted those to
+The execution parameters are defined by `entry_delay_sec` and `quote_range`
+as much as by `offset`, so a CLI that silently defaulted those to
 0 replayed a *different* strategy than the bot runs — and the tape-vs-book
 comparison built on it proved nothing about the configuration being shipped.
 These tests pin the wiring from flag to `BacktestParams`.
@@ -54,27 +54,27 @@ def _captured_params(monkeypatch):
     return seen
 
 
-def test_entry_delay_and_band_reach_the_engine(tmp_path, monkeypatch, capsys):
-    """The two knobs that define the winning preset must be settable here."""
+def test_entry_delay_and_quote_range_reach_the_engine(tmp_path, monkeypatch, capsys):
+    """The knobs that define execution parameters must be settable here."""
     seen = _captured_params(monkeypatch)
     src = _one_window_ticks(tmp_path)
-    assert cli.main([str(src), "--entry-delay", "60", "--entry-band", "0.04"]) == 0
+    assert cli.main([str(src), "--entry-delay", "60", "--quote-lo", "0.20", "--quote-hi", "0.80"]) == 0
     params = seen["params"]
     assert params.entry_delay_sec == 60.0
-    assert params.entry_band == 0.04
+    assert params.quote_range == (0.20, 0.80)
     # Echoed in the header line, so a logged run states which strategy it was.
     out = capsys.readouterr().out
     assert "entry_delay=60.0s" in out
-    assert "entry_band=0.04" in out
+    assert "quote_range=(0.2, 0.8)" in out
 
 
-def test_entry_delay_and_band_default_to_disabled(tmp_path, monkeypatch):
+def test_entry_delay_and_quote_range_default_to_baseline(tmp_path, monkeypatch):
     """Omitting them keeps the previous baseline behavior exactly."""
     seen = _captured_params(monkeypatch)
     src = _one_window_ticks(tmp_path)
     assert cli.main([str(src)]) == 0
     assert seen["params"].entry_delay_sec == 0.0
-    assert seen["params"].entry_band == 0.0
+    assert seen["params"].quote_range == (0.10, 0.90)
     assert seen["params"].params_hash() == BacktestParams(
         offset=0.020, queue_gate=50.0, max_pair_cost=0.99,
         exit_thresh_by_slug=seen["params"].exit_thresh_by_slug,
@@ -84,21 +84,21 @@ def test_entry_delay_and_band_default_to_disabled(tmp_path, monkeypatch):
 
 
 def test_the_two_knobs_change_the_params_hash(tmp_path, monkeypatch):
-    """Sweep caches key on `params_hash`; a preset run must not reuse baseline."""
+    """Sweep caches key on `params_hash`; custom runs must not reuse baseline."""
     src = _one_window_ticks(tmp_path)
     seen = _captured_params(monkeypatch)
     cli.main([str(src)])
     baseline = seen["params"].params_hash()
-    cli.main([str(src), "--entry-delay", "60", "--entry-band", "0.04"])
+    cli.main([str(src), "--entry-delay", "60", "--quote-lo", "0.20", "--quote-hi", "0.80"])
     assert seen["params"].params_hash() != baseline, (
-        "a delay/band run would collide with the baseline in the sweep cache")
+        "a delay/quote_range run would collide with the baseline in the sweep cache")
 
 
 @pytest.mark.parametrize("flag,value", [
     ("--entry-delay", "-1"),
     ("--entry-delay", "3601"),
-    ("--entry-band", "-0.01"),
-    ("--entry-band", "0.51"),
+    ("--quote-lo", "-0.01"),
+    ("--quote-hi", "1.01"),
 ])
 def test_out_of_range_values_are_refused_not_silently_clamped(
         tmp_path, monkeypatch, flag, value):
@@ -121,13 +121,13 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
     assert cli.main([
         str(src),
         "--offset", "0.03", "--queue", "0", "--pair-cost", "0.98",
-        "--size", "5", "--entry-delay", "60", "--entry-band", "0.04",
+        "--size", "5", "--entry-delay", "60", "--quote-lo", "0.10", "--quote-hi", "0.90",
         "--exit-default-5m", "0.49", "--exit-default-15m", "0.50",
         "--max-start-delay", "0",
     ]) == 0
     p = seen["params"]
     assert (p.offset, p.queue_gate, p.max_pair_cost) == (0.03, 0.0, 0.98)
-    assert (p.entry_delay_sec, p.entry_band) == (60.0, 0.04)
+    assert (p.entry_delay_sec, p.quote_range) == (60.0, (0.10, 0.90))
     assert p.quote_shares == 5
     assert p.exit_thresh_by_slug["default_5m"] == 0.49
     assert p.exit_thresh_by_slug["default_15m"] == 0.50
