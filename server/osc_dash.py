@@ -1050,7 +1050,7 @@ def api_collector_status():
     """Return status of the background tick collector, today's ticks, and tape empty-rate health."""
     global _collector_proc
     running = _collector_proc is not None and _collector_proc.poll() is None
-    # Count total tick lines collected today — cheap on large files (same
+    # Count total tick lines collected today -- cheap on large files (same
     # 20 MB / 950-bytes heuristic as api_ticks_manifest) so a growing tick
     # file cannot make status exceed the menu's timeout (issue #200).
     today_ticks = 0
@@ -3716,7 +3716,8 @@ async function refreshCollectorStatus(){
       } else {
         tb.textContent = 'Tape: -';
       }
-    }  }catch(e){ console.warn('refreshCollectorStatus failed', e); }
+    }
+  }catch(e){ console.warn('refreshCollectorStatus failed', e); }
 }
 
 async function toggleCollector(){
