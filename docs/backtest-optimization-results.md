@@ -2,6 +2,13 @@
 
 > **Dataset:** 199,884 tick snapshots across 1,680 closed condition windows (10 series: BTC, ETH, SOL, BNB, XRP on 5m and 15m) recorded in `run/ticks/`.
 > **Simulation Engine:** `scripts/sweep_backtest.py` executing `backtest/engine.py:replay()` with conservative `fill_model="tape"`.
+>
+> **These numbers predate the fill rule (2026-09-16, issue #226).** `fill_model`
+> no longer exists: the engine has one hard-coded rule, and the `"tape"` setting
+> these runs used was half of it. Read the table as a record of what was decided,
+> not as a measurement of the current engine. The driver behind the
+> exit-reversal row (`research/sweeps/run_exit_rev_110.py`) was deleted with the
+> knob.
 
 ---
 

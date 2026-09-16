@@ -931,11 +931,11 @@ def test_stop_ws_bridge_survives_a_failing_bridge(capsys):
 # --------------------------------------------------------------------------
 
 def test_streamed_tape_produces_fills_in_replay():
-    """Ticks carrying WS-sourced `tape_delta` fill under `fill_model="tape"`."""
+    """Ticks carrying WS-sourced `tape_delta` fill under the one fill rule."""
     from backtest.engine import BacktestParams, replay
 
     start = 1700000000.0
-    params = BacktestParams(fill_model="tape", offset=0.02)
+    params = BacktestParams(offset=0.02)
 
     def snap(i: int, tape: list[dict]) -> dict:
         ts = start + i

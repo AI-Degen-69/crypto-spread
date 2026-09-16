@@ -6,13 +6,13 @@ Same parameters the dashboard sliders expose (Plan §2 / T3).
 The `patient_band_maker` preset that `strategy/live_trader.py` actually runs
 is reproducible here:
 
-  python -m scripts.backtest run/ticks --fill-model tape \\
-      --offset 0.03 --queue 0 --pair-cost 0.98 --size 5 \\
-      --entry-delay 60 --entry-band 0.04 \\
+  python -m scripts.backtest run/ticks \
+      --offset 0.03 --queue 0 --pair-cost 0.98 --size 5 \
+      --entry-delay 60 --entry-band 0.04 \
       --exit-default-5m 0.49 --exit-default-15m 0.50 --max-start-delay 0
 
-Swap `--fill-model book` for the optimistic side of the tape-vs-book
-comparison; the gap between the two is the "are these windows full" question.
+There is no fill model to choose (issue #226): one rule, the same one the live
+engine runs.
 """
 from __future__ import annotations
 import argparse
