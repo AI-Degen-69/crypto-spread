@@ -2170,6 +2170,9 @@ textarea:focus-visible,
    must stay direct children of .form-grid, or the wrapper collapses into a
    single grid cell. display:contents keeps the layout identical; the [hidden]
    rule is required because the id selector would otherwise outrank the UA one. */
+/* The four backtest thresholds must start a clean row under their switch, or
+   auto-placement strands the header mid-row and splits the group in two. */
+#btStopLossHead{grid-column:1/-1}
 #btStopLossFields,#cockpitStopLossFields{display:contents}
 #btStopLossFields[hidden],#cockpitStopLossFields[hidden]{display:none}
 .form-group{display:flex;flex-direction:column;gap:4px}
@@ -2416,7 +2419,7 @@ textarea:focus-visible,
               </div>
               <input type="number" step="0.005" id="btPairCost" data-param="pair_cost_gate" value="1.05" disabled style="opacity:0.45">
             </div>
-            <div class="form-group">
+            <div class="form-group" id="btStopLossHead">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <label data-param-label="stop_loss_enabled"></label>
                 <label class="toggle-wrap" title="Turn every stop-loss threshold on or off">

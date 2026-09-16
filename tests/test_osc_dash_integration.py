@@ -2699,6 +2699,10 @@ def test_stop_loss_group_survives_the_form_grid():
     override is mandatory: the id selector outranks the UA `[hidden]` rule.
     """
     html = client.get("/").text
+    assert "#btStopLossHead{grid-column:1/-1}" in html, (
+        "without a full-width header the four fields wrap around it and the "
+        "group reads as two unrelated halves")
+    assert 'class="form-group" id="btStopLossHead"' in html
     assert "#btStopLossFields,#cockpitStopLossFields{display:contents}" in html
     assert ("#btStopLossFields[hidden],#cockpitStopLossFields[hidden]"
             "{display:none}") in html
