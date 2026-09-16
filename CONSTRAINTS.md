@@ -1,47 +1,44 @@
-# CONSTRAINTS — Issue #224
+# CONSTRAINTS — Issue #225
 
-Binding while `fix/window-clock-and-no-invented-numbers-224` is live.
+Binding while `fix/entry-anchor-repriced-two-sided-225` is live.
 
 ## 1. Test gates
 
-Targeted files first, then the full suite in CI:
-
 ```
-python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py tests/test_stop_orders.py -q
-python -m pytest tests/test_backtest_engine.py tests/test_sweep_backtest.py -q
+python -m pytest tests/test_backtest_engine.py tests/test_entry_timeout.py tests/test_entry_anchor_parity.py -q
+python -m pytest tests/test_osc_dash_integration.py tests/test_sweep_backtest.py -q
 ```
 
-The full suite is CI's job (`docs/git-workflow.md` §4). Do not run `python -m pytest -q` locally
-as a gate; it is slow and CI already does it on push.
+The full suite is CI's job (`docs/git-workflow.md` §4).
 
-## 2. No new fabricated value may replace a removed one
+## 2. A changed expectation needs a cause, not an adjustment
 
-Removing `0.40` and `0.50` is the point. Replacing either with a different constant, a clamp to
-a plausible range, or a value carried forward from an earlier tick fails this issue outright.
-The only permitted outcomes are: a value resolved from the book, or no action.
+This issue changes what the backtest fills, so test expectations will move. Every one that does
+must be explained by the rule, in the commit body or the test's own docstring. "The number is
+different now" is not an explanation, and quietly re-baselining a number is the failure mode
+this constraint exists to catch.
 
-## 3. Skips are visible
+## 3. Fixtures describe real books
 
-A window skipped for a missing clock logs once at a level the operator sees, and — in the
-backtest — is reported as a distinct outcome, not folded into `no_data` or a normal no-fill.
-A silent skip trades one invisible failure for another.
+A binary pair's DOWN leg is the complement of its UP leg. Several fixtures centred DOWN on an
+unrelated `down_ask`, which nothing noticed while the anchor read the one-sided `s["mid"]`. Where
+a fixture is corrected, it is corrected to a coherent book — not to whatever makes the assertion
+pass. A test whose subject **is** a leg-imbalanced book opts out explicitly and says why.
 
-## 4. One clock helper, not a repeated expression
+## 4. No expected price on both sides of a parity assertion
 
-The window length and elapsed time are computed in exactly one place per engine. Four copies of
-`end_ts - start_ts` with four different fallbacks is how the current divergence happened.
+A parity test compares the two engines against each other. Writing `0.51` into the live
+assertion *and* the backtest assertion tests neither engine against the other; the backtest side
+reads the live engine's own resting price.
 
-## 5. No behaviour change beyond the invariants
+## 5. Nothing else moves
 
-Thresholds, offsets, fill rules, gate ordering and defaults are untouched. Any test that changes
-its expected outcome must be explained by a clock that was previously wrong, and that
-explanation goes in the commit body.
+No change to gates, thresholds, the fill rule, or `BacktestParams` defaults. The one behaviour
+change is where the anchor comes from and when it stops being recomputed.
 
 ## 6. Anti-cheat
 
-No `skip`, `xfail`, deleted assertion, loosened tolerance or suppressed warning to make a test
-pass. If a test fails because the clock is now correct, fix the test's fixture and say so.
+No `skip`, `xfail`, deleted assertion or loosened tolerance. A test that can no longer be reached
+through `_simulate_window` is moved to the function it covers and says so — it is not deleted.
 
 ## 7. No new dependencies
-
-Standard library and what is already imported.
