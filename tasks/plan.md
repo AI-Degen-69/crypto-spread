@@ -1,105 +1,116 @@
-# tasks/plan.md — Issue #201: Group backtest stop-loss params under an on/off toggle
+# Plan — Issue #206: Live entry quotes are always 0.50 - offset
 
-- **Issue:** #201 — https://github.com/AI-Degen/crypto-spread/issues/201
-- **Branch:** `feat/backtest-stop-loss-toggle-201` off `master`
-- **Size tier:** **Small** — one file (`server/osc_dash.py`), one HTML block +
-  one new JS function + two JS lines. No contract change, no engine change.
-- **Task type:** `[Design/UI]` (front-end grouping/toggle). Not Debug, not
-  Backend — `stop_loss_enabled=false` already flows into `BacktestParams`.
-- **Stack detected:** Python 3 / FastAPI, dashboard HTML+vanilla JS served as a
-  string from `server/osc_dash.py`. Tests: `pytest`, HTML-string assertions via
-  `TestClient` in `tests/test_osc_dash_integration.py`.
+- **Issue:** #206 (`ready-for-agent`, assigned)
+- **Branch:** `fix/live-entry-anchor-mid-206`
+- **Size tier:** Small — one block in one function, one file plus its tests.
+  It is small in diff and large in consequence: it is the pricing of every live
+  entry order the engine places.
+- **Task type:** Debug (root-cause of a live-money defect) + Code.
+- **Stack:** Python 3.12.10, FastAPI project, pytest. No venv activation needed.
+- **Skills routed:** `debugging-and-error-recovery` (root cause is already
+  isolated — the `locals()` guard), `test-driven-development` (red before green),
+  `source-driven-development` (the correct formula is already in the repo twice).
+  No UI skills: this is engine logic, nothing renders.
 
-## Spec (embedded — Small tier, no separate SPEC.md)
+## Root cause (confirmed by reading, not assumed)
 
-### Goal
-One stop-loss on/off switch in the backtest Operator Controls that owns all four
-threshold inputs (`btExit5m`, `btExit15m`, `btExitBtc`, `btExitSol`).
+`strategy/live_trader.py:4384-4385` reads `up_mid` / `down_mid`. Neither name is
+bound anywhere in `_update_market_strategy` or its module scope — the only
+`up_mid` in the repo is a local inside `book_math.two_sided_mid` (`book_math.py:89`).
+So `'up_mid' in locals()` is permanently `False` and both legs price off `0.50`.
 
-### Acceptance criteria
-1. Backtest Parameters shows a single stop-loss on/off toggle grouping all four
-   threshold fields.
-2. Off → fields hidden + `disabled`; `/api/backtest` URL carries
-   `stop_loss_enabled=0`.
-3. On → fields visible + enabled; URL carries `stop_loss_enabled=1`.
-4. Toggle styling/behavior match the existing pair-cost toggle in the same
-   section (`toggle-wrap` / `toggle-switch` / `toggle-slider`, ON/OFF span).
-5. `python -m pytest tests/test_osc_dash_integration.py -q` passes.
+The correct value exists already: `mstate.mid` is assigned at `:4365` from
+`two_sided_mid_with_default`, and the exact formula to apply to it exists twice:
 
-### Edge cases
-- Default page load = **On** (today's select defaults to `value="1"`).
-- Hidden fields must also be `disabled`, so a stale value cannot be read back by
-  any future form-serialization path.
-- `runBacktest()` must not read `.value` off a checkbox — `.checked ? '1' : '0'`.
-- `resetBtParams()` / `applyWinningConfig()` must call the toggle handler if they
-  touch the checkbox (mirrors existing `btPairCostEnabled` handling).
-- `applyParamSpec()` walks `[data-param]` and sets `min`/`max` only for
-  `INPUT[type=number]`, so keeping `data-param="stop_loss_enabled"` on a checkbox
-  is safe and preserves the `bt` surface-prefix test.
+- re-quote path, `live_trader.py:5190`: `anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)`
+- backtest, `backtest/engine.py:786-788`: same, with `(1.0 - _anchor_f)` for the down leg.
 
-### Out of scope
-Cockpit tab stop-loss control, engine semantics, threshold defaults/bounds, any
-other parameter group.
-
-## API / interface contract (locked)
-
-| Surface | Before | After |
-|---|---|---|
-| DOM | `<select id="btStopLossEnabled" data-param="stop_loss_enabled">` with `1`/`0` options | `<input type="checkbox" id="btStopLossEnabled" data-param="stop_loss_enabled" checked onchange="toggleStopLossInputs()">` |
-| DOM | four loose `.form-group` blocks | same four, wrapped in `<div id="btStopLossFields">` |
-| JS | `const stopLoss = $('btStopLossEnabled').value` | `const stopLoss = $('btStopLossEnabled') ? ($('btStopLossEnabled').checked ? '1' : '0') : '1'` |
-| JS | — | `function toggleStopLossInputs()` — mirror of `togglePairCostInput()` |
-| HTTP | `/api/backtest?...&stop_loss_enabled=1\|0` | **unchanged** |
-| Python | `server/osc_dash.py:651,718` | **unchanged** |
+`tests/test_live_trader.py:2831` (`test_requote_dynamic_anchor_math`) already
+pins that behaviour — **for round 1 only**. Round 0 was never covered, which is
+how the dead fallback survived.
 
 ## Tasks
 
-### T1 ✅ `[Design/UI]` — Restructure the stop-loss markup
-- **File:** `server/osc_dash.py` (~2404-2419 thresholds, ~2461-2467 select)
-- **Do:** Delete the standalone `btStopLossEnabled` select `.form-group`. In its
-  place at the threshold block, add a header row reusing the pair-cost pattern:
-  `<label data-param-label="stop_loss_enabled">` + `toggle-wrap` containing
-  `<span id="btStopLossToggleLabel">ON</span>` and the `toggle-switch` checkbox
-  `btStopLossEnabled` (`checked`, `data-param="stop_loss_enabled"`,
-  `onchange="toggleStopLossInputs()"`). Wrap the four existing threshold
-  `.form-group` blocks in `<div id="btStopLossFields">`.
-- **Skill:** `frontend-ui-engineering`
-- **Verify:** `python -m pytest tests/test_osc_dash_integration.py -q` still
-  green (registry/surface tests must not regress).
+### T1 — Branch and red test `[Debug]`
+- Create `fix/live-entry-anchor-mid-206` off `master`.
+- Add `test_initial_entry_anchors_to_live_mid` to `tests/test_live_trader.py`,
+  next to `test_requote_dynamic_anchor_math` so the round-0 and round-1 cases
+  read as a pair.
+- Model it on that test's fixtures: a 15m engine, a benign 0.50 open snapshot so
+  the adverse-open gate (`:4509`) stays out of the way, then a skewed two-sided
+  book with mid `0.60`.
+- Assert `m.resting_up == 0.57` and `m.resting_down == 0.37` at `offset = 0.03`
+  (or the engine's configured offset, expressed as `round(0.60 - engine.offset, 3)`).
+- **Verification:** `python -m pytest tests/test_live_trader.py -q -k initial_entry_anchors`
+  must FAIL, reporting `0.47`. Capture that output — CONSTRAINTS §5 requires it.
 
-### T2 ✅ `[Design/UI]` — `toggleStopLossInputs()` + request wiring
-- **File:** `server/osc_dash.py` (next to `togglePairCostInput()` ~3897; caller
-  ~3976; `resetBtParams()` ~4222; `applyWinningConfig()` ~4255)
-- **Do:** Add `toggleStopLossInputs()`: read `.checked`, set `hidden` on
-  `btStopLossFields`, set `disabled` + `opacity` on the four inputs, flip the
-  `ON`/`OFF` label text and `var(--up)`/`var(--dim)` color — same shape as
-  `togglePairCostInput()`. Change the `stopLoss` read in `runBacktest()` to
-  `.checked ? '1' : '0'`. In `resetBtParams()`, restore the checkbox to `checked`
-  and call the handler.
-- **Skill:** `frontend-ui-engineering`
-- **Verify:** page loads with fields visible; toggling Off hides/disables them.
+### T2 — The fix `[Backend/Logic]`
+- `strategy/live_trader.py:4383-4387`: delete the two `locals()` lines and price
+  from the mid:
 
-### T3 ✅ `[Test]` — Lock the behavior
-- **File:** `tests/test_osc_dash_integration.py`
-- **Do:** Add tests in the existing HTML-string style:
-  (a) `btStopLossFields` wrapper exists and the four ids live inside it;
-  (b) `btStopLossEnabled` is a `checkbox` with `toggle-switch` markup and no
-      leftover `<select id="btStopLossEnabled"`;
-  (c) `toggleStopLossInputs` is defined and wired via `onchange`;
-  (d) `runBacktest` sends `stop_loss_enabled=${stopLoss}` derived from `.checked`.
-- **Skill:** `test-driven-development`
-- **Verify:** `python -m pytest tests/test_osc_dash_integration.py -q`, then full
-  `python -m pytest -q` (~50s, ~390 tests).
+```python
+_anchor = mstate.mid if mstate.mid is not None else 0.50
+resting_up = round(min(0.99, max(0.01, _anchor - self.offset)), 3)
+resting_down = round(min(0.99, max(0.01, (1.0 - _anchor) - self.offset)), 3)
+```
 
-## Improvement pass (operator decides — NOT folded in)
+- Update the comment above it: it currently describes behaviour the code did not
+  have. Name `mstate.mid` and say the price is recomputed every tick until an
+  order exists, which is what makes it placement-time fresh.
+- **Verification:** the T1 test goes green; `tests/test_live_trader.py` whole file green.
 
-**Proposal:** the four threshold labels are hard-coded strings
-(`Exit Stop Loss 5m ($)` …) while the registry already owns
-`exit_thresh_by_slug` → `"Exit Stop Loss ($)"` (`backtest/engine.py:228`), and
-`test_shared_labels_are_not_hard_coded_in_the_page` exists precisely to catch
-that class of drift. Since T1 already rewrites this block, using
-`data-param-label="exit_thresh_by_slug"` on the new group header would put the
-group title under registry control for free.
-**Cost:** touches wording the issue declared out of scope.
-**Recommendation:** adopt only the group *header* label from the registry; leave
-the four per-slug labels hard-coded. Defer if you want the diff minimal.
+### T3 — Boundary and parity tests `[Debug]`
+- Add to the same test, or a sibling, the two cases that keep the fix honest:
+  - pair-sum invariant: `resting_up + resting_down == round(1 - 2*offset, 3)`
+    across several mids (0.20 / 0.50 / 0.80).
+  - clamping: a mid at 0.02 with `offset = 0.03` must not emit a price below 0.01.
+- Assert the mid-0.50 case still yields the historical `0.47` / `0.47`, so the
+  claim "no existing fixture changes" is a test, not a hope.
+- **Verification:** `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py tests/test_patient_band_preset.py -q`.
+
+### T4 — Placement-time proof `[Debug]`
+- One test with `entry_delay_sec = 60`: feed a tick at mid 0.50 before the delay
+  expires (no order placed), then a tick at mid 0.65 after it expires, and assert
+  the placed price is `0.65 - offset`, not `0.50 - offset`.
+- This is the operator's own acceptance criterion from the #206 comment; without
+  it the fix is correct by inspection only.
+- **Verification:** same command as T3.
+
+### T5 — Document the pre-quote exception `[Docs]`
+- `strategy/live_trader.py:4230`: add one comment line saying the `0.50` there is
+  deliberate — the T+1 window has no book to anchor to, and the block is already
+  suspended whenever `entry_delay_sec` or `entry_band` is armed. No code change.
+- **Verification:** `python -m pytest tests/test_docstrings.py -q`.
+
+### T6 — Full suite and PR `[Backend/Logic]`
+- `python -m pytest -q` (~50s).
+- Commit per task, conventional, scoped `fix(live)`. PR body carries the red
+  output from T1 and the green output from T6, per CONSTRAINTS §5, and states
+  plainly that every backtest result for a non-zero `entry_delay_sec` before this
+  commit described a strategy the live engine never ran.
+
+## 💡 Proposed improvement (operator decides — not folded in)
+
+The clamp formula now appears three times: round-0 (after T2), the re-quote path
+(`:5190`), and the backtest (`engine.py:786`). A four-line module function —
+
+```python
+def anchor_prices(mid: float, offset: float) -> tuple[float, float]:
+    """Both legs' resting prices at `mid`: (mid - offset, (1 - mid) - offset)."""
+```
+
+— in `strategy/book_math.py`, called from both live sites, would make the two
+live copies impossible to drift apart again, and gives #214's parity harness a
+single symbol to assert against. It is a real deduplication of code that already
+exists, not speculative abstraction.
+
+**Cost:** touches the re-quote path, which is currently green and out of scope,
+so it widens the blast radius of a live-money fix. **Recommendation: defer to
+#214**, where parity is the whole point. Adopt now only if you want it.
+
+## Ordering note
+
+#206 is the unblocker. #213 (entry band) must land after it — relaxing the band
+while quotes are still nailed to `0.50 - offset` quotes 0.47/0.47 into a market
+at 0.70, which is exactly the adverse-fill scenario with the guard removed.
+#209 (stop measured from 0.50) and #214 (parity) both read this issue's result.
