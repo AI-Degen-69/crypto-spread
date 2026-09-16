@@ -83,7 +83,8 @@ from server.osc_dash import app
 
 ### Test Framework
 
-- **Pytest**: Run tests via `python -m pytest -q`
+- **Pytest**: Run targeted tests via `python -m pytest tests/test_<module>.py -q` (or `-k <pattern>`).
+- **Policy**: Avoid running full-suite `python -m pytest -q` locally (930+ tests takes ~96s). Fast targeted tests run in <1s; GitHub Actions CI handles full regression testing on push.
 
 ### File Pattern: `test_*.py`
 
