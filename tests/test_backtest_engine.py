@@ -43,8 +43,8 @@ def snap(ts: float, mid_up: float, down_ask: float = 0.49, up_ask: float = 0.49,
     """Build a minimal tick dict with the shape collect_ticks writes.
 
     `mid_up` is authoritative — the book's bb/ba are derived so that
-    (bb+ba)/2 == mid_up. Default up_ask/down_ask=0.49 keeps touch_pair <= 0.99
-    so the default pair_cost_gate=0.995 lets the test through.
+    (bb+ba)/2 == mid_up. Default up_ask/down_ask=0.49 keeps touch_pair <= 0.99,
+    which no longer gates anything (issue #227) but keeps the fixture realistic.
 
     Both legs are pinned, the DOWN one at `1 - mid_up`, so the *two-sided* mid
     is `mid_up` too. It used to centre the DOWN book on `down_ask` with no
@@ -239,7 +239,7 @@ def test_simulate_book_only_fill():
         "resting_pair": 0.96, "queue_up": 0.0, "queue_down": 0.0, "err": None,
     }]
     w = _simulate_window(snaps, BacktestParams(offset=0.005,
-                                                pair_cost_gate=1.00))
+                                                max_pair_cost=1.00))
     assert w.filled_up is True
     assert w.filled_down is False
 
@@ -343,46 +343,40 @@ def test_simulate_queue_gate_zero_disables():
     w = _simulate_window(snaps, BacktestParams(queue_gate=0.0))
     assert w.filled_up is True
 
-def test_simulate_pair_cost_gate_blocks_expensive_pair():
-    # Issue #204: Gate measures resting pair cost (here 0.495 + 0.495 = 0.99 > 0.98),
-    # so resting orders exceeding the gate are blocked from filling.
-    tape = [{"asset": UP_TOKEN, "price": 0.495, "size": 5.0}]
-    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
-    assert w.filled_up is False
+def test_a_wide_touch_never_blocks_a_resting_fill():
+    """The book's two asks say nothing about what our own quotes cost.
 
-def test_simulate_pair_cost_gate_zero_disables():
-    # With pair_cost_gate=0, gate is bypassed even if resting quotes are expensive
-    tape = [{"asset": UP_TOKEN, "price": 0.495, "size": 5.0}]
-    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.0))
-    assert w.filled_up is True
-
-def test_resting_pair_cost_gate_allows_fills_when_touch_is_wide():
-    # Issue #204: Maker rests at 0.48 / 0.48 (pair cost 0.96 <= 0.98).
-    # Wide touch asks (0.60 + 0.60 = 1.20) must NOT block resting quotes from filling.
+    Issue #204 first read a wide touch (0.60 + 0.60 = 1.20) as an expensive
+    pair and refused the window. Our resting legs cost 0.96 there. Issue #227
+    deleted the entry-side pair-cost test outright — this pins that a wide
+    touch still cannot suppress a fill.
+    """
     tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
     snaps = [snap(1.0, 0.50, up_ask=0.60, down_ask=0.60, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(offset=0.02, pair_cost_gate=0.98))
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, max_pair_cost=0.98))
     assert w.filled_up is True
 
-def test_resting_pair_cost_gate_blocks_when_quotes_exceed_cap():
-    # Issue #204: If resting quotes exceed pair_cost_gate (e.g. offset=0.005 -> pair=0.99 > 0.98),
-    # resting quotes should be gated out.
+
+def test_a_thin_offset_is_no_longer_an_entry_block():
+    """Issue #227: `max_pair_cost` caps the chase, and only the chase.
+
+    Under #204 an offset of 0.005 rested the pair at 0.99, which failed a 0.98
+    cap on every tick of every window — an on/off switch driven by the offset,
+    wearing a market gate's clothes. The offset is now the only thing that
+    decides entry cost, so both windows enter and the thin one fills.
+    """
     tape = [{"asset": UP_TOKEN, "price": 0.495, "size": 5.0}]
     snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
-    assert w.filled_up is False
+    w = _simulate_window(snaps, BacktestParams(offset=0.005, max_pair_cost=0.98))
+    assert w.entered is True
+    assert w.filled_up is True, (
+        "a 0.99 resting pair was refused — the deleted entry gate is back")
+
 
 def test_simulate_window_tracks_entered_flag():
-    # Issue #204: When quotes are resting and not gated out, entered is True
     snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51)]
-    w = _simulate_window(snaps, BacktestParams(offset=0.02, pair_cost_gate=0.98))
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, max_pair_cost=0.98))
     assert w.entered is True
-
-    # When all ticks are blocked by pair_cost_gate, entered is False
-    w_blocked = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
-    assert w_blocked.entered is False
 
 
 # --- simulation: exit -----------------------------------------------------
@@ -977,7 +971,7 @@ def _drift_window(start_ts=1_760_000_000.0, duration=300, mids=None):
 
 
 def _params(**kw):
-    base = dict(offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
+    base = dict(offset=0.02, queue_gate=0.0, max_pair_cost=1.00,
                 entry_timeout_pct=0.0,
                 max_start_elapsed_pct=0.0, exit_reversal=0.0,
                 exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
@@ -1215,7 +1209,7 @@ def test_the_chase_never_breaches_the_pair_cost_cap():
     # the cap is the only thing that can stop the chase. entry_up is 0.48, so
     # floor((0.98 - 0.48) * 100) / 100 = 0.50 is the ceiling.
     w = _simulate_window(_chaseable_window(dn_ask=0.49, dn_ask_after=0.60),
-                         _params(enable_leg_chase=True, pair_cost_gate=cap))
+                         _params(enable_leg_chase=True, max_pair_cost=cap))
     assert w.filled_up is True, "the window never entered — fixture is vacuous"
     assert w.chased_leg == "down", "the chase never ran"
     assert w.chased_resting is not None
@@ -1229,14 +1223,14 @@ def test_the_chase_never_breaches_the_pair_cost_cap():
 def test_the_chase_only_raises_the_quote_never_lowers_it():
     """Lowering would walk away from a fill already within reach."""
     # The ask after the fill sits above what the cap allows (ceiling is
-    # floor((1.05 - 0.48) * 100) / 100 = 0.57), so the chased leg never fills
+    # floor((1.00 - 0.48) * 100) / 100 = 0.52), so the chased leg never fills
     # and the chase keeps running — an ask the chase could reach would pair
     # immediately and the loop would break before the drop ever happened.
     w = _simulate_window(
         _chaseable_window(dn_ask=0.49, dn_ask_after=0.70, last_dn_ask=0.20),
-        _params(enable_leg_chase=True, pair_cost_gate=1.05))
+        _params(enable_leg_chase=True, max_pair_cost=1.00))
     assert w.chased_leg == "down", "the chase never ran"
-    assert w.chased_resting >= 0.57 - 1e-9, (
+    assert w.chased_resting >= 0.52 - 1e-9, (
         f"the resting DOWN bid followed the ask down to {w.chased_resting}")
 
 
@@ -1328,7 +1322,7 @@ def test_the_chase_does_not_move_a_quote_with_no_ask_to_anchor_to():
     for s in snaps[2:]:                      # blind the DOWN book after the fill
         s["down_book"]["best_ask"] = None
         s["down_book"]["asks"] = {}
-    w = _simulate_window(snaps, _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    w = _simulate_window(snaps, _params(enable_leg_chase=True, max_pair_cost=1.00))
     assert w.filled_up is True, "fixture never entered"
     assert w.chased_leg == "", (
         f"the chase moved the DOWN leg to {w.chased_resting} with no ask on "
@@ -1341,7 +1335,7 @@ def test_the_chase_resumes_once_an_ask_reappears():
     for s in snaps[2:5]:
         s["down_book"]["best_ask"] = None
         s["down_book"]["asks"] = {}
-    w = _simulate_window(snaps, _params(enable_leg_chase=True, pair_cost_gate=1.05))
+    w = _simulate_window(snaps, _params(enable_leg_chase=True, max_pair_cost=1.00))
     assert w.chased_leg == "down", "the chase never resumed after the ask returned"
     assert w.chased_resting is not None
 
@@ -1383,7 +1377,7 @@ def test_a_naked_leg_always_reaches_the_naked_threshold_check():
     import re
 
     src = inspect.getsource(_simulate_window)
-    gate = src.index("if not queue_ok or not pair_cost_ok:")
+    gate = src.index("if not queue_ok:")
     fill = src.index("# --- FILL DETECTION")
     branch = src[gate:fill]
     continues = re.findall(r"^\s+if (.+):\n\s+continue$", branch, re.M)
@@ -1442,7 +1436,7 @@ def _settle_params(**kw) -> BacktestParams:
     This is the `ex=none` shape the sweep ran -- the only configuration in
     which a naked leg reaches window close still open.
     """
-    base = dict(offset=0.02, pair_cost_gate=1.05,
+    base = dict(offset=0.02, max_pair_cost=1.00,
                 entry_timeout_pct=0.0, stop_loss_enabled=False,
                 naked_leg_timeout_pct=0.0)
     base.update(kw)
