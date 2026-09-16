@@ -2807,3 +2807,14 @@ def test_cockpit_toggle_survives_unlocking_the_params():
     tog = html[tog_start:html.index("function toggleBtSection", tog_start)]
     assert "cockpitParamsLockHint" in tog, (
         "the toggle must not re-enable the input while the bot holds the lock")
+
+
+def test_both_stop_loss_toggles_are_labelled_for_assistive_tech():
+    """The visible text is just ON/OFF, so the switch needs a real name."""
+    html = client.get("/").text
+    for el_id in ("btStopLossEnabled", "cockpitStopLossEnabled"):
+        start = html.index(f'id="{el_id}"')
+        assert 'aria-label="Stop loss enabled"' in html[start:start + 200], (
+            f"{el_id} would be announced as just 'ON'")
+        assert f'<label for="{el_id}"' in html, (
+            f"the {el_id} caption should be a click target for its switch")

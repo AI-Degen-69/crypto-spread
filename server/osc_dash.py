@@ -2166,13 +2166,13 @@ textarea:focus-visible,
 .btn-danger:hover{background:rgba(240,104,77,.3)}
 .form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
-/* Issue #201: the stop-loss thresholds are one toggled group in the markup but
-   must stay direct children of .form-grid, or the wrapper collapses into a
-   single grid cell. display:contents keeps the layout identical; the [hidden]
-   rule is required because the id selector would otherwise outrank the UA one. */
-/* The four backtest thresholds must start a clean row under their switch, or
-   auto-placement strands the header mid-row and splits the group in two. */
+/* Issue #201: the four backtest thresholds must start a clean row under their
+   switch, or auto-placement strands the header mid-row and splits the group. */
 #btStopLossHead{grid-column:1/-1}
+/* The toggled thresholds are one group in the markup but must stay direct
+   children of .form-grid, or the wrapper collapses into a single grid cell.
+   display:contents keeps the layout identical; the [hidden] rule is required
+   because the id selector would otherwise outrank the UA one. */
 #btStopLossFields,#cockpitStopLossFields{display:contents}
 #btStopLossFields[hidden],#cockpitStopLossFields[hidden]{display:none}
 .form-group{display:flex;flex-direction:column;gap:4px}
@@ -2421,11 +2421,11 @@ textarea:focus-visible,
             </div>
             <div class="form-group" id="btStopLossHead">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <label data-param-label="stop_loss_enabled"></label>
+                <label for="btStopLossEnabled" data-param-label="stop_loss_enabled"></label>
                 <label class="toggle-wrap" title="Turn every stop-loss threshold on or off">
                   <span id="btStopLossToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--up)">ON</span>
                   <div class="toggle-switch">
-                    <input type="checkbox" id="btStopLossEnabled" data-param="stop_loss_enabled" checked onchange="toggleStopLossInputs()">
+                    <input type="checkbox" id="btStopLossEnabled" data-param="stop_loss_enabled" aria-label="Stop loss enabled" checked onchange="toggleStopLossInputs()">
                     <span class="toggle-slider"></span>
                   </div>
                 </label>
@@ -2751,11 +2751,11 @@ textarea:focus-visible,
         </div>
         <div class="form-group">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <label data-param-label="stop_loss_enabled"></label>
+            <label for="cockpitStopLossEnabled" data-param-label="stop_loss_enabled"></label>
             <label class="toggle-wrap" title="Turn the stop loss on or off">
               <span id="cockpitStopLossToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--up)">ON</span>
               <div class="toggle-switch">
-                <input type="checkbox" id="cockpitStopLossEnabled" data-param="stop_loss_enabled" checked onchange="toggleCockpitStopLossInputs()">
+                <input type="checkbox" id="cockpitStopLossEnabled" data-param="stop_loss_enabled" aria-label="Stop loss enabled" checked onchange="toggleCockpitStopLossInputs()">
                 <span class="toggle-slider"></span>
               </div>
             </label>
@@ -3942,7 +3942,7 @@ function toggleStopLossInputs(){
     const inp = $(id);
     if(!inp) continue;
     inp.disabled = !enabled;
-    inp.style.opacity = enabled ? '1' : '0.45';
+    inp.style.opacity = enabled ? '' : '0.45';
   }
   const lbl = $('btStopLossToggleLabel');
   if(lbl){
