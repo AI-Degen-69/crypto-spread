@@ -602,22 +602,19 @@ def test_simulate_window_start_delay_and_partial_flag():
     assert w_early.is_partial is False
 
 
-def test_replay_max_start_delay_filtering():
-    # Window 1: delay = 10s (late)
-    w1_snap = {**snap(110.0, 0.50), "cid": "0xW1", "start_ts": 100.0}
-    # Window 2: delay = 1s (early)
-    w2_snap = {**snap(201.0, 0.50), "cid": "0xW2", "start_ts": 200.0}
+def test_replay_dead_zone_start_filtering():
+    # Window 1: first tick at 195.0, start_ts=100.0, end_ts=200.0 (5s remaining <= 10s dead zone) -> not entered
+    w1_snap = {**snap(195.0, 0.50), "cid": "0xW1", "start_ts": 100.0, "end_ts": 200.0, "duration": 100}
+    # Window 2: first tick at 201.0, start_ts=200.0, end_ts=300.0 (99s remaining > 10s dead zone) -> entered
+    w2_snap = {**snap(201.0, 0.50), "cid": "0xW2", "start_ts": 200.0, "end_ts": 300.0, "duration": 100}
     snaps = [w1_snap, w2_snap]
 
-    # No filter (default max_start_delay_sec = 0.0) -> both windows included
-    out_all = replay(snaps, BacktestParams())
+    out_all = replay(snaps, BacktestParams(dead_zone_val=10.0, dead_zone_unit="sec"))
     assert out_all["n_windows"] == 2
-
-    # Filter max_start_delay_sec = 5.0 -> only w2 included
-    out_filtered = replay(snaps, BacktestParams(max_start_delay_sec=5.0))
-    assert out_filtered["n_windows"] == 1
-    assert out_filtered["trades_sample"][0]["slug"] == w2_snap["slug"]
-    assert out_filtered["trades_sample"][0]["is_partial"] is False
+    res_w1 = [w for w in out_all["per_window"] if w["cid"] == "0xW1"][0]
+    res_w2 = [w for w in out_all["per_window"] if w["cid"] == "0xW2"][0]
+    assert res_w1["entered"] is False
+    assert res_w2["entered"] is True
 
 
 def test_backtest_dynamic_symmetric_quoting_off_center_open():
@@ -784,12 +781,11 @@ def test_entry_delay_holds_quotes_until_expiry():
     # nothing may fill; without delay the pair captures immediately.
     snaps = _window_snaps(70, lambda i: 0.50,
                           lambda i: _tape_both(0.48, 0.48) if i < 60 else [])
-    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
-                                               entry_timeout_pct=0.0))
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0))
     assert w.filled_up is False
     assert w.filled_down is False
     assert w.pair_captured is False
-    w0 = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
+    w0 = _simulate_window(snaps, BacktestParams())
     assert w0.pair_captured is True
 
 
@@ -807,8 +803,7 @@ def test_entry_delay_anchors_quotes_post_delay():
         70, mid_fn, lambda i: _tape_both(0.53, 0.43) if i >= 60 else [],
         up_ask_fn=lambda i: 0.49 if i < 60 else 0.555,
         down_ask_fn=lambda i: 0.49 if i < 60 else 0.4525)
-    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
-                                               entry_timeout_pct=0.0))
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0))
     assert w.pair_captured is True
     assert w.entry_price_up == 0.53
     assert w.entry_price_down == 0.43
@@ -825,8 +820,7 @@ def test_entry_delay_classifies_full_path():
     """
     snaps = _window_snaps(70, lambda i: 0.45 if i % 2 == 0 else 0.55,
                           lambda i: [])
-    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
-                                               entry_timeout_pct=0.0))
+    w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0))
     assert w.n_snaps == 70
     assert w.class_label == "oscillating"
     # The fill the marketable-on-placement rule produces, asserted rather than
@@ -858,14 +852,14 @@ def test_the_anchor_ignores_a_one_sided_mid_prefix():
         return snaps
 
     w = _simulate_window(_prefixed(lambda i: _tape_both(0.50, 0.46)),
-                         BacktestParams(entry_timeout_pct=0.0))
+                         BacktestParams())
     assert w.pair_captured is False, "the one-sided prefix was quoted anyway"
 
     # Control: the same window, with the tape printing where the two-sided
     # anchor actually rests, does capture. The abstention above is the anchor
     # source, not some other gate.
     w2 = _simulate_window(_prefixed(lambda i: _tape_both(0.48, 0.48)),
-                          BacktestParams(entry_timeout_pct=0.0))
+                          BacktestParams())
     assert w2.pair_captured is True
     assert w2.entry_price_up == 0.48
 
@@ -914,53 +908,31 @@ def _drift_window(start_ts=1_760_000_000.0, duration=300, mids=None):
 
 def _params(**kw):
     base = dict(offset=0.02, queue_gate=0.0, max_pair_cost=1.00,
-                entry_timeout_pct=0.0,
-                max_start_elapsed_pct=0.0, exit_reversal=0.0,
+                exit_reversal=0.0,
                 exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
     base.update(kw)
     return BacktestParams(**base)
 
 
-def test_stop_loss_enabled_defaults_to_the_previous_behaviour():
-    """True is today: a naked leg past the threshold stops out."""
-    assert BacktestParams().stop_loss_enabled is True
-    w = _simulate_window(_drift_window(), _params())
-    assert w.exit_taken is True, "the drift stop no longer fires by default"
-    assert w.exit_side == "up"
+def test_stop_loss_always_active_on_adverse_drift():
+    """Stop loss fires on adverse drift regardless of naked_leg_at_expiry setting."""
+    w_close = _simulate_window(_drift_window(), _params(naked_leg_at_expiry="close"))
+    assert w_close.exit_taken is True
+    assert w_close.exit_side == "up"
+
+    w_hold = _simulate_window(_drift_window(), _params(naked_leg_at_expiry="hold"))
+    assert w_hold.exit_taken is True
+    assert w_hold.exit_side == "up"
 
 
-def test_disabling_the_stop_holds_the_naked_leg_to_settlement():
-    """`patient_band_maker` runs with stop_loss_enabled=False.
-
-    Same ticks, same thresholds — the only difference is the knob. The leg
-    must ride the drift instead of being sold into it.
-    """
-    w = _simulate_window(_drift_window(), _params(stop_loss_enabled=False))
-    assert w.exit_taken is False, "the stop fired with stop_loss_enabled=False"
-    assert w.filled_up is True, "the leg should still have filled"
+def test_naked_leg_at_expiry_defaults_to_close():
+    """Default naked_leg_at_expiry is 'close'."""
+    assert BacktestParams().naked_leg_at_expiry == "close"
 
 
-def test_the_knob_changes_pnl_rather_than_only_a_flag():
-    """A flag that flips without moving P&L would prove nothing."""
-    on = _simulate_window(_drift_window(), _params())
-    off = _simulate_window(_drift_window(), _params(stop_loss_enabled=False))
-    assert on.pnl_cents != off.pnl_cents, (
-        "disabling the stop left P&L unchanged — the gate is not on the path "
-        "that books the exit")
-
-
-def test_disabling_the_stop_does_not_suppress_pairing():
-    """Only the stop is gated; a window that pairs must still pair."""
-    snaps = _drift_window()
-    # collapse the DOWN ask too, so both legs fill and the pair merges
-    snaps[1]["down_book"]["best_ask"] = 0.47
-    w = _simulate_window(snaps, _params(stop_loss_enabled=False))
-    assert w.pair_captured is True, "pairing broke when the stop was disabled"
-
-
-def test_stop_loss_enabled_is_part_of_the_params_hash():
+def test_naked_leg_at_expiry_is_part_of_the_params_hash():
     """Sweep caches key on the hash; two strategies must not collide."""
-    assert _params().params_hash() != _params(stop_loss_enabled=False).params_hash()
+    assert _params().params_hash() != _params(naked_leg_at_expiry="hold").params_hash()
 
 
 # ===========================================================================
@@ -994,46 +966,49 @@ def _flat_naked_window(n_ticks=29, start_ts=1_760_000_000.0, duration=300,
     return snaps
 
 
-def test_naked_timeout_defaults_to_off():
-    """0 is today: a flat naked leg rides to the end of the window."""
-    assert BacktestParams().naked_leg_timeout_pct == 0.0
-    w = _simulate_window(_flat_naked_window(), _params())
+def test_dead_zone_defaults():
+    """Default dead zone: 10% of window remaining."""
+    p = BacktestParams()
+    assert p.dead_zone_val == 0.10
+    assert p.dead_zone_unit == "pct"
+
+
+def test_dead_zone_zero_disables():
+    """dead_zone_val=0.0 disables the dead zone; flat naked leg rides to end of window."""
+    w = _simulate_window(_flat_naked_window(), _params(dead_zone_val=0.0))
     assert w.filled_up is True and w.filled_down is False
     assert w.exit_taken is False
 
 
-def test_naked_leg_is_exited_once_the_horizon_passes():
-    """A time stop, not a price stop — the mid never moves in this window."""
-    w = _simulate_window(_flat_naked_window(), _params(naked_leg_timeout_pct=0.50))
-    assert w.exit_taken is True, "the naked leg was never timed out"
+def test_dead_zone_exits_naked_leg_when_close():
+    """In dead zone, an unpaired leg exits at the book if naked_leg_at_expiry == 'close'."""
+    w = _simulate_window(_flat_naked_window(), _params(dead_zone_val=0.10, dead_zone_unit="pct", naked_leg_at_expiry="close"))
+    assert w.exit_taken is True, "the naked leg was not exited in dead zone"
     assert w.exit_side == "up"
-    # The invariant that matters: drift never reached the price stop, so the
-    # exit above cannot have been a price stop.
-    assert max(w.max_up, w.max_down) < 0.05, (
-        f"drift reached {max(w.max_up, w.max_down)} — at or past the 0.05 "
-        "price stop, so this no longer isolates the time stop")
+    assert max(w.max_up, w.max_down) < 0.05
 
 
-def test_the_clock_starts_when_the_leg_goes_naked_not_at_window_open():
-    """A late fill must still get its full horizon (mirrors live)."""
-    # Fill at tick 20 = 200s into a 300s window; the window's last tick is 280s.
-    snaps = _flat_naked_window(fill_tick=20)
-    w = _simulate_window(snaps, _params(naked_leg_timeout_pct=0.50))
-    assert w.filled_up is True
-    # 50% of 300s = 150s of naked time. The fill lands at 200s, so the window
-    # ends before the horizon: measured from window open it would have fired.
-    assert w.exit_taken is False, (
-        "the timeout fired early — the clock is measured from window open, "
-        "not from the moment the leg went naked")
+def test_dead_zone_holds_naked_leg_when_hold():
+    """In dead zone, an unpaired leg is held to settlement if naked_leg_at_expiry == 'hold'."""
+    w = _simulate_window(_flat_naked_window(), _params(dead_zone_val=0.10, dead_zone_unit="pct", naked_leg_at_expiry="hold"))
+    assert w.exit_taken is False
+    assert w.settle_source in ("direct_bid", "latched_bid", "redeemed")
+
+
+def test_dead_zone_unit_seconds():
+    """Dead zone in absolute seconds unit works identically."""
+    w = _simulate_window(_flat_naked_window(), _params(dead_zone_val=30.0, dead_zone_unit="sec", naked_leg_at_expiry="close"))
+    assert w.exit_taken is True
+    assert w.exit_side == "up"
 
 
 def test_a_completed_pair_is_never_timed_out():
     """The clock resets when the leg stops being naked."""
     snaps = _flat_naked_window()
     snaps[1]["down_book"]["best_ask"] = 0.47      # both legs fill on tick 1
-    w = _simulate_window(snaps, _params(naked_leg_timeout_pct=0.10))
+    w = _simulate_window(snaps, _params(dead_zone_val=0.10))
     assert w.pair_captured is True
-    assert w.exit_taken is False, "a merged pair was killed by the naked timeout"
+    assert w.exit_taken is False, "a merged pair was killed by the dead zone"
 
 
 def test_naked_stop_may_tighten_the_paired_stop_but_never_loosen_it():
@@ -1064,20 +1039,15 @@ def test_a_tighter_naked_stop_exits_a_drift_the_paired_stop_would_ride():
         "the tighter naked stop should have exited earlier, at a better bid")
 
 
-def test_naked_timeout_is_not_suppressed_by_disabling_the_price_stop():
-    """Time stop and price stop are separate triggers, as they are live."""
-    w = _simulate_window(_flat_naked_window(),
-                         _params(stop_loss_enabled=False, naked_leg_timeout_pct=0.50))
-    assert w.exit_taken is True, (
-        "stop_loss_enabled=False suppressed the naked *time* stop — live "
-        "treats them as independent triggers")
-
-
 @pytest.mark.parametrize("kw", [
-    {"naked_leg_timeout_pct": 1.01}, {"naked_leg_timeout_pct": -0.01},
-    {"exit_thresh_naked": 0.51}, {"exit_thresh_naked": -0.01},
+    {"dead_zone_val": 1.01, "dead_zone_unit": "pct"},
+    {"dead_zone_val": -0.01},
+    {"dead_zone_unit": "hours"},
+    {"naked_leg_at_expiry": "sell"},
+    {"exit_thresh_naked": 0.51},
+    {"exit_thresh_naked": -0.01},
 ])
-def test_out_of_range_naked_knobs_are_refused(kw):
+def test_out_of_range_dead_zone_knobs_are_refused(kw):
     with pytest.raises(ValueError):
         BacktestParams(**kw)
 
@@ -1282,18 +1252,15 @@ def test_the_chase_resumes_once_an_ask_reappears():
     assert w.chased_resting is not None
 
 
-def test_nothing_closes_a_naked_leg_when_both_stops_are_off():
-    """`stop_loss_enabled=False` with no timeout is newly reachable.
-
-    Neither stop can fire, so the leg must still be marked to the final book
-    rather than silently contributing nothing.
-    """
+def test_nothing_closes_a_naked_leg_when_held_to_settlement():
+    """`naked_leg_at_expiry='hold'` carries open leg to settlement when stop loss does not trigger."""
     w = _simulate_window(_drift_window(),
-                         _params(stop_loss_enabled=False, naked_leg_timeout_pct=0.0))
+                         _params(exit_thresh_by_slug={"default_5m": 1.0, "default_15m": 1.0},
+                                 naked_leg_at_expiry="hold"))
     assert w.filled_up is True and w.filled_down is False
     assert w.exit_taken is False
     assert w.settlement_mid is not None, (
-        "a naked leg with both stops disabled was never marked to settlement")
+        "a naked leg carried to settlement was never marked to settlement")
     assert w.pnl_cents != 0.0, "the held leg contributed no P&L at all"
 
 
@@ -1373,14 +1340,10 @@ def _settle_snap(i: int, mid: float, up_bid, up_ask, dn_bid, dn_ask) -> dict:
 
 
 def _settle_params(**kw) -> BacktestParams:
-    """Hold-to-settle params: both stops off, no entry timeout.
-
-    This is the `ex=none` shape the sweep ran -- the only configuration in
-    which a naked leg reaches window close still open.
-    """
+    """Hold-to-settle params: wide stop threshold so drift doesn't trigger stop loss, naked_leg_at_expiry='hold'."""
     base = dict(offset=0.02, max_pair_cost=1.00,
-                entry_timeout_pct=0.0, stop_loss_enabled=False,
-                naked_leg_timeout_pct=0.0)
+                exit_thresh_by_slug={"default_5m": 1.0, "default_15m": 1.0},
+                naked_leg_at_expiry="hold")
     base.update(kw)
     return BacktestParams(**base)
 
@@ -1500,8 +1463,7 @@ def test_a_captured_pair_never_reaches_the_settlement_ladder():
 
 def test_a_stopped_out_leg_never_reaches_the_settlement_ladder():
     """An exit already closed the position at a real price."""
-    p = _settle_params(stop_loss_enabled=True,
-                       exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05,
+    p = _settle_params(exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05,
                                             "eth-up-or-down-5m": 0.05})
     w = _simulate_window(_held_down_window(), p)
     assert w.exit_taken is True and w.exit_side == "down"
@@ -1945,7 +1907,7 @@ def test_snapshot_without_a_timestamp_is_skipped_not_counted_as_a_second():
     untimed["tape_delta"] = _tape_both(0.48, 0.48)
     snaps[1] = untimed
 
-    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
+    w = _simulate_window(snaps, BacktestParams())
     assert not w.filled_up and not w.filled_down
 
     # The same print on a timestamped snapshot does fill, so the skip is what
@@ -1953,15 +1915,16 @@ def test_snapshot_without_a_timestamp_is_skipped_not_counted_as_a_second():
     timed = dict(untimed)
     timed["ts"] = 1001.0
     w2 = _simulate_window([snaps[0], timed, snaps[2]],
-                          BacktestParams(entry_timeout_pct=0.0))
+                          BacktestParams())
     assert w2.filled_up and w2.filled_down
 
 
 def test_time_gates_read_the_timestamps_not_the_duration_field():
     """A window whose `duration` label disagrees with its clock obeys the clock.
 
-    The label says 900s, so a 10% entry timeout would cut off at 90s; the real
-    pair spans 300s, cutting off at 30s. The tape only prints at 40s.
+    The label says 900s, so a 90% dead zone would cut off at remaining <= 810s;
+    the real pair spans 300s (end_ts=1300.0), cutting off at 270s remaining (ts=1030.0).
+    The tape prints at ts=1040.0, which is inside the dead zone and does not fill.
     """
     snaps = []
     for i, ts in enumerate((1000.0, 1040.0)):
@@ -1972,5 +1935,5 @@ def test_time_gates_read_the_timestamps_not_the_duration_field():
         s["duration"] = 900        # collector's series label, not a clock
         snaps.append(s)
 
-    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.10))
+    w = _simulate_window(snaps, BacktestParams(dead_zone_val=0.90, dead_zone_unit="pct"))
     assert not w.filled_up and not w.filled_down

@@ -133,17 +133,8 @@ class BacktestParams:
     merge_gas_usd: float = 0.0
     taker_fee_rate: float = 0.07     # crypto fee coefficient
     min_quote_shares: int = 5
-    max_start_delay_sec: float = 0.0  # 0 disables; e.g. 5.0 filters late-start windows
-    entry_timeout_pct: float = 0.10   # 0 disables; e.g. 0.10 cancels unfilled entry quotes once 10% elapsed
-    # Late-start guard (issue #96), independent of entry_timeout_pct: a window whose
-    # first snapshot already lands this far in was never observed at its open, so it
-    # is neither entered nor used for the adverse-open snapshot. Mirrors
-    # LiveTraderEngine.max_start_elapsed_pct. 0 disables.
-    max_start_elapsed_pct: float = 0.10
-    # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
-    # Patient undecided-band maker knobs (issue #145, mirrors issue #137 live
-    # semantics). `entry_delay_sec` holds all quoting until that many seconds
-    # into the window (0 = off). Defaults preserve the current behavior exactly.
+    # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
+    # holds all quoting until that far into the window (0 = off).
     entry_delay_sec: float = 0.0
     # Issue #228: the one quotable range, replacing `entry_band` and the
     # adverse-open gate (`docs/engine-decision-rules.md` §6). A structural
@@ -151,23 +142,21 @@ class BacktestParams:
     # outside it placement holds for that tick only — evaluated every tick on
     # the two-sided mid, never latched. Inclusive on both ends.
     quote_range: tuple[float, float] = (0.10, 0.90)
-    # Issue #164: mirrors LiveTraderEngine.stop_loss_enabled. False holds a
-    # filled naked leg to settlement/rollover instead of stopping it out, which
-    # is how `patient_band_maker` actually trades. The backtest previously had
-    # to fake that by setting exit thresholds so wide they never tripped — a
-    # different mechanism for the same intent, so neither proved the other.
-    # True preserves current behaviour exactly.
-    stop_loss_enabled: bool = True
+    # Issue #229: Dead zone governs the end of the window (rules §8 & §14).
+    # Structural limit, not a tuning knob: in the dead zone, open nothing, and
+    # close what is open. Replaces entry_timeout_pct, naked_leg_timeout_pct,
+    # max_start_elapsed_pct, and max_start_delay_sec.
+    dead_zone_unit: str = "pct"        # "pct" (fraction of window) or "sec" (absolute seconds)
+    dead_zone_val: float = 0.10        # default 10% (0.10) of window remaining; 0.0 disables
+    # Issue #229 / rule §14: what happens to an unpaired leg in the dead zone.
+    # Replaces stop_loss_enabled. "close" (default) exits at the book; "hold" carries
+    # the leg to settlement (pays 1.00 or 0.00).
+    naked_leg_at_expiry: str = "close" # "close" | "hold"
     # Issue #164: mirrors LiveTraderEngine.exit_thresh_naked (issue #124). A
     # single unpaired leg may carry a tighter stop than the paired one. 0 or a
     # value at/above the paired `exit_thresh` falls back to `exit_thresh`, so
     # the knob can never loosen risk beyond the paired stop. 0 = off = today.
     exit_thresh_naked: float = 0.0
-    # Issue #164: mirrors LiveTraderEngine.naked_leg_timeout_pct. A leg left
-    # unpaired this long — measured from the moment it went naked, not from
-    # window open, so a late fill still gets its full horizon — is exited at
-    # the book. 0 disables, which is today's behaviour.
-    naked_leg_timeout_pct: float = 0.0
     # Issue #164: mirrors LiveTraderEngine.enable_leg_chase (issue #123). Once
     # one leg fills, the other is re-anchored each tick toward its ask, capped
     # so the pair still costs at most `max_pair_cost` — converting a naked leg
@@ -205,8 +194,6 @@ class BacktestParams:
              "$", (0.50, 1.00), ("backtest", "cockpit")),
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
              "shares", (5, 10000), ("backtest", "cockpit")),
-            ("max_start_delay_sec", "Max Start Delay (s)", "You decide which windows are fresh enough to enter",
-             "s", (0.0, 3600.0), ("backtest",)),
             ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
              "s", (0.0, 3600.0), ("backtest", "cockpit")),
             # Issue #228: structural limit (ADR-0003) replacing the band and
@@ -216,12 +203,11 @@ class BacktestParams:
              "$", (0.0, 1.0), ("backtest", "cockpit")),
             ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
              "$", None, ("backtest", "cockpit")),
-            ("stop_loss_enabled", "Stop Loss Enabled", "Off holds a filled naked leg to settlement instead of stopping out",
-             "bool", None, ("backtest", "cockpit")),
             ("exit_thresh_naked", "Naked Leg Stop ($)", "Tighter stop for a leg still unpaired; 0 follows the paired stop",
              "$", (0.0, 0.50), ("backtest", "cockpit")),
-            ("naked_leg_timeout_pct", "Naked Leg Timeout (% of window)", "How long one filled leg may sit unpaired before you exit it",
-             "%", (0.0, 1.0), ("backtest", "cockpit")),
+            # Issue #229 / rule §14: what happens to an unpaired leg in the dead zone.
+            ("naked_leg_at_expiry", "Naked Leg at Expiry", "close at book (default) or hold to settlement",
+             "str", None, ("backtest", "cockpit")),
             ("enable_leg_chase", "Leg Chase Enabled", "After one leg fills, re-anchor the other toward its ask within the pair-cost cap",
              "bool", None, ("backtest", "cockpit")),
             ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
@@ -238,13 +224,12 @@ class BacktestParams:
              "shares", (1, 100000), ("backtest",)),
         ],
         "window_policy": [
-            ("entry_timeout_pct", "Entry Timeout (% of window)", "Engine policy — mirrors live config, tuned in research",
-             "%", (0.0, 1.0), ("backtest", "cockpit")),
-            ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live",
-             "%", (0.0, 1.0), ("backtest",)),
-            # Issue #228: the re-entry rows stood here. Removed with the
-            # mechanism; the fields stay inert until T5 removes them with
-            # their last senders (scripts, sims).
+            # Issue #229: Dead zone governs the end of the window (rules §8 & §14).
+            # Structural limits (ADR-0003), not tuning knobs.
+            ("dead_zone_val", "Dead Zone Threshold", "Tail of window that is untradeable (0.10 default; 0 disables)",
+             "% or s", (0.0, 3600.0), ("backtest", "cockpit")),
+            ("dead_zone_unit", "Dead Zone Unit", "Whether threshold is % of window or absolute seconds",
+             "str", None, ("backtest", "cockpit")),
         ],
     }
 
@@ -359,14 +344,20 @@ class BacktestParams:
 
     def __post_init__(self):
         """Validate parameter ranges and finite boundaries."""
-        if self.entry_timeout_pct is not None:
-            if math.isnan(self.entry_timeout_pct) or not (0.0 <= self.entry_timeout_pct <= 1.0):
-                raise ValueError(f"entry_timeout_pct must be between 0.0 and 1.0, got {self.entry_timeout_pct}")
-        if self.max_start_elapsed_pct is not None:
-            if math.isnan(self.max_start_elapsed_pct) or not (0.0 <= self.max_start_elapsed_pct <= 1.0):
-                raise ValueError(
-                    f"max_start_elapsed_pct must be between 0.0 and 1.0, got {self.max_start_elapsed_pct}"
-                )
+        # Issue #229: Dead zone (rules §8 & §14)
+        if self.dead_zone_unit not in ("pct", "sec"):
+            raise ValueError(f"dead_zone_unit must be 'pct' or 'sec', got {self.dead_zone_unit!r}")
+        if (
+            isinstance(self.dead_zone_val, bool)
+            or not isinstance(self.dead_zone_val, (int, float))
+            or not math.isfinite(self.dead_zone_val)
+            or self.dead_zone_val < 0.0
+        ):
+            raise ValueError(f"dead_zone_val must be a finite number >= 0.0, got {self.dead_zone_val!r}")
+        if self.dead_zone_unit == "pct" and self.dead_zone_val > 1.0:
+            raise ValueError(f"dead_zone_val for unit 'pct' must be <= 1.0, got {self.dead_zone_val}")
+        if self.naked_leg_at_expiry not in ("close", "hold"):
+            raise ValueError(f"naked_leg_at_expiry must be 'close' or 'hold', got {self.naked_leg_at_expiry!r}")
         if self.entry_delay_sec is not None:
             if not math.isfinite(self.entry_delay_sec) or not (0.0 <= self.entry_delay_sec <= 3600.0):
                 raise ValueError(
@@ -391,11 +382,6 @@ class BacktestParams:
             if not math.isfinite(self.exit_thresh_naked) or not (0.0 <= self.exit_thresh_naked <= 0.50):
                 raise ValueError(
                     f"exit_thresh_naked must be between 0.0 and 0.50, got {self.exit_thresh_naked}"
-                )
-        if self.naked_leg_timeout_pct is not None:
-            if not math.isfinite(self.naked_leg_timeout_pct) or not (0.0 <= self.naked_leg_timeout_pct <= 1.0):
-                raise ValueError(
-                    f"naked_leg_timeout_pct must be between 0.0 and 1.0, got {self.naked_leg_timeout_pct}"
                 )
         # Issue #228: a structural limit, enforced here and not only at the API
         # clamp (the #227 pattern). Every driver in `research/sweeps/` builds
@@ -711,6 +697,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                             0.0, 0.0, False, False, False, False, "", 0.0, 0.0,
                             0.0, False, "no_clock")
     start_ts, window_length = clock
+    end_ts = start_ts + window_length
 
     first_ts = float(first.get("ts", 0.0) or 0.0)
     raw_start_delay_sec = max(0.0, first_ts - start_ts) if first_ts else 0.0
@@ -779,23 +766,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # the mid at placement time and not one carried over from before whatever
     # was holding placement cleared.
     orders_live = False
-
     entry_cancelled = False
-    # Late start (issue #96): the replay's first snapshot for this window already
-    # lands past max_start_elapsed_pct, so the window's open was never observed.
-    # Skip it entirely -- no entry. Matches LiveTraderEngine's late_start_skip.
-    late_start = bool(
-        params.max_start_elapsed_pct
-        and params.max_start_elapsed_pct > 0
-        and window_length > 0
-        and raw_start_delay_sec >= params.max_start_elapsed_pct * window_length
-    )
-    if late_start:
+    # Dead zone at window start (issue #229 / rule §8):
+    # A window whose first observed tick already lands inside the dead zone is
+    # not entered at all -- "in the dead zone, open nothing".
+    # Replaces max_start_elapsed_pct and max_start_delay_sec.
+    first_remaining = max(0.0, window_length - raw_start_delay_sec)
+    if book_math.is_in_dead_zone(first_remaining, window_length, params.dead_zone_val, params.dead_zone_unit):
         entry_cancelled = True
-    if params.entry_timeout_pct > 0 and window_length > 0:
-        cutoff_sec = params.entry_timeout_pct * window_length
-        if raw_start_delay_sec >= cutoff_sec:
-            entry_cancelled = True
 
     for s in window_snaps:
         # Invariant 1 (#224). This used to fall back to `float(s_idx)`, counting
@@ -814,12 +792,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         if not math.isfinite(cur_ts):
             continue
         elapsed = max(0.0, cur_ts - start_ts)
+        rem_sec = max(0.0, end_ts - cur_ts)
+        in_dead_zone = book_math.is_in_dead_zone(rem_sec, window_length, params.dead_zone_val, params.dead_zone_unit)
 
-        # Check entry timeout (Issue #48): if elapsed strictly exceeds cutoff, timeout already passed
-        if params.entry_timeout_pct > 0 and window_length > 0 and not entry_cancelled:
-            if elapsed > (params.entry_timeout_pct * window_length):
-                if not filled_up and not filled_down:
-                    entry_cancelled = True
+        # Check dead zone for unentered / unfilled windows (rule §8):
+        if in_dead_zone and not entry_cancelled:
+            if not filled_up and not filled_down:
+                entry_cancelled = True
 
         ub = s.get("up_book") or {}
         db = s.get("down_book") or {}
@@ -847,7 +826,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # `entry_cancelled` is live's cancelled-orders state: the handles are
         # gone, so the anchor tracks the mid again and a later re-entry quotes
         # at the price of its own tick.
-        if (not filled_up and not filled_down and delay_expired
+        if (not in_dead_zone and not filled_up and not filled_down and delay_expired
                 and (entry_cancelled or not orders_live)
                 and anchor_mid is not None):
             resting_up = round(min(0.99, max(0.01, anchor_mid - params.offset)), 3)
@@ -1008,8 +987,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # tick. Tightening these would make the stop fire *before* fill
             # detection and pair completion run — costing the leg its chance to
             # pair on a tick where it could have.
-            if (params.stop_loss_enabled
-                    and filled_up and not filled_down and adverse_drift_down >= exit_thr
+            if (filled_up and not filled_down and adverse_drift_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
                 bb_up = ub.get("best_bid")
                 if bb_up is not None:
@@ -1019,8 +997,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     pnl_cents += (bb_up - resting_up) * 100.0
                     fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                     break
-            if (params.stop_loss_enabled
-                    and filled_down and not filled_up and adverse_drift_up >= exit_thr
+            if (filled_down and not filled_up and adverse_drift_up >= exit_thr
                     and not reversal_seen_up and not exit_taken):
                 bb_dn = db.get("best_bid")
                 if bb_dn is not None:
@@ -1043,8 +1020,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
         quotable = (resting_up is not None and resting_down is not None
                     and not range_hold and not no_book_hold)
-        can_fill_up = (not filled_up) and (not entry_cancelled or filled_down) and quotable
-        can_fill_down = (not filled_down) and (not entry_cancelled or filled_up) and quotable
+        can_fill_up = (not filled_up) and not in_dead_zone and (not entry_cancelled or filled_down) and quotable
+        can_fill_down = (not filled_down) and not in_dead_zone and (not entry_cancelled or filled_up) and quotable
         # A quote that is not live yet is being *placed* on this tick, so it
         # can be marketable on arrival (issue #226). One already resting has to
         # wait for the ask to pass fully through it.
@@ -1106,32 +1083,29 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         elif not _one_leg:
             naked_since_elapsed = None
 
-        # --- NAKED TIMEOUT (issue #164) ---
-        # An unpaired leg held past the horizon is exited at the book,
-        # independently of drift: this is a time stop, not a price stop, so it
-        # is not gated on `stop_loss_enabled`, exactly as live treats them as
-        # separate triggers.
-        if (params.naked_leg_timeout_pct > 0 and window_length > 0
-                and _one_leg and not exit_taken and not pair_captured
-                and naked_since_elapsed is not None
-                and (elapsed - naked_since_elapsed) >= params.naked_leg_timeout_pct * window_length):
-            _book = ub if filled_up else db
-            _bb = _book.get("best_bid")
-            if _bb is not None:
-                exit_taken = True
-                exit_side = "up" if filled_up else "down"
-                exit_price = _bb
-                _rest = resting_up if filled_up else resting_down
-                pnl_cents += (_bb - _rest) * 100.0
-                fees_cents += _taker_fee(_bb, params.taker_fee_rate) * 100.0
-                break
+        # --- DEAD ZONE: UNPAIRED LEG HANDLING (rules §8 and §14) ---
+        # In the dead zone: cancel unfilled resting quotes. If one leg is filled,
+        # close it at best bid if naked_leg_at_expiry == "close", or hold to settlement
+        # if naked_leg_at_expiry == "hold".
+        if in_dead_zone and _one_leg and not exit_taken and not pair_captured:
+            entry_cancelled = True
+            if params.naked_leg_at_expiry == "close":
+                _book = ub if filled_up else db
+                _bb = _book.get("best_bid")
+                if _bb is not None:
+                    exit_taken = True
+                    exit_side = "up" if filled_up else "down"
+                    exit_price = _bb
+                    _rest = resting_up if filled_up else resting_down
+                    pnl_cents += (_bb - _rest) * 100.0
+                    fees_cents += _taker_fee(_bb, params.taker_fee_rate) * 100.0
+                    break
 
         # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
         # Check BEFORE we update the reversal flag this tick so the crossing
         # tick is the exit tick (otherwise the flag toggles the same tick and
         # the exit is suppressed).
-        if (params.stop_loss_enabled
-                and filled_up and not filled_down and adverse_drift_down >= naked_thr
+        if (filled_up and not filled_down and adverse_drift_down >= naked_thr
                 and not reversal_seen_down and not exit_taken):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
@@ -1141,8 +1115,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_up - resting_up) * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
-        if (params.stop_loss_enabled
-                and filled_down and not filled_up and adverse_drift_up >= naked_thr
+        if (filled_down and not filled_up and adverse_drift_up >= naked_thr
                 and not reversal_seen_up and not exit_taken):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:
@@ -1152,13 +1125,6 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_dn - resting_down) * 100.0
                 fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
                 break
-
-        # Check entry timeout (Issue #48): cancel unfilled entry quotes if 0 legs filled
-        # Evaluated after snapshot fills so trades in the cutoff snapshot are not dropped
-        if params.entry_timeout_pct > 0 and window_length > 0 and not entry_cancelled:
-            if elapsed >= (params.entry_timeout_pct * window_length):
-                if not filled_up and not filled_down:
-                    entry_cancelled = True
 
     # Fallback for windows where the chase never ran: the resting price at
     # loop end is the price the leg rested at throughout.
@@ -1243,12 +1209,6 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
     for _cid, group in group_by_cid(snaps_list):
         if not group:
             continue
-        if params.max_start_delay_sec > 0:
-            first_ts = float(group[0].get("ts", 0.0) or 0.0)
-            start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
-            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
-            if delay > params.max_start_delay_sec:
-                continue
         per_window.append(_simulate_window(group, params))
 
     per_series: dict[str, dict] = defaultdict(lambda: {

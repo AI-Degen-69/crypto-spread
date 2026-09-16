@@ -43,7 +43,7 @@ Handle clock boundaries (`window_length <= 0`, negative remaining time, unit val
 **Skill**: `test-driven-development`.
 **Verify**: Targeted test in `test_book_math.py`.
 
-### [ ] T2 — `[Backend/Logic]` Backtest: delete timeout knobs, add Dead Zone & `naked_leg_at_expiry`
+### [x] T2 — `[Backend/Logic]` Backtest: delete timeout knobs, add Dead Zone & `naked_leg_at_expiry`
 **Files**: `backtest/engine.py`.
 **Do**: Delete `entry_timeout_pct`, `naked_leg_timeout_pct`, `max_start_elapsed_pct`,
 `max_start_delay_sec`, and `stop_loss_enabled`.
