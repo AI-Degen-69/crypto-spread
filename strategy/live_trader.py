@@ -4466,8 +4466,7 @@ class LiveTraderEngine:
                 entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
                 if entry_up is not None:
                     excursion_down = round(entry_up - mid, 6)
-                    if excursion_down > 0.0:
-                        mstate.max_down_drift = max(mstate.max_down_drift, excursion_down)
+                    mstate.max_down_drift = max(mstate.max_down_drift, excursion_down)
                     # Reversal detection: mid retraced back towards entry price
                     if mstate.max_down_drift >= self._naked_exit_thresh() and excursion_down < self.exit_reversal:
                         mstate.reversal_seen_down = True
@@ -4475,8 +4474,7 @@ class LiveTraderEngine:
                 entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
                 if entry_dn is not None:
                     excursion_up = round(mid - (1.0 - entry_dn), 6)
-                    if excursion_up > 0.0:
-                        mstate.max_up_drift = max(mstate.max_up_drift, excursion_up)
+                    mstate.max_up_drift = max(mstate.max_up_drift, excursion_up)
                     # Reversal detection: mid retraced back towards entry price
                     if mstate.max_up_drift >= self._naked_exit_thresh() and excursion_up < self.exit_reversal:
                         mstate.reversal_seen_up = True

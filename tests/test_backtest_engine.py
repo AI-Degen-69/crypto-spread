@@ -1845,3 +1845,22 @@ def test_backtest_window_range_metrics_stay_anchored_to_050():
                          _params(offset=0.05))
     assert w.max_down == pytest.approx(0.10, abs=1e-6)
     assert w.max_up == pytest.approx(0.0, abs=1e-6)
+
+
+def test_backtest_stop_loss_anchored_to_an_entry_above_050():
+    """A leg filled above 0.50 was under-protected, the mirror of the #209 bug.
+
+    The old anchor only counted a down excursion once the mid was below 0.50, so
+    an UP leg entered at 0.55 could lose five cents on the way down to 0.50 with
+    `max_down` still reading 0.00 and the stop never arming. `entry_delay_sec`
+    anchors the quotes on the 0.60 tick, which is what rests UP at 0.55.
+    """
+    snaps = _anchored_window([0.50, 0.50, 0.60, 0.54, 0.52, 0.50])
+    w = _simulate_window(snaps, _params(offset=0.05, entry_delay_sec=2.0))
+    assert w.filled_up is True
+    assert w.filled_down is False
+    assert w.entry_price_up == pytest.approx(0.55, abs=1e-6)
+    # Excursion reaches 0.05 at mid 0.50, where the old code still had 0.00.
+    assert w.exit_taken is True
+    assert w.exit_side == "up"
+    assert w.exit_price == pytest.approx(0.49, abs=1e-6)
