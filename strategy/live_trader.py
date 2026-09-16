@@ -4376,15 +4376,29 @@ class LiveTraderEngine:
                 mstate.status = "IDLE"
             return
 
-        # Target resting prices. Anchor initial quotes dynamically and symmetrically to
-        # each leg's live mid minus offset (up_mid - offset, down_mid - offset).
-        # Once orders are placed or a window has merged and re-quoted, prices latch.
+        # Target resting prices. Anchor the opening quotes symmetrically to the
+        # live synthetic mid computed above: mid - offset on UP, its complement
+        # (1 - mid) - offset on DOWN, so the pair costs 1 - 2*offset. Same
+        # formula as the re-quote path below and as backtest/engine.py:786.
+        #
+        # Issue #206: this block used to read `up_mid` / `down_mid`, names bound
+        # nowhere in this scope, so `'up_mid' in locals()` was always False and
+        # both legs were priced off a hardcoded 0.50 on every window -- ignoring
+        # `entry_delay_sec` entirely and systematically resting the adverse leg
+        # in any market that had moved. `mstate.mid` was already sitting right
+        # there, and is what the original comment was describing.
+        #
+        # Recomputed on every tick until an order actually exists, which is what
+        # makes the submitted price the mid at placement time rather than one
+        # carried over from before the entry delay expired. Once orders are
+        # placed or a window has merged and re-quoted, prices latch.
         if mstate.requote_round <= 0:
             if not mstate.order_id_up and not mstate.order_id_down and not mstate.filled_up and not mstate.filled_down:
-                u_m = up_mid if 'up_mid' in locals() and up_mid is not None else 0.50
-                d_m = down_mid if 'down_mid' in locals() and down_mid is not None else 0.50
-                resting_up = round(min(0.99, max(0.01, u_m - self.offset)), 3)
-                resting_down = round(min(0.99, max(0.01, d_m - self.offset)), 3)
+                # None only before the first snapshot; the 0.50 substitution for
+                # an unpriceable book lives in two_sided_mid_with_default (#207).
+                _anchor = mstate.mid if mstate.mid is not None else 0.50
+                resting_up = round(min(0.99, max(0.01, _anchor - self.offset)), 3)
+                resting_down = round(min(0.99, max(0.01, (1.0 - _anchor) - self.offset)), 3)
                 mstate.resting_up = resting_up
                 mstate.resting_down = resting_down
             else:

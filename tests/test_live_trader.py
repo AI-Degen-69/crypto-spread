@@ -2874,79 +2874,83 @@ def test_initial_entry_anchors_to_live_mid():
     now = time.time()
     market = _fifteen_minute_market(now)
 
-    # Benign 0.50 open so the adverse-open gate (#92) latches "not adverse"
-    # and does not own the window before the anchor is exercised.
-    _open_50_50_quotes(engine, slug, market, now)
-    m = engine.markets[slug]
-    assert m.open_gate_evaluated is True and m.adverse_open is False
-
-    # Coherent skewed book: up mid 0.60, down mid 0.40 -> synthetic mid 0.60.
-    # Both asks sit above their own leg's anchor, so nothing fills and the
-    # opening prices are still observable.
+    # Opening snapshot at mid 0.54: drifted enough to tell 0.52 from the old
+    # 0.48, but inside exit_thresh so the adverse-open gate (#92) lets the
+    # window through. Both asks sit above their own leg's anchor, so nothing
+    # fills and the prices the engine actually quoted stay observable.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.59, "best_ask": 0.61},
-        "down_book": {"best_bid": 0.39, "best_ask": 0.41},
-    }, now + 1)
+        "up_book": {"best_bid": 0.53, "best_ask": 0.55},
+        "down_book": {"best_bid": 0.45, "best_ask": 0.47},
+    }, now)
+    m = engine.markets[slug]
+    assert m.mid == 0.54
+    assert m.resting_up == round(0.54 - engine.offset, 3) == 0.52
+    assert m.resting_down == round((1.0 - 0.54) - engine.offset, 3) == 0.44
 
+    # Context: this is the opening round on a window the gates admitted, and the
+    # prices above are what was actually quoted, not merely computed.
     assert m.requote_round == 0, "still the opening round, not a re-quote"
-    assert m.mid == 0.60
-    assert m.resting_up == round(0.60 - engine.offset, 3) == 0.58
-    assert m.resting_down == round((1.0 - 0.60) - engine.offset, 3) == 0.38
+    assert m.open_gate_evaluated is True and m.adverse_open is False
+    assert m.filled_up is False and m.filled_down is False
+    assert m.order_status_up == "RESTING" and m.order_status_down == "RESTING"
+
+
+def _anchor_at(engine, slug, market, now, up_book, down_book):
+    """Round-0 prices for one book, with entry held so nothing latches.
+
+    `entry_delay_sec` keeps `can_place_entry` false, so no order is ever placed
+    and no leg fills: the round-0 branch re-runs every tick and `resting_*`
+    always shows the anchor for the book just fed in. That is the same property
+    that makes the placed price placement-time fresh.
+    """
+    engine._update_market_strategy(
+        slug, {"market": market, "up_book": up_book, "down_book": down_book}, now)
+    m = engine.markets[slug]
+    assert not m.order_id_up and not m.order_id_down and not m.filled_up and not m.filled_down
+    return m
 
 
 def test_initial_entry_anchor_invariants():
-    """Pair sum is 1 - 2*offset, 0.50 is unchanged, and extremes stay clamped."""
-    for mid_target, up_book, down_book in (
+    """Pair sum is 1 - 2*offset across the range, and mid 0.50 is unchanged."""
+    engine = _fifteen_minute_engine()
+    engine.entry_delay_sec = 900.0  # entry held open for the whole window
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+
+    cases = (
         (0.20, {"best_bid": 0.19, "best_ask": 0.21}, {"best_bid": 0.79, "best_ask": 0.81}),
         (0.50, {"best_bid": 0.49, "best_ask": 0.51}, {"best_bid": 0.49, "best_ask": 0.51}),
         (0.80, {"best_bid": 0.79, "best_ask": 0.81}, {"best_bid": 0.19, "best_ask": 0.21}),
-    ):
-        engine = _fifteen_minute_engine()
-        # The open gate would claim the 0.20 / 0.80 windows as adverse; this test
-        # is about the arithmetic, so give it a benign open first either way.
-        engine.start()
-        slug = "btc-up-or-down-15m"
-        now = time.time()
-        market = _fifteen_minute_market(now)
-        _open_50_50_quotes(engine, slug, market, now)
-        m = engine.markets[slug]
-        engine._update_market_strategy(slug, {
-            "market": market, "up_book": up_book, "down_book": down_book,
-        }, now + 1)
+    )
+    for i, (mid_target, up_book, down_book) in enumerate(cases):
+        m = _anchor_at(engine, slug, market, now + i, up_book, down_book)
         assert m.mid == mid_target
         assert m.resting_up == round(mid_target - engine.offset, 3)
         assert m.resting_down == round((1.0 - mid_target) - engine.offset, 3)
         assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
-
-    # The historical fixture value survives: a 0.50 book still quotes 0.48/0.48.
-    engine = _fifteen_minute_engine()
-    engine.start()
-    now = time.time()
-    market = _fifteen_minute_market(now)
-    _open_50_50_quotes(engine, "btc-up-or-down-15m", market, now)
-    m = engine.markets["btc-up-or-down-15m"]
-    assert m.resting_up == 0.48 and m.resting_down == 0.48
+        if mid_target == 0.50:
+            # The historical fixture value survives untouched.
+            assert m.resting_up == 0.48 and m.resting_down == 0.48
 
 
 def test_initial_entry_anchor_clamps_at_the_edges():
     """A near-certain market never emits a price below 0.01 or above 0.99."""
     engine = _fifteen_minute_engine()
     engine.offset = 0.05
+    engine.entry_delay_sec = 900.0
     engine.start()
     slug = "btc-up-or-down-15m"
     now = time.time()
     market = _fifteen_minute_market(now)
-    _open_50_50_quotes(engine, slug, market, now)
-    m = engine.markets[slug]
 
     # Synthetic mid 0.02: the down leg wants (1 - 0.02) - 0.05 = 0.93, the up leg
     # wants 0.02 - 0.05 = -0.03 and must clamp instead of going negative.
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.01, "best_ask": 0.03},
-        "down_book": {"best_bid": 0.97, "best_ask": 0.99},
-    }, now + 1)
+    m = _anchor_at(engine, slug, market, now,
+                   {"best_bid": 0.01, "best_ask": 0.03},
+                   {"best_bid": 0.97, "best_ask": 0.99})
     assert m.mid == 0.02
     assert m.resting_up == 0.01
     assert m.resting_down == 0.93
