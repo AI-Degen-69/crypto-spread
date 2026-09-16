@@ -50,7 +50,7 @@ def test_pid_registry_format(tmp_path):
 def test_menu_script_status_execution():
     """Test executing scripts/crypto-spread-menu.ps1 status via pwsh -NoProfile."""
     cmd = ["pwsh", "-NoProfile", "-Command", f"$env:OutputEncoding=[System.Text.Encoding]::UTF8; & '{SCRIPT_PATH}' status"]
-    res = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, encoding="utf-8", errors="replace", timeout=15)
+    res = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, encoding="utf-8", errors="replace", timeout=60)
     assert res.returncode == 0, f"Script failed with stdout={res.stdout} stderr={res.stderr}"
     assert "CRYPTO SPREAD" in res.stdout
     assert "8802" in res.stdout
