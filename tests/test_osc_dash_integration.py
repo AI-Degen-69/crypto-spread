@@ -2676,3 +2676,158 @@ def test_summary_hero_announces_async_updates():
     card = html[card_start:html.index("oscHeroAsOf")]
     assert 'aria-live="polite"' in card, "async-populated hero figures need a live region"
     assert 'aria-atomic="true"' in card, "the sentence should be announced whole, not word by word"
+
+
+# --- Issue #201: backtest stop-loss thresholds grouped under one on/off toggle ---
+
+def test_stop_loss_thresholds_live_inside_the_toggled_group():
+    """All four thresholds must sit inside the wrapper the toggle hides."""
+    html = client.get("/").text
+    start = html.index('<div id="btStopLossFields">')
+    end = html.index('data-param-label="quote_shares"', start)
+    group = html[start:end]
+    for el_id in ("btExit5m", "btExit15m", "btExitBtc", "btExitSol"):
+        assert f'id="{el_id}"' in group, (
+            f"{el_id} is outside btStopLossFields, so the toggle cannot hide it")
+
+
+def test_stop_loss_group_survives_the_form_grid():
+    """The wrapper must not collapse the four fields into one grid cell.
+
+    `.form-grid` is `repeat(4,1fr)`, so a plain wrapper becomes a single item.
+    `display:contents` keeps them as direct grid children, and the `[hidden]`
+    override is mandatory: the id selector outranks the UA `[hidden]` rule.
+    """
+    html = client.get("/").text
+    assert "#btStopLossHead{grid-column:1/-1}" in html, (
+        "without a full-width header the four fields wrap around it and the "
+        "group reads as two unrelated halves")
+    assert 'class="form-group" id="btStopLossHead"' in html
+    assert "#btStopLossFields,#cockpitStopLossFields{display:contents}" in html
+    assert ("#btStopLossFields[hidden],#cockpitStopLossFields[hidden]"
+            "{display:none}") in html
+
+
+def test_stop_loss_switch_is_a_checkbox_matching_the_pair_cost_toggle():
+    """The control is the shared toggle widget, not the old dropdown."""
+    html = client.get("/").text
+    assert '<select id="btStopLossEnabled"' not in html, (
+        "the standalone stop-loss dropdown should be gone")
+    start = html.index('id="btStopLossToggleLabel"')
+    block = html[start:start + 400]
+    assert 'class="toggle-switch"' in block
+    assert 'class="toggle-slider"' in block
+    assert 'type="checkbox" id="btStopLossEnabled"' in block
+    assert 'onchange="toggleStopLossInputs()"' in block
+    assert "checked" in block, "stop loss defaults to On, as the old select did"
+    # Kept so applyParamSpec() still resolves the label and the `bt` surface.
+    assert 'data-param="stop_loss_enabled"' in block
+
+
+def test_toggle_disables_as_well_as_hides_and_drives_the_request():
+    """Off must disable the inputs and send stop_loss_enabled=0."""
+    html = client.get("/").text
+    fn_start = html.index("function toggleStopLossInputs()")
+    fn = html[fn_start:html.index("function toggleBtSection", fn_start)]
+    assert "wrap.hidden = !enabled" in fn, "Off must hide the group"
+    assert "inp.disabled = !enabled" in fn, "Off must disable the inputs too"
+    assert (
+        "const stopLoss = ($('btStopLossEnabled') && "
+        "!$('btStopLossEnabled').checked) ? '0' : '1';"
+    ) in html, "runBacktest must read .checked, not .value, off a checkbox"
+    assert "stop_loss_enabled=${stopLoss}" in html
+
+
+def test_reset_restores_the_stop_loss_toggle():
+    """resetBtParams must not leave the group hidden with default values."""
+    html = client.get("/").text
+    fn_start = html.index("function resetBtParams()")
+    fn = html[fn_start:html.index("function applyWinningConfig", fn_start)]
+    assert "$('btStopLossEnabled').checked = true;" in fn
+    assert "toggleStopLossInputs();" in fn
+
+
+def test_winning_config_states_hold_to_settle_instead_of_faking_it():
+    """The preset must turn the stop loss off, not hide it behind 0.49 stops.
+
+    `max_down`/`max_up` are drift from 0.50, so a 0.49 threshold is reachable in
+    an extreme window — the preset would then take a stop it claims never to
+    take. `stop_loss_enabled=0` is the exact statement.
+    """
+    html = client.get("/").text
+    fn_start = html.index("function applyWinningConfig()")
+    fn = html[fn_start:html.index("\n}", fn_start)]
+    for stale in ('"0.49"', '"0.50"'):
+        assert stale not in fn, (
+            f"the preset still fakes hold-to-settle with a {stale} stop")
+    assert "$('btStopLossEnabled').checked = false;" in fn
+    assert "toggleStopLossInputs();" in fn
+    assert "'btStopLossEnabled'" in fn.split("\n")[1], (
+        "the toggle belongs in the required-ids guard, or the preset can half apply")
+
+
+# --- Issue #201: the same grouping on the Live Cockpit ---
+
+def test_cockpit_stop_loss_switch_mirrors_the_backtest_toggle():
+    html = client.get("/").text
+    assert '<select id="cockpitStopLossEnabled"' not in html, (
+        "the cockpit stop-loss dropdown should be gone")
+    start = html.index('id="cockpitStopLossToggleLabel"')
+    block = html[start:start + 420]
+    assert 'class="toggle-switch"' in block
+    assert 'type="checkbox" id="cockpitStopLossEnabled"' in block
+    assert 'onchange="toggleCockpitStopLossInputs()"' in block
+    assert "checked" in block, "the cockpit stop loss defaults to On, as its select did"
+    assert 'data-param="stop_loss_enabled"' in block
+
+
+def test_cockpit_stop_threshold_lives_inside_the_toggled_group():
+    html = client.get("/").text
+    start = html.index('<div id="cockpitStopLossFields">')
+    end = html.index("</div>\n        </div>", start)
+    assert 'id="cockpitExit"' in html[start:end], (
+        "cockpitExit is outside cockpitStopLossFields, so the toggle cannot hide it")
+
+
+def test_cockpit_payload_reads_the_checkbox_not_a_select_value():
+    """`checkbox.value` is the string "on", which is truthy for both states."""
+    html = client.get("/").text
+    assert "body.stop_loss_enabled = stopEl.checked;" in html
+    assert "stopEl.value === 'true'" not in html
+
+
+def test_cockpit_toggle_survives_unlocking_the_params():
+    """Stopping the bot re-enables every param id; the toggle must be re-applied."""
+    html = client.get("/").text
+    fn_start = html.index("function updateCockpitParamsLockUI(locked)")
+    fn = html[fn_start:html.index("async function", fn_start)]
+    assert "toggleCockpitStopLossInputs();" in fn, (
+        "unlocking would otherwise re-enable a stop field the toggle turned off")
+    tog_start = html.index("function toggleCockpitStopLossInputs()")
+    tog = html[tog_start:html.index("function toggleBtSection", tog_start)]
+    assert "cockpitParamsLockHint" in tog, (
+        "the toggle must not re-enable the input while the bot holds the lock")
+
+
+def test_both_stop_loss_toggles_are_labelled_for_assistive_tech():
+    """The visible text is just ON/OFF, so the switch needs a real name."""
+    html = client.get("/").text
+    for el_id in ("btStopLossEnabled", "cockpitStopLossEnabled"):
+        start = html.index(f'id="{el_id}"')
+        assert 'aria-label="Stop loss enabled"' in html[start:start + 200], (
+            f"{el_id} would be announced as just 'ON'")
+        assert f'<label for="{el_id}"' in html, (
+            f"the {el_id} caption should be a click target for its switch")
+
+
+def test_cockpit_stop_loss_switch_is_locked_while_the_bot_runs():
+    """applyCockpitConfig() returns early when running, so the switch must lock.
+
+    Left interactive it would hide the stop group and flip the caption without
+    ever reaching /api/live/config — the UI would claim a stop-loss state the
+    engine never received.
+    """
+    html = client.get("/").text
+    fn_start = html.index("function updateCockpitParamsLockUI(locked)")
+    ids = html[fn_start:html.index("];", fn_start)]
+    assert "'cockpitStopLossEnabled'" in ids

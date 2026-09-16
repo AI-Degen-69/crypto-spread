@@ -1,42 +1,60 @@
-# CONSTRAINTS.md — Issue #200: Menu Collector status shows Could not query even while dashboard collector is running
+# CONSTRAINTS.md — Issue #201: Group backtest stop-loss params under an on/off toggle
 
-Binding while `fix/collector-status-reliability-200` is live. These are gates, not suggestions: a violation blocks the PR.
+Binding while `feat/backtest-stop-loss-toggle-201` is live. These are gates, not
+suggestions: a violation blocks the PR.
 
 ## 1. Zero regressions
 
 - `python -m pytest -q` must end with **0 failures**, before and after.
 - Targeted gate, run on every task:
   `python -m pytest tests/test_osc_dash_integration.py -q`
-- Every new behavior ships with an automated test or an explicit HTML/PS1-string assertion in the same commit.
+- Every new behavior ships with an HTML-string assertion in
+  `tests/test_osc_dash_integration.py` in the same commit.
 
 ## 2. Anti-cheat
 
 - No `@pytest.mark.skip`, no `xfail`, no deleted or weakened assertions.
 - Do not edit an existing test to lower standards or delete checks.
-- Zero linter suppressions (`# noqa`).
+- Do not silence a failing registry/bounds test by removing `data-param`.
 
 ## 3. Scope fence
 
-- **May touch:** `server/osc_dash.py` (`api_collector_status` + `_count_lines_fast` call site, and `refreshCollectorStatus` catch block), `scripts/crypto-spread-menu.ps1` (Collector status query block, lines ~268-279), plus per-issue planning files (`CONSTRAINTS.md`, `tasks/plan.md`, `tasks/todo.md`) and tests under `tests/`.
-- **Do not touch:** collector engine capture logic (`scripts/collect_ticks.py`, tape handling, poll loop), CLOB / market-data paths, Trading Engine `/api/live/state` semantics, dashboard badge styling beyond the `catch` visibility fix, or any file under `run/` / `runs/`.
-- Never commit anything under `run/` or `runs/`.
+**Widened by the operator on 2026-09-16, after the first three commits:** the
+same grouping was requested for the Live Cockpit, and `applyWinningConfig()` was
+told to state hold-to-settle via the toggle instead of faking it with 0.49/0.50
+stops. The original backtest-only fence below no longer binds those two areas.
 
-## 4. Correctness gates (from the issue's acceptance criteria)
+- `server/osc_dash.py` backtest tab Operator Controls, the Cockpit stop-loss
+  control (`cockpitStopLossEnabled` and its threshold), and their JS.
+- **Forbidden:** `backtest/engine.py` semantics of `stop_loss_enabled`,
+  threshold bounds, any other parameter group, any new dependency.
+- Backend `stop_loss_enabled` passthrough (`server/osc_dash.py:651,718`) stays
+  byte-identical — this is a front-end grouping task.
 
-- Starting the collector from the dashboard ("Start Polling") then running `scripts/crypto-spread-menu.ps1 status` shows Collector RUNNING (no `Could not query` warning) while collection is active.
-- Menu Collector failure message includes the underlying reason (`$_`) — timeout vs connection-refused vs HTTP error are distinguishable, matching the Trading Engine query pattern at `scripts/crypto-spread-menu.ps1:257` / `:259`. The static-only string `Could not query /api/collector/status` without `$_` must be gone.
-- `GET /api/collector/status` stays fast on a large tick file — no full O(n) scan per request when the file is large (≥20 MB heuristic, or TTL-cached). Must reuse the cheap-source policy already used in `api_ticks_manifest` / `_aggregate_ticks` (size-based estimate or cached count), not a new unbounded scan.
-- `refreshCollectorStatus` in `server/osc_dash.py:3654-3712` must not silently hide failures (`catch{}` must log or surface the error; empty catch is disallowed).
-- `python -m pytest tests/test_osc_dash_integration.py -q` passes.
+## 4. Behavioral gates
+
+- Toggle Off → the four threshold inputs are hidden **and** `disabled`, and the
+  `/api/backtest` request carries `stop_loss_enabled=0`.
+- Toggle On → fields visible, enabled, request carries `stop_loss_enabled=1`.
+- Default page state = On (matches today's `<option value="1" selected>`).
+- Toggle markup reuses the existing `toggle-wrap` / `toggle-switch` /
+  `toggle-slider` classes and the ON/OFF label pattern of
+  `togglePairCostInput()` — no new CSS classes.
+- `resetBtParams()` and `applyWinningConfig()` leave no half-applied state: if
+  either touches the toggle it must call the toggle handler, as they already do
+  for `btPairCostEnabled`.
+- The control keeps `id="btStopLossEnabled"` and `data-param="stop_loss_enabled"`
+  so `applyParamSpec()` surface detection and
+  `test_every_registry_control_has_an_id_the_surface_detection_understands`
+  still pass.
 
 ## 5. Performance
 
-- Large tick file (1 GB+) does not make `GET /api/collector/status` exceed the menu's timeout. Threshold: estimated or cached count for files ≥20 MB (same constant as `api_ticks_manifest`), and/or a short TTL cache (≤10s) for smaller files so repeated status polls do not re-scan.
-- No new per-request unbounded I/O or subprocess.
+- No new network calls, no new timers, no per-keystroke work. Toggle handler is
+  O(4) DOM writes.
 
 ## 6. Git discipline
 
-- Feature branch: `fix/collector-status-reliability-200` off `master`.
+- Feature branch: `feat/backtest-stop-loss-toggle-201` off `master`.
 - Atomic conventional commits, e.g.:
-  `fix(dash): cheap tick count for collector status to avoid per-request full scan (#200)`
-  `fix(menu): surface collector status failure reason and align timeout (#200)`
+  `feat(dash): group backtest stop-loss thresholds under one on/off toggle (#201)`
