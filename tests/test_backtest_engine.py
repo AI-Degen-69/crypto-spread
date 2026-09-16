@@ -500,10 +500,11 @@ def test_replay_returns_aggregate_and_per_window():
     assert "entered_windows" in out["aggregate"]["overall"]
 
 
-def test_replay_aggregates_reentry_by_series():
-    """Aggregate reports how many windows each series recovered via re-entry."""
-    # Adverse open (mid 0.35, drift 0.15) at t=102s; the mid reverts to 0.50 at
-    # t=110s with both legs filling at the 0.48 resting price -> re-entry fires.
+def test_replay_reentry_counts_stay_zero_without_the_mechanism():
+    """Issue #228: the re-entry mechanism is deleted, so the aggregation
+    plumbing reports zeros. Same fixture as the old re-entry test — a 0.35
+    open reverting to 0.50 — now quoted directly (0.35 is inside the range)
+    with nothing to recover."""
     reentry_cid = "0xRE_001"
     reentry_snaps = [
         {**snap(102.0, 0.35, up_ask=0.355, down_ask=0.655), "cid": reentry_cid},
@@ -512,22 +513,18 @@ def test_replay_aggregates_reentry_by_series():
                       {"asset": DN_TOKEN, "price": 0.48, "size": 5.0}]),
          "cid": reentry_cid},
     ]
-    # A plain healthy pair in another series is never re-entered.
     healthy_snaps = [
         {**snap(202.0, 0.50, up_ask=0.505, down_ask=0.505,
                 tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0},
                       {"asset": DN_TOKEN, "price": 0.48, "size": 5.0}]),
          "cid": "0xRE_002", "series": "eth-up-or-down-5m"},
     ]
-    # min_requote_remaining_sec defaults to a whole 5m window (issue #89's shared
-    # knob), so lower it to let these 5m replays re-enter at all.
-    out = replay(reentry_snaps + healthy_snaps,
-                 BacktestParams(min_requote_remaining_sec=60.0))
+    out = replay(reentry_snaps + healthy_snaps, BacktestParams())
 
     btc = out["aggregate"]["per_series"][SERIES]
     assert btc["windows"] == 1
-    assert btc["reentry_count"] == 1
-    assert btc["reentry_pnl_cents"] == pytest.approx(4.0, abs=1e-3)
+    assert btc["reentry_count"] == 0
+    assert btc["reentry_pnl_cents"] == 0.0
 
     eth = out["aggregate"]["per_series"]["eth-up-or-down-5m"]
     assert eth["windows"] == 1
@@ -535,11 +532,11 @@ def test_replay_aggregates_reentry_by_series():
     assert eth["reentry_pnl_cents"] == 0.0
 
     ov = out["aggregate"]["overall"]
-    assert ov["reentry_count"] == 1
-    assert ov["reentry_pnl_cents"] == pytest.approx(4.0, abs=1e-3)
+    assert ov["reentry_count"] == 0
+    assert ov["reentry_pnl_cents"] == 0.0
 
     recovered = next(w for w in out["per_window"] if w["cid"] == reentry_cid)
-    assert recovered["reentry_count"] == 1
+    assert recovered["reentry_count"] == 0
 
 
 def test_replay_is_deterministic():
@@ -719,13 +716,15 @@ def test_replay_trades_sample_untruncated_with_prices():
 def test_entry_delay_band_defaults_off():
     p = BacktestParams()
     assert p.entry_delay_sec == 0.0
+    # Issue #228: the band gate is deleted; the field is inert (T5 removes it).
     assert p.entry_band == 0.0
+    assert p.quote_range == (0.10, 0.90)
 
 
-def test_entry_delay_band_accept_winning_config():
-    p = BacktestParams(entry_delay_sec=60.0, entry_band=0.04)
+def test_quote_range_accepts_a_winning_config():
+    p = BacktestParams(entry_delay_sec=60.0, quote_range=(0.20, 0.80))
     assert p.entry_delay_sec == 60.0
-    assert p.entry_band == 0.04
+    assert p.quote_range == (0.20, 0.80)
 
 
 def test_entry_delay_band_reject_out_of_range():
@@ -739,10 +738,22 @@ def test_entry_delay_band_reject_out_of_range():
         BacktestParams(entry_band=0.51)
 
 
+def test_quote_range_rejects_out_of_range():
+    # Inverted, out-of-domain, wrong length, non-numeric, and None.
+    for bad in [(0.90, 0.10), (0.50, 0.50), (-0.01, 0.90), (0.10, 1.01),
+                (0.10,), (0.10, 0.90, 0.95), ("0.10", 0.90), (True, 0.90),
+                (float("nan"), 0.90), None]:
+        with pytest.raises(ValueError):
+            BacktestParams(quote_range=bad)
+    # Boundaries are inside: the range is inclusive on both ends.
+    assert BacktestParams(quote_range=(0.0, 1.0)).quote_range == (0.0, 1.0)
+
+
 def test_entry_delay_band_grouped_as_trading_knobs():
     gp = BacktestParams().grouped_params()
     assert "entry_delay_sec" in gp["trading_knobs"]
     assert "entry_band" in gp["trading_knobs"]
+    assert gp["trading_knobs"]["quote_range"] == (0.10, 0.90)
 
 
 def _window_snaps(n: int, mid_fn, tape_fn, start: float = 1000.0,
@@ -787,32 +798,9 @@ def test_entry_delay_holds_quotes_until_expiry():
     assert w0.pair_captured is True
 
 
-def test_entry_band_skips_decided_window():
-    # Two-sided mid 0.60 at expiry (drift 0.10 > 0.04) -> skip, no fills.
-    # exit_thresh is raised to 0.15 so the adverse-open gate (drift 0.10)
-    # passes and only the band decides the window.
-    no_adverse = {"default_5m": 0.15}
-    snaps = _window_snaps(
-        10, lambda i: 0.60, lambda i: _tape_both(0.58, 0.38),
-        up_ask_fn=lambda i: 0.605, down_ask_fn=lambda i: 0.4025)
-    w = _simulate_window(snaps, BacktestParams(entry_band=0.04,
-                                               entry_timeout_pct=0.0,
-                                               exit_thresh_by_slug=no_adverse))
-    assert w.filled_up is False
-    assert w.filled_down is False
-    w0 = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0,
-                                                exit_thresh_by_slug=no_adverse))
-    assert w0.pair_captured is True
-
-
-def test_entry_band_admits_undecided_window():
-    # Two-sided mid 0.51 (drift 0.01 <= 0.04) -> admitted, pair captures.
-    snaps = _window_snaps(
-        10, lambda i: 0.51, lambda i: _tape_both(0.49, 0.47),
-        up_ask_fn=lambda i: 0.515, down_ask_fn=lambda i: 0.4925)
-    w = _simulate_window(snaps, BacktestParams(entry_band=0.04,
-                                               entry_timeout_pct=0.0))
-    assert w.pair_captured is True
+# Issue #228: the entry-band skip/admit tests stood here. They asserted the
+# deleted band gate and were removed with the behaviour; the quotable range
+# they became is covered by tests/test_quote_range_parity.py (T3).
 
 
 def test_entry_delay_anchors_quotes_post_delay():
@@ -829,18 +817,6 @@ def test_entry_delay_anchors_quotes_post_delay():
     assert w.pair_captured is True
     assert w.entry_price_up == 0.53
     assert w.entry_price_down == 0.43
-
-
-def test_entry_band_boundary_admits_inside_band():
-    # Drift 0.0400..36 (float repr of 0.54-0.50) admits under band 0.041
-    # (strict `>` skips); exit 0.05 lets it through. Mirrors live's raw
-    # comparison — exact-decimal boundaries are not promised.
-    snaps = _window_snaps(
-        10, lambda i: 0.54, lambda i: _tape_both(0.52, 0.44),
-        up_ask_fn=lambda i: 0.545, down_ask_fn=lambda i: 0.4625)
-    w = _simulate_window(snaps, BacktestParams(entry_band=0.041,
-                                               entry_timeout_pct=0.0))
-    assert w.pair_captured is True
 
 
 def test_entry_delay_classifies_full_path():
@@ -866,21 +842,8 @@ def test_entry_delay_classifies_full_path():
     assert w.filled_up is False
 
 
-def test_adverse_claimed_window_bypasses_band_then_reenters():
-    # Drift 0.10 trips both gates; the adverse gate owns the window, so a
-    # later revert to 0.50 recovers via re-entry (a band skip is final).
-    def mid_fn(i):
-        return 0.60 if i < 10 else 0.50
-    snaps = _window_snaps(
-        30, mid_fn, lambda i: [],
-        up_ask_fn=lambda i: 0.605 if i < 10 else 0.505,
-        down_ask_fn=lambda i: 0.4025 if i < 10 else 0.5025)
-    w = _simulate_window(snaps, BacktestParams(
-        entry_band=0.04, entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
-    assert w.reentry_count == 1
-    assert w.filled_up is False
-
-
+# Issue #228: the adverse-gate ownership test stood here. Removed with the
+# behaviour — no gate owns windows anymore, so there is nothing to recover.
 def test_the_anchor_ignores_a_one_sided_mid_prefix():
     """`s["mid"]` is the collector's up leg alone and outlives its own book.
 
@@ -912,34 +875,18 @@ def test_the_anchor_ignores_a_one_sided_mid_prefix():
     assert w2.entry_price_up == 0.48
 
 
-def test_entry_delay_band_changes_hash():
+def test_quote_range_changes_hash():
     p0 = BacktestParams()
-    p1 = BacktestParams(entry_delay_sec=60.0, entry_band=0.04)
+    p1 = BacktestParams(entry_delay_sec=60.0, quote_range=(0.20, 0.80))
     assert p0.params_hash() != p1.params_hash()
     assert p1.params_hash() == BacktestParams(
-        entry_delay_sec=60.0, entry_band=0.04).params_hash()
+        entry_delay_sec=60.0, quote_range=(0.20, 0.80)).params_hash()
 
 
-def test_reentry_deferred_until_delay_expiry():
-    # Adverse tick at t=0, revert at t=1, tape pre-delay only. delay=60 must
-    # not fill before expiry (live holds all quotes while delay pending);
-    # the grant is deferred to t=60 (reentry_count==1), not dropped.
-    # delay=0 control grants and fills at t=1.
-    def mid_fn(i):
-        return 0.60 if i == 0 else 0.50
-    snaps = _window_snaps(
-        70, mid_fn, lambda i: _tape_both(0.48, 0.48) if 1 <= i < 60 else [],
-        up_ask_fn=lambda i: 0.605 if i == 0 else 0.505,
-        down_ask_fn=lambda i: 0.4025 if i == 0 else 0.5025)
-    w = _simulate_window(snaps, BacktestParams(
-        entry_delay_sec=60.0, entry_timeout_pct=0.0,
-        min_requote_remaining_sec=0.0))
-    assert w.filled_up is False
-    assert w.filled_down is False
-    assert w.reentry_count == 1
-    w0 = _simulate_window(snaps, BacktestParams(
-        entry_timeout_pct=0.0, min_requote_remaining_sec=0.0))
-    assert w0.pair_captured is True
+# Issue #228: the re-entry deferral test stood here. It asserted the deleted
+# drift-skip grant (reentry_count == 1); removed with the behaviour. The
+# delay still holding quotes pre-expiry is covered by
+# test_entry_delay_holds_quotes_until_expiry above.
 
 
 # ===========================================================================
