@@ -631,20 +631,16 @@ def api_backtest(
     gas: float = 0.0,
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
-    entry_timeout_pct: float = 0.10,
     quote_lo: float = 0.10,
     quote_hi: float = 0.90,
     entry_delay_sec: float = 0.0,
     exit_thresh_naked: float = 0.0,
-    naked_leg_timeout_pct: float = 0.0,
-    # Issue #164 review: these six were rendered, labelled and bounded from the
-    # registry but never reached the engine, so a researcher tuning the taker
-    # fee or the re-entry caps got results computed with the defaults instead.
-    max_start_elapsed_pct: float = 0.10,
+    dead_zone_val: float = 0.10,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
     taker_fee_rate: float = 0.07,
     tick_size: float = 0.001,
     min_quote_shares: int = 5,
-    stop_loss_enabled: bool = True,
     enable_leg_chase: bool = False,
     limit_windows: int = 0,
 ):
@@ -702,6 +698,13 @@ def api_backtest(
     # the UI's min/max already showed. Previously each endpoint clamped with
     # its own inline min/max calls, which is how a bound tightened in the
     # engine could stay loose here.
+    dz_unit = dead_zone_unit if dead_zone_unit in ("pct", "sec") else "pct"
+    # The registry bound (0.0, 3600.0) is the union across units; under "pct"
+    # the engine itself refuses anything above 1.0, so the clamp must be
+    # unit-aware or a pct request of 9999 would 500 at construction.
+    dz_high = 1.0 if dz_unit == "pct" else 3600.0
+    dz_val = min(max(dead_zone_val, 0.0), dz_high)
+    naked_expiry = naked_leg_at_expiry if naked_leg_at_expiry in ("close", "hold") else "close"
     params = BacktestParams(
         offset=_clamp_to_spec("offset", offset),
         queue_gate=_clamp_to_spec("queue_gate", queue),
@@ -710,16 +713,13 @@ def api_backtest(
         exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
         quote_shares=_clamp_to_spec("quote_shares", size),
         merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
-        max_start_delay_sec=_clamp_to_spec("max_start_delay_sec", max_start_delay),
-        entry_timeout_pct=_clamp_to_spec("entry_timeout_pct", entry_timeout_pct),
         quote_range=(quote_lo, quote_hi),
         entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
         exit_thresh_naked=_clamp_to_spec("exit_thresh_naked", exit_thresh_naked),
-        naked_leg_timeout_pct=_clamp_to_spec(
-            "naked_leg_timeout_pct", naked_leg_timeout_pct),
-        stop_loss_enabled=bool(stop_loss_enabled),
+        dead_zone_val=dz_val,
+        dead_zone_unit=dz_unit,
+        naked_leg_at_expiry=naked_expiry,
         enable_leg_chase=bool(enable_leg_chase),
-        max_start_elapsed_pct=_clamp_to_spec("max_start_elapsed_pct", max_start_elapsed_pct),
         taker_fee_rate=_clamp_to_spec("taker_fee_rate", taker_fee_rate),
         tick_size=_clamp_to_spec("tick_size", tick_size),
         min_quote_shares=_clamp_to_spec("min_quote_shares", min_quote_shares),
@@ -776,7 +776,7 @@ def api_backtest(
                 "exit_reversal": params.exit_reversal,
                 "size": size,
                 "gas": params.merge_gas_usd,
-                "max_start_delay": params.max_start_delay_sec,
+                "max_start_delay": max_start_delay,
                 "quote_lo": quote_lo,
                 "quote_hi": quote_hi,
                 "entry_delay_sec": params.entry_delay_sec,
@@ -801,7 +801,7 @@ def api_backtest(
             "n_windows": 0,
         }
 
-    if params.max_start_delay_sec > 0:
+    if max_start_delay > 0:
         filtered_grouped = []
         for _cid, g in grouped:
             if not g:
@@ -809,7 +809,7 @@ def api_backtest(
             first_ts = float(g[0].get("ts", 0.0) or 0.0)
             start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
             delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
-            if delay <= params.max_start_delay_sec:
+            if delay <= max_start_delay:
                 filtered_grouped.append((_cid, g))
         grouped = filtered_grouped
 
@@ -1335,14 +1335,15 @@ class LiveConfigPayload(BaseModel):
     selected_markets: Optional[list[str]] = None
     tokens: Optional[list[str]] = None
     durations: Optional[list[int]] = None
-    entry_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    dead_zone_val: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
+    dead_zone_unit: Optional[str] = Field(default=None, pattern="^(pct|sec)$")
+    naked_leg_at_expiry: Optional[str] = Field(default=None, pattern="^(close|hold)$")
     exit_reversal: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     # Issue #228: the re-entry payload fields stood here. Removed with the
     # mechanism; the engine still accepts the knobs (inert) until T5.
     # 0 = off, matching `max(0.0, ...)` in the engine's own clamp; a 0.001
     # floor here made the naked stop impossible to switch back off.
     exit_thresh_naked: Optional[float] = Field(default=None, ge=0.0, le=0.50)
-    naked_leg_timeout_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     # Issue #137: patient entry delay. entry_delay_sec has no
     # upper bound (a delay past the window simply never quotes).
     # (Issue #228: the entry_band field stood here. Removed with the band
@@ -1356,7 +1357,6 @@ class LiveConfigPayload(BaseModel):
     # gate. Two ends in one field — the Cockpit renders two inputs and posts
     # the pair; `update_config` clamps each end and refuses an inverted pair.
     quote_range: Optional[list[float]] = None
-    stop_loss_enabled: Optional[bool] = None
     enable_leg_chase: Optional[bool] = None
     max_pair_cost: Optional[float] = Field(default=None, ge=0.50, le=1.00)
 
@@ -1416,40 +1416,6 @@ class LiveConfigPayload(BaseModel):
                 pass
         return v
 
-    @field_validator("naked_leg_timeout_pct", mode="before")
-    @classmethod
-    def normalize_naked_leg_timeout_pct(cls, v: Any) -> Any:
-        """Normalize a whole-number percentage above 1 (2-100) to a decimal fraction."""
-        if v is not None:
-            try:
-                fv = float(v)
-                if 1.0 < fv <= 100.0:
-                    return fv / 100.0
-                return fv
-            except (ValueError, TypeError):
-                pass
-        return v
-
-    @field_validator("entry_timeout_pct", mode="before")
-    @classmethod
-    def normalize_entry_timeout_pct(cls, v: Any) -> Any:
-        """Normalize a whole-number percentage above 1 (2-100) to a decimal (0.02-1.0).
-
-        Values of 1.0 or below are passed through as decimals already in range, so
-        `1` and `1.0` both mean a full window rather than one percent. The cockpit
-        never relies on this ambiguity -- it divides its 1-100 field by 100 before
-        posting -- but API callers can send either form.
-        """
-        if v is not None:
-            try:
-                fv = float(v)
-                if 1.0 < fv <= 100.0:
-                    return fv / 100.0
-                return fv
-            except (ValueError, TypeError):
-                pass
-        return v
-
 
 @app.post("/api/live/config")
 def api_live_config(payload: LiveConfigPayload, request: Request):
@@ -1467,15 +1433,15 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             selected_markets=payload.selected_markets,
             tokens=payload.tokens,
             durations=payload.durations,
-            entry_timeout_pct=payload.entry_timeout_pct,
+            dead_zone_val=payload.dead_zone_val,
+            dead_zone_unit=payload.dead_zone_unit,
+            naked_leg_at_expiry=payload.naked_leg_at_expiry,
             exit_reversal=payload.exit_reversal,
             exit_thresh_naked=payload.exit_thresh_naked,
-            naked_leg_timeout_pct=payload.naked_leg_timeout_pct,
             enable_leg_chase=payload.enable_leg_chase,
             max_pair_cost=payload.max_pair_cost,
             entry_delay_sec=payload.entry_delay_sec,
             quote_range=payload.quote_range,
-            stop_loss_enabled=payload.stop_loss_enabled,
             preset=payload.preset,
         )
         return state
@@ -2138,15 +2104,13 @@ textarea:focus-visible,
 .btn-danger:hover{background:rgba(240,104,77,.3)}
 .form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
-/* Issue #201: the four backtest thresholds must start a clean row under their
-   switch, or auto-placement strands the header mid-row and splits the group. */
-#btStopLossHead{grid-column:1/-1}
-/* The toggled thresholds are one group in the markup but must stay direct
-   children of .form-grid, or the wrapper collapses into a single grid cell.
-   display:contents keeps the layout identical; the [hidden] rule is required
-   because the id selector would otherwise outrank the UA one. */
-#btStopLossFields,#cockpitStopLossFields{display:contents}
-#btStopLossFields[hidden],#cockpitStopLossFields[hidden]{display:none}
+/* Issue #201, carried through #229: the four backtest thresholds are one group
+   in the markup but must stay direct children of .form-grid, or the wrapper
+   collapses into a single grid cell. display:contents keeps the layout
+   identical; the [hidden] rule is required because the id selector would
+   otherwise outrank the UA one. */
+#btStopLossFields{display:contents}
+#btStopLossFields[hidden]{display:none}
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
 .form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
@@ -2386,18 +2350,6 @@ textarea:focus-visible,
               <label for="btPairCost" data-param-label="max_pair_cost"></label>
               <input type="number" min="0.5" max="1" step="0.005" id="btPairCost" data-param="max_pair_cost" value="0.99">
             </div>
-            <div class="form-group" id="btStopLossHead">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <label for="btStopLossEnabled" data-param-label="stop_loss_enabled"></label>
-                <label class="toggle-wrap" title="Turn every stop-loss threshold on or off">
-                  <span id="btStopLossToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--up)">ON</span>
-                  <div class="toggle-switch">
-                    <input type="checkbox" id="btStopLossEnabled" data-param="stop_loss_enabled" aria-label="Stop loss enabled" checked onchange="toggleStopLossInputs()">
-                    <span class="toggle-slider"></span>
-                  </div>
-                </label>
-              </div>
-            </div>
             <div id="btStopLossFields">
               <div class="form-group">
                 <label>Exit Stop Loss 5m ($)</label>
@@ -2421,24 +2373,30 @@ textarea:focus-visible,
               <input type="number" min="5" step="1" id="btSize" data-param="quote_shares" value="5">
             </div>
             <div class="form-group">
-              <label data-param-label="max_start_elapsed_pct"></label>
-              <input type="number" min="0" max="1" step="0.05" id="btMaxStartElapsed" data-param="max_start_elapsed_pct" value="0.10">
-            </div>
-            <div class="form-group">
               <label data-param-label="exit_reversal"></label>
               <input type="number" min="0" max="0.5" step="0.005" id="btExitReversal" data-param="exit_reversal" value="0.02">
             </div>
             <div class="form-group">
-              <label data-param-label="entry_timeout_pct"></label>
-              <input type="number" min="0" max="1" step="0.05" id="btEntryTimeout" data-param="entry_timeout_pct" value="0.10">
+              <label data-param-label="dead_zone_val"></label>
+              <input type="number" min="0" max="3600" step="0.01" id="btDeadZoneVal" data-param="dead_zone_val" value="0.10">
+            </div>
+            <div class="form-group">
+              <label data-param-label="dead_zone_unit"></label>
+              <select id="btDeadZoneUnit" data-param="dead_zone_unit">
+                <option value="pct" selected>% of window</option>
+                <option value="sec">Seconds</option>
+              </select>
             </div>
             <div class="form-group">
               <label data-param-label="exit_thresh_naked"></label>
               <input type="number" min="0" max="0.5" step="0.01" id="btExitNaked" data-param="exit_thresh_naked" value="0">
             </div>
             <div class="form-group">
-              <label data-param-label="naked_leg_timeout_pct"></label>
-              <input type="number" min="0" max="1" step="0.05" id="btNakedTimeout" data-param="naked_leg_timeout_pct" value="0">
+              <label data-param-label="naked_leg_at_expiry"></label>
+              <select id="btNakedLegAtExpiry" data-param="naked_leg_at_expiry">
+                <option value="close" selected>Close at Book</option>
+                <option value="hold">Hold to Settlement</option>
+              </select>
             </div>
             <div class="form-group">
               <label data-param-label="enable_leg_chase"></label>
@@ -2449,7 +2407,7 @@ textarea:focus-visible,
             </div>
             <div class="form-group">
               <label>Partial Windows Filter</label>
-              <select id="btMaxStartDelay" data-param="max_start_delay_sec">
+              <select id="btMaxStartDelay">
                 <option value="0" selected>All (No filter)</option>
                 <option value="5.0">Full Windows Only (≤5s delay)</option>
                 <option value="2.0">Strict Full Windows (≤2s delay)</option>
@@ -2672,30 +2630,20 @@ textarea:focus-visible,
           <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" data-param="offset" value="0.02" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <label for="cockpitStopLossEnabled" data-param-label="stop_loss_enabled"></label>
-            <label class="toggle-wrap" title="Turn the stop loss on or off">
-              <span id="cockpitStopLossToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--up)">ON</span>
-              <div class="toggle-switch">
-                <input type="checkbox" id="cockpitStopLossEnabled" data-param="stop_loss_enabled" aria-label="Stop loss enabled" checked onchange="toggleCockpitStopLossInputs()">
-                <span class="toggle-slider"></span>
-              </div>
-            </label>
-          </div>
-        </div>
-        <div id="cockpitStopLossFields">
-          <div class="form-group">
-            <label data-param-label="exit_thresh_by_slug"></label>
-            <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
-          </div>
+        <div class="form-group">
+          <label data-param-label="exit_thresh_by_slug"></label>
+          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="exit_thresh_naked"></label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" data-param="exit_thresh_naked" value="0.05" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label data-param-label="naked_leg_timeout_pct"></label>
-          <input type="number" min="0" max="100" step="5" id="cockpitNakedTimeout" data-param="naked_leg_timeout_pct" value="70" placeholder="0 = off" oninput="validateCockpitInputs()">
+          <label data-param-label="naked_leg_at_expiry"></label>
+          <select id="cockpitNakedLegAtExpiry" data-param="naked_leg_at_expiry">
+            <option value="close" selected>Close at Book</option>
+            <option value="hold">Hold to Settlement</option>
+          </select>
         </div>
         <div class="form-group">
           <label data-param-label="exit_reversal"></label>
@@ -2736,8 +2684,15 @@ textarea:focus-visible,
           </select>
         </div>
         <div class="form-group">
-          <label data-param-label="entry_timeout_pct"></label>
-          <input type="number" min="1" max="100" step="5" id="cockpitEntryTimeout" data-param="entry_timeout_pct" value="100" placeholder="100 = full window" oninput="validateCockpitInputs()">
+          <label data-param-label="dead_zone_val"></label>
+          <input type="number" min="0" max="3600" step="0.01" id="cockpitDeadZoneVal" data-param="dead_zone_val" value="0.10" placeholder="0.10 or sec" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="dead_zone_unit"></label>
+          <select id="cockpitDeadZoneUnit" data-param="dead_zone_unit">
+            <option value="pct" selected>% of window</option>
+            <option value="sec">Seconds</option>
+          </select>
         </div>
         <div class="form-group" style="grid-column:span 2">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
@@ -3844,49 +3799,6 @@ function runBacktestOnFile(filename){
   runBacktest(filename);
 }
 
-// Issue #201: one switch owns every stop-loss threshold. Off hides AND disables
-// the fields so a stale value cannot leak back into the /api/backtest request.
-function toggleStopLossInputs(){
-  const enabled = $('btStopLossEnabled') ? $('btStopLossEnabled').checked : true;
-  const wrap = $('btStopLossFields');
-  if(wrap) wrap.hidden = !enabled;
-  for(const id of ['btExit5m','btExit15m','btExitBtc','btExitSol']){
-    const inp = $(id);
-    if(!inp) continue;
-    inp.disabled = !enabled;
-    inp.style.opacity = enabled ? '' : '0.45';
-  }
-  const lbl = $('btStopLossToggleLabel');
-  if(lbl){
-    lbl.textContent = enabled ? 'ON' : 'OFF';
-    lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
-  }
-}
-
-// Issue #201: the Cockpit mirror of toggleStopLossInputs(). Same contract —
-// Off hides AND disables the stop threshold, and the live payload carries
-// stop_loss_enabled=false.
-function toggleCockpitStopLossInputs(){
-  const enabled = $('cockpitStopLossEnabled') ? $('cockpitStopLossEnabled').checked : true;
-  const wrap = $('cockpitStopLossFields');
-  if(wrap) wrap.hidden = !enabled;
-  const inp = $('cockpitExit');
-  // A running bot locks its parameters (updateCockpitParamsLockUI shows the
-  // hint), and re-enabling here would hand the operator an input the engine
-  // will not accept while it runs.
-  const hint = $('cockpitParamsLockHint');
-  const locked = !!(hint && hint.style.display !== 'none');
-  if(inp && !locked){
-    inp.disabled = !enabled;
-    inp.style.opacity = enabled ? '' : '0.45';
-  }
-  const lbl = $('cockpitStopLossToggleLabel');
-  if(lbl){
-    lbl.textContent = enabled ? 'ON' : 'OFF';
-    lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
-  }
-}
-
 function toggleBtSection(btn, bodyId){
   const body = document.getElementById(bodyId);
   if(!btn || !body) return;
@@ -3945,13 +3857,12 @@ async function runBacktest(fileOverride){
     const entryDelay = getVal('btEntryDelay', 0.0);
     // Issue #164: knobs the live engine has always had, now simulated too.
     const exitReversal = getVal('btExitReversal', 0.02);
-    const entryTimeout = getVal('btEntryTimeout', 0.10);
+    const deadZoneVal = getVal('btDeadZoneVal', 0.10);
+    const deadZoneUnit = $('btDeadZoneUnit') ? $('btDeadZoneUnit').value : 'pct';
+    const nakedLegAtExpiry = $('btNakedLegAtExpiry') ? $('btNakedLegAtExpiry').value : 'close';
     const exitNaked = getVal('btExitNaked', 0.0);
-    const nakedTimeout = getVal('btNakedTimeout', 0.0);
-    const stopLoss = ($('btStopLossEnabled') && !$('btStopLossEnabled').checked) ? '0' : '1';
     const legChase = $('btLegChase') ? $('btLegChase').value : '0';
     // Rendered from the registry, so they must actually reach the engine.
-    const maxStartElapsed = getVal('btMaxStartElapsed', 0.10);
     const takerFee = getVal('btTakerFee', 0.07);
     const tickSize = getVal('btTickSize', 0.001);
     const minShares = getVal('btMinShares', 5);
@@ -3961,7 +3872,7 @@ async function runBacktest(fileOverride){
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_sec=${entryDelay}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}&max_start_elapsed_pct=${maxStartElapsed}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_sec=${entryDelay}&exit_reversal=${exitReversal}&dead_zone_val=${deadZoneVal}&dead_zone_unit=${deadZoneUnit}&naked_leg_at_expiry=${nakedLegAtExpiry}&exit_thresh_naked=${exitNaked}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -4200,10 +4111,6 @@ function resetBtParams(){
   $('btOffset').value = "0.02";
   $('btQueue').value = "0";
   $('btPairCost').value = "0.99";
-  if ($('btStopLossEnabled')) {
-    $('btStopLossEnabled').checked = true;
-    toggleStopLossInputs();
-  }
   $('btExit5m').value = "0.05";
   $('btExit15m').value = "0.05";
   $('btExitBtc').value = "0.05";
@@ -4949,11 +4856,7 @@ function updateCockpitParamsLockUI(locked) {
     'cockpitOffset',
     'cockpitExit',
     'cockpitExitNaked',
-    'cockpitNakedTimeout',
-    // Issue #201: applyCockpitConfig() returns early while the bot runs, so a
-    // switch left interactive here would hide the stop group and never reach
-    // /api/live/config — a lie about what the engine is doing.
-    'cockpitStopLossEnabled',
+    'cockpitNakedLegAtExpiry',
     'cockpitExitReversal',
     'cockpitShares',
     'cockpitEntryDelay',
@@ -4962,7 +4865,8 @@ function updateCockpitParamsLockUI(locked) {
     'cockpitPairCost',
     'cockpitLegChase',
     'cockpitMode',
-    'cockpitEntryTimeout',
+    'cockpitDeadZoneVal',
+    'cockpitDeadZoneUnit',
     'cockpitWallet',
     'cockpitStartBal',
     'btnApplyParams',
@@ -4994,11 +4898,6 @@ function updateCockpitParamsLockUI(locked) {
 
   const hint = $('cockpitParamsLockHint');
   if (hint) hint.style.display = locked ? 'inline' : 'none';
-  if (!locked && typeof toggleCockpitStopLossInputs === 'function') {
-    // The loop above re-enables every param id unconditionally; re-apply the
-    // stop-loss toggle so an Off group does not come back editable.
-    toggleCockpitStopLossInputs();
-  }
   if (!locked && typeof validateCockpitInputs === 'function') {
     validateCockpitInputs();
   }
@@ -5513,16 +5412,19 @@ function validateCockpitInputs() {
     }
   }
 
-  // 5. Entry Timeout: 1 to 100
-  const timeoutEl = $('cockpitEntryTimeout');
-  if (timeoutEl) {
-    const raw = timeoutEl.value.trim();
+  // 5. Dead Zone Val: >= 0 (and <= 1.0 if pct)
+  const dzValEl = $('cockpitDeadZoneVal');
+  const dzUnitEl = $('cockpitDeadZoneUnit');
+  if (dzValEl) {
+    const raw = dzValEl.value.trim();
     const val = parseFloat(raw);
-    if (raw === '' || isNaN(val) || val < 1 || val > 100) {
-      timeoutEl.classList.add('input-invalid');
+    const unit = dzUnitEl ? dzUnitEl.value : 'pct';
+    const maxVal = unit === 'pct' ? 1.0 : 3600.0;
+    if (raw === '' || isNaN(val) || val < 0.0 || val > maxVal) {
+      dzValEl.classList.add('input-invalid');
       allValid = false;
     } else {
-      timeoutEl.classList.remove('input-invalid');
+      dzValEl.classList.remove('input-invalid');
     }
   }
 
@@ -5600,14 +5502,14 @@ async function applyCockpitConfig() {
   const mode = $('cockpitMode').value || 'paper';
   const wallet = $('cockpitWallet').value.trim();
   const startBal = parseFloat($('cockpitStartBal').value) || 1000.0;
-  const timeoutEl = $('cockpitEntryTimeout');
-  const timeoutVal = timeoutEl ? parseFloat(timeoutEl.value) : 100;
-  // The cockpit input is always a whole percentage (min=1, max=100), so divide
-  // unconditionally. The old `timeoutVal > 1.0` guard left a typed 1 as 1.0,
-  // silently turning a 1% timeout into a full-window timeout.
-  const entry_timeout_pct = !isNaN(timeoutVal)
-    ? Math.min(1.0, Math.max(0.01, timeoutVal / 100.0))
-    : 1.0;
+  const dzValEl = $('cockpitDeadZoneVal');
+  const dzUnitEl = $('cockpitDeadZoneUnit');
+  const nakedExpiryEl = $('cockpitNakedLegAtExpiry');
+  const dead_zone_val = dzValEl && dzValEl.value !== '' && !isNaN(parseFloat(dzValEl.value))
+    ? parseFloat(dzValEl.value)
+    : 0.10;
+  const dead_zone_unit = dzUnitEl ? dzUnitEl.value : 'pct';
+  const naked_leg_at_expiry = nakedExpiryEl ? nakedExpiryEl.value : 'close';
   const body = {
     offset,
     exit_thresh,
@@ -5616,18 +5518,13 @@ async function applyCockpitConfig() {
     mode,
     wallet_address: wallet,
     starting_balance: startBal,
-    entry_timeout_pct,
+    dead_zone_val,
+    dead_zone_unit,
+    naked_leg_at_expiry,
   };
-  // Issue #124: naked-leg risk knobs. Naked stop is entered like exit_thresh
-  // (whole numbers normalized to decimals server-side); timeout as a whole
-  // percentage normalized to a fraction server-side.
   const nakedEl = $('cockpitExitNaked');
-  const nakedTimeoutEl = $('cockpitNakedTimeout');
   if (nakedEl && nakedEl.value) {
     body.exit_thresh_naked = parseFloat(nakedEl.value);
-  }
-  if (nakedTimeoutEl && nakedTimeoutEl.value !== '' && !isNaN(parseFloat(nakedTimeoutEl.value))) {
-    body.naked_leg_timeout_pct = Math.min(100, Math.max(0, parseFloat(nakedTimeoutEl.value))) / 100.0;
   }
   // Issue #228: the quotable range is two ends in one knob. Read off the two
   // dedicated inputs and post the pair; `update_config` clamps each end and
@@ -5651,8 +5548,6 @@ async function applyCockpitConfig() {
       body[field] = parseFloat(el.value);
     }
   }
-  const stopEl = $('cockpitStopLossEnabled');
-  if (stopEl) body.stop_loss_enabled = stopEl.checked;
   const chaseEl = $('cockpitLegChase');
   if (chaseEl) body.enable_leg_chase = chaseEl.value === 'true';
   // Market selection is immutable while the bot runs; only send filters when stopped
@@ -5743,9 +5638,10 @@ function renderCockpitUI(st) {
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
       if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
-      if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
+      if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
+      if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
+      if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
       if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
-      if ($('cockpitNakedTimeout') && st.params.naked_leg_timeout_pct != null) $('cockpitNakedTimeout').value = Math.round(st.params.naked_leg_timeout_pct * 100);
       if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
       if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
@@ -5764,9 +5660,10 @@ function renderCockpitUI(st) {
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
       if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
-      if ($('cockpitEntryTimeout') && st.params.entry_timeout_pct != null) $('cockpitEntryTimeout').value = Math.round(st.params.entry_timeout_pct * 100);
+      if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
+      if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
+      if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
       if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
-      if ($('cockpitNakedTimeout') && st.params.naked_leg_timeout_pct != null) $('cockpitNakedTimeout').value = Math.round(st.params.naked_leg_timeout_pct * 100);
       if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
       if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }

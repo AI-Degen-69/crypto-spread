@@ -1448,36 +1448,59 @@ def test_api_live_config_validation_error_format():
     assert "detail" in data
 
 
-def test_api_live_config_entry_timeout_pct():
-    """Verify entry_timeout_pct is configurable and normalizes whole numbers (1-100)."""
+def test_api_live_config_dead_zone_knobs():
+    """Issue #229: the dead-zone trio is configurable via /api/live/config.
+
+    `dead_zone_val` accepts a pct fraction (0.10) or absolute seconds under the
+    matching unit; `naked_leg_at_expiry` is the close/hold switch that replaced
+    `stop_loss_enabled`. All three appear in /api/live/state params, and
+    out-of-domain values are rejected with 422 rather than clamped.
+    """
     engine = osc_dash.get_live_trader_engine()
     engine.is_running = False
-    orig_pct = engine.entry_timeout_pct
+    orig_val = engine.dead_zone_val
+    orig_unit = engine.dead_zone_unit
+    orig_expiry = engine.naked_leg_at_expiry
     # get_live_trader_engine() is a module-global singleton. Pin it to paper for the
     # duration so update_config cannot reach fetch_polymarket_account_value and make
     # a real Polymarket request if an earlier test left the singleton in live mode.
     orig_mode = engine.mode
     engine.mode = "paper"
     try:
-        # Test whole number 10 -> 0.10
-        res = client.post("/api/live/config", json={"entry_timeout_pct": 10})
+        # Pct fraction pass-through (the 10% default spelled explicitly).
+        res = client.post("/api/live/config", json={"dead_zone_val": 0.10})
         assert res.status_code == 200
-        data = res.json()
-        assert abs(data["params"]["entry_timeout_pct"] - 0.10) < 1e-4
+        assert abs(res.json()["params"]["dead_zone_val"] - 0.10) < 1e-9
 
-        # Test full window 100 -> 1.0
-        res_full = client.post("/api/live/config", json={"entry_timeout_pct": 100})
-        assert res_full.status_code == 200
-        data_full = res_full.json()
-        assert abs(data_full["params"]["entry_timeout_pct"] - 1.0) < 1e-4
+        # Unit switch to seconds carries an absolute value.
+        res_sec = client.post("/api/live/config", json={
+            "dead_zone_val": 30.0, "dead_zone_unit": "sec"})
+        assert res_sec.status_code == 200
+        params = res_sec.json()["params"]
+        assert abs(params["dead_zone_val"] - 30.0) < 1e-9
+        assert params["dead_zone_unit"] == "sec"
 
-        # Test decimal 0.25 -> 0.25
-        res_dec = client.post("/api/live/config", json={"entry_timeout_pct": 0.25})
-        assert res_dec.status_code == 200
-        data_dec = res_dec.json()
-        assert abs(data_dec["params"]["entry_timeout_pct"] - 0.25) < 1e-4
+        # The expiry policy switch.
+        res_hold = client.post("/api/live/config", json={"naked_leg_at_expiry": "hold"})
+        assert res_hold.status_code == 200
+        assert res_hold.json()["params"]["naked_leg_at_expiry"] == "hold"
+
+        # Out of domain: pct above 1.0 passes the payload's union bound (sec
+        # allows absolute seconds) but is rejected by the engine's unit-aware
+        # validation and surfaced as 400; an unknown policy is a 422 at the
+        # payload model. Neither is silently clamped.
+        res_bad = client.post(
+            "/api/live/config", json={"dead_zone_val": 1.5, "dead_zone_unit": "pct"})
+        assert res_bad.status_code == 400
+        assert "dead_zone_val" in res_bad.json()["error"]
+        assert client.post(
+            "/api/live/config", json={"naked_leg_at_expiry": "keep"}).status_code == 422
     finally:
-        engine.update_config(entry_timeout_pct=orig_pct)
+        engine.update_config(
+            dead_zone_val=orig_val,
+            dead_zone_unit=orig_unit,
+            naked_leg_at_expiry=orig_expiry,
+        )
         engine.mode = orig_mode
 
 
@@ -1517,51 +1540,37 @@ def test_api_live_config_exit_reversal():
         engine.is_running = orig_running
 
 
-def test_api_live_config_naked_leg_knobs():
-    """Issue #124: naked-leg risk knobs are exposed in /api/live/config.
+def test_api_live_config_naked_leg_stop_stays_settable():
+    """Issue #229: exit_thresh_naked survives (its deletion is #230's scope),
 
-    exit_thresh_naked normalizes whole cents like exit_thresh (3 -> 0.03);
-    naked_leg_timeout_pct normalizes whole percentages above 1 to fractions
-    (70 -> 0.70). Both appear in /api/live/state params.
+    but the timeout beside it is gone — posting `naked_leg_timeout_pct` is a
+    422 at the payload model, and the field no longer appears in state params.
     """
     engine = osc_dash.get_live_trader_engine()
     orig_running = engine.is_running
     engine.is_running = False
     orig_naked = engine.exit_thresh_naked
-    orig_timeout = engine.naked_leg_timeout_pct
     orig_mode = engine.mode
     engine.mode = "paper"
     try:
-        # Decimals pass through and appear in state params.
-        res = client.post("/api/live/config", json={
-            "exit_thresh_naked": 0.04,
-            "naked_leg_timeout_pct": 0.8,
-        })
+        res = client.post("/api/live/config", json={"exit_thresh_naked": 0.04})
         assert res.status_code == 200
-        params = res.json()["params"]
-        assert abs(params["exit_thresh_naked"] - 0.04) < 1e-9
-        assert abs(params["naked_leg_timeout_pct"] - 0.8) < 1e-9
+        assert abs(res.json()["params"]["exit_thresh_naked"] - 0.04) < 1e-9
 
-        # Cents normalization: 3 -> 0.03; percentage: 70 -> 0.70.
-        res_norm = client.post("/api/live/config", json={
-            "exit_thresh_naked": 3,
-            "naked_leg_timeout_pct": 70,
-        })
+        # Cents normalization: 3 -> 0.03.
+        res_norm = client.post("/api/live/config", json={"exit_thresh_naked": 3})
         assert res_norm.status_code == 200
-        params = res_norm.json()["params"]
-        assert abs(params["exit_thresh_naked"] - 0.03) < 1e-9
-        assert abs(params["naked_leg_timeout_pct"] - 0.70) < 1e-9
+        assert abs(res_norm.json()["params"]["exit_thresh_naked"] - 0.03) < 1e-9
 
         # Out of range rejected by the payload model.
         assert client.post("/api/live/config", json={"exit_thresh_naked": 0.9}).status_code == 422
-        # Above 100 percent: the before-validator only divides values <= 100,
-        # so 150 stays out of the field's le=1.0 range and is rejected.
-        assert client.post("/api/live/config", json={"naked_leg_timeout_pct": 150}).status_code == 422
+
+        # The timeout this issue deleted must not be silently ignored
+        # (pydantic's extra="ignore" would turn the post into a no-op).
+        state = client.get("/api/live/state").json()
+        assert "naked_leg_timeout_pct" not in state["params"]
     finally:
-        engine.update_config(
-            exit_thresh_naked=orig_naked,
-            naked_leg_timeout_pct=orig_timeout,
-        )
+        engine.update_config(exit_thresh_naked=orig_naked)
         engine.mode = orig_mode
         engine.is_running = orig_running
 
@@ -1604,7 +1613,7 @@ def test_api_live_config_patient_band_preset_deleted():
     engine.mode = "paper"
     orig_delay = engine.entry_delay_sec
     orig_range = engine.quote_range
-    orig_stop_loss = engine.stop_loss_enabled
+    orig_expiry = engine.naked_leg_at_expiry
     try:
         res = client.post("/api/live/config", json={"preset": "patient_band_maker"})
         assert res.status_code == 400
@@ -1614,13 +1623,13 @@ def test_api_live_config_patient_band_preset_deleted():
         res_knobs = client.post("/api/live/config", json={
             "entry_delay_sec": 30,
             "quote_range": [0.20, 0.80],
-            "stop_loss_enabled": True,
+            "naked_leg_at_expiry": "hold",
         })
         assert res_knobs.status_code == 200
         params = res_knobs.json()["params"]
         assert abs(params["entry_delay_sec"] - 30.0) < 1e-9
         assert params["quote_range"] == [0.20, 0.80]
-        assert params["stop_loss_enabled"] is True
+        assert params["naked_leg_at_expiry"] == "hold"
 
         # Unknown preset rejected, config untouched.
         res_bad = client.post("/api/live/config", json={"preset": "nope"})
@@ -1631,7 +1640,7 @@ def test_api_live_config_patient_band_preset_deleted():
     finally:
         engine.entry_delay_sec = orig_delay
         engine.quote_range = orig_range
-        engine.stop_loss_enabled = orig_stop_loss
+        engine.naked_leg_at_expiry = orig_expiry
         engine.mode = orig_mode
         engine.is_running = orig_running
 
@@ -2275,7 +2284,9 @@ def test_the_quotable_range_is_settable_on_both_tabs():
     assert 'id="btQuoteLo"' in html
     assert 'id="btQuoteHi"' in html
     assert 'id="cockpitEntryBand"' not in html
-    assert 'id="cockpitStopLossEnabled"' in html
+    assert 'id="cockpitStopLossEnabled"' not in html, (
+        "Issue #229: the stop-loss toggle is gone — naked_leg_at_expiry governs "
+        "the unpaired leg now")
 
 
 def test_shared_labels_are_not_hard_coded_in_the_page():
@@ -2305,15 +2316,18 @@ def test_the_old_drifted_wordings_are_gone():
 
 def test_backtest_sends_the_new_knobs():
     html = client.get("/").text
-    for q in ("exit_reversal=", "entry_timeout_pct=", "exit_thresh_naked=",
-              "naked_leg_timeout_pct=", "stop_loss_enabled=", "enable_leg_chase=",
-              "quote_lo=", "quote_hi="):
+    for q in ("exit_reversal=", "dead_zone_val=", "dead_zone_unit=",
+              "naked_leg_at_expiry=", "exit_thresh_naked=",
+              "enable_leg_chase=", "quote_lo=", "quote_hi="):
         assert q in html, f"the Backtest run URL never sends {q}"
+    for stale in ("entry_timeout_pct=", "naked_leg_timeout_pct=",
+                  "stop_loss_enabled=", "max_start_elapsed_pct="):
+        assert stale not in html, f"the Backtest run URL still sends deleted knob {stale}"
 
 
 @pytest.mark.parametrize("field,over,clamped", [
     ("entry_delay_sec", 999999.0, 3600.0),
-    ("naked_leg_timeout_pct", 5.0, 1.0),
+    ("dead_zone_val", 9999.0, 3600.0),
     ("exit_thresh_naked", 9.0, 0.50),
 ])
 def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped, tmp_path,
@@ -2388,8 +2402,7 @@ REGISTRY_TO_PAYLOAD = {
     "max_pair_cost": "max_pair_cost",
     "exit_reversal": "exit_reversal",
     "exit_thresh_naked": "exit_thresh_naked",
-    "naked_leg_timeout_pct": "naked_leg_timeout_pct",
-    "entry_timeout_pct": "entry_timeout_pct",
+    "dead_zone_val": "dead_zone_val",
     "entry_delay_sec": "entry_delay_sec",
     "quote_range": "quote_range",
 }
@@ -2417,10 +2430,10 @@ def test_every_cockpit_knob_is_mapped_to_a_payload_field():
         for name, v in group.items()
         if "cockpit" in v["surfaces"]
     }
-    # `exit_thresh_by_slug` is a dict fanned out per series, not one bounded
-    # scalar; the two booleans have no numeric range to compare. Neither has a
-    # payload field this check could be applied to.
-    for no_range in ("exit_thresh_by_slug", "stop_loss_enabled", "enable_leg_chase"):
+    # `exit_thresh_by_slug` is a dict fanned out per series, and the remaining
+    # unbounded knobs have no numeric range this check could compare.
+    for no_range in ("exit_thresh_by_slug", "enable_leg_chase",
+                     "dead_zone_unit", "naked_leg_at_expiry"):
         cockpit.discard(no_range)
     unmapped = sorted(cockpit - set(REGISTRY_TO_PAYLOAD))
     assert unmapped == [], (
@@ -2468,7 +2481,7 @@ def test_every_knob_the_cockpit_posts_is_declared_on_the_payload():
     block = re.search(r"const numeric = \{(.*?)\};", html, re.S)
     assert block, "the Cockpit's numeric field map was not found in the page"
     posted = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
-    posted |= {"stop_loss_enabled", "enable_leg_chase"}
+    posted |= {"enable_leg_chase"}
     undeclared = sorted(posted - set(LiveConfigPayload.model_fields))
     assert undeclared == [], (
         f"the Cockpit posts these and the payload silently drops them: {undeclared}")
@@ -2485,17 +2498,19 @@ def test_every_declared_payload_knob_reaches_the_engine():
     forwarded = set(re.findall(r"(\w+)=payload\.\w+", src))
     accepted = set(inspect.signature(lt.LiveTraderEngine.update_config).parameters)
     for name in ("offset", "entry_delay_sec", "quote_range",
-                 "exit_thresh_naked", "naked_leg_timeout_pct"):
+                 "exit_thresh_naked", "dead_zone_val", "dead_zone_unit",
+                 "naked_leg_at_expiry"):
         assert name in LiveConfigPayload.model_fields, f"{name} not declared"
         assert name in accepted, f"update_config does not accept {name}"
         assert name in forwarded, (
             f"{name} is declared on the payload but never passed to "
             "update_config — the request succeeds and changes nothing")
-    # Issue #228: the retired gates must not be declared anymore — pydantic's
-    # `extra="ignore"` would turn a Cockpit post into a silent no-op.
+    # Issues #228/#229: the retired gates must not be declared anymore —
+    # pydantic's `extra="ignore"` would turn a Cockpit post into a silent no-op.
     for name in ("entry_band", "reentry_drift_band",
                  "min_requote_remaining_sec", "reentry_min_remaining_pct",
-                 "max_reentries_per_window", "reentry_require_pairable"):
+                 "max_reentries_per_window", "reentry_require_pairable",
+                 "entry_timeout_pct", "naked_leg_timeout_pct", "stop_loss_enabled"):
         assert name not in LiveConfigPayload.model_fields, (
             f"{name} is still declared after its mechanism was deleted")
 
@@ -2625,17 +2640,19 @@ def test_summary_hero_announces_async_updates():
     assert 'aria-atomic="true"' in card, "the sentence should be announced whole, not word by word"
 
 
-# --- Issue #201: backtest stop-loss thresholds grouped under one on/off toggle ---
+# --- Issue #201, carried through #229: backtest stop-loss thresholds stay one
+# --- grid group; the on/off switch itself is gone (naked_leg_at_expiry, #229).
 
-def test_stop_loss_thresholds_live_inside_the_toggled_group():
-    """All four thresholds must sit inside the wrapper the toggle hides."""
+def test_stop_loss_thresholds_live_inside_one_grid_group():
+    """All four thresholds must sit inside the wrapper that keeps them together."""
     html = client.get("/").text
     start = html.index('<div id="btStopLossFields">')
     end = html.index('data-param-label="quote_shares"', start)
     group = html[start:end]
     for el_id in ("btExit5m", "btExit15m", "btExitBtc", "btExitSol"):
         assert f'id="{el_id}"' in group, (
-            f"{el_id} is outside btStopLossFields, so the toggle cannot hide it")
+            f"{el_id} is outside btStopLossFields, so the group reads as four "
+            "unrelated inputs")
 
 
 def test_stop_loss_group_survives_the_form_grid():
@@ -2646,121 +2663,68 @@ def test_stop_loss_group_survives_the_form_grid():
     override is mandatory: the id selector outranks the UA `[hidden]` rule.
     """
     html = client.get("/").text
-    assert "#btStopLossHead{grid-column:1/-1}" in html, (
-        "without a full-width header the four fields wrap around it and the "
-        "group reads as two unrelated halves")
-    assert 'class="form-group" id="btStopLossHead"' in html
-    assert "#btStopLossFields,#cockpitStopLossFields{display:contents}" in html
-    assert ("#btStopLossFields[hidden],#cockpitStopLossFields[hidden]"
-            "{display:none}") in html
+    assert "#btStopLossFields{display:contents}" in html
+    assert "#btStopLossFields[hidden]{display:none}" in html
+    assert "cockpitStopLossFields" not in html, (
+        "Issue #229: the Cockpit mirror of the group went with the toggle")
 
 
-def test_stop_loss_switch_is_a_checkbox_matching_the_pair_cost_toggle():
-    """The control is the shared toggle widget, not the old dropdown."""
+def test_both_tabs_render_the_dead_zone_and_expiry_switches():
+    """Issue #229: close/hold and pct/sec are selects on both tabs."""
     html = client.get("/").text
-    assert '<select id="btStopLossEnabled"' not in html, (
-        "the standalone stop-loss dropdown should be gone")
-    start = html.index('id="btStopLossToggleLabel"')
-    block = html[start:start + 400]
-    assert 'class="toggle-switch"' in block
-    assert 'class="toggle-slider"' in block
-    assert 'type="checkbox" id="btStopLossEnabled"' in block
-    assert 'onchange="toggleStopLossInputs()"' in block
-    assert "checked" in block, "stop loss defaults to On, as the old select did"
-    # Kept so applyParamSpec() still resolves the label and the `bt` surface.
-    assert 'data-param="stop_loss_enabled"' in block
+    for sel_id in ("btNakedLegAtExpiry", "cockpitNakedLegAtExpiry"):
+        start = html.index(f'id="{sel_id}"')
+        block = html[start:start + 300]
+        assert 'data-param="naked_leg_at_expiry"' in block
+        assert '<option value="close"' in block
+        assert '<option value="hold"' in block
+    for sel_id in ("btDeadZoneUnit", "cockpitDeadZoneUnit"):
+        start = html.index(f'id="{sel_id}"')
+        block = html[start:start + 300]
+        assert 'data-param="dead_zone_unit"' in block
+        assert '<option value="pct"' in block
+        assert '<option value="sec"' in block
 
 
-def test_toggle_disables_as_well_as_hides_and_drives_the_request():
-    """Off must disable the inputs and send stop_loss_enabled=0."""
+def test_the_deleted_knobs_have_no_inputs_left_on_either_tab():
+    """Issue #229: a control for a deleted knob is a form that posts a no-op."""
     html = client.get("/").text
-    fn_start = html.index("function toggleStopLossInputs()")
-    fn = html[fn_start:html.index("function toggleBtSection", fn_start)]
-    assert "wrap.hidden = !enabled" in fn, "Off must hide the group"
-    assert "inp.disabled = !enabled" in fn, "Off must disable the inputs too"
-    assert (
-        "const stopLoss = ($('btStopLossEnabled') && "
-        "!$('btStopLossEnabled').checked) ? '0' : '1';"
-    ) in html, "runBacktest must read .checked, not .value, off a checkbox"
-    assert "stop_loss_enabled=${stopLoss}" in html
+    for stale in ("entry_timeout_pct", "naked_leg_timeout_pct",
+                  "max_start_elapsed_pct", "stop_loss_enabled",
+                  "btStopLossEnabled", "cockpitStopLossEnabled"):
+        assert stale not in html, f"deleted knob {stale} is still in the page"
 
 
-def test_reset_restores_the_stop_loss_toggle():
-    """resetBtParams must not leave the group hidden with default values."""
+def test_reset_restores_the_stop_loss_group_defaults():
+    """resetBtParams must restore the four thresholds without a toggle left."""
     html = client.get("/").text
     fn_start = html.index("function resetBtParams()")
     fn = html[fn_start:html.index("\n}", fn_start)]
-    assert "$('btStopLossEnabled').checked = true;" in fn
-    assert "toggleStopLossInputs();" in fn
+    assert "toggleStopLossInputs" not in fn, (
+        "Issue #229: the toggle function is deleted, nothing may call it")
     assert "$('btQuoteLo').value = \"0.10\";" in fn
     assert "$('btQuoteHi').value = \"0.90\";" in fn
 
 
-# --- Issue #201: the same grouping on the Live Cockpit ---
-
-def test_cockpit_stop_loss_switch_mirrors_the_backtest_toggle():
+def test_cockpit_payload_sends_the_dead_zone_trio():
+    """The Cockpit posts dead_zone_val/unit and naked_leg_at_expiry explicitly."""
     html = client.get("/").text
-    assert '<select id="cockpitStopLossEnabled"' not in html, (
-        "the cockpit stop-loss dropdown should be gone")
-    start = html.index('id="cockpitStopLossToggleLabel"')
-    block = html[start:start + 420]
-    assert 'class="toggle-switch"' in block
-    assert 'type="checkbox" id="cockpitStopLossEnabled"' in block
-    assert 'onchange="toggleCockpitStopLossInputs()"' in block
-    assert "checked" in block, "the cockpit stop loss defaults to On, as its select did"
-    assert 'data-param="stop_loss_enabled"' in block
+    assert "dead_zone_val" in html
+    assert "dead_zone_unit" in html
+    assert "naked_leg_at_expiry" in html
+    assert "body.stop_loss_enabled" not in html
 
 
-def test_cockpit_stop_threshold_lives_inside_the_toggled_group():
-    html = client.get("/").text
-    start = html.index('<div id="cockpitStopLossFields">')
-    end = html.index("</div>\n        </div>", start)
-    assert 'id="cockpitExit"' in html[start:end], (
-        "cockpitExit is outside cockpitStopLossFields, so the toggle cannot hide it")
+def test_cockpit_dead_zone_inputs_are_locked_while_the_bot_runs():
+    """applyCockpitConfig() returns early when running, so the new inputs must lock.
 
-
-def test_cockpit_payload_reads_the_checkbox_not_a_select_value():
-    """`checkbox.value` is the string "on", which is truthy for both states."""
-    html = client.get("/").text
-    assert "body.stop_loss_enabled = stopEl.checked;" in html
-    assert "stopEl.value === 'true'" not in html
-
-
-def test_cockpit_toggle_survives_unlocking_the_params():
-    """Stopping the bot re-enables every param id; the toggle must be re-applied."""
-    html = client.get("/").text
-    fn_start = html.index("function updateCockpitParamsLockUI(locked)")
-    fn = html[fn_start:html.index("async function", fn_start)]
-    assert "toggleCockpitStopLossInputs();" in fn, (
-        "unlocking would otherwise re-enable a stop field the toggle turned off")
-    tog_start = html.index("function toggleCockpitStopLossInputs()")
-    tog = html[tog_start:html.index("function toggleBtSection", tog_start)]
-    assert "cockpitParamsLockHint" in tog, (
-        "the toggle must not re-enable the input while the bot holds the lock")
-
-
-def test_both_stop_loss_toggles_are_labelled_for_assistive_tech():
-    """The visible text is just ON/OFF, so the switch needs a real name."""
-    html = client.get("/").text
-    for el_id in ("btStopLossEnabled", "cockpitStopLossEnabled"):
-        start = html.index(f'id="{el_id}"')
-        assert 'aria-label="Stop loss enabled"' in html[start:start + 200], (
-            f"{el_id} would be announced as just 'ON'")
-        assert f'<label for="{el_id}"' in html, (
-            f"the {el_id} caption should be a click target for its switch")
-
-
-def test_cockpit_stop_loss_switch_is_locked_while_the_bot_runs():
-    """applyCockpitConfig() returns early when running, so the switch must lock.
-
-    Left interactive it would hide the stop group and flip the caption without
-    ever reaching /api/live/config — the UI would claim a stop-loss state the
-    engine never received.
+    Left interactive they would show values the engine never received.
     """
     html = client.get("/").text
     fn_start = html.index("function updateCockpitParamsLockUI(locked)")
     ids = html[fn_start:html.index("];", fn_start)]
-    assert "'cockpitStopLossEnabled'" in ids
+    for el_id in ("cockpitDeadZoneVal", "cockpitDeadZoneUnit", "cockpitNakedLegAtExpiry"):
+        assert f"'{el_id}'" in ids
 
 
 def test_dash_script_contains_no_phantom_up_down_mid_keys():
