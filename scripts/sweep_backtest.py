@@ -164,7 +164,7 @@ def generate_sensitivity_grid(
             p = BacktestParams(
                 offset=off,
                 queue_gate=base.queue_gate,
-                pair_cost_gate=base.pair_cost_gate,
+                max_pair_cost=base.max_pair_cost,
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=base.exit_reversal,
                 quote_shares=base.quote_shares,
@@ -181,7 +181,7 @@ def generate_sensitivity_grid(
             p = BacktestParams(
                 offset=base.offset,
                 queue_gate=q,
-                pair_cost_gate=base.pair_cost_gate,
+                max_pair_cost=base.max_pair_cost,
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=base.exit_reversal,
                 quote_shares=base.quote_shares,
@@ -201,7 +201,7 @@ def generate_sensitivity_grid(
         p = BacktestParams(
             offset=base.offset,
             queue_gate=base.queue_gate,
-            pair_cost_gate=base.pair_cost_gate,
+            max_pair_cost=base.max_pair_cost,
             exit_thresh_by_slug=ex_dict,
             exit_reversal=base.exit_reversal,
             quote_shares=base.quote_shares,
@@ -218,7 +218,7 @@ def generate_sensitivity_grid(
             p = BacktestParams(
                 offset=base.offset,
                 queue_gate=base.queue_gate,
-                pair_cost_gate=base.pair_cost_gate,
+                max_pair_cost=base.max_pair_cost,
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=r,
                 quote_shares=base.quote_shares,
@@ -229,13 +229,16 @@ def generate_sensitivity_grid(
             grid.append((f"exit_rev={r:.3f}", p))
 
     # 6. Pair cost gate variations
-    pair_costs = [1.01, 1.02, 1.03, 1.05, 1.10]
+    # Issue #227 hard-caps this at 1.00 (a binary pair settles there), so the
+    # old [1.01 .. 1.10] sweep is five values the engine now refuses. Same
+    # five-point shape, inside the legal range.
+    pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
     for pc in pair_costs:
-        if pc != base.pair_cost_gate:
+        if pc != base.max_pair_cost:
             p = BacktestParams(
                 offset=base.offset,
                 queue_gate=base.queue_gate,
-                pair_cost_gate=pc,
+                max_pair_cost=pc,
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=base.exit_reversal,
                 quote_shares=base.quote_shares,
@@ -321,7 +324,7 @@ def generate_joint_grid(
         p = BacktestParams(
             offset=off,
             queue_gate=q,
-            pair_cost_gate=1.05,
+            max_pair_cost=1.00,
             exit_thresh_by_slug=ex_dict,
             exit_reversal=rev,
             quote_shares=size,
@@ -349,7 +352,10 @@ def generate_random_grid(
     queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
     exit_5ms = [0.06, 0.08, 0.09, 0.10, 0.11, 0.12, 0.14, 0.16]
     exit_reversals = [0.010, 0.015, 0.020, 0.030]
-    pair_costs = [1.01, 1.02, 1.03, 1.05, 1.10]
+    # Issue #227 hard-caps this at 1.00 (a binary pair settles there), so the
+    # old [1.01 .. 1.10] sweep is five values the engine now refuses. Same
+    # five-point shape, inside the legal range.
+    pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
     reentry_bands = [0.000, 0.005, 0.010, 0.015, 0.020, 0.030, 0.050]
     requote_mins = [0.0, 15.0, 30.0, 60.0, 120.0, 240.0]
 
@@ -382,7 +388,7 @@ def generate_random_grid(
         p = BacktestParams(
             offset=off,
             queue_gate=q,
-            pair_cost_gate=pc,
+            max_pair_cost=pc,
             exit_thresh_by_slug=ex_dict,
             exit_reversal=rev,
             quote_shares=size,

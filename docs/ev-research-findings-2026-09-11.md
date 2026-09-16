@@ -205,7 +205,9 @@ The live engine already records everything needed to measure this: per-order `qu
 1. **Primary candidate — "patient undecided-band maker":**
    - Series: start with **xrp-15m + bnb-15m + eth-5m** (best per-series signals), avoid sol-15m and btc-5m initially.
    - Entry: delay 60s after window open; require |mid − 0.50| ≤ 0.03–0.04 at entry; re-check mid hasn't moved >1¢ in the last 5s (the live engine's `mid_drift_for_resting` gate covers this).
-   - Quotes: both legs at **mid − 0.03**, requote only on re-entry, queue_gate 0, pair_cost_gate 1.05.
+   - Quotes: both legs at **mid − 0.03**, requote only on re-entry, queue_gate 0, pair_cost_gate 1.05
+     (issue #227 deleted that knob's entry-side block and hard-capped its successor `max_pair_cost` at 1.00;
+     the value recorded here cannot be set today).
    - Exit: **no stop-loss**; if one leg fills, **chase the opposite leg capped at pair cost 0.96–0.98** (live #123 mechanic, already implemented); otherwise hold to settlement.
    - Expected (if fills are tape-like): +1.0–1.6¢ per 5-share window, PF 2.2–2.9, CI lo +0.04–0.12¢/window.
 2. **Secondary (more trades, thinner edge):** off=0.02, band 0.06, delay 60s, chase 0.98, exit 0.08. +1.19¢/window, CI lo +0.05, but −2.04 day-lo — more sensitive to regime.

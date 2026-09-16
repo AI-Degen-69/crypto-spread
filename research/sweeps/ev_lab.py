@@ -294,7 +294,11 @@ ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
                      "max_start_delay_sec")
 
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
-UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band") + ENGINE_ONLY_KNOBS
+#: The first three are implemented by `sim2` as its own call arguments, so
+#: setting them on the params is silent rather than unimplemented --
+#: `max_pair_cost` is `sim2`'s `chase_cap` argument (issue #227).
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band",
+                     "max_pair_cost") + ENGINE_ONLY_KNOBS
 
 
 def _non_default_knobs(p: BacktestParams, names: tuple[str, ...]) -> list[str]:
@@ -326,27 +330,29 @@ def _reject_unsupported_knobs(p: BacktestParams) -> None:
         raise ValueError(
             f"fast_simulate does not implement {', '.join(ignored)}; "
             "engine._simulate_window applies them, so results would not be "
-            "comparable. Use research/sweeps/sim2.py for entry_delay_sec and "
-            "entry_band; nothing in research/ implements "
-            f"{', '.join(ENGINE_ONLY_KNOBS)}."
+            "comparable. Use research/sweeps/sim2.py for entry_delay_sec, "
+            "entry_band and max_pair_cost (its `chase_cap` argument); nothing "
+            f"in research/ implements {', '.join(ENGINE_ONLY_KNOBS)}."
         )
 
 
 def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
     """Raise when `p` sets a knob `sim2` would silently ignore.
 
-    `sim2` takes `entry_delay_sec` and `entry_band` as its own arguments and
-    never reads the `BacktestParams` fields of the same name, so setting them
-    on the params is as silent as not implementing them at all. The four
-    `ENGINE_ONLY_KNOBS` it does not implement in any form.
+    `sim2` takes `entry_delay_sec`, `entry_band` and the chase ceiling as its
+    own arguments -- the ceiling under the name `chase_cap` -- and never reads
+    the `BacktestParams` fields behind them, so setting one on the params is as
+    silent as not implementing it at all. The `ENGINE_ONLY_KNOBS` it does not
+    implement in any form.
     """
     ignored = _non_default_knobs(p, UNSUPPORTED_KNOBS)
     if ignored:
         raise ValueError(
             f"sim2 ignores {', '.join(ignored)} on BacktestParams; pass "
-            "entry_delay_sec / entry_band as sim2() arguments, and note that "
-            f"{', '.join(ENGINE_ONLY_KNOBS)} are not implemented in research/ "
-            "at all — express hold-to-settlement through exit_thresh_by_slug."
+            "entry_delay_sec / entry_band / max_pair_cost (as `chase_cap`) "
+            f"as sim2() arguments, and note that {', '.join(ENGINE_ONLY_KNOBS)} "
+            "are not implemented in research/ at all — express "
+            "hold-to-settlement through exit_thresh_by_slug."
         )
 
 
@@ -483,15 +489,13 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
 
         up_ask = w.up_ba[i]
         dn_ask = w.dn_ba[i]
-        if p.pair_cost_gate is not None and p.pair_cost_gate > 0:
-            if up_ask is not None and dn_ask is not None:
-                pair_cost_ok = (up_ask + dn_ask) <= p.pair_cost_gate
-            else:
-                pair_cost_ok = True
-        else:
-            pair_cost_ok = True
+        # Issue #227 deleted the entry-side pair-cost test that stood here. It
+        # compared the book's two asks against the cap, and the two asks of a
+        # binary pair always sum to roughly 1.00-1.01, so it carried no
+        # information about the market. `max_pair_cost` caps the leg chase and
+        # nothing else.
 
-        if not queue_ok or not pair_cost_ok:
+        if not queue_ok:
             if (filled_up and not filled_dn and max_dn >= exit_thr
                     and not reversal_dn and not exit_taken):
                 bb = w.up_bb[i]
@@ -867,7 +871,7 @@ def _get_cache() -> list[Win]:
 
 def default_base_params() -> BacktestParams:
     return BacktestParams(
-        offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
+        offset=0.02, queue_gate=0.0,
         merge_gas_usd=0.0, taker_fee_rate=0.07,
         quote_shares=5, entry_timeout_pct=0.0,
         max_start_elapsed_pct=0.0,
@@ -1098,7 +1102,7 @@ def _parity(file_substr: str = "") -> int:
         replace(default_base_params(), exit_reversal=0.03),
         replace(default_base_params(), entry_timeout_pct=0.10),
         replace(default_base_params(), entry_timeout_pct=0.10, max_start_elapsed_pct=0.10),
-        replace(default_base_params(), pair_cost_gate=1.01, queue_gate=25.0),
+        replace(default_base_params(), queue_gate=25.0),
         replace(default_base_params(), exit_thresh_by_slug={
             "default_5m": 0.05, "default_15m": 0.06,
             "btc-up-or-down-5m": 0.05, "sol-up-or-down-5m": 0.06}),

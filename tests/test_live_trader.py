@@ -3563,6 +3563,10 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
         neg_risk=False,
     )
 
+    # Pinned rather than left at the #227 default of 0.99, which would put the
+    # ceiling exactly on the DOWN ask and complete the pair -- this test is
+    # about the cap biting, so it needs a cap below the ask.
+    engine.max_pair_cost = 0.98
     _open_50_50_quotes(engine, slug, fake_market, now - 1)
     # Initial resting bids: 0.48 / 0.48.
     # Poll 1: UP ask is 0.48 -> UP fills at 0.48.

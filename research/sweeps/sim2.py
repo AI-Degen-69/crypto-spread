@@ -6,7 +6,10 @@ preserves engine parity):
   chase_cap - leg-chase pairs rule (mirrors live issue #123): after exactly
   one leg fills, the opposite quote is re-anchored each tick to
   min(ask, chase_cap - entry) (never lowered), converting the naked leg into
-  a pair at <= cap.
+  a pair at <= cap. This is `BacktestParams.max_pair_cost` under an older
+  name, taken as an argument rather than read off the params -- the ceiling
+  itself comes from `book_math.chase_cap`, the one copy both engines use
+  (issue #227). The extra min(0.99, ...) is sim2's own quotable-price clamp.
 
 Fills come from `book_math.resting_bid_filled` -- the one rule both engines
 run (issue #226, ADR-0002). `fill_model="tapeq"`, a queue-aware model with no
@@ -19,7 +22,6 @@ Rows returned are compatible with ev_lab.summarize().
 """
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
@@ -27,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams, resolve_redemption  # noqa: E402
+from strategy import book_math  # noqa: E402
 from strategy.book_math import resting_bid_filled  # noqa: E402
 from ev_lab import (  # noqa: E402
     SIDE_BUY, SIDE_SELL, Win, _mid_from, _two_sided, _queue_ahead, _taker_fee,
@@ -49,8 +52,19 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     Both are read from these arguments, never from `p` — so a caller that sets
     them on the `BacktestParams` instead is rejected rather than quietly
     simulated without them.
+
+    `chase_cap` is `BacktestParams.max_pair_cost` under its research name, so
+    it carries the same range (issue #227): None disables the chase, anything
+    else must sit inside [0.50, 1.00]. Above 1.00 authorises a guaranteed
+    loss, and the engine refuses one — the simulator must too.
     """
     reject_knobs_sim2_ignores(p)
+    if chase_cap is not None and (
+        isinstance(chase_cap, bool)
+        or not isinstance(chase_cap, (int, float))
+        or not (0.50 <= chase_cap <= 1.00)
+    ):
+        raise ValueError(f"chase_cap must be None or between 0.50 and 1.00, got {chase_cap}")
     duration = w.duration
     start_ts = w.start_ts
     first_ts = w.first_ts
@@ -174,15 +188,13 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
 
         up_ask = w.up_ba[i]
         dn_ask = w.dn_ba[i]
-        if p.pair_cost_gate is not None and p.pair_cost_gate > 0:
-            if up_ask is not None and dn_ask is not None:
-                pair_cost_ok = (up_ask + dn_ask) <= p.pair_cost_gate
-            else:
-                pair_cost_ok = True
-        else:
-            pair_cost_ok = True
+        # Issue #227 deleted the entry-side pair-cost test that stood here. It
+        # compared the book's two asks against the cap, and the two asks of a
+        # binary pair always sum to roughly 1.00-1.01, so it carried no
+        # information about the market. `max_pair_cost` caps the leg chase and
+        # nothing else.
 
-        if not queue_ok or not pair_cost_ok:
+        if not queue_ok:
             if (filled_up and not filled_dn and max_dn >= exit_thr
                     and not reversal_dn and not exit_taken):
                 bb = w.up_bb[i]
@@ -212,14 +224,14 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
         chased_now_up = chased_now_dn = False
         if chase_on and (filled_up != filled_dn) and not pair and not exit_taken:
             if filled_up:
-                cap_px = round(min(0.99, math.floor((chase_cap - resting_up + 1e-9) * 100.0) / 100.0), 3)
+                cap_px = round(min(0.99, book_math.chase_cap(chase_cap, resting_up)), 3)
                 target = min(dn_ask, cap_px) if dn_ask is not None else cap_px
                 if target > resting_dn:
                     resting_dn = target
                     chased_now_dn = True
                 chased_leg = "dn"
             else:
-                cap_px = round(min(0.99, math.floor((chase_cap - resting_dn + 1e-9) * 100.0) / 100.0), 3)
+                cap_px = round(min(0.99, book_math.chase_cap(chase_cap, resting_dn)), 3)
                 target = min(up_ask, cap_px) if up_ask is not None else cap_px
                 if target > resting_up:
                     resting_up = target

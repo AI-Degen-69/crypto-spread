@@ -220,3 +220,41 @@ def test_a_newly_placed_quote_below_the_ask_still_rests():
     from strategy.book_math import resting_bid_filled
 
     assert resting_bid_filled(0.48, 0.51, [], tick=0.001, newly_placed=True) is False
+
+
+# --- chase_cap (issue #227) ----------------------------------------------
+
+def test_chase_cap_floors_to_whole_cents():
+    """Cent flooring, so `entry + chased` cannot exceed the cap by rounding."""
+    from strategy.book_math import chase_cap
+
+    # 0.99 - 0.485 = 0.505, which must floor DOWN to 0.50, not round to 0.51.
+    assert chase_cap(0.99, 0.485) == 0.50
+    assert chase_cap(0.99, 0.48) == 0.51
+    assert chase_cap(0.98, 0.48) == 0.50
+
+
+def test_chase_cap_never_lets_the_pair_exceed_the_ceiling():
+    from strategy.book_math import chase_cap
+
+    for entry in (0.31, 0.42, 0.485, 0.50, 0.517, 0.63):
+        assert entry + chase_cap(0.99, entry) <= 0.99 + 1e-9
+
+
+def test_chase_cap_is_negative_when_the_entry_already_breached_the_cap():
+    """A leg bought above the cap leaves nothing to spend; the chase must not raise.
+
+    `min(ask, cap)` is then below any quotable price, which is how both engines
+    express "do not chase" without a separate branch.
+    """
+    from strategy.book_math import chase_cap
+
+    assert chase_cap(0.99, 1.00) == -0.01
+
+
+def test_chase_cap_of_an_unparseable_entry_is_unknown():
+    from strategy.book_math import chase_cap
+
+    assert chase_cap(0.99, None) is None
+    assert chase_cap(0.99, "abc") is None
+    assert chase_cap("abc", 0.48) is None

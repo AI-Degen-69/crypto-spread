@@ -557,8 +557,8 @@ def api_params_spec():
         """Serialize one knob, resolving its bounds for every surface it has.
 
         Each tab renders the range that surface actually enforces (issue #164
-        review): research sweeps `pair_cost_gate` above 1.00 to disable the
-        gate, while live caps `max_pair_cost` at 1.00.
+        review). No knob declares a per-surface override today — the one that
+        did, `pair_cost_gate`, was unified with live by issue #227.
         """
         return {
             **v,
@@ -621,7 +621,7 @@ def api_backtest(
     file: str = "",
     offset: float = 0.02,
     queue: float = 0.0,
-    pair_cost: float = 1.05,
+    pair_cost: float = 0.99,
     exit_default_5m: float = 0.05,
     exit_default_15m: float = 0.05,
     exit_btc_5m: float = 0.05,
@@ -698,7 +698,7 @@ def api_backtest(
     params = BacktestParams(
         offset=_clamp_to_spec("offset", offset),
         queue_gate=_clamp_to_spec("queue_gate", queue),
-        pair_cost_gate=_clamp_to_spec("pair_cost_gate", pair_cost),
+        max_pair_cost=_clamp_to_spec("max_pair_cost", pair_cost),
         exit_thresh_by_slug=exit_thresh,
         exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
         quote_shares=_clamp_to_spec("quote_shares", size),
@@ -768,7 +768,7 @@ def api_backtest(
             "params": {
                 "offset": params.offset,
                 "queue": params.queue_gate,
-                "pair_cost": params.pair_cost_gate,
+                "pair_cost": params.max_pair_cost,
                 "exit_default_5m": exit_default_5m,
                 "exit_default_15m": exit_default_15m,
                 "exit_btc_5m": exit_btc_5m,
@@ -2406,17 +2406,8 @@ textarea:focus-visible,
               <input type="number" min="0" max="0.5" step="0.005" id="btEntryBand" data-param="entry_band" value="0">
             </div>
             <div class="form-group">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <label for="btPairCost" data-param-label="pair_cost_gate"></label>
-                <label class="toggle-wrap" title="Enable or disable max pair cost filter">
-                  <span id="btPairCostToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--dim)">OFF</span>
-                  <div class="toggle-switch">
-                    <input type="checkbox" id="btPairCostEnabled" onchange="togglePairCostInput()">
-                    <span class="toggle-slider"></span>
-                  </div>
-                </label>
-              </div>
-              <input type="number" step="0.005" id="btPairCost" data-param="pair_cost_gate" value="1.05" disabled style="opacity:0.45">
+              <label for="btPairCost" data-param-label="max_pair_cost"></label>
+              <input type="number" min="0.5" max="1" step="0.005" id="btPairCost" data-param="max_pair_cost" value="0.99">
             </div>
             <div class="form-group" id="btStopLossHead">
               <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2789,8 +2780,8 @@ textarea:focus-visible,
           <input type="number" min="0" max="0.5" step="0.005" id="cockpitEntryBand" data-param="entry_band" value="0" placeholder="0 = off" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label data-param-label="pair_cost_gate"></label>
-          <input type="number" min="0" max="2" step="0.005" id="cockpitPairCost" data-param="pair_cost_gate" value="0.98" placeholder="max pair cost" oninput="validateCockpitInputs()">
+          <label data-param-label="max_pair_cost"></label>
+          <input type="number" min="0.5" max="1" step="0.005" id="cockpitPairCost" data-param="max_pair_cost" value="0.99" placeholder="max pair cost" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="reentry_drift_band"></label>
@@ -3931,20 +3922,6 @@ function runBacktestOnFile(filename){
   runBacktest(filename);
 }
 
-function togglePairCostInput(){
-  const enabled = $('btPairCostEnabled') ? $('btPairCostEnabled').checked : false;
-  const inp = $('btPairCost');
-  const lbl = $('btPairCostToggleLabel');
-  if(inp){
-    inp.disabled = !enabled;
-    inp.style.opacity = enabled ? '1' : '0.45';
-  }
-  if(lbl){
-    lbl.textContent = enabled ? 'ON' : 'OFF';
-    lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
-  }
-}
-
 // Issue #201: one switch owns every stop-loss threshold. Off hides AND disables
 // the fields so a stale value cannot leak back into the /api/backtest request.
 function toggleStopLossInputs(){
@@ -4031,8 +4008,7 @@ async function runBacktest(fileOverride){
 
     const offset = getVal('btOffset', 0.02);
     const queue = getVal('btQueue', 50);
-    const pairCostEnabled = $('btPairCostEnabled') ? $('btPairCostEnabled').checked : false;
-    const pairCost = pairCostEnabled ? getVal('btPairCost', 1.05) : 0.0;
+    const pairCost = getVal('btPairCost', 0.99);
     const exit5m = getVal('btExit5m', 0.05);
     const exit15m = getVal('btExit15m', 0.05);
     const exitBtc = getVal('btExitBtc', 0.05);
@@ -4310,11 +4286,7 @@ function renderBacktestTradesPage() {
 function resetBtParams(){
   $('btOffset').value = "0.02";
   $('btQueue').value = "0";
-  if ($('btPairCostEnabled')) {
-    $('btPairCostEnabled').checked = false;
-    togglePairCostInput();
-  }
-  $('btPairCost').value = "1.05";
+  $('btPairCost').value = "0.99";
   if ($('btStopLossEnabled')) {
     $('btStopLossEnabled').checked = true;
     toggleStopLossInputs();
@@ -4343,17 +4315,13 @@ function resetBtParams(){
 // reproducible 1-click config, then auto-runs the backtest. Aborts without
 // running if any required input is missing (no half-applied state).
 function applyWinningConfig(){
-  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btStopLossEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
+  const required = ['btOffset','btQueue','btPairCost','btStopLossEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
   for (const id of required) { if (!$(id)) return; }
   $('btOffset').value = "0.03";
   $('btQueue').value = "0";
   $('btEntryDelay').value = "60";
   $('btEntryBand').value = "0.04";
   $('btPairCost').value = "0.98";
-  if ($('btPairCostEnabled') && !$('btPairCostEnabled').checked) {
-    $('btPairCostEnabled').checked = true;
-    togglePairCostInput();
-  }
   $('btSize').value = "5";
   // Issue #201: the preset is hold-to-settle. It used to express that with
   // 0.49/0.50 stops — a threshold drift can still technically reach — so it now

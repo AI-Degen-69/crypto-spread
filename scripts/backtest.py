@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None):
                     help="ticks file, .jsonl.gz, or directory")
     ap.add_argument("--offset", type=float, default=0.020)
     ap.add_argument("--queue", type=float, default=50.0)
-    ap.add_argument("--pair-cost", type=float, default=1.05)
+    ap.add_argument("--pair-cost", type=float, default=0.99)
     ap.add_argument("--exit", action="append", default=[],
                     help="key=value, e.g. --exit btc-up-or-down-5m=0.09 (repeatable)")
     ap.add_argument("--exit-default-5m", type=float, default=0.05)
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None):
 
     params = BacktestParams(
         offset=args.offset, queue_gate=args.queue,
-        pair_cost_gate=args.pair_cost, exit_thresh_by_slug=exit_thresh,
+        max_pair_cost=args.pair_cost, exit_thresh_by_slug=exit_thresh,
         exit_reversal=args.exit_reversal, quote_shares=args.size,
         merge_gas_usd=args.gas,
         max_start_delay_sec=max_start_delay,
@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None):
         entry_band=args.entry_band,
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
-          f"pair_cost={params.pair_cost_gate} "
+          f"pair_cost={params.max_pair_cost} "
           f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct:.2%} "
           f"entry_delay={params.entry_delay_sec}s entry_band={params.entry_band} "
           f"params_hash={params.params_hash()}")

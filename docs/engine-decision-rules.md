@@ -272,9 +272,9 @@ paying more for the pair than the pair returns. Both engines clamp to 1.00.
    skipped fill detection when it failed. Deleted; the offset already controls entry cost
    directly and legibly.
 2. **The declared range divergence.** The backtest's default of 1.05 existed only to disable
-   that entry block by sweeping above 1.00 (documented at `backtest/engine.py:352-360`). With
-   the block gone there is nothing to disable, so the two engines share one range and one
-   default, and the exception disappears.
+   that entry block by sweeping above 1.00, and `bounds_for()` carried a per-surface override
+   to render it. With the block gone there is nothing to disable, so the two engines share one
+   range and one default, and the exception disappears — no knob declares an override today.
 
 **Not a market gate.** Checking the book's two asks at entry was considered and rejected: the
 two asks of a binary pair always sum to roughly 1.00-1.01, so the check carries no

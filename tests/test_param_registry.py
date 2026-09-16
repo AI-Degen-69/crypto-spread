@@ -73,10 +73,10 @@ def test_every_raw_entry_has_the_expected_tuple_shape():
 def test_every_default_lies_inside_its_own_bounds():
     """A default outside its advertised range is a form that rejects its own value.
 
-    Caught exactly this: `pair_cost_gate` defaults to 1.05, and copying live's
+    Caught exactly this: `pair_cost_gate` defaulted to 1.05, and copying live's
     `max_pair_cost` range of (0.50, 1.00) onto it made the registry advertise a
-    range excluding the engine's own default — every sweep in
-    `research/sweeps/` constructs it at 1.05.
+    range excluding the engine's own default. Issue #227 resolved it the other
+    way — one field, one default of 0.99, inside one range.
     """
     live = BacktestParams()
     bad = []
@@ -136,9 +136,12 @@ def test_the_registry_does_not_claim_post_init_enforces_every_bound():
     Review flagged the docstring as false: twelve registry-bounded fields have
     no `__post_init__` check, and every driver in `research/sweeps/` builds
     `BacktestParams` directly, bypassing the API clamp. Rather than add
-    validation that would reject configurations those sweeps legitimately use
-    (`pair_cost_gate=1.05` is the dataclass default *and* the research
-    baseline), the claim was corrected. This pins that it stays corrected.
+    validation that would reject configurations those sweeps legitimately use,
+    the claim was corrected. This pins that it stays corrected.
+
+    The worked example used to be `pair_cost_gate`. Issue #227 made that one a
+    validated structural limit, so the example moved to `queue_gate`, which is
+    still registry-bounded and still unchecked at construction.
     """
     doc = BacktestParams.param_spec.__doc__ or ""
     assert "NOT a claim about" in doc, (
@@ -146,8 +149,8 @@ def test_the_registry_does_not_claim_post_init_enforces_every_bound():
         "validation rather than dataclass validation")
     # And the gap it describes is real: a direct construction outside bounds
     # still succeeds, which is exactly why the wording matters.
-    low, high = BacktestParams.spec_for("pair_cost_gate")["bounds"]
-    assert BacktestParams(pair_cost_gate=high + 1.0).pair_cost_gate == high + 1.0
+    low, high = BacktestParams.spec_for("queue_gate")["bounds"]
+    assert BacktestParams(queue_gate=high + 1.0).queue_gate == high + 1.0
 
 
 @pytest.mark.parametrize("name,low,high", [
@@ -157,6 +160,7 @@ def test_the_registry_does_not_claim_post_init_enforces_every_bound():
     ("reentry_min_remaining_pct", 0.0, 1.0),
     ("entry_delay_sec", 0.0, 3600.0),
     ("entry_band", 0.0, 0.50),
+    ("max_pair_cost", 0.50, 1.00),
 ])
 def test_registered_bounds_match_post_init_validation(name, low, high):
     """The UI must refuse exactly what the engine refuses, not a wider range."""
@@ -171,7 +175,7 @@ def test_registered_bounds_match_post_init_validation(name, low, high):
 def test_knobs_the_live_engine_exposes_are_marked_for_the_cockpit():
     """The Cockpit had no input for the two knobs that define the preset."""
     for name in ("entry_delay_sec", "entry_band", "reentry_drift_band",
-                 "min_requote_remaining_sec", "pair_cost_gate", "offset",
+                 "min_requote_remaining_sec", "max_pair_cost", "offset",
                  "quote_shares", "entry_timeout_pct", "exit_reversal"):
         spec = next(g[name] for g in SPEC.values() if name in g)
         assert "cockpit" in spec["surfaces"], (
@@ -197,3 +201,19 @@ def test_grouped_params_still_works_unchanged():
     assert g["trading_knobs"]["offset"] == pytest.approx(0.020)
     assert g["trading_knobs"]["exit_default_5m"] == pytest.approx(0.05)
     assert "taker_fee_rate" in g["execution_assumptions"]
+
+
+def test_zero_is_no_longer_a_way_to_switch_the_pair_cost_cap_off():
+    """0.0 used to disable the gate. It is now simply out of range (#227).
+
+    The lower bound matters more than the upper one for muscle memory: every
+    driver written against `pair_cost_gate` could pass 0.0 to mean "no cap",
+    and under the new field that reads as a cap of zero, which would stop the
+    chase dead on every window instead of freeing it. It raises.
+    """
+    for off in (0.0, 0.49):
+        with pytest.raises(ValueError, match="max_pair_cost"):
+            BacktestParams(max_pair_cost=off)
+    # And the bound itself is inclusive on both ends.
+    assert BacktestParams(max_pair_cost=0.50).max_pair_cost == 0.50
+    assert BacktestParams(max_pair_cost=1.00).max_pair_cost == 1.00

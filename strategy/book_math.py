@@ -25,6 +25,7 @@ unknown rather than as zero.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, Optional
 
 # A lone bid implies the true mid sits somewhere above it, and a lone ask
@@ -166,6 +167,36 @@ def resting_bid_filled(resting: Any, best_ask: Any,
     if newly_placed:
         return ask <= (price + 1e-6)
     return ask <= (price - tick + 1e-6)
+
+
+def chase_cap(max_pair_cost: Any, entry_price: Any) -> Optional[float]:
+    """The highest bid the leg chase may post for the unfilled leg (issue #227).
+
+    A binary pair settles at exactly 1.00, so a completed pair costing more than
+    that is a guaranteed loss. `max_pair_cost` is the ceiling on the completed
+    pair; one leg is already bought at `entry_price`, so what remains for the
+    other is the difference -- floored to whole cents, because the venue quotes
+    in cents and rounding up would breach the ceiling by a cent.
+
+    The single ceiling formula, shared by the backtest engine and the live
+    trader so the two cannot drift apart. `docs/engine-decision-rules.md` §4 and
+    ADR-0003 carry the reasoning.
+
+    A **negative** result is meaningful, not an error: the filled leg already
+    cost more than the whole pair may, so there is nothing left to spend. Both
+    engines express that through `min(ask, cap)`, which then sits below any
+    quotable price and raises nothing -- no separate branch needed.
+
+    Anything unparseable is unknown, never zero: zero reads as "chase to the
+    floor", which is a decision, and we have not made one.
+    """
+    cap = _as_price(max_pair_cost)
+    entry = _as_price(entry_price)
+    if cap is None or entry is None:
+        return None
+    # `+ 1e-9` before the floor: 0.51 * 100 lands on 50.999999... in binary, and
+    # without the nudge a legitimate 0.51 floors to 0.50.
+    return round(math.floor((cap - entry + 1e-9) * 100.0) / 100.0, 2)
 
 
 def pair_cost(up: Any, down: Any) -> Optional[float]:

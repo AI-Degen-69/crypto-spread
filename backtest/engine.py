@@ -115,7 +115,13 @@ class BacktestParams:
     """All knobs the engine consumes. Frozen = deterministic replay."""
     offset: float = 0.020
     queue_gate: float = 0.0           # 0 disables
-    pair_cost_gate: float = 1.05
+    # Issue #227: the ceiling on a *completed pair*, and it caps the leg chase
+    # only. A binary pair settles at 1.00, so a cap above that authorises a
+    # guaranteed loss; both engines refuse one. Named for what it is, matching
+    # live. It was `pair_cost_gate` at 1.05 -- a research value chosen to sit
+    # above the top of live's range purely so a sweep could switch off an
+    # entry-side block that no longer exists.
+    max_pair_cost: float = 0.99
     exit_thresh_by_slug: dict = field(default_factory=lambda: {
         "btc-up-or-down-5m": 0.05, "sol-up-or-down-5m": 0.05,
         "btc-up-or-down-15m": 0.05, "sol-up-or-down-15m": 0.05,
@@ -181,7 +187,7 @@ class BacktestParams:
     naked_leg_timeout_pct: float = 0.0
     # Issue #164: mirrors LiveTraderEngine.enable_leg_chase (issue #123). Once
     # one leg fills, the other is re-anchored each tick toward its ask, capped
-    # so the pair still costs at most `pair_cost_gate` — converting a naked leg
+    # so the pair still costs at most `max_pair_cost` — converting a naked leg
     # into a pair at or under the cap instead of riding it. The quote is only
     # ever raised, never lowered. False = off = today's behaviour.
     enable_leg_chase: bool = False
@@ -208,13 +214,12 @@ class BacktestParams:
              "$", (0.001, 0.49), ("backtest", "cockpit")),
             ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
              "shares", (0.0, 100000.0), ("backtest",)),
-            # Research sweeps a gate that may sit above 1.00 to disable it —
-            # the dataclass default is 1.05 — while the live engine caps
-            # `max_pair_cost` at 1.00. One global range cannot be honest about
-            # both, so the Cockpit gets the live range and the Backtest keeps
-            # the research one.
-            ("pair_cost_gate", "Max Pair Cost ($)", "Your cost threshold before walking away",
-             "$", (0.0, 2.0), ("backtest", "cockpit"), {"cockpit": (0.50, 1.00)}),
+            # A structural limit, not a tuning knob (ADR-0003): it bounds what
+            # the chase may do at all rather than tuning how it performs. One
+            # range on both surfaces — issue #227 deleted the entry-side block
+            # whose disabling was the only reason the Backtest wanted 2.0.
+            ("max_pair_cost", "Max Pair Cost ($)", "The most the chase may pay to complete a pair",
+             "$", (0.50, 1.00), ("backtest", "cockpit")),
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
              "shares", (5, 10000), ("backtest", "cockpit")),
             ("max_start_delay_sec", "Max Start Delay (s)", "You decide which windows are fresh enough to enter",
@@ -349,11 +354,13 @@ class BacktestParams:
     def bounds_for(cls, name: str, surface: str = "") -> "tuple[float, float] | None":
         """Bounds for one knob on one surface, falling back to the shared pair.
 
-        Issue #164: a single global range cannot describe a knob whose research
-        and live meanings differ — `pair_cost_gate` sweeps above 1.00 to switch
-        the gate off, while live `max_pair_cost` stops at 1.00. Rendering one
-        range on both surfaces either blocks a legitimate sweep or shows the
-        operator a value the request will reject.
+        Issue #164 added per-surface overrides for one case: `pair_cost_gate`
+        swept above 1.00 to switch an entry gate off, while live capped
+        `max_pair_cost` at 1.00. Issue #227 deleted that gate and unified the
+        field, so **no knob declares an override today** — the mechanism stays
+        because the next research/live split will want it, and because the
+        registry test that guards it (an override may tighten a surface, never
+        loosen it) is cheaper to keep than to re-derive.
         """
         spec = cls.spec_for(name)
         if surface and surface in spec.get("surface_bounds", {}):
@@ -404,6 +411,21 @@ class BacktestParams:
                 raise ValueError(
                     f"entry_delay_sec must be between 0.0 and 3600.0, got {self.entry_delay_sec}"
                 )
+        # Issue #227: a structural limit, enforced here and not only at the API
+        # clamp. Every driver in `research/sweeps/` builds this dataclass
+        # directly, and the one value that matters — above 1.00 — is exactly
+        # the one a sweep reached for. There is no "off": 0.0 is out of
+        # range, and so is None (the field is a plain float, and an
+        # unvalidated None would crash the chase at `min(ask, None)`).
+        if (
+            isinstance(self.max_pair_cost, bool)
+            or not isinstance(self.max_pair_cost, (int, float))
+            or not math.isfinite(self.max_pair_cost)
+            or not (0.50 <= self.max_pair_cost <= 1.00)
+        ):
+            raise ValueError(
+                f"max_pair_cost must be between 0.50 and 1.00, got {self.max_pair_cost}"
+            )
         if self.exit_thresh_naked is not None:
             if not math.isfinite(self.exit_thresh_naked) or not (0.0 <= self.exit_thresh_naked <= 0.50):
                 raise ValueError(
@@ -1016,18 +1038,17 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
         up_ask = ub.get("best_ask")
         dn_ask = db.get("best_ask")
-        # Pair cost gate (issue #204: tests resting quote pair cost via book_math.pair_cost; 0 disables)
-        if params.pair_cost_gate <= 0:
-            pair_cost_ok = True
-        elif resting_up is None or resting_down is None:
-            pair_cost_ok = True
-        else:
-            rcost = book_math.pair_cost(resting_up, resting_down)
-            pair_cost_ok = (rcost is None) or (rcost <= (params.pair_cost_gate + 1e-6))
+        # Issue #227 deleted the entry-side pair-cost test that stood here. It
+        # measured our own resting quotes, which cost `1 - 2*offset` by
+        # construction — a constant, not a fact about the market. It therefore
+        # admitted every window or blocked every window depending only on the
+        # offset, and when it blocked it skipped fill detection with the rest of
+        # the branch. `max_pair_cost` now caps the chase and nothing else; the
+        # offset alone decides what an entry costs.
 
         # --- LEG CHASE (issue #164, mirrors live issue #123 and sim2) ---
         # One leg filled: step the other toward its ask, floored to cent
-        # precision so entry + opposite can never exceed `pair_cost_gate`. The
+        # precision so entry + opposite can never exceed `max_pair_cost`. The
         # quote is only ever raised — lowering it would walk away from a fill
         # already within reach. Runs before fill detection so a chase and its
         # fill can land on the same tick, as they do live.
@@ -1041,7 +1062,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         if (params.enable_leg_chase and (filled_up != filled_down)
                 and not pair_captured and not exit_taken
                 and resting_up is not None and resting_down is not None):
-            _cap = params.pair_cost_gate
+            _cap = params.max_pair_cost
             # No ask means nothing to anchor to, and live
             # (`live_trader.py:4406/4421`) wraps its whole chase in
             # `if <leg>_ask is not None`. Advancing to the cap ceiling on a
@@ -1059,7 +1080,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 _ask = db.get("best_ask")
                 if _ask is not None:
                     _entry = entry_price_up if entry_price_up is not None else resting_up
-                    _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                    _max_bid = book_math.chase_cap(_cap, _entry)
                     _target = min(_ask, _max_bid)
                     if _target > resting_down:
                         resting_down = round(min(0.99, max(0.01, _target)), 3)
@@ -1069,14 +1090,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 _ask = ub.get("best_ask")
                 if _ask is not None:
                     _entry = entry_price_down if entry_price_down is not None else resting_down
-                    _max_bid = round(math.floor((_cap - _entry + 1e-9) * 100.0) / 100.0, 2)
+                    _max_bid = book_math.chase_cap(_cap, _entry)
                     _target = min(_ask, _max_bid)
                     if _target > resting_up:
                         resting_up = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "up"
                         chased_now_up = True
 
-        if not queue_ok or not pair_cost_ok:
+        if not queue_ok:
             # An already-filled position must still be eligible to exit even
             # if the live book no longer meets the entry gate. Check exit
             # BEFORE updating the reversal flag, otherwise the crossing tick
