@@ -29,29 +29,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from strategy.live_trader import LiveTraderEngine, PATIENT_BAND_MAKER  # noqa: E402
+from strategy.live_trader import LiveTraderEngine  # noqa: E402
 from scripts import run_layout  # noqa: E402
 
 
-def build_engine(band: float, shares: int, starting_balance: float) -> LiveTraderEngine:
+def build_engine(delay: float, shares: int, starting_balance: float) -> LiveTraderEngine:
     """Paper-only engine pinned to the hold-to-settle winner preset; refuses live/stop modes."""
     eng = LiveTraderEngine(load_persisted=False)
-    # Named preset first (offset 0.03 / band 0.04 / delay 60s / no-stop /
-    # max_pair_cost 0.98 / xrp15+bnb15+eth5 universe), then pin the
-    # hold-to-settle extras the preset table does not carry:
+    # Pinned to the hold-to-settle winner configuration (offset 0.03 /
+    # delay 60s / quote_range (0.10, 0.90) / no-stop / max_pair_cost 0.98 /
+    # xrp15+bnb15+eth5 universe):
     #  - naked_leg_timeout_pct=0  -> never force-exit an unpaired leg
-    #  - max_reentries_per_window=0 -> no re-entry (research: negative)
     #  - entry_timeout_pct=1.0    -> never cancel unfilled entry quotes early
     #  - exit_reversal wide       -> mercy rule cannot fire without a stop
     eng.update_config(
-        preset=PATIENT_BAND_MAKER,
         mode="paper",
+        offset=0.03,
+        entry_delay_sec=delay,
+        quote_range=(0.10, 0.90),
+        stop_loss_enabled=False,
+        max_pair_cost=0.98,
+        selected_markets=["xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"],
         shares=shares,
         starting_balance=starting_balance,
-        entry_band=band,  # allows 0.03 variant via CLI
         enable_leg_chase=True,
         naked_leg_timeout_pct=0.0,
-        max_reentries_per_window=0,
         entry_timeout_pct=1.0,
         exit_reversal=0.50,
     )
@@ -109,9 +111,9 @@ def snapshot(eng: LiveTraderEngine) -> dict:
     }
 
 
-async def amain(hours: float, band: float, shares: int,
-               starting_balance: float, run_dir: Path,
-               snap_every_sec: float) -> dict:
+async def amain(hours: float, delay: float, shares: int,
+                starting_balance: float, run_dir: Path,
+                snap_every_sec: float) -> dict:
     """Run the paper engine, append data/ snapshots+trades, write papers/manifest/summary at stop."""
     data_dir = run_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -123,14 +125,12 @@ async def amain(hours: float, band: float, shares: int,
     trades_file.touch()
     started_utc = datetime.now(timezone.utc)
     config_hypothesis = {
-        "preset": PATIENT_BAND_MAKER,
         "offset": 0.03,
-        "entry_band": band,
-        "entry_delay_sec": 60.0,
+        "quote_range": [0.10, 0.90],
+        "entry_delay_sec": delay,
         "stop_loss_enabled": False,
         "hold_to_settle": True,
         "naked_leg_timeout_pct": 0.0,
-        "max_reentries_per_window": 0,
         "entry_timeout_pct": 1.0,
         "enable_leg_chase": True,
         "max_pair_cost": 0.98,
@@ -150,15 +150,15 @@ async def amain(hours: float, band: float, shares: int,
     run_layout.write_paper_stub(
         run_dir, "abstract-and-methodology",
         f"Abstract & methodology — {run_dir.name}",
-        f"<p>preset={PATIENT_BAND_MAKER} mode=paper band={band} "
+        f"<p>mode=paper delay={delay} "
         f"shares={shares} planned_hours={hours}</p>"
         f"<pre>{json.dumps(config_hypothesis, indent=2)}</pre>",
     )
 
-    eng = build_engine(band, shares, starting_balance)
+    eng = build_engine(delay, shares, starting_balance)
     eng.start()
     print(f"[shadow] engine started mode={eng.mode} preset={eng.active_preset} "
-          f"band={eng.entry_band} delay={eng.entry_delay_sec} "
+          f"delay={eng.entry_delay_sec} "
           f"stop_loss={eng.stop_loss_enabled} shares={eng.shares}", flush=True)
     print(f"[shadow] snapshots -> {snap_file}", flush=True)
 
@@ -229,7 +229,7 @@ async def amain(hours: float, band: float, shares: int,
             "started_utc": started_utc.isoformat(),
             "stopped_utc": stopped_utc.isoformat(),
             "tz": run_layout.local_tz_abbr(),
-            "preset": PATIENT_BAND_MAKER,
+            "preset": "hold_to_settle",
             "config_hypothesis": config_hypothesis,
             "planned_hours": hours,
             "final": {k: final[k] for k in (
@@ -250,7 +250,8 @@ def main() -> None:
     """CLI: resolve the runs/paper dir (or --outdir escape hatch) and run amain."""
     ap = argparse.ArgumentParser(description="Shadow EV pilot (paper only)")
     ap.add_argument("--hours", type=float, default=11.0)
-    ap.add_argument("--band", type=float, default=0.04)
+    ap.add_argument("--delay", type=float, default=60.0)
+    ap.add_argument("--band", type=float, default=None, help="deprecated inert flag")
     ap.add_argument("--shares", type=int, default=5)
     ap.add_argument("--starting-balance", type=float, default=1000.0)
     ap.add_argument("--snap-every", type=float, default=60.0)
@@ -268,7 +269,7 @@ def main() -> None:
         run_dir = run_layout.new_run_dir(
             "paper", now_local, run_layout.local_tz_abbr())
     print(f"[shadow] run dir -> {run_dir} (stamp {stamp})", flush=True)
-    asyncio.run(amain(args.hours, args.band, args.shares,
+    asyncio.run(amain(args.hours, args.delay, args.shares,
                       args.starting_balance, run_dir, args.snap_every))
 
 

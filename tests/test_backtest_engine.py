@@ -716,8 +716,6 @@ def test_replay_trades_sample_untruncated_with_prices():
 def test_entry_delay_band_defaults_off():
     p = BacktestParams()
     assert p.entry_delay_sec == 0.0
-    # Issue #228: the band gate is deleted; the field is inert (T5 removes it).
-    assert p.entry_band == 0.0
     assert p.quote_range == (0.10, 0.90)
 
 
@@ -732,10 +730,6 @@ def test_entry_delay_band_reject_out_of_range():
         BacktestParams(entry_delay_sec=-1.0)
     with pytest.raises(ValueError):
         BacktestParams(entry_delay_sec=3600.01)
-    with pytest.raises(ValueError):
-        BacktestParams(entry_band=-0.01)
-    with pytest.raises(ValueError):
-        BacktestParams(entry_band=0.51)
 
 
 def test_quote_range_rejects_out_of_range():

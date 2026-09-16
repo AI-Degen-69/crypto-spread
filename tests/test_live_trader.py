@@ -1862,17 +1862,6 @@ def test_drift_after_a_healthy_open_never_cancels_resting_quotes():
 # tests/test_quote_range_parity.py (T3).
 
 
-def test_update_config_accepts_max_reentries_per_window():
-    """update_config exposes the per-window cap like the other re-entry knobs."""
-    engine = _drift_engine()
-    engine.is_running = False  # parameter changes are rejected while running
-    res = engine.update_config(max_reentries_per_window=3)
-    assert engine.max_reentries_per_window == 3
-    assert res["params"]["max_reentries_per_window"] == 3
-
-    engine.update_config(max_reentries_per_window=-2)
-    assert engine.max_reentries_per_window == 0
-
 
 def test_update_config_quote_range_roundtrip_and_refusals():
     """Issue #228: quote_range round-trips through update_config; each end
@@ -3208,7 +3197,6 @@ def test_unpriceable_book_prevents_quoting():
     engine = LiveTraderEngine(load_persisted=False)
     engine.is_running = True
     engine.entry_delay_sec = 0.0
-    engine.entry_band = 0.0
     slug = "eth-up-or-down-5m"
     now = time.time()
     fake_market = LiveMarket(

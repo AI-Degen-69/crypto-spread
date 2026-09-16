@@ -102,17 +102,10 @@ def test_generate_sensitivity_grid():
     assert any("offset=" in label for label in labels)
     assert any("queue=" in label for label in labels)
     assert any("exit_5m=" in label for label in labels)
-    assert any("reentry_band=" in label for label in labels)
-    assert any("requote_min=" in label for label in labels)
-    # The baseline's 0.015 band / 60s requote are skipped, others carried.
-    reentry_rows = [(lbl, p) for lbl, p in grid if "reentry_band=" in lbl]
-    assert reentry_rows
-    assert all(p.min_requote_remaining_sec == base.min_requote_remaining_sec
-               for _, p in reentry_rows)
-    requote_rows = [(lbl, p) for lbl, p in grid if "requote_min=" in lbl]
-    assert requote_rows
-    assert all(p.reentry_drift_band == base.reentry_drift_band
-               for _, p in requote_rows)
+    assert any("quote_range=" in label for label in labels)
+    qr_rows = [(lbl, p) for lbl, p in grid if "quote_range=" in lbl]
+    assert qr_rows
+    assert all(p.offset == base.offset for _, p in qr_rows)
 
 
 def test_generate_joint_grid():
@@ -121,39 +114,34 @@ def test_generate_joint_grid():
         queues=[0.0, 50.0],
         exit_5ms=[0.08, 0.12],
         exit_reversals=[0.02],
-        reentry_bands=[0.015],
-        requote_mins=[60.0],
+        quote_ranges=[(0.10, 0.90)],
     )
-    # 2 * 2 * 2 * 1 * 1 * 1 = 8 combinations
+    # 2 * 2 * 2 * 1 * 1 = 8 combinations
     assert len(grid) == 8
     label, p = grid[0]
     assert isinstance(p, BacktestParams)
     assert "off=" in label
 
 
-def test_generate_joint_grid_sweeps_reentry():
-    """The joint grid sweeps drift-skip re-entry bands and requote minimums."""
+def test_generate_joint_grid_sweeps_quote_range():
+    """The joint grid sweeps quote range bounds."""
     grid = generate_joint_grid(
         offsets=[0.015, 0.020],
         queues=[0.0, 50.0],
         exit_5ms=[0.08, 0.12],
         exit_reversals=[0.02],
-        reentry_bands=[0.0, 0.015, 0.030],
-        requote_mins=[0.0, 60.0],
+        quote_ranges=[(0.05, 0.95), (0.10, 0.90), (0.15, 0.85)],
     )
-    # 2 * 2 * 2 * 1 * 3 * 2 = 48 combinations
-    assert len(grid) == 48
-    bands = sorted({p.reentry_drift_band for _, p in grid})
-    assert bands == [0.0, 0.015, 0.03]
-    requotes = sorted({p.min_requote_remaining_sec for _, p in grid})
-    assert requotes == [0.0, 60.0]
+    # 2 * 2 * 2 * 1 * 3 = 24 combinations
+    assert len(grid) == 24
+    ranges = sorted({p.quote_range for _, p in grid})
+    assert ranges == [(0.05, 0.95), (0.10, 0.90), (0.15, 0.85)]
     labels = [label for label, _ in grid]
-    assert all("_rb=" in label and "_rq=" in label for label in labels)
+    assert all("_qr=" in label for label in labels)
 
-    # The CLI grid preset defaults still vary the band (off / default / wide).
+    # The CLI grid preset defaults vary quote_range.
     default_grid = generate_joint_grid()
-    assert len({p.reentry_drift_band for _, p in default_grid}) == 3
-    assert {p.min_requote_remaining_sec for _, p in default_grid} == {60.0}
+    assert len({p.quote_range for _, p in default_grid}) == 4
 
 
 def test_run_sweep_with_grouped_windows():

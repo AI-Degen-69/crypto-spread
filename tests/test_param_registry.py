@@ -17,14 +17,7 @@ SPEC = BacktestParams.param_spec()
 
 def test_every_engine_field_is_registered_exactly_once():
     """A field absent from the registry is invisible to both UIs."""
-    # Issue #228: entry_band and reentry_* are inert on BacktestParams pending
-    # T5 removal of their last senders (scripts, sims); they are deliberately
-    # absent from the UI registry.
-    _INERT_PENDING_T5 = {
-        "entry_band", "reentry_drift_band", "min_requote_remaining_sec",
-        "reentry_min_remaining_pct", "max_reentries_per_window"
-    }
-    declared = {f.name for f in fields(BacktestParams)} - _INERT_PENDING_T5
+    declared = {f.name for f in fields(BacktestParams)}
     registered = [name for group in SPEC.values() for name in group]
     assert len(registered) == len(set(registered)), (
         "a field is registered in more than one group: "

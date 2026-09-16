@@ -42,7 +42,7 @@ quotable &= (range_mid is None or (QUOTE_LO <= range_mid <= QUOTE_HI))
 Branch `fix/quote-range-228` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 `tasks/plan.md`, `tasks/todo.md` written. No code touched.
 
-### [ ] T1 — `[Backend/Logic]` Backtest: delete both gates, add the range
+### [x] T1 — `[Backend/Logic]` Backtest: delete both gates, add the range
 **Files**: `backtest/engine.py` — field `:170`, registry entry `:229`,
 `__post_init__` `:439-442`, locals `:793`, flags `:804-811`, adverse block
 `:932-946`, band block `:957-963`, re-entry block `:965-1018`, fill guards
@@ -60,7 +60,7 @@ call (operator-approved 2026-09-16, דרך ב'). Timeout/late-start
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_backtest_engine.py -q`.
 
-### [ ] T2 — `[Backend/Logic]` Live: delete both gates + re-entry, add the range
+### [x] T2 — `[Backend/Logic]` Live: delete both gates + re-entry, add the range
 **Files**: `strategy/live_trader.py` — preset table `:660-669` (preset deleted,
 T5), state fields `:734-748`, reset block `:3666-3704`, re-entry method
 `:4160-4260`, open-gate block `:4655-4662`, band block `:4673-4710`,
@@ -75,7 +75,7 @@ in scope — no second mid computation (operator-approved 2026-09-16, דרך ב'
 stay only if another reader uses them — otherwise they go with the gate.
 **Verify**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`.
 
-### [ ] T3 — `[Test/Parity]` Range parity: entry, exit, re-entry to the range
+### [x] T3 — `[Test/Parity]` Range parity: entry, exit, re-entry to the range
 **Files**: new `tests/test_quote_range_parity.py`, reusing `_snap` /
 `_drive_live` from `tests/test_entry_anchor_parity.py`.
 **Do**: one shared snapshot sequence per scenario, both engines: (a) mid
@@ -87,7 +87,7 @@ holds placement outside it in both. Assert on quotes/fills, never on markers.
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_quote_range_parity.py -q`.
 
-### [ ] T4 — `[API/Dashboard]` Band inputs become range inputs
+### [x] T4 — `[API/Dashboard]` Band inputs become range inputs
 **Files**: `server/osc_dash.py` (query model `:638`, clamp `:688-691`, spec
 pass-through `:712`, echo `:783,:1000`, cockpit schema `:1380`, payload
 `:1504`, Backtest control `:2405-2406`, Cockpit control `:2779-2780`, request
@@ -99,7 +99,7 @@ builder `:4045`, preset/validation maps `:5733-5738`), `tests/test_osc_dash_inte
 **Skills**: `frontend-ui-engineering`, `api-and-interface-design`.
 **Verify**: `python -m pytest tests/test_osc_dash_integration.py tests/test_param_registry.py -q` + browser check.
 
-### [ ] T5 — `[Backend/CLI]` Scripts, sims, preset deletion
+### [x] T5 — `[Backend/CLI]` Scripts, sims, preset deletion
 **Files**: `scripts/backtest.py` (`--entry-band` → `--quote-lo/--quote-hi`);
 `scripts/replay_shadow_check.py` (gates legs keep `entry_delay`; delete the
 `entry_band` leg of the mirror + its recorded comparison);
@@ -111,7 +111,7 @@ builder `:4045`, preset/validation maps `:5733-5738`), `tests/test_osc_dash_inte
 (deleted with the preset — the one file deletion `CONSTRAINTS.md` permits).
 **Verify**: `python -m pytest tests/test_backtest_cli.py tests/test_sweep_backtest.py tests/test_replay_shadow_check.py tests/test_ev_sweep_lab.py -q`.
 
-### [ ] T6 — `[Test]` The tests that encode the deleted gates
+### [x] T6 — `[Test]` The tests that encode the deleted gates
 **Files**: every test file with `entry_band`/`adverse_open` refs (14 files per
 the Station II scan — heaviest: `test_live_trader.py` (48), `test_backtest_engine.py`
 (15), `test_osc_dash_integration.py` (16), `test_patient_band_preset.py` (16,

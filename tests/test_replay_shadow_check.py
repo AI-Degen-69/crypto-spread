@@ -24,13 +24,8 @@ RECORDED = {
     "shares": 5,
     "entry_timeout_pct": 1.0,
     "max_start_elapsed_pct": 0.1,
-    "min_requote_remaining_sec": 300.0,
-    "reentry_min_remaining_pct": 0.3,
-    "max_reentries_per_window": 0,
-    "reentry_drift_band": 0.015,
     "max_pair_cost": 0.98,
     "entry_delay_sec": 60.0,
-    "entry_band": 0.04,
 }
 
 

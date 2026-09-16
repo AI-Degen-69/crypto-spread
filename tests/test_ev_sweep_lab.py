@@ -179,16 +179,16 @@ def test_every_sweep_script_can_resolve_the_functions_it_calls():
 # ---------------------------------------------------------------------------
 
 def test_fast_simulate_refuses_knobs_it_would_otherwise_ignore():
-    """`entry_delay_sec`/`entry_band` define patient_band_maker and were never
-    implemented here, so the parity claim never covered the shipped preset."""
+    """`entry_delay_sec`/`quote_range` define execution parameters and were never
+    implemented here, so the parity claim never covered custom values."""
     from backtest.engine import BacktestParams
-    for kwargs in ({"entry_delay_sec": 60.0}, {"entry_band": 0.04},
-                   {"entry_delay_sec": 60.0, "entry_band": 0.04}):
+    for kwargs in ({"entry_delay_sec": 60.0}, {"quote_range": (0.20, 0.80)},
+                   {"entry_delay_sec": 60.0, "quote_range": (0.20, 0.80)}):
         with pytest.raises(ValueError, match="fast_simulate does not implement"):
             ev_lab._reject_unsupported_knobs(BacktestParams(**kwargs))
-    # Zero means "off" and must stay accepted.
+    # Default values must stay accepted.
     ev_lab._reject_unsupported_knobs(
-        BacktestParams(entry_delay_sec=0.0, entry_band=0.0))
+        BacktestParams(entry_delay_sec=0.0, quote_range=(0.10, 0.90)))
 
 
 def _one_tick_window():
@@ -215,7 +215,7 @@ def test_fast_simulate_itself_enforces_the_guard():
     with pytest.raises(ValueError, match="fast_simulate does not implement"):
         ev_lab.fast_simulate(w, BacktestParams(entry_delay_sec=60.0))
     with pytest.raises(ValueError, match="fast_simulate does not implement"):
-        ev_lab.fast_simulate(w, BacktestParams(entry_band=0.04))
+        ev_lab.fast_simulate(w, BacktestParams(quote_range=(0.20, 0.80)))
     # An unaffected config still simulates.
     assert isinstance(ev_lab.fast_simulate(w, BacktestParams()), dict)
 
@@ -500,7 +500,7 @@ def test_sim2_rejects_its_own_arguments_set_on_the_params_instead():
     """`sim2` takes these as arguments and never reads the fields of the same
     name, so setting them on the params is as silent as not implementing them."""
     from backtest.engine import BacktestParams
-    for kwargs in ({"entry_delay_sec": 60.0}, {"entry_band": 0.04}):
+    for kwargs in ({"entry_delay_sec": 60.0}, {"quote_range": (0.20, 0.80)}):
         with pytest.raises(ValueError, match="sim2 ignores"):
             ev_lab.reject_knobs_sim2_ignores(BacktestParams(**kwargs))
 
@@ -516,7 +516,7 @@ def test_sim2_itself_enforces_the_guard():
     # knobs still work when passed as arguments.
     assert isinstance(sim2(w, BacktestParams()), dict)
     assert isinstance(sim2(w, BacktestParams(), entry_delay_sec=60.0,
-                           entry_band=0.04), dict)
+                           quote_range=(0.20, 0.80)), dict)
 
 
 def test_sim2_refuses_a_chase_cap_above_one():

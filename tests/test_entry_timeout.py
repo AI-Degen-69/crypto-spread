@@ -707,26 +707,3 @@ def test_backtest_late_start_skip_is_never_reentered():
     assert res.reentry_count == 0
     assert res.filled_up is False
 
-
-def test_backtest_reentry_params_match_live_defaults():
-    """Parity: the three re-entry knobs are byte-identical to LiveTraderEngine."""
-    live = LiveTraderEngine(load_persisted=False)
-    bt = BacktestParams()
-    assert bt.reentry_drift_band == live.reentry_drift_band == 0.015
-    assert bt.min_requote_remaining_sec == live.min_requote_remaining_sec == 300.0
-    assert bt.reentry_min_remaining_pct == live.reentry_min_remaining_pct == 0.30
-    assert bt.max_reentries_per_window == live.max_reentries_per_window == 1
-
-
-def test_backtest_rejects_out_of_range_reentry_params():
-    """The three re-entry knobs validate in the existing BacktestParams style."""
-    with pytest.raises(ValueError):
-        BacktestParams(reentry_min_remaining_pct=1.5)
-    with pytest.raises(ValueError):
-        BacktestParams(reentry_drift_band=0.9)
-    with pytest.raises(ValueError):
-        BacktestParams(reentry_drift_band=-0.1)
-    with pytest.raises(ValueError):
-        BacktestParams(min_requote_remaining_sec=-1.0)
-    with pytest.raises(ValueError):
-        BacktestParams(max_reentries_per_window=-1)

@@ -141,38 +141,10 @@ class BacktestParams:
     # LiveTraderEngine.max_start_elapsed_pct. 0 disables.
     max_start_elapsed_pct: float = 0.10
     # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
-    # re-entered once the replay mid reverts within `reentry_drift_band` of 0.50
-    # with at least `min_requote_remaining_sec` left to pair two legs. Only the
-    # gate sets `adverse_skipped` in `_simulate_window`; entry-timeout and
-    # late-start cancels are never re-entered. Defaults are byte-identical to
-    # `LiveTraderEngine.__init__`. 0 disables the respective guard.
-    # Issue #228: the mechanism is deleted and nothing below reads these
-    # fields. They stay until T5 removes their last senders (dashboard query
-    # keys and inputs, sim2, scripts); deleting them now would break every
-    # constructor that still passes them.
-    reentry_drift_band: float = 0.015
-    # Mirrors LiveTraderEngine.DEFAULT_MIN_REQUOTE_REMAINING_SEC (issue #89), which
-    # issue #95 shares rather than defining a second knob with the same meaning. At
-    # 300s a 5m window can never clear the gate, so only 15m windows re-enter until
-    # an operator lowers it; the tests set it explicitly to exercise the rule.
-    min_requote_remaining_sec: float = 300.0
-    # Re-entry time gate as a fraction of the window, mirroring
-    # LiveTraderEngine.reentry_min_remaining_pct. The effective gate is the tighter
-    # of this and `min_requote_remaining_sec`, so a 5m replay needs 90s left and a
-    # 15m one 270s. 0 or >= 1.0 falls back to the absolute knob alone.
-    reentry_min_remaining_pct: float = 0.30
-    # How many times one window may be recovered by re-entry. 1 keeps a market
-    # oscillating across the band from thrashing the book for a whole window;
-    # 0 disables re-entry outright. Mirrors LiveTraderEngine.
-    max_reentries_per_window: int = 1
     # Patient undecided-band maker knobs (issue #145, mirrors issue #137 live
     # semantics). `entry_delay_sec` holds all quoting until that many seconds
     # into the window (0 = off). Defaults preserve the current behavior exactly.
     entry_delay_sec: float = 0.0
-    # Issue #228: `entry_band` is inert — the post-delay band gate is deleted
-    # and nothing below reads this. The field stays until T5 removes its last
-    # senders (dashboard query key and inputs, scripts flag, sims, tests).
-    entry_band: float = 0.0
     # Issue #228: the one quotable range, replacing `entry_band` and the
     # adverse-open gate (`docs/engine-decision-rules.md` §6). A structural
     # limit, not a tuning knob (ADR-0003): inside it the window is quoted,
@@ -395,26 +367,6 @@ class BacktestParams:
                 raise ValueError(
                     f"max_start_elapsed_pct must be between 0.0 and 1.0, got {self.max_start_elapsed_pct}"
                 )
-        if self.reentry_drift_band is not None:
-            if not math.isfinite(self.reentry_drift_band) or not (0.0 <= self.reentry_drift_band <= 0.5):
-                raise ValueError(
-                    f"reentry_drift_band must be between 0.0 and 0.5, got {self.reentry_drift_band}"
-                )
-        if self.min_requote_remaining_sec is not None:
-            if not math.isfinite(self.min_requote_remaining_sec) or self.min_requote_remaining_sec < 0:
-                raise ValueError(
-                    f"min_requote_remaining_sec must be >= 0, got {self.min_requote_remaining_sec}"
-                )
-        if self.reentry_min_remaining_pct is not None:
-            if not math.isfinite(self.reentry_min_remaining_pct) or not (0.0 <= self.reentry_min_remaining_pct <= 1.0):
-                raise ValueError(
-                    f"reentry_min_remaining_pct must be between 0.0 and 1.0, got {self.reentry_min_remaining_pct}"
-                )
-        if self.max_reentries_per_window is not None:
-            if self.max_reentries_per_window < 0:
-                raise ValueError(
-                    f"max_reentries_per_window must be >= 0, got {self.max_reentries_per_window}"
-                )
         if self.entry_delay_sec is not None:
             if not math.isfinite(self.entry_delay_sec) or not (0.0 <= self.entry_delay_sec <= 3600.0):
                 raise ValueError(
@@ -444,11 +396,6 @@ class BacktestParams:
             if not math.isfinite(self.naked_leg_timeout_pct) or not (0.0 <= self.naked_leg_timeout_pct <= 1.0):
                 raise ValueError(
                     f"naked_leg_timeout_pct must be between 0.0 and 1.0, got {self.naked_leg_timeout_pct}"
-                )
-        if self.entry_band is not None:
-            if not math.isfinite(self.entry_band) or not (0.0 <= self.entry_band <= 0.50):
-                raise ValueError(
-                    f"entry_band must be between 0.0 and 0.50, got {self.entry_band}"
                 )
         # Issue #228: a structural limit, enforced here and not only at the API
         # clamp (the #227 pattern). Every driver in `research/sweeps/` builds
@@ -818,8 +765,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # one-sided source as `s["mid"]` here); with delay 0 that is the first
     # valid snapshot, exactly as before. Explicit None handling matches the
     # validator (`__post_init__` owns range/finiteness for constructed params).
-    # Issue #228: the entry band is deleted — `params.entry_band` is accepted
-    # but unread — and the range below is judged on the anchor's own mid.
+    # Issue #228: the entry band is deleted and the range below is judged on
+    # the anchor's own two-sided mid.
     entry_delay = 0.0 if params.entry_delay_sec is None else params.entry_delay_sec
     quote_lo, quote_hi = params.quote_range
     resting_up: float | None = None

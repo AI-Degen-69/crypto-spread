@@ -3,12 +3,12 @@
 Reads ticks from a file or directory and prints per-series + overall stats.
 Same parameters the dashboard sliders expose (Plan §2 / T3).
 
-The `patient_band_maker` preset that `strategy/live_trader.py` actually runs
+The configuration that `strategy/live_trader.py` runs
 is reproducible here:
 
   python -m scripts.backtest run/ticks \
       --offset 0.03 --queue 0 --pair-cost 0.98 --size 5 \
-      --entry-delay 60 --entry-band 0.04 \
+      --entry-delay 60 --quote-lo 0.10 --quote-hi 0.90 \
       --exit-default-5m 0.49 --exit-default-15m 0.50 --max-start-delay 0
 
 There is no fill model to choose (issue #226): one rule, the same one the live
@@ -66,11 +66,11 @@ def main(argv: list[str] | None = None):
     # so without them the CLI could only replay a different strategy than the
     # one the bot runs, and the tape-vs-book comparison proved nothing about it.
     ap.add_argument("--entry-delay", type=float, default=0.0,
-                    help="hold all quoting until N seconds into the window "
-                         "(0 disables; patient_band_maker uses 60)")
-    ap.add_argument("--entry-band", type=float, default=0.0,
-                    help="admit only windows still undecided at entry, i.e. "
-                         "|mid-0.50| <= N (0 disables; patient_band_maker uses 0.04)")
+                    help="hold all quoting until N seconds into the window (0 disables)")
+    ap.add_argument("--quote-lo", type=float, default=0.10,
+                    help="lower bound of the quotable two-sided mid range (default 0.10)")
+    ap.add_argument("--quote-hi", type=float, default=0.90,
+                    help="upper bound of the quotable two-sided mid range (default 0.90)")
     ap.add_argument("--start", type=str, default=None,
                     help="inclusive start ISO timestamp, e.g. 2026-08-29T00:00:00Z")
     ap.add_argument("--end", type=str, default=None,
@@ -97,12 +97,12 @@ def main(argv: list[str] | None = None):
         max_start_delay_sec=max_start_delay,
         entry_timeout_pct=args.entry_timeout,
         entry_delay_sec=args.entry_delay,
-        entry_band=args.entry_band,
+        quote_range=(args.quote_lo, args.quote_hi),
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
           f"pair_cost={params.max_pair_cost} "
           f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct:.2%} "
-          f"entry_delay={params.entry_delay_sec}s entry_band={params.entry_band} "
+          f"entry_delay={params.entry_delay_sec}s quote_range={params.quote_range} "
           f"params_hash={params.params_hash()}")
 
     t0 = time.perf_counter()

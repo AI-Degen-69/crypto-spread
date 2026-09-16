@@ -54,16 +54,24 @@ FLIP_CENTS = 100.0
 def build_grid() -> list[dict]:
     """The phase-5 axes -- the grid the reported winner was selected from."""
     out = []
+    ranges = (
+        (0.10, 0.90),
+        (0.15, 0.85),
+        (0.20, 0.80),
+        (0.25, 0.75),
+        (0.30, 0.70),
+        (0.00, 1.00),
+    )
     for off in (0.02, 0.03):
-        for band in (0.01, 0.02, 0.03, 0.04, 0.06, None):
+        for qrange in ranges:
             for delay in (0.0, 30.0, 60.0, 120.0):
                 for chase in (None, 0.98):
                     for ex_none in (True, False):
                         out.append({
-                            "name": (f"off={off}_band={band}_d={delay:.0f}"
+                            "name": (f"off={off}_range={qrange[0]:.2f}-{qrange[1]:.2f}_d={delay:.0f}"
                                      f"_{'ch' if chase else 'nc'}"
                                      f"{'_ex=none' if ex_none else ''}"),
-                            "offset": off, "band": band, "delay": delay,
+                            "offset": off, "quote_range": qrange, "delay": delay,
                             "chase": chase, "ex_none": ex_none})
     return out
 
@@ -73,7 +81,7 @@ def run_config(cache: list[Win], cfg: dict) -> list[dict]:
     if cfg["ex_none"]:
         p = replace(p, exit_thresh_by_slug=dict(HOLD_TO_SETTLEMENT))
     return [sim2(w, p, chase_cap=cfg["chase"],
-                 entry_delay_sec=cfg["delay"], entry_band=cfg["band"])
+                 entry_delay_sec=cfg["delay"], quote_range=cfg["quote_range"])
             for w in cache]
 
 

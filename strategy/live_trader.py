@@ -637,19 +637,8 @@ DEFAULT_MIN_REQUOTE_REMAINING_SEC = 300.0
 # Named live-trading presets (issue #137). `patient_band_maker` encodes the
 # EV-research-winning configuration: delay entry 60s, only enter undecided
 # markets (|mid - 0.50| <= 0.04), quote at mid - 0.03, hold naked legs to
-# settlement (no stop-loss), chase the second leg capped at pair cost 0.98,
-# on the recommended xrp-15m / bnb-15m / eth-5m universe.
-PATIENT_BAND_MAKER = "patient_band_maker"
-LIVE_PRESETS: Dict[str, Dict[str, Any]] = {
-    PATIENT_BAND_MAKER: {
-        "offset": 0.03,
-        "entry_band": 0.04,
-        "entry_delay_sec": 60.0,
-        "stop_loss_enabled": False,
-        "max_pair_cost": 0.98,
-        "selected_markets": ("xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"),
-    },
-}
+# Issue #228: `patient_band_maker` preset deleted with the band gate.
+LIVE_PRESETS: Dict[str, Dict[str, Any]] = {}
 
 
 @dataclass
@@ -938,13 +927,9 @@ class LiveTraderEngine:
         # Issue #137: patient entry delay. `entry_delay_sec` holds all quoting
         # until that many seconds into the window (0 = off);
         # `stop_loss_enabled=False` holds a filled naked leg to
-        # settlement/rollover instead of staging a stop. Defaults preserve
-        # the current behavior exactly.
+        # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
+        # holds all quoting until that far into the window (0 = off).
         self.entry_delay_sec: float = 0.0
-        # Issue #228: `entry_band` is inert — the post-delay band gate is
-        # deleted and nothing below reads this. The field stays until T5
-        # removes its last senders (cockpit input, preset table, tests).
-        self.entry_band: float = 0.0
         # Issue #228: the one quotable range, replacing `entry_band` and the
         # adverse-open gate (`docs/engine-decision-rules.md` §6). A structural
         # limit, not a tuning knob (ADR-0003): inside it the window is quoted,
@@ -978,29 +963,14 @@ class LiveTraderEngine:
             max(0.0, float(min_requote_remaining_sec)) if min_requote_remaining_sec is not None
             else DEFAULT_MIN_REQUOTE_REMAINING_SEC
         )
-        # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
-        # re-entered once the live mid comes back within `reentry_drift_band` of 0.50
-        # and `min_requote_remaining_sec` of the window is left.
-        # Issue #228: the mechanism is deleted and nothing below reads these
-        # fields. They stay until T5 removes their last senders (cockpit
-        # inputs, backtest mirror, tests).
-        self.reentry_drift_band: float = 0.015
-        self.max_reentries_per_window: int = 1
-        # Session tally of drift-skip re-entries and how they ended (issue #95
-        # observability). Counted as each re-entered window closes, so it answers
-        # "did re-entry actually fill anything today?" without reading the file.
+        # Issue #228: empty stats dicts kept for backward compatibility with
+        # callers/state consumers (observe_paper, shadow_ev_pilot, cockpit).
         self.reentry_stats: Dict[str, int] = _empty_reentry_stats()
-        # Entry-band skip tally (issue #137 observability). Counts windows the
-        # post-delay band filter rejected, so the pilot can tell band skips
-        # apart from adverse-open skips without reading the log.
         self.band_skip_stats: Dict[str, int] = _empty_band_skip_stats()
         # Issue #138: fill-telemetry worker mode. True (default) joins tape
         # and appends off the hot path in a daemon thread; False runs inline
         # (deterministic, for tests and debugging).
         self.fill_telemetry_async: bool = True
-        # Re-entry time gate, as a fraction of the window (issue #95).
-        # Issue #228: inert with the mechanism (see above); stays until T5.
-        self.reentry_min_remaining_pct: float = 0.30
         
         # State tracking
         self.selected_series: tuple[tuple[str, int, str], ...] = _resolve_series_selection(
@@ -2684,13 +2654,9 @@ class LiveTraderEngine:
                 "entry_timeout_pct": self.entry_timeout_pct,
                 "max_start_elapsed_pct": self.max_start_elapsed_pct,
                 "min_requote_remaining_sec": self.min_requote_remaining_sec,
-                "reentry_drift_band": self.reentry_drift_band,
-                "reentry_min_remaining_pct": self.reentry_min_remaining_pct,
-                "max_reentries_per_window": self.max_reentries_per_window,
                 "enable_leg_chase": self.enable_leg_chase,
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
-                "entry_band": self.entry_band,
                 "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
                 "stop_loss_enabled": self.stop_loss_enabled,
             },
@@ -2733,16 +2699,12 @@ class LiveTraderEngine:
                       entry_timeout_pct: Optional[float] = None,
                       exit_reversal: Optional[float] = None,
                       min_requote_remaining_sec: Optional[float] = None,
-                      reentry_drift_band: Optional[float] = None,
-                      reentry_min_remaining_pct: Optional[float] = None,
-                      max_reentries_per_window: Optional[int] = None,
                       exit_thresh_naked: Optional[float] = None,
                       naked_leg_timeout_pct: Optional[float] = None,
                       reentry_require_pairable: Optional[bool] = None,
                       enable_leg_chase: Optional[bool] = None,
                       max_pair_cost: Optional[float] = None,
                       entry_delay_sec: Optional[float] = None,
-                      entry_band: Optional[float] = None,
                       quote_range: Optional[Sequence[float]] = None,
                       stop_loss_enabled: Optional[bool] = None,
                       preset: Optional[str] = None) -> Dict[str, Any]:
@@ -2771,15 +2733,15 @@ class LiveTraderEngine:
                 table = LIVE_PRESETS[preset]
                 if offset is None:
                     offset = table["offset"]
-                if entry_band is None:
-                    entry_band = table["entry_band"]
-                if entry_delay_sec is None:
+                if entry_delay_sec is None and "entry_delay_sec" in table:
                     entry_delay_sec = table["entry_delay_sec"]
-                if stop_loss_enabled is None:
+                if quote_range is None and "quote_range" in table:
+                    quote_range = table["quote_range"]
+                if stop_loss_enabled is None and "stop_loss_enabled" in table:
                     stop_loss_enabled = table["stop_loss_enabled"]
-                if max_pair_cost is None:
+                if max_pair_cost is None and "max_pair_cost" in table:
                     max_pair_cost = table["max_pair_cost"]
-                if selected_markets is None and tokens is None and durations is None:
+                if selected_markets is None and tokens is None and durations is None and "selected_markets" in table:
                     selected_markets = list(table["selected_markets"])
             # Market selection is resolved and checked before any scalar field is
             # assigned, so a rejected selection leaves the whole configuration untouched.
@@ -2819,25 +2781,17 @@ class LiveTraderEngine:
                     param_changed = True
                 if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
                     param_changed = True
-                if reentry_drift_band is not None and abs(float(reentry_drift_band) - self.reentry_drift_band) > 1e-6:
-                    param_changed = True
-                if reentry_min_remaining_pct is not None and abs(float(reentry_min_remaining_pct) - self.reentry_min_remaining_pct) > 1e-6:
-                    param_changed = True
                 if exit_thresh_naked is not None and abs(float(exit_thresh_naked) - self._naked_exit_thresh()) > 1e-6:
                     param_changed = True
                 if naked_leg_timeout_pct is not None and abs(float(naked_leg_timeout_pct) - self.naked_leg_timeout_pct) > 1e-6:
                     param_changed = True
                 if reentry_require_pairable is not None and bool(reentry_require_pairable) != self.reentry_require_pairable:
                     param_changed = True
-                if max_reentries_per_window is not None and int(max_reentries_per_window) != self.max_reentries_per_window:
-                    param_changed = True
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
                     param_changed = True
                 if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
                     param_changed = True
                 if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
-                    param_changed = True
-                if entry_band is not None and abs(float(entry_band) - self.entry_band) > 1e-6:
                     param_changed = True
                 if quote_range is not None and (
                         len(list(quote_range)) != 2
@@ -2953,17 +2907,6 @@ class LiveTraderEngine:
                     self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
                 if min_requote_remaining_sec is not None:
                     self.min_requote_remaining_sec = max(0.0, float(min_requote_remaining_sec))
-                if reentry_drift_band is not None:
-                    # Clamped to the same 0..0.50 range as `exit_thresh`; 0 disables
-                    # re-entry entirely by making the band unreachable for any real mid.
-                    self.reentry_drift_band = max(0.0, min(0.50, float(reentry_drift_band)))
-                if reentry_min_remaining_pct is not None:
-                    # 0 or >= 1.0 falls back to the absolute knob alone: a gate of a
-                    # whole window can never be satisfied.
-                    self.reentry_min_remaining_pct = max(0.0, min(1.0, float(reentry_min_remaining_pct)))
-                if max_reentries_per_window is not None:
-                    # Non-negative; 0 disables re-entry entirely via the per-window cap.
-                    self.max_reentries_per_window = max(0, int(max_reentries_per_window))
                 if exit_thresh_naked is not None:
                     # Issue #124: tighter naked-leg stop; clamped to (0, exit_thresh).
                     # Values at/above the paired stop or <= 0 fall back to exit_thresh
@@ -2983,11 +2926,6 @@ class LiveTraderEngine:
                     # Issue #137: seconds into the window before quoting may
                     # start. Negative clamps to 0 (off).
                     self.entry_delay_sec = max(0.0, float(entry_delay_sec))
-                if entry_band is not None:
-                    # Issue #137: |mid - 0.50| admission band at entry time.
-                    # Clamped to the same 0..0.50 range as `exit_thresh`; 0
-                    # disables the filter.
-                    self.entry_band = max(0.0, min(0.50, float(entry_band)))
                 if quote_range is not None:
                     # Issue #228: structural limit — each end clamps to the
                     # price domain like the other knobs above, and an inverted
@@ -4011,17 +3949,17 @@ class LiveTraderEngine:
         table = LIVE_PRESETS.get(name)
         if table is None:
             return False
-        if abs(self.offset - float(table["offset"])) > 1e-9:
+        if "quote_range" in table:
+            lo, hi = table["quote_range"]
+            if abs(self.quote_range[0] - float(lo)) > 1e-9 or abs(self.quote_range[1] - float(hi)) > 1e-9:
+                return False
+        if "entry_delay_sec" in table and abs(self.entry_delay_sec - float(table["entry_delay_sec"])) > 1e-9:
             return False
-        if abs(self.entry_band - float(table["entry_band"])) > 1e-9:
+        if "stop_loss_enabled" in table and self.stop_loss_enabled != bool(table["stop_loss_enabled"]):
             return False
-        if abs(self.entry_delay_sec - float(table["entry_delay_sec"])) > 1e-9:
+        if "max_pair_cost" in table and abs(self.max_pair_cost - float(table["max_pair_cost"])) > 1e-9:
             return False
-        if self.stop_loss_enabled != bool(table["stop_loss_enabled"]):
-            return False
-        if abs(self.max_pair_cost - float(table["max_pair_cost"])) > 1e-9:
-            return False
-        if {s[0] for s in self.selected_series} != set(table["selected_markets"]):
+        if "selected_markets" in table and {s[0] for s in self.selected_series} != set(table["selected_markets"]):
             return False
         return True
 

@@ -35,7 +35,7 @@ CEILING = 0.51
 def _params(**over) -> BacktestParams:
     """Every gate off, chase on, so only the ceiling can decide the outcome."""
     base = dict(offset=OFFSET, entry_timeout_pct=0.0, max_start_elapsed_pct=0.0,
-                entry_band=0.0, enable_leg_chase=True, stop_loss_enabled=False,
+                enable_leg_chase=True, stop_loss_enabled=False,
                 naked_leg_timeout_pct=0.0, max_pair_cost=CAP)
     base.update(over)
     return BacktestParams(**base)
