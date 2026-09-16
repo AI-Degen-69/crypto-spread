@@ -54,7 +54,7 @@ other parameter group.
 
 ## Tasks
 
-### T1 `[Design/UI]` — Restructure the stop-loss markup
+### T1 ✅ `[Design/UI]` — Restructure the stop-loss markup
 - **File:** `server/osc_dash.py` (~2404-2419 thresholds, ~2461-2467 select)
 - **Do:** Delete the standalone `btStopLossEnabled` select `.form-group`. In its
   place at the threshold block, add a header row reusing the pair-cost pattern:
@@ -67,7 +67,7 @@ other parameter group.
 - **Verify:** `python -m pytest tests/test_osc_dash_integration.py -q` still
   green (registry/surface tests must not regress).
 
-### T2 `[Design/UI]` — `toggleStopLossInputs()` + request wiring
+### T2 ✅ `[Design/UI]` — `toggleStopLossInputs()` + request wiring
 - **File:** `server/osc_dash.py` (next to `togglePairCostInput()` ~3897; caller
   ~3976; `resetBtParams()` ~4222; `applyWinningConfig()` ~4255)
 - **Do:** Add `toggleStopLossInputs()`: read `.checked`, set `hidden` on
@@ -79,7 +79,7 @@ other parameter group.
 - **Skill:** `frontend-ui-engineering`
 - **Verify:** page loads with fields visible; toggling Off hides/disables them.
 
-### T3 `[Test]` — Lock the behavior
+### T3 ✅ `[Test]` — Lock the behavior
 - **File:** `tests/test_osc_dash_integration.py`
 - **Do:** Add tests in the existing HTML-string style:
   (a) `btStopLossFields` wrapper exists and the four ids live inside it;
