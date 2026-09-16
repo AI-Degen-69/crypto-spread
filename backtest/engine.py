@@ -414,12 +414,18 @@ class BacktestParams:
         # Issue #227: a structural limit, enforced here and not only at the API
         # clamp. Every driver in `research/sweeps/` builds this dataclass
         # directly, and the one value that matters — above 1.00 — is exactly
-        # the one a sweep reached for. There is no "off": 0.0 is out of range.
-        if self.max_pair_cost is not None:
-            if not math.isfinite(self.max_pair_cost) or not (0.50 <= self.max_pair_cost <= 1.00):
-                raise ValueError(
-                    f"max_pair_cost must be between 0.50 and 1.00, got {self.max_pair_cost}"
-                )
+        # the one a sweep reached for. There is no "off": 0.0 is out of
+        # range, and so is None (the field is a plain float, and an
+        # unvalidated None would crash the chase at `min(ask, None)`).
+        if (
+            isinstance(self.max_pair_cost, bool)
+            or not isinstance(self.max_pair_cost, (int, float))
+            or not math.isfinite(self.max_pair_cost)
+            or not (0.50 <= self.max_pair_cost <= 1.00)
+        ):
+            raise ValueError(
+                f"max_pair_cost must be between 0.50 and 1.00, got {self.max_pair_cost}"
+            )
         if self.exit_thresh_naked is not None:
             if not math.isfinite(self.exit_thresh_naked) or not (0.0 <= self.exit_thresh_naked <= 0.50):
                 raise ValueError(

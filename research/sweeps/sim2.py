@@ -52,8 +52,19 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     Both are read from these arguments, never from `p` — so a caller that sets
     them on the `BacktestParams` instead is rejected rather than quietly
     simulated without them.
+
+    `chase_cap` is `BacktestParams.max_pair_cost` under its research name, so
+    it carries the same range (issue #227): None disables the chase, anything
+    else must sit inside [0.50, 1.00]. Above 1.00 authorises a guaranteed
+    loss, and the engine refuses one — the simulator must too.
     """
     reject_knobs_sim2_ignores(p)
+    if chase_cap is not None and (
+        isinstance(chase_cap, bool)
+        or not isinstance(chase_cap, (int, float))
+        or not (0.50 <= chase_cap <= 1.00)
+    ):
+        raise ValueError(f"chase_cap must be None or between 0.50 and 1.00, got {chase_cap}")
     duration = w.duration
     start_ts = w.start_ts
     first_ts = w.first_ts

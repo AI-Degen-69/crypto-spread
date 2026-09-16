@@ -519,6 +519,23 @@ def test_sim2_itself_enforces_the_guard():
                            entry_band=0.04), dict)
 
 
+def test_sim2_refuses_a_chase_cap_above_one():
+    """`chase_cap` is `max_pair_cost` under its research name: same range.
+
+    The simulator bypasses `BacktestParams` validation for this knob, so it
+    enforces the range itself (issue #227) — otherwise a stale 1.05 would
+    silently simulate a cap both engines refuse.
+    """
+    sim2 = _load("sim2").sim2
+    from backtest.engine import BacktestParams
+    w = _one_tick_window()
+    with pytest.raises(ValueError, match="chase_cap"):
+        sim2(w, BacktestParams(), chase_cap=1.05)
+    # None disables the chase; the floor of the range still simulates.
+    assert isinstance(sim2(w, BacktestParams(), chase_cap=None), dict)
+    assert isinstance(sim2(w, BacktestParams(), chase_cap=0.50), dict)
+
+
 def test_the_guard_compares_against_defaults_not_truthiness():
     """`stop_loss_enabled` defaults to True, so `if getattr(p, k)` — the shape
     the guard had — would reject every ordinary config and wave through

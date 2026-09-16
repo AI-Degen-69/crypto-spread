@@ -157,3 +157,15 @@ def test_the_cap_is_refused_above_one_in_both_engines():
     engine = LiveTraderEngine(load_persisted=False)
     engine.update_config(max_pair_cost=1.05)
     assert engine.max_pair_cost == 1.00
+
+
+def test_the_cap_has_no_off_switch_or_nan_hole():
+    """None, NaN and infinities are refused, not silently skipped.
+
+    The field is a plain float: a None that slipped past validation would
+    crash the chase at `min(ask, None)`, and a NaN would poison every
+    comparison it touches. There is no "off" — 0.0 is out of range.
+    """
+    for bad in (None, float("nan"), float("inf"), float("-inf"), 0.0, True):
+        with pytest.raises(ValueError):
+            BacktestParams(max_pair_cost=bad)
