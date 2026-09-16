@@ -1738,7 +1738,25 @@ class LiveTraderEngine:
             exit_order_id = mstate.order_id_exit_up if is_up else mstate.order_id_exit_down
             exit_token = mstate.up_token if is_up else mstate.down_token
             book_bid = mstate.up_bid if is_up else mstate.down_bid
-            sell_bid = exit_price if exit_price is not None else (book_bid if book_bid is not None else 0.40)
+            sell_bid = exit_price if exit_price is not None else book_bid
+
+        if sell_bid is None:
+            # Invariant 0 (#224): this used to substitute 0.40. A stop that exits
+            # at an invented price is worse than one that has not fired yet, and
+            # the constant was plausible enough that nothing ever looked wrong.
+            # `_resolve_exit_bid` (issue #160) is the same ladder the rollover
+            # settle uses; when every stage of it fails there is no executable
+            # mark, so the position is held and the exit is re-evaluated on the
+            # next tick. The caller left `STOP_EXIT_PENDING` set, and the
+            # reconcile block in `_update_market_strategy` retries from there.
+            try:
+                sell_bid, _bid_src = self._resolve_exit_bid(mstate, side)
+            except RuntimeError:
+                log.warning(
+                    "[%s] Stop exit for %s leg held: no executable bid in book or latch",
+                    mstate.slug, side,
+                )
+                return
 
         now_time_str = datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S")
         if self.mode == "live":
@@ -4119,7 +4137,7 @@ class LiveTraderEngine:
         self,
         mstate: MarketLiveState,
         slug: str,
-        mid: float,
+        mid: Optional[float],
         remaining_sec: float,
         win_duration: float,
         book_two_sided: bool,
@@ -4147,6 +4165,10 @@ class LiveTraderEngine:
 
         Returns True when the window was re-entered on this tick.
         """
+        if mid is None:
+            # Invariant 0 (#224). The whole test below is `abs(mid - 0.50)`, so an
+            # invented mid does not weaken the gate, it inverts it.
+            return False
         if not mstate.adverse_open or not mstate.entry_cancelled_timeout:
             return False
         if mstate.late_start_skip or is_late_start:
@@ -4803,9 +4825,12 @@ class LiveTraderEngine:
             max(0.0, mstate.end_ts - now) if mstate.end_ts > 0
             else max(0.0, win_duration - elapsed_sec)
         )
-        mid_for_reentry = mstate.mid or 0.50
+        # Invariant 0 (#224): `mstate.mid or 0.50` substituted a perfectly balanced
+        # book for an unpriceable one -- and 0.50 is the one value that passes the
+        # drift band by definition, so the gate meant to catch a skewed market was
+        # handed the single input that could never fail it. No mid, no re-entry.
         if self._maybe_reenter_drift_skipped(
-                mstate, slug, mid_for_reentry, remaining_sec, win_duration,
+                mstate, slug, mstate.mid, remaining_sec, win_duration,
                 book_two_sided, is_late_start, now, resting_up, resting_down):
             is_adverse_open = mstate.adverse_open
             # Issue #137: the entry band never gates re-entry; mark it
