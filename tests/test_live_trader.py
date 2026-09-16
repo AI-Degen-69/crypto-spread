@@ -202,7 +202,7 @@ def test_rest_mid_recompute_cannot_tear_against_concurrent_ws_update(monkeypatch
         engine.on_book_update("tok_dn", bids={0.26: 10.0}, asks={0.28: 10.0})
         ws_done.set()
 
-    real_mid = book_math.two_sided_mid_with_default
+    real_mid = book_math.two_sided_mid
 
     def _blocking_mid(up: Any, down: Any) -> Any:
         # Only stall the REST path's own call, and only once.
@@ -214,7 +214,7 @@ def test_rest_mid_recompute_cannot_tear_against_concurrent_ws_update(monkeypatch
             ws_done.wait(timeout=0.5)
         return real_mid(up, down)
 
-    monkeypatch.setattr(book_math, "two_sided_mid_with_default", _blocking_mid)
+    monkeypatch.setattr(book_math, "two_sided_mid", _blocking_mid)
 
     writer = threading.Thread(target=_ws_writer, daemon=True)
     writer.start()
@@ -1831,11 +1831,12 @@ def _drift_engine() -> LiveTraderEngine:
 
 
 def test_adverse_gate_ignores_one_sided_book_at_open():
-    """A one-sided book yields a synthetic mid that must not latch the drift gate."""
+    """A one-sided book yields a synthetic mid that must not latch the drift gate,
+    and under #207 an unpriceable leg holds quoting until both sides exist."""
     engine = _drift_engine()
     slug = "btc-up-or-down-5m"
     now = 1000.0
-    # UP book has no ask: mid collapses to the lone bid (0.34) and fakes a 0.15 drift.
+    # UP book has no ask: mid is None under #207; must not latch DRIFT_SKIPPED and must not quote blind.
     engine._update_market_strategy(slug, _drift_poll_data(
         now,
         {"best_bid": 0.34, "best_ask": None},
@@ -1844,6 +1845,16 @@ def test_adverse_gate_ignores_one_sided_book_at_open():
     m = engine.markets[slug]
     assert m.entry_cancelled_timeout is False
     assert m.status != "DRIFT_SKIPPED"
+    assert m.mid is None
+    assert m.order_status_up != "RESTING"
+    assert m.order_status_down != "RESTING"
+
+    # Once both legs quote two sides, quoting begins safely
+    engine._update_market_strategy(slug, _drift_poll_data(
+        now + 1,
+        {"best_bid": 0.49, "best_ask": 0.51},
+        {"best_bid": 0.49, "best_ask": 0.51},
+    ), now + 1)
     assert m.order_status_up == "RESTING"
     assert m.order_status_down == "RESTING"
 
@@ -3924,5 +3935,99 @@ def test_shadow_snapshot_exports_book_bids():
     assert mkt["last_valid_down_ask"] == 0.51
 
 
+def test_unpriceable_book_yields_none_mid_and_no_drift():
+    """Issue #207: unpriceable book sets mstate.mid to None and does NOT accumulate drift."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xunpriceable_cid",
+        market_slug="btc-up-or-down-5m-fake",
+        up_token="up_token",
+        down_token="dn_token",
+        start_ts=now,
+        end_ts=now + 300,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    # up_book has quotes, but down_book is completely unpriceable (None bids/asks)
+    poll_data = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": None, "best_ask": None},
+    }
+    engine._update_market_strategy(slug, poll_data, now)
+    m = engine.markets[slug]
+    assert m.mid is None
+    assert m.max_up_drift == 0.0
+    assert m.max_down_drift == 0.0
+    assert m.open_gate_evaluated is False
+    assert not m.order_id_up and not m.order_id_down
 
 
+def test_unpriceable_book_prevents_quoting():
+    """Issue #207: engine refuses to quote when a leg is unpriceable even with entry delay expired."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.entry_delay_sec = 0.0
+    engine.entry_band = 0.0
+    engine.start()
+    slug = "eth-up-or-down-5m"
+    now = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xeth_unpriceable",
+        market_slug="eth-up-or-down-5m-fake",
+        up_token="up_tok",
+        down_token="dn_tok",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    poll_data = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.50, "best_ask": None},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }
+    engine._update_market_strategy(slug, poll_data, now)
+    m = engine.markets[slug]
+    assert m.mid is None
+    assert m.order_status_up != "RESTING"
+    assert m.order_status_down != "RESTING"
+    assert m.status in ("IDLE", "PRE_QUOTING", "NO_BOOK")
+
+
+def test_unpriceable_book_timeout_sets_no_book_skipped():
+    """Issue #207: window timing out without a valid two-sided book is marked NO_BOOK_SKIPPED."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.entry_timeout_pct = 0.10  # 30s for 300s window
+    engine.start()
+    slug = "sol-up-or-down-5m"
+    start_ts = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xsol_unpriceable",
+        market_slug="sol-up-or-down-5m-fake",
+        up_token="sol_up",
+        down_token="sol_dn",
+        start_ts=start_ts,
+        end_ts=start_ts + 300,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    poll_data = {
+        "market": fake_market,
+        "up_book": {"best_bid": None, "best_ask": None},
+        "down_book": {"best_bid": None, "best_ask": None},
+    }
+    # Tick 1: 5s into window - engine attaches on time, but book is unpriceable
+    engine._update_market_strategy(slug, poll_data, start_ts + 5)
+    m = engine.markets[slug]
+    assert m.mid is None
+    assert m.late_start_skip is False
+    assert m.status in ("IDLE", "PRE_QUOTING", "NO_BOOK")
+
+    # Tick 2: 35s into window - 10% entry timeout expires (35s >= 30s)
+    engine._update_market_strategy(slug, poll_data, start_ts + 35)
+    assert m.mid is None
+    assert m.status == "NO_BOOK_SKIPPED"
+    assert "unpriceable" in m.last_action.lower() or "no book" in m.last_action.lower()
