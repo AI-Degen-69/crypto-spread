@@ -422,11 +422,18 @@ def test_issue137_spot_fast_stop_gated_when_disabled():
 
 
 def test_issue137_spot_fast_stop_fires_when_enabled():
-    """Control: the same adverse spot drift exits with the stop enabled."""
+    """Control: the same adverse spot drift exits with the stop enabled.
+
+    The UP leg needs a bid to sell into. Issue #224 removed the invented 0.40
+    that used to stand in for an empty book, so a fixture with no book at all
+    now exercises the hold path (covered separately), not this one.
+    """
     engine = _spot_engine()
     slug = "btc-up-or-down-5m"
     mstate = engine.markets[slug]
     mstate.filled_up = True
+    mstate.up_bid = 0.44
+    mstate.last_update_ts = 1.0
     engine.on_spot_tick("btcusdt", 1_000_000, 50000.0)
     engine.on_spot_tick("btcusdt", 2_000_000, 49000.0)
     assert mstate.exit_taken is True
