@@ -956,7 +956,11 @@ class LiveTraderEngine:
         # Issue #123: actively chase second leg after a one-sided fill by stepping
         # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
         self.enable_leg_chase: bool = True
-        self.max_pair_cost: float = 0.98
+        # Issue #227: 0.99 in both engines. A binary pair settles at 1.00, so
+        # this is the ceiling on a completed pair and `update_config` clamps it
+        # to [0.50, 1.00]. `PATIENT_BAND_MAKER` pins 0.98 explicitly; this is
+        # what an unconfigured engine starts at.
+        self.max_pair_cost: float = 0.99
         # Issue #137: patient undecided-band maker knobs. `entry_delay_sec`
         # holds all quoting until that many seconds into the window (0 = off);
         # `entry_band` only admits windows whose mid is still near 0.50 at
@@ -4492,8 +4496,7 @@ class LiveTraderEngine:
         if self.enable_leg_chase and not mstate.pair_captured and not mstate.exit_taken:
             if mstate.filled_up and not mstate.filled_down:
                 entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
-                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
-                max_down_bid = round(math.floor((self.max_pair_cost - entry_up + 1e-9) * 100) / 100.0, 2)
+                max_down_bid = book_math.chase_cap(self.max_pair_cost, entry_up)
                 if mstate.down_ask is not None:
                     target_down = min(mstate.down_ask, max_down_bid)
                     if target_down > resting_down:
@@ -4509,8 +4512,7 @@ class LiveTraderEngine:
                             chased_now_dn = True
             elif mstate.filled_down and not mstate.filled_up:
                 entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
-                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
-                max_up_bid = round(math.floor((self.max_pair_cost - entry_dn + 1e-9) * 100) / 100.0, 2)
+                max_up_bid = book_math.chase_cap(self.max_pair_cost, entry_dn)
                 if mstate.up_ask is not None:
                     target_up = min(mstate.up_ask, max_up_bid)
                     if target_up > resting_up:
@@ -5082,8 +5084,7 @@ class LiveTraderEngine:
                         # If DOWN is not yet filled, step up DOWN quote towards ask within cap
                         if not mstate.filled_down and self.enable_leg_chase:
                             entry_up = mstate.fill_price_up
-                            # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
-                            max_down_bid = round(math.floor((self.max_pair_cost - entry_up + 1e-9) * 100) / 100.0, 2)
+                            max_down_bid = book_math.chase_cap(self.max_pair_cost, entry_up)
                             if mstate.down_ask is not None:
                                 target_down = min(mstate.down_ask, max_down_bid)
                                 if target_down > resting_down:
@@ -5123,8 +5124,7 @@ class LiveTraderEngine:
                             # If UP is not yet filled, step up UP quote towards ask within cap
                             if self.enable_leg_chase:
                                 entry_dn = mstate.fill_price_down
-                                # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
-                                max_up_bid = round(math.floor((self.max_pair_cost - entry_dn + 1e-9) * 100) / 100.0, 2)
+                                max_up_bid = book_math.chase_cap(self.max_pair_cost, entry_dn)
                                 if mstate.up_ask is not None:
                                     target_up = min(mstate.up_ask, max_up_bid)
                                     if target_up > resting_up:

@@ -49,6 +49,7 @@ def _books_poll(start_ts: float, up_bids: dict, dn_bids: dict,
 
 def _paper_engine(**config) -> LiveTraderEngine:
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     if config:
         engine.update_config(**config)
     engine.is_running = True
@@ -224,6 +225,7 @@ def test_issue138_paper_fill_appends_exactly_one_line(monkeypatch, tmp_path):
 def test_issue138_clob_fill_appends_line_with_venue_price(monkeypatch, tmp_path):
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.fill_telemetry_async = False
     engine.mode = "live"
     engine.is_running = True
@@ -255,6 +257,10 @@ def test_issue138_clob_fill_appends_line_with_venue_price(monkeypatch, tmp_path)
 def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = _paper_engine()
+    # This one IS about the chase. 0.98 rather than the #227 default of 0.99
+    # keeps the ceiling at 0.50, which is what the ticks below are built around.
+    engine.enable_leg_chase = True
+    engine.max_pair_cost = 0.98
     slug = "btc-up-or-down-5m"
     engine._update_market_strategy(
         slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
@@ -290,6 +296,7 @@ def test_issue138_stream_fill_uses_stashed_book(monkeypatch, tmp_path):
     """Stream fills (no book in the event) join the last stashed books."""
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.fill_telemetry_async = False
     slug = "btc-up-or-down-5m"
     m = engine.markets[slug]
@@ -411,6 +418,7 @@ def test_issue138_async_worker_appends_line(monkeypatch, tmp_path):
     """Default async mode joins and appends off-thread; the line lands."""
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.is_running = True
     assert engine.fill_telemetry_async is True  # production default
     slug = "btc-up-or-down-5m"
@@ -473,6 +481,7 @@ def test_issue138_none_pair_cost_never_burns_claim(monkeypatch, tmp_path):
     """Blocker: stream fill before any quote must still record a line."""
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.fill_telemetry_async = False
     slug = "btc-up-or-down-5m"
     m = engine.markets[slug]
@@ -491,6 +500,7 @@ def test_issue138_none_pair_cost_never_burns_claim(monkeypatch, tmp_path):
 
 def test_issue138_unknown_side_claims_no_flag():
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.fill_telemetry_async = False
     m = engine.markets["btc-up-or-down-5m"]
     engine._record_fill_telemetry(m, "SIDEWAYS", 0.5, 5, 1000.0)
@@ -560,6 +570,7 @@ def test_issue138_bucket_boundaries_and_exclusions():
 def test_issue138_filled_size_fallback_to_shares(monkeypatch, tmp_path):
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.fill_telemetry_async = False
     slug = "btc-up-or-down-5m"
     m = engine.markets[slug]
@@ -586,6 +597,7 @@ def test_async_telemetry_binds_its_path_at_dispatch(monkeypatch, tmp_path):
     intended = _telemetry_env(monkeypatch, tmp_path)
     elsewhere = tmp_path / "somewhere-else.jsonl"
     engine = LiveTraderEngine()
+    engine.enable_leg_chase = False  # telemetry, not the chase (issue #227)
     engine.is_running = True
     slug = "btc-up-or-down-5m"
     engine._update_market_strategy(

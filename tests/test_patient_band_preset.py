@@ -279,7 +279,13 @@ def _fill_up_naked(engine: LiveTraderEngine, slug: str):
 
     Tick 1 quotes into a healthy book (resting UP latches at 0.48); tick 2
     shifts the UP book down so its ask (0.47) lifts the resting bid.
+
+    The chase is off here: these are stop-loss tests, and at the #227 default
+    of 0.99 the ceiling on the DOWN leg is 0.99 - 0.48 = 0.51, which is the
+    DOWN ask -- so the chase would complete the pair and there would be no
+    naked leg left to test. `test_leg_chase_*` covers the chase itself.
     """
+    engine.enable_leg_chase = False
     engine._update_market_strategy(
         slug, _side_books(1000.0, 0.49, 0.51, 0.49, 0.51), now=1000.0)
     engine._update_market_strategy(
