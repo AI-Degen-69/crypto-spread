@@ -291,10 +291,14 @@ def _taker_fee(p: float, rate: float) -> float:
 #: drops late-start windows at `engine.py:1083`, neither simulator here does.
 ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
                      "naked_leg_timeout_pct", "enable_leg_chase",
-                     "max_pair_cost", "max_start_delay_sec")
+                     "max_start_delay_sec")
 
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
-UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band") + ENGINE_ONLY_KNOBS
+#: The first three are implemented by `sim2` as its own call arguments, so
+#: setting them on the params is silent rather than unimplemented --
+#: `max_pair_cost` is `sim2`'s `chase_cap` argument (issue #227).
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band",
+                     "max_pair_cost") + ENGINE_ONLY_KNOBS
 
 
 def _non_default_knobs(p: BacktestParams, names: tuple[str, ...]) -> list[str]:
@@ -326,27 +330,29 @@ def _reject_unsupported_knobs(p: BacktestParams) -> None:
         raise ValueError(
             f"fast_simulate does not implement {', '.join(ignored)}; "
             "engine._simulate_window applies them, so results would not be "
-            "comparable. Use research/sweeps/sim2.py for entry_delay_sec and "
-            "entry_band; nothing in research/ implements "
-            f"{', '.join(ENGINE_ONLY_KNOBS)}."
+            "comparable. Use research/sweeps/sim2.py for entry_delay_sec, "
+            "entry_band and max_pair_cost (its `chase_cap` argument); nothing "
+            f"in research/ implements {', '.join(ENGINE_ONLY_KNOBS)}."
         )
 
 
 def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
     """Raise when `p` sets a knob `sim2` would silently ignore.
 
-    `sim2` takes `entry_delay_sec` and `entry_band` as its own arguments and
-    never reads the `BacktestParams` fields of the same name, so setting them
-    on the params is as silent as not implementing them at all. The four
-    `ENGINE_ONLY_KNOBS` it does not implement in any form.
+    `sim2` takes `entry_delay_sec`, `entry_band` and the chase ceiling as its
+    own arguments -- the ceiling under the name `chase_cap` -- and never reads
+    the `BacktestParams` fields behind them, so setting one on the params is as
+    silent as not implementing it at all. The `ENGINE_ONLY_KNOBS` it does not
+    implement in any form.
     """
     ignored = _non_default_knobs(p, UNSUPPORTED_KNOBS)
     if ignored:
         raise ValueError(
             f"sim2 ignores {', '.join(ignored)} on BacktestParams; pass "
-            "entry_delay_sec / entry_band as sim2() arguments, and note that "
-            f"{', '.join(ENGINE_ONLY_KNOBS)} are not implemented in research/ "
-            "at all — express hold-to-settlement through exit_thresh_by_slug."
+            "entry_delay_sec / entry_band / max_pair_cost (as `chase_cap`) "
+            f"as sim2() arguments, and note that {', '.join(ENGINE_ONLY_KNOBS)} "
+            "are not implemented in research/ at all — express "
+            "hold-to-settlement through exit_thresh_by_slug."
         )
 
 
