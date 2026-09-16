@@ -3598,6 +3598,48 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
     assert round(mstate.realized_pnl_usd, 2) == 0.10
 
 
+def test_the_chase_before_the_fill_block_also_marks_the_quote_as_placed(monkeypatch):
+    """Issue #226: the chase runs in two places and both make a quote marketable.
+
+    Review caught only the one inside the paper fill block being flagged. This
+    drives the other: UP fills on a tick where the DOWN book has no ask, so the
+    chase cannot anchor and DOWN stays at 0.48. The next tick's chase — the one
+    above the fill block — raises DOWN onto a standing 0.49 ask, which is a
+    placement, not a touch against something we were queued behind.
+    """
+    engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(engine.stream_bridge, "start", lambda: None)
+    monkeypatch.setattr(engine, "_schedule_wallet_balance_fetch", lambda: None)
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xchase226", market_slug="btc-up-down-5m",
+        up_token="tok_up", down_token="tok_dn",
+        start_ts=now - 10, end_ts=now + 290, tick_size=0.01, neg_risk=False,
+    )
+    _open_50_50_quotes(engine, slug, fake_market, now - 1)
+    mstate = engine.markets[slug]
+
+    engine._update_market_strategy(slug, {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+    }, now)
+    assert mstate.filled_up is True
+    assert mstate.filled_down is False, "a touch does not fill a queued quote"
+    assert mstate.resting_down == 0.48, "nothing above 0.48 to chase to"
+
+    engine._update_market_strategy(slug, {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.49},
+    }, now + 1)
+    assert mstate.resting_down == 0.49
+    assert mstate.filled_down is True, "a chased quote lands on the ask and fills"
+    assert mstate.fill_price_down == 0.49
+
+
 def test_leg_chase_symmetric_down_first(monkeypatch):
     """When DOWN fills first, UP quote steps up to ask bounded by max_pair_cost."""
     engine = LiveTraderEngine(load_persisted=False)

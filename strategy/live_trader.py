@@ -2076,12 +2076,12 @@ class LiveTraderEngine:
                 return
         # Resting target must exist
         target = m.resting_up if leg == "UP" else m.resting_down
-        # Tick tolerance for a tape-print fill. The shared rule
-        # (`book_math.resting_bid_filled`, issue #226) uses
-        # `FILL_PRICE_TICK_TOL`; this WS path keeps its own wider 0.002 because
-        # it matches against a single streamed print rather than a tick's worth
-        # of them.
-        if abs(p - float(target)) > 0.002:
+        # The one fill rule decides this too (issue #226). This path used its
+        # own wider 0.002 tolerance, which is a second fill rule by another
+        # name: a print at `target + 0.0015` filled here and nowhere else.
+        # `best_ask` is None because a streamed print carries no book.
+        if not book_math.resting_bid_filled(
+                target, None, (p,), FILL_PRICE_TICK_TOL):
             return
         # Enforce entry gates (simplified): respect entry_cancelled / band_hold etc.
         # If the window is gated, don't fabricate a fill.
@@ -4478,6 +4478,14 @@ class LiveTraderEngine:
             resting_down = mstate.resting_down
         mstate.order_shares = self.shares
 
+        # Issue #226: a quote the chase raises onto the ask is marketable on
+        # arrival, the same as one being placed for the first time. The chase
+        # runs here AND again inside the paper fill block below, so the flags
+        # are initialised before the first of the two and carry to the fill
+        # check at the end of the tick.
+        chased_now_up = False
+        chased_now_dn = False
+
         # --- LEG CHASE AFTER ONE-SIDED FILL (Issue #123) ---
         # When one leg fills, step up the opposite leg's quote towards the ask,
         # strictly capped so pair cost stays <= max_pair_cost (default 0.98).
@@ -4492,11 +4500,13 @@ class LiveTraderEngine:
                         resting_down = target_down
                         mstate.resting_down = resting_down
                         mstate.chased_leg = "DOWN"
+                        chased_now_dn = True
                     elif target_down == max_down_bid and target_down >= resting_down:
                         if max_down_bid > resting_down:
                             resting_down = max_down_bid
                             mstate.resting_down = resting_down
                             mstate.chased_leg = "DOWN"
+                            chased_now_dn = True
             elif mstate.filled_down and not mstate.filled_up:
                 entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
                 # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
@@ -4507,11 +4517,13 @@ class LiveTraderEngine:
                         resting_up = target_up
                         mstate.resting_up = resting_up
                         mstate.chased_leg = "UP"
+                        chased_now_up = True
                     elif target_up == max_up_bid and target_up >= resting_up:
                         if max_up_bid > resting_up:
                             resting_up = max_up_bid
                             mstate.resting_up = resting_up
                             mstate.chased_leg = "UP"
+                            chased_now_up = True
             else:
                 mstate.chased_leg = None
         else:
@@ -4884,8 +4896,6 @@ class LiveTraderEngine:
         # leaves it alone), so round 2+ would have been read as already-resting.
         placed_now_up = False
         placed_now_dn = False
-        chased_now_up = False
-        chased_now_dn = False
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price

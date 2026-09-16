@@ -64,8 +64,12 @@ is evidence that our order was taken, not that we took anything.
 - The live engine fills slightly less often than before, accepted knowingly.
 
 ### Risks
-- **Orphaning the research evidence trail.** Mitigated by leaving `research/sweeps/phase*.py`
-  frozen and untouched, with a note in `RESULTS-ARE-STALE.md` recording that they predate this
-  rule. `ev_lab.py` and `selection_bias.py` are under test and so are updated.
+- **Orphaning the research evidence trail.** The eight phase drivers are deleted rather than
+  frozen: they swept `fill_model`, so with the knob gone they cannot be imported, let alone run,
+  and `RESULTS-ARE-STALE.md` had already recorded that their output could not be regenerated.
+  Mitigated by keeping their `*.json` tables, which `docs/ev-research-findings-2026-09-11.md`
+  cites as the record of how `patient_band_maker` was chosen, and by saying plainly in both that
+  no row in them can be reproduced. `ev_lab.py`, `sim2.py` and `selection_bias.py` are under
+  test and are updated instead.
 - **Losing a comparison tool research genuinely used.** Accepted: comparing a model against a
   model the engine does not run was never evidence about this system.

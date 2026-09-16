@@ -54,8 +54,9 @@ comment at the chase site records this.
    CLI flag, not in any research simulator. `tapeq` is gone with it.
 2. Every entry fill — either branch, either engine — books the resting price and
    adds nothing to `fees_cents`. No entry path calls `_taker_fee`.
-3. The live paper simulation fills only on a fully-crossed book (`ask <= resting -
-   tick`), at the resting price. Its WS tape fill is unchanged.
+3. The live paper simulation fills only on a fully-crossed book (`ask <= resting
+   - tick_size + 1e-6`, the shared predicate verbatim), at the resting price. Its
+   WS tape fill runs through the same predicate rather than its own tolerance.
 4. Exit paths are untouched: the stops, the naked timeout and the settlement mark
    still sell into the bid and still pay `_taker_fee`.
 5. A parity test drives one shared snapshot sequence through both engines and
