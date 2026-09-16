@@ -663,6 +663,36 @@ def _classify(mids: list[float]) -> str:
     return "flat"
 
 
+def _window_clock(first: dict) -> tuple[float, float] | None:
+    """Return `(start_ts, window_length)` for a window, or None when it has no clock.
+
+    Invariant 1 (issue #224), and the mirror of `LiveTraderEngine._window_clock`:
+
+        window_length = end_ts - start_ts
+        elapsed       = snapshot_ts - start_ts
+
+    A usable pair is two finite numbers with `end_ts > start_ts`. The absolute
+    epoch position is not checked -- replays and fixtures legitimately use a
+    synthetic timebase, and no real fault gets past `end_ts > start_ts` by way of
+    one. A window with no usable pair has no clock, so no time gate may be
+    evaluated and the window is not traded.
+    """
+    raw_start = first.get("start_ts")
+    raw_end = first.get("end_ts")
+    if raw_start is None or raw_end is None:
+        return None
+    try:
+        start_ts = float(raw_start)
+        end_ts = float(raw_end)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(start_ts) and math.isfinite(end_ts)):
+        return None
+    if end_ts <= start_ts:
+        return None
+    return (start_ts, end_ts - start_ts)
+
+
 def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> WindowResult:
     """Replay one condition window of ticks under BacktestParams and return WindowResult."""
     if not window_snaps:
@@ -676,9 +706,19 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     slug = first.get("slug", "")
     duration = int(first.get("duration", 0))
 
+    # Invariant 1 (issue #224): one definition of the window clock, taken from the
+    # market's own metadata. `duration` below is the collector's *series label*
+    # (300 / 900), kept only to key the per-duration stop threshold and to report
+    # the window -- no time gate may read it, or there are two clocks again.
+    clock = _window_clock(first)
+    if clock is None:
+        return WindowResult(cid, series, slug, duration, len(window_snaps), "no_clock",
+                            0.0, 0.0, False, False, False, False, "", 0.0, 0.0,
+                            0.0, False, "no_clock")
+    start_ts, window_length = clock
+
     first_ts = float(first.get("ts", 0.0) or 0.0)
-    start_ts = float(first.get("start_ts", 0.0) or 0.0)
-    raw_start_delay_sec = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+    raw_start_delay_sec = max(0.0, first_ts - start_ts) if first_ts else 0.0
     start_delay_sec = round(raw_start_delay_sec, 2)
     is_partial = bool(raw_start_delay_sec > 5.0)
 
@@ -751,26 +791,37 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     late_start = bool(
         params.max_start_elapsed_pct
         and params.max_start_elapsed_pct > 0
-        and duration > 0
-        and raw_start_delay_sec >= params.max_start_elapsed_pct * duration
+        and window_length > 0
+        and raw_start_delay_sec >= params.max_start_elapsed_pct * window_length
     )
     if late_start:
         entry_cancelled = True
-    if params.entry_timeout_pct > 0 and duration > 0:
-        cutoff_sec = params.entry_timeout_pct * duration
+    if params.entry_timeout_pct > 0 and window_length > 0:
+        cutoff_sec = params.entry_timeout_pct * window_length
         if raw_start_delay_sec >= cutoff_sec:
             entry_cancelled = True
 
-    for s_idx, s in enumerate(window_snaps):
-        cur_ts = float(s.get("ts", 0.0) or 0.0)
-        if cur_ts > 0.0 and start_ts > 0.0:
-            elapsed = max(0.0, cur_ts - start_ts)
-        else:
-            elapsed = float(s_idx)
+    for s in window_snaps:
+        # Invariant 1 (#224). This used to fall back to `float(s_idx)`, counting
+        # snapshots as if each were one second -- and the collector misses
+        # seconds, the same gap that makes the tape incomplete, so every time
+        # gate in such a window was measured against a made-up clock with
+        # nothing reporting it. A snapshot with no timestamp carries no clock
+        # reading, so it is skipped rather than assigned one.
+        raw_ts = s.get("ts")
+        if raw_ts is None:
+            continue
+        try:
+            cur_ts = float(raw_ts)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(cur_ts):
+            continue
+        elapsed = max(0.0, cur_ts - start_ts)
 
         # Check entry timeout (Issue #48): if elapsed strictly exceeds cutoff, timeout already passed
-        if params.entry_timeout_pct > 0 and duration > 0 and not entry_cancelled:
-            if elapsed > (params.entry_timeout_pct * duration):
+        if params.entry_timeout_pct > 0 and window_length > 0 and not entry_cancelled:
+            if elapsed > (params.entry_timeout_pct * window_length):
                 if not filled_up and not filled_down:
                     entry_cancelled = True
 
@@ -888,15 +939,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 and delay_expired
                 and reentry_count < params.max_reentries_per_window):
             entry_timeout_cutoff = (
-                params.entry_timeout_pct * duration
-                if (0.0 < params.entry_timeout_pct < 1.0 and duration > 0)
+                params.entry_timeout_pct * window_length
+                if (0.0 < params.entry_timeout_pct < 1.0 and window_length > 0)
                 else None
             )
-            remaining = max(0.0, duration - elapsed) if duration > 0 else 0.0
+            remaining = max(0.0, window_length - elapsed) if window_length > 0 else 0.0
             min_remaining = params.min_requote_remaining_sec
-            if duration > 0 and 0.0 < params.reentry_min_remaining_pct <= 1.0:
+            if window_length > 0 and 0.0 < params.reentry_min_remaining_pct <= 1.0:
                 min_remaining = min(min_remaining,
-                                    params.reentry_min_remaining_pct * duration)
+                                    params.reentry_min_remaining_pct * window_length)
             # Measured with `_two_sided_mid`, the same metric the gate above used --
             # `mid` here is the up leg alone, and undoing a two-sided skip with a
             # one-sided reading lets a leg-imbalanced book clear the band while the
@@ -1120,10 +1171,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # independently of drift: this is a time stop, not a price stop, so it
         # is not gated on `stop_loss_enabled`, exactly as live treats them as
         # separate triggers.
-        if (params.naked_leg_timeout_pct > 0 and duration > 0
+        if (params.naked_leg_timeout_pct > 0 and window_length > 0
                 and _one_leg and not exit_taken and not pair_captured
                 and naked_since_elapsed is not None
-                and (elapsed - naked_since_elapsed) >= params.naked_leg_timeout_pct * duration):
+                and (elapsed - naked_since_elapsed) >= params.naked_leg_timeout_pct * window_length):
             _book = ub if filled_up else db
             _bb = _book.get("best_bid")
             if _bb is not None:
@@ -1164,8 +1215,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
         # Check entry timeout (Issue #48): cancel unfilled entry quotes if 0 legs filled
         # Evaluated after snapshot fills so trades in the cutoff snapshot are not dropped
-        if params.entry_timeout_pct > 0 and duration > 0 and not entry_cancelled:
-            if elapsed >= (params.entry_timeout_pct * duration):
+        if params.entry_timeout_pct > 0 and window_length > 0 and not entry_cancelled:
+            if elapsed >= (params.entry_timeout_pct * window_length):
                 if not filled_up and not filled_down:
                     entry_cancelled = True
 

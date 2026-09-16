@@ -16,6 +16,7 @@ from backtest.engine import (
     _classify,
     _mid,
     _simulate_window,
+    _window_clock,
     _taker_fee,
     group_by_cid,
     iter_ticks,
@@ -1864,3 +1865,77 @@ def test_backtest_stop_loss_anchored_to_an_entry_above_050():
     assert w.exit_taken is True
     assert w.exit_side == "up"
     assert w.exit_price == pytest.approx(0.49, abs=1e-6)
+
+
+# --- Issue #224: one window clock, taken from timestamps only ---------------
+
+def test_window_clock_rejects_an_unusable_pair():
+    assert _window_clock({"start_ts": 100.0, "end_ts": 400.0}) == (100.0, 300.0)
+    assert _window_clock({"start_ts": 100.0, "end_ts": 100.0}) is None
+    assert _window_clock({"start_ts": 400.0, "end_ts": 100.0}) is None
+    assert _window_clock({"start_ts": 100.0}) is None
+    assert _window_clock({"end_ts": 400.0}) is None
+    assert _window_clock({"start_ts": float("nan"), "end_ts": 400.0}) is None
+    assert _window_clock({"start_ts": "x", "end_ts": 400.0}) is None
+    # A synthetic timebase straddling zero is still a usable pair.
+    assert _window_clock({"start_ts": -2.0, "end_ts": 298.0}) == (-2.0, 300.0)
+
+
+def test_window_without_a_clock_is_not_traded():
+    """No usable start/end pair means no clock, so the window is skipped entirely."""
+    snaps = [snap(1.0, 0.50, up_ask=0.49, down_ask=0.49,
+                  tape=_tape_both(0.48, 0.48))]
+    for s in snaps:
+        s["start_ts"] = 500.0
+        s["end_ts"] = 100.0        # end before start
+    w = _simulate_window(snaps, BacktestParams())
+    assert w.class_label == "no_clock"
+    assert w.err == "no_clock"
+    assert not w.filled_up and not w.filled_down
+    assert not w.entered
+    # Identity is preserved so the skip is attributable, not anonymous.
+    assert w.slug == SLUG and w.cid == CID
+
+
+def test_snapshot_without_a_timestamp_is_skipped_not_counted_as_a_second():
+    """A tick with no `ts` carries no clock reading, so it cannot fill anything.
+
+    `elapsed = float(s_idx)` used to assign it one. Here the only tape print
+    sits on the untimed snapshot: under the old fallback it filled, now the
+    snapshot is skipped and the window stays empty.
+    """
+    snaps = _window_snaps(3, lambda i: 0.50, lambda i: [])
+    untimed = dict(snaps[1])
+    untimed.pop("ts")
+    untimed["tape_delta"] = _tape_both(0.48, 0.48)
+    snaps[1] = untimed
+
+    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
+    assert not w.filled_up and not w.filled_down
+
+    # The same print on a timestamped snapshot does fill, so the skip is what
+    # made the difference and not some other gate.
+    timed = dict(untimed)
+    timed["ts"] = 1001.0
+    w2 = _simulate_window([snaps[0], timed, snaps[2]],
+                          BacktestParams(entry_timeout_pct=0.0))
+    assert w2.filled_up and w2.filled_down
+
+
+def test_time_gates_read_the_timestamps_not_the_duration_field():
+    """A window whose `duration` label disagrees with its clock obeys the clock.
+
+    The label says 900s, so a 10% entry timeout would cut off at 90s; the real
+    pair spans 300s, cutting off at 30s. The tape only prints at 40s.
+    """
+    snaps = []
+    for i, ts in enumerate((1000.0, 1040.0)):
+        s = snap(ts, 0.50, up_ask=0.49, down_ask=0.49,
+                 tape=_tape_both(0.48, 0.48) if i == 1 else [])
+        s["start_ts"] = 1000.0
+        s["end_ts"] = 1300.0       # 300s, whatever the label claims
+        s["duration"] = 900        # collector's series label, not a clock
+        snaps.append(s)
+
+    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.10))
+    assert not w.filled_up and not w.filled_down

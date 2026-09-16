@@ -4309,3 +4309,152 @@ def test_stop_loss_anchored_to_an_entry_above_050():
     engine._update_market_strategy(slug, poll_data_2, now)
     assert m.max_down_drift == pytest.approx(0.05, abs=1e-4)
     assert m.exit_taken or m.status == "STOP_EXIT_PENDING"
+
+
+# --- Issue #224: invariants (no invented numbers, one window clock) ----------
+
+def _clock_engine(slug: str = "btc-up-or-down-5m") -> LiveTraderEngine:
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    engine.enable_leg_chase = False
+    return engine
+
+
+def test_window_with_no_clock_is_not_traded():
+    """Metadata whose end_ts does not follow start_ts leaves the window untraded.
+
+    Invariant 1 (#224): every time gate is a fraction or offset of the window,
+    so a window with no usable pair has no clock, no gate may be evaluated, and
+    nothing is quoted into it.
+    """
+    engine = _clock_engine()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    broken = LiveMarket(
+        condition_id="0xno_clock",
+        market_slug="btc-updown-5m-no-clock",
+        up_token="btc_up",
+        down_token="btc_dn",
+        start_ts=now + 100.0,
+        end_ts=now + 50.0,   # end before start: not a usable pair
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    m = engine.markets[slug]
+    engine._update_market_strategy(slug, {
+        "market": broken,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now)
+
+    assert not m.filled_up and not m.filled_down
+    assert m.order_id_up is None and m.order_id_down is None
+    assert "clock" in m.last_action.lower()
+
+
+def test_window_length_ignores_the_market_name():
+    """A 15-minute window whose slug says nothing is still measured as 900s.
+
+    The duration used to be read out of the slug: `900.0 if "15m" in slug else
+    300.0`. With `entry_timeout_pct=0.10` a window 120s old is past the cutoff
+    of a guessed 300s window but well inside the real 900s one, so a quote here
+    proves the length came from the metadata. 60s keeps the window inside the
+    late-start guard's 10% too (90s of 900), which is the other gate this
+    length feeds.
+    """
+    engine = _clock_engine()
+    engine.entry_timeout_pct = 0.10
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    quarter_hour = LiveMarket(
+        condition_id="0xfifteen",
+        market_slug="btc-updown-quarterly-no-duration-in-the-name",
+        up_token="btc_up",
+        down_token="btc_dn",
+        start_ts=now - 60.0,
+        end_ts=now + 840.0,      # 900s total, 60s elapsed = 6.7%
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    m = engine.markets[slug]
+    engine._update_market_strategy(slug, {
+        "market": quarter_hour,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now)
+
+    # 60s is 6.7% of 900 -- past a guessed 300s window's 30s cutoff, inside the
+    # real one's 90s cutoff.
+    assert not m.entry_cancelled_timeout
+    assert m.status == "QUOTING"
+
+
+def test_stop_exit_holds_when_no_bid_can_be_resolved():
+    """With no book and no latched quote, the stop holds instead of selling at 0.40.
+
+    Invariant 0 (#224). `_resolve_exit_bid` raising means there is no executable
+    mark anywhere, so the position stays open and the exit re-evaluates on the
+    next tick.
+    """
+    engine = _clock_engine()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    m = engine.markets[slug]
+    m.slug = slug
+    m.filled_up = True
+    m.fill_price_up = 0.55
+    m.order_shares = 10
+    m.status = "STOP_EXIT_PENDING"
+    # Nothing priceable: no book, no latch, no observed update.
+    m.up_bid = m.up_ask = m.down_bid = m.down_ask = None
+    m.last_valid_up_bid = m.last_valid_down_bid = None
+    m.last_valid_up_ask = m.last_valid_down_ask = None
+    m.mid = None
+    m.last_update_ts = 0
+
+    engine._execute_stop_exit(slug, m, "UP", None, "no-book stop", now)
+
+    assert not m.exit_taken
+    assert m.status == "STOP_EXIT_PENDING"
+    assert not engine.trades
+
+
+def test_stop_exit_uses_the_resolver_ladder_not_a_constant():
+    """A leg with no bid of its own still exits off the complement ask, not 0.40."""
+    engine = _clock_engine()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    m = engine.markets[slug]
+    m.slug = slug
+    m.filled_up = True
+    m.fill_price_up = 0.55
+    m.order_shares = 10
+    m.status = "STOP_EXIT_PENDING"
+    m.up_bid = None
+    m.down_ask = 0.62          # complement: UP is worth 0.38
+    m.last_update_ts = now
+
+    engine._execute_stop_exit(slug, m, "UP", None, "complement stop", now)
+
+    assert m.exit_taken
+    assert engine.trades[-1].exit_price == pytest.approx(0.38, abs=1e-6)
+
+
+def test_reentry_is_refused_without_a_mid():
+    """An unpriceable book cannot be judged against the drift band, so no re-entry.
+
+    Invariant 0 (#224): the substituted 0.50 was the one value `abs(mid - 0.50)
+    < band` could never reject.
+    """
+    engine = _clock_engine()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    m = engine.markets[slug]
+    m.adverse_open = True
+    m.entry_cancelled_timeout = True
+    m.mid = None
+
+    assert not engine._maybe_reenter_drift_skipped(
+        m, slug, None, 200.0, 300.0, True, False, now, 0.48, 0.48)
+    assert m.reentry_count == 0
