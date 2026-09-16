@@ -621,7 +621,7 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
         for t in ticks:
             f.write(json.dumps(t) + "\n")
 
-    url = "/api/backtest?file=fake_round.jsonl&offset=0.03&queue=75&pair_cost=0.98&exit_default_5m=0.15&fill_model=book&size=150&gas=0.02"
+    url = "/api/backtest?file=fake_round.jsonl&offset=0.03&queue=75&pair_cost=0.98&exit_default_5m=0.15&size=150&gas=0.02"
     response = client.get(url)
     assert response.status_code == 200
     data = response.json()
@@ -631,7 +631,6 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert data["params"]["queue"] == 75.0
     assert data["params"]["pair_cost"] == 0.98
     assert data["params"]["exit_default_5m"] == 0.15
-    assert data["params"]["fill_model"] == "book"
     assert data["params"]["size"] == 150
     assert data["params"]["gas"] == 0.02
     assert "overall" in data
@@ -656,11 +655,12 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert btc_series["reentry_count"] == 0
     assert btc_series["reentry_pnl_cents"] == 0.0
 
-    # Test with fill_model=cross
-    url_cross = "/api/backtest?file=fake_round.jsonl&offset=0.02&fill_model=cross"
-    res_cross = client.get(url_cross)
-    assert res_cross.status_code == 200
-    assert res_cross.json()["params"]["fill_model"] == "cross"
+    # There is no fill model to select (issue #226). An old bookmark that
+    # still carries one is ignored rather than rejected, and runs the one rule.
+    res_legacy = client.get(
+        "/api/backtest?file=fake_round.jsonl&offset=0.02&fill_model=cross")
+    assert res_legacy.status_code == 200
+    assert "fill_model" not in res_legacy.json()["params"]
 
 
 def test_api_backtest_reentry_telemetry(tmp_path, monkeypatch):
@@ -682,7 +682,7 @@ def test_api_backtest_reentry_telemetry(tmp_path, monkeypatch):
             f.write(json.dumps(t) + "\n")
 
     data = client.get(
-        "/api/backtest?file=fake_reentry.jsonl&fill_model=tape"
+        "/api/backtest?file=fake_reentry.jsonl"
     ).json()
     assert data["n_windows"] == 1
     assert data["overall"]["reentry_count"] == 1
@@ -710,7 +710,7 @@ def test_api_backtest_reentry_knob_a_b(tmp_path, monkeypatch):
         for t in ticks:
             f.write(json.dumps(t) + "\n")
 
-    base = "/api/backtest?file=fake_reentry_knobs.jsonl&fill_model=tape"
+    base = "/api/backtest?file=fake_reentry_knobs.jsonl"
 
     # Default band 0.015 + 60s minimum: the skipped window is recovered.
     on = client.get(base).json()
@@ -754,7 +754,7 @@ def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monk
         for t in ticks:
             f.write(json.dumps(t) + "\n")
 
-    res = client.get(f"/api/backtest?file=fake_prices.jsonl&fill_model=tape")
+    res = client.get(f"/api/backtest?file=fake_prices.jsonl")
     assert res.status_code == 200
     data = res.json()
     assert len(data["trades_sample"]) == 1
@@ -2021,9 +2021,9 @@ def test_api_backtest_entry_delay_band_passthrough(tmp_path, monkeypatch):
     """Delay=60 holds quotes past the only tape prints; echo carries knobs."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _write_delay_fixture(tmp_path)
-    base = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02&fill_model=tape").json()
+    base = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02").json()
     assert base["overall"]["pairs"] == 1
-    delayed = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02&fill_model=tape"
+    delayed = client.get("/api/backtest?file=fake_delay.jsonl&offset=0.02"
                          "&entry_delay_sec=60&entry_band=0.04").json()
     assert delayed["overall"]["pairs"] == 0
     assert delayed["params"]["entry_delay_sec"] == 60.0

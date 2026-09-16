@@ -628,7 +628,6 @@ def api_backtest(
     exit_sol_5m: float = 0.05,
     exit_reversal: float = 0.02,
     size: int = 5,
-    fill_model: str = "cross",
     gas: float = 0.0,
     max_start_delay: float = 0.0,
     filter_partial: bool = False,
@@ -703,7 +702,6 @@ def api_backtest(
         exit_thresh_by_slug=exit_thresh,
         exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
         quote_shares=_clamp_to_spec("quote_shares", size),
-        fill_model=fill_model,
         merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
         max_start_delay_sec=_clamp_to_spec("max_start_delay_sec", max_start_delay),
         entry_timeout_pct=_clamp_to_spec("entry_timeout_pct", entry_timeout_pct),
@@ -777,7 +775,6 @@ def api_backtest(
                 "exit_sol_5m": exit_sol_5m,
                 "exit_reversal": params.exit_reversal,
                 "size": size,
-                "fill_model": params.fill_model,
                 "gas": params.merge_gas_usd,
                 "max_start_delay": params.max_start_delay_sec,
                 "reentry_drift_band": params.reentry_drift_band,
@@ -994,7 +991,6 @@ def api_backtest(
             "exit_default_15m": exit_default_15m,
             "exit_btc_5m": exit_btc_5m,
             "exit_sol_5m": exit_sol_5m,
-            "fill_model": fill_model,
             "size": size,
             "gas": gas,
             "max_start_delay_sec": max_start_delay,
@@ -2512,20 +2508,11 @@ textarea:focus-visible,
           </button>
           <div class="bt-section-body" id="btSecExecutionBody">
           <div class="bt-section-desc">
-            These describe how we assume the book fills you. In live trading the
-            venue decides fills — you cannot set a fill model on an order. They
-            are tuning knobs for the replay, not operator controls.
+            Costs and price granularity the replay assumes. How the book fills
+            you is not here and is not settable: there is one fill rule, the
+            same one the live engine runs (ADR-0002).
           </div>
           <div class="form-grid" style="margin-top:6px">
-            <div class="form-group">
-              <label data-param-label="fill_model"></label>
-              <select id="btFillModel" data-param="fill_model">
-                <option value="cross" selected>Cross (Strict Through-Price Fill — Ask ≤ Resting Bid - 1¢)</option>
-                <option value="tape">Tape (Conservative - executed trades)</option>
-                <option value="book">Book (Optimistic - Ask crossing)</option>
-                <option value="both">Both</option>
-              </select>
-            </div>
             <div class="form-group">
               <label data-param-label="taker_fee_rate"></label>
               <input type="number" min="0" max="1" step="0.01" id="btTakerFee" data-param="taker_fee_rate" value="0.07">
@@ -2593,7 +2580,7 @@ textarea:focus-visible,
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <h4 style="margin:0;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
-          <span id="btEquityWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run. Verify fill_model or tape data density.</span>
+          <span id="btEquityWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run. Check tape data density for this dataset.</span>
         </div>
         <canvas id="chartEquity" height="140"></canvas>
       </div>
@@ -4050,7 +4037,6 @@ async function runBacktest(fileOverride){
     const exit15m = getVal('btExit15m', 0.05);
     const exitBtc = getVal('btExitBtc', 0.05);
     const exitSol = getVal('btExitSol', 0.05);
-    const fillModel = $('btFillModel') ? $('btFillModel').value : 'cross';
     const size = Math.max(5, Math.round(getVal('btSize', 5)));
     if ($('btSize')) $('btSize').value = size;
     const gas = getVal('btGas', 0.0);
@@ -4080,7 +4066,7 @@ async function runBacktest(fileOverride){
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&fill_model=${fillModel}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}&max_start_elapsed_pct=${maxStartElapsed}&reentry_min_remaining_pct=${reentryMinPct}&max_reentries_per_window=${maxReentries}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&reentry_drift_band=${reentryBand}&min_requote_remaining_sec=${requoteMin}&entry_delay_sec=${entryDelay}&entry_band=${entryBand}&exit_reversal=${exitReversal}&entry_timeout_pct=${entryTimeout}&exit_thresh_naked=${exitNaked}&naked_leg_timeout_pct=${nakedTimeout}&stop_loss_enabled=${stopLoss}&enable_leg_chase=${legChase}&max_start_elapsed_pct=${maxStartElapsed}&reentry_min_remaining_pct=${reentryMinPct}&max_reentries_per_window=${maxReentries}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -4122,7 +4108,7 @@ async function runBacktest(fileOverride){
         if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
           $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry band / delay / pair cost).`;
         } else {
-          $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Verify fill_model or tape data density.';
+          $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Check tape data density for this dataset.';
         }
         $('btEquityWarning').style.display = 'inline-block';
       } else {
@@ -4337,7 +4323,6 @@ function resetBtParams(){
   $('btExit15m').value = "0.05";
   $('btExitBtc').value = "0.05";
   $('btExitSol').value = "0.05";
-  $('btFillModel').value = "cross";
   $('btSize').value = "5";
   $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
@@ -4358,13 +4343,12 @@ function resetBtParams(){
 // reproducible 1-click config, then auto-runs the backtest. Aborts without
 // running if any required input is missing (no half-applied state).
 function applyWinningConfig(){
-  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btStopLossEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btFillModel','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
+  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btStopLossEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
   for (const id of required) { if (!$(id)) return; }
   $('btOffset').value = "0.03";
   $('btQueue').value = "0";
   $('btEntryDelay').value = "60";
   $('btEntryBand').value = "0.04";
-  $('btFillModel').value = "tape";
   $('btPairCost').value = "0.98";
   if ($('btPairCostEnabled') && !$('btPairCostEnabled').checked) {
     $('btPairCostEnabled').checked = true;
@@ -6803,7 +6787,7 @@ function onCockpitChartMouseLeave() {
 function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
-    'btExit15m', 'btExitBtc', 'btExitSol', 'btFillModel',
+    'btExit15m', 'btExitBtc', 'btExitSol',
     'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
     'btReentryBand', 'btRequoteMin', 'btEntryDelay', 'btEntryBand'
   ];
