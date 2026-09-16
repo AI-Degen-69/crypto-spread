@@ -2860,6 +2860,129 @@ def test_requote_dynamic_anchor_math():
     assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
 
 
+def test_initial_entry_anchors_to_live_mid():
+    """Round-0 resting prices anchor to the live mid, not a hardcoded 0.50.
+
+    Issue #206: the round-0 branch read `up_mid` / `down_mid`, names bound
+    nowhere in the module, so its `locals()` guard always fell through to 0.50
+    and every opening quote was 0.50 - offset on both legs. Round 1 was already
+    covered by `test_requote_dynamic_anchor_math`; round 0 never was.
+    """
+    engine = _fifteen_minute_engine()
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+
+    # Benign 0.50 open so the adverse-open gate (#92) latches "not adverse"
+    # and does not own the window before the anchor is exercised.
+    _open_50_50_quotes(engine, slug, market, now)
+    m = engine.markets[slug]
+    assert m.open_gate_evaluated is True and m.adverse_open is False
+
+    # Coherent skewed book: up mid 0.60, down mid 0.40 -> synthetic mid 0.60.
+    # Both asks sit above their own leg's anchor, so nothing fills and the
+    # opening prices are still observable.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.59, "best_ask": 0.61},
+        "down_book": {"best_bid": 0.39, "best_ask": 0.41},
+    }, now + 1)
+
+    assert m.requote_round == 0, "still the opening round, not a re-quote"
+    assert m.mid == 0.60
+    assert m.resting_up == round(0.60 - engine.offset, 3) == 0.58
+    assert m.resting_down == round((1.0 - 0.60) - engine.offset, 3) == 0.38
+
+
+def test_initial_entry_anchor_invariants():
+    """Pair sum is 1 - 2*offset, 0.50 is unchanged, and extremes stay clamped."""
+    for mid_target, up_book, down_book in (
+        (0.20, {"best_bid": 0.19, "best_ask": 0.21}, {"best_bid": 0.79, "best_ask": 0.81}),
+        (0.50, {"best_bid": 0.49, "best_ask": 0.51}, {"best_bid": 0.49, "best_ask": 0.51}),
+        (0.80, {"best_bid": 0.79, "best_ask": 0.81}, {"best_bid": 0.19, "best_ask": 0.21}),
+    ):
+        engine = _fifteen_minute_engine()
+        # The open gate would claim the 0.20 / 0.80 windows as adverse; this test
+        # is about the arithmetic, so give it a benign open first either way.
+        engine.start()
+        slug = "btc-up-or-down-15m"
+        now = time.time()
+        market = _fifteen_minute_market(now)
+        _open_50_50_quotes(engine, slug, market, now)
+        m = engine.markets[slug]
+        engine._update_market_strategy(slug, {
+            "market": market, "up_book": up_book, "down_book": down_book,
+        }, now + 1)
+        assert m.mid == mid_target
+        assert m.resting_up == round(mid_target - engine.offset, 3)
+        assert m.resting_down == round((1.0 - mid_target) - engine.offset, 3)
+        assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
+
+    # The historical fixture value survives: a 0.50 book still quotes 0.48/0.48.
+    engine = _fifteen_minute_engine()
+    engine.start()
+    now = time.time()
+    market = _fifteen_minute_market(now)
+    _open_50_50_quotes(engine, "btc-up-or-down-15m", market, now)
+    m = engine.markets["btc-up-or-down-15m"]
+    assert m.resting_up == 0.48 and m.resting_down == 0.48
+
+
+def test_initial_entry_anchor_clamps_at_the_edges():
+    """A near-certain market never emits a price below 0.01 or above 0.99."""
+    engine = _fifteen_minute_engine()
+    engine.offset = 0.05
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+    _open_50_50_quotes(engine, slug, market, now)
+    m = engine.markets[slug]
+
+    # Synthetic mid 0.02: the down leg wants (1 - 0.02) - 0.05 = 0.93, the up leg
+    # wants 0.02 - 0.05 = -0.03 and must clamp instead of going negative.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.01, "best_ask": 0.03},
+        "down_book": {"best_bid": 0.97, "best_ask": 0.99},
+    }, now + 1)
+    assert m.mid == 0.02
+    assert m.resting_up == 0.01
+    assert m.resting_down == 0.93
+
+
+def test_initial_entry_price_is_taken_at_placement_not_at_open():
+    """With `entry_delay_sec` armed, the quote uses the mid on the placing tick.
+
+    Issue #206, operator's acceptance criterion: the price computed before the
+    delay expired is irrelevant if the market moved during it.
+    """
+    # Late-start guard off: this test isolates the delay, and a 61s-elapsed tick
+    # would otherwise trip the #96 skip before the anchor is reached.
+    engine = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    engine.entry_delay_sec = 60.0
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    # start_offset 1.0: only ~1s elapsed, so the delay is still running.
+    market = _fifteen_minute_market(now, start_offset=1.0)
+    _open_50_50_quotes(engine, slug, market, now)
+    m = engine.markets[slug]
+    assert not m.order_id_up and not m.order_id_down, "delay still holding entry"
+
+    # Market moves to 0.65 while the delay runs, then the delay expires.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.64, "best_ask": 0.66},
+        "down_book": {"best_bid": 0.34, "best_ask": 0.36},
+    }, now + 60)
+
+    assert m.mid == 0.65
+    assert m.resting_up == round(0.65 - engine.offset, 3) == 0.63
+    assert m.resting_down == round(0.35 - engine.offset, 3) == 0.33
+
+
 def test_no_requote_when_time_short():
     """A 5m merge with ~60s left stays terminal: no second round."""
     # Late-start guard disabled: this test isolates the re-quote time gate,
