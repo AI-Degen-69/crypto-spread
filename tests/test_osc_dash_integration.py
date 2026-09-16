@@ -2699,8 +2699,9 @@ def test_stop_loss_group_survives_the_form_grid():
     override is mandatory: the id selector outranks the UA `[hidden]` rule.
     """
     html = client.get("/").text
-    assert "#btStopLossFields{display:contents}" in html
-    assert "#btStopLossFields[hidden]{display:none}" in html
+    assert "#btStopLossFields,#cockpitStopLossFields{display:contents}" in html
+    assert ("#btStopLossFields[hidden],#cockpitStopLossFields[hidden]"
+            "{display:none}") in html
 
 
 def test_stop_loss_switch_is_a_checkbox_matching_the_pair_cost_toggle():
@@ -2740,3 +2741,65 @@ def test_reset_restores_the_stop_loss_toggle():
     fn = html[fn_start:html.index("function applyWinningConfig", fn_start)]
     assert "$('btStopLossEnabled').checked = true;" in fn
     assert "toggleStopLossInputs();" in fn
+
+
+def test_winning_config_states_hold_to_settle_instead_of_faking_it():
+    """The preset must turn the stop loss off, not hide it behind 0.49 stops.
+
+    `max_down`/`max_up` are drift from 0.50, so a 0.49 threshold is reachable in
+    an extreme window — the preset would then take a stop it claims never to
+    take. `stop_loss_enabled=0` is the exact statement.
+    """
+    html = client.get("/").text
+    fn_start = html.index("function applyWinningConfig()")
+    fn = html[fn_start:html.index("\n}", fn_start)]
+    for stale in ('"0.49"', '"0.50"'):
+        assert stale not in fn, (
+            f"the preset still fakes hold-to-settle with a {stale} stop")
+    assert "$('btStopLossEnabled').checked = false;" in fn
+    assert "toggleStopLossInputs();" in fn
+    assert "'btStopLossEnabled'" in fn.split("\n")[1], (
+        "the toggle belongs in the required-ids guard, or the preset can half apply")
+
+
+# --- Issue #201: the same grouping on the Live Cockpit ---
+
+def test_cockpit_stop_loss_switch_mirrors_the_backtest_toggle():
+    html = client.get("/").text
+    assert '<select id="cockpitStopLossEnabled"' not in html, (
+        "the cockpit stop-loss dropdown should be gone")
+    start = html.index('id="cockpitStopLossToggleLabel"')
+    block = html[start:start + 420]
+    assert 'class="toggle-switch"' in block
+    assert 'type="checkbox" id="cockpitStopLossEnabled"' in block
+    assert 'onchange="toggleCockpitStopLossInputs()"' in block
+    assert "checked" in block, "the cockpit stop loss defaults to On, as its select did"
+    assert 'data-param="stop_loss_enabled"' in block
+
+
+def test_cockpit_stop_threshold_lives_inside_the_toggled_group():
+    html = client.get("/").text
+    start = html.index('<div id="cockpitStopLossFields">')
+    end = html.index("</div>\n        </div>", start)
+    assert 'id="cockpitExit"' in html[start:end], (
+        "cockpitExit is outside cockpitStopLossFields, so the toggle cannot hide it")
+
+
+def test_cockpit_payload_reads_the_checkbox_not_a_select_value():
+    """`checkbox.value` is the string "on", which is truthy for both states."""
+    html = client.get("/").text
+    assert "body.stop_loss_enabled = stopEl.checked;" in html
+    assert "stopEl.value === 'true'" not in html
+
+
+def test_cockpit_toggle_survives_unlocking_the_params():
+    """Stopping the bot re-enables every param id; the toggle must be re-applied."""
+    html = client.get("/").text
+    fn_start = html.index("function updateCockpitParamsLockUI(locked)")
+    fn = html[fn_start:html.index("async function", fn_start)]
+    assert "toggleCockpitStopLossInputs();" in fn, (
+        "unlocking would otherwise re-enable a stop field the toggle turned off")
+    tog_start = html.index("function toggleCockpitStopLossInputs()")
+    tog = html[tog_start:html.index("function toggleBtSection", tog_start)]
+    assert "cockpitParamsLockHint" in tog, (
+        "the toggle must not re-enable the input while the bot holds the lock")
