@@ -174,15 +174,13 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
 
         up_ask = w.up_ba[i]
         dn_ask = w.dn_ba[i]
-        if p.pair_cost_gate is not None and p.pair_cost_gate > 0:
-            if up_ask is not None and dn_ask is not None:
-                pair_cost_ok = (up_ask + dn_ask) <= p.pair_cost_gate
-            else:
-                pair_cost_ok = True
-        else:
-            pair_cost_ok = True
+        # Issue #227 deleted the entry-side pair-cost test that stood here. It
+        # compared the book's two asks against the cap, and the two asks of a
+        # binary pair always sum to roughly 1.00-1.01, so it carried no
+        # information about the market. `max_pair_cost` caps the leg chase and
+        # nothing else.
 
-        if not queue_ok or not pair_cost_ok:
+        if not queue_ok:
             if (filled_up and not filled_dn and max_dn >= exit_thr
                     and not reversal_dn and not exit_taken):
                 bb = w.up_bb[i]

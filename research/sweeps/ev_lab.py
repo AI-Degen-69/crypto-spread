@@ -291,7 +291,7 @@ def _taker_fee(p: float, rate: float) -> float:
 #: drops late-start windows at `engine.py:1083`, neither simulator here does.
 ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
                      "naked_leg_timeout_pct", "enable_leg_chase",
-                     "max_start_delay_sec")
+                     "max_pair_cost", "max_start_delay_sec")
 
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
 UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_band") + ENGINE_ONLY_KNOBS
@@ -483,15 +483,13 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
 
         up_ask = w.up_ba[i]
         dn_ask = w.dn_ba[i]
-        if p.pair_cost_gate is not None and p.pair_cost_gate > 0:
-            if up_ask is not None and dn_ask is not None:
-                pair_cost_ok = (up_ask + dn_ask) <= p.pair_cost_gate
-            else:
-                pair_cost_ok = True
-        else:
-            pair_cost_ok = True
+        # Issue #227 deleted the entry-side pair-cost test that stood here. It
+        # compared the book's two asks against the cap, and the two asks of a
+        # binary pair always sum to roughly 1.00-1.01, so it carried no
+        # information about the market. `max_pair_cost` caps the leg chase and
+        # nothing else.
 
-        if not queue_ok or not pair_cost_ok:
+        if not queue_ok:
             if (filled_up and not filled_dn and max_dn >= exit_thr
                     and not reversal_dn and not exit_taken):
                 bb = w.up_bb[i]
@@ -867,7 +865,7 @@ def _get_cache() -> list[Win]:
 
 def default_base_params() -> BacktestParams:
     return BacktestParams(
-        offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
+        offset=0.02, queue_gate=0.0,
         merge_gas_usd=0.0, taker_fee_rate=0.07,
         quote_shares=5, entry_timeout_pct=0.0,
         max_start_elapsed_pct=0.0,
@@ -1098,7 +1096,7 @@ def _parity(file_substr: str = "") -> int:
         replace(default_base_params(), exit_reversal=0.03),
         replace(default_base_params(), entry_timeout_pct=0.10),
         replace(default_base_params(), entry_timeout_pct=0.10, max_start_elapsed_pct=0.10),
-        replace(default_base_params(), pair_cost_gate=1.01, queue_gate=25.0),
+        replace(default_base_params(), queue_gate=25.0),
         replace(default_base_params(), exit_thresh_by_slug={
             "default_5m": 0.05, "default_15m": 0.06,
             "btc-up-or-down-5m": 0.05, "sol-up-or-down-5m": 0.06}),
