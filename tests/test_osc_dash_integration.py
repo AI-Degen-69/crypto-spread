@@ -55,11 +55,11 @@ def test_root_returns_4tab_spa():
     assert "app-sidebar" in html
     assert "sidebarToggleBtn" in html
     assert "tab-btn-cockpit" in html
-    assert "tab-btn-live" in html
+    assert "tab-btn-marketdata" in html
     assert "tab-btn-backtest" in html
     assert "tab-btn-summary" in html
     assert "tab-btn-ticks" in html
-    assert "tab-live" in html
+    assert "tab-marketdata" in html
     assert "tab-backtest" in html
     assert "tab-summary" in html
     assert "tab-ticks" in html
@@ -147,7 +147,7 @@ def test_sidebar_dom_structure_and_header_streamlining():
     assert 'onclick="toggleSidebarPin()"' in html
 
     # All 5 navigation tab buttons exist with SVG icons and labels
-    for tab_id in ["tab-btn-cockpit", "tab-btn-live", "tab-btn-backtest", "tab-btn-summary", "tab-btn-ticks"]:
+    for tab_id in ["tab-btn-cockpit", "tab-btn-marketdata", "tab-btn-backtest", "tab-btn-summary", "tab-btn-ticks"]:
         assert f'id="{tab_id}"' in html
 
     assert 'sidebarBotStatusPill' in html
