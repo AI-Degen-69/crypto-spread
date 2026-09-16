@@ -3120,6 +3120,27 @@ function renderOscillationHero(summary){
   put('oscHeroPct15m', formatOscPct(h.pct15m));
   put('oscHeroAsOf', formatOscAsOf(s.ts));
 }
+// Issue #216: compute effective resting and execution quote prices for market display.
+// Eliminates dead phantom-key branches that unconditionally defaulted to 0.48.
+// Derives quotes from the real m.mid (or 0.50 anchor) and the active live offset.
+function cockpitRestingPrice(m, leg, fallbackOffset) {
+  const isUp = leg === 'up';
+  const resting = isUp ? m?.resting_up : m?.resting_down;
+  if (resting != null) return resting;
+  const off = (fallbackOffset != null && isFinite(fallbackOffset)) ? fallbackOffset : 0.02;
+  const mid = m?.mid;
+  if (mid != null && isFinite(mid)) {
+    const anchor = isUp ? mid : (1.0 - mid);
+    return Math.max(0.01, +(anchor - off).toFixed(2));
+  }
+  return Math.max(0.01, +(0.50 - off).toFixed(2));
+}
+function cockpitLegPrice(m, leg, fallbackOffset) {
+  const isUp = leg === 'up';
+  const fill = isUp ? m?.fill_price_up : m?.fill_price_down;
+  if (fill != null) return fill;
+  return cockpitRestingPrice(m, leg, fallbackOffset);
+}
 // Issue #100: two-way visual link. Hovering a market card highlights its Open
 // Orders group and vice versa, via the shared data-market key.
 function setMarketHighlight(key,on){
@@ -3324,7 +3345,7 @@ function reconcileCockpitToasts(st) {
 
       // Check UP leg fill transition
       if (!prev.filled_up && m.filled_up) {
-        const price = m.fill_price_up != null ? m.fill_price_up : (m.resting_up != null ? m.resting_up : (m.up_mid != null ? Math.max(0.01, +(m.up_mid - 0.02).toFixed(2)) : 0.48));
+        const price = cockpitLegPrice(m, 'up', st?.params?.offset);
         showToast({
           type: 'filled',
           title: 'Order Filled',
@@ -3334,7 +3355,7 @@ function reconcileCockpitToasts(st) {
 
       // Check DOWN leg fill transition
       if (!prev.filled_down && m.filled_down) {
-        const price = m.fill_price_down != null ? m.fill_price_down : (m.resting_down != null ? m.resting_down : (m.down_mid != null ? Math.max(0.01, +(m.down_mid - 0.02).toFixed(2)) : 0.48));
+        const price = cockpitLegPrice(m, 'down', st?.params?.offset);
         showToast({
           type: 'filled',
           title: 'Order Filled',
@@ -6013,8 +6034,8 @@ function renderCockpitUI(st) {
       const statusText = otStatusLabel(marketStatusRaw);
 
       let posStr = 'FLAT';
-      const actualUp = m.fill_price_up != null ? m.fill_price_up : (m.resting_up != null ? m.resting_up : (m.up_mid != null ? Math.max(0.01, +(m.up_mid - 0.02).toFixed(2)) : 0.48));
-      const actualDown = m.fill_price_down != null ? m.fill_price_down : (m.resting_down != null ? m.resting_down : (m.down_mid != null ? Math.max(0.01, +(m.down_mid - 0.02).toFixed(2)) : 0.48));
+      const actualUp = cockpitLegPrice(m, 'up', st?.params?.offset);
+      const actualDown = cockpitLegPrice(m, 'down', st?.params?.offset);
       if (m.status === 'STOP_EXIT' || m.exit_taken) {
         posStr = 'FLAT (STOPPED OUT)';
       } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.status === 'LATE_START_SKIPPED' || m.entry_cancelled_timeout) {
@@ -6063,8 +6084,8 @@ function renderCockpitUI(st) {
       } else if (!st.is_running) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">INACTIVE (BOT STOPPED)</span>`;
       } else {
-        const restingUpDisp = m.resting_up != null ? m.resting_up : (m.up_mid != null ? Math.max(0.01, +(m.up_mid - 0.02).toFixed(2)) : 0.48);
-        const restingDownDisp = m.resting_down != null ? m.resting_down : (m.down_mid != null ? Math.max(0.01, +(m.down_mid - 0.02).toFixed(2)) : 0.48);
+        const restingUpDisp = cockpitRestingPrice(m, 'up', st?.params?.offset);
+        const restingDownDisp = cockpitRestingPrice(m, 'down', st?.params?.offset);
         bidsTextHtml = `Bids: $${restingUpDisp.toFixed(2)} / $${restingDownDisp.toFixed(2)}${fillsSub}`;
       }
 

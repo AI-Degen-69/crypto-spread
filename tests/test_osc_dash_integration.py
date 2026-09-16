@@ -2861,6 +2861,13 @@ def test_dash_resting_price_helper_respects_custom_offset_and_mid():
     script = html[start + len("<script>"):end]
 
     dom_prelude = """
+    const setInterval = () => 0;
+    const clearInterval = () => {};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {};
+    const fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+    const EventSource = class { constructor() {} addEventListener() {} close() {} };
+    const WebSocket = class { constructor() {} addEventListener() {} send() {} close() {} };
     const makeElem = () => ({
       style: {},
       textContent: '',
@@ -2915,6 +2922,7 @@ def test_dash_resting_price_helper_respects_custom_offset_and_mid():
     if (cockpitLegPrice(filledMarket, 'up', 0.03) !== 0.55) throw new Error('expected fill_price_up 0.55');
 
     console.log('DASH_RESTING_PRICE_HELPER_TESTS_PASSED');
+    process.exit(0);
     """
 
     res = subprocess.run(
