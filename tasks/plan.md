@@ -1,194 +1,146 @@
-# Plan — Issue #227: `max_pair_cost` caps the chase only
+# Plan — Issue #228: `quote_range` replaces `entry_band` and `adverse_open`
 
-**Size**: Large — 18 files, a public API contract (`/api/backtest`), a dashboard
-control and its toggle, a CLI flag, both engines, two research simulators and eight
-test files. One behaviour deletion and one field rename that changes `params_hash()`.
+**Size**: Large — both engines (gate blocks + re-entry mechanism + preset),
+a public API contract (`/api/backtest` query keys), two dashboard controls, a CLI
+flag, two research simulators, three scripts, ~14 test files, one test file
+deleted with the preset. Two behaviour deletions plus one re-entry deletion.
 **Type**: Code (+ a Docs slice).
-**Stack**: Python 3.12, FastAPI, pytest (971 tests / 19 files). Targeted tests only
-locally; CI is the merge gate (`AGENTS.md`).
+**Stack**: Python 3.12, FastAPI, pytest. Targeted tests only locally; CI is the
+merge gate (`AGENTS.md`).
 **Spec**: `SPEC.md`. **Gates**: `CONSTRAINTS.md`. **Rule of record**:
-`docs/engine-decision-rules.md` §4 + `docs/adr/0003-structural-limits-separate-from-tuning-knobs.md`.
-
-## Interview
-
-Skipped — the issue settles every question it raises. The rule text, the formula, the
-default, the maximum, the rename and the rejected alternative (checking the book's two
-asks) are all written down and agreed with the operator on 2026-09-16. Three things the
-issue does not name explicitly, resolved from the code and recorded in `SPEC.md`:
-
-1. **The research simulators carry the same entry-side test**, in the book-ask form
-   the issue rejects (`ev_lab.py:486`, `sim2.py:177`). They are in scope.
-2. **The dashboard has an ON/OFF toggle** for the Backtest pair-cost field that sets
-   the value to `0.0` to disable the gate (`osc_dash.py:2411-2418, 4034-4035`). It
-   switched the gate being deleted, so it goes with it.
-3. **`strategy/config.py:649` is a different bot's knob** with the same name. Out of
-   scope, recorded in `SPEC.md`.
+`docs/engine-decision-rules.md` §6.
+**Interview**: one question asked — the `patient_band_maker` preset is
+**deleted** (operator decision 2026-09-16), not redefined. Everything else was
+settled by the issue + rule text, so `interview-me` asked nothing further.
 
 ## Contract changes
 
 ```python
 # backtest/engine.py
-- pair_cost_gate: float = 1.05
-+ max_pair_cost: float = 0.99          # validated to [0.50, 1.00] in __post_init__
+- entry_band: float = 0.0
++ quote_range: tuple[float, float] = (0.10, 0.90)   # validated: 0.0 <= lo < hi <= 1.0
 
-- ("pair_cost_gate", "Max Pair Cost ($)", "Your cost threshold before walking away",
--  "$", (0.0, 2.0), ("backtest", "cockpit"), {"cockpit": (0.50, 1.00)})
-+ ("max_pair_cost", "Max Pair Cost ($)", "The most the chase may pay to complete a pair",
-+  "$", (0.50, 1.00), ("backtest", "cockpit"))     # no per-surface override
+# strategy/live_trader.py
+- self.entry_band: float = 0.0                      # + update_config + preset-table read
++ self.quote_range: tuple[float, float] = (0.10, 0.90)
 
-# new shared helper — the single chase ceiling (T1), in strategy/book_math.py
-def chase_cap(max_pair_cost: float, entry_price: Any) -> Optional[float]:
-    """The highest bid the chase may post for the unfilled leg."""
+# per-tick placement hold, both engines (two-sided mid only, never latched):
+quotable &= (range_mid is None or (QUOTE_LO <= range_mid <= QUOTE_HI))
 ```
 
-- `GET /api/backtest`: the `pair_cost` query key keeps its spelling (it is already
-  short for the knob, and the echoed payload key is `pair_cost` too); its default
-  moves `1.05 → 0.99` and it clamps to `[0.50, 1.00]`. `0.0` is no longer accepted as
-  "off" — it clamps up to `0.50`.
-- `scripts/backtest.py`: `--pair-cost` default moves to `0.99`.
-- `scripts/replay_shadow_check.py`: `PAIR_CAPS` becomes `(0.98, 1.00)`; `verdict_leg`
-  becomes `gates_pc1.00`.
-- `BacktestParams.params_hash()` changes for every config (accepted, `SPEC.md`).
+- `GET /api/backtest`: `entry_band` query key becomes `quote_lo` / `quote_hi`
+  (defaults 0.10 / 0.90, clamped to `[0.0, 1.0]`, lo < hi enforced).
+- `scripts/backtest.py`: `--entry-band` becomes `--quote-lo` / `--quote-hi`.
+- `research/sweeps/sim2.py`: `entry_band` argument becomes `quote_range`
+  (per-tick, never-latched — not the old first-tick latch under a new name).
+- Registry: `entry_band` entry deleted; `quote_range` registered as a
+  **structural limit** (no per-surface override), per ADR-0003.
 
 ## Tasks
 
-All tasks complete. T8 was folded into T2/T5/T6 rather than run last: each of
-those tasks owns a distinct test file, so fixing its tests in the same commit
-kept every commit's suite green instead of leaving eight red ones behind.
+### [x] T0 — Branch + spec lock (done in Station II)
+Branch `fix/quote-range-228` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
+`tasks/plan.md`, `tasks/todo.md` written. No code touched.
 
-### [x] T1 — `[Backend/Logic]` One ceiling formula, in one place
-**Files**: `strategy/book_math.py` (new `chase_cap`), `tests/test_book_math.py`.
-**Do**: add `chase_cap(max_pair_cost, entry_price)` returning
-`round(floor((cap - entry + 1e-9) * 100) / 100, 2)`, `None` for an unparseable entry.
-Unit-test the flooring, the negative result when `entry > cap`, and the `None` path.
-Nothing calls it yet.
+### [ ] T1 — `[Backend/Logic]` Backtest: delete both gates, add the range
+**Files**: `backtest/engine.py` — field `:170`, registry entry `:229`,
+`__post_init__` `:439-442`, locals `:793`, flags `:804-811`, adverse block
+`:932-946`, band block `:957-963`, re-entry block `:965-1018`, fill guards
+`:1149-1150` (keep timeout/late-start meaning), timeout re-check `:1261-1264`.
+**Do**: delete the field + validation + registry entry; add `quote_range` with
+`(0.10, 0.90)` default and `0.0 <= lo < hi <= 1.0` `ValueError` check; delete
+the adverse-gate, band-gate and drift-skip re-entry blocks with their flags
+(`band_gate_evaluated`, `adverse_gate_evaluated`, `adverse_skipped`,
+`reentry_count`); delete `reentry_*` knobs with no remaining readers (verify
+zero readers at build time); add the per-tick range hold on the two-sided mid
+next to `no_book_hold`, gating placement only. The range check reuses the
+anchor's two-sided mid (`anchor_mid`, `:876`) — no second `_two_sided_mid`
+call (operator-approved 2026-09-16, דרך ב'). Timeout/late-start
+`entry_cancelled` sets stay untouched.
 **Skill**: `test-driven-development`.
-**Verify**: `python -m pytest tests/test_book_math.py -q`.
+**Verify**: `python -m pytest tests/test_backtest_engine.py -q`.
 
-### [x] T2 — `[Backend/Logic]` Backtest: rename, re-default, revalidate, and delete the entry block
-**Files**: `backtest/engine.py` — field `:118`, chase comment `:184`, registry entry
-`:211-217`, `bounds_for` docstring `:350-360`, `__post_init__` `:372+`, the
-`pair_cost_ok` computation `:1019-1026`, the branch condition `:1079`, the two chase
-call sites `:1044-1075`.
-**Do**: rename the field and set it to `0.99`; add the `[0.50, 1.00]` `ValueError`
-check to `__post_init__`; collapse the registry entry to one range with no override
-and reword `why` to say it caps the chase; delete `pair_cost_ok` entirely and reduce
-`if not queue_ok or not pair_cost_ok:` to `if not queue_ok:`; route both chase sites
-through `book_math.chase_cap`. Rewrite the `bounds_for` docstring, whose whole worked
-example was this divergence — pick a surviving example or state that none remains.
-**Do not**: touch the chase's `min(ask, cap)` / `> resting` logic, or the entry
-anchor. The ceiling's behaviour is unchanged; only its name, default, range and the
-location of its arithmetic move.
-**Skill**: `source-driven-development`, `test-driven-development`.
-**Verify**: `python -m pytest tests/test_backtest_engine.py tests/test_docstrings.py -q`.
+### [ ] T2 — `[Backend/Logic]` Live: delete both gates + re-entry, add the range
+**Files**: `strategy/live_trader.py` — preset table `:660-669` (preset deleted,
+T5), state fields `:734-748`, reset block `:3666-3704`, re-entry method
+`:4160-4260`, open-gate block `:4655-4662`, band block `:4673-4710`,
+cancellation block `:4728-4830` (keep timeout/late-start arms), placement
+gating `:4853-4890`, `entry_controls_armed` `:4292`, stats `:80-82,1019,2668,2726`.
+**Do**: delete `entry_band` plumbing (`update_config`, preset-table read,
+`:3011` clamp, `:2866` drift check, `:4040` mirror check); delete the
+open-gate/adverse snapshot, the band block + hold, `_maybe_reenter_drift_skipped`
+with its telemetry/state, and `band_skip_stats`; add the per-tick range hold on
+the two-sided mid at the placement gate, reusing the anchor mid value already
+in scope — no second mid computation (operator-approved 2026-09-16, דרך ב'). `open_mid/open_drift` telemetry fields
+stay only if another reader uses them — otherwise they go with the gate.
+**Verify**: `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py -q`.
 
-### [x] T3 — `[Backend/Logic]` Live: same default, same one formula
-**Files**: `strategy/live_trader.py` — defaults `:666`, `:959`; the four flooring
-copies `:4496`, `:4513`, `:5086`, `:5127`.
-**Do**: default `0.98 → 0.99` in both places; replace all four inline floorings with
-`book_math.chase_cap`. The `max(0.50, min(1.00, ...))` clamp in `update_config`
-`:2998` already matches the new range and stays.
-**Do not**: change the preset — `PATIENT_BAND_MAKER` pins `max_pair_cost: 0.98`
-explicitly and keeps it; the default is what an unconfigured engine starts at.
-**Verify**: `python -m pytest tests/test_live_trader.py tests/test_patient_band_preset.py -q`.
+### [ ] T3 — `[Test/Parity]` Range parity: entry, exit, re-entry to the range
+**Files**: new `tests/test_quote_range_parity.py`, reusing `_snap` /
+`_drive_live` from `tests/test_entry_anchor_parity.py`.
+**Do**: one shared snapshot sequence per scenario, both engines: (a) mid
+outside the range at open → no quote on either leg that tick; (b) mid returns
+inside → quoted again the same window, at the current mid; (c) boundary mids
+0.10 / 0.90 are inside (inclusive); (d) an already-resting quote stands while
+the mid is outside (no cancel); (e) narrow custom range (e.g. `(0.40, 0.60)`)
+holds placement outside it in both. Assert on quotes/fills, never on markers.
+**Skill**: `test-driven-development`.
+**Verify**: `python -m pytest tests/test_quote_range_parity.py -q`.
 
-### [x] T4 — `[Test/Parity]` The parity test the issue asks for
-**Files**: new `tests/test_chase_cap_parity.py`, reusing `_snap` / `_drive_live` from
-`tests/test_entry_anchor_parity.py`.
-**Do**: one shared snapshot sequence per scenario, both engines, assert the chased
-quote lands on the identical price: (a) the ask is below the ceiling → both chase to
-the ask; (b) the ask is above the ceiling → both stop at `floor((cap - entry)*100)/100`
-and never above it; (c) `entry + chased <= max_pair_cost` holds in both after every
-tick; (d) `entry` above the cap → neither engine raises the quote.
-**Verify**: `python -m pytest tests/test_chase_cap_parity.py -q`.
+### [ ] T4 — `[API/Dashboard]` Band inputs become range inputs
+**Files**: `server/osc_dash.py` (query model `:638`, clamp `:688-691`, spec
+pass-through `:712`, echo `:783,:1000`, cockpit schema `:1380`, payload
+`:1504`, Backtest control `:2405-2406`, Cockpit control `:2779-2780`, request
+builder `:4045`, preset/validation maps `:5733-5738`), `tests/test_osc_dash_integration.py`.
+**Do**: replace both band inputs with lo/hi number inputs (`min="0" max="1"`,
+`value="0.10"/"0.90"`, plain fields, no toggle — the #227 pattern); rename
+`data-param` to `quote_lo`/`quote_hi`; register `quote_range` as structural
+(no per-surface override). Browser-check both tabs after.
+**Skills**: `frontend-ui-engineering`, `api-and-interface-design`.
+**Verify**: `python -m pytest tests/test_osc_dash_integration.py tests/test_param_registry.py -q` + browser check.
 
-### [x] T5 — `[API/Dashboard]` Drop the off switch, unify the range
-**Files**: `server/osc_dash.py` (`_one` docstring `:556-561`, query default `:624`,
-clamp `:701`, echo `:771`, `:989`, the Backtest control and its toggle `:2409-2420`,
-the Cockpit control `:2792-2793`, `togglePairCostInput` `:3934+`, the request builder
-`:4034-4035`, the reset block `:4313-4317`, the preset block `:4346-4355`, the
-`required` id lists `:4346`, `:6789`), `tests/test_osc_dash_integration.py`.
-**Do**: delete the toggle, its label span, its JS function and every call to it;
-the number input becomes a plain enabled field with `min="0.5" max="1"` and
-`value="0.99"`; rename `data-param` to `max_pair_cost` on both controls; update the
-two reset/preset defaults; reword the `_one` docstring, which cites this exact
-divergence as its reason for existing.
-**Skill**: `frontend-ui-engineering` (the panel must not be left with a hole),
-`api-and-interface-design`.
-**Verify**: `python -m pytest tests/test_osc_dash_integration.py tests/test_param_registry.py -q`,
-then a browser check of the Backtest tab (no toggle, field enabled at 0.99, a run
-still returns fills) and the Cockpit tab.
+### [ ] T5 — `[Backend/CLI]` Scripts, sims, preset deletion
+**Files**: `scripts/backtest.py` (`--entry-band` → `--quote-lo/--quote-hi`);
+`scripts/replay_shadow_check.py` (gates legs keep `entry_delay`; delete the
+`entry_band` leg of the mirror + its recorded comparison);
+`scripts/shadow_ev_pilot.py` (band variant — delete or re-scope to delay);
+`research/sweeps/sim2.py` (`entry_band` arg → `quote_range`, per-tick);
+`research/sweeps/ev_lab.py` (`UNSUPPORTED_KNOBS` follows the rename);
+`research/sweeps/selection_bias.py` (band cfg follows);
+`strategy/live_trader.py` preset block + `tests/test_patient_band_preset.py`
+(deleted with the preset — the one file deletion `CONSTRAINTS.md` permits).
+**Verify**: `python -m pytest tests/test_backtest_cli.py tests/test_sweep_backtest.py tests/test_replay_shadow_check.py tests/test_ev_sweep_lab.py -q`.
 
-### [x] T6 — `[Backend/CLI]` Scripts
-**Files**: `scripts/backtest.py` `:94`, `:103`; `scripts/sweep_backtest.py` `:167`,
-`:184`, `:204`, `:221`, `:232-238`, `:324`, `:385`; `scripts/replay_shadow_check.py`
-`:53-73`, `:113-120`, `:309`.
-**Do**: rename every pass-through. `sweep_backtest.py`'s pair-cost grid is
-`[1.01, 1.02, 1.03, 1.05, 1.10]` — every value is now out of range and would raise;
-replace it with `[0.96, 0.97, 0.98, 0.99, 1.00]`, which is the same five-point sweep
-inside the legal range. `replay_shadow_check.py`'s `PAIR_CAPS` `1.05` becomes `1.00`
-and the comment explaining 1.05 as "engine default + research §5" is rewritten.
-**Verify**: `python -m pytest tests/test_backtest_cli.py tests/test_sweep_backtest.py tests/test_replay_shadow_check.py -q`.
-
-### [x] T7 — `[Research/Logic]` The research simulators
-**Files**: `research/sweeps/ev_lab.py` `:486-492`, `:870`, `:1101`;
-`research/sweeps/sim2.py` `:177-183`.
-**Do**: delete the `(up_ask + dn_ask) <= cap` entry test in both and reduce the branch
-to `if not queue_ok:`; rename the field; move the base config `1.05 → 0.99` and the
-comparison config `1.01 → 0.99`. `tests/test_ev_sweep_lab.py` scans `sim2.py`'s source
-for `p.<field>` exhaustiveness against the dataclass — check whether removing the last
-`p.max_pair_cost` read from `sim2.py` trips that scan, and if so record the field as
-chase-only rather than weakening the scan.
-**Verify**: `python -m pytest tests/test_ev_sweep_lab.py tests/test_selection_bias.py -q`.
-
-### [x] T8 — `[Test]` The tests that encode the deleted gate
-**Files**: `tests/test_backtest_engine.py` (`:346`, `:354`, `:361`, `:369` and the
-`_params` defaults at `:47`, `:242`, `:980`, `:1218`, `:1237`, `:1331`, `:1344`,
-`:1445`), `tests/test_param_registry.py` (`:76`, `:140-150`, `:174`),
-`tests/test_backtest_cli.py` (`:79`, `:129`),
-`tests/test_replay_shadow_check.py` (`:124`),
-`tests/test_osc_dash_integration.py` (`:2449`, `:2475`, `:2609`).
-**Do**: the four entry-gate tests assert behaviour this issue deletes — remove them
-and name the removal in the commit body (`CONSTRAINTS.md` permits exactly this and
-nothing wider). Everything else is a rename or a default change. Retarget
-`test_the_registry_does_not_claim_post_init_enforces_every_bound` to `queue_gate`,
-which is still registry-bounded and still unvalidated, and add `max_pair_cost` to
-`test_registered_bounds_match_post_init_validation`'s parametrize list, where it now
-belongs.
+### [ ] T6 — `[Test]` The tests that encode the deleted gates
+**Files**: every test file with `entry_band`/`adverse_open` refs (14 files per
+the Station II scan — heaviest: `test_live_trader.py` (48), `test_backtest_engine.py`
+(15), `test_osc_dash_integration.py` (16), `test_patient_band_preset.py` (16,
+deleted in T5), `test_ev_sweep_lab.py` (10)).
+**Do**: tests asserting band/adverse/re-entry behaviour are removed with the
+behaviour (removal named in the commit body); timeout/late-start tests stay;
+everything else is a rename. Fold into T1/T2/T4/T5 per file (the #227 pattern:
+one pass per file keeps every commit green) rather than running last.
 **Verify**: the full targeted set from `CONSTRAINTS.md`.
 
-### [x] T9 — `[Docs]` The surfaces that still describe a gate
-**Files**: `AGENTS.md` (the `/api/backtest` query list),
-`docs/backtest-optimization-results.md:89` (a header note that `pair_cost_gate = 1.05`
-described a rule that no longer exists — the numbers themselves stay),
-`docs/engine-decision-rules.md:283` and the `backtest/engine.py:352-360` line reference
-inside rule 4 (that code is deleted by T2),
-`docs/ev-research-findings-2026-09-11.md:208`, `docs/operations.md` if it names the knob.
-**Do**: nothing new is decided here. `docs/engine-decision-rules.md` §4 and ADR-0003
-are the definition and were agreed before this plan; these files only stop pointing at
-a gate that no longer exists.
+### [ ] T7 — `[Docs]` Surfaces that still describe the gates
+**Files**: `docs/engine-decision-rules.md` §5 (`adverse-open` gate — now
+historical, mark it), `:523` (flag paragraph), `docs/operations.md` (band
+references), `AGENTS.md` (`/api/backtest` query list), research finding docs
+that quote band numbers as live config (mark as unreproducible records, the
+#227 pattern — numbers stay).
+**Do**: nothing new is decided; rule §6 is the definition. Mark, do not
+rewrite history.
 
 ## Order and commits
 
-T1 → T2 → T3 → T4 (parity proves T2-T3) → T5 → T6 → T7 → T8 → T9.
-One atomic commit per task, conventional, scoped (`feat(strategy):`, `fix(backtest):`,
-`fix(strategy):`, `fix(dash):`, `chore(research):`, `test:`, `docs:`). Branch
-`fix/max-pair-cost-chase-only-227` off `master`.
+T0 → T1 → T2 → T3 (parity proves T1–T2) → T4 → T5 → T6 (folded per-file) → T7.
+One atomic commit per task, conventional, scoped. Branch
+`fix/quote-range-228` off `master`.
 
-T8 is last among the code tasks on purpose: the earlier tasks will each break a
-handful of the tests it owns, and fixing them once, deliberately, beats patching the
-same file eight times.
+## Improvement decided (operator approved 2026-09-16 — adopted)
 
-## Improvement proposed (operator decides — not folded in silently)
-
-**Make the ceiling structural, not just renamed.** The issue asks for one name, one
-default and one range. It does not ask for one *formula* — and the formula is copied
-six times today: twice in `backtest/engine.py` and four times in `strategy/live_trader.py`,
-each with its own `+ 1e-9` and its own `round(..., 2)`. That is the same shape as the
-fill rule before #226, where four copies of one predicate is exactly how they drifted
-apart. A `chase_cap()` in `strategy/book_math.py` (T1) makes the two engines unable to
-disagree about the ceiling instead of merely asserted to agree, and shrinks T2 and T3
-to call sites. Cost: one ten-line function, in the module both engines already import.
-**Adopt / defer / drop?** The plan above assumes *adopt*; dropping it means T1
-disappears, T2 and T3 edit six inline copies in place, and T4's parity test carries
-the whole guarantee.
+**The range check reuses the anchor mid, no second computation.** Both engines
+evaluate the range on the anchor's two-sided mid value (`anchor_mid` in
+backtest, the anchor mid in scope in live) instead of calling `_two_sided_mid`
+a second time — one mid definition, covered by the parity test together with
+the anchor. Folded into T1/T2 above.
