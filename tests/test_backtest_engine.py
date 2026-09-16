@@ -345,6 +345,16 @@ def test_resting_pair_cost_gate_blocks_when_quotes_exceed_cap():
     w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
     assert w.filled_up is False
 
+def test_simulate_window_tracks_entered_flag():
+    # Issue #204: When quotes are resting and not gated out, entered is True
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51)]
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, pair_cost_gate=0.98))
+    assert w.entered is True
+
+    # When all ticks are blocked by pair_cost_gate, entered is False
+    w_blocked = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
+    assert w_blocked.entered is False
+
 
 # --- simulation: exit -----------------------------------------------------
 
@@ -463,6 +473,8 @@ def test_replay_returns_aggregate_and_per_window():
     assert len(out["trades_sample"]) == 2
     assert "max_drawdown_cents" in out["aggregate"]["overall"]
     assert "win_rate" in out["aggregate"]["overall"]
+    assert "entered" in out["aggregate"]["overall"]
+    assert "entered_windows" in out["aggregate"]["overall"]
 
 
 def test_replay_aggregates_reentry_by_series():

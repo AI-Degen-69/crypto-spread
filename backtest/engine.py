@@ -1326,6 +1326,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         n = d.get("windows", 0)
         return {
             "windows": n,
+            "entered": d.get("entered", 0),
             "entered_windows": d.get("entered", 0),
             "entered_rate": round(d.get("entered", 0) / n, 4) if n else 0.0,
             "pair_rate": round(d.get("pair", 0) / n, 4) if n else 0.0,
@@ -1347,6 +1348,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
     overall = {
         "windows": sum(s["windows"] for s in per_series.values()),
         "entered": sum(s.get("entered", 0) for s in per_series.values()),
+        "entered_windows": sum(s.get("entered", 0) for s in per_series.values()),
         "pair": sum(s["pair"] for s in per_series.values()),
         "exit": sum(s["exit"] for s in per_series.values()),
         "total_pnl_cents": sum(s["total_pnl_cents"] for s in per_series.values()),
