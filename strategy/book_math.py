@@ -25,7 +25,7 @@ unknown rather than as zero.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 # A lone bid implies the true mid sits somewhere above it, and a lone ask
 # implies it sits below. Half a cent is the smallest nudge that expresses the
@@ -114,6 +114,58 @@ def queue_ahead(bids: Optional[Dict[Any, Any]],
         if level_price >= target:
             total += level_size
     return total
+
+
+def resting_bid_filled(resting: Any, best_ask: Any,
+                       tape_prices: Iterable[Any], tick: float,
+                       newly_placed: bool = False) -> bool:
+    """Was our buy order filled on this tick? (issue #226)
+
+    The single fill rule, shared by the backtest engine and the live trader's
+    paper simulation so the two cannot drift apart. It answers *whether* we
+    were filled, never at what price: the entry quote is a limit order that
+    sits and waits, so whoever filled it was the aggressor. We are the maker,
+    we get our own price, and we pay no fee. `docs/engine-decision-rules.md`
+    §3 and ADR-0002 carry the reasoning.
+
+    Two triggers, both detectors of the same event:
+
+    - **A print at our price.** A trade within `tick` of our bid.
+    - **An ask fully through our price.** Strictly below, never a touch. An ask
+      resting *under* our bid is not a state a book can hold -- the two would
+      have matched on contact -- so seeing it in a one-second snapshot is
+      evidence that our order was taken while the collector was not looking.
+
+    Both are needed: the tape capture is incomplete, so the book covers what
+    the tape missed. A *touch* (`ask == resting`) is deliberately not a fill --
+    other bids may sit ahead of ours in the queue, so the promise is fewer
+    fills than the market would give, never more.
+
+    `newly_placed` is the exception to the touch rule, and it is the whole
+    reason the flag exists. Queue priority is about our own side of the book:
+    it decides who gets hit when a seller comes down to us. An order *placed*
+    at or above the current ask never joins that queue at all -- it is
+    marketable and matches the resting ask on arrival, with nobody ahead of it.
+    That is what the leg chase does every time it steps to `min(ask, cap)`, so
+    without this branch the chase could never complete a pair. It is still a
+    limit order, so it is still booked at our price with no fee (`SPEC.md`).
+
+    Anything unparseable is unknown, not zero, and never fills.
+    """
+    price = _as_price(resting)
+    if price is None:
+        return False  # unquotable: there is no order to be filled
+    tolerance = tick + 1e-6
+    for printed in tape_prices or ():
+        traded = _as_price(printed)
+        if traded is not None and abs(traded - price) <= tolerance:
+            return True
+    ask = _as_price(best_ask)
+    if ask is None:
+        return False
+    if newly_placed:
+        return ask <= (price + 1e-6)
+    return ask <= (price - tick + 1e-6)
 
 
 def pair_cost(up: Any, down: Any) -> Optional[float]:

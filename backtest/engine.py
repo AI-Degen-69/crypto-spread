@@ -10,14 +10,13 @@ importable, CLI thin wrapper) + D8 (cid index for fast slider sweep):
   snaps = load_ticks("run/ticks/")  # iterates all *.jsonl[.gz]
   for cid, window_snaps in group_by_cid(snaps):  # handles midnight split
       ...
-  params = BacktestParams(offset=0.02, queue_gate=50, exit_thresh_by_slug={...},
-                         fill_model="tape", ...)
+  params = BacktestParams(offset=0.02, queue_gate=50, exit_thresh_by_slug={...})
   results = replay(snaps, params)
 
-`fill_model="tape"` is the conservative default (matches `strategy/markets.py:271`
-- only counts a trade that the venue actually printed). `"book"` is optimistic
-(book crossed our resting price = filled). `"both"` reports both so the UI
-can show the gap.
+There is one fill rule and it is not configurable (issue #226, ADR-0002):
+`book_math.resting_bid_filled` -- a print at our price, or an ask fully through
+it. Both detect the same event, our resting limit order being taken, so the
+fill price is always our own and an entry never pays a fee.
 """
 from __future__ import annotations
 import gzip
@@ -124,7 +123,6 @@ class BacktestParams:
     })
     exit_reversal: float = 0.02
     quote_shares: int = 5
-    fill_model: str = "tape"         # "tape" | "book" | "both" | "cross"
     tick_size: float = 0.001
     merge_gas_usd: float = 0.0
     taker_fee_rate: float = 0.07     # crypto fee coefficient
@@ -239,8 +237,6 @@ class BacktestParams:
              "$", (0.001, 0.50), ("backtest", "cockpit")),
         ],
         "execution_assumptions": [
-            ("fill_model", "Fill Model", "Not directly settable live: the book decides fills",
-             "enum", None, ("backtest",)),
             ("merge_gas_usd", "Gas Merge Cost ($)", "Real cost, not a tuning knob",
              "$", (0.0, 100.0), ("backtest",)),
             ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption",
@@ -315,7 +311,7 @@ class BacktestParams:
         does — can still construct a value outside these bounds. The registry
         constrains what a *request* may ask for, not what the dataclass will
         accept. `surfaces` says which tabs may show a knob: an execution
-        assumption like `fill_model` is not something an operator sets on a
+        assumption like `taker_fee_rate` is not something an operator sets on a
         live order, so it is backtest-only by design.
         """
         return copy.deepcopy(cls._param_spec_cached())
@@ -1040,6 +1036,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # already half into is not a new entry, so a book that no longer meets
         # the entry gate must not strand the open leg — the same reasoning the
         # exit check below is placed there for.
+        chased_now_up = False
+        chased_now_down = False
         if (params.enable_leg_chase and (filled_up != filled_down)
                 and not pair_captured and not exit_taken
                 and resting_up is not None and resting_down is not None):
@@ -1047,9 +1045,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # No ask means nothing to anchor to, and live
             # (`live_trader.py:4406/4421`) wraps its whole chase in
             # `if <leg>_ask is not None`. Advancing to the cap ceiling on a
-            # blind tick would rest the leg where live never would — and under
-            # `fill_model="tape"`, which needs no ask to fill, manufacture a
-            # fill the live engine could not have produced.
+            # blind tick would rest the leg where live never would — and since
+            # a tape print fills with no ask involved, manufacture a fill the
+            # live engine could not have produced.
+            #
+            # `min(ask, ...)` can land the chased quote exactly ON the ask, and
+            # such an order is matched on arrival rather than resting. It is
+            # still a limit order, so it books here as a maker fill at our
+            # price with no fee — knowingly understating cost by one taker fee
+            # in that one case (`SPEC.md`, issue #226). Our price *is* the ask
+            # there, so only the fee is at stake.
             if filled_up:
                 _ask = db.get("best_ask")
                 if _ask is not None:
@@ -1059,6 +1064,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     if _target > resting_down:
                         resting_down = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "down"
+                        chased_now_down = True
             else:
                 _ask = ub.get("best_ask")
                 if _ask is not None:
@@ -1068,6 +1074,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     if _target > resting_up:
                         resting_up = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "up"
+                        chased_now_up = True
 
         if not queue_ok or not pair_cost_ok:
             # An already-filled position must still be eligible to exit even
@@ -1108,9 +1115,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             if not filled_up and not filled_down:
                 continue
 
-        # --- FILL DETECTION (Plan fill_model: tape conservative default, cross for strict through-price fills) ---
-        # Tape-confirmed: a real trade printed at our resting price (or strictly through for "cross").
-        # Book-only: best_ask <= resting_price means book crossed us.
+        # --- FILL DETECTION (issue #226: one rule, `book_math.resting_bid_filled`) ---
+        # A print at our price, or an ask fully through it. Both are detectors
+        # of the same event -- our resting limit order being taken -- so the
+        # fill price is always our own and no fee is charged here. The taker
+        # fee belongs to the exits below, which cross the book to sell.
         # Hoist token lookups and guard empty identifiers (prevents "" == "" match).
         up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
@@ -1118,6 +1127,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     and not band_hold and not no_book_hold)
         can_fill_up = (not filled_up) and (not entry_cancelled or filled_down) and quotable
         can_fill_down = (not filled_down) and (not entry_cancelled or filled_up) and quotable
+        # A quote that is not live yet is being *placed* on this tick, so it
+        # can be marketable on arrival (issue #226). One already resting has to
+        # wait for the ask to pass fully through it.
+        placed_now = not orders_live
         if (quotable and (can_fill_up or can_fill_down)) or filled_up or filled_down:
             window_entered = True
             # The quote reached the book on this tick, so from the next one it
@@ -1125,39 +1138,26 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # exists. A later cancellation re-opens repricing via
             # `entry_cancelled` in the anchor block above.
             orders_live = True
+        up_prints: list[float] = []
+        dn_prints: list[float] = []
         for trade in s.get("tape_delta") or []:
             tasset = str(trade.get("asset", "")).strip()
             if not tasset:
                 continue
-            tprice = float(trade.get("price", 0))
-            if up_token and tasset == up_token and can_fill_up:
-                if params.fill_model in ("tape", "both") and abs(tprice - resting_up) <= (params.tick_size + 1e-6):
-                    filled_up = True
-                    can_fill_up = False
-                elif params.fill_model == "cross" and tprice <= (resting_up - params.tick_size + 1e-6):
-                    filled_up = True
-                    can_fill_up = False
-            if dn_token and tasset == dn_token and can_fill_down:
-                if params.fill_model in ("tape", "both") and abs(tprice - resting_down) <= (params.tick_size + 1e-6):
-                    filled_down = True
-                    can_fill_down = False
-                elif params.fill_model == "cross" and tprice <= (resting_down - params.tick_size + 1e-6):
-                    filled_down = True
-                    can_fill_down = False
-        if params.fill_model in ("book", "both"):
-            if can_fill_up and up_ask is not None and up_ask <= resting_up:
-                filled_up = True
-                can_fill_up = False
-            if can_fill_down and dn_ask is not None and dn_ask <= resting_down:
-                filled_down = True
-                can_fill_down = False
-        elif params.fill_model == "cross":
-            if can_fill_up and up_ask is not None and up_ask <= (resting_up - params.tick_size + 1e-6):
-                filled_up = True
-                can_fill_up = False
-            if can_fill_down and dn_ask is not None and dn_ask <= (resting_down - params.tick_size + 1e-6):
-                filled_down = True
-                can_fill_down = False
+            if up_token and tasset == up_token:
+                up_prints.append(trade.get("price"))
+            elif dn_token and tasset == dn_token:
+                dn_prints.append(trade.get("price"))
+        if can_fill_up and book_math.resting_bid_filled(
+                resting_up, up_ask, up_prints, params.tick_size,
+                newly_placed=placed_now or chased_now_up):
+            filled_up = True
+            can_fill_up = False
+        if can_fill_down and book_math.resting_bid_filled(
+                resting_down, dn_ask, dn_prints, params.tick_size,
+                newly_placed=placed_now or chased_now_down):
+            filled_down = True
+            can_fill_down = False
 
         # Latch each leg's entry price the tick it fills. Without this, a
         # chase step after the fill would rewrite the entry the P&L is

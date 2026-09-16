@@ -157,3 +157,66 @@ def test_default_variant_and_honest_variant_agree_on_healthy_books():
 
     up, down = _book(0.44, 0.46), _book(0.54, 0.56)
     assert two_sided_mid(up, down) == two_sided_mid_with_default(up, down)
+
+
+# ---------------------------------------------------------------------------
+# resting_bid_filled (issue #226) -- the one fill rule, shared by both engines
+# ---------------------------------------------------------------------------
+
+def test_a_print_at_our_price_fills_us():
+    """A trade printed within the tick tolerance of our bid took our order."""
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(0.47, None, [0.47], tick=0.001) is True
+    assert resting_bid_filled(0.47, None, [0.4705], tick=0.001) is True
+    assert resting_bid_filled(0.47, None, [0.60, 0.4695], tick=0.001) is True
+
+
+def test_a_print_away_from_our_price_does_not_fill_us():
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(0.47, None, [0.48], tick=0.001) is False
+    assert resting_bid_filled(0.47, None, [], tick=0.001) is False
+
+
+def test_an_ask_fully_through_our_price_fills_us():
+    """The print was missed; a crossed book is the evidence it happened."""
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(0.47, 0.41, [], tick=0.001) is True
+    assert resting_bid_filled(0.47, 0.469, [], tick=0.001) is True
+
+
+def test_an_ask_merely_touching_our_price_does_not_fill_us():
+    """Other bids may sit ahead of ours at an equal price, so a touch is not
+    a trade. Deliberately more conservative than the venue."""
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(0.47, 0.47, [], tick=0.001) is False
+    assert resting_bid_filled(0.47, 0.4695, [], tick=0.001) is False
+
+
+def test_an_unknown_or_unquotable_side_never_fills():
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(None, 0.41, [0.47], tick=0.001) is False
+    assert resting_bid_filled(0.47, None, [None], tick=0.001) is False
+    assert resting_bid_filled(0.47, "junk", ["junk"], tick=0.001) is False
+
+
+def test_a_quote_placed_onto_a_standing_ask_is_marketable():
+    """Issue #226: the leg chase steps to `min(ask, cap)`, landing ON the ask.
+    Such an order matches on arrival -- there is no queue in front of it --
+    so the touch rule does not apply to the tick it is placed."""
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(0.49, 0.49, [], tick=0.001, newly_placed=True) is True
+    assert resting_bid_filled(0.49, 0.48, [], tick=0.001, newly_placed=True) is True
+    # Once it is resting, the same touch is no longer a fill.
+    assert resting_bid_filled(0.49, 0.49, [], tick=0.001) is False
+
+
+def test_a_newly_placed_quote_below_the_ask_still_rests():
+    from strategy.book_math import resting_bid_filled
+
+    assert resting_bid_filled(0.48, 0.51, [], tick=0.001, newly_placed=True) is False
