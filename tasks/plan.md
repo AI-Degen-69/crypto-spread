@@ -1,116 +1,81 @@
-# Plan — Issue #206: Live entry quotes are always 0.50 - offset
+# Plan — Issue #204: Backtest pair_cost_gate tests resting pair cost, not touch ask sum
 
-- **Issue:** #206 (`ready-for-agent`, assigned)
-- **Branch:** `fix/live-entry-anchor-mid-206`
-- **Size tier:** Small — one block in one function, one file plus its tests.
-  It is small in diff and large in consequence: it is the pricing of every live
-  entry order the engine places.
-- **Task type:** Debug (root-cause of a live-money defect) + Code.
-- **Stack:** Python 3.12.10, FastAPI project, pytest. No venv activation needed.
-- **Skills routed:** `debugging-and-error-recovery` (root cause is already
-  isolated — the `locals()` guard), `test-driven-development` (red before green),
-  `source-driven-development` (the correct formula is already in the repo twice).
-  No UI skills: this is engine logic, nothing renders.
+- **Issue:** #204 (`ready-for-agent`, assigned)
+- **Branch:** `fix/backtest-pair-cost-gate-204`
+- **Size tier:** Standard — 2-4 files (`backtest/engine.py`, `tests/test_backtest_engine.py`, `server/osc_dash.py`), logic correction for backtest gate and diagnostic visibility.
+- **Task type:** Debug + Code (eliminating backtest fill suppression and live divergence).
+- **Stack:** Python 3.12.10, FastAPI, pytest.
+- **Skills routed:** `debugging-and-error-recovery`, `test-driven-development`, `api-and-interface-design`.
 
-## Root cause (confirmed by reading, not assumed)
+## Root Cause (Confirmed by Inspection)
 
-`strategy/live_trader.py:4384-4385` reads `up_mid` / `down_mid`. Neither name is
-bound anywhere in `_update_market_strategy` or its module scope — the only
-`up_mid` in the repo is a local inside `book_math.two_sided_mid` (`book_math.py:89`).
-So `'up_mid' in locals()` is permanently `False` and both legs price off `0.50`.
+In `backtest/engine.py:928-938`:
+```python
+up_ask = ub.get("best_ask")
+dn_ask = db.get("best_ask")
+if params.pair_cost_gate <= 0:
+    pair_cost_ok = True
+else:
+    touch = None
+    if up_ask is not None and dn_ask is not None:
+        touch = up_ask + dn_ask
+    pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
+```
+and consumed at `:979`:
+```python
+if not queue_ok or not pair_cost_ok:
+    ...
+    if not filled_up and not filled_down:
+        continue # <-- skips fill detection!
+```
 
-The correct value exists already: `mstate.mid` is assigned at `:4365` from
-`two_sided_mid_with_default`, and the exact formula to apply to it exists twice:
-
-- re-quote path, `live_trader.py:5190`: `anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)`
-- backtest, `backtest/engine.py:786-788`: same, with `(1.0 - _anchor_f)` for the down leg.
-
-`tests/test_live_trader.py:2831` (`test_requote_dynamic_anchor_math`) already
-pins that behaviour — **for round 1 only**. Round 0 was never covered, which is
-how the dead fallback survived.
+This gates fill detection on `up_ask + dn_ask` — the taker touch cost. In binary markets, `up_ask + dn_ask` is usually >= 1.00 (~1.01-1.02). With the live default `pair_cost_gate = 0.98`, this fails every tick, skipping fill detection on 100% of windows. The maker strategy rests at `mid - offset` and `(1 - mid) - offset`, so the pair cost is `1.0 - 2*offset` (0.94 at 0.03, 0.96 at 0.02), well under 0.98. Furthermore, live trader uses `max_pair_cost` only as the cap for leg chase, never gating resting quotes on the touch.
 
 ## Tasks
 
-### T1 — Branch and red test `[Debug]`
-- Create `fix/live-entry-anchor-mid-206` off `master`.
-- Add `test_initial_entry_anchors_to_live_mid` to `tests/test_live_trader.py`,
-  next to `test_requote_dynamic_anchor_math` so the round-0 and round-1 cases
-  read as a pair.
-- Model it on that test's fixtures: a 15m engine, a benign 0.50 open snapshot so
-  the adverse-open gate (`:4509`) stays out of the way, then a skewed two-sided
-  book with mid `0.60`.
-- Assert `m.resting_up == 0.57` and `m.resting_down == 0.37` at `offset = 0.03`
-  (or the engine's configured offset, expressed as `round(0.60 - engine.offset, 3)`).
-- **Verification:** `python -m pytest tests/test_live_trader.py -q -k initial_entry_anchors`
-  must FAIL, reporting `0.47`. Capture that output — CONSTRAINTS §5 requires it.
+### T1 — Red Tests for Resting Pair Cost Gate `[Debug]`
+- Add `test_resting_pair_cost_gate_allows_fills_when_touch_is_wide` to `tests/test_backtest_engine.py`:
+  - With `up_ask=0.60, down_ask=0.60` (touch=1.20) and `offset=0.02` (`resting_cost=0.96`), when `pair_cost_gate=0.98`, resting quote MUST fill when touched by a trade.
+- Add `test_resting_pair_cost_gate_blocks_when_quotes_exceed_cap`:
+  - With `offset=0.005` (`resting_cost=0.99`) and `pair_cost_gate=0.98`, entry/fill MUST be blocked because the resting pair exceeds the ceiling.
+- **Verification:** `python -m pytest tests/test_backtest_engine.py -q -k resting_pair_cost` must FAIL on master.
 
-### T2 — The fix `[Backend/Logic]`
-- `strategy/live_trader.py:4383-4387`: delete the two `locals()` lines and price
-  from the mid:
+### T2 — Fix Gate in `backtest/engine.py` `[Backend/Logic]`
+- In `backtest/engine.py:928-938`, replace the touch ask test with resting pair cost:
+  ```python
+  if params.pair_cost_gate <= 0:
+      pair_cost_ok = True
+  elif resting_up is None or resting_down is None:
+      pair_cost_ok = True
+  else:
+      resting_pair_cost = resting_up + resting_down
+      pair_cost_ok = resting_pair_cost <= (params.pair_cost_gate + 1e-6)
+  ```
+- Update the legacy test `test_simulate_pair_cost_gate_blocks_wide_touch` in `tests/test_backtest_engine.py` to assert the corrected resting pair cost logic.
+- Ensure leg chase cap (`_cap = params.pair_cost_gate` at line 953) continues to function as expected.
+- **Verification:** T1 tests pass; `tests/test_backtest_engine.py` passes.
 
-```python
-_anchor = mstate.mid if mstate.mid is not None else 0.50
-resting_up = round(min(0.99, max(0.01, _anchor - self.offset)), 3)
-resting_down = round(min(0.99, max(0.01, (1.0 - _anchor) - self.offset)), 3)
-```
+### T3 — Track and Expose `entered_windows` in Backtest Engine & API `[Backend/Logic]`
+- In `backtest/engine.py:WindowResult`, add `entered: bool` indicating whether the window was quotable and met entry gates (delay, band, pair cost, queue).
+- In `replay()` aggregate metrics, track `entered_windows` and include it in overall summary.
+- In `server/osc_dash.py:api_backtest`, expose `entered_windows` in the `overall` payload.
+- **Verification:** `python -m pytest tests/test_backtest_engine.py tests/test_osc_dash_integration.py -q`.
 
-- Update the comment above it: it currently describes behaviour the code did not
-  have. Name `mstate.mid` and say the price is recomputed every tick until an
-  order exists, which is what makes it placement-time fresh.
-- **Verification:** the T1 test goes green; `tests/test_live_trader.py` whole file green.
+### T4 — Dashboard Zero-Entry vs Zero-PnL Diagnostics `[Design/UI]`
+- In `server/osc_dash.py`:
+  - Update backtest metrics display in JS to show entered windows (`${ov.entered_windows || ov.windows || 0} entered`).
+  - Update `btEquityWarning` banner to state clearly when 0 windows were entered due to gates vs 0 fills on entered windows.
+  - Enable `btPairCost` input if applicable, ensuring validation matches `BacktestParams.bounds_for("pair_cost_gate")`.
+- **Verification:** `python -m pytest tests/test_osc_dash_integration.py -q`.
 
-### T3 — Boundary and parity tests `[Debug]`
-- Add to the same test, or a sibling, the two cases that keep the fix honest:
-  - pair-sum invariant: `resting_up + resting_down == round(1 - 2*offset, 3)`
-    across several mids (0.20 / 0.50 / 0.80).
-  - clamping: a mid at 0.02 with `offset = 0.03` must not emit a price below 0.01.
-- Assert the mid-0.50 case still yields the historical `0.47` / `0.47`, so the
-  claim "no existing fixture changes" is a test, not a hope.
-- **Verification:** `python -m pytest tests/test_live_trader.py tests/test_entry_timeout.py tests/test_patient_band_preset.py -q`.
+### T5 — Empirical Verification on Real Ticks `[Research/Debug]`
+- Run backtest against `run/ticks/` with preset defaults (`pair_cost_gate=0.98`) to confirm that windows now quote and fill as expected (confirming the zero-fill lock is broken).
+- Document results in the PR walkthrough.
 
-### T4 — Placement-time proof `[Debug]`
-- One test with `entry_delay_sec = 60`: feed a tick at mid 0.50 before the delay
-  expires (no order placed), then a tick at mid 0.65 after it expires, and assert
-  the placed price is `0.65 - offset`, not `0.50 - offset`.
-- This is the operator's own acceptance criterion from the #206 comment; without
-  it the fix is correct by inspection only.
-- **Verification:** same command as T3.
+### T6 — Full Test Suite & Quality Gate `[Backend/Logic]`
+- Run `python -m pytest -q` across the entire repository to ensure zero regressions.
+- Verify commit history is clean and atomic per task.
 
-### T5 — Document the pre-quote exception `[Docs]`
-- `strategy/live_trader.py:4230`: add one comment line saying the `0.50` there is
-  deliberate — the T+1 window has no book to anchor to, and the block is already
-  suspended whenever `entry_delay_sec` or `entry_band` is armed. No code change.
-- **Verification:** `python -m pytest tests/test_docstrings.py -q`.
+## 💡 Proposed Improvement (Operator Decides — Not Folded In Silently)
 
-### T6 — Full suite and PR `[Backend/Logic]`
-- `python -m pytest -q` (~50s).
-- Commit per task, conventional, scoped `fix(live)`. PR body carries the red
-  output from T1 and the green output from T6, per CONSTRAINTS §5, and states
-  plainly that every backtest result for a non-zero `entry_delay_sec` before this
-  commit described a strategy the live engine never ran.
-
-## 💡 Proposed improvement (operator decides — not folded in)
-
-The clamp formula now appears three times: round-0 (after T2), the re-quote path
-(`:5190`), and the backtest (`engine.py:786`). A four-line module function —
-
-```python
-def anchor_prices(mid: float, offset: float) -> tuple[float, float]:
-    """Both legs' resting prices at `mid`: (mid - offset, (1 - mid) - offset)."""
-```
-
-— in `strategy/book_math.py`, called from both live sites, would make the two
-live copies impossible to drift apart again, and gives #214's parity harness a
-single symbol to assert against. It is a real deduplication of code that already
-exists, not speculative abstraction.
-
-**Cost:** touches the re-quote path, which is currently green and out of scope,
-so it widens the blast radius of a live-money fix. **Recommendation: defer to
-#214**, where parity is the whole point. Adopt now only if you want it.
-
-## Ordering note
-
-#206 is the unblocker. #213 (entry band) must land after it — relaxing the band
-while quotes are still nailed to `0.50 - offset` quotes 0.47/0.47 into a market
-at 0.70, which is exactly the adverse-fill scenario with the guard removed.
-#209 (stop measured from 0.50) and #214 (parity) both read this issue's result.
+Extract `resting_pair_cost(resting_up, resting_down)` into `strategy/book_math.py` with standard rounding and clamp checks, and reuse it across both `live_trader.py` and `backtest/engine.py`. This ensures identical mathematical precision (e.g. 1e-9 epsilon handling) and single-source truth for pair affordability across live and simulation.

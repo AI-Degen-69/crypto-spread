@@ -500,6 +500,7 @@ class WindowResult:
     # in the results, and an abstention looks identical to a flat window.
     settled_unmarked: bool = False
     settle_source: str = ""
+    entered: bool = False
 
 
 # Issue #170: these used to be local copies that disagreed with the collector
@@ -700,6 +701,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     pnl_cents = 0.0
     fees_cents = 0.0
     err = ""
+    window_entered = False
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
     # Issue #164: a leg still unpaired may carry a tighter stop than the paired
@@ -925,16 +927,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                         and q_up <= params.queue_gate
                         and q_dn <= params.queue_gate)
 
-        # Touch pair gate (0 or <= 0 disables per Maker strategy)
         up_ask = ub.get("best_ask")
         dn_ask = db.get("best_ask")
+        # Pair cost gate (issue #204: tests resting quote pair cost via book_math.pair_cost; 0 disables)
         if params.pair_cost_gate <= 0:
             pair_cost_ok = True
+        elif resting_up is None or resting_down is None:
+            pair_cost_ok = True
         else:
-            touch = None
-            if up_ask is not None and dn_ask is not None:
-                touch = up_ask + dn_ask
-            pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
+            rcost = book_math.pair_cost(resting_up, resting_down)
+            pair_cost_ok = (rcost is None) or (rcost <= (params.pair_cost_gate + 1e-6))
 
         # --- LEG CHASE (issue #164, mirrors live issue #123 and sim2) ---
         # One leg filled: step the other toward its ask, floored to cent
@@ -1025,6 +1027,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     and not band_hold)
         can_fill_up = (not filled_up) and (not entry_cancelled or filled_down) and quotable
         can_fill_down = (not filled_down) and (not entry_cancelled or filled_up) and quotable
+        if (quotable and (can_fill_up or can_fill_down)) or filled_up or filled_down:
+            window_entered = True
         for trade in s.get("tape_delta") or []:
             tasset = str(trade.get("asset", "")).strip()
             if not tasset:
@@ -1194,6 +1198,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                         else resting_up if chased_leg == "up" else None),
         settled_unmarked=settled_unmarked,
         settle_source=settle_source,
+        entered=window_entered,
     )
 
 
@@ -1229,7 +1234,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         per_window.append(_simulate_window(group, params))
 
     per_series: dict[str, dict] = defaultdict(lambda: {
-        "windows": 0, "pair": 0, "exit": 0, "filled_up_only": 0,
+        "windows": 0, "entered": 0, "pair": 0, "exit": 0, "filled_up_only": 0,
         "filled_down_only": 0, "oscillating": 0, "monotonic": 0, "flat": 0,
         "total_pnl_cents": 0.0, "total_fees_cents": 0.0,
         "wins": 0, "peak_pnl": 0.0, "cum_pnl": 0.0, "max_dd": 0.0,
@@ -1285,6 +1290,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         # Per series tracking
         a = per_series[w.series]
         a["windows"] += 1
+        if getattr(w, "entered", False):
+            a["entered"] += 1
         if w.pair_captured:
             a["pair"] += 1
         if w.exit_taken:
@@ -1319,6 +1326,9 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         n = d.get("windows", 0)
         return {
             "windows": n,
+            "entered": d.get("entered", 0),
+            "entered_windows": d.get("entered", 0),
+            "entered_rate": round(d.get("entered", 0) / n, 4) if n else 0.0,
             "pair_rate": round(d.get("pair", 0) / n, 4) if n else 0.0,
             "exit_rate": round(d.get("exit", 0) / n, 4) if n else 0.0,
             "filled_up_only": d.get("filled_up_only", 0),
@@ -1337,6 +1347,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
 
     overall = {
         "windows": sum(s["windows"] for s in per_series.values()),
+        "entered": sum(s.get("entered", 0) for s in per_series.values()),
+        "entered_windows": sum(s.get("entered", 0) for s in per_series.values()),
         "pair": sum(s["pair"] for s in per_series.values()),
         "exit": sum(s["exit"] for s in per_series.values()),
         "total_pnl_cents": sum(s["total_pnl_cents"] for s in per_series.values()),

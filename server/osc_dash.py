@@ -788,6 +788,7 @@ def api_backtest(
             "params_groups": gp,
             "overall": {
                 "windows": 0,
+                "entered_windows": 0,
                 "pairs": 0,
                 "pair_rate": 0.0,
                 "exits": 0,
@@ -921,8 +922,10 @@ def api_backtest(
     total_reentry_count = sum(a["reentry_count"] for a in per_series_raw.values())
     total_reentry_pnl = sum(a["reentry_pnl_cents"] for a in per_series_raw.values())
 
+    entered_windows = sum(1 for w in per_window if getattr(w, "entered", False) or w.filled_up or w.filled_down)
     overall = {
         "windows": total_windows,
+        "entered_windows": entered_windows,
         "pairs": total_pairs,
         "pair_rate": round(total_pairs / total_windows, 4)
         if total_windows
@@ -4062,13 +4065,14 @@ async function runBacktest(fileOverride){
     const data = await res.json();
     if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
 
-    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${fileVal ? ' · [' + fileVal + ']' : ''}`;
     const ov = data.overall || {};
+    const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
+    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}`;
     $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);
     $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
     $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
     $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
-    $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs`;
+    $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs${enteredTxt}`;
     $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
     $('btExitsCount').textContent = `${ov.exits||0} exits`;
     $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
@@ -4087,11 +4091,20 @@ async function runBacktest(fileOverride){
     const labels = eqData.map(e => e.window_idx);
     const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
 
-    // Zero-fill / flatline warning diagnostic
+    // Zero-fill / flatline warning diagnostic (issue #204)
     const fillsCount = (ov.pairs || 0) + (ov.exits || 0);
     const hasFills = fillsCount > 0 || (ov.total_pnl_cents || 0) !== 0;
     if ($('btEquityWarning')) {
-      $('btEquityWarning').style.display = hasFills ? 'none' : 'inline-block';
+      if (!hasFills) {
+        if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
+          $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry band / delay / pair cost).`;
+        } else {
+          $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Verify fill_model or tape data density.';
+        }
+        $('btEquityWarning').style.display = 'inline-block';
+      } else {
+        $('btEquityWarning').style.display = 'none';
+      }
     }
 
     destroyChartInstance('chartEquity');
