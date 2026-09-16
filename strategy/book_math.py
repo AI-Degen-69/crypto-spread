@@ -244,3 +244,59 @@ def two_sided_mid_with_default(up_book: Optional[Dict[str, Any]],
         return default
 
     return round((_leg(up_book) + (1.0 - _leg(down_book))) / 2.0, 4)
+
+
+# --- dead zone (issue #229 / ADR-0003) ---------------------------------------
+
+def dead_zone_cutoff_seconds(window_length: float,
+                             dead_zone_val: float,
+                             dead_zone_unit: str = "pct") -> float:
+    """Return the threshold in seconds before window end where the dead zone begins.
+
+    `dead_zone_unit`: "pct" (fraction of window, default) or "sec" (absolute seconds).
+    If window_length <= 0 or dead_zone_val <= 0, returns 0.0 (dead zone disabled).
+    `docs/engine-decision-rules.md` §8 carries the reasoning.
+    """
+    if window_length <= 0.0 or dead_zone_val <= 0.0:
+        return 0.0
+    unit = str(dead_zone_unit).lower().strip()
+    if unit == "sec":
+        return min(float(dead_zone_val), float(window_length))
+    # default / "pct"
+    pct = min(1.0, max(0.0, float(dead_zone_val)))
+    return round(pct * float(window_length), 6)
+
+
+def dead_zone_start_ts(start_ts: float,
+                       end_ts: float,
+                       dead_zone_val: float,
+                       dead_zone_unit: str = "pct") -> float:
+    """Return the timestamp at which the dead zone begins.
+
+    Invariant 1 compliant: window_length = end_ts - start_ts.
+    If window_length <= 0, returns end_ts.
+    """
+    win_len = end_ts - start_ts
+    cutoff = dead_zone_cutoff_seconds(win_len, dead_zone_val, dead_zone_unit)
+    return end_ts - cutoff
+
+
+def is_in_dead_zone(remaining_sec: float,
+                    window_length: float,
+                    dead_zone_val: float,
+                    dead_zone_unit: str = "pct") -> bool:
+    """True when the remaining window time has fallen into the dead zone.
+
+    If window_length <= 0, dead zone cannot be evaluated (returns False).
+    At or past window expiry (remaining_sec <= 0), always returns True.
+    If dead_zone_val <= 0, returns True only when remaining_sec <= 0.
+    """
+    if window_length <= 0.0:
+        return False
+    if remaining_sec <= 0.0:
+        return True
+    cutoff = dead_zone_cutoff_seconds(window_length, dead_zone_val, dead_zone_unit)
+    if cutoff <= 0.0:
+        return False
+    return remaining_sec <= cutoff + 1e-6
+

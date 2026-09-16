@@ -36,8 +36,8 @@ Shared helpers in `strategy/book_math.py`:
 Branch `feat/dead-zone-229` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 `tasks/plan.md`, `tasks/todo.md` written.
 
-### [ ] T1 — `[Backend/Logic]` Shared dead-zone calculation in `strategy/book_math.py`
-**Files**: `strategy/book_math.py`, `tests/test_book_math.py` (or inline unit tests).
+### [x] T1 — `[Backend/Logic]` Shared dead-zone calculation in `strategy/book_math.py`
+**Files**: `strategy/book_math.py`, `tests/test_book_math.py`.
 **Do**: Implement `dead_zone_cutoff_seconds`, `is_in_dead_zone`, and `dead_zone_start_ts`.
 Handle clock boundaries (`window_length <= 0`, negative remaining time, unit validation).
 **Skill**: `test-driven-development`.
