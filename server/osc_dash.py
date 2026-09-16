@@ -2170,8 +2170,8 @@ textarea:focus-visible,
    must stay direct children of .form-grid, or the wrapper collapses into a
    single grid cell. display:contents keeps the layout identical; the [hidden]
    rule is required because the id selector would otherwise outrank the UA one. */
-#btStopLossFields{display:contents}
-#btStopLossFields[hidden]{display:none}
+#btStopLossFields,#cockpitStopLossFields{display:contents}
+#btStopLossFields[hidden],#cockpitStopLossFields[hidden]{display:none}
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
 .form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
@@ -2747,8 +2747,22 @@ textarea:focus-visible,
           <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" data-param="offset" value="0.02" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label data-param-label="exit_thresh_by_slug"></label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <label data-param-label="stop_loss_enabled"></label>
+            <label class="toggle-wrap" title="Turn the stop loss on or off">
+              <span id="cockpitStopLossToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--up)">ON</span>
+              <div class="toggle-switch">
+                <input type="checkbox" id="cockpitStopLossEnabled" data-param="stop_loss_enabled" checked onchange="toggleCockpitStopLossInputs()">
+                <span class="toggle-slider"></span>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div id="cockpitStopLossFields">
+          <div class="form-group">
+            <label data-param-label="exit_thresh_by_slug"></label>
+            <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
+          </div>
         </div>
         <div class="form-group">
           <label data-param-label="exit_thresh_naked"></label>
@@ -2800,13 +2814,6 @@ textarea:focus-visible,
         <div class="form-group">
           <label data-param-label="max_reentries_per_window"></label>
           <input type="number" min="0" max="100" step="1" id="cockpitMaxReentries" data-param="max_reentries_per_window" value="1" placeholder="0 = no re-entry" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="stop_loss_enabled"></label>
-          <select id="cockpitStopLossEnabled" data-param="stop_loss_enabled">
-            <option value="true" selected>On — stop out an adverse naked leg</option>
-            <option value="false">Off — hold to settlement (patient_band_maker)</option>
-          </select>
         </div>
         <div class="form-group">
           <label data-param-label="enable_leg_chase"></label>
@@ -3941,6 +3948,30 @@ function toggleStopLossInputs(){
   }
 }
 
+// Issue #201: the Cockpit mirror of toggleStopLossInputs(). Same contract —
+// Off hides AND disables the stop threshold, and the live payload carries
+// stop_loss_enabled=false.
+function toggleCockpitStopLossInputs(){
+  const enabled = $('cockpitStopLossEnabled') ? $('cockpitStopLossEnabled').checked : true;
+  const wrap = $('cockpitStopLossFields');
+  if(wrap) wrap.hidden = !enabled;
+  const inp = $('cockpitExit');
+  // A running bot locks its parameters (updateCockpitParamsLockUI shows the
+  // hint), and re-enabling here would hand the operator an input the engine
+  // will not accept while it runs.
+  const hint = $('cockpitParamsLockHint');
+  const locked = !!(hint && hint.style.display !== 'none');
+  if(inp && !locked){
+    inp.disabled = !enabled;
+    inp.style.opacity = enabled ? '' : '0.45';
+  }
+  const lbl = $('cockpitStopLossToggleLabel');
+  if(lbl){
+    lbl.textContent = enabled ? 'ON' : 'OFF';
+    lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
+  }
+}
+
 function toggleBtSection(btn, bodyId){
   const body = document.getElementById(bodyId);
   if(!btn || !body) return;
@@ -4282,13 +4313,13 @@ function resetBtParams(){
 
 // Winning config preset (issue #145): the EV-research-winning setup —
 // offset 0.03, delay 60s, band 0.04, tape fills, pair cost 0.98, size 5,
-// hold-to-settle (exits 0.49/0.50 = ex=none mirror). The remaining replay
+// hold-to-settle (stop loss off, issue #201). The remaining replay
 // inputs are pinned to dashboard defaults (queue 0, gas 0, no partial
 // filter, re-entry band 0.015, re-quote-min 300) so the button is a
 // reproducible 1-click config, then auto-runs the backtest. Aborts without
 // running if any required input is missing (no half-applied state).
 function applyWinningConfig(){
-  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btFillModel','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
+  const required = ['btOffset','btQueue','btPairCost','btPairCostEnabled','btStopLossEnabled','btExit5m','btExit15m','btExitBtc','btExitSol','btFillModel','btSize','btGas','btMaxStartDelay','btReentryBand','btRequoteMin','btEntryDelay','btEntryBand'];
   for (const id of required) { if (!$(id)) return; }
   $('btOffset').value = "0.03";
   $('btQueue').value = "0";
@@ -4301,10 +4332,18 @@ function applyWinningConfig(){
     togglePairCostInput();
   }
   $('btSize').value = "5";
-  $('btExit5m').value = "0.49";
-  $('btExit15m').value = "0.50";
-  $('btExitBtc').value = "0.49";
-  $('btExitSol').value = "0.49";
+  // Issue #201: the preset is hold-to-settle. It used to express that with
+  // 0.49/0.50 stops — a threshold drift can still technically reach — so it now
+  // states it directly via the stop-loss toggle and leaves the thresholds at
+  // their dashboard defaults for when the operator switches stops back on.
+  $('btExit5m').value = "0.05";
+  $('btExit15m').value = "0.05";
+  $('btExitBtc').value = "0.05";
+  $('btExitSol').value = "0.05";
+  if ($('btStopLossEnabled')) {
+    $('btStopLossEnabled').checked = false;
+    toggleStopLossInputs();
+  }
   $('btGas').value = "0.00";
   $('btMaxStartDelay').value = "0";
   $('btReentryBand').value = "0.015";
@@ -5076,6 +5115,11 @@ function updateCockpitParamsLockUI(locked) {
 
   const hint = $('cockpitParamsLockHint');
   if (hint) hint.style.display = locked ? 'inline' : 'none';
+  if (!locked && typeof toggleCockpitStopLossInputs === 'function') {
+    // The loop above re-enables every param id unconditionally; re-apply the
+    // stop-loss toggle so an Off group does not come back editable.
+    toggleCockpitStopLossInputs();
+  }
   if (!locked && typeof validateCockpitInputs === 'function') {
     validateCockpitInputs();
   }
@@ -5710,7 +5754,7 @@ async function applyCockpitConfig() {
     }
   }
   const stopEl = $('cockpitStopLossEnabled');
-  if (stopEl) body.stop_loss_enabled = stopEl.value === 'true';
+  if (stopEl) body.stop_loss_enabled = stopEl.checked;
   const chaseEl = $('cockpitLegChase');
   if (chaseEl) body.enable_leg_chase = chaseEl.value === 'true';
   // Market selection is immutable while the bot runs; only send filters when stopped
