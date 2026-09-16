@@ -4031,3 +4031,208 @@ def test_unpriceable_book_timeout_sets_no_book_skipped():
     assert m.mid is None
     assert m.status == "NO_BOOK_SKIPPED"
     assert "unpriceable" in m.last_action.lower() or "no book" in m.last_action.lower()
+
+
+# ===========================================================================
+# Issue #209: Stop loss is measured from entry price, not from 0.50
+# ===========================================================================
+
+def test_stop_loss_anchored_to_fill_price_up():
+    """Issue #209: UP leg filled at 0.45 with exit_thresh=0.05 does not stop out at 0.45 or 0.42."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    engine.stop_loss_enabled = True
+    engine.exit_thresh = 0.05
+    engine.exit_thresh_naked = 0.05
+    engine.exit_reversal = 0.02
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xbtc_test_209",
+        market_slug="btc-updown-5m-209",
+        up_token="btc_up",
+        down_token="btc_dn",
+        start_ts=now - 20,
+        end_ts=now + 280,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    m = engine.markets[slug]
+    m.market_slug = fake_market.market_slug
+    m.up_token = fake_market.up_token
+    m.down_token = fake_market.down_token
+    m.start_ts = fake_market.start_ts
+    m.end_ts = fake_market.end_ts
+    m.filled_up = True
+    m.filled_down = False
+    m.fill_price_up = 0.45
+    m.resting_up = 0.45
+    m.order_shares = 10
+    m.status = "QUOTING"
+
+    # Tick 1: mid = 0.45 (same as entry price).
+    # With 0.50 anchor, drift was 0.05 (stopped out immediately!).
+    # With entry anchor, drift is 0.00.
+    poll_data_1 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.44, "best_ask": 0.46},
+        "down_book": {"best_bid": 0.54, "best_ask": 0.56},
+    }
+    engine._update_market_strategy(slug, poll_data_1, now)
+    assert not m.exit_taken
+    assert m.status != "STOP_EXIT_PENDING"
+    assert m.max_down_drift == pytest.approx(0.0, abs=1e-4)
+
+    # Tick 2: mid = 0.42. Adverse excursion = 0.45 - 0.42 = 0.03 < 0.05.
+    now += 1
+    poll_data_2 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.41, "best_ask": 0.43},
+        "down_book": {"best_bid": 0.57, "best_ask": 0.59},
+    }
+    engine._update_market_strategy(slug, poll_data_2, now)
+    assert not m.exit_taken
+    assert m.status != "STOP_EXIT_PENDING"
+    assert m.max_down_drift == pytest.approx(0.03, abs=1e-4)
+
+    # Tick 3: mid = 0.40. Adverse excursion = 0.45 - 0.40 = 0.05 >= exit_thresh (0.05).
+    # Stop loss triggers!
+    now += 1
+    poll_data_3 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.39, "best_ask": 0.41},
+        "down_book": {"best_bid": 0.59, "best_ask": 0.61},
+    }
+    engine._update_market_strategy(slug, poll_data_3, now)
+    assert m.max_down_drift == pytest.approx(0.05, abs=1e-4)
+    assert m.exit_taken or m.status == "STOP_EXIT_PENDING"
+
+
+def test_stop_loss_anchored_to_fill_price_down():
+    """Issue #209: DOWN leg filled at 0.45 (implied mid 0.55) does not stop out until mid >= 0.60."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    engine.stop_loss_enabled = True
+    engine.exit_thresh = 0.05
+    engine.exit_thresh_naked = 0.05
+    engine.exit_reversal = 0.02
+    slug = "eth-up-or-down-5m"
+    now = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xeth_test_209",
+        market_slug="eth-updown-5m-209",
+        up_token="eth_up",
+        down_token="eth_dn",
+        start_ts=now - 20,
+        end_ts=now + 280,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    m = engine.markets[slug]
+    m.market_slug = fake_market.market_slug
+    m.up_token = fake_market.up_token
+    m.down_token = fake_market.down_token
+    m.start_ts = fake_market.start_ts
+    m.end_ts = fake_market.end_ts
+    m.filled_up = False
+    m.filled_down = True
+    m.fill_price_down = 0.45
+    m.resting_down = 0.45
+    m.order_shares = 10
+    m.status = "QUOTING"
+
+    # Tick 1: mid = 0.55 (implied down mid = 0.45, same as entry).
+    poll_data_1 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.54, "best_ask": 0.56},
+        "down_book": {"best_bid": 0.44, "best_ask": 0.46},
+    }
+    engine._update_market_strategy(slug, poll_data_1, now)
+    assert not m.exit_taken
+    assert m.status != "STOP_EXIT_PENDING"
+    assert m.max_up_drift == pytest.approx(0.0, abs=1e-4)
+
+    # Tick 2: mid = 0.58. Adverse excursion = 0.58 - 0.55 = 0.03 < 0.05.
+    now += 1
+    poll_data_2 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.57, "best_ask": 0.59},
+        "down_book": {"best_bid": 0.41, "best_ask": 0.43},
+    }
+    engine._update_market_strategy(slug, poll_data_2, now)
+    assert not m.exit_taken
+    assert m.status != "STOP_EXIT_PENDING"
+    assert m.max_up_drift == pytest.approx(0.03, abs=1e-4)
+
+    # Tick 3: mid = 0.60. Adverse excursion = 0.60 - 0.55 = 0.05 >= 0.05.
+    # Stop loss triggers!
+    now += 1
+    poll_data_3 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.59, "best_ask": 0.61},
+        "down_book": {"best_bid": 0.39, "best_ask": 0.41},
+    }
+    engine._update_market_strategy(slug, poll_data_3, now)
+    assert m.max_up_drift == pytest.approx(0.05, abs=1e-4)
+    assert m.exit_taken or m.status == "STOP_EXIT_PENDING"
+
+
+def test_reversal_anchored_to_entry_price():
+    """Issue #209: Reversal detection checks distance to entry price, not to 0.50."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    engine.stop_loss_enabled = True
+    engine.exit_thresh = 0.05
+    engine.exit_thresh_naked = 0.05
+    engine.exit_reversal = 0.02
+    slug = "sol-up-or-down-5m"
+    now = time.time()
+    fake_market = LiveMarket(
+        condition_id="0xsol_test_209",
+        market_slug="sol-updown-5m-209",
+        up_token="sol_up",
+        down_token="sol_dn",
+        start_ts=now - 20,
+        end_ts=now + 280,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+    m = engine.markets[slug]
+    m.market_slug = fake_market.market_slug
+    m.up_token = fake_market.up_token
+    m.down_token = fake_market.down_token
+    m.start_ts = fake_market.start_ts
+    m.end_ts = fake_market.end_ts
+    m.filled_up = True
+    m.filled_down = False
+    m.fill_price_up = 0.45
+    m.resting_up = 0.45
+    m.order_shares = 10
+    m.status = "QUOTING"
+
+    # Tick 1: mid drops to 0.39. Book has no best_bid so exit is not filled yet.
+    # Adverse excursion = 0.45 - 0.39 = 0.06 >= 0.05.
+    poll_data_1 = {
+        "market": fake_market,
+        "up_book": {"best_bid": None, "best_ask": 0.40},
+        "down_book": {"best_bid": 0.60, "best_ask": 0.62},
+    }
+    engine._update_market_strategy(slug, poll_data_1, now)
+    assert m.max_down_drift == pytest.approx(0.06, abs=1e-4)
+    assert not m.reversal_seen_down
+
+    # Tick 2: mid retraces to 0.44 (within 0.01 of entry 0.45, < exit_reversal 0.02).
+    # Reversal should be detected!
+    now += 1
+    poll_data_2 = {
+        "market": fake_market,
+        "up_book": {"best_bid": 0.43, "best_ask": 0.45},
+        "down_book": {"best_bid": 0.55, "best_ask": 0.57},
+    }
+    engine._update_market_strategy(slug, poll_data_2, now)
+    assert m.reversal_seen_down
+    assert not m.exit_taken
+    assert m.status != "STOP_EXIT_PENDING"
