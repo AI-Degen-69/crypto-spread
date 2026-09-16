@@ -6,13 +6,13 @@ Same parameters the dashboard sliders expose (Plan §2 / T3).
 The `patient_band_maker` preset that `strategy/live_trader.py` actually runs
 is reproducible here:
 
-  python -m scripts.backtest run/ticks --fill-model tape \\
-      --offset 0.03 --queue 0 --pair-cost 0.98 --size 5 \\
-      --entry-delay 60 --entry-band 0.04 \\
+  python -m scripts.backtest run/ticks \
+      --offset 0.03 --queue 0 --pair-cost 0.98 --size 5 \
+      --entry-delay 60 --entry-band 0.04 \
       --exit-default-5m 0.49 --exit-default-15m 0.50 --max-start-delay 0
 
-Swap `--fill-model book` for the optimistic side of the tape-vs-book
-comparison; the gap between the two is the "are these windows full" question.
+There is no fill model to choose (issue #226): one rule, the same one the live
+engine runs.
 """
 from __future__ import annotations
 import argparse
@@ -55,8 +55,6 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--exit-default-15m", type=float, default=0.05)
     ap.add_argument("--exit-reversal", type=float, default=0.02)
     ap.add_argument("--size", type=int, default=120)
-    ap.add_argument("--fill-model", choices=["tape", "book", "both", "cross"],
-                    default="tape", help="tape=conservative, book=optimistic, cross=strict price-crossing")
     ap.add_argument("--gas", type=float, default=0.0)
     ap.add_argument("--max-start-delay", type=float, default=0.0,
                     help="filter late-started windows where first tick > N seconds after window open (0 disables)")
@@ -95,14 +93,14 @@ def main(argv: list[str] | None = None):
         offset=args.offset, queue_gate=args.queue,
         pair_cost_gate=args.pair_cost, exit_thresh_by_slug=exit_thresh,
         exit_reversal=args.exit_reversal, quote_shares=args.size,
-        fill_model=args.fill_model, merge_gas_usd=args.gas,
+        merge_gas_usd=args.gas,
         max_start_delay_sec=max_start_delay,
         entry_timeout_pct=args.entry_timeout,
         entry_delay_sec=args.entry_delay,
         entry_band=args.entry_band,
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
-          f"pair_cost={params.pair_cost_gate} fill={params.fill_model} "
+          f"pair_cost={params.pair_cost_gate} "
           f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct:.2%} "
           f"entry_delay={params.entry_delay_sec}s entry_band={params.entry_band} "
           f"params_hash={params.params_hash()}")

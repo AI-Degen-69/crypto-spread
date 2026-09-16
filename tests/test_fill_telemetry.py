@@ -268,11 +268,12 @@ def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
     assert m.filled_up is True
     assert m.filled_down is False
     assert m.chased_leg == "DOWN"
-    # Tick 3: DOWN ask meets the chased 0.50 quote.
+    # Tick 3: DOWN ask passes through the chased 0.50 quote. It rested on tick
+    # 2, so a mere touch is no longer a fill (issue #226).
     tick3 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0, 0.50: 200.0})
     tick3["up_book"]["best_ask"] = 0.46
     tick3["down_book"]["best_bid"] = 0.48
-    tick3["down_book"]["best_ask"] = 0.50
+    tick3["down_book"]["best_ask"] = 0.499
     engine._update_market_strategy(slug, tick3, now=1002.0)
     assert m.filled_down is True
     by_leg = {r["leg"]: r for r in _fill_lines(path)}

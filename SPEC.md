@@ -1,59 +1,94 @@
-# SPEC — Issue #225: the entry anchor
+# SPEC — Issue #226: one fill rule, no `fill_model` knob
 
-Binding while `fix/entry-anchor-repriced-two-sided-225` is live. Supersedes the #224 spec,
-preserved at commit `a6c88d2`.
+Binding while `fix/one-fill-rule-226` is live. Supersedes the #225 spec, which is
+merged and closed. Per-issue working file (`docs/git-workflow.md` §5) — not an
+architecture document.
 
-Rule text: `docs/engine-decision-rules.md`, rule 1 `entry_anchor`. This file is the executable
-scope.
+The rule itself is already written and agreed: `docs/engine-decision-rules.md` §3
+(`fill_rule`) and `docs/adr/0002-single-hard-coded-fill-rule.md`. Those two files
+are the definition. This spec is the work that makes the code match them.
 
-## The rule
+## Goal
 
-```
-resting_up   = clamp(round(mid - offset, 3), 0.01, 0.99)
-resting_down = clamp(round((1 - mid) - offset, 3), 0.01, 0.99)
-```
+A resting buy fills by exactly one rule in both engines, and the fill price says
+which side of the trade we were on.
 
-Two settled points, both of which the backtest gets wrong.
+## The rule (restated, normative)
 
-**G1 — repriced every tick until an order actually exists.** The submitted price is the mid at
-placement time. It latches only once the quote is live. Live already does this; the backtest
-anchors once at delay expiry and never re-anchors, so whenever anything holds placement the two
-engines drift apart.
+A resting buy at price `R` fills on a tick when **either**:
 
-**G2 — `mid` means the two-sided mid, and nothing else.** If either leg cannot be priced there
-is no anchor and no quote is placed. Live already does this (#207); the backtest prefers the
-recorded one-sided `s["mid"]` — the collector's up-leg reading — and quotes anyway.
+1. **Tape print** — a trade prints with `abs(price - R) <= tick_size + 1e-6`.
+2. **Fully-crossed book** — `best_ask <= R - tick_size + 1e-6`. Strictly through,
+   never a touch.
 
-## What "the quote is live" means in the backtest
+**Both are detectors of the same event, not two kinds of fill.** They answer "was
+our order taken", not "what did we pay". The fill price is `R` and the fee is zero,
+under either branch, with no same-tick precedence to decide.
 
-There is no order object. A quote is live once it has reached fill detection on some earlier
-tick and has not been cancelled since — the condition live spells as
-`order_id_up or order_id_down`. `entry_cancelled` is live's cancelled-orders state and re-opens
-repricing, which is what lets a re-entry quote at the price of its own tick.
+| how we saw it | fill price | fee |
+|---|---|---|
+| tape print at our price | `R` | none |
+| ask fully through our price | `R` | none |
+
+**Why the second branch is not a taker fill.** An ask resting below our bid is not
+a state a book can hold — they would have matched on contact. Seeing it in a
+one-second snapshot is evidence our resting order was taken between snapshots, not
+evidence we crossed into anything. The seller was the aggressor and the aggressor
+pays. Operator correction, 2026-09-16, superseding an earlier draft (and the issue
+body) that booked the ask price with a taker fee here.
+
+**Entries never pay a fee; exits always do.** A stop or naked-leg timeout sells into
+the best bid, which crosses the book. `_taker_fee` stays exactly where it is on
+those paths and is not added to any entry path.
+
+**The one marketable-limit case, knowingly under-charged.** The leg chase raises the
+unfilled leg to `min(ask, max_affordable)`, which can land exactly on the ask; such
+an order matches on arrival. It is booked as a maker fill at `R` with no fee, per
+the operator's rule. Since `R == ask` in that case, only the fee is at stake. A
+comment at the chase site records this.
 
 ## Acceptance criteria
 
-| # | Criterion |
-|---|---|
-| A1 | The backtest reprices the anchor on every tick until the quote is placed |
-| A2 | Both engines anchor only on a two-sided mid |
-| A3 | An unpriceable book produces no quote on **either** leg and latches nothing |
-| A4 | `s["mid"]` is not read as an anchor anywhere, including the re-entry re-quote |
-| A5 | A parity test drives both engines over a book that goes one-sided mid-window and asserts the same quote and the same abstention |
-
-## Expected consequences
-
-- **Historical sweep numbers change.** The point of the issue: the old numbers described entries
-  the live engine would not have placed.
-- **Three settlement stages stop being reachable end to end.** `latched_complement_ask`,
-  `redeemed` and `unresolved` all need a leg the ladder has nothing latched for — which, once
-  entry requires a two-sided mid on both legs, is a leg that was never quoted. The stages stay
-  in the resolver and keep their tests; those tests now call it directly, like the empty-window
-  case already did.
+1. `fill_model` does not exist: not on `BacktestParams`, not in the param registry,
+   not in the `/api/backtest` query contract, not in the dashboard HTML, not as a
+   CLI flag, not in any research simulator. `tapeq` is gone with it.
+2. Every entry fill — either branch, either engine — books the resting price and
+   adds nothing to `fees_cents`. No entry path calls `_taker_fee`.
+3. The live paper simulation fills only on a fully-crossed book (`ask <= resting
+   - tick_size + 1e-6`, the shared predicate verbatim), at the resting price. Its
+   WS tape fill runs through the same predicate rather than its own tolerance.
+4. Exit paths are untouched: the stops, the naked timeout and the settlement mark
+   still sell into the bid and still pay `_taker_fee`.
+5. A parity test drives one shared snapshot sequence through both engines and
+   asserts identical fill decisions **and** identical fill prices: tape-print case,
+   fully-through case, no-fill-on-touch case.
+6. The eight frozen sweep drivers — `research/sweeps/phase{1..6}*.py`,
+   `validate_top.py`, `run_exit_rev_110.py` — are **deleted**, not patched.
+   Operator decision, 2026-09-16: they cannot run against the current engine,
+   nothing imports them, and keeping them alive only to carry a keyword we are
+   deleting is the tail wagging the dog. Their `.json` result tables stay —
+   `docs/ev-research-findings-2026-09-11.md` cites seven of them as the evidence
+   `patient_band_maker` was chosen on.
 
 ## Out of scope
 
-- The full parity harness (#214). The test added here is a scenario, not the harness.
-- Every other rule issue, #226-#233.
-- The `entry_band` / `adverse_open` gates (#228) and the pair-cost gate (#227), even where the
-  fixtures touched here also exercise them.
+- Live (`mode="live"`) fill detection: real fills come from `get_order` /
+  `associate_trades` and already carry the venue's own fill price. Untouched.
+- Fee accounting in the live engine — it computes no fees at all today, tracked
+  separately (`docs/engine-decision-rules.md` §2). Not this issue.
+- Re-running or regenerating any historical sweep result.
+- Queue-position modelling. `queue_gate` and the `_queue_ahead` telemetry stay as
+  they are; only `tapeq`, which was a fill model, is removed.
+
+## Known consequences (accepted)
+
+- The live engine fills slightly less often than today (touch → fully-through).
+- Backtest P&L moves because the *set* of fills changes — the shipped preset ran
+  the tape branch alone and now runs both. Fill prices and entry fees do not move:
+  an entry was booked at the resting price with no fee before this change, and
+  still is.
+- The chase-onto-the-ask case understates cost by one taker fee. Known, accepted.
+- `BacktestParams.params_hash()` changes for every configuration, invalidating
+  cached sweep artifacts keyed on it.
+- `docs/ev-research-findings-2026-09-11.md` and `docs/backtest-optimization-results.md`
+  describe a fill rule the code no longer has.

@@ -194,18 +194,33 @@ ahead of ours, so a touch does not mean we traded. Only once the price passes th
 fill effectively certain. This is deliberately more conservative than reality: the backtest
 should promise fewer fills than the market would give, never more.
 
-**Action on trigger — the fill price is whichever side of the trade we were on.**
+**Action on trigger — our resting price, and no fee. Always.**
 
-| how it filled | our role | fill price | fee |
+Both triggers are *detectors*. They answer "did our order get taken", not "what did we pay".
+The entry quote is a limit order that sits and waits, so whenever it fills, somebody came to
+us. We were the maker. We get our own price and we pay no fee.
+
+| how we saw it | who crossed | fill price | fee |
 |---|---|---|---|
-| a trade printed at our price | **maker** — a seller hit our resting bid | **our resting price** | none |
-| an ask was sitting below our price | **taker** — our bid crossed into it | **the ask price** | taker fee |
+| a trade printed at our price | the seller came to us | **our resting price** | none |
+| the ask passed below our price | the seller came to us; the print was missed | **our resting price** | none |
 
-The second row is the venue's actual behaviour and the simulation follows it: a buy limit at
-0.47 meeting an ask at 0.41 executes at 0.41, and the price improvement belongs to us. The
-backtest previously booked our own 0.47 in that case, recording a worse entry than the market
-would have given, and charging no fee where the venue charges one. Operator decision,
-2026-09-16: simulate what actually happens.
+**Why the second row is not a taker fill.** A resting ask *below* our resting bid is not a
+state a book can hold — the two would have matched the instant they met. Seeing it in a
+one-second snapshot is evidence that our order was taken between the two snapshots, not
+evidence that we crossed into anything. Whoever sold to us was the aggressor, and an aggressor
+pays the fee, not us. Operator correction, 2026-09-16, replacing an earlier draft of this rule
+that booked the ask price and charged a taker fee on the second row.
+
+**Where a taker fee does belong: the exits.** A stop or a naked-leg timeout sells into the
+best bid. That crosses the book, so it is a taker and it pays the fee (§2). Entries never do.
+
+**The one marketable-limit case.** The leg chase (§12) raises the unfilled leg to
+`min(ask, max_affordable)`, which can land exactly *on* the ask, and an order placed at the ask
+is matched on arrival. It is still a limit order, so it is booked here as a maker fill at our
+price with no fee — the operator's rule, knowingly, for the narrow case where it understates
+cost by one fee. A quote placed at the ask fills at the ask, and our price *is* the ask, so
+only the fee is at stake.
 
 The entry price latches on the tick it fills and never moves afterwards — a later chase step
 may change the resting quote but must not rewrite the entry that the P&L and the stop are

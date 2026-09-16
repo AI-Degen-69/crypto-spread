@@ -5,6 +5,16 @@ Every `*.json` in this directory was produced **before** the fixes in issue
 no longer exists. Read them as a historical record of how `patient_band_maker`
 was arrived at — not as measurements.
 
+**Update, 2026-09-16 (issue #226).** "Code that is no longer in this directory"
+is now literal. The eight drivers that produced these tables — `phase1_1d.py`
+through `phase6_tapeq_top.py`, `validate_top.py` and `run_exit_rev_110.py` —
+have been deleted. They swept `fill_model`, a knob that no longer exists: there
+is one fill rule now and both engines run it (ADR-0002). Every number below was
+measured under a fill rule the code no longer has, on top of everything else
+that was already wrong with it. The tables stay only because
+`docs/ev-research-findings-2026-09-11.md` cites them as the record of a
+decision; git history has the drivers.
+
 ## Why they are wrong
 
 Two of the fixed defects change what the published numbers *mean*:
@@ -75,15 +85,17 @@ stale.
 
 ## What replaces them
 
-The next collection run rebuilds the cache from WebSocket-captured ticks and
-re-runs the phases with the fixed code. At that point:
+Nothing regenerates these tables. The drivers are gone and the sweep they ran is
+now `python -m scripts.sweep_backtest`, which replays `backtest/engine.py`
+directly instead of a parallel re-implementation of it. When the next collection
+run has enough ticks:
 
-1. Regenerate every `phase*.json` here.
+1. Sweep with `scripts/sweep_backtest.py` against the new dataset.
 2. Supersede `docs/ev-research-findings-2026-09-11.md` with a findings document
-   written against the new dataset, rather than editing numbers in the old one —
+   written against that dataset, rather than editing numbers in the old one —
    its dataset line (5 collection days, 2,430 windows) describes data that is
    gone.
-3. Delete this file.
+3. Delete this file and the `*.json` tables together, once nothing cites them.
 
 Until then, the one piece of evidence for the preset that does **not** depend on
 this lab is `runs/paper/2026-09-11_22-10_IDT/` — an 11-hour paper run that

@@ -179,8 +179,12 @@ def test_knobs_the_live_engine_exposes_are_marked_for_the_cockpit():
 
 
 def test_model_side_assumptions_are_not_offered_as_live_knobs():
-    """Fill model and venue fees are not things an operator sets on the book."""
-    for name in ("fill_model", "taker_fee_rate", "tick_size", "merge_gas_usd"):
+    """Venue fees and price granularity are not set by an operator on the book.
+
+    `fill_model` used to head this list. Issue #226 removed it outright: how a
+    venue fills you is not an assumption to tune, it is one rule (ADR-0002).
+    """
+    for name in ("taker_fee_rate", "tick_size", "merge_gas_usd"):
         spec = next(g[name] for g in SPEC.values() if name in g)
         assert "cockpit" not in spec["surfaces"], (
             f"{name} is an execution assumption and must not appear in the Cockpit")
@@ -192,4 +196,4 @@ def test_grouped_params_still_works_unchanged():
     g = BacktestParams().grouped_params()
     assert g["trading_knobs"]["offset"] == pytest.approx(0.020)
     assert g["trading_knobs"]["exit_default_5m"] == pytest.approx(0.05)
-    assert "fill_model" in g["execution_assumptions"]
+    assert "taker_fee_rate" in g["execution_assumptions"]

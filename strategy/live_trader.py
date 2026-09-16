@@ -2076,8 +2076,12 @@ class LiveTraderEngine:
                 return
         # Resting target must exist
         target = m.resting_up if leg == "UP" else m.resting_down
-        # Tick tolerance matches backtest fill_model="tape"
-        if abs(p - float(target)) > 0.002:
+        # The one fill rule decides this too (issue #226). This path used its
+        # own wider 0.002 tolerance, which is a second fill rule by another
+        # name: a print at `target + 0.0015` filled here and nowhere else.
+        # `best_ask` is None because a streamed print carries no book.
+        if not book_math.resting_bid_filled(
+                target, None, (p,), FILL_PRICE_TICK_TOL):
             return
         # Enforce entry gates (simplified): respect entry_cancelled / band_hold etc.
         # If the window is gated, don't fabricate a fill.
@@ -4474,6 +4478,14 @@ class LiveTraderEngine:
             resting_down = mstate.resting_down
         mstate.order_shares = self.shares
 
+        # Issue #226: a quote the chase raises onto the ask is marketable on
+        # arrival, the same as one being placed for the first time. The chase
+        # runs here AND again inside the paper fill block below, so the flags
+        # are initialised before the first of the two and carry to the fill
+        # check at the end of the tick.
+        chased_now_up = False
+        chased_now_dn = False
+
         # --- LEG CHASE AFTER ONE-SIDED FILL (Issue #123) ---
         # When one leg fills, step up the opposite leg's quote towards the ask,
         # strictly capped so pair cost stays <= max_pair_cost (default 0.98).
@@ -4488,11 +4500,13 @@ class LiveTraderEngine:
                         resting_down = target_down
                         mstate.resting_down = resting_down
                         mstate.chased_leg = "DOWN"
+                        chased_now_dn = True
                     elif target_down == max_down_bid and target_down >= resting_down:
                         if max_down_bid > resting_down:
                             resting_down = max_down_bid
                             mstate.resting_down = resting_down
                             mstate.chased_leg = "DOWN"
+                            chased_now_dn = True
             elif mstate.filled_down and not mstate.filled_up:
                 entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
                 # Floor strictly to cent precision so entry + opposite never exceeds max_pair_cost
@@ -4503,11 +4517,13 @@ class LiveTraderEngine:
                         resting_up = target_up
                         mstate.resting_up = resting_up
                         mstate.chased_leg = "UP"
+                        chased_now_up = True
                     elif target_up == max_up_bid and target_up >= resting_up:
                         if max_up_bid > resting_up:
                             resting_up = max_up_bid
                             mstate.resting_up = resting_up
                             mstate.chased_leg = "UP"
+                            chased_now_up = True
             else:
                 mstate.chased_leg = None
         else:
@@ -4871,6 +4887,15 @@ class LiveTraderEngine:
             )
             if mstate.status in ("IDLE", "PRE_QUOTING"):
                 mstate.status = "NO_BOOK"
+        # Issue #226: a quote reaching the book on THIS tick is marketable on
+        # arrival -- it matches a standing ask rather than joining the queue
+        # behind one -- so the touch rule does not apply to it. Set where the
+        # order actually transitions to RESTING, not inferred from the
+        # fill-telemetry rest snapshot: that snapshot survives a post-merge
+        # re-quote (`_maybe_requote_after_merge` resets the order fields and
+        # leaves it alone), so round 2+ would have been read as already-resting.
+        placed_now_up = False
+        placed_now_dn = False
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
@@ -4887,12 +4912,14 @@ class LiveTraderEngine:
                         mstate.order_id_up = res_up["order_id"]
                         mstate.order_time_up = time.strftime("%H:%M:%S")
                         mstate.order_status_up = "RESTING"
+                        placed_now_up = True
                 if not mstate.order_id_down and mstate.down_token:
                     res_dn = self.place_live_quote(mstate.down_token, resting_down, self.shares, "BUY")
                     if res_dn and res_dn.get("order_id"):
                         mstate.order_id_down = res_dn["order_id"]
                         mstate.order_time_down = time.strftime("%H:%M:%S")
                         mstate.order_status_down = "RESTING"
+                        placed_now_dn = True
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
                 self._finalize_reentry_telemetry(mstate, slug, mid)
@@ -4901,10 +4928,12 @@ class LiveTraderEngine:
                     mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
                     mstate.order_status_up = "RESTING"
                     mstate.order_time_up = mstate.order_time_up if mstate.order_time_up != "-" else time.strftime("%H:%M:%S")
+                    placed_now_up = True
                 if not mstate.filled_down and mstate.order_status_down != "RESTING":
                     mstate.order_id_down = mstate.order_id_down or f"paper_dn_{slug}"
                     mstate.order_status_down = "RESTING"
                     mstate.order_time_down = mstate.order_time_down if mstate.order_time_down != "-" else time.strftime("%H:%M:%S")
+                    placed_now_dn = True
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
                 self._finalize_reentry_telemetry(mstate, slug, mid)
@@ -5031,7 +5060,9 @@ class LiveTraderEngine:
                 can_sim_dn = (not mstate.filled_down) and (mstate.filled_up or can_place_entry)
 
                 if can_sim_up:
-                    if mstate.up_ask is not None and mstate.up_ask <= resting_up:
+                    if book_math.resting_bid_filled(
+                            resting_up, mstate.up_ask, (), FILL_PRICE_TICK_TOL,
+                            newly_placed=placed_now_up or chased_now_up):
                         mstate.filled_up = True
                         mstate.fill_price_up = resting_up
                         mstate.order_status_up = "FILLED"
@@ -5059,13 +5090,17 @@ class LiveTraderEngine:
                                     resting_down = target_down
                                     mstate.resting_down = resting_down
                                     mstate.chased_leg = "DOWN"
+                                    chased_now_dn = True
                                 elif target_down == max_down_bid and target_down >= resting_down and max_down_bid > resting_down:
                                     resting_down = max_down_bid
                                     mstate.resting_down = resting_down
                                     mstate.chased_leg = "DOWN"
+                                    chased_now_dn = True
 
                 if can_sim_dn:
-                    if mstate.down_ask is not None and mstate.down_ask <= resting_down:
+                    if book_math.resting_bid_filled(
+                            resting_down, mstate.down_ask, (), FILL_PRICE_TICK_TOL,
+                            newly_placed=placed_now_dn or chased_now_dn):
                         mstate.filled_down = True
                         mstate.fill_price_down = resting_down
                         mstate.order_status_down = "FILLED"
@@ -5096,12 +5131,16 @@ class LiveTraderEngine:
                                         resting_up = target_up
                                         mstate.resting_up = resting_up
                                         mstate.chased_leg = "UP"
+                                        chased_now_up = True
                                     elif target_up == max_up_bid and target_up >= resting_up and max_up_bid > resting_up:
                                         resting_up = max_up_bid
                                         mstate.resting_up = resting_up
                                         mstate.chased_leg = "UP"
+                                        chased_now_up = True
                                     # Immediate fill check if UP ask meets new chase quote
-                                    if can_sim_up and mstate.up_ask <= resting_up:
+                                    if can_sim_up and book_math.resting_bid_filled(
+                                            resting_up, mstate.up_ask, (), FILL_PRICE_TICK_TOL,
+                                            newly_placed=placed_now_up or chased_now_up):
                                         mstate.filled_up = True
                                         mstate.fill_price_up = resting_up
                                         mstate.order_status_up = "FILLED"

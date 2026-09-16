@@ -238,69 +238,85 @@ def test_simulate_book_only_fill():
         "tape_delta": [], "mid": 0.4845, "touch_pair": 0.999,
         "resting_pair": 0.96, "queue_up": 0.0, "queue_down": 0.0, "err": None,
     }]
-    w = _simulate_window(snaps, BacktestParams(offset=0.005, fill_model="book",
+    w = _simulate_window(snaps, BacktestParams(offset=0.005,
                                                 pair_cost_gate=1.00))
     assert w.filled_up is True
     assert w.filled_down is False
 
 def test_simulate_book_only_no_fill_when_ask_above_resting():
     snaps = [snap(1.0, 0.50, up_ask=0.49, down_ask=0.49)]
-    w = _simulate_window(snaps, BacktestParams(fill_model="book"))
+    w = _simulate_window(snaps, BacktestParams())
     assert w.filled_up is False
 
-def test_simulate_both_models_flag_both_fills():
+def test_a_print_fills_one_leg_and_a_crossed_book_the_other():
+    """Issue #226: the two triggers detect the same event and coexist on a
+    tick. UP sees the print, DOWN only the book that moved through it."""
     tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
-    snaps = [snap(1.0, 0.50, up_ask=0.479, down_ask=0.479, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(fill_model="both"))
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.479, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams())
     assert w.filled_up is True
     assert w.filled_down is True
 
-def test_simulate_cross_model_requires_strict_crossing():
-    # At offset=0.02 (resting at 0.48), a trade at 0.48 DOES NOT fill in cross model.
-    tape_48 = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
-    snaps_48 = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape_48)]
-    w_48 = _simulate_window(snaps_48, BacktestParams(offset=0.02, fill_model="cross"))
-    assert w_48.filled_up is False
+def test_both_triggers_book_the_same_entry_and_the_same_fee():
+    """Issue #226: a print and a crossed book detect one event, so they must
+    produce one outcome. Our own 0.48 either way, and the entry itself adds no
+    fee -- whatever `fees_cents` holds is the settlement charge, identical in
+    both runs."""
+    # The two runs differ only in HOW the UP leg filled; they close on an
+    # identical book so the settlement charge is the same in both.
+    close = snap(3.0, 0.50, up_ask=0.51, down_ask=0.51)
+    by_print = _simulate_window(
+        [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51,
+              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]),
+         snap(2.0, 0.50, up_ask=0.51, down_ask=0.51), close],
+        BacktestParams(offset=0.02))
+    by_book = _simulate_window(
+        [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51),
+         snap(2.0, 0.50, up_ask=0.47, down_ask=0.51), close],
+        BacktestParams(offset=0.02))
+    assert by_print.filled_up is True and by_book.filled_up is True
+    assert by_print.entry_price_up == pytest.approx(0.48)
+    assert by_book.entry_price_up == pytest.approx(0.48)
+    assert by_print.fees_cents == pytest.approx(by_book.fees_cents)
+    assert by_print.pnl_cents == pytest.approx(by_book.pnl_cents)
 
-    # A trade that crosses through at 0.47 DOES fill in cross model.
-    tape_47 = [{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}]
-    snaps_47 = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape_47)]
-    w_47 = _simulate_window(snaps_47, BacktestParams(offset=0.02, fill_model="cross"))
-    assert w_47.filled_up is True
+def test_the_book_must_pass_fully_through_a_resting_quote_not_merely_touch_it():
+    """Issue #226: once our quote is resting, an equal ask may have other bids
+    queued ahead of ours, so a touch is not evidence that we traded."""
+    # Tick 1 places the quote well under the ask; tick 2 brings the ask down.
+    place = snap(1.0, 0.50, up_ask=0.51, down_ask=0.51)
 
-    # Book ask at 0.48 DOES NOT fill in cross model (must be <= 0.47).
-    snaps_ask_48 = [snap(1.0, 0.50, up_ask=0.48, down_ask=0.51)]
-    w_ask_48 = _simulate_window(snaps_ask_48, BacktestParams(offset=0.02, fill_model="cross"))
-    assert w_ask_48.filled_up is False
+    touch = _simulate_window([place, snap(2.0, 0.50, up_ask=0.48, down_ask=0.51)],
+                             BacktestParams(offset=0.02))
+    assert touch.filled_up is False
 
-    # Book ask at 0.47 DOES fill in cross model.
-    snaps_ask_47 = [snap(1.0, 0.50, up_ask=0.47, down_ask=0.51)]
-    w_ask_47 = _simulate_window(snaps_ask_47, BacktestParams(offset=0.02, fill_model="cross"))
-    assert w_ask_47.filled_up is True
+    through = _simulate_window([place, snap(2.0, 0.50, up_ask=0.47, down_ask=0.51)],
+                               BacktestParams(offset=0.02))
+    assert through.filled_up is True
+    assert through.entry_price_up == pytest.approx(0.48)
 
-def test_simulate_cross_model_pair_capture():
-    # Both legs cross through 0.48 to 0.47 -> Pair captured (+4c profit)
+def test_two_printed_legs_capture_the_pair():
+    # Both legs print at our 0.48 resting price -> pair captured (+4c profit)
     tape = [
-        {"asset": UP_TOKEN, "price": 0.47, "size": 5.0},
-        {"asset": DN_TOKEN, "price": 0.47, "size": 5.0},
+        {"asset": UP_TOKEN, "price": 0.48, "size": 5.0},
+        {"asset": DN_TOKEN, "price": 0.48, "size": 5.0},
     ]
     snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(offset=0.02, fill_model="cross"))
+    w = _simulate_window(snaps, BacktestParams(offset=0.02))
     assert w.filled_up is True
     assert w.filled_down is True
     assert w.pair_captured is True
     assert w.pnl_cents == 4.0
 
-def test_simulate_cross_model_exit_on_drift():
-    # UP leg crosses to 0.47 on tape and fills; DOWN ask stays at 0.53 (above 0.48 resting, no fill).
+def test_a_printed_leg_that_drifts_is_stopped_out():
+    # UP leg prints at our 0.48 and fills; DOWN ask stays at 0.53 (above 0.48 resting, no fill).
     # Mid drifts to 0.40 (max_down = 0.10 >= 0.08 exit threshold) -> Safety exit triggered on UP.
     snap1 = snap(1.0, 0.50, up_ask=0.49, down_ask=0.53,
-                 tape=[{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}])
+                 tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}])
     snap2 = snap(2.0, 0.40, up_ask=0.41, down_ask=0.61,
                  up_bids={"0.39": 100.0})
     w = _simulate_window([snap1, snap2], BacktestParams(
         offset=0.02,
-        fill_model="cross",
         exit_thresh_by_slug={"btc-up-or-down-5m": 0.08, "default_5m": 0.08},
     ))
     assert w.filled_up is True
@@ -627,14 +643,14 @@ def test_backtest_dynamic_symmetric_quoting_off_center_open():
     s1["down_book"]["best_bid"] = 0.645
     s1["down_book"]["best_ask"] = 0.655
 
-    params = BacktestParams(offset=0.02, fill_model="cross", exit_thresh_by_slug={"default_5m": 0.20})
+    params = BacktestParams(offset=0.02, exit_thresh_by_slug={"default_5m": 0.20})
 
-    # Case A: Trade on DOWN leg at 0.62. Under dynamic quoting (resting_down=0.63),
-    # 0.62 is <= resting_down - 1c, so it fills in cross model.
-    # Under old static 0.48, 0.62 would NEVER fill (0.62 > 0.48).
-    s_down_fill = {**s1, "tape_delta": [{"asset": DN_TOKEN, "price": 0.62, "size": 5.0}]}
+    # Case A: Trade on DOWN leg at 0.63. Under dynamic quoting resting_down is
+    # 0.63, so the print is at our price and fills us.
+    # Under old static 0.48, 0.63 would NEVER fill (0.63 > 0.48).
+    s_down_fill = {**s1, "tape_delta": [{"asset": DN_TOKEN, "price": 0.63, "size": 5.0}]}
     w_down = _simulate_window([s_down_fill], params)
-    assert w_down.filled_down is True, "DOWN leg should fill at 0.62 when resting_down is 0.63"
+    assert w_down.filled_down is True, "DOWN leg should fill at 0.63 when resting_down is 0.63"
 
     # Case B: Trade on UP leg at 0.47. Under static 0.48 quoting, 0.47 would fill (0.47 <= 0.48 - 1c).
     # But under dynamic quoting (resting_up=0.33), 0.47 is far above 0.33 and should NOT fill.
@@ -642,11 +658,11 @@ def test_backtest_dynamic_symmetric_quoting_off_center_open():
     w_up_nofill = _simulate_window([s_up_nofill], params)
     assert w_up_nofill.filled_up is False, "UP leg should NOT fill at 0.47 when resting_up is 0.33"
 
-    # Case C: Both legs cross through dynamic quotes (UP at 0.32, DOWN at 0.62).
+    # Case C: Both legs print at their dynamic quotes (UP at 0.33, DOWN at 0.63).
     # Pair should be captured with pnl_cents = (1.00 - (0.33 + 0.63)) * 100 = 4.0c
     s_pair = {**s1, "tape_delta": [
-        {"asset": UP_TOKEN, "price": 0.32, "size": 5.0},
-        {"asset": DN_TOKEN, "price": 0.62, "size": 5.0},
+        {"asset": UP_TOKEN, "price": 0.33, "size": 5.0},
+        {"asset": DN_TOKEN, "price": 0.63, "size": 5.0},
     ]}
     w_pair = _simulate_window([s_pair], params)
     assert w_pair.filled_up is True
@@ -658,10 +674,10 @@ def test_backtest_dynamic_symmetric_quoting_off_center_open():
 def test_window_result_execution_prices_pair_captured():
     """Verify WindowResult tracks entry prices on both legs when pair is captured."""
     s1 = snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=[
-        {"asset": UP_TOKEN, "price": 0.47, "size": 5.0},
-        {"asset": DN_TOKEN, "price": 0.47, "size": 5.0},
+        {"asset": UP_TOKEN, "price": 0.48, "size": 5.0},
+        {"asset": DN_TOKEN, "price": 0.48, "size": 5.0},
     ])
-    params = BacktestParams(offset=0.02, fill_model="cross")
+    params = BacktestParams(offset=0.02)
     w = _simulate_window([s1], params)
     assert w.pair_captured is True
     assert w.entry_price_up == 0.48
@@ -672,12 +688,11 @@ def test_window_result_execution_prices_pair_captured():
 def test_window_result_execution_prices_stop_exit():
     """Verify WindowResult tracks entry and exit prices on stop-loss exit."""
     snap1 = snap(1.0, 0.50, up_ask=0.49, down_ask=0.53,
-                 tape=[{"asset": UP_TOKEN, "price": 0.47, "size": 5.0}])
+                 tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}])
     snap2 = snap(2.0, 0.40, up_ask=0.41, down_ask=0.61,
                  up_bids={"0.39": 100.0})
     w = _simulate_window([snap1, snap2], BacktestParams(
         offset=0.02,
-        fill_model="cross",
         exit_thresh_by_slug={"btc-up-or-down-5m": 0.08, "default_5m": 0.08},
     ))
     assert w.filled_up is True
@@ -835,15 +850,26 @@ def test_entry_band_boundary_admits_inside_band():
 
 
 def test_entry_delay_classifies_full_path():
-    # Observe-only delay: no fills, but classification uses the whole path.
+    """Classification reads the whole path, including the delayed head.
+
+    The delay is observe-only, but it is not a promise that nothing fills:
+    this fixture holds both asks at 0.49 while the mid swings, so the first
+    quote placed after the delay lands above a standing ask and is marketable
+    on arrival (issue #226). What the delay owns is the ticks before it
+    expires; what this test owns is that all 70 of them are classified.
+    """
     snaps = _window_snaps(70, lambda i: 0.45 if i % 2 == 0 else 0.55,
                           lambda i: [])
     w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0,
                                                entry_timeout_pct=0.0))
-    assert w.filled_up is False
-    assert w.filled_down is False
     assert w.n_snaps == 70
     assert w.class_label == "oscillating"
+    # The fill the marketable-on-placement rule produces, asserted rather than
+    # dropped: the first quote after the delay rests DOWN at 0.53 with the ask
+    # already at 0.49. UP rests at 0.43, under the same ask, and does not fill.
+    assert w.filled_down is True
+    assert w.entry_price_down == pytest.approx(0.53)
+    assert w.filled_up is False
 
 
 def test_adverse_claimed_window_bypasses_band_then_reenters():
@@ -952,7 +978,7 @@ def _drift_window(start_ts=1_760_000_000.0, duration=300, mids=None):
 
 def _params(**kw):
     base = dict(offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
-                fill_model="book", entry_timeout_pct=0.0,
+                entry_timeout_pct=0.0,
                 max_start_elapsed_pct=0.0, exit_reversal=0.0,
                 exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
     base.update(kw)
@@ -1295,8 +1321,8 @@ def test_the_chase_does_not_move_a_quote_with_no_ask_to_anchor_to():
 
     Without that gate the backtest advanced the resting price to the pair-cost
     ceiling on a tick where the book showed no ask at all — resting the leg
-    where the live engine never would, and under `fill_model="tape"` (which
-    needs no ask to fill) manufacturing a fill live could not have produced.
+    where the live engine never would, and — since a tape print fills with no
+    ask involved — manufacturing a fill live could not have produced.
     """
     snaps = _chaseable_window(dn_ask=0.49, dn_ask_after=0.70)
     for s in snaps[2:]:                      # blind the DOWN book after the fill
@@ -1411,12 +1437,12 @@ def _settle_snap(i: int, mid: float, up_bid, up_ask, dn_bid, dn_ask) -> dict:
 
 
 def _settle_params(**kw) -> BacktestParams:
-    """Hold-to-settle params: book fills, both stops off, no entry timeout.
+    """Hold-to-settle params: both stops off, no entry timeout.
 
     This is the `ex=none` shape the sweep ran -- the only configuration in
     which a naked leg reaches window close still open.
     """
-    base = dict(offset=0.02, fill_model="book", pair_cost_gate=1.05,
+    base = dict(offset=0.02, pair_cost_gate=1.05,
                 entry_timeout_pct=0.0, stop_loss_enabled=False,
                 naked_leg_timeout_pct=0.0)
     base.update(kw)

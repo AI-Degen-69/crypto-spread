@@ -57,24 +57,24 @@ CLI:
 ```powershell
 python -m scripts.backtest run/ticks
 python -m scripts.backtest run/ticks --offset 0.02 --queue 50 --exit btc-up-or-down-5m=0.09
-python -m scripts.backtest run/ticks --fill-model book   # optimistic, no tape
 python -m scripts.backtest run/ticks/ticks_2026-08-29.jsonl --out run\backtest\baseline.json
 ```
 
 Dash:
 ```
-http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=1.05&fill_model=tape
+http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=1.05
 http://127.0.0.1:8802/api/ticks/manifest
 ```
 
 CLI flags map 1:1 to `BacktestParams` fields — `--offset`, `--queue`,
 `--pair-cost`, `--exit <slug>=<thresh>` (repeatable), `--exit-default-5m`,
-`--exit-default-15m`, `--size`, `--fill-model {tape,book,both}`, `--gas`.
+`--exit-default-15m`, `--size`, `--gas`.
 
-`fill_model=tape` (default) is **conservative** — only counts a trade the
-venue actually printed at the resting price. `book` is optimistic — fills
-when the book's best_ask crosses the resting price (catches a fill even
-without a tape hit). Use `both` to see the gap on the dashboard.
+**There is no fill model to choose.** One rule, hard-coded, the same one the
+live engine runs: a resting buy fills when a trade prints at our price *or*
+the best ask passes fully through it, and it fills at our own price with no
+fee because a limit order that waits is a maker order. See
+`docs/engine-decision-rules.md` §3 and ADR-0002.
 
 ## What the result means
 
@@ -106,9 +106,9 @@ fills that the data says are reachable.
 1. **Set `queue_gate=0` to see what fills look like with no queue
    constraint.** If pair_rate is still < oscillating rate, the issue is
    offset or pair_cost, not queue.
-2. **Set `fill_model=book` to see the upper bound** the data implies.
-   The gap between `book` and `tape` is roughly the "did we miss the
-   tape hit because of polling cadence" loss.
+2. **Compare `pair_rate` against the oscillating rate** to see how much
+   the gates are costing. The fill rule itself has no looser setting to
+   fall back on.
 3. **Run with `--offset 0.01` and `--offset 0.03`** bracketing 0.02. If
    0.01 is not much better than 0.02, the queue is the binding constraint,
    not the price level.
@@ -123,7 +123,7 @@ fills that the data says are reachable.
 python -m pytest tests/ -v
 ```
 
-49 tests covering: classification thresholds, fill-model A vs B, queue
+49 tests covering: classification thresholds, the fill rule, queue
 gating (including 0=disabled), monotonic exit (with and without reversal),
 replay determinism (same input + params = identical pnl hash), gzip
 roundtrip, per-file cid sidecars (5 tests), CLI smoke (4 tests).
