@@ -4227,6 +4227,10 @@ class LiveTraderEngine:
         entry_controls_armed = self.entry_delay_sec > 0 or self.entry_band > 0
         if (self.is_running and not self.quoting_halted and not entry_controls_armed
                 and mstate.next_condition_id and not mstate.next_quoted):
+            # 0.50 here is deliberate, unlike the round-0 anchor fixed in #206:
+            # the T+1 window has not opened, so there is no book to anchor to.
+            # Priced at the coin-flip these markets open at, and only ever
+            # reached with both entry controls off (the guard above).
             resting_up = round(0.50 - self.offset, 3)
             resting_down = round(0.50 - self.offset, 3)
             if self.mode == "live":
