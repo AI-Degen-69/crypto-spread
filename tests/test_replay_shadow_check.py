@@ -131,6 +131,19 @@ def test_pair_cap_override_documented():
         mod.assert_config_mirror(params, RECORDED, True, 0.98)
 
 
+def test_every_main_loop_cap_is_engine_legal():
+    """main()'s legs must construct: a stale cap above 1.00 crashes the run.
+
+    The loop draws from PAIR_CAPS, so pin both ends — every listed cap builds,
+    and the old 1.05 raises instead of silently simulating an illegal cap.
+    """
+    for cap in mod.PAIR_CAPS:
+        assert mod.build_params(True, cap).max_pair_cost == cap
+        assert mod.build_params(False, cap).max_pair_cost == cap
+    with pytest.raises(ValueError):
+        mod.build_params(True, 1.05)
+
+
 def test_select_groups_rejects_empty():
     """Empty scope fails fast instead of producing vacuous totals."""
     with pytest.raises(AssertionError):

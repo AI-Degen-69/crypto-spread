@@ -292,8 +292,8 @@ def main() -> None:
     groups, excluded = select_groups(snaps)
     legs: dict[str, dict] = {}
     for gates_on, pair_cap in (
-            (True, 0.98), (False, 0.98),
-            (True, 1.05), (False, 1.05)):
+            (True, PAIR_CAPS[0]), (False, PAIR_CAPS[0]),
+            (True, PAIR_CAPS[1]), (False, PAIR_CAPS[1])):
         params = build_params(gates_on, pair_cap)
         assert_config_mirror(params, recorded, gates_on, pair_cap)
         totals = summarize(params, groups)
