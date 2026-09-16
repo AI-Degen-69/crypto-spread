@@ -676,8 +676,12 @@ def api_backtest(
     # the same "fall back, never pass through" rule as the non-finite
     # fallbacks below. Non-finite input (nan/inf) falls back the same way.
     try:
-        _lo = max(0.0, min(1.0, float(quote_lo)))
-        _hi = max(0.0, min(1.0, float(quote_hi)))
+        f_lo, f_hi = float(quote_lo), float(quote_hi)
+        if not (math.isfinite(f_lo) and math.isfinite(f_hi)):
+            _lo, _hi = 0.10, 0.90
+        else:
+            _lo = max(0.0, min(1.0, f_lo))
+            _hi = max(0.0, min(1.0, f_hi))
     except (TypeError, ValueError):
         _lo, _hi = 0.10, 0.90
     if not (_lo < _hi):

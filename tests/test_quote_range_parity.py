@@ -50,6 +50,13 @@ RESTING_THEN_OUTSIDE = [
 ]
 
 
+# Tick 0 opens at mid 0.08, outside the lower bound of (0.10, 0.90).
+OUTSIDE_LOW_OPEN = [
+    _snap(0.0, 0.075, 0.085, 0.915, 0.925, recorded_mid=0.08),
+    _snap(20.0, 0.075, 0.085, 0.915, 0.925, recorded_mid=0.08),
+]
+
+
 def test_outside_range_at_open_places_nothing_in_either_engine():
     """Mid 0.92 at open: no quote on either leg, and nothing latched."""
     _engine, mstate = _drive_live(OUTSIDE_OPEN, offset=OFFSET)
@@ -60,6 +67,19 @@ def test_outside_range_at_open_places_nothing_in_either_engine():
     assert not mstate.filled_up and not mstate.filled_down
 
     w = _simulate_window(OUTSIDE_OPEN, _bt_params())
+    assert w.entered is False
+    assert not w.filled_up and not w.filled_down
+
+
+def test_outside_range_low_at_open_places_nothing_in_either_engine():
+    """Mid 0.08 at open (below quote_lo): no quote on either leg in both engines."""
+    _engine, mstate = _drive_live(OUTSIDE_LOW_OPEN, offset=OFFSET)
+    assert mstate.order_id_up is None and mstate.order_id_down is None
+    assert mstate.order_status_up != "RESTING"
+    assert mstate.order_status_down != "RESTING"
+    assert not mstate.filled_up and not mstate.filled_down
+
+    w = _simulate_window(OUTSIDE_LOW_OPEN, _bt_params())
     assert w.entered is False
     assert not w.filled_up and not w.filled_down
 

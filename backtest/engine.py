@@ -150,7 +150,7 @@ class BacktestParams:
     # limit, not a tuning knob (ADR-0003): inside it the window is quoted,
     # outside it placement holds for that tick only — evaluated every tick on
     # the two-sided mid, never latched. Inclusive on both ends.
-    quote_range: tuple = (0.10, 0.90)
+    quote_range: tuple[float, float] = (0.10, 0.90)
     # Issue #164: mirrors LiveTraderEngine.stop_loss_enabled. False holds a
     # filled naked leg to settlement/rollover instead of stopping it out, which
     # is how `patient_band_maker` actually trades. The backtest previously had
@@ -1204,9 +1204,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         start_delay_sec=start_delay_sec,
         is_partial=is_partial,
         err=err,
-            # Issue #228: the re-entry mechanism is deleted, so this is always
-            # 0 (the field itself goes in T5 with its last readers).
-            reentry_count=0,
+        # Issue #228: the re-entry mechanism is deleted, so this is always
+        # 0 (the field itself goes in T5 with its last readers).
+        reentry_count=0,
         entry_price_up=entry_price_up,
         entry_price_down=entry_price_down,
         exit_price=exit_price,

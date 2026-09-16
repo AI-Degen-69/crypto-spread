@@ -2793,11 +2793,14 @@ class LiveTraderEngine:
                     param_changed = True
                 if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
                     param_changed = True
-                if quote_range is not None and (
-                        len(list(quote_range)) != 2
-                        or abs(float(list(quote_range)[0]) - self.quote_range[0]) > 1e-9
-                        or abs(float(list(quote_range)[1]) - self.quote_range[1]) > 1e-9):
-                    param_changed = True
+                if quote_range is not None:
+                    _qr_list = list(quote_range) if not isinstance(quote_range, (str, bytes)) else []
+                    if (
+                        len(_qr_list) != 2
+                        or abs(float(_qr_list[0]) - self.quote_range[0]) > 1e-9
+                        or abs(float(_qr_list[1]) - self.quote_range[1]) > 1e-9
+                    ):
+                        param_changed = True
                 if stop_loss_enabled is not None and bool(stop_loss_enabled) != self.stop_loss_enabled:
                     param_changed = True
                 if preset is not None and preset != self.active_preset:
@@ -2932,6 +2935,10 @@ class LiveTraderEngine:
                     # or degenerate pair is refused outright (there is no
                     # clamp order that preserves "lo < hi" without inventing
                     # a range the operator never asked for).
+                    if isinstance(quote_range, (str, bytes)):
+                        raise ValueError(
+                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                        )
                     try:
                         _qr = [float(v) for v in quote_range]
                     except (TypeError, ValueError):
