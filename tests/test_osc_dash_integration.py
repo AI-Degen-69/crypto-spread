@@ -2818,3 +2818,16 @@ def test_both_stop_loss_toggles_are_labelled_for_assistive_tech():
             f"{el_id} would be announced as just 'ON'")
         assert f'<label for="{el_id}"' in html, (
             f"the {el_id} caption should be a click target for its switch")
+
+
+def test_cockpit_stop_loss_switch_is_locked_while_the_bot_runs():
+    """applyCockpitConfig() returns early when running, so the switch must lock.
+
+    Left interactive it would hide the stop group and flip the caption without
+    ever reaching /api/live/config — the UI would claim a stop-loss state the
+    engine never received.
+    """
+    html = client.get("/").text
+    fn_start = html.index("function updateCockpitParamsLockUI(locked)")
+    ids = html[fn_start:html.index("];", fn_start)]
+    assert "'cockpitStopLossEnabled'" in ids

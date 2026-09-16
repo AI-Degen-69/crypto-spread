@@ -19,10 +19,15 @@ suggestions: a violation blocks the PR.
 
 ## 3. Scope fence
 
-- `server/osc_dash.py` backtest tab Operator Controls + its JS only.
-- **Forbidden:** cockpit stop-loss control (`cockpitStopLossEnabled`),
-  `backtest/engine.py` semantics of `stop_loss_enabled`, threshold defaults or
-  bounds, any other parameter group, any new dependency.
+**Widened by the operator on 2026-09-16, after the first three commits:** the
+same grouping was requested for the Live Cockpit, and `applyWinningConfig()` was
+told to state hold-to-settle via the toggle instead of faking it with 0.49/0.50
+stops. The original backtest-only fence below no longer binds those two areas.
+
+- `server/osc_dash.py` backtest tab Operator Controls, the Cockpit stop-loss
+  control (`cockpitStopLossEnabled` and its threshold), and their JS.
+- **Forbidden:** `backtest/engine.py` semantics of `stop_loss_enabled`,
+  threshold bounds, any other parameter group, any new dependency.
 - Backend `stop_loss_enabled` passthrough (`server/osc_dash.py:651,718`) stays
   byte-identical — this is a front-end grouping task.
 
