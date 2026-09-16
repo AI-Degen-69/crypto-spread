@@ -69,7 +69,7 @@ def build_grid() -> list[dict]:
 
 
 def run_config(cache: list[Win], cfg: dict) -> list[dict]:
-    p = replace(default_base_params(), offset=cfg["offset"], fill_model="tape")
+    p = replace(default_base_params(), offset=cfg["offset"])
     if cfg["ex_none"]:
         p = replace(p, exit_thresh_by_slug=dict(HOLD_TO_SETTLEMENT))
     return [sim2(w, p, chase_cap=cfg["chase"],

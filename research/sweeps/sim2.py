@@ -1,19 +1,19 @@
 """sim2: research simulator extensions on top of ev_lab's window cache.
 
-Adds two mechanics the canonical engine does not model (default args preserve
-engine parity for fill_model="tape"):
+Adds one mechanic the canonical engine does not model (the default arg
+preserves engine parity):
 
-  1. fill_model="tapeq" - queue-aware tape fills:
-     - queue ahead is snapshotted when a leg becomes quotable,
-     - burned down by printed trade SIZE at our price,
-     - any sell print strictly THROUGH our price fills us regardless of queue,
-     - buy-side prints (side=1, classified in the cache from the snapshot book)
-       cannot fill a resting bid.
+  chase_cap - leg-chase pairs rule (mirrors live issue #123): after exactly
+  one leg fills, the opposite quote is re-anchored each tick to
+  min(ask, chase_cap - entry) (never lowered), converting the naked leg into
+  a pair at <= cap.
 
-  2. chase_cap - leg-chase pairs rule (mirrors live issue #123):
-     after exactly one leg fills, the opposite quote is re-anchored each tick
-     to min(ask, chase_cap - entry) (never lowered), and fills on any sell
-     print at or below it, converting the naked leg into a pair at <= cap.
+Fills come from `book_math.resting_bid_filled` -- the one rule both engines
+run (issue #226, ADR-0002). `fill_model="tapeq"`, a queue-aware model with no
+engine equivalent, was removed with the knob it lived on; the queue telemetry
+it was built to answer is `queue_gate` and `_queue_ahead`, which stay. Prints
+are still filtered to sells before the rule sees them: a buy that lifted the
+ask cannot fill a resting bid (issue #182).
 
 Rows returned are compatible with ev_lab.summarize().
 """
@@ -27,8 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backtest.engine import BacktestParams, resolve_redemption  # noqa: E402
+from strategy.book_math import resting_bid_filled  # noqa: E402
 from ev_lab import (  # noqa: E402
-    Win, _mid_from, _two_sided, _queue_ahead, _taker_fee,
+    SIDE_BUY, SIDE_SELL, Win, _mid_from, _two_sided, _queue_ahead, _taker_fee,
     reject_knobs_sim2_ignores,
 )
 
@@ -90,10 +91,6 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     pnl = fees = 0.0
     cap_up = cap_dn = 0.0
 
-    fm = p.fill_model
-    tq = fm == "tapeq"
-    q_up = q_dn = None
-    q_rest_up = q_rest_dn = None
     chased_leg = ""
 
     timeout_on = p.entry_timeout_pct is not None and p.entry_timeout_pct > 0 and duration > 0
@@ -101,8 +98,10 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
         entry_cancelled = True
 
     chase_on = chase_cap is not None and chase_cap > 0
+    orders_live = False
     n = len(w.ts)
     for i in range(n):
+        requoted_now = False
         cur_ts = w.ts[i]
         elapsed = max(0.0, cur_ts - start_ts) if (cur_ts > 0.0 and start_ts > 0.0) else float(i)
 
@@ -161,10 +160,10 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
                 r_mid = w.s_mid[i] if w.s_mid[i] is not None else rm
                 if not filled_up:
                     resting_up = round(min(0.99, max(0.01, r_mid - p.offset)), 3)
-                    q_up = None
+                    requoted_now = True
                 if not filled_dn:
                     resting_dn = round(min(0.99, max(0.01, (1.0 - r_mid) - p.offset)), 3)
-                    q_dn = None
+                    requoted_now = True
 
         if p.queue_gate is not None and p.queue_gate > 0:
             qa_up = _queue_ahead(w.up_bids[i], resting_up)
@@ -203,105 +202,54 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
             if not filled_up and not filled_dn:
                 continue
 
+        # A quote not yet on the book is being placed on this tick, so it can
+        # be marketable on arrival (issue #226); one already resting must wait
+        # for the ask to pass fully through it.
+        placed_now = (not orders_live) or requoted_now
+        orders_live = True
+
         # --- leg chase (issue #123): re-anchor the unfilled leg each tick ---
+        chased_now_up = chased_now_dn = False
         if chase_on and (filled_up != filled_dn) and not pair and not exit_taken:
             if filled_up:
                 cap_px = round(min(0.99, math.floor((chase_cap - resting_up + 1e-9) * 100.0) / 100.0), 3)
                 target = min(dn_ask, cap_px) if dn_ask is not None else cap_px
                 if target > resting_dn:
                     resting_dn = target
-                    q_dn = None
+                    chased_now_dn = True
                 chased_leg = "dn"
             else:
                 cap_px = round(min(0.99, math.floor((chase_cap - resting_dn + 1e-9) * 100.0) / 100.0), 3)
                 target = min(up_ask, cap_px) if up_ask is not None else cap_px
                 if target > resting_up:
                     resting_up = target
-                    q_up = None
+                    chased_now_up = True
                 chased_leg = "up"
 
         can_up = (not filled_up) and (not entry_cancelled or filled_dn)
         can_dn = (not filled_dn) and (not entry_cancelled or filled_up)
-        if tq:
-            if can_up and q_up is None and not entry_cancelled and chased_leg != "up":
-                q_rest_up = resting_up
-                q_up = _queue_ahead(w.up_bids[i], resting_up)
-            if can_dn and q_dn is None and not entry_cancelled and chased_leg != "dn":
-                q_rest_dn = resting_dn
-                q_dn = _queue_ahead(w.dn_bids[i], resting_dn)
-            # book-through: ask strictly through our resting price
-            if can_up and up_ask is not None and up_ask <= (resting_up - p.tick_size + 1e-6):
-                filled_up, can_up = True, False
-            if can_dn and dn_ask is not None and dn_ask <= (resting_dn - p.tick_size + 1e-6):
-                filled_dn, can_dn = True, False
-
+        # --- fill detection: the one rule (issue #226) ---
+        # `book_math.resting_bid_filled`, the same call the engine makes. The
+        # four selectable models -- and `tapeq`, which had no engine
+        # equivalent at all -- are gone: how a venue fills you is not a
+        # research variable (ADR-0002).
+        #
+        # Prints are pre-filtered to sells. A buy that lifted the ask cannot
+        # fill our resting bid (issue #182); the shared rule does not know a
+        # print's side, so the caller that does decides which prints are ours.
         tup_now, tdn_now = w.tape[i]
-        if can_up and fm in ("tape", "both", "cross", "tapeq"):
-            for tr in tup_now:
-                tpx, tsz = tr[0], tr[1]
-                tside = tr[2] if len(tr) > 2 else 0
-                if fm in ("tape", "both"):
-                    if abs(tpx - resting_up) <= (p.tick_size + 1e-6):
-                        filled_up, can_up = True, False
-                        break
-                elif fm == "cross":
-                    if tpx <= (resting_up - p.tick_size + 1e-6):
-                        filled_up, can_up = True, False
-                        break
-                else:  # tapeq
-                    if tside == 1:
-                        continue  # buy lifted the ask; cannot fill our bid
-                    if chased_leg == "up":
-                        if tpx <= resting_up + 1e-9:
-                            filled_up, can_up = True, False
-                            break
-                        continue
-                    if q_rest_up is not None and tpx <= (q_rest_up - p.tick_size + 1e-6):
-                        filled_up, can_up = True, False
-                        break
-                    if q_rest_up is not None and abs(tpx - q_rest_up) <= (p.tick_size + 1e-6):
-                        if q_up is None or q_up - tsz <= 0.0:
-                            filled_up, can_up = True, False
-                            break
-                        q_up -= tsz
-        if can_dn and fm in ("tape", "both", "cross", "tapeq"):
-            for tr in tdn_now:
-                tpx, tsz = tr[0], tr[1]
-                tside = tr[2] if len(tr) > 2 else 0
-                if fm in ("tape", "both"):
-                    if abs(tpx - resting_dn) <= (p.tick_size + 1e-6):
-                        filled_dn, can_dn = True, False
-                        break
-                elif fm == "cross":
-                    if tpx <= (resting_dn - p.tick_size + 1e-6):
-                        filled_dn, can_dn = True, False
-                        break
-                else:  # tapeq
-                    if tside == 1:
-                        continue
-                    if chased_leg == "dn":
-                        if tpx <= resting_dn + 1e-9:
-                            filled_dn, can_dn = True, False
-                            break
-                        continue
-                    if q_rest_dn is not None and tpx <= (q_rest_dn - p.tick_size + 1e-6):
-                        filled_dn, can_dn = True, False
-                        break
-                    if q_rest_dn is not None and abs(tpx - q_rest_dn) <= (p.tick_size + 1e-6):
-                        if q_dn is None or q_dn - tsz <= 0.0:
-                            filled_dn, can_dn = True, False
-                            break
-                        q_dn -= tsz
-        if fm in ("book", "both"):
-            if can_up and up_ask is not None and up_ask <= resting_up:
-                filled_up = True
-            if can_dn and dn_ask is not None and dn_ask <= resting_dn:
-                filled_dn = True
-        elif fm == "cross":
-            if can_up and up_ask is not None and up_ask <= (resting_up - p.tick_size + 1e-6):
-                filled_up = True
-            if can_dn and dn_ask is not None and dn_ask <= (resting_dn - p.tick_size + 1e-6):
-                filled_dn = True
+        if can_up and resting_bid_filled(
+                resting_up, up_ask,
+                [tr[0] for tr in tup_now
+                 if (tr[2] if len(tr) > 2 else SIDE_SELL) != SIDE_BUY],
+                p.tick_size, newly_placed=placed_now or chased_now_up):
+            filled_up, can_up = True, False
+        if can_dn and resting_bid_filled(
+                resting_dn, dn_ask,
+                [tr[0] for tr in tdn_now
+                 if (tr[2] if len(tr) > 2 else SIDE_SELL) != SIDE_BUY],
+                p.tick_size, newly_placed=placed_now or chased_now_dn):
+            filled_dn, can_dn = True, False
 
         if filled_up and filled_dn and not pair and not exit_taken:
             pair = True

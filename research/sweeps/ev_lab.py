@@ -38,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from strategy.book_math import resting_bid_filled  # noqa: E402
 from backtest.engine import (  # noqa: E402
     BacktestParams,
     _mid,
@@ -85,9 +86,9 @@ def _classify_side(px: float, best_bid, best_ask) -> int:
 
     Issue #182: `sim2` documents and consumes a third tuple element for this,
     but `build_cache` only ever stored `(px, sz)` — so `tr[2] if len(tr) > 2
-    else 0` made every print look like a sell, and under `fill_model="tapeq"`
-    a buy that lifted the ask could fill our resting bid. `phase6_tapeq_top.py`
-    runs exactly that model.
+    else 0` made every print look like a sell, and a buy that lifted the ask
+    could fill our resting bid. Both research simulators now filter on this
+    before the shared fill rule sees a print (issue #226).
 
     A print at or above the ask is the aggressor lifting it (buy); at or below
     the bid is the aggressor hitting it (sell). Inside an untouched spread it
@@ -394,11 +395,7 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
 
     filled_up = filled_dn = False
     entry_cancelled = late_start
-    # Queue-adjusted tape model state (fill_model="tapeq"): snapshot the queue
-    # ahead when quoting starts, burn it down with tape trades at our price,
-    # and treat trades strictly through our price as guaranteed fills.
-    q_up = q_dn = None
-    q_rest_up = q_rest_dn = None
+    orders_live = False
     adverse_skipped = False
     gate_evaluated = False
     reentry_count = 0
@@ -416,6 +413,7 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
 
     n = len(w.ts)
     for i in range(n):
+        requoted_now = False
         cur_ts = w.ts[i]
         elapsed = max(0.0, cur_ts - start_ts) if (cur_ts > 0.0 and start_ts > 0.0) else float(i)
 
@@ -471,16 +469,12 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                 r_mid = w.s_mid[i] if w.s_mid[i] is not None else rm
                 if not filled_up:
                     resting_up = round(min(0.99, max(0.01, r_mid - p.offset)), 3)
+                    requoted_now = True
                 if not filled_dn:
                     resting_dn = round(min(0.99, max(0.01, (1.0 - r_mid) - p.offset)), 3)
+                    requoted_now = True
 
         if p.queue_gate is not None and p.queue_gate > 0:
-            # Separate locals from the tapeq state below (issue #182). These
-            # used to write `q_up`/`q_dn`, which the tapeq block treats as
-            # "queue not yet latched" sentinels: once the gate had filled them,
-            # `q_rest_up`/`q_rest_dn` were never set, and every tapeq fill path
-            # requires them — so `fill_model="tapeq"` could not fill at all
-            # whenever `queue_gate > 0`.
             qa_up = _queue_ahead(w.up_bids[i], resting_up)
             qa_dn = _queue_ahead(w.dn_bids[i], resting_dn)
             queue_ok = (qa_up <= p.queue_gate) and (qa_dn <= p.queue_gate)
@@ -519,85 +513,36 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
 
         can_up = (not filled_up) and (not entry_cancelled or filled_dn)
         can_dn = (not filled_dn) and (not entry_cancelled or filled_up)
-        fm = p.fill_model
-        # tapeq: (re)initialize the queue snapshot on the first tick where the
-        # leg is quotable (post-gates). Research-only fill model (no engine
-        # equivalent): queue ahead at rest, burned down by printed size, and
-        # any trade strictly through our price fills us regardless of queue.
-        if fm == "tapeq":
-            if can_up and q_up is None and not entry_cancelled:
-                q_rest_up = resting_up
-                q_up = _queue_ahead(w.up_bids[i], resting_up)
-            if can_dn and q_dn is None and not entry_cancelled:
-                q_rest_dn = resting_dn
-                q_dn = _queue_ahead(w.dn_bids[i], resting_dn)
-            if can_up and q_rest_up is not None and up_ask is not None                     and up_ask <= (q_rest_up - p.tick_size + 1e-6):
-                filled_up, can_up = True, False
-            if can_dn and q_rest_dn is not None and dn_ask is not None                     and dn_ask <= (q_rest_dn - p.tick_size + 1e-6):
-                filled_dn, can_dn = True, False
-        # Tape entries are (price, size, side) triples; side is 1 for a buy
-        # that lifted the ask, which cannot fill a resting bid (issue #182).
-        # Tolerate 2-tuples so a cache written before CACHE_VERSION 2 fails
-        # at the version guard in load_cache rather than here.
+        # --- fill detection: the one rule (issue #226) ---
+        # `book_math.resting_bid_filled`, the same call the canonical engine
+        # makes. The four selectable models -- and `tapeq`, a queue-aware
+        # model with no engine equivalent at all -- went with the knob:
+        # how a venue fills you is not a research variable (ADR-0002). The
+        # queue question tapeq was built to probe still has `queue_gate` and
+        # `_queue_ahead`.
+        #
+        # Prints are pre-filtered to sells: a buy that lifted the ask cannot
+        # fill our resting bid (issue #182). The shared rule does not know a
+        # print's side, so the caller that does decides which are ours.
+        #
+        # A quote not yet on the book is being placed on this tick and can be
+        # marketable on arrival; one already resting waits for the ask to pass
+        # fully through it.
+        placed_now = (not orders_live) or requoted_now
+        orders_live = True
         tup_now, tdn_now = w.tape[i]
-        if can_up and fm in ("tape", "both", "cross", "tapeq"):
-            for _tr in tup_now:
-                tpx, tsz = _tr[0], _tr[1]
-                tside = _tr[2] if len(_tr) > 2 else SIDE_SELL
-                if fm in ("tape", "both"):
-                    if abs(tpx - resting_up) <= (p.tick_size + 1e-6):
-                        filled_up, can_up = True, False
-                        break
-                elif fm == "cross":
-                    if tpx <= (resting_up - p.tick_size + 1e-6):
-                        filled_up, can_up = True, False
-                        break
-                else:  # tapeq
-                    if tside == SIDE_BUY:
-                        continue  # buy lifted the ask; cannot fill our bid
-                    if q_rest_up is not None and tpx <= (q_rest_up - p.tick_size + 1e-6):
-                        filled_up, can_up = True, False
-                        break
-                    if q_rest_up is not None and abs(tpx - q_rest_up) <= (p.tick_size + 1e-6):
-                        if q_up is None or q_up - tsz <= 0.0:
-                            filled_up, can_up = True, False
-                            break
-                        q_up -= tsz
-        if can_dn and fm in ("tape", "both", "cross", "tapeq"):
-            for _tr in tdn_now:
-                tpx, tsz = _tr[0], _tr[1]
-                tside = _tr[2] if len(_tr) > 2 else SIDE_SELL
-                if fm in ("tape", "both"):
-                    if abs(tpx - resting_dn) <= (p.tick_size + 1e-6):
-                        filled_dn, can_dn = True, False
-                        break
-                elif fm == "cross":
-                    if tpx <= (resting_dn - p.tick_size + 1e-6):
-                        filled_dn, can_dn = True, False
-                        break
-                else:  # tapeq
-                    if tside == SIDE_BUY:
-                        continue  # buy lifted the ask; cannot fill our bid
-                    if q_rest_dn is not None and tpx <= (q_rest_dn - p.tick_size + 1e-6):
-                        filled_dn, can_dn = True, False
-                        break
-                    if q_rest_dn is not None and abs(tpx - q_rest_dn) <= (p.tick_size + 1e-6):
-                        if q_dn is None or q_dn - tsz <= 0.0:
-                            filled_dn, can_dn = True, False
-                            break
-                        q_dn -= tsz
-        if fm in ("book", "both"):
-            if can_up and up_ask is not None and up_ask <= resting_up:
-                filled_up = True
-            if can_dn and dn_ask is not None and dn_ask <= resting_dn:
-                filled_dn = True
-        elif fm == "tapeq":
-            pass  # handled above
-        elif fm == "cross":
-            if can_up and up_ask is not None and up_ask <= (resting_up - p.tick_size + 1e-6):
-                filled_up = True
-            if can_dn and dn_ask is not None and dn_ask <= (resting_dn - p.tick_size + 1e-6):
-                filled_dn = True
+        if can_up and resting_bid_filled(
+                resting_up, up_ask,
+                [t[0] for t in tup_now
+                 if (t[2] if len(t) > 2 else SIDE_SELL) != SIDE_BUY],
+                p.tick_size, newly_placed=placed_now):
+            filled_up, can_up = True, False
+        if can_dn and resting_bid_filled(
+                resting_dn, dn_ask,
+                [t[0] for t in tdn_now
+                 if (t[2] if len(t) > 2 else SIDE_SELL) != SIDE_BUY],
+                p.tick_size, newly_placed=placed_now):
+            filled_dn, can_dn = True, False
 
         if filled_up and filled_dn and not pair and not exit_taken:
             pair = True
@@ -923,7 +868,7 @@ def _get_cache() -> list[Win]:
 def default_base_params() -> BacktestParams:
     return BacktestParams(
         offset=0.02, queue_gate=0.0, pair_cost_gate=1.05,
-        fill_model="tape", merge_gas_usd=0.0, taker_fee_rate=0.07,
+        merge_gas_usd=0.0, taker_fee_rate=0.07,
         quote_shares=5, entry_timeout_pct=0.0,
         max_start_elapsed_pct=0.0,
         reentry_drift_band=0.0, min_requote_remaining_sec=0.0,
@@ -1153,8 +1098,6 @@ def _parity(file_substr: str = "") -> int:
         replace(default_base_params(), exit_reversal=0.03),
         replace(default_base_params(), entry_timeout_pct=0.10),
         replace(default_base_params(), entry_timeout_pct=0.10, max_start_elapsed_pct=0.10),
-        replace(default_base_params(), fill_model="book"),
-        replace(default_base_params(), fill_model="cross"),
         replace(default_base_params(), pair_cost_gate=1.01, queue_gate=25.0),
         replace(default_base_params(), exit_thresh_by_slug={
             "default_5m": 0.05, "default_15m": 0.06,

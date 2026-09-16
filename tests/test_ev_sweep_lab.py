@@ -241,9 +241,13 @@ def test_cache_version_is_bumped_past_the_sideless_shape():
 
 
 def test_sim2_and_fast_simulate_agree_on_the_buy_side_constant():
-    """Both simulators must filter the same value, or tapeq results diverge."""
+    """Both simulators must filter the same value, or their fills diverge.
+
+    They used to spell it as two bare `1` literals kept in step by a grep.
+    `sim2` now imports the constant, so agreement is structural.
+    """
     src = (SWEEPS / "sim2.py").read_text(encoding="utf-8")
-    assert "tside == 1" in src
+    assert "SIDE_BUY" in src and "tside == 1" not in src
     assert ev_lab.SIDE_BUY == 1
 
 
