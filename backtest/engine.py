@@ -775,6 +775,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     entry_band = 0.0 if params.entry_band is None else params.entry_band
     resting_up: float | None = None
     resting_down: float | None = None
+    # Whether a quote has actually been exposed to the book (issue #225). The
+    # backtest has no order object, so "an order is live" is "the quote reached
+    # fill detection on some earlier tick and has not been cancelled since" --
+    # the condition live spells as `order_id_up or order_id_down`. Until then
+    # the anchor is repriced every tick, so the price that goes on the book is
+    # the mid at placement time and not one carried over from before whatever
+    # was holding placement cleared.
+    orders_live = False
     band_gate_evaluated = False
 
     entry_cancelled = False
@@ -828,25 +836,37 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         ub = s.get("up_book") or {}
         db = s.get("down_book") or {}
         mid = _mid(ub)
-        # Lazy quote anchor (replaces the old pre-loop scan): replicates its
-        # source order (`s["mid"]` first, then the up-book mid) but only from
-        # delay expiry onward. Ticks with no usable mid leave the anchor
-        # unset for a later tick; garbage/non-finite mids are skipped, never
-        # quoted. With delay 0 this anchors at the first valid snapshot,
-        # exactly like the old scan (including `s["mid"]`-only prefixes).
+        # --- ENTRY ANCHOR (issue #225) ---
+        # Two settled points, both of which this used to get wrong.
+        #
+        # 1. Repriced on every tick until the quote is actually live, so the
+        #    price that reaches the book is the mid at placement time. The old
+        #    `if resting_up is None` anchored once at delay expiry and never
+        #    again: whenever anything held placement -- an unevaluated band, a
+        #    failing queue or pair-cost gate, a cancelled window later
+        #    re-entered -- live kept tracking the mid while this stayed frozen
+        #    on a mid from ticks ago. They agreed only when placement happened
+        #    on the very tick the delay expired.
+        #
+        # 2. The anchor is the two-sided mid and nothing else. `s["mid"]` is the
+        #    collector's up-leg reading and survives a one-sided down book, so
+        #    preferring it quoted a book that priced only one leg -- the same
+        #    substitution issue #207 removed from live, on the other side. No
+        #    two-sided mid means no anchor: an already-live quote stands (the
+        #    order is on the venue), and an unplaced one simply waits.
         delay_expired = entry_delay <= 0 or elapsed >= entry_delay
-        if resting_up is None and delay_expired:
-            _anchor_src = s.get("mid")
-            if _anchor_src is None:
-                _anchor_src = mid
-            if _anchor_src is not None:
-                try:
-                    _anchor_f = float(_anchor_src)
-                except (ValueError, TypeError):
-                    _anchor_f = None
-                if _anchor_f is not None and math.isfinite(_anchor_f):
-                    resting_up = round(min(0.99, max(0.01, _anchor_f - params.offset)), 3)
-                    resting_down = round(min(0.99, max(0.01, (1.0 - _anchor_f) - params.offset)), 3)
+        anchor_mid = _two_sided_mid(ub, db)
+        # `entry_cancelled` is live's cancelled-orders state: the handles are
+        # gone, so the anchor tracks the mid again and a later re-entry quotes
+        # at the price of its own tick.
+        if (not filled_up and not filled_down and delay_expired
+                and (entry_cancelled or not orders_live)
+                and anchor_mid is not None):
+            resting_up = round(min(0.99, max(0.01, anchor_mid - params.offset)), 3)
+            resting_down = round(min(0.99, max(0.01, (1.0 - anchor_mid) - params.offset)), 3)
+        # Live holds placement on a tick it cannot price (`no_book_hold`); a
+        # quote already resting is unaffected, because it is already on the book.
+        no_book_hold = (not orders_live) and anchor_mid is None
         if mid is None:
             continue
         mids.append(mid)
@@ -970,19 +990,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 # which marks the band evaluated when re-entry is granted).
                 band_gate_evaluated = True
                 if not filled_up or not filled_down:
-                    r_mid = s.get("mid")
-                    if r_mid is None:
-                        r_mid = reentry_mid
-                    try:
-                        r_mid = float(r_mid)
-                    except (ValueError, TypeError):
-                        r_mid = reentry_mid
-                    if not math.isfinite(r_mid):
-                        r_mid = reentry_mid
+                    # Issue #225: the re-quote anchors on the same two-sided mid
+                    # the re-entry test just passed, not on `s["mid"]`. Judging
+                    # the book with one number and then pricing off another is
+                    # how a one-sided leg used to get quoted anyway.
                     if not filled_up:
-                        resting_up = round(min(0.99, max(0.01, r_mid - params.offset)), 3)
+                        resting_up = round(min(0.99, max(0.01, reentry_mid - params.offset)), 3)
                     if not filled_down:
-                        resting_down = round(min(0.99, max(0.01, (1.0 - r_mid) - params.offset)), 3)
+                        resting_down = round(min(0.99, max(0.01, (1.0 - reentry_mid) - params.offset)), 3)
 
         # Queue gate (0 disables per Plan §2; max_rest_queue_ahead=0 means "always pass")
         if params.queue_gate <= 0:
@@ -1100,11 +1115,16 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         up_token = (first.get("up_token") or (ub.get("token_id") or "")).strip()
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
         quotable = (resting_up is not None and resting_down is not None
-                    and not band_hold)
+                    and not band_hold and not no_book_hold)
         can_fill_up = (not filled_up) and (not entry_cancelled or filled_down) and quotable
         can_fill_down = (not filled_down) and (not entry_cancelled or filled_up) and quotable
         if (quotable and (can_fill_up or can_fill_down)) or filled_up or filled_down:
             window_entered = True
+            # The quote reached the book on this tick, so from the next one it
+            # latches (#225) -- exactly as live stops repricing once an order id
+            # exists. A later cancellation re-opens repricing via
+            # `entry_cancelled` in the anchor block above.
+            orders_live = True
         for trade in s.get("tape_delta") or []:
             tasset = str(trade.get("asset", "")).strip()
             if not tasset:

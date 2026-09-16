@@ -1,62 +1,59 @@
-# SPEC — Issue #224: invariants (no invented numbers, one window clock)
+# SPEC — Issue #225: the entry anchor
 
-Binding while `fix/window-clock-and-no-invented-numbers-224` is live. Supersedes the #214
-harness spec, which is preserved at commit `5f1f8b8` and in issue #214.
+Binding while `fix/entry-anchor-repriced-two-sided-225` is live. Supersedes the #224 spec,
+preserved at commit `a6c88d2`.
 
-The agreed rule text is `docs/engine-decision-rules.md` (Invariant 0 and Invariant 1). This
-file is the executable scope: what the code must do to match that text.
+Rule text: `docs/engine-decision-rules.md`, rule 1 `entry_anchor`. This file is the executable
+scope.
 
-## Goals
-
-**G1 — No decision path substitutes a constant for a missing book value.**
-Two fabrications remain. The stop exit price falls back to `0.40`
-(`strategy/live_trader.py:1735`), and the re-entry mid falls back to `0.50`
-(`strategy/live_trader.py:4744`). Both are removed. When the value cannot be resolved from
-the book, the engine does not act on that tick and re-evaluates on the next one.
-
-**G2 — One definition of the window clock, read from market metadata only.**
+## The rule
 
 ```
-window_length = end_ts - start_ts
-elapsed       = now - start_ts           # live
-elapsed       = snapshot_ts - start_ts   # backtest
+resting_up   = clamp(round(mid - offset, 3), 0.01, 0.99)
+resting_down = clamp(round((1 - mid) - offset, 3), 0.01, 0.99)
 ```
 
-No other source. The slug is not parsed for a duration, and the snapshot index is not counted
-as seconds.
+Two settled points, both of which the backtest gets wrong.
 
-**G3 — A window with no usable clock is not traded.**
-If `start_ts` and `end_ts` are not a usable pair, there is no clock, no time gate may be
-evaluated, and the window is skipped in both engines. This is a visible skip, not a silent
-default.
+**G1 — repriced every tick until an order actually exists.** The submitted price is the mid at
+placement time. It latches only once the quote is live. Live already does this; the backtest
+anchors once at delay expiry and never re-anchors, so whenever anything holds placement the two
+engines drift apart.
 
-## What "usable pair" means
+**G2 — `mid` means the two-sided mid, and nothing else.** If either leg cannot be priced there
+is no anchor and no quote is placed. Live already does this (#207); the backtest prefers the
+recorded one-sided `s["mid"]` — the collector's up-leg reading — and quotes anyway.
 
-Both values are present and finite, and `end_ts > start_ts`. Nothing else is asserted: absolute
-epoch position is not checked, because tests and replays legitimately use small or synthetic
-timebases, and an absolute-value check would reject them while catching no real fault that
-`end_ts > start_ts` misses.
+## What "the quote is live" means in the backtest
 
-For `elapsed`, the tick's own timestamp must also be present and finite. A snapshot without one
-carries no clock reading and is skipped.
+There is no order object. A quote is live once it has reached fill detection on some earlier
+tick and has not been cancelled since — the condition live spells as
+`order_id_up or order_id_down`. `entry_cancelled` is live's cancelled-orders state and re-opens
+repricing, which is what lets a re-entry quote at the price of its own tick.
 
 ## Acceptance criteria
 
-| # | Criterion | Where |
-|---|---|---|
-| A1 | The literal `0.40` stop-exit fallback is gone; the price resolves through `_resolve_exit_bid` | `strategy/live_trader.py` |
-| A2 | When every resolution stage fails, the position is held, no trade is recorded, and the exit re-evaluates next tick | `strategy/live_trader.py` |
-| A3 | The literal `0.50` re-entry mid is gone; no mid means no re-entry this tick | `strategy/live_trader.py` |
-| A4 | `(900.0 if "15m" in slug else 300.0)` appears nowhere | `strategy/live_trader.py` |
-| A5 | `elapsed = float(s_idx)` appears nowhere | `backtest/engine.py` |
-| A6 | A live window whose metadata gives no usable pair is not traded | `strategy/live_trader.py` |
-| A7 | A backtest window whose first snapshot gives no usable pair is not traded, and reports why | `backtest/engine.py` |
-| A8 | Tests cover each of: missing exit bid, missing mid at re-entry, missing timestamps, a slug with no duration substring | `tests/` |
+| # | Criterion |
+|---|---|
+| A1 | The backtest reprices the anchor on every tick until the quote is placed |
+| A2 | Both engines anchor only on a two-sided mid |
+| A3 | An unpriceable book produces no quote on **either** leg and latches nothing |
+| A4 | `s["mid"]` is not read as an anchor anywhere, including the re-entry re-quote |
+| A5 | A parity test drives both engines over a book that goes one-sided mid-window and asserts the same quote and the same abstention |
+
+## Expected consequences
+
+- **Historical sweep numbers change.** The point of the issue: the old numbers described entries
+  the live engine would not have placed.
+- **Three settlement stages stop being reachable end to end.** `latched_complement_ask`,
+  `redeemed` and `unresolved` all need a leg the ladder has nothing latched for — which, once
+  entry requires a two-sided mid on both legs, is a leg that was never quoted. The stages stay
+  in the resolver and keep their tests; those tests now call it directly, like the empty-window
+  case already did.
 
 ## Out of scope
 
-- The parity harness for #214. It is the next piece of work, not this one.
-- Every rule issue #225-#233. This issue changes only the two invariants above.
-- `taker_fee_rate` being dead in the live engine. Real, separate, unfiled.
-- The `duration` field the collector writes. It is a series label used to key the per-duration
-  stop threshold, not a clock, and no time gate may read it after this change.
+- The full parity harness (#214). The test added here is a scenario, not the harness.
+- Every other rule issue, #226-#233.
+- The `entry_band` / `adverse_open` gates (#228) and the pair-cost gate (#227), even where the
+  fixtures touched here also exercise them.

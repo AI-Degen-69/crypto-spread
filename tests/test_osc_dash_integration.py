@@ -30,7 +30,12 @@ def _make_fake_tick(ts: float, cid: str, slug: str, series: str, mid: float, tap
         "up_token": up_tok,
         "down_token": dn_tok,
         "up_book": {"token_id": up_tok, "bids": {"0.48": 10}, "asks": {}, "best_bid": mid - 0.005, "best_ask": mid + 0.005, "malformed": 0},
-        "down_book": {"token_id": dn_tok, "bids": {"0.48": 10}, "asks": {}, "best_bid": 0.485, "best_ask": 0.495, "malformed": 0},
+        # DOWN pinned at the complement of `mid`, so the two-sided mid the entry
+        # anchor reads is `mid` too (issue #225). A fixed 0.485/0.495 described a
+        # book no real binary pair produces.
+        "down_book": {"token_id": dn_tok, "bids": {"0.48": 10}, "asks": {},
+                      "best_bid": round((1.0 - mid) - 0.005, 4),
+                      "best_ask": round((1.0 - mid) + 0.005, 4), "malformed": 0},
         "tape_delta": tape or [],
         "mid": mid,
         "touch_pair": 0.99,
@@ -663,7 +668,7 @@ def test_api_backtest_reentry_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     fake_file = tmp_path / "fake_reentry.jsonl"
     cid = "0xRE_000"
-    # t=1000: adverse open (synthetic two-sided mid ~0.43 -> drift 0.07 >= 0.05)
+    # t=1000: adverse open (two-sided mid 0.35 -> drift 0.15 >= 0.05)
     # latches the drift gate. t=1011: mid back at 0.50 (21s in, inside the 30s
     # entry-timeout cutoff) with both legs filling at the 0.48 resting price.
     ticks = [
