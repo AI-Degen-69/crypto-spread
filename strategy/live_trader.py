@@ -4757,16 +4757,18 @@ class LiveTraderEngine:
                 f"Entry delayed ({elapsed_sec:.0f}s/{self.entry_delay_sec:.0f}s into window)"
                 " — quoting after delay"
             )
+        elif band_hold:
+            mstate.last_action = (
+                "Entry band check waiting for two-sided book — quoting held"
+            )
+            if mstate.status in ("IDLE", "PRE_QUOTING"):
+                mstate.status = "NO_BOOK"
         elif no_book_hold and not mstate.entry_cancelled_timeout and not is_late_start and not mstate.late_start_skip:
             mstate.last_action = (
                 "Waiting for two-sided book (unpriceable leg) — quoting held"
             )
             if mstate.status in ("IDLE", "PRE_QUOTING"):
                 mstate.status = "NO_BOOK"
-        elif band_hold:
-            mstate.last_action = (
-                "Entry band check waiting for two-sided book — quoting held"
-            )
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
