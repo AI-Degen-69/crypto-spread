@@ -3207,7 +3207,9 @@ const OT_STATUS_LABELS = {
   'STOP_EXIT_PENDING': 'Stop Exiting',
   'TIMEOUT_NO_FILL': 'Timed Out',
   'DRIFT_SKIPPED': 'Drift Skipped',
-  'LATE_START_SKIPPED': 'Late Start Skipped'
+  'LATE_START_SKIPPED': 'Late Start Skipped',
+  'NO_BOOK': 'No Book',
+  'NO_BOOK_SKIPPED': 'No Book Skipped'
 };
 function otStatusLabel(s){
   const raw = String(s || '').toUpperCase();
@@ -6038,7 +6040,7 @@ function renderCockpitUI(st) {
       const actualDown = cockpitLegPrice(m, 'down', st?.params?.offset);
       if (m.status === 'STOP_EXIT' || m.exit_taken) {
         posStr = 'FLAT (STOPPED OUT)';
-      } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.status === 'LATE_START_SKIPPED' || m.entry_cancelled_timeout) {
+      } else if (m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED' || m.status === 'LATE_START_SKIPPED' || m.status === 'NO_BOOK_SKIPPED' || m.entry_cancelled_timeout) {
         posStr = 'FLAT';
       } else if (m.filled_up && m.filled_down) {
         posStr = `MERGED PAIR (${m.order_shares || 5}) @ $${actualUp.toFixed(2)} + $${actualDown.toFixed(2)}`;
@@ -6056,13 +6058,15 @@ function renderCockpitUI(st) {
       // box exactly like cancelled rows in the Open Orders table.
       const bidsCancelled = m.status === 'STOP_EXIT' || m.status === 'STOP_EXIT_PENDING'
         || m.status === 'TIMEOUT_NO_FILL' || m.status === 'DRIFT_SKIPPED'
-        || m.status === 'LATE_START_SKIPPED' || m.exit_taken || m.entry_cancelled_timeout;
+        || m.status === 'LATE_START_SKIPPED' || m.status === 'NO_BOOK_SKIPPED'
+        || m.exit_taken || m.entry_cancelled_timeout;
       const bidsBoxDimCls = bidsCancelled ? ' mat-bids-cancelled' : '';
       // Human-readable cause shown inside the dimmed box (visible without
       // hovering) and mirrored as a native title tooltip on the box itself.
       let cancelReason = '';
       if (m.status === 'STOP_EXIT' || m.exit_taken) cancelReason = 'Bids cancelled — stop-loss exit';
       else if (m.status === 'STOP_EXIT_PENDING') cancelReason = 'Bids cancelling — stop-loss exit';
+      else if (m.status === 'NO_BOOK_SKIPPED') cancelReason = 'Skipped — unpriceable book';
       else if (m.status === 'TIMEOUT_NO_FILL' || m.entry_cancelled_timeout) cancelReason = 'Bids cancelled — 10% entry timeout';
       else if (m.status === 'DRIFT_SKIPPED') cancelReason = 'Bids cancelled — adverse drift';
       else if (m.status === 'LATE_START_SKIPPED') cancelReason = 'Skipped — window started mid-way';
@@ -6079,6 +6083,10 @@ function renderCockpitUI(st) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">CANCELLED (ADVERSE DRIFT)</span>`;
       } else if (m.status === 'LATE_START_SKIPPED') {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">NOT QUOTED (STARTED MID-WINDOW)</span>`;
+      } else if (m.status === 'NO_BOOK_SKIPPED') {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">NOT QUOTED (UNPRICEABLE BOOK)</span>`;
+      } else if (m.status === 'NO_BOOK') {
+        bidsTextHtml = `Bids: <span style="color:var(--dim)">WAITING FOR BOOK</span>`;
       } else if (m.status === 'PAIR_MERGED' || m.pair_captured) {
         bidsTextHtml = `Bids: <span style="color:var(--dim)">MERGED / COMPLETE</span>${fillsSub}`;
       } else if (!st.is_running) {

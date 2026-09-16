@@ -2166,13 +2166,9 @@ class LiveTraderEngine:
                     if best_a is not None and 0.0 < best_a <= 1.0:
                         m.last_valid_down_ask = best_a
                 # mid/spread recomputed from authoritative bests
-                # Issue #170: one shared implementation instead of this copy
-                # and the REST-path copy below. Issue #171 kept the
-                # default-substitution semantics as-is (see
-                # book_math.two_sided_mid_with_default) -- adopting the
-                # honest `two_sided_mid` (None for an unpriceable leg) is
-                # deferred to #174.
-                m.mid = book_math.two_sided_mid_with_default(
+                # Issue #207: use honest book_math.two_sided_mid (None for unpriceable leg)
+                # rather than fabricating 0.50 which compromises all downstream gates.
+                m.mid = book_math.two_sided_mid(
                     {"best_bid": m.up_bid, "best_ask": m.up_ask},
                     {"best_bid": m.down_bid, "best_ask": m.down_ask})
                 if m.up_ask is not None and m.down_ask is not None:
@@ -4366,12 +4362,13 @@ class LiveTraderEngine:
             _up_ask = mstate.up_ask
             _down_bid = mstate.down_bid
             _down_ask = mstate.down_ask
-            mstate.mid = book_math.two_sided_mid_with_default(
+            mstate.mid = book_math.two_sided_mid(
                 {"best_bid": _up_bid, "best_ask": _up_ask},
                 {"best_bid": _down_bid, "best_ask": _down_ask})
             _pair = book_math.pair_cost(_up_ask, _down_ask)
             if _pair is not None:
                 mstate.spread = _pair
+        mid: Optional[float] = mstate.mid
         # Keep legacy last_valid* in sync even when WS kept authority (already set in on_book_update)
 
         # If not active or window is expired, stay idle
@@ -4398,13 +4395,16 @@ class LiveTraderEngine:
         # placed or a window has merged and re-quoted, prices latch.
         if mstate.requote_round <= 0:
             if not mstate.order_id_up and not mstate.order_id_down and not mstate.filled_up and not mstate.filled_down:
-                # None only before the first snapshot; the 0.50 substitution for
-                # an unpriceable book lives in two_sided_mid_with_default (#207).
-                _anchor = mstate.mid if mstate.mid is not None else 0.50
-                resting_up = round(min(0.99, max(0.01, _anchor - self.offset)), 3)
-                resting_down = round(min(0.99, max(0.01, (1.0 - _anchor) - self.offset)), 3)
-                mstate.resting_up = resting_up
-                mstate.resting_down = resting_down
+                # Issue #207: Anchor quotes only when a real two-sided mid exists.
+                # Never substitute 0.50 for an unpriceable book.
+                if mstate.mid is not None:
+                    resting_up = round(min(0.99, max(0.01, mstate.mid - self.offset)), 3)
+                    resting_down = round(min(0.99, max(0.01, (1.0 - mstate.mid) - self.offset)), 3)
+                    mstate.resting_up = resting_up
+                    mstate.resting_down = resting_down
+                else:
+                    resting_up = mstate.resting_up
+                    resting_down = mstate.resting_down
             else:
                 resting_up = mstate.resting_up
                 resting_down = mstate.resting_down
@@ -4453,17 +4453,19 @@ class LiveTraderEngine:
             mstate.chased_leg = None
 
         # --- DRIFT TRACKING (vs 0.50 base) ---
-        mid = mstate.mid or 0.50
-        if mid > 0.50:
-            mstate.max_up_drift = max(mstate.max_up_drift, mid - 0.50)
-        elif mid < 0.50:
-            mstate.max_down_drift = max(mstate.max_down_drift, 0.50 - mid)
+        # Issue #207: only track drift against a genuine two-sided mid, never a fabricated 0.50.
+        if mstate.mid is not None:
+            mid = mstate.mid
+            if mid > 0.50:
+                mstate.max_up_drift = max(mstate.max_up_drift, mid - 0.50)
+            elif mid < 0.50:
+                mstate.max_down_drift = max(mstate.max_down_drift, 0.50 - mid)
 
-        # Reversal detection: mid retraced back towards 0.50
-        if mstate.max_down_drift >= self.exit_thresh and (0.50 - mid) < self.exit_reversal:
-            mstate.reversal_seen_down = True
-        if mstate.max_up_drift >= self.exit_thresh and (mid - 0.50) < self.exit_reversal:
-            mstate.reversal_seen_up = True
+            # Reversal detection: mid retraced back towards 0.50
+            if mstate.max_down_drift >= self.exit_thresh and (0.50 - mid) < self.exit_reversal:
+                mstate.reversal_seen_down = True
+            if mstate.max_up_drift >= self.exit_thresh and (mid - 0.50) < self.exit_reversal:
+                mstate.reversal_seen_up = True
 
         # Determine window duration & elapsed time (Issue #48)
         win_duration = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else (900.0 if "15m" in slug else 300.0)
@@ -4537,10 +4539,11 @@ class LiveTraderEngine:
             and mstate.down_bid is not None and mstate.down_ask is not None
         )
         if not mstate.open_gate_evaluated and book_two_sided and not mstate.late_start_skip:
-            mstate.open_mid = mid
-            mstate.open_drift = abs(mid - 0.50)
-            mstate.adverse_open = (mstate.open_drift >= self.exit_thresh)
-            mstate.open_gate_evaluated = True
+            if mstate.mid is not None:
+                mstate.open_mid = mstate.mid
+                mstate.open_drift = abs(mstate.mid - 0.50)
+                mstate.adverse_open = (mstate.open_drift >= self.exit_thresh)
+                mstate.open_gate_evaluated = True
         initial_drift = mstate.open_drift
         is_adverse_open = mstate.adverse_open
 
@@ -4560,7 +4563,7 @@ class LiveTraderEngine:
                 and book_two_sided and not mstate.late_start_skip
                 and delay_expired):
             mstate.band_gate_evaluated = True
-            band_drift = abs(mid - 0.50)
+            band_drift = abs(mstate.mid - 0.50) if mstate.mid is not None else 0.0
             if band_drift > self.entry_band:
                 with self._engine_lock:
                     mstate.entry_cancelled_timeout = True
@@ -4707,6 +4710,11 @@ class LiveTraderEngine:
                         # Issue #137: the latch above already recorded the
                         # mid/drift numbers in last_action; keep them.
                         mstate.status = "BAND_SKIPPED"
+                    elif mstate.mid is None and not mstate.open_gate_evaluated:
+                        # Issue #207: unpriceable book throughout entry window
+                        mstate.status = "NO_BOOK_SKIPPED"
+                        mstate.last_action = "Window skipped — unpriceable book (never formed two-sided quotes)"
+                        log.info("[%s] Window skipped: unpriceable book throughout entry window", slug)
                     else:
                         mstate.status = "TIMEOUT_NO_FILL"
                         pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
@@ -4721,8 +4729,9 @@ class LiveTraderEngine:
             max(0.0, mstate.end_ts - now) if mstate.end_ts > 0
             else max(0.0, win_duration - elapsed_sec)
         )
+        mid_for_reentry = mstate.mid or 0.50
         if self._maybe_reenter_drift_skipped(
-                mstate, slug, mid, remaining_sec, win_duration,
+                mstate, slug, mid_for_reentry, remaining_sec, win_duration,
                 book_two_sided, is_late_start, now, resting_up, resting_down):
             is_adverse_open = mstate.adverse_open
             # Issue #137: the entry band never gates re-entry; mark it
@@ -4730,6 +4739,7 @@ class LiveTraderEngine:
             mstate.band_gate_evaluated = True
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
+        no_book_hold = (mstate.mid is None)
         can_place_entry = (
             not self.quoting_halted
             and not mstate.pair_captured
@@ -4740,6 +4750,7 @@ class LiveTraderEngine:
             and not mstate.late_start_skip
             and not entry_delay_pending
             and not band_hold
+            and not no_book_hold
         )
         if entry_delay_pending and not mstate.entry_cancelled_timeout:
             mstate.last_action = (
@@ -4750,6 +4761,14 @@ class LiveTraderEngine:
             mstate.last_action = (
                 "Entry band check waiting for two-sided book — quoting held"
             )
+            if mstate.status in ("IDLE", "PRE_QUOTING"):
+                mstate.status = "NO_BOOK"
+        elif no_book_hold and not mstate.entry_cancelled_timeout and not is_late_start and not mstate.late_start_skip:
+            mstate.last_action = (
+                "Waiting for two-sided book (unpriceable leg) — quoting held"
+            )
+            if mstate.status in ("IDLE", "PRE_QUOTING"):
+                mstate.status = "NO_BOOK"
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
@@ -4824,7 +4843,7 @@ class LiveTraderEngine:
             mstate.pending_ws_trades_down.clear()
 
         # --- FILL DETECTION ---
-        if mstate.status in ("IDLE", "PRE_QUOTING") and can_place_entry:
+        if mstate.status in ("IDLE", "PRE_QUOTING", "NO_BOOK") and can_place_entry:
             mstate.status = "QUOTING"
             mstate.last_action = f"Quoting bids @ {resting_up:.2f} / {resting_down:.2f}"
 
@@ -5042,7 +5061,8 @@ class LiveTraderEngine:
                     self._save_persisted_trades()
                 # Issue #89: recycle into a fresh quoting round when the window
                 # has enough life left; otherwise stay terminal until rollover.
-                self._maybe_requote_after_merge(mstate, slug, mid, now)
+                if mid is not None:
+                    self._maybe_requote_after_merge(mstate, slug, mid, now)
                 return
 
         # --- RECONCILE STAGED STOP-LOSS (issue #87) ---
@@ -5200,6 +5220,8 @@ class LiveTraderEngine:
 
         Returns True when a new round opened.
         """
+        if mid is None:
+            return False
         gate = self.min_requote_remaining_sec
         if gate is None or gate <= 0:
             return False

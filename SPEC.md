@@ -1,57 +1,45 @@
-# SPEC.md — Issue #216: Dashboard resting-price fallback reads up_mid/down_mid
+# SPEC.md — Issue #207: An unpriceable leg is substituted with 0.50 instead of skipping the window
 
 ## 1. Problem Statement
 
-In `server/osc_dash.py`, six sites fall back to `m.up_mid` / `m.down_mid` when `resting_up` / `resting_down` are null:
-- Toast notifications for UP/DOWN fill transitions (`:3327`, `:3337`)
-- Orders & Position status display string (`:6016`, `:6017`)
-- Market matrix bids display (`:6066`, `:6067`)
-
-Neither `up_mid` nor `down_mid` is ever emitted in any payload from the live trader. As a result:
-1. The `m.up_mid` / `m.down_mid` branch is completely dead and unreachable.
-2. The chain unconditionally falls through to hardcoded `0.48` and hardcoded `offset = 0.02`.
-3. An operator running with a non-default offset (e.g., `offset = 0.03`) sees `0.48` displayed instead of their actual strategy parameter (`0.47`), distorting operator telemetry.
+When a leg's order book is empty, missing, or one-sided, the live trading engine calls `book_math.two_sided_mid_with_default(..., default=0.50)` in two places (`strategy/live_trader.py:2175`, `:4369`).
+This substitutes a fabricated synthetic mid of `0.50` for an unpriceable book.
+Downstream, this fabricated 0.50 creates serious defects:
+1. **Adverse-open gate** (`:4540`): `abs(0.50 - 0.50) = 0`, so it passes unconditionally on an empty book that never priced anything.
+2. **Entry band** (`:4563`): `abs(0.50 - 0.50) = 0`, so it passes unconditionally.
+3. **Drift tracking** (`:4456`): treats the market as flat at 0.50, ignoring actual movement or masking real risk.
+4. **Order quoting** (`:4403`): if delay expires and `mstate.mid` is 0.50, the engine can quote orders blind at `0.50 - offset` into an unpriced market.
+5. **Operator blindness**: the Live Cockpit displays `mid: $0.50` and a flat line, hiding the fact that the venue book was missing or dead.
 
 ## 2. Specification & Contracts
 
-### 2.1 Shared Helper Functions in Dashboard JavaScript
+### 2.1 Use Honest Mid Calculation
+- In `strategy/live_trader.py`, replace calls to `book_math.two_sided_mid_with_default` with `book_math.two_sided_mid`.
+- `two_sided_mid` returns `Optional[float]` (`None` if any leg lacks a valid bid or ask).
+- `mstate.mid` retains its type `Optional[float] = None`.
 
-Introduce two cohesive, shared helper functions in the client script of `server/osc_dash.py`:
+### 2.2 Quoting & Execution Safety
+- Do not quote when `mstate.mid is None`. Add `mstate.mid is not None` to `can_place_entry`.
+- When `mstate.mid is None` and not already quoting/filled:
+  - If entry delay has expired, set `mstate.status = "NO_BOOK"` and `mstate.last_action = "Waiting for two-sided book (unpriceable leg) — quoting held"`.
+- If the entry window expires/times out and no two-sided book was ever formed (`open_gate_evaluated` is False and `mstate.mid is None`):
+  - Mark window status as `"NO_BOOK_SKIPPED"`.
+  - Set `mstate.last_action = "Window skipped — unpriceable book (never formed two-sided quotes)"`.
+  - Do not record as standard `TIMEOUT_NO_FILL`.
 
-```javascript
-function cockpitRestingPrice(m, leg, fallbackOffset) {
-  const isUp = leg === 'up';
-  const resting = isUp ? m?.resting_up : m?.resting_down;
-  if (resting != null) return resting;
-  const off = (fallbackOffset != null) ? fallbackOffset : 0.02;
-  const mid = m?.mid;
-  if (mid != null && isFinite(mid)) {
-    const anchor = isUp ? mid : (1.0 - mid);
-    return Math.max(0.01, +(anchor - off).toFixed(2));
-  }
-  return Math.max(0.01, +(0.50 - off).toFixed(2));
-}
+### 2.3 Drift Tracking Safety
+- In drift tracking (`strategy/live_trader.py:4455`), only evaluate drift and reversal detection when `mstate.mid is not None`.
+- Never execute drift logic against an assumed `0.50` fallback.
 
-function cockpitLegPrice(m, leg, fallbackOffset) {
-  const isUp = leg === 'up';
-  const fill = isUp ? m?.fill_price_up : m?.fill_price_down;
-  if (fill != null) return fill;
-  return cockpitRestingPrice(m, leg, fallbackOffset);
-}
-```
+### 2.4 Cockpit & UI Integration
+- In `server/osc_dash.py`:
+  - Add `'NO_BOOK': 'No Book'` and `'NO_BOOK_SKIPPED': 'No Book Skipped'` to `OT_STATUS_LABELS`.
+  - Update `bidsCancelled` and `cancelReason` to handle `'NO_BOOK_SKIPPED'`.
+  - Display appropriate status tags in cockpit cards.
 
-### 2.2 Call Site Replacements
-
-1. **Fill Toast Transitions (lines ~3327, ~3337):**
-   - Replace ternary chain with `cockpitLegPrice(m, 'up', st?.params?.offset)` and `cockpitLegPrice(m, 'down', st?.params?.offset)`.
-2. **Card Positions PosStr (lines ~6016, ~6017):**
-   - Replace ternary chain with `cockpitLegPrice(m, 'up', st?.params?.offset)` and `cockpitLegPrice(m, 'down', st?.params?.offset)`.
-3. **Card Bids Display (lines ~6066, ~6067):**
-   - Replace ternary chain with `cockpitRestingPrice(m, 'up', st?.params?.offset)` and `cockpitRestingPrice(m, 'down', st?.params?.offset)`.
-
-### 2.3 Acceptance Criteria
-
-1. No references to `up_mid` or `down_mid` remain in `server/osc_dash.py`.
-2. When `resting_up` / `resting_down` are null and `st.params.offset` is 0.03 (with no `mid`), the resting price evaluates to `0.47`, never `0.48`.
-3. When `resting_up` is null, `st.params.offset` is 0.03, and `mid` is 0.60, UP evaluates to `0.57` and DOWN evaluates to `0.37`.
-4. Existing tests pass, and new integration tests in `tests/test_osc_dash_integration.py` verify points 1-3.
+### 2.5 Acceptance Criteria
+1. When either leg is unpriceable, `mstate.mid` is `None`.
+2. No resting orders are placed while `mstate.mid is None`.
+3. No drift accumulation occurs against an unpriceable leg.
+4. Windows that timeout with no book receive status `"NO_BOOK_SKIPPED"`.
+5. All targeted tests pass.
