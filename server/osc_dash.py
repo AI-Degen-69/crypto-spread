@@ -1,7 +1,7 @@
 """Oscillation & Backtest Lab dashboard for 5m/15m crypto spread capture.
 
 Unified 4-tab SPA:
-- Tab 1: Live Observation & Recent Closed Windows
+- Tab 1: Collector market data & recent closed windows
 - Tab 2: Backtest Simulator Sweeper with Equity Curve
 - Tab 3: Statistical Analysis & Distributions
 - Tab 4: Ticks File Repository & Ingestion Manager
@@ -1227,12 +1227,12 @@ def api_delete_tick_file(request: Request, filename: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-# --- Live Trading Cockpit Endpoints ---
+# --- Trading Platform Endpoints ---
 
 
 @app.get("/api/live/state")
 def api_live_state():
-    """Return real-time state snapshot of the Live Trading Cockpit engine."""
+    """Return real-time state snapshot of the trading engine behind the Trading Platform tab."""
     engine = get_live_trader_engine()
     return engine.get_state()
 
@@ -2048,7 +2048,7 @@ async def api_ticks_verify(
     }
 
 
-# --- Front-end SPA (Complete Hebrew RTL Studio: Live / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
+# --- Front-end SPA (Complete Hebrew RTL Studio: Trading / Backtest Lab / Statistical Analysis / Tick Data Manager) ---
 
 FULL_APP_HTML = r"""<!doctype html><html lang="en" dir="ltr"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2267,15 +2267,15 @@ textarea:focus-visible,
     <div class="sidebar-brand-text">CRYPTO SPREAD</div>
   </div>
   <nav class="sidebar-nav">
-    <button class="sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Live Trading Cockpit">
+    <button class="sidebar-tab-btn active" id="tab-btn-cockpit" onclick="switchTab('cockpit')" title="Trading Platform">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
         </svg>
       </span>
-      <span class="nav-label">Live Trading Cockpit</span>
+      <span class="nav-label">Trading Platform</span>
     </button>
-    <button class="sidebar-tab-btn" id="tab-btn-live" onclick="switchTab('live')" title="Live Books & Queue">
+    <button class="sidebar-tab-btn" id="tab-btn-marketdata" onclick="switchTab('marketdata')" title="Collector's Market Data">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4.93 4.93a10 10 0 0 1 14.14 0"></path>
@@ -2284,7 +2284,7 @@ textarea:focus-visible,
           <path d="M12 14v7"></path>
         </svg>
       </span>
-      <span class="nav-label">Live Books & Queue</span>
+      <span class="nav-label">Collector's Market Data</span>
     </button>
     <button class="sidebar-tab-btn" id="tab-btn-backtest" onclick="switchTab('backtest')" title="Backtest Sweeper">
       <span class="nav-icon">
@@ -2361,7 +2361,7 @@ textarea:focus-visible,
 
 <div class="wrap">
   <!-- TAB 1: LIVE & RECENT WINDOWS -->
-  <div id="tab-live" class="tab-content">
+  <div id="tab-marketdata" class="tab-content">
     <div id="goalBar" class="card" style="border-top:2px solid var(--gold)"></div>
     <div id="liveBar" class="card"></div>
     <div id="seriesGrid" class="grid"></div>
@@ -2731,7 +2731,7 @@ textarea:focus-visible,
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
         <div style="display:flex;align-items:center;gap:10px">
           <h3 style="margin:0;font-size:15px;display:flex;align-items:center;gap:8px">
-            <span>⚡</span> Live Trading Cockpit (5m Markets)
+            <span>⚡</span> Trading Platform (5m Markets)
           </h3>
           <span id="cockpitStatusPill" class="pill pill-flat" style="font-size:11px;padding:3px 10px;font-weight:700">BOT: STOPPED</span>
           <span id="cockpitModePill" class="pill" style="font-size:11px;padding:3px 10px;background:rgba(51,201,181,0.15);color:var(--up);border-color:rgba(51,201,181,0.3);font-weight:700">PAPER TRADING</span>
@@ -2831,8 +2831,8 @@ textarea:focus-visible,
         <div class="form-group">
           <label>Execution Mode</label>
           <select id="cockpitMode" onchange="onCockpitModeChange()">
-            <option value="paper" selected>Paper Simulation (Live Book)</option>
-            <option value="live">Live Polymarket Orders</option>
+            <option value="paper" selected>Paper — simulated fills, real books</option>
+            <option value="live">Real Money — Polymarket orders</option>
           </select>
         </div>
         <div class="form-group">
@@ -2841,7 +2841,7 @@ textarea:focus-visible,
         </div>
         <div class="form-group" style="grid-column:span 2">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
-          <input type="text" id="cockpitWallet" placeholder="0x... (Fetches Live Balance)" onchange="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
+          <input type="text" id="cockpitWallet" placeholder="0x... (fetches real balance)" onchange="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
         </div>
         <div class="form-group">
           <label id="lblCockpitStartBal">Starting Portfolio Balance ($)</label>
@@ -2879,7 +2879,7 @@ textarea:focus-visible,
       </div>
     </div>
 
-    <!-- Live KPI Summary -->
+    <!-- KPI Summary -->
     <div class="kpi" id="cockpitKpiBar">
       <div class="box">
         <div class="lbl">Total Realized P&L</div>
@@ -2889,7 +2889,7 @@ textarea:focus-visible,
       <div class="box">
         <div class="lbl">Portfolio Net Value</div>
         <div class="val" id="cockpitPortfolioVal" style="color:var(--gold)">$1,000.00</div>
-        <div class="sub">Live Account Equity</div>
+        <div class="sub">Account Equity</div>
       </div>
       <div class="box">
         <div class="lbl">Win Rate (Pairs / Closed)</div>
@@ -2932,10 +2932,10 @@ textarea:focus-visible,
       <div id="cockpitChartLegend" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;align-items:center" class="mono"></div>
     </div>
 
-    <!-- Live Market Matrix -->
+    <!-- Market Matrix -->
     <div class="card" style="margin-top:12px">
       <h3 style="margin:0 0 10px">
-        <span>🎯 Live Market Matrix</span>
+        <span>🎯 Market Matrix</span>
         <span id="cockpitActiveMarketsBadge" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">5 ACTIVE MARKETS</span>
       </h3>
       <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));gap:10px"></div>
@@ -3189,7 +3189,7 @@ const fmtPrice=(p)=>{
 function pill(cls,txt){return `<span class="pill ${cls}">${txt}</span>`;}
 function clsPill(c){return c==='oscillating'?pill('pill-osc','oscillating'):c==='monotonic'?pill('pill-mono','monotonic'):c==='flat'?pill('pill-flat','flat'):pill('pill-flat',esc(c));}
 // Engine statuses are machine names; map the ones shown in Orders & Trades and
-// on the Live Matrix badges to human-readable labels so e.g. next-window
+// on the Market Matrix badges to human-readable labels so e.g. next-window
 // pre-quotes never display raw ADVANCE_PRE_QUOTE and matrix cards read
 // "Stopped Out" / "Timed Out" instead of STOP_EXIT-style tokens. Unknown
 // statuses render unchanged (still raw).
@@ -3197,7 +3197,7 @@ const OT_STATUS_LABELS = {
   // order / venue statuses (Open Orders Status column)
   'ADVANCE_PRE_QUOTE': 'Pre-Quote',
   'PRE_QUOTE': 'Pre-Quote',
-  // market-state statuses (Live Matrix badge)
+  // market-state statuses (Market Matrix badge)
   'IDLE': 'Idle',
   'QUOTING': 'Quoting Bids',
   'FILLED_UP': 'Filled Up',
@@ -3837,8 +3837,8 @@ async function tick(){
     $('goalBar').innerHTML=`<h3>🎯 Window Capture Targets</h3><div style="display:flex;gap:10px;flex-wrap:wrap">${bar(g5)}${bar(g15)}${tot}</div>${prov}`;
   })();
 
-  // Live bar
-  let liveHtml = '<h3>Live Windows — Books & Queue</h3><div class="live-grid">';
+  // Collector market-data bar
+  let liveHtml = '<h3>Market Data — Books & Queue</h3><div class="live-grid">';
   const order=['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'];
   for(const k of order){
     const s=live[k];
@@ -5931,7 +5931,7 @@ function renderCockpitUI(st) {
 
   const modePill = $('cockpitModePill');
   if (modePill) {
-    modePill.textContent = (st.mode || 'paper').toUpperCase() + ' TRADING';
+    modePill.textContent = st.mode === 'live' ? 'REAL MONEY' : 'PAPER TRADING';
     modePill.style.background = st.mode === 'live' ? 'rgba(240,104,77,0.15)' : 'rgba(51,201,181,0.15)';
     modePill.style.color = st.mode === 'live' ? 'var(--down)' : 'var(--up)';
     modePill.style.borderColor = st.mode === 'live' ? 'rgba(240,104,77,0.4)' : 'rgba(51,201,181,0.4)';
@@ -6005,7 +6005,7 @@ function renderCockpitUI(st) {
   const expEl = $('cockpitExposure');
   if (expEl) expEl.textContent = '$' + (st.active_exposure || 0.0).toFixed(2);
 
-  // 3. Render Live Matrix Grid
+  // 3. Render Market Matrix Grid
   const gridEl = $('cockpitMarketGrid');
   const activeSeries = getActiveCockpitSeries();
   const activeBadge = $('cockpitActiveMarketsBadge');

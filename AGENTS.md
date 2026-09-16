@@ -2,6 +2,17 @@
 
 Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP.
 
+## Naming
+
+`docs/glossary.md` is the agreed name for every entity here — the two engines, the two execution
+modes, the five dashboard tabs, the data artifacts, and the terms that have already caused bugs
+(`mid` vs the recorded one-sided `"mid"` field, tuning knob vs structural limit). Read it before
+naming anything in a comment, a commit message or a chat reply. Where it disagrees with an older
+code comment, the glossary wins.
+
+Note in particular: **"live" is not a name for the trading engine.** The engine runs in both
+execution modes; `mode="live"` means real money.
+
 ## Stack
 - Python; deps per `requirements.txt`: `fastapi`, `uvicorn`, `requests`, `sse-starlette>=2.0.0`, `anyio>=4.0.0`
 - Data sources: `https://gamma-api.polymarket.com/events?series_slug` and `https://clob.polymarket.com/book`
@@ -39,7 +50,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `live_trader.py` (order flow & execution engine), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `runs/` — gitignored (`.gitignore:7`). Self-contained `paper|live` run folders (`runs/paper|live/YYYY-MM-DD_HH-MM_TZ/`); convention in `docs/run-conventions.md`.
-- `docs/` — `operations.md` (runbook for capture + replay), `run-conventions.md` (the `/runs` paper|live layout), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `rtds-clob-latency-audit.md`, `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report), `issue-workflow.md` (canonical agent pipeline) + `git-workflow.md` (branching, commits, PR/CI merge gate); the old `ecc-flow-guide.md` was superseded by the former and removed.
+- `docs/` — `operations.md` (runbook for capture + replay), `run-conventions.md` (the `/runs` paper|live layout), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `rtds-clob-latency-audit.md`, `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report), `issue-workflow.md` (canonical agent pipeline) + `git-workflow.md` (branching, commits, PR/CI merge gate), `glossary.md` (agreed names), `engine-decision-rules.md` (what the strategy does), `adr/` (why the system is shaped this way); the old `ecc-flow-guide.md` was superseded by the former and removed.
 - `tests/` — 367 tests across 18 files (per-file counts drift; run `python -m pytest --collect-only -q` for the current split). Targeted gates for live-trader work: `test_live_trader.py`, `test_entry_timeout.py`, `test_backtest_engine.py`, `test_osc_dash_integration.py`.
 - Other dirs: `bot/paper_bot.py` (paper-trading reference bot), `ten-bankrolls/` (bankroll-farm experiments: `run_one.py`, `watcher.py`), `tasks/plan.md` + `tasks/todo.md` (working plans).
 
