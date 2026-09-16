@@ -2676,3 +2676,67 @@ def test_summary_hero_announces_async_updates():
     card = html[card_start:html.index("oscHeroAsOf")]
     assert 'aria-live="polite"' in card, "async-populated hero figures need a live region"
     assert 'aria-atomic="true"' in card, "the sentence should be announced whole, not word by word"
+
+
+# --- Issue #201: backtest stop-loss thresholds grouped under one on/off toggle ---
+
+def test_stop_loss_thresholds_live_inside_the_toggled_group():
+    """All four thresholds must sit inside the wrapper the toggle hides."""
+    html = client.get("/").text
+    start = html.index('<div id="btStopLossFields">')
+    end = html.index('data-param-label="quote_shares"', start)
+    group = html[start:end]
+    for el_id in ("btExit5m", "btExit15m", "btExitBtc", "btExitSol"):
+        assert f'id="{el_id}"' in group, (
+            f"{el_id} is outside btStopLossFields, so the toggle cannot hide it")
+
+
+def test_stop_loss_group_survives_the_form_grid():
+    """The wrapper must not collapse the four fields into one grid cell.
+
+    `.form-grid` is `repeat(4,1fr)`, so a plain wrapper becomes a single item.
+    `display:contents` keeps them as direct grid children, and the `[hidden]`
+    override is mandatory: the id selector outranks the UA `[hidden]` rule.
+    """
+    html = client.get("/").text
+    assert "#btStopLossFields{display:contents}" in html
+    assert "#btStopLossFields[hidden]{display:none}" in html
+
+
+def test_stop_loss_switch_is_a_checkbox_matching_the_pair_cost_toggle():
+    """The control is the shared toggle widget, not the old dropdown."""
+    html = client.get("/").text
+    assert '<select id="btStopLossEnabled"' not in html, (
+        "the standalone stop-loss dropdown should be gone")
+    start = html.index('id="btStopLossToggleLabel"')
+    block = html[start:start + 400]
+    assert 'class="toggle-switch"' in block
+    assert 'class="toggle-slider"' in block
+    assert 'type="checkbox" id="btStopLossEnabled"' in block
+    assert 'onchange="toggleStopLossInputs()"' in block
+    assert "checked" in block, "stop loss defaults to On, as the old select did"
+    # Kept so applyParamSpec() still resolves the label and the `bt` surface.
+    assert 'data-param="stop_loss_enabled"' in block
+
+
+def test_toggle_disables_as_well_as_hides_and_drives_the_request():
+    """Off must disable the inputs and send stop_loss_enabled=0."""
+    html = client.get("/").text
+    fn_start = html.index("function toggleStopLossInputs()")
+    fn = html[fn_start:html.index("function toggleBtSection", fn_start)]
+    assert "wrap.hidden = !enabled" in fn, "Off must hide the group"
+    assert "inp.disabled = !enabled" in fn, "Off must disable the inputs too"
+    assert (
+        "const stopLoss = ($('btStopLossEnabled') && "
+        "!$('btStopLossEnabled').checked) ? '0' : '1';"
+    ) in html, "runBacktest must read .checked, not .value, off a checkbox"
+    assert "stop_loss_enabled=${stopLoss}" in html
+
+
+def test_reset_restores_the_stop_loss_toggle():
+    """resetBtParams must not leave the group hidden with default values."""
+    html = client.get("/").text
+    fn_start = html.index("function resetBtParams()")
+    fn = html[fn_start:html.index("function applyWinningConfig", fn_start)]
+    assert "$('btStopLossEnabled').checked = true;" in fn
+    assert "toggleStopLossInputs();" in fn
