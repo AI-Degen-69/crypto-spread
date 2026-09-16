@@ -28,12 +28,18 @@ DUR = 300
 
 
 def _make_snap(ts: float, mid: float = 0.50, up_ask: float = 0.49, down_ask: float = 0.49,
-               start_ts: float = 1000.0, tape: list | None = None) -> dict:
+               start_ts: float = 1000.0, tape: list | None = None,
+               down_bid: float | None = None) -> dict:
+    # Both legs are pinned so the *two-sided* mid is `mid` too: UP at `mid`,
+    # DOWN at its complement. Centring DOWN on `down_ask` instead described a
+    # book no real binary pair produces, and nothing noticed while the engine
+    # anchored off the one-sided `s["mid"]` (issue #225).
     half = 0.005
-    bb_up = round(mid - half, 4)
-    ba_up = round(mid + half, 4)
-    if up_ask is not None:
-        ba_up = up_ask
+    ba_up = round(mid + half, 4) if up_ask is None else up_ask
+    bb_up = round(2.0 * mid - ba_up, 4)
+    # `down_bid` opts out of the pinning, for the tests whose whole subject is a
+    # leg-imbalanced book.
+    bb_dn = round(2.0 * (1.0 - mid) - down_ask, 4) if down_bid is None else down_bid
     return {
         "ts": ts,
         "iso": "2026-09-03T12:00:00+00:00",
@@ -59,7 +65,7 @@ def _make_snap(ts: float, mid: float = 0.50, up_ask: float = 0.49, down_ask: flo
             "token_id": DN_TOKEN,
             "bids": {},
             "asks": {},
-            "best_bid": round(down_ask - 0.005, 4),
+            "best_bid": bb_dn,
             "best_ask": down_ask,
             "malformed": 0,
         },
@@ -451,16 +457,25 @@ def test_backtest_enters_window_with_balanced_open():
 
 
 def test_backtest_one_sided_open_book_does_not_cancel_entry():
-    """A one-sided book at open must not be trusted as an adverse-drift signal."""
-    snaps = [
-        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
-    ]
+    """A one-sided book at open must not be trusted as an adverse-drift signal.
+
+    It is not quoted either (issue #225): with one leg unpriceable there is no
+    two-sided mid and so no anchor. What must not happen is a *latched* cancel
+    -- the next tick that prices both legs still enters.
+    """
+    one_sided = _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                           tape=[{"asset": UP_TOKEN, "price": 0.48}])
     # Strip the DOWN ask so the opening mid cannot be evaluated on this tick.
-    snaps[0]["down_book"]["best_ask"] = None
+    one_sided["down_book"]["best_ask"] = None
     p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-    res = _simulate_window(snaps, p)
-    assert res.filled_up is True
+
+    assert _simulate_window([one_sided], p).filled_up is False, (
+        "a book that priced one leg was quoted anyway")
+
+    priced = _make_snap(1010.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                        tape=[{"asset": UP_TOKEN, "price": 0.48}])
+    assert _simulate_window([one_sided, priced], p).filled_up is True, (
+        "the one-sided open latched a cancel the drift gate never evaluated")
 
 
 # ============================================================================
@@ -743,7 +758,9 @@ def test_backtest_reentry_uses_the_two_sided_mid_not_the_up_leg():
     skewed to 0.31 undo its own skip on the very same tick.
     """
     snaps = [
-        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.32,
+        # `down_bid` keeps the leg imbalance the test is about: the UP leg sits
+        # at 0.50 while DOWN is skewed to 0.3175.
+        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.32, down_bid=0.315,
                    tape=_fill_tape()),
     ]
     res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
@@ -756,8 +773,9 @@ def test_backtest_reentry_band_capped_by_exit_thresh():
     """Parity: a band wider than exit_thresh is capped in the replay too."""
     snaps = [
         _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        # Mid ~0.449 -- inside the configured 0.40 band, outside exit_thresh 0.05.
-        _make_snap(1100.0, mid=0.45, up_ask=0.455, down_ask=0.555, tape=_fill_tape()),
+        # Two-sided mid 0.44 -- inside the configured 0.40 band, outside
+        # exit_thresh 0.05.
+        _make_snap(1100.0, mid=0.44, up_ask=0.445, down_ask=0.565, tape=_fill_tape()),
     ]
     res = _simulate_window(snaps, BacktestParams(
         offset=0.02, entry_timeout_pct=1.0, reentry_drift_band=0.40))

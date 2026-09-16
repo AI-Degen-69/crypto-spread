@@ -45,6 +45,13 @@ def snap(ts: float, mid_up: float, down_ask: float = 0.49, up_ask: float = 0.49,
     `mid_up` is authoritative — the book's bb/ba are derived so that
     (bb+ba)/2 == mid_up. Default up_ask/down_ask=0.49 keeps touch_pair <= 0.99
     so the default pair_cost_gate=0.995 lets the test through.
+
+    Both legs are pinned, the DOWN one at `1 - mid_up`, so the *two-sided* mid
+    is `mid_up` too. It used to centre the DOWN book on `down_ask` with no
+    relation to `mid_up` at all, which no real binary pair does: with the
+    defaults that put the two-sided mid at 0.5062 while `s["mid"]` said 0.50.
+    Nothing noticed while the engine anchored off the one-sided `s["mid"]`
+    (issue #225).
     """
     half = 0.005
     bb_up = round(mid_up - half, 4)
@@ -53,6 +60,9 @@ def snap(ts: float, mid_up: float, down_ask: float = 0.49, up_ask: float = 0.49,
     if up_ask is not None and up_ask != ba_up:
         ba_up = up_ask
         bb_up = round(mid_up - (ba_up - mid_up), 4)
+    # Same treatment for DOWN, pinned at the complement of `mid_up`.
+    dn_mid = 1.0 - mid_up
+    bb_dn = round(dn_mid - (down_ask - dn_mid), 4)
     return {
         "ts": ts, "iso": iso, "series": SERIES, "duration": DUR,
         "label": "BTC 5m", "cid": CID, "slug": SLUG,
@@ -64,7 +74,7 @@ def snap(ts: float, mid_up: float, down_ask: float = 0.49, up_ask: float = 0.49,
         },
         "down_book": {
             "token_id": DN_TOKEN, "bids": down_bids or {}, "asks": {},
-            "best_bid": round(down_ask - 0.005, 4), "best_ask": down_ask, "malformed": 0,
+            "best_bid": bb_dn, "best_ask": down_ask, "malformed": 0,
         },
         "tape_delta": tape or [],
         "mid": mid_up, "touch_pair": up_ask + down_ask,
@@ -221,8 +231,10 @@ def test_simulate_book_only_fill():
         "up_token": UP_TOKEN, "down_token": DN_TOKEN,
         "up_book": {"token_id": UP_TOKEN, "bids": {}, "asks": {},
                     "best_bid": 0.49, "best_ask": 0.479, "malformed": 0},
+        # DOWN pinned at the complement of 0.4845, so the two-sided mid the
+        # anchor reads is 0.4845 too (#225).
         "down_book": {"token_id": DN_TOKEN, "bids": {}, "asks": {},
-                      "best_bid": 0.52, "best_ask": 0.52, "malformed": 0},
+                      "best_bid": 0.511, "best_ask": 0.52, "malformed": 0},
         "tape_delta": [], "mid": 0.4845, "touch_pair": 0.999,
         "resting_pair": 0.96, "queue_up": 0.0, "queue_down": 0.0, "err": None,
     }]
@@ -849,18 +861,35 @@ def test_adverse_claimed_window_bypasses_band_then_reenters():
     assert w.filled_up is False
 
 
-def test_anchor_uses_mid_only_prefix():
-    # First snaps carry s["mid"] but no quotable book: the anchor still
-    # latches from s["mid"] (old pre-loop scan parity), not a later tick.
-    snaps = _window_snaps(
-        10, lambda i: 0.50, lambda i: _tape_both(0.50, 0.46),
-        up_ask_fn=lambda i: 0.505, down_ask_fn=lambda i: 0.5025)
-    for s in snaps[:3]:
-        s["mid"] = 0.52
-        s["up_book"] = {**s["up_book"], "best_bid": None, "best_ask": None}
-    w = _simulate_window(snaps, BacktestParams(entry_timeout_pct=0.0))
-    assert w.pair_captured is True
-    assert w.entry_price_up == 0.50  # anchored at 0.52, not the 0.50 books
+def test_the_anchor_ignores_a_one_sided_mid_prefix():
+    """`s["mid"]` is the collector's up leg alone and outlives its own book.
+
+    Issue #225. Ticks 0-2 carry `s["mid"] = 0.52` with no UP quotes at all.
+    Anchoring off it rested the pair at 0.50/0.46 -- exactly where the tape
+    prints -- so the window captured a pair off a book that priced one leg.
+    With the two-sided anchor those ticks quote nothing, the later ones anchor
+    at the real 0.50, and the 0.50/0.46 prints no longer match anything.
+    """
+    def _prefixed(tape_fn):
+        snaps = _window_snaps(
+            10, lambda i: 0.50, tape_fn,
+            up_ask_fn=lambda i: 0.505, down_ask_fn=lambda i: 0.5025)
+        for s in snaps[:3]:
+            s["mid"] = 0.52
+            s["up_book"] = {**s["up_book"], "best_bid": None, "best_ask": None}
+        return snaps
+
+    w = _simulate_window(_prefixed(lambda i: _tape_both(0.50, 0.46)),
+                         BacktestParams(entry_timeout_pct=0.0))
+    assert w.pair_captured is False, "the one-sided prefix was quoted anyway"
+
+    # Control: the same window, with the tape printing where the two-sided
+    # anchor actually rests, does capture. The abstention above is the anchor
+    # source, not some other gate.
+    w2 = _simulate_window(_prefixed(lambda i: _tape_both(0.48, 0.48)),
+                          BacktestParams(entry_timeout_pct=0.0))
+    assert w2.pair_captured is True
+    assert w2.entry_price_up == 0.48
 
 
 def test_entry_delay_band_changes_hash():
@@ -1112,6 +1141,11 @@ def _chaseable_window(start_ts=1_760_000_000.0, duration=300,
         a = dn_ask if i <= 1 else after
         if last_dn_ask is not None and i == n - 1:
             a = last_dn_ask
+        # The DOWN bid is pinned so the leg's mid is the complement of UP's,
+        # which is what a real binary pair looks like and what the two-sided
+        # anchor reads (#225). A fixed 0.47 made the two-sided mid 0.51 while
+        # the tick claimed 0.50.
+        dn_bid = round(2.0 * (1.0 - (up_bid + up_ask) / 2.0) - a, 4)
         snaps.append({
             "ts": start_ts + i * 10.0, "cid": "0xchase",
             "series": "eth-up-or-down-5m", "slug": "eth-up-or-down-5m",
@@ -1119,8 +1153,8 @@ def _chaseable_window(start_ts=1_760_000_000.0, duration=300,
             "duration": duration, "mid": 0.50,
             "up_book": {"best_bid": up_bid, "best_ask": up_ask,
                         "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
-            "down_book": {"best_bid": 0.47, "best_ask": a,
-                          "bids": {"0.47": 500.0}, "asks": {str(a): 500.0}},
+            "down_book": {"best_bid": dn_bid, "best_ask": a,
+                          "bids": {str(dn_bid): 500.0}, "asks": {str(a): 500.0}},
             "tape_delta": [],
         })
     return snaps
@@ -1409,6 +1443,28 @@ def _held_down_window(final_dn_bid=None, final_up_ask=None,
     ]
 
 
+def _ask_only_down_window() -> list[dict]:
+    """DOWN quoted ask-only throughout: no DOWN bid is ever latched.
+
+    Unreachable through `_simulate_window` since issue #225 -- the entry anchor
+    needs a two-sided mid on both legs -- so the tests that use it call
+    `resolve_naked_settlement` directly.
+    """
+    return [
+        _settle_snap(0, 0.51, 0.505, 0.515, None, 0.460),
+        _settle_snap(1, 0.70, 0.695, 0.900, None, 0.310),
+        _settle_snap(2, 0.99, 0.990, None, None, 0.010),
+    ]
+
+
+def _redeeming_down_window() -> list[dict]:
+    """DOWN ask-only and UP bid-only: every stage of the ladder fails."""
+    return [
+        _settle_snap(0, 0.51, 0.505, None, None, 0.460),
+        _settle_snap(1, 0.99, 0.990, None, None, 0.010),
+    ]
+
+
 def test_a_losing_naked_leg_with_no_final_bid_books_the_loss():
     """Issue #191: the bid vanishing is not the position vanishing.
 
@@ -1430,24 +1486,26 @@ def test_a_winning_naked_leg_the_ladder_cannot_mark_redeems_at_one():
     """The mirror: no bid, no complement, nothing latched -- but it won.
 
     UP is quoted ask-only all window and DOWN bid-only, so every stage of the
-    ladder fails. The window still ends at an UP mid of 0.985, so the leg
-    redeems at 1.00 rather than contributing nothing. A redemption is not a
-    trade, so no taker fee is charged on it.
+    ladder fails. The leg still won, so it redeems at 1.00 rather than
+    contributing nothing, and `mark is None` is what tells the engine a
+    redemption is not a closing trade and carries no taker fee.
+
+    Called directly. Since issue #225 the entry anchor requires a two-sided mid
+    on both legs, so a window quoted one-sided from its first tick is never
+    entered and this stage cannot be reached through `_simulate_window` --
+    same as `test_the_settlement_ladder_abstains_on_an_empty_window`.
     """
     snaps = [
-        _settle_snap(0, 0.49, None, 0.460, 0.510, None),   # UP fills @ 0.470
+        _settle_snap(0, 0.49, None, 0.460, 0.510, None),
         _settle_snap(1, 0.60, None, 0.610, 0.390, None),
         _settle_snap(2, 0.80, None, 0.810, 0.190, None),
         _settle_snap(3, 0.99, None, 0.990, 0.010, None),
     ]
-    p = _settle_params()
-    w = _simulate_window(snaps, p)
-    assert w.filled_up is True and w.filled_down is False
-    assert w.pnl_cents == pytest.approx((1.0 - 0.470) * 100.0), (
+    mark, delta, source = resolve_naked_settlement(snaps, True, 0.470)
+    assert source == "redeemed"
+    assert delta == pytest.approx((1.0 - 0.470) * 100.0), (
         "a winning naked leg with an unmarkable book booked nothing")
-    assert w.settled_unmarked is True
-    assert w.settle_source == "redeemed"
-    assert w.fees_cents == pytest.approx(_taker_fee(0.50, p.taker_fee_rate) * 100.0), (
+    assert mark is None, (
         "a redemption is not a closing trade and must not carry a taker fee")
 
 
@@ -1497,16 +1555,19 @@ def test_an_undecided_window_abstains_instead_of_guessing():
 
     Held DOWN, because the abstention branch reads the held side's own book and
     a held-UP fixture would never exercise the down-side half of it.
+
+    Called directly: DOWN is quoted ask-only from the first tick, so since
+    issue #225 no quote is ever placed and the window cannot reach settlement
+    through `_simulate_window`.
     """
     snaps = [
-        _settle_snap(0, 0.51, 0.505, None, None, 0.460),   # DOWN fills @ 0.470
+        _settle_snap(0, 0.51, 0.505, None, None, 0.460),
         _settle_snap(1, 0.51, 0.495, None, None, 0.505),
     ]
-    w = _simulate_window(snaps, _settle_params())
-    assert w.filled_down is True and w.filled_up is False
-    assert w.pnl_cents == 0.0
-    assert w.settlement_mid is None
-    assert w.settle_source == "unresolved"
+    mark, delta, source = resolve_naked_settlement(snaps, False, 0.470)
+    assert source == "unresolved"
+    assert delta == 0.0
+    assert mark is None
 
 
 # --- issue #191: one test per resolution stage -----------------------------
@@ -1539,36 +1600,47 @@ def test_stage_three_falls_back_to_the_last_bid_the_leg_ever_had():
 
 
 def test_stage_four_falls_back_to_the_last_opposite_ask():
-    """DOWN is quoted ask-only all window, so no DOWN bid was ever latched."""
-    snaps = [
-        _settle_snap(0, 0.51, 0.505, 0.515, None, 0.460),   # DOWN fills @ 0.470
-        _settle_snap(1, 0.70, 0.695, 0.900, None, 0.310),
-        _settle_snap(2, 0.99, 0.990, None, None, 0.010),
-    ]
-    w = _simulate_window(snaps, _settle_params())
-    assert w.filled_down is True and w.filled_up is False
-    assert w.settle_source == "latched_complement_ask"
-    assert w.settlement_mid == pytest.approx(1.0 - 0.900)
-    assert w.pnl_cents == pytest.approx((0.10 - 0.470) * 100.0)
+    """DOWN is quoted ask-only all window, so no DOWN bid was ever latched.
+
+    Called directly. Since issue #225 the entry anchor needs a two-sided mid on
+    both legs, so a window quoted one-sided from its first tick is never entered
+    and this stage is unreachable through `_simulate_window`.
+    """
+    mark, delta, source = resolve_naked_settlement(_ask_only_down_window(), False, 0.470)
+    assert source == "latched_complement_ask"
+    assert mark == pytest.approx(1.0 - 0.900)
+    assert delta == pytest.approx((0.10 - 0.470) * 100.0)
 
 
 def test_stage_five_redeems_when_no_quote_resolves():
-    w = _simulate_window([
+    """Nothing on either side of the ladder resolves, and the leg won.
+
+    Called directly. Since issue #225 the entry anchor needs a two-sided mid on
+    both legs, so a window quoted one-sided from its first tick is never entered
+    and this stage is unreachable through `_simulate_window`.
+    """
+    mark, _delta, source = resolve_naked_settlement([
         _settle_snap(0, 0.49, None, 0.460, 0.510, None),
         _settle_snap(1, 0.99, None, 0.990, 0.010, None),
-    ], _settle_params())
-    assert w.settle_source == "redeemed"
-    assert w.settlement_mid is None, "a redemption has no executable mark"
+    ], True, 0.470)
+    assert source == "redeemed"
+    assert mark is None, "a redemption has no executable mark"
 
 
 def test_an_unresolved_window_is_recorded_as_such():
-    w = _simulate_window([
+    """A final mid of exactly 0.50 names no winner, so nothing is booked.
+
+    Called directly. Since issue #225 the entry anchor needs a two-sided mid on
+    both legs, so a window quoted one-sided from its first tick is never entered
+    and this stage is unreachable through `_simulate_window`.
+    """
+    mark, delta, source = resolve_naked_settlement([
         _settle_snap(0, 0.50, None, 0.480, 0.520, None),
         _settle_snap(1, 0.50, None, 0.505, 0.495, None),
-    ], _settle_params())
-    assert w.pnl_cents == 0.0
-    assert w.settle_source == "unresolved"
-    assert w.settled_unmarked is False, (
+    ], True, 0.470)
+    assert source == "unresolved"
+    assert delta == 0.0
+    assert mark is None, (
         "an abstention is not a settlement and must not be counted as one")
 
 
@@ -1650,17 +1722,21 @@ def test_a_held_up_leg_falls_back_to_its_own_last_bid():
 
 
 def test_a_held_up_leg_falls_back_to_the_last_down_ask():
-    """UP is quoted ask-only all window, so no UP bid was ever latched."""
+    """UP is quoted ask-only all window, so no UP bid was ever latched.
+
+    Called directly. Since issue #225 the entry anchor needs a two-sided mid on
+    both legs, so a window quoted one-sided from its first tick is never entered
+    and this stage is unreachable through `_simulate_window`.
+    """
     snaps = [
-        _settle_snap(0, 0.49, None, 0.460, 0.510, 0.520),   # UP fills @ 0.470
+        _settle_snap(0, 0.49, None, 0.460, 0.510, 0.520),
         _settle_snap(1, 0.30, None, 0.310, 0.690, 0.900),
         _settle_snap(2, 0.01, None, 0.010, 0.990, None),
     ]
-    w = _simulate_window(snaps, _settle_params())
-    assert w.filled_up is True and w.filled_down is False
-    assert w.settle_source == "latched_complement_ask"
-    assert w.settlement_mid == pytest.approx(1.0 - 0.900)
-    assert w.pnl_cents == pytest.approx((0.10 - 0.470) * 100.0)
+    mark, delta, source = resolve_naked_settlement(snaps, True, 0.470)
+    assert source == "latched_complement_ask"
+    assert mark == pytest.approx(1.0 - 0.900)
+    assert delta == pytest.approx((0.10 - 0.470) * 100.0)
 
 
 def test_a_held_down_leg_redeems_when_no_quote_resolves():
@@ -1669,17 +1745,15 @@ def test_a_held_down_leg_redeems_when_no_quote_resolves():
     DOWN is quoted ask-only and UP bid-only, so every stage of the ladder
     fails. The window ends at a DOWN mid of 0.005, so the leg redeems at 0.00
     and books the full stake -- the -47.00c the engine used to record as zero.
+
+    Called directly. Since issue #225 the entry anchor needs a two-sided mid on
+    both legs, so a window quoted one-sided from its first tick is never entered
+    and this stage is unreachable through `_simulate_window`.
     """
-    p = _settle_params()
-    w = _simulate_window([
-        _settle_snap(0, 0.51, 0.505, None, None, 0.460),   # DOWN fills @ 0.470
-        _settle_snap(1, 0.99, 0.990, None, None, 0.010),
-    ], p)
-    assert w.filled_down is True and w.filled_up is False
-    assert w.settle_source == "redeemed"
-    assert w.settled_unmarked is True
-    assert w.pnl_cents == pytest.approx((0.0 - 0.470) * 100.0)
-    assert w.fees_cents == pytest.approx(_taker_fee(0.50, p.taker_fee_rate) * 100.0)
+    mark, delta, source = resolve_naked_settlement(_redeeming_down_window(), False, 0.470)
+    assert source == "redeemed"
+    assert delta == pytest.approx((0.0 - 0.470) * 100.0)
+    assert mark is None
 
 
 def test_a_complement_of_a_full_price_ask_is_clamped_not_zero():
@@ -1760,25 +1834,24 @@ def test_every_declared_settlement_source_is_reachable_and_tested():
     is decoration and a new stage can ship with no test at all.
     """
     p = _settle_params()
+    # The three stages a window can still reach end to end. Since issue #225 the
+    # entry anchor needs a two-sided mid on both legs, so a leg the ladder has
+    # nothing latched for is a leg that was never quoted -- the remaining three
+    # stages are contract-only and are pinned against the resolver itself.
     produced = {
         _simulate_window(snaps, p).settle_source
         for snaps in (
             _held_down_window(final_dn_bid=0.30, final_up_ask=0.71),   # direct_bid
             _held_down_window(final_dn_bid=None, final_up_ask=0.98),   # complement_ask
             _held_down_window(),                                       # latched_bid
-            [                                                          # latched_complement_ask
-                _settle_snap(0, 0.51, 0.505, 0.515, None, 0.460),
-                _settle_snap(1, 0.70, 0.695, 0.900, None, 0.310),
-                _settle_snap(2, 0.99, 0.990, None, None, 0.010),
-            ],
-            [                                                          # redeemed
-                _settle_snap(0, 0.51, 0.505, None, None, 0.460),
-                _settle_snap(1, 0.99, 0.990, None, None, 0.010),
-            ],
-            [                                                          # unresolved
-                _settle_snap(0, 0.51, 0.505, None, None, 0.460),
-                _settle_snap(1, 0.51, 0.495, None, None, 0.505),
-            ],
+        )
+    }
+    produced |= {
+        resolve_naked_settlement(snaps, held_up, 0.470)[2]
+        for snaps, held_up in (
+            (_ask_only_down_window(), False),                          # latched_complement_ask
+            (_redeeming_down_window(), False),                         # redeemed
+            ([], True),                                                # unresolved
         )
     }
     assert produced == set(SETTLE_SOURCES)
