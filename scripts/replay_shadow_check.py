@@ -59,13 +59,13 @@ PAIR_CAPS = (0.98, 1.05)
 SHARES = 5
 
 
-def build_params(fill_model: str = "tape", gates_on: bool = True,
+def build_params(gates_on: bool = True,
                  pair_cap: float = 0.98) -> BacktestParams:
     """Mirror the shadow final.json params into engine knobs (issue #146 §1).
 
-    The prescribed verdict leg is fill_model="tape" with gates on. The other
-    three legs of the 2x2 matrix (book x gates) attribute divergence to the
-    fill model vs the delay/band gates.
+    The prescribed verdict leg has the gates on. The fill model used to be the
+    other axis of a 2x2 matrix; issue #226 left one fill rule, so the legs are
+    now gates x pair cap and divergence can only be attributed to those.
     """
     return BacktestParams(
         offset=0.03,
@@ -80,7 +80,6 @@ def build_params(fill_model: str = "tape", gates_on: bool = True,
         },
         exit_reversal=0.5,
         quote_shares=SHARES,
-        fill_model=fill_model,
         merge_gas_usd=0.0,
         max_start_delay_sec=0.0,
         entry_timeout_pct=1.0,
@@ -107,13 +106,13 @@ def load_shadow_recorded(path: Path | None = None) -> dict:
 
 
 def assert_config_mirror(params: BacktestParams, recorded: dict,
-                         fill_model: str, gates_on: bool,
+                         gates_on: bool,
                          pair_cap: float = 0.98) -> None:
     """Fail fast if any mirrored knob drifts from the recorded shadow config.
 
     Field renames recorded -> engine: max_pair_cost -> pair_cost_gate,
-    shares -> quote_shares. fill_model/queue_gate/merge_gas_usd have no recorded
-    equivalent (paper fills on touch; replay-side documented choices).
+    shares -> quote_shares. queue_gate/merge_gas_usd have no recorded
+    equivalent (replay-side documented choices).
     pair_cap 1.05 is a deliberate research-§5 override, not a transcription.
     """
     pairs = [
@@ -133,7 +132,6 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
     for field, want in pairs:
         got = getattr(params, field)
         assert got == want, f"config mirror broken: {field}={got!r} want {want!r}"
-    assert params.fill_model == fill_model, "fill leg mismatch"
     assert params.queue_gate == 0.0, "queue gate must stay off (paper has none)"
     assert params.merge_gas_usd == 0.0, "merge gas must stay 0 (gasless merges)"
     assert recorded["exit_thresh"] == 0.05 and recorded["exit_thresh_naked"] == 0.05
@@ -292,16 +290,14 @@ def main() -> None:
     snaps = load_scoped_snaps()
     groups, excluded = select_groups(snaps)
     legs: dict[str, dict] = {}
-    for fill_model, gates_on, pair_cap in (
-            ("tape", True, 0.98), ("book", True, 0.98),
-            ("tape", False, 0.98), ("book", False, 0.98),
-            ("tape", True, 1.05), ("book", True, 1.05),
-            ("tape", False, 1.05), ("book", False, 1.05)):
-        params = build_params(fill_model, gates_on, pair_cap)
-        assert_config_mirror(params, recorded, fill_model, gates_on, pair_cap)
+    for gates_on, pair_cap in (
+            (True, 0.98), (False, 0.98),
+            (True, 1.05), (False, 1.05)):
+        params = build_params(gates_on, pair_cap)
+        assert_config_mirror(params, recorded, gates_on, pair_cap)
         totals = summarize(params, groups)
         totals["params_hash"] = params.params_hash()
-        leg = f"{fill_model}_{'gates' if gates_on else 'nogates'}_pc{pair_cap}"
+        leg = f"{'gates' if gates_on else 'nogates'}_pc{pair_cap}"
         legs[leg] = totals
         print(f"[{leg}] "
               f"windows={totals['n_included_windows']} pairs={totals['pairs']} "
@@ -310,7 +306,7 @@ def main() -> None:
     if sum(t["n_events"] for t in legs.values()) == 0:
         raise RuntimeError("all replay legs empty — data flow broken, refusing artifact")
     out_payload = {
-        "verdict_leg": "tape_gates_pc1.05",
+        "verdict_leg": "gates_pc1.05",
         "legs": legs,
         "scope": {
             "ticks_file": TICKS_FILE.name,

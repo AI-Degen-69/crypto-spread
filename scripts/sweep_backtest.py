@@ -168,7 +168,6 @@ def generate_sensitivity_grid(
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=base.exit_reversal,
                 quote_shares=base.quote_shares,
-                fill_model=base.fill_model,
                 merge_gas_usd=base.merge_gas_usd,
                 taker_fee_rate=base.taker_fee_rate,
                 max_start_delay_sec=base.max_start_delay_sec,
@@ -186,7 +185,6 @@ def generate_sensitivity_grid(
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=base.exit_reversal,
                 quote_shares=base.quote_shares,
-                fill_model=base.fill_model,
                 merge_gas_usd=base.merge_gas_usd,
                 taker_fee_rate=base.taker_fee_rate,
                 max_start_delay_sec=base.max_start_delay_sec,
@@ -207,7 +205,6 @@ def generate_sensitivity_grid(
             exit_thresh_by_slug=ex_dict,
             exit_reversal=base.exit_reversal,
             quote_shares=base.quote_shares,
-            fill_model=base.fill_model,
             merge_gas_usd=base.merge_gas_usd,
             taker_fee_rate=base.taker_fee_rate,
             max_start_delay_sec=base.max_start_delay_sec,
@@ -225,7 +222,6 @@ def generate_sensitivity_grid(
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=r,
                 quote_shares=base.quote_shares,
-                fill_model=base.fill_model,
                 merge_gas_usd=base.merge_gas_usd,
                 taker_fee_rate=base.taker_fee_rate,
                 max_start_delay_sec=base.max_start_delay_sec,
@@ -243,7 +239,6 @@ def generate_sensitivity_grid(
                 exit_thresh_by_slug=base.exit_thresh_by_slug,
                 exit_reversal=base.exit_reversal,
                 quote_shares=base.quote_shares,
-                fill_model=base.fill_model,
                 merge_gas_usd=base.merge_gas_usd,
                 taker_fee_rate=base.taker_fee_rate,
                 max_start_delay_sec=base.max_start_delay_sec,
@@ -300,7 +295,6 @@ def generate_joint_grid(
     exit_reversals: Sequence[float] = (0.015, 0.020),
     reentry_bands: Sequence[float] = (0.0, 0.015, 0.030),
     requote_mins: Sequence[float] = (60.0,),
-    fill_model: str = "tape",
     max_start_delay: float = 0.0,
     size: int = 5,
 ) -> list[tuple[str, BacktestParams]]:
@@ -331,7 +325,6 @@ def generate_joint_grid(
             exit_thresh_by_slug=ex_dict,
             exit_reversal=rev,
             quote_shares=size,
-            fill_model=fill_model,
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             max_start_delay_sec=max_start_delay,
@@ -346,7 +339,6 @@ def generate_joint_grid(
 def generate_random_grid(
     count: int = 50,
     seed: int = 42,
-    fill_model: str = "tape",
     max_start_delay: float = 0.0,
     size: int = 5,
 ) -> list[tuple[str, BacktestParams]]:
@@ -394,7 +386,6 @@ def generate_random_grid(
             exit_thresh_by_slug=ex_dict,
             exit_reversal=rev,
             quote_shares=size,
-            fill_model=fill_model,
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             max_start_delay_sec=max_start_delay,
@@ -476,8 +467,6 @@ def main(argv: list[str] | None = None) -> int:
                     help="Sample count for random sweep (default: 50)")
     ap.add_argument("--seed", type=int, default=42,
                     help="Deterministic seed for random sweep (default: 42)")
-    ap.add_argument("--fill-model", choices=["tape", "book", "both", "cross"], default="tape",
-                    help="Fill model: tape (conservative), book (optimistic), cross (strict price-crossing)")
     ap.add_argument("--size", type=int, default=5,
                     help="Position size in shares (minimum 5, default: 5)")
     ap.add_argument("--top", type=int, default=15, help="Number of top configurations to show")
@@ -512,19 +501,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Grouped into {len(grouped)} condition windows. Running '{args.preset}' sweep (size={size} shares)...")
 
     # Build grid based on preset
-    base = BacktestParams(fill_model=args.fill_model, max_start_delay_sec=max_delay, quote_shares=size)
+    base = BacktestParams(max_start_delay_sec=max_delay, quote_shares=size)
 
     if args.preset == "sensitivity":
         grid = generate_sensitivity_grid(base, size=size)
         if args.only is not None:
             grid = filter_sensitivity_grid(grid, args.only)
     elif args.preset == "grid":
-        grid = generate_joint_grid(fill_model=args.fill_model, max_start_delay=max_delay, size=size)
+        grid = generate_joint_grid(max_start_delay=max_delay, size=size)
     elif args.preset == "random":
         grid = generate_random_grid(
             count=args.count,
             seed=args.seed,
-            fill_model=args.fill_model,
             max_start_delay=max_delay,
             size=size,
         )
@@ -571,7 +559,6 @@ def main(argv: list[str] | None = None) -> int:
             "source": str(args.source),
             "preset": args.preset,
             "only": args.only,
-            "fill_model": args.fill_model,
             "size": size,
             "count": args.count if args.preset == "random" else None,
             "seed": args.seed if args.preset == "random" else None,

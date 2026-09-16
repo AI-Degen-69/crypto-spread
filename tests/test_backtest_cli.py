@@ -78,7 +78,7 @@ def test_entry_delay_and_band_default_to_disabled(tmp_path, monkeypatch):
     assert seen["params"].params_hash() == BacktestParams(
         offset=0.020, queue_gate=50.0, pair_cost_gate=1.05,
         exit_thresh_by_slug=seen["params"].exit_thresh_by_slug,
-        exit_reversal=0.02, quote_shares=120, fill_model="tape",
+        exit_reversal=0.02, quote_shares=120,
         merge_gas_usd=0.0, max_start_delay_sec=0.0,
         entry_timeout_pct=0.10).params_hash()
 
@@ -119,7 +119,7 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
     seen = _captured_params(monkeypatch)
     src = _one_window_ticks(tmp_path)
     assert cli.main([
-        str(src), "--fill-model", "tape",
+        str(src),
         "--offset", "0.03", "--queue", "0", "--pair-cost", "0.98",
         "--size", "5", "--entry-delay", "60", "--entry-band", "0.04",
         "--exit-default-5m", "0.49", "--exit-default-15m", "0.50",
@@ -129,7 +129,6 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
     assert (p.offset, p.queue_gate, p.pair_cost_gate) == (0.03, 0.0, 0.98)
     assert (p.entry_delay_sec, p.entry_band) == (60.0, 0.04)
     assert p.quote_shares == 5
-    assert p.fill_model == "tape"
     assert p.exit_thresh_by_slug["default_5m"] == 0.49
     assert p.exit_thresh_by_slug["default_15m"] == 0.50
 

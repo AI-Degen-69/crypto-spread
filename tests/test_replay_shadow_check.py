@@ -36,30 +36,33 @@ RECORDED = {
 
 def test_mirror_accepts_recorded_config():
     """Exact recorded config passes the mirror gate on every leg."""
-    for fill_model, gates_on in (("tape", True), ("book", True),
-                                 ("tape", False), ("book", False)):
-        params = mod.build_params(fill_model, gates_on)
-        mod.assert_config_mirror(params, RECORDED, fill_model, gates_on)
+    for gates_on in (True, False):
+        params = mod.build_params(gates_on)
+        mod.assert_config_mirror(params, RECORDED, gates_on)
 
 
 def test_mirror_rejects_drift():
     """A single drifted knob fails the mirror gate."""
-    params = mod.build_params("tape", True)
+    params = mod.build_params(True)
     drifted = dataclasses.replace(params, offset=0.99)
     with pytest.raises(AssertionError):
-        mod.assert_config_mirror(drifted, RECORDED, "tape", True)
+        mod.assert_config_mirror(drifted, RECORDED, True)
 
 
 def test_mirror_rejects_wrong_leg():
-    """Right params under the wrong leg label fail the mirror gate."""
-    params = mod.build_params("book", True)
+    """Right params under the wrong leg label fail the mirror gate.
+
+    The fill model used to be the label that could be wrong; with one fill
+    rule (#226) the remaining label is the gates.
+    """
+    params = mod.build_params(gates_on=False)
     with pytest.raises(AssertionError):
-        mod.assert_config_mirror(params, RECORDED, "tape", True)
+        mod.assert_config_mirror(params, RECORDED, gates_on=True)
 
 
 def test_exit_covers_universe():
     """Every universe series has an explicit 0.05 exit threshold."""
-    params = mod.build_params("tape", True)
+    params = mod.build_params(True)
     for slug in mod.UNIVERSE:
         assert params.exit_thresh_by_slug.get(slug) == 0.05
 
@@ -117,11 +120,11 @@ def test_select_groups_touch_insane():
 
 def test_pair_cap_override_documented():
     """1.05 leg asserts against the override, not the recorded 0.98."""
-    params = mod.build_params("book", True, 1.05)
+    params = mod.build_params(True, 1.05)
     assert params.pair_cost_gate == 1.05
-    mod.assert_config_mirror(params, RECORDED, "book", True, 1.05)
+    mod.assert_config_mirror(params, RECORDED, True, 1.05)
     with pytest.raises(AssertionError):
-        mod.assert_config_mirror(params, RECORDED, "book", True, 0.98)
+        mod.assert_config_mirror(params, RECORDED, True, 0.98)
 
 
 def test_select_groups_rejects_empty():
