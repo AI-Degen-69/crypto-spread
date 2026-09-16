@@ -3922,6 +3922,25 @@ function togglePairCostInput(){
   }
 }
 
+// Issue #201: one switch owns every stop-loss threshold. Off hides AND disables
+// the fields so a stale value cannot leak back into the /api/backtest request.
+function toggleStopLossInputs(){
+  const enabled = $('btStopLossEnabled') ? $('btStopLossEnabled').checked : true;
+  const wrap = $('btStopLossFields');
+  if(wrap) wrap.hidden = !enabled;
+  for(const id of ['btExit5m','btExit15m','btExitBtc','btExitSol']){
+    const inp = $(id);
+    if(!inp) continue;
+    inp.disabled = !enabled;
+    inp.style.opacity = enabled ? '1' : '0.45';
+  }
+  const lbl = $('btStopLossToggleLabel');
+  if(lbl){
+    lbl.textContent = enabled ? 'ON' : 'OFF';
+    lbl.style.color = enabled ? 'var(--up)' : 'var(--dim)';
+  }
+}
+
 function toggleBtSection(btn, bodyId){
   const body = document.getElementById(bodyId);
   if(!btn || !body) return;
@@ -3986,7 +4005,7 @@ async function runBacktest(fileOverride){
     const entryTimeout = getVal('btEntryTimeout', 0.10);
     const exitNaked = getVal('btExitNaked', 0.0);
     const nakedTimeout = getVal('btNakedTimeout', 0.0);
-    const stopLoss = $('btStopLossEnabled') ? $('btStopLossEnabled').value : '1';
+    const stopLoss = ($('btStopLossEnabled') && !$('btStopLossEnabled').checked) ? '0' : '1';
     const legChase = $('btLegChase') ? $('btLegChase').value : '0';
     // Rendered from the registry, so they must actually reach the engine.
     const maxStartElapsed = getVal('btMaxStartElapsed', 0.10);
@@ -4240,6 +4259,10 @@ function resetBtParams(){
     togglePairCostInput();
   }
   $('btPairCost').value = "1.05";
+  if ($('btStopLossEnabled')) {
+    $('btStopLossEnabled').checked = true;
+    toggleStopLossInputs();
+  }
   $('btExit5m').value = "0.05";
   $('btExit15m').value = "0.05";
   $('btExitBtc').value = "0.05";
