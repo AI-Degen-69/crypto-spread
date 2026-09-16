@@ -595,11 +595,13 @@ def test_live_trader_live_stop_loss_order_routing():
     mstate.resting_up = 0.48
     mstate.resting_down = 0.48
 
-    # Adverse drift: mid drops down to 0.44 (drift = 0.06 >= 0.05 exit_thresh)
+    # Adverse drift: mid drops to 0.43, i.e. 0.05 below the 0.48 entry price,
+    # which meets exit_thresh. Issue #209: the excursion is measured from the
+    # entry, not from 0.50, so the mid that trips the stop moves with the fill.
     poll_stop = {
         "market": {"conditionId": "0xbtc123", "up_token": "tok_btc_up", "down_token": "tok_btc_dn", "start_ts": now - 100, "end_ts": now + 200},
-        "up_book": {"best_bid": 0.43, "best_ask": 0.45},
-        "down_book": {"best_bid": 0.55, "best_ask": 0.57},
+        "up_book": {"best_bid": 0.42, "best_ask": 0.44},
+        "down_book": {"best_bid": 0.56, "best_ask": 0.58},
     }
 
     engine._update_market_strategy(slug, poll_stop, now)
@@ -4213,20 +4215,24 @@ def test_reversal_anchored_to_entry_price():
     m.order_shares = 10
     m.status = "QUOTING"
 
-    # Tick 1: mid drops to 0.39. Book has no best_bid so exit is not filled yet.
-    # Adverse excursion = 0.45 - 0.39 = 0.06 >= 0.05.
+    # Tick 1: mid drops to 0.39 with the stop switched off (issue #137 lets the
+    # operator hold a naked leg through an excursion), so drift accumulates
+    # without an exit firing. Adverse excursion = 0.45 - 0.39 = 0.06 >= 0.05.
+    engine.stop_loss_enabled = False
     poll_data_1 = {
         "market": fake_market,
-        "up_book": {"best_bid": None, "best_ask": 0.40},
+        "up_book": {"best_bid": 0.38, "best_ask": 0.40},
         "down_book": {"best_bid": 0.60, "best_ask": 0.62},
     }
     engine._update_market_strategy(slug, poll_data_1, now)
     assert m.max_down_drift == pytest.approx(0.06, abs=1e-4)
     assert not m.reversal_seen_down
 
-    # Tick 2: mid retraces to 0.44 (within 0.01 of entry 0.45, < exit_reversal 0.02).
-    # Reversal should be detected!
+    # Tick 2: mid retraces to 0.44 (within 0.01 of entry 0.45, < exit_reversal 0.02)
+    # with the stop switched back on. Anchored on the 0.45 entry the reversal arms
+    # and suppresses the exit; anchored on 0.50 the distance is 0.06 and it does not.
     now += 1
+    engine.stop_loss_enabled = True
     poll_data_2 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.43, "best_ask": 0.45},
