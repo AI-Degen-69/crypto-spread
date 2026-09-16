@@ -119,10 +119,14 @@ def test_select_groups_touch_insane():
 
 
 def test_pair_cap_override_documented():
-    """1.05 leg asserts against the override, not the recorded 0.98."""
-    params = mod.build_params(True, 1.05)
-    assert params.pair_cost_gate == 1.05
-    mod.assert_config_mirror(params, RECORDED, True, 1.05)
+    """The loose leg asserts against the override, not the recorded 0.98.
+
+    It was 1.05 until issue #227 hard-capped the knob at 1.00; 1.00 is now the
+    loosest cap the engine accepts and plays the same role in the 2x2.
+    """
+    params = mod.build_params(True, 1.00)
+    assert params.max_pair_cost == 1.00
+    mod.assert_config_mirror(params, RECORDED, True, 1.00)
     with pytest.raises(AssertionError):
         mod.assert_config_mirror(params, RECORDED, True, 0.98)
 

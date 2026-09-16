@@ -76,7 +76,7 @@ def test_entry_delay_and_band_default_to_disabled(tmp_path, monkeypatch):
     assert seen["params"].entry_delay_sec == 0.0
     assert seen["params"].entry_band == 0.0
     assert seen["params"].params_hash() == BacktestParams(
-        offset=0.020, queue_gate=50.0, pair_cost_gate=1.05,
+        offset=0.020, queue_gate=50.0, max_pair_cost=0.99,
         exit_thresh_by_slug=seen["params"].exit_thresh_by_slug,
         exit_reversal=0.02, quote_shares=120,
         merge_gas_usd=0.0, max_start_delay_sec=0.0,
@@ -126,7 +126,7 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
         "--max-start-delay", "0",
     ]) == 0
     p = seen["params"]
-    assert (p.offset, p.queue_gate, p.pair_cost_gate) == (0.03, 0.0, 0.98)
+    assert (p.offset, p.queue_gate, p.max_pair_cost) == (0.03, 0.0, 0.98)
     assert (p.entry_delay_sec, p.entry_band) == (60.0, 0.04)
     assert p.quote_shares == 5
     assert p.exit_thresh_by_slug["default_5m"] == 0.49

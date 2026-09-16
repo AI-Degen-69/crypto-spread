@@ -51,10 +51,11 @@ STRICT_START_DELAY_SEC = 2.0
 # a snap outside is quarantined from the comparison (dislocated/stale book).
 TOUCH_LO, TOUCH_HI = 0.50, 1.50
 
-# Pair-cost gate values: 0.98 = paper preset transcription (live-touch
-# semantics make it a near-total quote block — kept for reference);
-# 1.05 = engine default + research §5 value (dislocation filter).
-PAIR_CAPS = (0.98, 1.05)
+# Chase-ceiling values (issue #227: the cap bounds the leg chase only, and
+# 1.00 is its hard maximum because a binary pair settles at 1.00): 0.98 = the
+# paper preset transcription; 1.00 = the loosest cap the engine will accept.
+# The leg that was pc1.05 is pc1.00 -- the same "cap as loose as it goes" role.
+PAIR_CAPS = (0.98, 1.00)
 
 SHARES = 5
 
@@ -70,7 +71,7 @@ def build_params(gates_on: bool = True,
     return BacktestParams(
         offset=0.03,
         queue_gate=0.0,
-        pair_cost_gate=pair_cap,
+        max_pair_cost=pair_cap,
         exit_thresh_by_slug={
             "default_5m": 0.05,
             "default_15m": 0.05,
@@ -110,14 +111,14 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
                          pair_cap: float = 0.98) -> None:
     """Fail fast if any mirrored knob drifts from the recorded shadow config.
 
-    Field renames recorded -> engine: max_pair_cost -> pair_cost_gate,
-    shares -> quote_shares. queue_gate/merge_gas_usd have no recorded
-    equivalent (replay-side documented choices).
-    pair_cap 1.05 is a deliberate research-§5 override, not a transcription.
+    Field renames recorded -> engine: shares -> quote_shares. `max_pair_cost`
+    is now one word in both (issue #227). queue_gate/merge_gas_usd have no
+    recorded equivalent (replay-side documented choices).
+    pair_cap 1.00 is a deliberate loosest-cap override, not a transcription.
     """
     pairs = [
         ("offset", recorded["offset"]),
-        ("pair_cost_gate", pair_cap),
+        ("max_pair_cost", pair_cap),
         ("exit_reversal", recorded["exit_reversal"]),
         ("quote_shares", recorded["shares"]),
         ("entry_timeout_pct", recorded["entry_timeout_pct"]),
@@ -306,7 +307,7 @@ def main() -> None:
     if sum(t["n_events"] for t in legs.values()) == 0:
         raise RuntimeError("all replay legs empty — data flow broken, refusing artifact")
     out_payload = {
-        "verdict_leg": "gates_pc1.05",
+        "verdict_leg": "gates_pc1.0",
         "legs": legs,
         "scope": {
             "ticks_file": TICKS_FILE.name,
