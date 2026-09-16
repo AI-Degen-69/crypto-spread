@@ -314,18 +314,36 @@ def test_simulate_queue_gate_zero_disables():
     w = _simulate_window(snaps, BacktestParams(queue_gate=0.0))
     assert w.filled_up is True
 
-def test_simulate_pair_cost_gate_blocks_wide_touch():
-    tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
-    snaps = [snap(1.0, 0.50, up_ask=0.60, down_ask=0.60, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(pair_cost_gate=0.99))
+def test_simulate_pair_cost_gate_blocks_expensive_pair():
+    # Issue #204: Gate measures resting pair cost (here 0.495 + 0.495 = 0.99 > 0.98),
+    # so resting orders exceeding the gate are blocked from filling.
+    tape = [{"asset": UP_TOKEN, "price": 0.495, "size": 5.0}]
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
     assert w.filled_up is False
 
 def test_simulate_pair_cost_gate_zero_disables():
-    # With pair_cost_gate=0, gate is bypassed even if touch is very wide (1.20)
+    # With pair_cost_gate=0, gate is bypassed even if resting quotes are expensive
+    tape = [{"asset": UP_TOKEN, "price": 0.495, "size": 5.0}]
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.0))
+    assert w.filled_up is True
+
+def test_resting_pair_cost_gate_allows_fills_when_touch_is_wide():
+    # Issue #204: Maker rests at 0.48 / 0.48 (pair cost 0.96 <= 0.98).
+    # Wide touch asks (0.60 + 0.60 = 1.20) must NOT block resting quotes from filling.
     tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
     snaps = [snap(1.0, 0.50, up_ask=0.60, down_ask=0.60, tape=tape)]
-    w = _simulate_window(snaps, BacktestParams(pair_cost_gate=0.0))
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, pair_cost_gate=0.98))
     assert w.filled_up is True
+
+def test_resting_pair_cost_gate_blocks_when_quotes_exceed_cap():
+    # Issue #204: If resting quotes exceed pair_cost_gate (e.g. offset=0.005 -> pair=0.99 > 0.98),
+    # resting quotes should be gated out.
+    tape = [{"asset": UP_TOKEN, "price": 0.495, "size": 5.0}]
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(offset=0.005, pair_cost_gate=0.98))
+    assert w.filled_up is False
 
 
 # --- simulation: exit -----------------------------------------------------
