@@ -20,9 +20,15 @@ backtest running half of the live engine's fill mechanism.
 ## Decision
 
 There is one fill rule in both engines and it is not configurable. A resting buy fills when a
-trade prints at our price **or** the best ask passes fully through it. The fill price depends on
-which side of the trade we were on: our price when we were hit as maker, the ask price when we
-crossed as taker.
+trade prints at our price **or** the best ask passes fully through it. Both are detectors of the
+same event. The fill price is always our resting price and an entry never pays a fee: the entry
+quote is a limit order that waits, so whoever filled it was the aggressor, and the aggressor
+pays. Exits, which sell into the bid, are takers and keep paying the fee.
+
+An earlier draft of this ADR had the second detector book the ask price and charge a taker fee,
+reading "ask below our bid" as "we crossed into it". Corrected by the operator on 2026-09-16: an
+ask resting below our bid is not a state a book can hold, so seeing it in a one-second snapshot
+is evidence that our order was taken, not that we took anything.
 
 ## Alternatives Considered
 
@@ -48,7 +54,8 @@ crossed as taker.
 ### Positive
 - The backtest can no longer be configured into a model the live engine never runs.
 - Issue #205's 16x gap is explained and closed rather than investigated further.
-- Fees fall out correctly: maker fills pay none, taker fills pay the venue's taker fee.
+- Fees fall out correctly and simply: entries are limit orders and pay none; exits cross the
+  book and pay the venue's taker fee, as they already did.
 
 ### Negative
 - Removal touches 24 files. Research sweeps that pass `fill_model` break.
