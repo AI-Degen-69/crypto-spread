@@ -752,7 +752,8 @@ def test_quote_range_rejects_out_of_range():
 def test_entry_delay_band_grouped_as_trading_knobs():
     gp = BacktestParams().grouped_params()
     assert "entry_delay_sec" in gp["trading_knobs"]
-    assert "entry_band" in gp["trading_knobs"]
+    # Issue #228: the band row stood here. Removed with the registry entry;
+    # the field stays inert until T5.
     assert gp["trading_knobs"]["quote_range"] == (0.10, 0.90)
 
 

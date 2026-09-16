@@ -17,7 +17,14 @@ SPEC = BacktestParams.param_spec()
 
 def test_every_engine_field_is_registered_exactly_once():
     """A field absent from the registry is invisible to both UIs."""
-    declared = {f.name for f in fields(BacktestParams)}
+    # Issue #228: entry_band and reentry_* are inert on BacktestParams pending
+    # T5 removal of their last senders (scripts, sims); they are deliberately
+    # absent from the UI registry.
+    _INERT_PENDING_T5 = {
+        "entry_band", "reentry_drift_band", "min_requote_remaining_sec",
+        "reentry_min_remaining_pct", "max_reentries_per_window"
+    }
+    declared = {f.name for f in fields(BacktestParams)} - _INERT_PENDING_T5
     registered = [name for group in SPEC.values() for name in group]
     assert len(registered) == len(set(registered)), (
         "a field is registered in more than one group: "
@@ -156,10 +163,7 @@ def test_the_registry_does_not_claim_post_init_enforces_every_bound():
 @pytest.mark.parametrize("name,low,high", [
     ("entry_timeout_pct", 0.0, 1.0),
     ("max_start_elapsed_pct", 0.0, 1.0),
-    ("reentry_drift_band", 0.0, 0.5),
-    ("reentry_min_remaining_pct", 0.0, 1.0),
     ("entry_delay_sec", 0.0, 3600.0),
-    ("entry_band", 0.0, 0.50),
     ("max_pair_cost", 0.50, 1.00),
 ])
 def test_registered_bounds_match_post_init_validation(name, low, high):
@@ -172,11 +176,23 @@ def test_registered_bounds_match_post_init_validation(name, low, high):
         BacktestParams(**{name: high + 0.01})
 
 
+def test_quote_range_registered_bounds_match_post_init_validation():
+    """quote_range bounds [0.0, 1.0] match __post_init__ validation."""
+    spec = next(g["quote_range"] for g in SPEC.values() if "quote_range" in g)
+    assert spec["bounds"] == (0.0, 1.0)
+    with pytest.raises(ValueError):
+        BacktestParams(quote_range=(-0.01, 0.90))
+    with pytest.raises(ValueError):
+        BacktestParams(quote_range=(0.10, 1.01))
+    with pytest.raises(ValueError):
+        BacktestParams(quote_range=(0.90, 0.10))
+
+
 def test_knobs_the_live_engine_exposes_are_marked_for_the_cockpit():
-    """The Cockpit had no input for the two knobs that define the preset."""
-    for name in ("entry_delay_sec", "entry_band", "reentry_drift_band",
-                 "min_requote_remaining_sec", "max_pair_cost", "offset",
-                 "quote_shares", "entry_timeout_pct", "exit_reversal"):
+    """The Cockpit exposes every trading knob settable on the live engine."""
+    for name in ("entry_delay_sec", "max_pair_cost", "offset",
+                 "quote_shares", "entry_timeout_pct", "exit_reversal",
+                 "quote_range"):
         spec = next(g[name] for g in SPEC.values() if name in g)
         assert "cockpit" in spec["surfaces"], (
             f"{name} is settable on the live engine but not marked for the Cockpit")

@@ -237,8 +237,6 @@ class BacktestParams:
              "s", (0.0, 3600.0), ("backtest",)),
             ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
              "s", (0.0, 3600.0), ("backtest", "cockpit")),
-            ("entry_band", "Entry Band ($ from 0.50)", "You admit only undecided markets at entry time",
-             "$", (0.0, 0.50), ("backtest", "cockpit")),
             # Issue #228: structural limit (ADR-0003) replacing the band and
             # the adverse-open gate. Bounds are the price domain itself; the
             # dashboard renders two inputs (lo/hi), not one knob.
@@ -272,14 +270,9 @@ class BacktestParams:
              "%", (0.0, 1.0), ("backtest", "cockpit")),
             ("max_start_elapsed_pct", "Max Start Elapsed (% of window)", "Late-start guard — policy, mirrors live",
              "%", (0.0, 1.0), ("backtest",)),
-            ("reentry_drift_band", "Drift Re-Entry Band ($)", "Re-entry discipline — policy knob",
-             "$", (0.0, 0.5), ("backtest", "cockpit")),
-            ("min_requote_remaining_sec", "Min Window Left for Re-Entry (s)", "Re-entry time gate — policy",
-             "s", (0.0, 3600.0), ("backtest", "cockpit")),
-            ("reentry_min_remaining_pct", "Re-Entry Min Remaining (% of window)", "Fractional re-entry gate — policy",
-             "%", (0.0, 1.0), ("backtest", "cockpit")),
-            ("max_reentries_per_window", "Max Re-Entries per Window", "Recovery cap — policy",
-             "count", (0, 100), ("backtest", "cockpit")),
+            # Issue #228: the re-entry rows stood here. Removed with the
+            # mechanism; the fields stay inert until T5 removes them with
+            # their last senders (scripts, sims).
         ],
     }
 
