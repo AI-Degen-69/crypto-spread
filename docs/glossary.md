@@ -49,6 +49,16 @@ The market data tab shows the collector's books and queue depth. It decides noth
 
 *(The `cockpit` element-id prefix is left alone: it is internal, and unambiguous.)*
 
+## "Live" is retired
+
+No label in the dashboard says "Live" any more. The stream-health pill reads
+`● STREAM · <1s` / `● OK · 1s` / `● OFFLINE · POLLING`, and the execution-mode pill reads
+`REAL MONEY` / `PAPER TRADING`.
+
+The only place the string survives is `LiveTraderEngine`, `mode="live"` and the `/api/live/*`
+routes — code identifiers and an API contract, not names we speak. When referring to them out
+loud, use **the trading engine** and **real money**.
+
 ## Data
 
 | Name | What it is |

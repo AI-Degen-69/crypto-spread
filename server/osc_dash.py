@@ -1814,7 +1814,7 @@ _VERIFY_REPORT_CACHE: dict[str, dict[str, Any]] = {}
 _VERIFY_SCAN_INFLIGHT: set[str] = set()
 _VERIFY_SCAN_SEM = asyncio.Semaphore(1)
 _VERIFY_RESCAN_COOLDOWN_SEC = 120.0
-# Live scan progress: filename -> {"lines": int, "est_total": int, "started_at": float}
+# Scan progress: filename -> {"lines": int, "est_total": int, "started_at": float}
 _VERIFY_SCAN_PROGRESS: dict[str, dict[str, Any]] = {}
 
 
@@ -5945,7 +5945,7 @@ function renderCockpitUI(st) {
     const isLive = !!sb.binance_ws_connected;
     const isOk = !isLive && (!!sb.rtds_connected || !!liveStreamConnected);
     if (isLive) {
-      el.textContent = '● LIVE · <1s';
+      el.textContent = '● STREAM · <1s';
       el.style.background = 'rgba(51,201,181,0.15)';
       el.style.color = 'var(--up)';
       el.style.borderColor = 'rgba(51,201,181,0.35)';
@@ -6149,7 +6149,7 @@ function renderCockpitUI(st) {
     wireMarketCardHighlight(gridEl);
   }
 
-  // 4. Tab 1: Render Live Open Orders & Pre-Quotes Table (9 columns, grouped by pair)
+  // 4. Tab 1: Render Open Orders & Pre-Quotes Table (9 columns, grouped by pair)
   const ordersBodyEl = $('cockpitOrdersBody');
   const ordersCountEl = $('otOrdersCount');
   const legacyOrdersCountEl = $('cockpitOrdersCount');
@@ -6244,7 +6244,7 @@ function renderCockpitUI(st) {
     }
   }
 
-  // 4b. Tab 2: Render Live Polymarket Open Positions Table (8 columns, grouped by pair)
+  // 4b. Tab 2: Render Polymarket Open Positions Table (8 columns, grouped by pair)
   const posBodyEl = $('cockpitPositionsBody');
   const posCountEl = $('otPositionsCount');
   const legacyPosCountEl = $('cockpitPositionsCount');
@@ -6856,7 +6856,7 @@ function initLiveCockpitStream() {
         const sb = (cockpitState && cockpitState.stream_bridge) || {};
         const isLive = !!sb.binance_ws_connected;
         if (isLive) {
-          el.textContent = '● LIVE · <1s';
+          el.textContent = '● STREAM · <1s';
           el.style.background = 'rgba(51,201,181,0.15)'; el.style.color = 'var(--up)'; el.style.borderColor = 'rgba(51,201,181,0.35)';
         } else {
           el.textContent = '● OK · 1s';
