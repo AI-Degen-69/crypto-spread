@@ -4368,6 +4368,7 @@ class LiveTraderEngine:
             _pair = book_math.pair_cost(_up_ask, _down_ask)
             if _pair is not None:
                 mstate.spread = _pair
+        mid: Optional[float] = mstate.mid
         # Keep legacy last_valid* in sync even when WS kept authority (already set in on_book_update)
 
         # If not active or window is expired, stay idle
@@ -4756,16 +4757,16 @@ class LiveTraderEngine:
                 f"Entry delayed ({elapsed_sec:.0f}s/{self.entry_delay_sec:.0f}s into window)"
                 " — quoting after delay"
             )
-        elif band_hold:
-            mstate.last_action = (
-                "Entry band check waiting for two-sided book — quoting held"
-            )
         elif no_book_hold and not mstate.entry_cancelled_timeout and not is_late_start and not mstate.late_start_skip:
             mstate.last_action = (
                 "Waiting for two-sided book (unpriceable leg) — quoting held"
             )
             if mstate.status in ("IDLE", "PRE_QUOTING"):
                 mstate.status = "NO_BOOK"
+        elif band_hold:
+            mstate.last_action = (
+                "Entry band check waiting for two-sided book — quoting held"
+            )
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
@@ -5058,7 +5059,8 @@ class LiveTraderEngine:
                     self._save_persisted_trades()
                 # Issue #89: recycle into a fresh quoting round when the window
                 # has enough life left; otherwise stay terminal until rollover.
-                self._maybe_requote_after_merge(mstate, slug, mid, now)
+                if mid is not None:
+                    self._maybe_requote_after_merge(mstate, slug, mid, now)
                 return
 
         # --- RECONCILE STAGED STOP-LOSS (issue #87) ---
@@ -5216,6 +5218,8 @@ class LiveTraderEngine:
 
         Returns True when a new round opened.
         """
+        if mid is None:
+            return False
         gate = self.min_requote_remaining_sec
         if gate is None or gate <= 0:
             return False

@@ -3938,7 +3938,7 @@ def test_shadow_snapshot_exports_book_bids():
 def test_unpriceable_book_yields_none_mid_and_no_drift():
     """Issue #207: unpriceable book sets mstate.mid to None and does NOT accumulate drift."""
     engine = LiveTraderEngine(load_persisted=False)
-    engine.start()
+    engine.is_running = True
     slug = "btc-up-or-down-5m"
     now = time.time()
     fake_market = LiveMarket(
@@ -3969,9 +3969,9 @@ def test_unpriceable_book_yields_none_mid_and_no_drift():
 def test_unpriceable_book_prevents_quoting():
     """Issue #207: engine refuses to quote when a leg is unpriceable even with entry delay expired."""
     engine = LiveTraderEngine(load_persisted=False)
+    engine.is_running = True
     engine.entry_delay_sec = 0.0
     engine.entry_band = 0.0
-    engine.start()
     slug = "eth-up-or-down-5m"
     now = time.time()
     fake_market = LiveMarket(
@@ -3994,14 +3994,14 @@ def test_unpriceable_book_prevents_quoting():
     assert m.mid is None
     assert m.order_status_up != "RESTING"
     assert m.order_status_down != "RESTING"
-    assert m.status in ("IDLE", "PRE_QUOTING", "NO_BOOK")
+    assert m.status == "NO_BOOK"
 
 
 def test_unpriceable_book_timeout_sets_no_book_skipped():
     """Issue #207: window timing out without a valid two-sided book is marked NO_BOOK_SKIPPED."""
     engine = LiveTraderEngine(load_persisted=False)
+    engine.is_running = True
     engine.entry_timeout_pct = 0.10  # 30s for 300s window
-    engine.start()
     slug = "sol-up-or-down-5m"
     start_ts = time.time()
     fake_market = LiveMarket(

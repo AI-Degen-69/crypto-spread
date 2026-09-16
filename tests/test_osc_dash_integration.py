@@ -2935,3 +2935,14 @@ def test_dash_resting_price_helper_respects_custom_offset_and_mid():
     )
     assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
     assert "DASH_RESTING_PRICE_HELPER_TESTS_PASSED" in res.stdout
+
+
+def test_dash_no_book_status_labels_and_cockpit_styling():
+    """Issue #207: Dashboard includes NO_BOOK and NO_BOOK_SKIPPED badges and styling."""
+    html = client.get("/").text
+    assert "'NO_BOOK': 'No Book'" in html
+    assert "'NO_BOOK_SKIPPED': 'No Book Skipped'" in html
+    assert "NOT QUOTED (UNPRICEABLE BOOK)" in html
+    assert "WAITING FOR BOOK" in html
+    assert "Skipped — unpriceable book" in html
+
