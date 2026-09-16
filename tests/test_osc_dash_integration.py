@@ -2831,3 +2831,99 @@ def test_cockpit_stop_loss_switch_is_locked_while_the_bot_runs():
     fn_start = html.index("function updateCockpitParamsLockUI(locked)")
     ids = html[fn_start:html.index("];", fn_start)]
     assert "'cockpitStopLossEnabled'" in ids
+
+
+def test_dash_script_contains_no_phantom_up_down_mid_keys():
+    """Issue #216: Neither up_mid nor down_mid exists in any engine payload.
+
+    The dashboard client script must not reference these phantom names in its
+    fallback ternary expressions.
+    """
+    html = client.get("/").text
+    assert "m.up_mid" not in html, "m.up_mid is a phantom key never emitted by live_trader"
+    assert "m.down_mid" not in html, "m.down_mid is a phantom key never emitted by live_trader"
+
+
+def test_dash_resting_price_helper_respects_custom_offset_and_mid():
+    """Issue #216: When resting prices are null, the helper must derive quotes from
+
+    the live offset and real mid, and must not hardcode 0.48 or offset 0.02.
+    """
+    import shutil
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    script = html[start + len("<script>"):end]
+
+    dom_prelude = """
+    const makeElem = () => ({
+      style: {},
+      textContent: '',
+      innerHTML: '',
+      appendChild: () => {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      addEventListener: () => {},
+      querySelectorAll: () => [],
+      value: ''
+    });
+    const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
+    globalThis.window = window;
+    const document = { getElementById: makeElem, querySelectorAll: () => [] };
+    globalThis.document = document;
+    const localStorage = {
+      _data: {},
+      getItem(k) { return this._data[k] || null; },
+      setItem(k, v) { this._data[k] = String(v); }
+    };
+    globalThis.localStorage = localStorage;
+    """
+
+    test_js = """
+    if (typeof cockpitRestingPrice !== 'function') {
+      throw new Error('cockpitRestingPrice function is not defined');
+    }
+    if (typeof cockpitLegPrice !== 'function') {
+      throw new Error('cockpitLegPrice function is not defined');
+    }
+
+    // 1. When resting quotes are absent and mid is absent, offset=0.03 must yield 0.47, NEVER 0.48
+    const emptyMarket = {};
+    const upDef = cockpitRestingPrice(emptyMarket, 'up', 0.03);
+    const downDef = cockpitRestingPrice(emptyMarket, 'down', 0.03);
+    if (upDef !== 0.47) throw new Error(`expected upDef 0.47 with offset 0.03, got ${upDef}`);
+    if (downDef !== 0.47) throw new Error(`expected downDef 0.47 with offset 0.03, got ${downDef}`);
+
+    // 2. When mid is present (0.60), anchored quote with offset 0.03
+    const anchoredMarket = { mid: 0.60 };
+    const upMid = cockpitRestingPrice(anchoredMarket, 'up', 0.03);
+    const downMid = cockpitRestingPrice(anchoredMarket, 'down', 0.03);
+    if (Math.abs(upMid - 0.57) > 1e-4) throw new Error(`expected upMid 0.57, got ${upMid}`);
+    if (Math.abs(downMid - 0.37) > 1e-4) throw new Error(`expected downMid 0.37, got ${downMid}`);
+
+    // 3. When resting quotes are populated, use them directly
+    const restingMarket = { resting_up: 0.52, resting_down: 0.44 };
+    if (cockpitRestingPrice(restingMarket, 'up', 0.03) !== 0.52) throw new Error('expected resting_up 0.52');
+    if (cockpitRestingPrice(restingMarket, 'down', 0.03) !== 0.44) throw new Error('expected resting_down 0.44');
+
+    // 4. cockpitLegPrice prefers fill price over resting price
+    const filledMarket = { fill_price_up: 0.55, resting_up: 0.52 };
+    if (cockpitLegPrice(filledMarket, 'up', 0.03) !== 0.55) throw new Error('expected fill_price_up 0.55');
+
+    console.log('DASH_RESTING_PRICE_HELPER_TESTS_PASSED');
+    """
+
+    res = subprocess.run(
+        [node_bin],
+        input=dom_prelude + "\n" + script + "\n" + test_js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "DASH_RESTING_PRICE_HELPER_TESTS_PASSED" in res.stdout
