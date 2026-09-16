@@ -1602,6 +1602,9 @@ def test_api_live_config_patient_band_preset_deleted():
     engine.is_running = False
     orig_mode = engine.mode
     engine.mode = "paper"
+    orig_delay = engine.entry_delay_sec
+    orig_range = engine.quote_range
+    orig_stop_loss = engine.stop_loss_enabled
     try:
         res = client.post("/api/live/config", json={"preset": "patient_band_maker"})
         assert res.status_code == 400
@@ -1626,6 +1629,9 @@ def test_api_live_config_patient_band_preset_deleted():
         assert client.post(
             "/api/live/config", json={"entry_delay_sec": 99999}).status_code == 422
     finally:
+        engine.entry_delay_sec = orig_delay
+        engine.quote_range = orig_range
+        engine.stop_loss_enabled = orig_stop_loss
         engine.mode = orig_mode
         engine.is_running = orig_running
 

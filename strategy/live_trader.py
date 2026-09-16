@@ -2754,6 +2754,36 @@ class LiveTraderEngine:
                 if self.is_running and new_slugs != set(self.markets.keys()):
                     raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
 
+            # Issue #228: validate and stage quote_range before any mutation (atomic all-or-nothing).
+            validated_quote_range = None
+            if quote_range is not None:
+                if isinstance(quote_range, (str, bytes)):
+                    raise ValueError(
+                        f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                    )
+                try:
+                    _qr_raw = list(quote_range)
+                except TypeError:
+                    raise ValueError(
+                        f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                    )
+                if len(_qr_raw) != 2:
+                    raise ValueError(
+                        f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                    )
+                for v in _qr_raw:
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+                        raise ValueError(
+                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                        )
+                _lo = max(0.0, min(1.0, float(_qr_raw[0])))
+                _hi = max(0.0, min(1.0, float(_qr_raw[1])))
+                if not (_lo < _hi):
+                    raise ValueError(
+                        f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                    )
+                validated_quote_range = (_lo, _hi)
+
             # Guard against modifying scalar strategy parameters while the trading bot is running
             if self.is_running:
                 # Each parameter is checked independently. An elif chain would let an
@@ -2793,12 +2823,10 @@ class LiveTraderEngine:
                     param_changed = True
                 if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
                     param_changed = True
-                if quote_range is not None:
-                    _qr_list = list(quote_range) if not isinstance(quote_range, (str, bytes)) else []
+                if validated_quote_range is not None:
                     if (
-                        len(_qr_list) != 2
-                        or abs(float(_qr_list[0]) - self.quote_range[0]) > 1e-9
-                        or abs(float(_qr_list[1]) - self.quote_range[1]) > 1e-9
+                        abs(validated_quote_range[0] - self.quote_range[0]) > 1e-9
+                        or abs(validated_quote_range[1] - self.quote_range[1]) > 1e-9
                     ):
                         param_changed = True
                 if stop_loss_enabled is not None and bool(stop_loss_enabled) != self.stop_loss_enabled:
@@ -2929,33 +2957,8 @@ class LiveTraderEngine:
                     # Issue #137: seconds into the window before quoting may
                     # start. Negative clamps to 0 (off).
                     self.entry_delay_sec = max(0.0, float(entry_delay_sec))
-                if quote_range is not None:
-                    # Issue #228: structural limit — each end clamps to the
-                    # price domain like the other knobs above, and an inverted
-                    # or degenerate pair is refused outright (there is no
-                    # clamp order that preserves "lo < hi" without inventing
-                    # a range the operator never asked for).
-                    if isinstance(quote_range, (str, bytes)):
-                        raise ValueError(
-                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
-                        )
-                    try:
-                        _qr = [float(v) for v in quote_range]
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
-                        )
-                    if len(_qr) != 2:
-                        raise ValueError(
-                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
-                        )
-                    _lo = max(0.0, min(1.0, _qr[0]))
-                    _hi = max(0.0, min(1.0, _qr[1]))
-                    if not (_lo < _hi):
-                        raise ValueError(
-                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
-                        )
-                    self.quote_range = (_lo, _hi)
+                if validated_quote_range is not None:
+                    self.quote_range = validated_quote_range
                 if stop_loss_enabled is not None:
                     self.stop_loss_enabled = bool(stop_loss_enabled)
                 # Issue #137: latch only a preset the resulting configuration

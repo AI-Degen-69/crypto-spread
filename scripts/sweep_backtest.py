@@ -161,34 +161,14 @@ def generate_sensitivity_grid(
     offsets = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040]
     for off in offsets:
         if off != base.offset:
-            p = BacktestParams(
-                offset=off,
-                queue_gate=base.queue_gate,
-                max_pair_cost=base.max_pair_cost,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, offset=off)
             grid.append((f"offset={off:.3f}", p))
 
     # 3. Queue gate variations
     queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
     for q in queues:
         if q != base.queue_gate:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=q,
-                max_pair_cost=base.max_pair_cost,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, queue_gate=q)
             grid.append((f"queue={q:.0f}", p))
 
     # 4. Exit threshold variations
@@ -198,34 +178,14 @@ def generate_sensitivity_grid(
         ex_dict["default_5m"] = e
         ex_dict["btc-up-or-down-5m"] = max(0.05, e - 0.03)
         ex_dict["sol-up-or-down-5m"] = max(0.06, e - 0.01)
-        p = BacktestParams(
-            offset=base.offset,
-            queue_gate=base.queue_gate,
-            max_pair_cost=base.max_pair_cost,
-            exit_thresh_by_slug=ex_dict,
-            exit_reversal=base.exit_reversal,
-            quote_shares=base.quote_shares,
-            merge_gas_usd=base.merge_gas_usd,
-            taker_fee_rate=base.taker_fee_rate,
-            max_start_delay_sec=base.max_start_delay_sec,
-        )
+        p = replace(base, exit_thresh_by_slug=ex_dict)
         grid.append((f"exit_5m={e:.2f}", p))
 
     # 5. Exit reversal variations (issue #110: 0.005 steps over 0.010-0.030)
     reversals = [0.010, 0.015, 0.020, 0.025, 0.030]
     for r in reversals:
         if r != base.exit_reversal:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=base.queue_gate,
-                max_pair_cost=base.max_pair_cost,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=r,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, exit_reversal=r)
             grid.append((f"exit_rev={r:.3f}", p))
 
     # 6. Pair cost gate variations
@@ -235,17 +195,7 @@ def generate_sensitivity_grid(
     pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
     for pc in pair_costs:
         if pc != base.max_pair_cost:
-            p = BacktestParams(
-                offset=base.offset,
-                queue_gate=base.queue_gate,
-                max_pair_cost=pc,
-                exit_thresh_by_slug=base.exit_thresh_by_slug,
-                exit_reversal=base.exit_reversal,
-                quote_shares=base.quote_shares,
-                merge_gas_usd=base.merge_gas_usd,
-                taker_fee_rate=base.taker_fee_rate,
-                max_start_delay_sec=base.max_start_delay_sec,
-            )
+            p = replace(base, max_pair_cost=pc)
             grid.append((f"pair_cost={pc:.2f}", p))
 
     # 7. Quote range (issue #228). Varies the quotable mid bounds.

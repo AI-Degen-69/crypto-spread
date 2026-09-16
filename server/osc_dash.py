@@ -4948,12 +4948,19 @@ function updateCockpitParamsLockUI(locked) {
   const paramIds = [
     'cockpitOffset',
     'cockpitExit',
+    'cockpitExitNaked',
+    'cockpitNakedTimeout',
     // Issue #201: applyCockpitConfig() returns early while the bot runs, so a
     // switch left interactive here would hide the stop group and never reach
     // /api/live/config — a lie about what the engine is doing.
     'cockpitStopLossEnabled',
     'cockpitExitReversal',
     'cockpitShares',
+    'cockpitEntryDelay',
+    'cockpitQuoteLo',
+    'cockpitQuoteHi',
+    'cockpitPairCost',
+    'cockpitLegChase',
     'cockpitMode',
     'cockpitEntryTimeout',
     'cockpitWallet',

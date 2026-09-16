@@ -444,7 +444,7 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
 
         # Issue #228: per-tick quote_range replaces adverse_open and re-entry
         om = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
-        if not orders_live and om is not None and not (p.quote_range[0] <= om <= p.quote_range[1]):
+        if not orders_live and (om is None or not (p.quote_range[0] <= om <= p.quote_range[1])):
             continue
 
         if p.queue_gate is not None and p.queue_gate > 0:

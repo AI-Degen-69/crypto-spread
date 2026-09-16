@@ -22,6 +22,7 @@ Rows returned are compatible with ev_lab.summarize().
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -60,6 +61,15 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     loss, and the engine refuses one — the simulator must too.
     """
     reject_knobs_sim2_ignores(p)
+    if (
+        not isinstance(quote_range, tuple)
+        or len(quote_range) != 2
+        or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in quote_range)
+        or not (0.0 <= quote_range[0] < quote_range[1] <= 1.0)
+    ):
+        raise ValueError(
+            f"quote_range must be a tuple of (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range}"
+        )
     if chase_cap is not None and (
         isinstance(chase_cap, bool)
         or not isinstance(chase_cap, (int, float))
@@ -145,7 +155,7 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
 
         # Issue #228: per-tick quote_range replaces entry_band and adverse_open
         om = _two_sided(w.up_bb[i], w.up_ba[i], w.dn_bb[i], w.dn_ba[i])
-        if not orders_live and om is not None and not (quote_range[0] <= om <= quote_range[1]):
+        if not orders_live and (om is None or not (quote_range[0] <= om <= quote_range[1])):
             continue
 
         if p.queue_gate is not None and p.queue_gate > 0:

@@ -1877,9 +1877,19 @@ def test_update_config_quote_range_roundtrip_and_refusals():
     engine.update_config(quote_range=(-0.50, 1.50))
     assert engine.quote_range == (0.0, 1.0)
 
-    for bad in [(0.80, 0.20), (0.50, 0.50), (0.10,)]:
+    for bad in [
+        (0.80, 0.20), (0.50, 0.50), (0.10,), (True, 0.90), (0.10, False),
+        (float("nan"), 0.90), (0.10, float("inf")), 123, "not-a-range",
+    ]:
         with pytest.raises(ValueError):
             engine.update_config(quote_range=bad)
+
+    # Atomicity: invalid quote_range aborts before any fields are modified
+    orig_offset = engine.offset
+    with pytest.raises(ValueError):
+        engine.update_config(offset=0.045, quote_range=(0.80, 0.20))
+    assert engine.offset == orig_offset
+
     # None is "unspecified" like every other knob — the range is untouched.
     engine.update_config(quote_range=None)
     assert engine.quote_range == (0.0, 1.0)
