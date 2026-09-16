@@ -41,7 +41,13 @@ def _snap(offset_sec: float, up_bid, up_ask, dn_bid, dn_ask,
     }
 
 
-def _live_engine(offset: float) -> LiveTraderEngine:
+def _live_engine(offset: float, **overrides) -> LiveTraderEngine:
+    """A paper engine with every gate off, so one decision is under test.
+
+    `overrides` sets any further attribute afterwards — issue #227's chase-cap
+    parity needs the chase on and a cap pinned, which is the only thing that
+    differs between its scenarios and the ones here.
+    """
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
@@ -50,12 +56,14 @@ def _live_engine(offset: float) -> LiveTraderEngine:
     engine.entry_timeout_pct = None
     engine.max_start_elapsed_pct = 0.0
     engine.entry_band = 0.0
+    for name, value in overrides.items():
+        setattr(engine, name, value)
     return engine
 
 
-def _drive_live(snaps: list[dict], offset: float):
+def _drive_live(snaps: list[dict], offset: float, **overrides):
     """Replay `snaps` through the live engine and return its market state."""
-    engine = _live_engine(offset)
+    engine = _live_engine(offset, **overrides)
     market = LiveMarket(
         condition_id=CID, market_slug=SLUG,
         up_token=UP_TOKEN, down_token=DN_TOKEN,
