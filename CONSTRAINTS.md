@@ -1,4 +1,4 @@
-# CONSTRAINTS.md — Issue #209: Stop loss is measured from 0.50, not from the entry price
+# CONSTRAINTS.md — Issue #209: stop loss must be measured from the entry price, not from 0.50
 
 Binding while working on Issue #209. These are gates, not suggestions: a violation blocks the PR.
 
