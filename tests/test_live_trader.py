@@ -2860,6 +2860,19 @@ def test_requote_dynamic_anchor_math():
     assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
 
 
+def _quiet_start(engine):
+    """Start an engine without its two outbound calls.
+
+    `start()` runs `ensure_telemetry_streaming()` (which opens the WS bridge) and
+    `_schedule_wallet_balance_fetch()`, which with no running loop calls
+    `fetch_polymarket_account_value` inline. Both are swallowed by broad excepts,
+    so they never fail a test -- they just make it slow and non-hermetic.
+    """
+    engine.stream_bridge.start = lambda *a, **k: None
+    engine._schedule_wallet_balance_fetch = lambda *a, **k: None
+    engine.start()
+
+
 def test_initial_entry_anchors_to_live_mid():
     """Round-0 resting prices anchor to the live mid, not a hardcoded 0.50.
 
@@ -2869,7 +2882,7 @@ def test_initial_entry_anchors_to_live_mid():
     covered by `test_requote_dynamic_anchor_math`; round 0 never was.
     """
     engine = _fifteen_minute_engine()
-    engine.start()
+    _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
     market = _fifteen_minute_market(now)
@@ -2915,7 +2928,7 @@ def test_initial_entry_anchor_invariants():
     """Pair sum is 1 - 2*offset across the range, and mid 0.50 is unchanged."""
     engine = _fifteen_minute_engine()
     engine.entry_delay_sec = 900.0  # entry held open for the whole window
-    engine.start()
+    _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
     market = _fifteen_minute_market(now)
@@ -2941,7 +2954,7 @@ def test_initial_entry_anchor_clamps_at_the_edges():
     engine = _fifteen_minute_engine()
     engine.offset = 0.05
     engine.entry_delay_sec = 900.0
-    engine.start()
+    _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
     market = _fifteen_minute_market(now)
@@ -2966,7 +2979,7 @@ def test_initial_entry_price_is_taken_at_placement_not_at_open():
     # would otherwise trip the #96 skip before the anchor is reached.
     engine = _fifteen_minute_engine(max_start_elapsed_pct=0)
     engine.entry_delay_sec = 60.0
-    engine.start()
+    _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
     # start_offset 1.0: only ~1s elapsed, so the delay is still running.

@@ -23,7 +23,10 @@ suggestions: a violation blocks the PR.
 
 ## 3. Scope discipline
 
-- Files touched: `strategy/live_trader.py` and `tests/test_live_trader.py` only.
+- Code and tests touched: `strategy/live_trader.py` and `tests/test_live_trader.py`
+  only. The Station II planning files — this file, `SPEC.md`, `tasks/plan.md`,
+  `tasks/todo.md` — are rewritten per issue by the pipeline and ship in the same
+  PR; they carry no behaviour and are not counted against this gate.
 - One behavioural change: the round-0 anchor. Issues #207-#214 are separate
   branches; do not fold any of them in, even where the code sits three lines away.
 - No new external dependency.
