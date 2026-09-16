@@ -64,10 +64,6 @@ _EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 RUN_DIR = Path(__file__).resolve().parent.parent / "run"
 TRADES_FILE = RUN_DIR / "live_trades.jsonl"
 META_FILE = RUN_DIR / "live_trades_meta.json"
-# One line per drift-skip re-entry (issue #95 observability): what was quoted,
-# whether each leg reached the book and filled, and how the window ended. Written
-# at window rollover, which is the first moment the outcome is known.
-REENTRY_FILE = RUN_DIR / "reentry_events.jsonl"
 
 
 def _empty_reentry_stats() -> Dict[str, int]:
@@ -321,19 +317,6 @@ def _append_fill_telemetry(record: Dict[str, Any], path: Any = None) -> bool:
     except Exception as e:
         log.warning("fill-telemetry write failed: %s", e)
         return False
-
-
-def _reentry_outcome(m: "MarketLiveState") -> str:
-    """Name the end state of a re-entered window, for the observability record."""
-    if m.pair_captured:
-        return "paired"
-    if m.exit_taken:
-        return "exited"
-    if m.filled_up != m.filled_down:
-        return "single_leg"
-    if m.filled_up and m.filled_down:
-        return "both_no_merge"
-    return "no_fill"
 
 
 _ENV_LOADED = False
@@ -733,17 +716,16 @@ class MarketLiveState:
     order_status_down: str = "NONE"
     entry_cancelled_timeout: bool = False
 
-    # Adverse-open drift gate snapshot (issue #92). Captured once per window
-    # from the first tick with a two-sided book on both legs, never re-evaluated
-    # against the live mid, and cleared on window rollover.
+    # Issue #228: the adverse-open snapshot stood here. The gate is deleted;
+    # the declarations stay until T5 (dashboard payload shape) and are never
+    # written.
     open_mid: Optional[float] = None
     open_drift: float = 0.0
     adverse_open: bool = False
     open_gate_evaluated: bool = False
 
-    # Entry-band gate (issue #137). Evaluated once per window after
-    # `entry_delay_sec` expires, against the then-current mid — never
-    # re-evaluated, never applied to re-entry, and cleared on rollover.
+    # Issue #228: the entry-band gate stood here. Deleted with the mechanism;
+    # declarations stay until T5 (dashboard payload shape) and are never written.
     band_gate_evaluated: bool = False
     band_skip: bool = False
 
@@ -776,17 +758,12 @@ class MarketLiveState:
     # than on every tick for its whole length.
     clock_skip_start_ts: Optional[float] = None
 
-    # Drift-skip re-entry (issue #95). A window skipped by the adverse-open gate may
-    # be re-entered later in the same window once the live mid has reverted to within
-    # `reentry_drift_band` of 0.50. `reentry_count` caps that per window; `reentry_mid`
-    # and `reentry_drift` record the book the re-entry was taken on, leaving the
-    # original `open_mid` / `open_drift` snapshot intact for telemetry.
+    # Issue #228: the drift-skip re-entry state stood here. Deleted with the
+    # mechanism; declarations stay until T5 (dashboard payload shape) and are
+    # never written.
     reentry_count: int = 0
     reentry_mid: Optional[float] = None
     reentry_drift: Optional[float] = None
-    # Observability record for the re-entry currently in flight. Seeded when
-    # re-entry is granted, completed once both legs reach the book, stamped with
-    # the window outcome and flushed to `REENTRY_FILE` at rollover.
     reentry_telemetry: Optional[Dict[str, Any]] = None
 
     # Advance Pre-Quoting (Upcoming Window T+1)
@@ -946,12 +923,9 @@ class LiveTraderEngine:
         # bounds the worst case where the mid hovers just inside the stop so the
         # naked leg rides all the way to the wall.
         self.naked_leg_timeout_pct: float = 0.70
-        # Issue #124: re-entry must not open a position that can only fill one
-        # leg. When True, drift-skip re-entry additionally requires both books to
-        # quote two sides at re-entry time (book_two_sided already gates it) AND
-        # requires at least naked_timeout-equivalent time remaining, so a fresh
-        # entry can pair before the naked timeout would fire. When False, re-entry
-        # behaves as before (issue #95 semantics).
+        # Issue #124: `reentry_require_pairable` only ever gated drift-skip
+        # re-entry. Issue #228: inert with the mechanism (see above); the
+        # field stays until T5 removes its last senders (cockpit input, tests).
         self.reentry_require_pairable: bool = True
         # Issue #123: actively chase second leg after a one-sided fill by stepping
         # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
@@ -961,14 +935,22 @@ class LiveTraderEngine:
         # to [0.50, 1.00]. `PATIENT_BAND_MAKER` pins 0.98 explicitly; this is
         # what an unconfigured engine starts at.
         self.max_pair_cost: float = 0.99
-        # Issue #137: patient undecided-band maker knobs. `entry_delay_sec`
-        # holds all quoting until that many seconds into the window (0 = off);
-        # `entry_band` only admits windows whose mid is still near 0.50 at
-        # entry time (0 = off); `stop_loss_enabled=False` holds a filled naked
-        # leg to settlement/rollover instead of staging a stop. Defaults
-        # preserve the current behavior exactly.
+        # Issue #137: patient entry delay. `entry_delay_sec` holds all quoting
+        # until that many seconds into the window (0 = off);
+        # `stop_loss_enabled=False` holds a filled naked leg to
+        # settlement/rollover instead of staging a stop. Defaults preserve
+        # the current behavior exactly.
         self.entry_delay_sec: float = 0.0
+        # Issue #228: `entry_band` is inert — the post-delay band gate is
+        # deleted and nothing below reads this. The field stays until T5
+        # removes its last senders (cockpit input, preset table, tests).
         self.entry_band: float = 0.0
+        # Issue #228: the one quotable range, replacing `entry_band` and the
+        # adverse-open gate (`docs/engine-decision-rules.md` §6). A structural
+        # limit, not a tuning knob (ADR-0003): inside it the window is quoted,
+        # outside it placement holds for that tick only — evaluated every tick
+        # on the two-sided mid, never latched. Inclusive on both ends.
+        self.quote_range: Tuple[float, float] = (0.10, 0.90)
         self.stop_loss_enabled: bool = True
         # Name of the active named preset, or None for a manual/custom
         # configuration. Set by update_config(preset=...), cleared as soon as
@@ -990,23 +972,18 @@ class LiveTraderEngine:
         )
         # Re-quote time gate (issue #89): a fresh round after a pair merge only
         # opens when at least this much window time remains. 0 disables it.
-        # Issue #95 shares this knob for drift-skip re-entry: both answer the same
-        # question -- "is there enough window left to open a fresh two-leg position
-        # and have it pair?" -- and the answer does not depend on why the market is
-        # currently flat. At the 300s default a 5m window can never re-enter; lower
-        # it to re-enter 5m markets.
+        # (Issue #228: the drift-skip re-entry that shared this knob is deleted;
+        # what remains is the post-merge re-quoting gate.)
         self.min_requote_remaining_sec: float = (
             max(0.0, float(min_requote_remaining_sec)) if min_requote_remaining_sec is not None
             else DEFAULT_MIN_REQUOTE_REMAINING_SEC
         )
         # Drift-skip re-entry (issue #95). A window the adverse-open gate skipped is
         # re-entered once the live mid comes back within `reentry_drift_band` of 0.50
-        # and `min_requote_remaining_sec` of the window is left. The band is
-        # deliberately far tighter than `exit_thresh`: issue #89's mid-anchored
-        # quoting only applies to post-merge re-quote rounds, so the *entry* (and
-        # therefore the re-entry) still rests at a static `0.50 - offset`. A wide band
-        # would re-quote 0.48/0.48 into a market trading well away from 0.50 and fill
-        # only the adverse leg. Defaults are mirrored in `BacktestParams`.
+        # and `min_requote_remaining_sec` of the window is left.
+        # Issue #228: the mechanism is deleted and nothing below reads these
+        # fields. They stay until T5 removes their last senders (cockpit
+        # inputs, backtest mirror, tests).
         self.reentry_drift_band: float = 0.015
         self.max_reentries_per_window: int = 1
         # Session tally of drift-skip re-entries and how they ended (issue #95
@@ -1021,13 +998,8 @@ class LiveTraderEngine:
         # and appends off the hot path in a daemon thread; False runs inline
         # (deterministic, for tests and debugging).
         self.fill_telemetry_async: bool = True
-        # Re-entry time gate, as a fraction of the window (issue #95). The shared
-        # `min_requote_remaining_sec` is an absolute 300s, which is a whole 5m
-        # window -- an absolute floor cannot mean the same thing on a 5m and a 15m
-        # market, and at 300s it made re-entry impossible on exactly the 5m markets
-        # the issue's evidence table shows reverting. The effective gate is the
-        # tighter of the two, so this can only ever add restriction to #89's knob
-        # and never loosens the post-merge re-quoting that knob also governs.
+        # Re-entry time gate, as a fraction of the window (issue #95).
+        # Issue #228: inert with the mechanism (see above); stays until T5.
         self.reentry_min_remaining_pct: float = 0.30
         
         # State tracking
@@ -2087,7 +2059,7 @@ class LiveTraderEngine:
         if not book_math.resting_bid_filled(
                 target, None, (p,), FILL_PRICE_TICK_TOL):
             return
-        # Enforce entry gates (simplified): respect entry_cancelled / band_hold etc.
+        # Enforce entry gates (simplified): respect entry_cancelled / late-start.
         # If the window is gated, don't fabricate a fill.
         if m.entry_cancelled_timeout or m.late_start_skip:
             return
@@ -2719,6 +2691,7 @@ class LiveTraderEngine:
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
                 "entry_band": self.entry_band,
+                "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
                 "stop_loss_enabled": self.stop_loss_enabled,
             },
             "active_preset": self.active_preset,
@@ -2770,6 +2743,7 @@ class LiveTraderEngine:
                       max_pair_cost: Optional[float] = None,
                       entry_delay_sec: Optional[float] = None,
                       entry_band: Optional[float] = None,
+                      quote_range: Optional[Sequence[float]] = None,
                       stop_loss_enabled: Optional[bool] = None,
                       preset: Optional[str] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
@@ -2864,6 +2838,11 @@ class LiveTraderEngine:
                 if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
                     param_changed = True
                 if entry_band is not None and abs(float(entry_band) - self.entry_band) > 1e-6:
+                    param_changed = True
+                if quote_range is not None and (
+                        len(list(quote_range)) != 2
+                        or abs(float(list(quote_range)[0]) - self.quote_range[0]) > 1e-9
+                        or abs(float(list(quote_range)[1]) - self.quote_range[1]) > 1e-9):
                     param_changed = True
                 if stop_loss_enabled is not None and bool(stop_loss_enabled) != self.stop_loss_enabled:
                     param_changed = True
@@ -3009,6 +2988,29 @@ class LiveTraderEngine:
                     # Clamped to the same 0..0.50 range as `exit_thresh`; 0
                     # disables the filter.
                     self.entry_band = max(0.0, min(0.50, float(entry_band)))
+                if quote_range is not None:
+                    # Issue #228: structural limit — each end clamps to the
+                    # price domain like the other knobs above, and an inverted
+                    # or degenerate pair is refused outright (there is no
+                    # clamp order that preserves "lo < hi" without inventing
+                    # a range the operator never asked for).
+                    try:
+                        _qr = [float(v) for v in quote_range]
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                        )
+                    if len(_qr) != 2:
+                        raise ValueError(
+                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                        )
+                    _lo = max(0.0, min(1.0, _qr[0]))
+                    _hi = max(0.0, min(1.0, _qr[1]))
+                    if not (_lo < _hi):
+                        raise ValueError(
+                            f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {quote_range!r}"
+                        )
+                    self.quote_range = (_lo, _hi)
                 if stop_loss_enabled is not None:
                     self.stop_loss_enabled = bool(stop_loss_enabled)
                 # Issue #137: latch only a preset the resulting configuration
@@ -3021,11 +3023,6 @@ class LiveTraderEngine:
                     )
                 elif self.active_preset is not None and not self._preset_matches(self.active_preset):
                     self.active_preset = None
-                # Re-entry is a narrower test than the adverse-open gate, never a
-                # looser one: a band at or above `exit_thresh` would let a window
-                # re-enter at the very drift the gate exists to reject. Applied
-                # unconditionally so lowering `exit_thresh` tightens the band with it.
-                self.reentry_drift_band = min(self.reentry_drift_band, self.exit_thresh)
 
                 # Update per-market resting prices
                 for m in self.markets.values():
@@ -3129,13 +3126,6 @@ class LiveTraderEngine:
                 if m.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR", "STOP_EXIT_PENDING"):
                     m.status = "IDLE"
                     m.last_action = "Stopped"
-        # Deliberately NOT flushing `reentry_telemetry` here. `start()` resumes the
-        # same in-flight window without resetting per-window state, and the re-entry
-        # gate cannot reseed a record mid-window (`adverse_open` is already cleared),
-        # so flushing on stop would write a premature "no_fill" and then swallow the
-        # real outcome at rollover. The record survives a stop/start and is flushed
-        # by `_handle_window_rollover()` when the window actually ends. A record is
-        # only lost if the process dies mid-window, which no in-process hook can fix.
         log.info("LiveTraderEngine stopped (streams_active=%s)", self.stream_bridge.is_running)
 
     def restart(self) -> None:
@@ -3622,11 +3612,6 @@ class LiveTraderEngine:
                 META_FILE.unlink()
             except Exception as e:
                 log.warning("Could not delete %s: %s", META_FILE, e)
-        if REENTRY_FILE.exists() and not os.getenv("PYTEST_CURRENT_TEST"):
-            try:
-                REENTRY_FILE.unlink()
-            except Exception as e:
-                log.warning("Could not delete %s: %s", REENTRY_FILE, e)
         with self._engine_lock:
             if self.mode == "live" and self.is_running and self._has_outstanding_orders():
                 return {
@@ -3663,10 +3648,9 @@ class LiveTraderEngine:
                 m.max_down_drift = 0.0
                 m.reversal_seen_up = False
                 m.reversal_seen_down = False
-                m.open_mid = None
-                m.open_drift = 0.0
-                m.adverse_open = False
-                m.open_gate_evaluated = False
+                # Issue #228: the adverse-open snapshot, the band gate and the
+                # re-entry state stood here. Deleted with the mechanism; the
+                # field declarations stay until T5 (dashboard payload shape).
                 # Issue #138: fill-telemetry rest context resets with the
                 # other per-window gate state (mirrors the rollover block).
                 m.rest_up_price = None
@@ -3686,17 +3670,9 @@ class LiveTraderEngine:
                 m.ws_tape_down.clear()
                 m.ws_last_print_ts_up = None
                 m.ws_last_print_ts_down = None
-                # Issue #137: the entry-band gate resets with the other
-                # per-window gates so the next window re-evaluates it.
-                m.band_gate_evaluated = False
-                m.band_skip = False
                 m.first_seen_start_ts = None
                 m.first_tick_elapsed_sec = None
                 m.late_start_skip = False
-                m.reentry_count = 0
-                m.reentry_mid = None
-                m.reentry_drift = None
-                m.reentry_telemetry = None
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
             self.reentry_stats = _empty_reentry_stats()
@@ -4114,155 +4090,6 @@ class LiveTraderEngine:
         naked_elapsed = max(0.0, now - mstate.naked_since_ts)
         return naked_elapsed >= self.naked_leg_timeout_pct * win_duration
 
-    def _reentry_min_remaining_sec(self, win_duration: float) -> float:
-        """Seconds of window that must remain for a drift-skipped window to re-enter.
-
-        The tighter of issue #89's shared `min_requote_remaining_sec` and
-        `reentry_min_remaining_pct` of this window's own duration: 90s on a 5m
-        window, 270s on a 15m one, at stock settings.
-
-        Issue #124: when `reentry_require_pairable` is on, a re-entry must also
-        leave enough time for a fresh two-leg entry to pair before the naked
-        timeout would fire -- a full quoting round needs roughly the naked
-        timeout worth of window (entry may sit unfilled for that long and still
-        end paired), so the gate is the tighter of the existing gates and the
-        timeout horizon. This prevents re-entry from opening a position that can
-        only ever fill one leg.
-        """
-        gate = self.min_requote_remaining_sec
-        if win_duration > 0 and 0.0 < self.reentry_min_remaining_pct <= 1.0:
-            gate = min(gate, self.reentry_min_remaining_pct * win_duration)
-        if self.reentry_require_pairable and win_duration > 0:
-            if self.naked_leg_timeout_pct and 0.0 < self.naked_leg_timeout_pct <= 1.0:
-                # Horizon before the timeout fires, not the timeout itself: a
-                # re-entry needs (1 - timeout_pct) of the window left so a fresh
-                # entry can pair before the naked timeout would kill one leg.
-                # Rounded to dodge float dust (300 * 0.30000000000000004).
-                gate = max(gate, round((1.0 - self.naked_leg_timeout_pct) * win_duration, 6))
-        return gate
-
-    def _maybe_reenter_drift_skipped(
-        self,
-        mstate: MarketLiveState,
-        slug: str,
-        mid: Optional[float],
-        remaining_sec: float,
-        win_duration: float,
-        book_two_sided: bool,
-        is_late_start: bool,
-        now: float,
-        resting_up: float,
-        resting_down: float,
-    ) -> bool:
-        """Re-enter a window the adverse-open gate skipped, once the mid reverts.
-
-        Issue #95. The gate (issue #92) is a one-shot decision taken from the
-        opening book, and until now it was terminal: one adverse snapshot latched
-        the market out for the whole window even when the skew closed minutes later.
-        This re-opens entry for the remainder of the window when the live mid has
-        come back within `reentry_drift_band` of 0.50 and at least
-        `_reentry_min_remaining_sec()` is left to fill and pair both legs.
-
-        The condition is `mstate.adverse_open`, never `entry_cancelled_timeout`
-        alone: that latch is shared with the entry timeout (`is_late_start`) and
-        with the issue #96 late-start skip, and neither of those windows may be
-        resurrected here. `open_mid` / `open_drift` / `open_gate_evaluated` are left
-        untouched -- the operator keeps seeing what the window actually opened at,
-        and re-entry is itself a stricter test of the live mid than re-running the
-        gate would be (the band is well inside `exit_thresh`).
-
-        Returns True when the window was re-entered on this tick.
-        """
-        if mid is None:
-            # Invariant 0 (#224). The whole test below is `abs(mid - 0.50)`, so an
-            # invented mid does not weaken the gate, it inverts it.
-            return False
-        if not mstate.adverse_open or not mstate.entry_cancelled_timeout:
-            return False
-        if mstate.late_start_skip or is_late_start:
-            return False
-        if mstate.filled_up or mstate.filled_down or mstate.pair_captured or mstate.exit_taken:
-            return False
-        if self.quoting_halted or not book_two_sided:
-            return False
-        if mstate.reentry_count >= self.max_reentries_per_window:
-            return False
-        min_remaining_sec = self._reentry_min_remaining_sec(win_duration)
-        if remaining_sec < min_remaining_sec:
-            return False
-        drift = abs(mid - 0.50)
-        # Re-entry may never be looser than the gate it undoes. A band at or above
-        # `exit_thresh` would re-quote into exactly the skew the gate rejected, so
-        # the effective band is capped here as well as clamped in `update_config()`
-        # -- the attribute is also writable directly.
-        band = min(self.reentry_drift_band, self.exit_thresh)
-        # `reentry_drift_band == 0` is documented as "disabled". Without this guard
-        # a two-sided mid of exactly 0.50 has drift 0 and would pass the
-        # `drift > band` test below, placing orders despite the disabled setting.
-        if band <= 0:
-            return False
-        # `>= exit_thresh` is what the gate rejects, so re-entry must stay strictly
-        # inside it -- otherwise a band configured at exactly `exit_thresh` would
-        # re-enter at the very drift that skipped the window.
-        if drift > band or drift >= self.exit_thresh:
-            return False
-
-        open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
-        with self._engine_lock:
-            mstate.entry_cancelled_timeout = False
-            mstate.adverse_open = False
-            mstate.reentry_count += 1
-            mstate.reentry_mid = mid
-            mstate.reentry_drift = drift
-            # Stale handles from the cancelled entry would suppress placement below;
-            # the `cancelled_orders` rows stay as history.
-            mstate.order_id_up = None
-            mstate.order_id_down = None
-            mstate.order_status_up = "NONE"
-            mstate.order_status_down = "NONE"
-            mstate.order_time_up = "-"
-            mstate.order_time_down = "-"
-            mstate.status = "QUOTING"
-            mstate.reentry_telemetry = {
-                "reentry_index": mstate.reentry_count,
-                "slug": mstate.slug,
-                "series_label": mstate.label,
-                "window_start_ts": mstate.start_ts,
-                "window_duration_sec": round(win_duration, 1),
-                "open_mid": mstate.open_mid,
-                "open_drift": round(mstate.open_drift, 4),
-                "reentry_mid": round(mid, 4),
-                "reentry_drift": round(drift, 4),
-                "effective_band": round(band, 4),
-                "remaining_sec": round(remaining_sec, 1),
-                "min_remaining_sec": round(min_remaining_sec, 1),
-                "quoted": {"up": resting_up, "down": resting_down},
-                "decided_at": datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                "perf_start": time.perf_counter(),
-                "mid_at_resting": None,
-                "latency_ms": None,
-                "resting_drift": None,
-                "filled_up": None,
-                "filled_down": None,
-                "pair_captured": None,
-                "exit_taken": None,
-                "outcome": None,
-            }
-            mstate.last_action = (
-                f"Re-entered after drift reverted (open {open_mid_txt}, drift "
-                f"{mstate.open_drift:.3f} -> mid {mid:.4f}, drift {drift:.3f} <= "
-                f"{self.reentry_drift_band:.3f}, {remaining_sec:.0f}s left) "
-                f"— re-entry {mstate.reentry_count}/{self.max_reentries_per_window}"
-            )
-        log.info(
-            "[%s] Re-entering drift-skipped window (open_mid=%s, open_drift=%.3f, "
-            "mid=%.4f, drift=%.3f <= %.3f, remaining=%.0fs, re-entry %d/%d)",
-            slug, open_mid_txt, mstate.open_drift, mid, drift,
-            self.reentry_drift_band, remaining_sec,
-            mstate.reentry_count, self.max_reentries_per_window,
-        )
-        return True
-
     def _update_market_strategy(self, slug: str, poll_data: Dict[str, Any], now: float):
         """Update trading state machine, advance pre-quoting, fills, stop-loss exits, and pair merges."""
         mstate = self.markets[slug]
@@ -4286,16 +4113,17 @@ class LiveTraderEngine:
                 mstate.next_quoted = False
 
         # 2. Advance Pre-Quoting on Next Window (T+1) (live CLOB or paper simulation)
-        # Issue #137: suspended while the entry controls are armed — a
-        # pre-quoted T+1 window would otherwise roll over with order IDs set,
-        # bypassing both the entry delay and the band evaluation.
-        entry_controls_armed = self.entry_delay_sec > 0 or self.entry_band > 0
+        # Issue #137: suspended while the entry delay is armed — a pre-quoted
+        # T+1 window would otherwise roll over with order IDs set, bypassing
+        # the entry delay. (Issue #228: the band arm of this guard is deleted
+        # with the band gate.)
+        entry_controls_armed = self.entry_delay_sec > 0
         if (self.is_running and not self.quoting_halted and not entry_controls_armed
                 and mstate.next_condition_id and not mstate.next_quoted):
             # 0.50 here is deliberate, unlike the round-0 anchor fixed in #206:
             # the T+1 window has not opened, so there is no book to anchor to.
             # Priced at the coin-flip these markets open at, and only ever
-            # reached with both entry controls off (the guard above).
+            # reached with the entry delay off (the guard above).
             resting_up = round(0.50 - self.offset, 3)
             resting_down = round(0.50 - self.offset, 3)
             if self.mode == "live":
@@ -4594,10 +4422,9 @@ class LiveTraderEngine:
         # --- ENTRY DELAY (issue #137) ---
         # While the window is younger than `entry_delay_sec`, no quotes are
         # placed at all. Transient by design: no skip flag is latched, so the
-        # adverse-open, band, and timeout gates below still evaluate normally
-        # after expiry. Stateless (a pure function of `elapsed_sec`), so there
-        # is nothing to reset on rollover. Windows with a fill already are
-        # unaffected.
+        # timeout gate below still evaluates normally after expiry. Stateless
+        # (a pure function of `elapsed_sec`), so there is nothing to reset on
+        # rollover. Windows with a fill already are unaffected.
         entry_delay_pending = (
             self.entry_delay_sec > 0
             and elapsed_sec < self.entry_delay_sec
@@ -4640,80 +4467,29 @@ class LiveTraderEngine:
             f"— waiting for next window"
         )
 
-        # Pre-entry drift check (issue #92): if the mid was already drifted >= exit_thresh
-        # vs 0.50 *when the window opened*, the market is already strongly monotonic /
-        # skewed. Never enter or quote into an immediate stop. The gate is evaluated once
-        # per window from the opening snapshot -- re-running it against the live mid on
-        # every 1s tick cancelled healthy resting bids seconds into a window.
-        # A one-sided book collapses `mid` onto whichever side exists, which reports a
-        # synthetic drift that is a book artifact rather than a real skew, so the snapshot
-        # is only taken once both legs quote two sides.
-        book_two_sided = (
-            mstate.up_bid is not None and mstate.up_ask is not None
-            and mstate.down_bid is not None and mstate.down_ask is not None
-        )
-        if not mstate.open_gate_evaluated and book_two_sided and not mstate.late_start_skip:
-            if mstate.mid is not None:
-                mstate.open_mid = mstate.mid
-                mstate.open_drift = abs(mstate.mid - 0.50)
-                mstate.adverse_open = (mstate.open_drift >= self.exit_thresh)
-                mstate.open_gate_evaluated = True
-        initial_drift = mstate.open_drift
-        is_adverse_open = mstate.adverse_open
-
-        # --- POST-DELAY ENTRY BAND (issue #137) ---
-        # Admit only undecided markets: once the entry delay has expired, the
-        # first tick with a two-sided book checks |mid - 0.50| against
-        # `entry_band` (0 = off). A failure latches the window skipped through
-        # the same `entry_cancelled_timeout` family the other pre-entry gates
-        # use, plus a distinct `band_skip` flag and session counter. The
-        # adverse gate owns windows it already claimed, and re-entry (#95)
-        # keeps its own `reentry_drift_band` — neither path reaches this check.
-        delay_expired = self.entry_delay_sec <= 0 or elapsed_sec >= self.entry_delay_sec
-        if (self.entry_band > 0 and not mstate.band_gate_evaluated
-                and not mstate.entry_cancelled_timeout and not is_adverse_open
-                and not mstate.filled_up and not mstate.filled_down
-                and not mstate.order_id_up and not mstate.order_id_down
-                and book_two_sided and not mstate.late_start_skip
-                and delay_expired):
-            mstate.band_gate_evaluated = True
-            band_drift = abs(mstate.mid - 0.50) if mstate.mid is not None else 0.0
-            if band_drift > self.entry_band:
-                with self._engine_lock:
-                    mstate.entry_cancelled_timeout = True
-                    mstate.band_skip = True
-                    self.band_skip_stats["band_skips"] += 1
-                mstate.status = "BAND_SKIPPED"
-                mstate.last_action = (
-                    f"Entry band skip (mid {mid:.4f}, drift {band_drift:.3f} > {self.entry_band:.2f})"
-                    " — entry skipped"
-                )
-                log.info("[%s] Entry skipped by entry band (mid=%.4f, drift=%.3f > %.2f)",
-                         slug, mid, band_drift, self.entry_band)
-
-        # While the band filter is armed but has not seen a two-sided book
-        # yet, hold placement too: "entry waits for the first two-sided tick"
-        # covers the quotes as well as the decision. Once evaluated (pass or
-        # fail) this clears by itself; re-entry bypasses the band entirely
-        # (marked evaluated when granted below).
-        band_hold = (
-            self.entry_band > 0
-            and not mstate.band_gate_evaluated
-            and not mstate.entry_cancelled_timeout
-            and not is_adverse_open
-            and not mstate.late_start_skip
-            and not mstate.filled_up
-            and not mstate.filled_down
+        # --- QUOTABLE RANGE (issue #228) ---
+        # One range, judged every tick on the anchor's own two-sided mid
+        # (`mstate.mid`, already None when the book is one-sided) and latching
+        # nothing. A mid outside [quote_lo, quote_hi] holds placement for that
+        # tick only: no order IDs yet and nothing filled means nothing is on
+        # the venue, so there is nothing to stand on. A resting quote stands
+        # because it is on the venue, and a filled leg's chase and exits are
+        # not entry. A market that leaves the range and returns is quoted
+        # again in the same window.
+        quote_lo, quote_hi = self.quote_range
+        range_hold = (
+            mstate.mid is not None
+            and (mstate.mid < quote_lo or mstate.mid > quote_hi)
             and not mstate.order_id_up
             and not mstate.order_id_down
-            and delay_expired
+            and not mstate.filled_up
+            and not mstate.filled_down
         )
 
         # --- LATE-START SKIP (issue #96) ---
-        # The engine attached to this window after `max_start_elapsed_pct` elapsed,
-        # so there is nothing to cancel: no entry was ever placed for it. Mark the
-        # window skipped and wait for the next rollover, which takes a genuine
-        # opening snapshot.
+        # The engine attached to this window after `max_start_elapsed_pct`
+        # elapsed, so there is nothing to cancel: no entry was ever placed for
+        # it. Mark the window skipped and wait for the next rollover.
         if (mstate.late_start_skip and not mstate.entry_cancelled_timeout
                 and not mstate.filled_up and not mstate.filled_down
                 and not mstate.order_id_up and not mstate.order_id_down):
@@ -4724,8 +4500,8 @@ class LiveTraderEngine:
             log.info("[%s] Window skipped: engine started %.1fs in (cutoff=%s)",
                      slug, first_tick_elapsed, late_cutoff_txt)
 
-        # --- PRE-ENTRY DRIFT & ENTRY TIMEOUT CANCELLATION ---
-        if (is_late_start or is_adverse_open or mstate.late_start_skip) and not mstate.entry_cancelled_timeout:
+        # --- ENTRY TIMEOUT CANCELLATION ---
+        if (is_late_start or mstate.late_start_skip) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
                 if self.mode == "live":
@@ -4815,16 +4591,7 @@ class LiveTraderEngine:
                         mstate.last_action = late_start_action
                         log.info("[%s] Window skipped: engine started %.1fs in (cutoff=%s)",
                                  slug, first_tick_elapsed, late_cutoff_txt)
-                    elif is_adverse_open:
-                        mstate.status = "DRIFT_SKIPPED"
-                        open_mid_txt = f"{mstate.open_mid:.4f}" if mstate.open_mid is not None else "n/a"
-                        mstate.last_action = f"Adverse drift at open (mid {open_mid_txt}, drift {initial_drift:.3f} >= {self.exit_thresh:.2f}) — entry skipped"
-                        log.info("[%s] Entry skipped due to adverse open drift (open_mid=%s, drift=%.3f >= %.2f)", slug, open_mid_txt, initial_drift, self.exit_thresh)
-                    elif mstate.band_skip:
-                        # Issue #137: the latch above already recorded the
-                        # mid/drift numbers in last_action; keep them.
-                        mstate.status = "BAND_SKIPPED"
-                    elif mstate.mid is None and not mstate.open_gate_evaluated:
+                    elif mstate.mid is None:
                         # Issue #207: unpriceable book throughout entry window
                         mstate.status = "NO_BOOK_SKIPPED"
                         mstate.last_action = "Window skipped — unpriceable book (never formed two-sided quotes)"
@@ -4835,26 +4602,6 @@ class LiveTraderEngine:
                         mstate.last_action = f"{pct_val}% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
                         log.info("[%s] Entry orders cancelled due to %d%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, pct_val, elapsed_sec, entry_timeout_sec)
 
-        # --- DRIFT-SKIP RE-ENTRY (issue #95) ---
-        # Evaluated after the cancellation block so a window skipped on an earlier
-        # tick can be re-opened on this one, and before `can_place_entry` so the
-        # cleared flags are visible to placement on the same tick.
-        remaining_sec = (
-            max(0.0, mstate.end_ts - now) if mstate.end_ts > 0
-            else max(0.0, win_duration - elapsed_sec)
-        )
-        # Invariant 0 (#224): `mstate.mid or 0.50` substituted a perfectly balanced
-        # book for an unpriceable one -- and 0.50 is the one value that passes the
-        # drift band by definition, so the gate meant to catch a skewed market was
-        # handed the single input that could never fail it. No mid, no re-entry.
-        if self._maybe_reenter_drift_skipped(
-                mstate, slug, mstate.mid, remaining_sec, win_duration,
-                book_two_sided, is_late_start, now, resting_up, resting_down):
-            is_adverse_open = mstate.adverse_open
-            # Issue #137: the entry band never gates re-entry; mark it
-            # evaluated so the hold below cannot block the re-opened window.
-            mstate.band_gate_evaluated = True
-
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         no_book_hold = (mstate.mid is None)
         can_place_entry = (
@@ -4863,10 +4610,9 @@ class LiveTraderEngine:
             and not mstate.exit_taken
             and not mstate.entry_cancelled_timeout
             and not is_late_start
-            and not is_adverse_open
             and not mstate.late_start_skip
             and not entry_delay_pending
-            and not band_hold
+            and not range_hold
             and not no_book_hold
             # Invariant 1 (#224): no clock, no new exposure. Reached only when a
             # leg is already filled -- an unfilled window returns much earlier.
@@ -4877,12 +4623,13 @@ class LiveTraderEngine:
                 f"Entry delayed ({elapsed_sec:.0f}s/{self.entry_delay_sec:.0f}s into window)"
                 " — quoting after delay"
             )
-        elif band_hold:
+        elif range_hold:
+            # No status change: the window is healthy, just outside the range
+            # on this tick. A status here would read as a skip downstream.
             mstate.last_action = (
-                "Entry band check waiting for two-sided book — quoting held"
+                f"Mid {mstate.mid:.4f} outside quotable range "
+                f"[{quote_lo:.2f}, {quote_hi:.2f}] — quoting held"
             )
-            if mstate.status in ("IDLE", "PRE_QUOTING"):
-                mstate.status = "NO_BOOK"
         elif no_book_hold and not mstate.entry_cancelled_timeout and not is_late_start and not mstate.late_start_skip:
             mstate.last_action = (
                 "Waiting for two-sided book (unpriceable leg) — quoting held"
@@ -4924,7 +4671,6 @@ class LiveTraderEngine:
                         placed_now_dn = True
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
-                self._finalize_reentry_telemetry(mstate, slug, mid)
             else:
                 if not mstate.filled_up and mstate.order_status_up != "RESTING":
                     mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
@@ -4938,7 +4684,6 @@ class LiveTraderEngine:
                     placed_now_dn = True
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
-                self._finalize_reentry_telemetry(mstate, slug, mid)
 
         # --- FILL-TELEMETRY REST SNAPSHOT (issue #138, unified #166) ---
         # Observation only: stash the full bid books for the stream fill path
@@ -5371,11 +5116,6 @@ class LiveTraderEngine:
             return False
         anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)
         anchor_down = round(min(0.99, max(0.01, (1.0 - mid) - self.offset)), 3)
-        # A re-entered window that pairs and then opens a fresh re-quote round would
-        # otherwise be classified at rollover from the LATER round's state, recording
-        # a paired re-entry as `no_fill` or `single_leg`. Freeze the re-entry's own
-        # terminal state here, while it is still the current one.
-        self._lock_reentry_outcome(mstate)
         with self._engine_lock:
             mstate.requote_round += 1
             mstate.filled_up = False
@@ -5416,114 +5156,6 @@ class LiveTraderEngine:
             slug, mstate.requote_round, anchor_up, anchor_down, mid, mstate.time_remaining_sec,
         )
         return True
-
-    def _finalize_reentry_telemetry(self, mstate: MarketLiveState, slug: str, mid: float) -> None:
-        """Complete the re-entry record once both legs reach the book.
-
-        No-op when no re-entry is in flight, when the record is already finalised,
-        and until both legs are confirmed RESTING or FILLED. Mirrors
-        `_finalize_requote_telemetry`: the point is to capture how far the mid
-        travelled between the decision and the quote actually resting, which is the
-        slippage a re-entry pays before it can fill.
-        """
-        tel = mstate.reentry_telemetry
-        if not isinstance(tel, dict) or tel.get("mid_at_resting") is not None:
-            return
-        if mstate.order_status_up not in ("RESTING", "FILLED"):
-            return
-        if mstate.order_status_down not in ("RESTING", "FILLED"):
-            return
-        try:
-            perf_start = float(tel.get("perf_start") or time.perf_counter())
-        except (TypeError, ValueError):
-            perf_start = time.perf_counter()
-        latency_ms = round((time.perf_counter() - perf_start) * 1000.0, 2)
-        try:
-            mid_at_calc = float(tel.get("reentry_mid") if tel.get("reentry_mid") is not None else mid)
-        except (TypeError, ValueError):
-            mid_at_calc = mid
-        resting_drift = round(abs(mid - mid_at_calc), 4)
-        with self._engine_lock:
-            tel["mid_at_resting"] = round(mid, 4)
-            tel["latency_ms"] = latency_ms
-            tel["resting_drift"] = resting_drift
-        if resting_drift > self.offset:
-            log.warning(
-                "[%s] Re-entry mid moved %.4f (> offset %.3f) between decision and resting "
-                "(decided %.4f, resting %.4f, %.0fms)",
-                slug, resting_drift, self.offset, mid_at_calc, mid, latency_ms,
-            )
-        else:
-            log.info(
-                "[%s] Re-entry quotes resting @ %.3f/%.3f (mid %.4f, drift %.4f, %.0fms)",
-                slug, mstate.resting_up, mstate.resting_down, mid, resting_drift, latency_ms,
-            )
-
-    def _lock_reentry_outcome(self, mstate: MarketLiveState) -> None:
-        """Freeze the re-entry's terminal state before something resets the flags.
-
-        `_maybe_requote_after_merge()` (issue #89) clears `filled_up`, `filled_down`
-        and `pair_captured` to open a new round. The re-entry record is flushed later,
-        at rollover, so without this it would report whatever the last round happened
-        to leave behind. No-op when no re-entry is in flight or the state is already
-        frozen -- the first freeze wins, since that is the one the re-entry produced.
-        """
-        tel = mstate.reentry_telemetry
-        if not isinstance(tel, dict) or tel.get("outcome") is not None:
-            return
-        with self._engine_lock:
-            tel["filled_up"] = mstate.filled_up
-            tel["filled_down"] = mstate.filled_down
-            tel["pair_captured"] = mstate.pair_captured
-            tel["exit_taken"] = mstate.exit_taken
-            tel["exit_side"] = mstate.exit_side or ""
-            tel["realized_pnl_usd"] = round(mstate.realized_pnl_usd, 4)
-            tel["final_status"] = mstate.status
-            tel["outcome"] = _reentry_outcome(mstate)
-            tel["chased_fill"] = mstate.chased_fill
-            tel["outcome_locked_at_round"] = mstate.requote_round
-
-    def _flush_reentry_event(self, mstate: MarketLiveState) -> Optional[Dict[str, Any]]:
-        """Stamp the in-flight re-entry record with the window outcome and persist it.
-
-        Called from `_handle_window_rollover()` before the per-window reset clears
-        the fill flags, since the outcome is only knowable once the window is over.
-        Returns the completed record, or None when the window never re-entered.
-        The write is skipped under pytest so the suite never touches `run/`,
-        mirroring the file handling in `reset_pnl()`.
-        """
-        tel = mstate.reentry_telemetry
-        if not isinstance(tel, dict):
-            return None
-        # `_lock_reentry_outcome()` may already have frozen the terminal state, if a
-        # re-quote round opened after the re-entry paired. That frozen state is the
-        # re-entry's own; the live flags now describe a later round.
-        self._lock_reentry_outcome(mstate)
-        with self._engine_lock:
-            tel.pop("perf_start", None)
-            record = dict(tel)
-            mstate.reentry_telemetry = None
-            self.reentry_stats["reentries"] += 1
-            if record.get("mid_at_resting") is not None:
-                self.reentry_stats["reached_book"] += 1
-            self.reentry_stats[record["outcome"]] = self.reentry_stats.get(record["outcome"], 0) + 1
-            if record.get("chased_fill"):
-                self.reentry_stats["chased_fills"] = self.reentry_stats.get("chased_fills", 0) + 1
-            elif record.get("outcome") == "paired":
-                self.reentry_stats["passive_fills"] = self.reentry_stats.get("passive_fills", 0) + 1
-        if not os.getenv("PYTEST_CURRENT_TEST"):
-            try:
-                RUN_DIR.mkdir(parents=True, exist_ok=True)
-                with open(REENTRY_FILE, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
-            except Exception as e:
-                log.warning("Could not append to %s: %s", REENTRY_FILE, e)
-        log.info(
-            "[%s] Re-entry window closed: outcome=%s filled=%s/%s pnl=%.4f",
-            mstate.slug, record["outcome"], record["filled_up"], record["filled_down"],
-            record["realized_pnl_usd"],
-        )
-        return record
 
     def _finalize_requote_telemetry(self, mstate: MarketLiveState, slug: str, mid: float) -> None:
         """Complete the re-quote resting snapshot once the new round reaches the book.
@@ -5754,11 +5386,6 @@ class LiveTraderEngine:
             mstate.order_status_up = "NONE"
             mstate.order_status_down = "NONE"
 
-        # Persist the re-entry record before the reset below clears the fill flags
-        # it reports (issue #95 observability). No-op when the window never
-        # re-entered.
-        self._flush_reentry_event(mstate)
-
         # Reset window execution state for the new 5m period
         with self._engine_lock:
             mstate.cancelled_orders.clear()
@@ -5773,13 +5400,6 @@ class LiveTraderEngine:
             mstate.entry_cancelled_timeout = False
             mstate.requote_round = 0
             mstate.last_requote_telemetry = None
-            mstate.reentry_telemetry = None
-            mstate.open_mid = None
-            mstate.open_drift = 0.0
-            mstate.adverse_open = False
-            mstate.open_gate_evaluated = False
-            mstate.band_gate_evaluated = False
-            mstate.band_skip = False
             mstate.rest_up_price = None
             mstate.rest_up_queue = None
             mstate.rest_up_ts = None
@@ -5797,9 +5417,6 @@ class LiveTraderEngine:
             mstate.first_seen_start_ts = None
             mstate.first_tick_elapsed_sec = None
             mstate.late_start_skip = False
-            mstate.reentry_count = 0
-            mstate.reentry_mid = None
-            mstate.reentry_drift = None
             mstate.naked_since_ts = None
             mstate.exit_side = None
             mstate.spot_open_price = None

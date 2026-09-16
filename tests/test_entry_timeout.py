@@ -430,23 +430,13 @@ def test_backtest_allows_second_leg_fill_after_timeout_if_first_filled_early():
 
 
 # ============================================================================
-# Issue #92: adverse-open drift gate parity between live and backtest
+# Entry controls: a balanced open fills, a one-sided open holds without a latch
+# (Issue #228: the adverse-open gate these controlled for is deleted)
 # ============================================================================
-
-def test_backtest_cancels_entry_on_adverse_open_drift():
-    """A window whose opening two-sided mid is >= exit_thresh off 0.50 is not entered."""
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=0.355, down_ask=0.655,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
-    ]
-    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-    res = _simulate_window(snaps, p)
-    assert res.filled_up is False
-    assert res.filled_down is False
 
 
 def test_backtest_enters_window_with_balanced_open():
-    """Control for the adverse-open gate: a mid at 0.50 still fills normally."""
+    """A mid at 0.50 — inside the quotable range — still fills normally."""
     snaps = [
         _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
                    tape=[{"asset": UP_TOKEN, "price": 0.48}]),
@@ -457,7 +447,7 @@ def test_backtest_enters_window_with_balanced_open():
 
 
 def test_backtest_one_sided_open_book_does_not_cancel_entry():
-    """A one-sided book at open must not be trusted as an adverse-drift signal.
+    """A one-sided book at open holds quoting without latching a cancel.
 
     It is not quoted either (issue #225): with one leg unpriceable there is no
     two-sided mid and so no anchor. What must not happen is a *latched* cancel
@@ -533,23 +523,20 @@ def test_live_trader_mid_window_start_places_no_entry_at_full_window_timeout():
 
 
 def test_live_trader_mid_window_start_does_not_latch_adverse_open():
-    """A skewed mid observed mid-window is not an opening mid, so no snapshot is taken."""
+    """A skewed mid observed mid-window is owned by the late-start skip alone."""
     engine = _late_start_engine(entry_timeout_pct=1.0)
     slug = "btc-up-or-down-5m"
 
-    # mid 0.44 -> drift 0.06 >= exit_thresh 0.05; pre-#96 this latched adverse_open.
+    # mid 0.44, observed 270s into the window: the late-start skip owns it.
     engine._update_market_strategy(slug, _poll(1000.0, mid=0.44), now=1270.0)
 
     mstate = engine.markets[slug]
-    assert mstate.open_gate_evaluated is False
-    assert mstate.open_mid is None
-    assert mstate.adverse_open is False
     assert mstate.status == "LATE_START_SKIPPED"
     assert mstate.status != "DRIFT_SKIPPED"
 
 
 def test_live_trader_window_after_late_start_quotes_normally():
-    """The rollover following a late start takes a genuine snapshot and quotes."""
+    """The rollover following a late start quotes normally."""
     engine = _late_start_engine(entry_timeout_pct=1.0)
     slug = "btc-up-or-down-5m"
 
@@ -563,9 +550,6 @@ def test_live_trader_window_after_late_start_quotes_normally():
 
     assert mstate.late_start_skip is False
     assert mstate.entry_cancelled_timeout is False
-    assert mstate.open_gate_evaluated is True
-    assert mstate.open_mid == 0.50
-    assert mstate.adverse_open is False
     assert mstate.order_status_up == "RESTING"
     assert mstate.order_status_down == "RESTING"
 
@@ -664,15 +648,13 @@ def test_live_trader_shifting_start_ts_does_not_re_arm_a_quoted_window():
 
 
 # ============================================================================
-# Issue #95: re-entry into a drift-skipped window — backtest parity
+# No re-entry without the mechanism (issue #228): timeout and late-start
+# windows stay unfilled even when the mid is healthy. The re-entry tests that
+# stood here were removed with the behaviour.
 # ============================================================================
 
-# Books used by the re-entry tests. The adverse open sits at mid ~0.35
-# (drift 0.15 >= exit_thresh 0.05), which fires the gate; the balanced book puts
-# the mid back at 0.50 with asks above the 0.48 resting price so fills come only
-# from the tape. Mirrors the live #95 tests in tests/test_live_trader.py.
-_ADVERSE_UP = 0.355
-_ADVERSE_DN = 0.655
+# The balanced book puts the mid at 0.50 with asks above the 0.48 resting
+# price so fills come only from the tape.
 _BALANCED_UP = 0.505
 _BALANCED_DN = 0.505
 
@@ -683,43 +665,12 @@ def _fill_tape():
             {"asset": DN_TOKEN, "price": 0.48}]
 
 
-def test_backtest_reenters_adverse_skipped_window_when_mid_reverts():
-    """A drift-skipped window whose mid reverts inside the band re-enters and fills."""
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        # 100s in: mid back at 0.50, 200s of the window still left.
-        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
-                   tape=_fill_tape()),
-    ]
-    # The shared re-entry time gate defaults to a full 5m window (issue #89), so a
-    # 5m replay only re-enters once an operator lowers it.
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert res.filled_up is True
-    assert res.filled_down is True
-    assert res.pair_captured is True
-    assert res.reentry_count == 1
-
-
-def test_backtest_does_not_reenter_adverse_skipped_window_while_mid_outside_band():
-    """A recovery only to mid 0.45 (drift 0.05 > band 0.015) leaves the window skipped."""
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        _make_snap(1100.0, mid=0.45, up_ask=0.455, down_ask=0.555,
-                   tape=_fill_tape()),
-    ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert res.filled_up is False
-    assert res.filled_down is False
-    assert res.pair_captured is False
-    assert res.reentry_count == 0
-
-
 def test_backtest_timeout_cancelled_window_never_reenters_even_at_mid_050():
-    """A window cancelled by the entry timeout is not a drift skip and never re-enters."""
+    """A window cancelled by the entry timeout stays cancelled at a healthy mid."""
     snaps = [
         _make_snap(1005.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
-        # 100s in -- far past the 30s cutoff at entry_timeout_pct=0.10 -- with the
-        # mid back inside the band. The skip reason was the timeout, not the gate.
+        # 100s in -- far past the 30s cutoff at entry_timeout_pct=0.10 -- with
+        # the mid still healthy. The skip reason was the timeout.
         _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
                    tape=_fill_tape()),
     ]
@@ -730,68 +681,8 @@ def test_backtest_timeout_cancelled_window_never_reenters_even_at_mid_050():
     assert res.reentry_count == 0
 
 
-def test_backtest_no_reentry_below_min_requote_remaining_sec():
-    """A revert with under the effective time gate left has no time to pair.
-
-    At stock settings a 5m window needs 90s -- `reentry_min_remaining_pct` of its
-    own duration, tighter than the shared 300s knob -- and reverting 250s in
-    leaves 50s.
-    """
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        # 250s in: only 50s of the 300s window remain.
-        _make_snap(1250.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
-                   tape=_fill_tape()),
-    ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert res.filled_up is False
-    assert res.filled_down is False
-    assert res.pair_captured is False
-    assert res.reentry_count == 0
-
-
-def test_backtest_reentry_uses_the_two_sided_mid_not_the_up_leg():
-    """A leg-imbalanced book must not clear the band the gate just rejected.
-
-    The gate measures drift with `_two_sided_mid`; measuring re-entry with the
-    up leg alone let a book whose UP leg sits at 0.50 while the DOWN leg is
-    skewed to 0.31 undo its own skip on the very same tick.
-    """
-    snaps = [
-        # `down_bid` keeps the leg imbalance the test is about: the UP leg sits
-        # at 0.50 while DOWN is skewed to 0.3175.
-        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.32, down_bid=0.315,
-                   tape=_fill_tape()),
-    ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert res.reentry_count == 0
-    assert res.filled_up is False
-    assert res.filled_down is False
-
-
-def test_backtest_reentry_band_capped_by_exit_thresh():
-    """Parity: a band wider than exit_thresh is capped in the replay too."""
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        # Two-sided mid 0.44 -- inside the configured 0.40 band, outside
-        # exit_thresh 0.05.
-        _make_snap(1100.0, mid=0.44, up_ask=0.445, down_ask=0.565, tape=_fill_tape()),
-    ]
-    res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=1.0, reentry_drift_band=0.40))
-    assert res.reentry_count == 0
-    assert res.filled_up is False
-
-
 def test_backtest_timeout_cancel_is_not_reentered_with_the_time_gate_open():
-    """A timeout cancel stays cancelled with the time gate deliberately open.
-
-    The entry-timeout cutoff term guards this case a second time -- a window can
-    only be timeout-cancelled after the cutoff has passed -- so the test that
-    actually isolates `adverse_skipped` is
-    `test_backtest_late_start_skip_is_never_reentered`, where
-    `entry_timeout_pct=1.0` disables the cutoff term entirely.
-    """
+    """A timeout cancel stays cancelled with the time gate deliberately open."""
     snaps = [
         _make_snap(1005.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
         _make_snap(1040.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
@@ -805,7 +696,7 @@ def test_backtest_timeout_cancel_is_not_reentered_with_the_time_gate_open():
 
 
 def test_backtest_late_start_skip_is_never_reentered():
-    """Parity with live: an issue #96 late start is not a drift skip."""
+    """Parity with live: an issue #96 late start stays skipped."""
     snaps = [
         # First snapshot lands 40s into a 300s window: past max_start_elapsed_pct.
         _make_snap(1040.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
@@ -817,41 +708,6 @@ def test_backtest_late_start_skip_is_never_reentered():
     assert res.filled_up is False
 
 
-def test_backtest_reentry_cap_of_zero_disables_reentry():
-    """Parity with live: max_reentries_per_window bounds the replay too."""
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
-                   tape=_fill_tape()),
-    ]
-    p_zero = BacktestParams(offset=0.02, entry_timeout_pct=1.0,
-                            max_reentries_per_window=0)
-    assert _simulate_window(snaps, p_zero).filled_up is False
-    # Control: the same replay re-enters and fills at the default cap of 1.
-    p_one = BacktestParams(offset=0.02, entry_timeout_pct=1.0)
-    assert _simulate_window(snaps, p_one).filled_up is True
-
-
-def test_backtest_reentry_gate_scales_with_window_duration():
-    """A 15m window needs 270s left; the same elapsed point clears a 5m window."""
-    def _reentered(duration: int, revert_ts: float) -> int:
-        snaps = [
-            {**_make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-             "duration": duration},
-            {**_make_snap(revert_ts, mid=0.50, up_ask=_BALANCED_UP,
-                          down_ask=_BALANCED_DN, tape=_fill_tape()),
-             "duration": duration},
-        ]
-        return _simulate_window(
-            snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0)).reentry_count
-
-    # 200s in: a 5m window has 100s left (gate 90), a 15m window has 700s (gate 270).
-    assert _reentered(300, 1200.0) == 1
-    assert _reentered(900, 1200.0) == 1
-    # 700s in: the 15m window has 200s left, under its 270s gate.
-    assert _reentered(900, 1700.0) == 0
-
-
 def test_backtest_reentry_params_match_live_defaults():
     """Parity: the three re-entry knobs are byte-identical to LiveTraderEngine."""
     live = LiveTraderEngine(load_persisted=False)
@@ -860,24 +716,6 @@ def test_backtest_reentry_params_match_live_defaults():
     assert bt.min_requote_remaining_sec == live.min_requote_remaining_sec == 300.0
     assert bt.reentry_min_remaining_pct == live.reentry_min_remaining_pct == 0.30
     assert bt.max_reentries_per_window == live.max_reentries_per_window == 1
-
-
-def test_backtest_zero_band_disables_reentry_even_at_exact_mid():
-    """`reentry_drift_band == 0` means disabled: a replay mid of exactly 0.50 (drift 0)
-    must not re-enter — mirrors the live engine's non-positive-band guard."""
-    snaps = [
-        _make_snap(1005.0, mid=0.35, up_ask=_ADVERSE_UP, down_ask=_ADVERSE_DN),
-        # 100s in: mid back at exactly 0.50 -> drift 0 <= band 0, but a
-        # non-positive band must disable re-entry, not admit it.
-        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
-                   tape=_fill_tape()),
-    ]
-    res = _simulate_window(snaps, BacktestParams(
-        offset=0.02, entry_timeout_pct=1.0, reentry_drift_band=0.0))
-    assert res.filled_up is False
-    assert res.filled_down is False
-    assert res.pair_captured is False
-    assert res.reentry_count == 0
 
 
 def test_backtest_rejects_out_of_range_reentry_params():
