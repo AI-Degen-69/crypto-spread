@@ -2446,7 +2446,7 @@ def test_live_config_accepts_the_re_entry_time_gate():
 REGISTRY_TO_PAYLOAD = {
     "offset": "offset",
     "quote_shares": "shares",
-    "pair_cost_gate": "max_pair_cost",
+    "max_pair_cost": "max_pair_cost",
     "exit_reversal": "exit_reversal",
     "exit_thresh_naked": "exit_thresh_naked",
     "naked_leg_timeout_pct": "naked_leg_timeout_pct",
@@ -2472,7 +2472,7 @@ def test_every_cockpit_knob_is_mapped_to_a_payload_field():
 
     The first version of the bounds test listed seven fields by hand. Three
     mismatches sat in the four it did not list — `exit_reversal`,
-    `pair_cost_gate` and `exit_thresh_naked` — and a reviewer found them, not
+    `max_pair_cost` and `exit_thresh_naked` — and a reviewer found them, not
     this suite. Derive the list from the registry so it cannot go stale.
     """
     from backtest.engine import BacktestParams
@@ -2606,9 +2606,9 @@ def test_every_registry_control_has_an_id_the_surface_detection_understands():
     """`applyParamSpec()` picks a surface from the id prefix.
 
     A control whose id starts with neither `cockpit` nor `bt` falls through to
-    the shared bounds, which for `pair_cost_gate` means a Cockpit-style control
-    silently rendering the research range. Nothing today is misnamed; this
-    fails the moment one is.
+    the shared bounds. No knob declares a per-surface override today (issue
+    #227 unified the one that did), so nothing is misrendered right now — this
+    fails the moment a control is misnamed and a future override appears.
     """
     import re
 
