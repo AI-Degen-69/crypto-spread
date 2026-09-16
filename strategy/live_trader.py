@@ -4492,7 +4492,7 @@ class LiveTraderEngine:
 
         # --- LEG CHASE AFTER ONE-SIDED FILL (Issue #123) ---
         # When one leg fills, step up the opposite leg's quote towards the ask,
-        # strictly capped so pair cost stays <= max_pair_cost (default 0.98).
+        # strictly capped so pair cost stays <= max_pair_cost (default 0.99).
         if self.enable_leg_chase and not mstate.pair_captured and not mstate.exit_taken:
             if mstate.filled_up and not mstate.filled_down:
                 entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up

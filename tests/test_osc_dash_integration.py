@@ -2423,6 +2423,33 @@ def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped, tmp_pa
     assert _clamp_to_spec(field, over) == pytest.approx(clamped)
 
 
+@pytest.mark.parametrize("sent,clamped", [
+    (1.05, 1.00),   # the pre-#227 default, still arriving from old bookmarks
+    (2.0, 1.00),
+    (0.0, 0.50),    # the pre-#227 "off" sentinel
+    (0.49, 0.50),
+    (0.99, 0.99),
+])
+def test_the_pair_cost_query_alias_clamps_to_the_engine_range(sent, clamped,
+                                                              tmp_path, monkeypatch):
+    """`pair_cost` is the query spelling of `max_pair_cost` (issue #227).
+
+    The alias is the reason this needs its own case: the parametrized clamp
+    test above sends the registry's own field name, and `pair_cost` is the one
+    knob whose query key and field name differ — so it would sail past that
+    test untouched. A cap above 1.00 authorises paying more for a pair than a
+    pair can return, and 0.0 used to mean "gate off", so both must land inside
+    [0.50, 1.00] rather than error or pass through.
+
+    `TICKS_DIR` is redirected for the same reason as the test above: this call
+    carries no `file=`.
+    """
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    r = client.get("/api/backtest", params={"pair_cost": sent})
+    assert r.status_code == 200, f"pair_cost={sent} produced {r.status_code}"
+    assert r.json()["params"]["pair_cost"] == pytest.approx(clamped)
+
+
 def test_clamp_falls_back_to_the_default_on_non_finite_input():
     """NaN compares False against every bound, so min/max would pass it through."""
     from server.osc_dash import _clamp_to_spec

@@ -201,3 +201,19 @@ def test_grouped_params_still_works_unchanged():
     assert g["trading_knobs"]["offset"] == pytest.approx(0.020)
     assert g["trading_knobs"]["exit_default_5m"] == pytest.approx(0.05)
     assert "taker_fee_rate" in g["execution_assumptions"]
+
+
+def test_zero_is_no_longer_a_way_to_switch_the_pair_cost_cap_off():
+    """0.0 used to disable the gate. It is now simply out of range (#227).
+
+    The lower bound matters more than the upper one for muscle memory: every
+    driver written against `pair_cost_gate` could pass 0.0 to mean "no cap",
+    and under the new field that reads as a cap of zero, which would stop the
+    chase dead on every window instead of freeing it. It raises.
+    """
+    for off in (0.0, 0.49):
+        with pytest.raises(ValueError, match="max_pair_cost"):
+            BacktestParams(max_pair_cost=off)
+    # And the bound itself is inclusive on both ends.
+    assert BacktestParams(max_pair_cost=0.50).max_pair_cost == 0.50
+    assert BacktestParams(max_pair_cost=1.00).max_pair_cost == 1.00

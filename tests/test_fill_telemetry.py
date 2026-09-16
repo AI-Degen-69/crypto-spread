@@ -259,6 +259,10 @@ def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
     engine = _paper_engine()
     # This one IS about the chase. 0.98 rather than the #227 default of 0.99
     # keeps the ceiling at 0.50, which is what the ticks below are built around.
+    # Belt and braces rather than load-bearing: the tick-2 ask of 0.55 is above
+    # either ceiling, so the assertions below hold at 0.99 too. Unlike
+    # test_leg_chase_triggers_on_single_fill_and_respects_cap, where the pin is
+    # the only thing keeping the cap from landing on the ask.
     engine.enable_leg_chase = True
     engine.max_pair_cost = 0.98
     slug = "btc-up-or-down-5m"

@@ -8,11 +8,15 @@ Everything here runs without `run/sweeps/window_cache.pkl` — that cache is
 derived from `run/ticks/`, both are gitignored, and neither exists on a clean
 checkout or in CI.
 """
+import ast
 import contextlib
 import importlib.util
+import inspect
 import json
+import re
 import sys
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -775,3 +779,53 @@ def test_no_sweep_driver_hardcodes_a_worker_count_again():
     assert offenders == [], (
         "these drivers size their pool without asking how much memory exists: "
         f"{offenders} — use safe_worker_count()/sweep_pool()")
+
+
+def test_the_chase_ceiling_is_guarded_but_not_called_unimplemented():
+    """`max_pair_cost` is sim2's `chase_cap` argument, not a missing feature.
+
+    Issue #227 first filed it under `ENGINE_ONLY_KNOBS`, whose error message
+    tells the reader those knobs "are not implemented in research/ at all".
+    `sim2` implements the chase (`sim2.py:37`, `chase_cap=`), so that was
+    false. It belongs with `entry_delay_sec` and `entry_band`: implemented,
+    but as a call argument, which makes setting it on the params silent.
+
+    Both guards must still reject it — silence is the thing they exist to
+    prevent — and the message must not claim research cannot do it.
+    """
+    assert "max_pair_cost" in ev_lab.UNSUPPORTED_KNOBS
+    assert "max_pair_cost" not in ev_lab.ENGINE_ONLY_KNOBS
+
+    p = replace(ev_lab.default_base_params(), max_pair_cost=0.98)
+    for guard in (ev_lab._reject_unsupported_knobs, ev_lab.reject_knobs_sim2_ignores):
+        with pytest.raises(ValueError, match="max_pair_cost") as exc:
+            guard(p)
+        # Both messages list the unimplemented knobs by name. `max_pair_cost`
+        # must not be in that list, and must be named as sim2's argument.
+        tail = str(exc.value).split("not implemented in research/ at all")[0]
+        assert "chase_cap" in tail, (
+            f"{guard.__name__} does not say where the ceiling actually lives")
+        assert "max_pair_cost" not in str(exc.value).split(
+            "nothing in research/ implements")[-1].split(
+            "are not implemented in research/")[-1], (
+            f"{guard.__name__} lists max_pair_cost as unimplemented; sim2 chases")
+
+
+def test_the_sweep_pair_cost_grid_stays_inside_the_engine_range():
+    """A grid point the dataclass refuses is a sweep leg that dies on start.
+
+    The grid was [1.01, 1.02, 1.03, 1.05, 1.10] while the knob's job was to
+    switch off an entry gate by going out of range. Issue #227 hard-caps it at
+    1.00, so every one of those five would now raise.
+    """
+    from backtest.engine import BacktestParams
+    import scripts.sweep_backtest as sweep
+
+    src = inspect.getsource(sweep.generate_sensitivity_grid)
+    grid = ast.literal_eval(
+        re.search(r"pair_costs = (\[[^\]]*\])", src).group(1))
+    assert len(grid) == 5, "the sweep lost a pair-cost leg"
+    low, high = BacktestParams.spec_for("max_pair_cost")["bounds"]
+    for pc in grid:
+        assert low <= pc <= high, f"{pc} is outside [{low}, {high}]"
+        BacktestParams(max_pair_cost=pc)  # raises if the engine disagrees
