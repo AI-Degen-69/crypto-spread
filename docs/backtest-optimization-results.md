@@ -9,6 +9,12 @@
 > not as a measurement of the current engine. The driver behind the
 > exit-reversal row (`research/sweeps/run_exit_rev_110.py`) was deleted with the
 > knob.
+>
+> **Item 5 below also predates the pair-cost rule (issue #227).** The value it
+> reports, 1.05, was chosen to sit above 1.00 so a sweep could switch off an
+> entry-side block. That block is deleted and the knob — now `max_pair_cost`,
+> defaulting to 0.99 — is hard-capped at 1.00 and bounds the leg chase only.
+> The row is a record of what was set, not a setting anything can reproduce.
 
 ---
 
@@ -86,7 +92,7 @@
    - BTC 5m: `0.05` (tightest, highly trending).
    - 15m default: `0.09`.
 4. **Mean-Reversion Buffer:** `exit_reversal = 0.015`.
-5. **Pair Cost Filter:** `pair_cost_gate = 1.05`.
+5. **Pair Cost Filter:** `pair_cost_gate = 1.05` (the knob and the filter are both gone — see the header note).
 
 ---
 

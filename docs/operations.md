@@ -62,12 +62,13 @@ python -m scripts.backtest run/ticks/ticks_2026-08-29.jsonl --out run\backtest\b
 
 Dash:
 ```
-http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=1.05
+http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=0.99
 http://127.0.0.1:8802/api/ticks/manifest
 ```
 
 CLI flags map 1:1 to `BacktestParams` fields — `--offset`, `--queue`,
-`--pair-cost`, `--exit <slug>=<thresh>` (repeatable), `--exit-default-5m`,
+`--pair-cost` (the `max_pair_cost` chase ceiling, 0.50-1.00),
+`--exit <slug>=<thresh>` (repeatable), `--exit-default-5m`,
 `--exit-default-15m`, `--size`, `--gas`.
 
 **There is no fill model to choose.** One rule, hard-coded, the same one the
@@ -98,14 +99,16 @@ Per series:
 
 For 5m BTC/SOL/ETH/BNB/XRP, the measured universe is ~73% oscillating and
 ~27% monotonic (`run/oscillation_windows.jsonl`). If `pair_rate` is much
-below oscillating rate, the queue gate or pair_cost gate is suppressing
-fills that the data says are reachable.
+below oscillating rate, the queue gate or the offset is suppressing fills
+that the data says are reachable. Pair cost is not a candidate: issue #227
+deleted the entry-side pair-cost block, and `max_pair_cost` now bounds the
+leg chase only.
 
 ## Tuning hints
 
 1. **Set `queue_gate=0` to see what fills look like with no queue
-   constraint.** If pair_rate is still < oscillating rate, the issue is
-   offset or pair_cost, not queue.
+   constraint.** If pair_rate is still < oscillating rate, the issue is the
+   offset, not queue and not pair cost.
 2. **Compare `pair_rate` against the oscillating rate** to see how much
    the gates are costing. The fill rule itself has no looser setting to
    fall back on.

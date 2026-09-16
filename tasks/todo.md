@@ -1,11 +1,15 @@
-# TODO — Issue #226
+# TODO — Issue #227: `max_pair_cost` caps the chase only
 
-- [x] T0 — correct the rule text: no taker fill on an entry (rules doc §3, ADR-0002, issue body)
-- [x] T1 — `resting_bid_filled` helper; delete `fill_model`; price stays ours, no entry fee
-- [x] T2 — live paper sim fills fully-through, still at our price
-- [x] T3 — dashboard + `/api/backtest`: the knob is gone
-- [x] T4 — CLI scripts; shadow-check legs collapse 8 → 4
-- [x] T5 — `ev_lab.py` / `sim2.py` / `selection_bias.py`: one path, `tapeq` deleted
-- [x] T6 — delete the 8 frozen sweep drivers; keep the .json tables; fix the docs that cite them
-- [x] T7 — `tests/test_fill_rule_parity.py`: same fills, same prices, both engines
-- [x] T8 — docs: AGENTS.md, operations.md, backtest-optimization-results.md
+Branch: `fix/max-pair-cost-chase-only-227`. Plan: `tasks/plan.md`.
+
+- [x] **T1** `[Backend/Logic]` `book_math.chase_cap()` + unit tests
+- [x] **T2** `[Backend/Logic]` Backtest: rename to `max_pair_cost`, default 0.99,
+      `__post_init__` range check, one registry range, delete the entry-side block
+- [x] **T3** `[Backend/Logic]` Live: default 0.99, four inline floorings → `chase_cap`
+- [x] **T4** `[Test/Parity]` `tests/test_chase_cap_parity.py` — identical ceiling, both engines
+- [x] **T5** `[API/Dashboard]` Delete the ON/OFF toggle, unify the range, rename the control
+- [x] **T6** `[Backend/CLI]` `backtest.py`, `sweep_backtest.py` grid, `replay_shadow_check.py` legs
+- [x] **T7** `[Research/Logic]` `ev_lab.py` + `sim2.py`: delete the two-ask entry test
+- [x] **T8** `[Test]` Remove the four entry-gate tests; rename everywhere else; retarget
+      the registry exemplar to `queue_gate` — folded into T2/T5/T6, one pass per file
+- [x] **T9** `[Docs]` `AGENTS.md`, optimization results, rule 4's stale line reference
