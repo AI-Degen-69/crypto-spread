@@ -1,113 +1,108 @@
-# tasks/plan.md — Issue #214: the engine parity harness
+# Plan — Issue #224: invariants (no invented numbers, one window clock)
 
-- **Issue:** https://github.com/AI-Degen-69/crypto-spread/issues/214
-- **Branch:** `add/214-engine-parity-harness`
-- **Size tier:** **Standard** — one new test module, no production code touched.
-  (It was scoped Large before the rule work was split out into #224-#233.)
-- **Task type:** `Test infrastructure`
-- **Stack:** Python 3, pytest. No new dependencies.
-- **Verification:** targeted `pytest`, per `CONSTRAINTS.md` §1. No UI surface.
-- **Definition of the rules being enforced:** `docs/engine-decision-rules.md`
+**Size**: Standard (2 engine files + tests). **Type**: Code / Debug.
+**Stack**: Python 3.12, FastAPI dashboard, pytest.
 
----
+Spec: `SPEC.md`. Gates: `CONSTRAINTS.md`. Rule text: `docs/engine-decision-rules.md`.
 
-## Locked interfaces (`tests/test_engine_parity.py`)
+## Locked interfaces
 
 ```python
-def snaps_to_polls(snaps: list[dict]) -> list[tuple[float, dict]]:
-    """Backtest snaps -> (now, poll_data) for LiveTraderEngine._update_market_strategy."""
+# strategy/live_trader.py — LiveTraderEngine
+def _window_clock(self, mstate: MarketLiveState, now: float) -> Optional[Tuple[float, float]]:
+    """(window_length, elapsed) from market metadata, or None when there is no clock.
 
-def live_outcome(snaps: list[dict], params: BacktestParams) -> dict:
-    """Run the live decision path in paper mode; return the SPEC §4 surface."""
-
-def backtest_outcome(snaps: list[dict], params: BacktestParams) -> dict:
-    """Run _simulate_window; return the same surface from WindowResult."""
-
-def assert_parity(snaps: list[dict], params: BacktestParams) -> None:
-    """Fail with the first disagreeing field and the tick it disagreed on."""
+    Usable pair: start_ts and end_ts both finite and end_ts > start_ts.
+    The sole definition of the window clock in the live engine.
+    """
 ```
 
----
+```python
+# backtest/engine.py — module level
+def _window_clock(first: dict) -> Optional[Tuple[float, float]]:
+    """(start_ts, window_length) from the window's first snapshot, or None."""
+```
+
+Both return `None` rather than raising: a missing clock is an expected market condition, not a
+programming error, and the callers must be able to skip and continue.
 
 ## Tasks
 
-### T1 — `[Test/Harness]` The snap-to-poll adapter
-- **Files:** `tests/test_engine_parity.py`
-- **Build:** `snaps_to_polls`. A snap carries `cid`, `series`, `slug`, `duration`, `ts`,
-  `start_ts`, `up_book`, `down_book`, `mid`, `tape_delta`. Live `poll_data` needs
-  `market.{conditionId,slug,up_token,down_token,start_ts,end_ts}` plus `up_book`/`down_book`.
-  Follow the existing fixtures in `tests/test_entry_timeout.py` (`_poll`, `_make_snap`) so one
-  snap shape feeds both engines.
-- **Verify:** `python -m pytest tests/test_engine_parity.py -q`
+### T1 — live engine: one window clock, no slug parsing `[Backend/Logic]`
 
-### T2 — `[Test/Harness]` Drive the live engine headlessly
-- **Files:** `tests/test_engine_parity.py`
-- **Build:** `live_outcome`. `LiveTraderEngine(load_persisted=False)`, `mode="paper"`,
-  `is_running=True`, CLOB client mocked out — the pattern already used by
-  `tests/test_entry_timeout.py:_late_start_engine`. Configure from the `BacktestParams` under
-  test via `update_config`, feed each poll at its own `now`, then read the surface off
-  `mstate`.
-- **Verify:** `python -m pytest tests/test_engine_parity.py -q`
+Files: `strategy/live_trader.py`.
 
-### T3 — `[Test/Harness]` The comparison
-- **Files:** `tests/test_engine_parity.py`
-- **Build:** `backtest_outcome` (project `WindowResult` onto the same keys) and
-  `assert_parity`. The failure message must name the field, both values, and the tick index —
-  a bare `assert a == b` on two dicts is not good enough to debug a 200-tick window.
-- **Verify:** deliberately break one engine's input and confirm the message is readable.
+1. Add `_window_clock` next to the other small helpers (near `_naked_timeout_elapsed`).
+2. `:4483-4484` — replace the `(900.0 if "15m" in slug else 300.0)` expression and the
+   `time_remaining_sec` fallback for `elapsed_sec` with one call. When it returns `None`: log
+   once per window, set status `IDLE`, and return before any gate is evaluated.
+3. `:5132` — `win_dur_naked` reads the same helper.
+4. `:2628` — the dashboard's `win_duration_sec` uses `end_ts - start_ts` when usable and `0.0`
+   otherwise. Display only; it never feeds a decision.
 
-### T4 — `[Test/Scenarios]` Seed the settled cases
-- **Files:** `tests/test_engine_parity.py`
-- **Build:** five scenarios, each asserting parity rather than a hard-coded price:
-  1. balanced open, both legs fill, pair merges;
-  2. opening quote anchored to the real mid (#206);
-  3. pair-cost cap does not block quoting (#204);
-  4. unpriceable leg skips the window (#207);
-  5. stop measured from the entry price (#209).
-- **Verify:** `python -m pytest tests/test_engine_parity.py -q`, under 5s.
+Verification: `tests/test_live_trader.py`, `tests/test_entry_timeout.py`.
 
-### T5 — `[Docs]` Point the rules of record at both documents
-- **Files:** `AGENTS.md`
-- **Build:** name `docs/engine-decision-rules.md` as the definition of the strategy's decision
-  rules, and `tests/test_engine_parity.py` as the gate that holds both engines to it. State the
-  rule: a change to either engine's decision logic adds or updates a parity scenario in the
-  same PR.
-- **Verify:** `python -m pytest tests/test_docstrings.py -q`
+### T2 — live engine: stop exit price resolves or holds `[Backend/Logic]`
 
----
+Files: `strategy/live_trader.py`.
 
-## Commit plan
+1. `_execute_stop_exit` `:1735` — drop the `0.40`. Order: the caller's `exit_price`, then the
+   live book bid, then `_resolve_exit_bid(mstate, side)`.
+2. `_resolve_exit_bid` raising `RuntimeError` means no executable mark exists. Catch it, log at
+   `warning`, and return without exiting. `STOP_EXIT_PENDING` stays set, so the reconcile block
+   at `:5093` retries on the next tick — the existing mechanism, not a new one.
 
-1. `add(tests): snap-to-poll adapter for the parity harness (#214)`
-2. `add(tests): drive the live decision path headlessly in paper mode (#214)`
-3. `add(tests): parity comparison with a readable failure diff (#214)`
-4. `add(tests): seed parity scenarios for #204/#206/#207/#209 (#214)`
-5. `docs(agents): name the decision-rules document and the parity gate (#214)`
+Verification: `tests/test_stop_orders.py`, `tests/test_live_trader.py`.
 
----
+### T3 — live engine: no invented re-entry mid `[Backend/Logic]`
 
-## Follow-on issues from the 2026-09-16 rules session
+Files: `strategy/live_trader.py`.
 
-The rules themselves were redefined with the operator and split out. Suggested order — the
-invariants first, because every other rule reads the clock:
+1. `:4744` — pass `mstate.mid` straight through; delete `or 0.50`.
+2. `_maybe_reenter_drift_skipped` takes `Optional[float]` and returns `False` when it is `None`.
+   A window with no mid cannot be judged against the drift band.
 
-| # | issue | closes |
-|---|---|---|
-| #224 | Invariants: no invented numbers, one window clock | |
-| #225 | Entry anchor: repriced until placed, two-sided mid only | |
-| #226 | One fill rule; remove the `fill_model` knob | explains #205 |
-| #227 | `max_pair_cost` caps the chase only | |
-| #228 | `quote_range` replaces `entry_band` and `adverse_open` | #213, half of #208 |
-| #229 | One dead zone at the end of the window | #211, rest of #208 |
-| #230 | One stop threshold | |
-| #231 | Time-proportional leg chase | #210 |
-| #232 | `fresh_start` — no memory inside a window | #212 |
-| #233 | Structural limits separated from tuning knobs | |
+Verification: `tests/test_entry_timeout.py`.
 
-Open measurements, deliberately not decided by argument:
+### T4 — backtest: clock from timestamps only `[Backend/Logic]`
 
-| # | question |
-|---|---|
-| #221 | Does a running backtest delay the live tick? |
-| #222 | Dead zone: percent of window or fixed seconds? |
-| #223 | Unpaired leg at expiry: close or hold? |
+Files: `backtest/engine.py`.
+
+1. Add `_window_clock(first)`. `_simulate_window` calls it once; `None` returns a `WindowResult`
+   with reason `no_clock` and nothing traded.
+2. Delete `elapsed = float(s_idx)` `:769`. `elapsed = cur_ts - start_ts`; a snapshot with no
+   usable `ts` is skipped (`continue`).
+3. Every time gate reads the derived `window_length`, not the snapshot's `duration` field:
+   `:755`, `:760`, `:773`, `:891`, `:895`, `:899`, `:1126`, `:1168`.
+4. `duration` stays only as the per-duration stop-threshold bucket key and as
+   `WindowResult.duration`. It is a series label, and a comment says so.
+
+Verification: `tests/test_backtest_engine.py`, `tests/test_sweep_backtest.py`.
+
+### T5 — tests for each fabrication removed `[Test]`
+
+Files: `tests/test_live_trader.py`, `tests/test_backtest_engine.py`.
+
+1. Live: metadata with `end_ts <= start_ts` → window not traded, no order placed.
+2. Live: a slug containing neither `5m` nor `15m`, with a valid 900s pair → gates measured
+   against 900, proving nothing reads the name.
+3. Live: stop exit with an empty book and no latched quote → position held, `exit_taken` still
+   `False`, status still `STOP_EXIT_PENDING`.
+4. Live: re-entry tick with `mstate.mid is None` → no re-entry.
+5. Backtest: first snapshot with no usable pair → `no_clock`, untraded.
+6. Backtest: a snapshot mid-window with no `ts` → skipped, and the gates of the surrounding
+   snapshots are unaffected.
+
+## Sequencing
+
+T4 is independent of T1-T3 and can land first or last. T2 and T3 are independent of each other.
+T5 follows whichever of its subjects has landed. One commit per task.
+
+## Risks
+
+- **Existing test fixtures build windows whose `end_ts - start_ts` is not the `duration` they
+  declare.** `_window_snaps` pins `start_ts` but leaves `end_ts = ts + 298`, giving a 298s
+  window where the test means 300. Gates at 10% move from 30.0s to 29.8s. Expected to be
+  harmless, but every changed expectation gets explained rather than adjusted.
+- **`snap()` stamps `start_ts = ts - 2.0`**, so windows starting at `ts <= 2.0` currently fall
+  through to `float(s_idx)` and will now measure a real 2s offset. Same treatment.

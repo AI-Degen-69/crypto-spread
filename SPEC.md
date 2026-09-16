@@ -1,74 +1,62 @@
-# SPEC.md — Issue #214: the engine parity harness
+# SPEC — Issue #224: invariants (no invented numbers, one window clock)
 
-## 1. Problem Statement
+Binding while `fix/window-clock-and-no-invented-numbers-224` is live. Supersedes the #214
+harness spec, which is preserved at commit `5f1f8b8` and in issue #214.
 
-`strategy/live_trader.py` and `backtest/engine.py` implement the same strategy twice. They
-share knob *names* through `BacktestParams.param_spec()` (issue #164), which is what makes
-divergence invisible: the dashboard shows one name and one number for two different meanings.
+The agreed rule text is `docs/engine-decision-rules.md` (Invariant 0 and Invariant 1). This
+file is the executable scope: what the code must do to match that text.
 
-Three divergences were found by hand in a single afternoon and have since been fixed
-(#204/#217, #206/#218, #207/#219). Nothing in the repo would have caught them, and nothing
-would catch the next one. The rules session of 2026-09-16 then found three more in a few
-hours, the largest being that **the backtest ends a window at the first merge while the live
-engine opens a fresh round**, so the backtest has been under-reporting profit per window.
+## Goals
 
-## 2. What this issue delivers
+**G1 — No decision path substitutes a constant for a missing book value.**
+Two fabrications remain. The stop exit price falls back to `0.40`
+(`strategy/live_trader.py:1735`), and the re-entry mid falls back to `0.50`
+(`strategy/live_trader.py:4744`). Both are removed. When the value cannot be resolved from
+the book, the engine does not act on that tick and re-evaluates on the next one.
 
-**The harness, and only the harness.** The strategy rules themselves were redefined in the
-same session and are tracked separately (#224-#233); `docs/engine-decision-rules.md` is their
-definition. This issue builds the machinery that holds both engines to whatever those rules
-say, and seeds it with the cases that are already settled.
+**G2 — One definition of the window clock, read from market metadata only.**
 
-- **G1 — A harness.** Given one synthetic book sequence and one parameter set, drive the live
-  decision path and `_simulate_window`, and compare their outcomes on a declared surface.
-- **G2 — Seed scenarios.** The three fixed divergences (#204, #206, #207) and the
-  entry-anchored stop (#209) are pinned so the fixes cannot silently unwind.
-- **G3 — An extension point.** Each rule issue adds its own scenarios to this harness rather
-  than inventing a second way to compare engines.
+```
+window_length = end_ts - start_ts
+elapsed       = now - start_ts           # live
+elapsed       = snapshot_ts - start_ts   # backtest
+```
 
-## 3. The parity contract
+No other source. The slug is not parsed for a duration, and the snapshot index is not counted
+as seconds.
 
-**Live `mode="paper"` versus `_simulate_window`.** Live paper mode simulates fills from the
-book and the WebSocket tape; the backtest simulates them from the snapshot and its tape delta.
-Under the single fill rule agreed in #226 these are the same rule, which is what makes the
-comparison meaningful.
+**G3 — A window with no usable clock is not traded.**
+If `start_ts` and `end_ts` are not a usable pair, there is no clock, no time gate may be
+evaluated, and the window is skipped in both engines. This is a visible skip, not a silent
+default.
 
-Until #226 lands, the harness runs against the existing model that matches live paper mode.
-The harness must not hard-code a model name — it reads whatever the fill rule currently is, so
-that #226 changes the engines and not the harness.
+## What "usable pair" means
 
-## 4. Comparable surface
+Both values are present and finite, and `end_ts > start_ts`. Nothing else is asserted: absolute
+epoch position is not checked, because tests and replays legitimately use small or synthetic
+timebases, and an absolute-value check would reject them while catching no real fault that
+`end_ts > start_ts` misses.
 
-Parity is asserted on the decision-visible subset of `WindowResult`:
+For `elapsed`, the tick's own timestamp must also be present and finite. A snapshot without one
+carries no clock reading and is skipped.
 
-`entered`, `filled_up`, `filled_down`, `entry_price_up`, `entry_price_down`, `pair_captured`,
-`exit_taken`, `exit_side`, `chased_leg`, and the number of completed rounds.
+## Acceptance criteria
 
-Explicitly **not** compared: `pnl_cents`, `fees_cents`, `settlement_mid`, `settle_source`,
-`class_label`, `max_up`, `max_down`, `n_snaps` — accounting and classification the live engine
-does not compute per window. Forcing them in would mean building a second P&L model to prove
-the first one.
+| # | Criterion | Where |
+|---|---|---|
+| A1 | The literal `0.40` stop-exit fallback is gone; the price resolves through `_resolve_exit_bid` | `strategy/live_trader.py` |
+| A2 | When every resolution stage fails, the position is held, no trade is recorded, and the exit re-evaluates next tick | `strategy/live_trader.py` |
+| A3 | The literal `0.50` re-entry mid is gone; no mid means no re-entry this tick | `strategy/live_trader.py` |
+| A4 | `(900.0 if "15m" in slug else 300.0)` appears nowhere | `strategy/live_trader.py` |
+| A5 | `elapsed = float(s_idx)` appears nowhere | `backtest/engine.py` |
+| A6 | A live window whose metadata gives no usable pair is not traded | `strategy/live_trader.py` |
+| A7 | A backtest window whose first snapshot gives no usable pair is not traded, and reports why | `backtest/engine.py` |
+| A8 | Tests cover each of: missing exit bid, missing mid at re-entry, missing timestamps, a slug with no duration substring | `tests/` |
 
-## 5. Acceptance Criteria
+## Out of scope
 
-- [ ] `snaps_to_polls` converts a backtest snap sequence into live `poll_data`, tick by tick.
-- [ ] `live_outcome` runs a `LiveTraderEngine(load_persisted=False)` in `mode="paper"` over
-      that sequence and returns the §4 surface.
-- [ ] `assert_parity` runs both engines on the same snaps and the same parameters and fails
-      with a readable diff naming the first field that disagrees and the tick it disagreed on.
-- [ ] Seed scenarios: balanced open through to a merged pair; opening quote anchored to the
-      real mid (#206); pair-cost cap not blocking quoting (#204); unpriceable leg skipping the
-      window (#207); stop anchored to the entry price (#209).
-- [ ] A divergence the harness finds is recorded as `xfail(strict=True)` with an issue number,
-      never fixed here — so the xfail goes stale loudly the day it is fixed.
-- [ ] `tests/test_engine_parity.py` runs in under 5 seconds on synthetic snaps.
-
-## 6. Out of Scope
-
-- **Every strategy rule change.** Tracked in #224-#233 against
-  `docs/engine-decision-rules.md`. This issue changes no behaviour in either engine.
-- **Extracting the shared decision logic into one module.** `_update_market_strategy` is
-  ~1,000 lines entangled with CLOB calls, WebSocket state, engine locks, telemetry and order
-  placement; `_simulate_window` is ~560 pure lines. Deferred by operator decision, with the
-  rules document as the map any future extraction starts from.
-- P&L, fee and settlement parity (see §4).
+- The parity harness for #214. It is the next piece of work, not this one.
+- Every rule issue #225-#233. This issue changes only the two invariants above.
+- `taker_fee_rate` being dead in the live engine. Real, separate, unfiled.
+- The `duration` field the collector writes. It is a series label used to key the per-duration
+  stop threshold, not a clock, and no time gate may read it after this change.

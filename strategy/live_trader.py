@@ -771,6 +771,11 @@ class MarketLiveState:
     first_tick_elapsed_sec: Optional[float] = None
     late_start_skip: bool = False
 
+    # No-clock skip (issue #224). Records the `start_ts` the clock warning was
+    # already logged for, so a window with unusable metadata says so once rather
+    # than on every tick for its whole length.
+    clock_skip_start_ts: Optional[float] = None
+
     # Drift-skip re-entry (issue #95). A window skipped by the adverse-open gate may
     # be re-entered later in the same window once the live mid has reverted to within
     # `reentry_drift_band` of 0.50. `reentry_count` caps that per window; `reentry_mid`
@@ -2625,7 +2630,10 @@ class LiveTraderEngine:
         # re-deriving window length client-side.
         mkts_dict = {slug: asdict(state) for slug, state in self.markets.items()}
         for slug, d in mkts_dict.items():
-            dur = (d["end_ts"] - d["start_ts"]) if d["end_ts"] > d["start_ts"] else (900.0 if "15m" in slug else 300.0)
+            # Display only, and the same clock the engine reads (#224): a window
+            # with no usable pair reports 0 rather than a length read out of its
+            # name, so the seeker bar shows nothing instead of showing a lie.
+            dur = (d["end_ts"] - d["start_ts"]) if d["end_ts"] > d["start_ts"] else 0.0
             d["win_duration_sec"] = round(dur, 3)
         # Copied under the lock its writer holds, so the dashboard can never read a
         # tally mid-update with `reentries` bumped but the outcome bucket not yet.
@@ -4028,6 +4036,37 @@ class LiveTraderEngine:
             return self.exit_thresh
         return naked
 
+    @staticmethod
+    def _window_clock(mstate: MarketLiveState, now: float) -> Optional[Tuple[float, float]]:
+        """Return `(window_length, elapsed)` for this window, or None when it has no clock.
+
+        Invariant 1 (issue #224). Every time gate in the strategy is a fraction or
+        an offset of the window, so they are only as sound as the clock they read,
+        and there is exactly one definition of it:
+
+            window_length = end_ts - start_ts     # the market's own metadata
+            elapsed       = now - start_ts
+
+        A usable pair is two finite numbers with `end_ts > start_ts`. Nothing else
+        is asserted -- the absolute epoch position is not checked, because replays
+        and fixtures legitimately use a synthetic timebase and no real fault gets
+        past `end_ts > start_ts` by way of one.
+
+        This replaced `(900.0 if "15m" in slug else 300.0)`, which read the window
+        duration out of a substring of the market name: any slug not containing
+        `15m` silently became a five-minute window and every gate in it was then
+        measured against a length nobody had verified. When the metadata gives no
+        usable pair the window has no clock, no gate may be evaluated, and the
+        caller does not trade it.
+        """
+        start_ts = mstate.start_ts
+        end_ts = mstate.end_ts
+        if not (math.isfinite(start_ts) and math.isfinite(end_ts)):
+            return None
+        if end_ts <= start_ts:
+            return None
+        return (end_ts - start_ts, max(0.0, now - start_ts))
+
     def _naked_timeout_elapsed(self, mstate: MarketLiveState, now: float, win_duration: float) -> bool:
         """True when a naked leg has exceeded `naked_leg_timeout_pct` of its window.
 
@@ -4479,9 +4518,32 @@ class LiveTraderEngine:
                     if mstate.max_up_drift >= self._naked_exit_thresh() and excursion_up < self.exit_reversal:
                         mstate.reversal_seen_up = True
 
-        # Determine window duration & elapsed time (Issue #48)
-        win_duration = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else (900.0 if "15m" in slug else 300.0)
-        elapsed_sec = max(0.0, now - mstate.start_ts) if mstate.start_ts > 0 else (win_duration - mstate.time_remaining_sec)
+        # Determine window duration & elapsed time (Issue #48, Invariant 1 / #224).
+        # No clock means no time gate may be evaluated, so the window is not
+        # traded at all -- a visible skip on the first tick, instead of an
+        # invented length that stays invisible for months.
+        _clock = self._window_clock(mstate, now)
+        no_clock = _clock is None
+        if no_clock:
+            if mstate.clock_skip_start_ts != mstate.start_ts:
+                mstate.clock_skip_start_ts = mstate.start_ts
+                log.warning(
+                    "[%s] Window has no usable clock (start_ts=%s end_ts=%s) — not traded",
+                    slug, mstate.start_ts, mstate.end_ts,
+                )
+            # Nothing at risk: skip the window outright.
+            if not (mstate.filled_up or mstate.filled_down or mstate.status == "STOP_EXIT_PENDING"):
+                mstate.last_action = "No window clock — start_ts/end_ts unusable, window skipped"
+                if mstate.status in ("QUOTING", "PRE_QUOTING", "LIVE_MONITOR"):
+                    mstate.status = "IDLE"
+                return
+            # Exposure is already open, so the price-driven stop below still runs:
+            # abandoning a filled leg because the metadata went bad would be the
+            # more dangerous reading of "do not trade this window". A zero length
+            # switches every *time* gate off, which is the part that needs a clock.
+            win_duration, elapsed_sec = 0.0, 0.0
+        else:
+            win_duration, elapsed_sec = _clock
         if self.entry_timeout_pct is not None and 0.0 < self.entry_timeout_pct < 1.0:
             entry_timeout_sec = self.entry_timeout_pct * win_duration
             is_late_start = (elapsed_sec >= entry_timeout_sec)
@@ -4763,6 +4825,9 @@ class LiveTraderEngine:
             and not entry_delay_pending
             and not band_hold
             and not no_book_hold
+            # Invariant 1 (#224): no clock, no new exposure. Reached only when a
+            # leg is already filled -- an unfilled window returns much earlier.
+            and not no_clock
         )
         if entry_delay_pending and not mstate.entry_cancelled_timeout:
             mstate.last_action = (
@@ -5129,7 +5194,8 @@ class LiveTraderEngine:
         # exits at the live bid with a WINDOW_SETTLE-style trade event, so a mid
         # hovering just inside the stop cannot ride the naked leg to the wall.
         if not mstate.exit_taken and not mstate.pair_captured:
-            win_dur_naked = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else 0.0
+            _naked_clock = self._window_clock(mstate, now)
+            win_dur_naked = _naked_clock[0] if _naked_clock is not None else 0.0
             if self._naked_timeout_elapsed(mstate, now, win_dur_naked):
                 naked_side = "UP" if mstate.filled_up else "DOWN"
                 naked_bid = mstate.up_bid if naked_side == "UP" else mstate.down_bid
