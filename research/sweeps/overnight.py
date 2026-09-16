@@ -1,8 +1,12 @@
 """Unattended re-analysis: wait for the capture to grow, then redo everything.
 
 Run detached before going to bed. It waits until `--at`, rebuilds the window
-cache from whatever the collector has by then, reruns the phase sweep and the
-selection-bias null, and writes one report.
+cache from whatever the collector has by then, reruns the selection-bias null,
+and writes one report.
+
+It used to rerun the phase sweep too. Those drivers were deleted with the
+`fill_model` knob they were built around (issue #226); the cache rebuild and
+the null are what remains, and both still run against the current engine.
 
 The point is not to run the same analysis again. It is that every number in it
 is a function of sample size, and the current sample (36 binary legs for the
@@ -94,11 +98,6 @@ def main(argv: list[str]) -> int:
                           + sections[-1], encoding="utf-8")
         log("aborting: cache rebuild failed")
         return 1
-
-    for phase in ("phase1_1d", "phase4_universe", "phase5_band"):
-        rc, out = run(phase, [str(SWEEPS / f"{phase}.py")], timeout=7200)
-        body = tail(out, 26) if rc == 0 else out[-2000:]
-        sections.append(f"## {phase} (rc={rc})\n\n```\n{body}\n```")
 
     rc, out = run("selection bias", [str(SWEEPS / "selection_bias.py"),
                                      "--perms", str(a.perms)], timeout=10800)

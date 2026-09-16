@@ -296,37 +296,26 @@ def test_every_phase_report_row_survives_an_empty_summary():
 
 
 # ---------------------------------------------------------------------------
-# 7. Documented Phase 1 baseline
-# ---------------------------------------------------------------------------
-
-def test_phase1_baseline_matches_the_documented_one():
-    """The sweep reports against `ex_5m=0.08, rev=0.015`; the engine defaults
-    are 0.05/0.02, so an implicit baseline was never the documented one."""
-    phase1 = _load("phase1_1d")
-    assert phase1.BASE.exit_reversal == pytest.approx(0.015)
-    assert phase1.BASE.exit_thresh_by_slug["default_5m"] == pytest.approx(0.08)
-    assert phase1.BASE.offset == pytest.approx(0.02)
-    assert phase1.BASE.queue_gate == pytest.approx(0.0)
-    assert phase1.BASE.pair_cost_gate == pytest.approx(1.05)
-    assert phase1.BASE.fill_model == "tape"
-
-
-# ---------------------------------------------------------------------------
 # 3. Worker cache loading
 # ---------------------------------------------------------------------------
 
 def test_pool_workers_use_the_memoised_cache_getter():
     """`load_cache()` re-unpickles ~336MB per task; `pool.map` dispatches one
-    task per shard per config."""
+    task per shard per config.
+
+    Written for the phase drivers, which issue #226 deleted. It now guards
+    every driver left in the directory, so a new one reintroducing the bug is
+    still caught.
+    """
+    # `ev_lab.py` is where `load_cache` and the memoised getter live, so it
+    # names both by definition and is not a driver.
     offenders = []
-    for p in SWEEPS.glob("phase*.py"):
-        src = p.read_text(encoding="utf-8")
+    for path in sorted(SWEEPS.glob("*.py")):
+        if path.name == "ev_lab.py":
+            continue
+        src = path.read_text(encoding="utf-8")
         if "def _worker" in src and "load_cache()" in src:
-            offenders.append(p.name)
-    for name in ("validate_top.py",):
-        src = (SWEEPS / name).read_text(encoding="utf-8")
-        if "def _worker" in src and "load_cache()" in src:
-            offenders.append(name)
+            offenders.append(path.name)
     assert offenders == [], f"worker re-unpickles the cache in {offenders}"
 
 

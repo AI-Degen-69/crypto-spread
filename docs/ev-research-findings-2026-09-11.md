@@ -241,4 +241,8 @@ The live engine already records everything needed to measure this: per-order `qu
 | `research/sweeps/phase6_tapeq_top.json` | queue stress test of top 5 |
 | `run/sweeps/window_cache.pkl` | 2,430-window compact cache (336MB, rebuild: `python research/sweeps/ev_lab.py cache --force`) |
 
-Reproduce any row: `python research/sweeps/phase5_band.py` (grid) or `python research/sweeps/validate_top.py` (trade-level detail).
+**No row here can be reproduced.** The drivers that produced these tables were
+deleted by issue #226 — they swept a `fill_model` knob that no longer exists,
+and the engine they called now has one hard-coded fill rule (ADR-0002). The
+`.json` tables are kept as the record of how `patient_band_maker` was chosen;
+see `research/sweeps/RESULTS-ARE-STALE.md` for everything else wrong with them.
