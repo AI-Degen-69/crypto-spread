@@ -1,84 +1,113 @@
-# Plan — Issue #209: Stop loss is measured from 0.50, not from the entry price
+# tasks/plan.md — Issue #214: the engine parity harness
 
-- **Issue:** #209 (`ready-for-agent`, assigned)
-- **Branch:** `fix/stop-loss-from-entry-price-209`
-- **Size tier:** Standard — 4 files (`strategy/live_trader.py`, `backtest/engine.py`, `tests/test_live_trader.py`, `tests/test_backtest_engine.py`).
-- **Task type:** Debug & Code (Risk Management & Trading Engine Correctness).
-- **Stack:** Python 3.12, FastAPI, pytest.
-- **Skills routed:** `debugging-and-error-recovery`, `test-driven-development`, `api-and-interface-design`, `planning-and-task-breakdown`.
+- **Issue:** https://github.com/AI-Degen-69/crypto-spread/issues/214
+- **Branch:** `add/214-engine-parity-harness`
+- **Size tier:** **Standard** — one new test module, no production code touched.
+  (It was scoped Large before the rule work was split out into #224-#233.)
+- **Task type:** `Test infrastructure`
+- **Stack:** Python 3, pytest. No new dependencies.
+- **Verification:** targeted `pytest`, per `CONSTRAINTS.md` §1. No UI surface.
+- **Definition of the rules being enforced:** `docs/engine-decision-rules.md`
 
-## Root Cause
+---
 
-`strategy/live_trader.py:4455-4469` and `backtest/engine.py:794-816` measure adverse price excursion against a hardcoded base of `0.50` (`mid - 0.50` / `0.50 - mid`).
-When a leg fills away from 0.50 (e.g. UP filled at 0.45), the position carries the distance from 0.50 as immediate artificial drift from tick 1. With `exit_thresh = 0.05`, the leg is immediately stopped out with zero actual market move against the entry price.
+## Locked interfaces (`tests/test_engine_parity.py`)
+
+```python
+def snaps_to_polls(snaps: list[dict]) -> list[tuple[float, dict]]:
+    """Backtest snaps -> (now, poll_data) for LiveTraderEngine._update_market_strategy."""
+
+def live_outcome(snaps: list[dict], params: BacktestParams) -> dict:
+    """Run the live decision path in paper mode; return the SPEC §4 surface."""
+
+def backtest_outcome(snaps: list[dict], params: BacktestParams) -> dict:
+    """Run _simulate_window; return the same surface from WindowResult."""
+
+def assert_parity(snaps: list[dict], params: BacktestParams) -> None:
+    """Fail with the first disagreeing field and the tick it disagreed on."""
+```
+
+---
 
 ## Tasks
 
-### T1 — Failing Tests for Live Engine Entry-Anchored Stop Loss `[Debug/Test]`
-- In `tests/test_live_trader.py`:
-  - Add `test_stop_loss_anchored_to_fill_price_up`:
-    - UP leg filled at 0.45 with `exit_thresh = 0.05`.
-    - Mid moves: 0.45 -> 0.43 -> 0.41 -> 0.40 -> 0.39.
-    - Assert no stop loss triggers at 0.45, 0.43, or 0.41 (in old code it triggers immediately).
-    - Assert stop loss triggers only at <= 0.40.
-  - Add `test_stop_loss_anchored_to_fill_price_down`:
-    - DOWN leg filled at 0.45 (implied mid 0.55) with `exit_thresh = 0.05`.
-    - Mid moves: 0.55 -> 0.57 -> 0.59 -> 0.60 -> 0.61.
-    - Assert no stop loss triggers until mid >= 0.60.
-  - Add `test_reversal_anchored_to_entry_price`:
-    - Adverse excursion occurs, mid bounces back to within `exit_reversal` of entry.
-    - Assert reversal flag arms and suppresses the exit.
-- **Target File:** `tests/test_live_trader.py`
-- **Verification:** Run `python -m pytest tests/test_live_trader.py -q -k "anchored"` (fails before implementation).
+### T1 — `[Test/Harness]` The snap-to-poll adapter
+- **Files:** `tests/test_engine_parity.py`
+- **Build:** `snaps_to_polls`. A snap carries `cid`, `series`, `slug`, `duration`, `ts`,
+  `start_ts`, `up_book`, `down_book`, `mid`, `tape_delta`. Live `poll_data` needs
+  `market.{conditionId,slug,up_token,down_token,start_ts,end_ts}` plus `up_book`/`down_book`.
+  Follow the existing fixtures in `tests/test_entry_timeout.py` (`_poll`, `_make_snap`) so one
+  snap shape feeds both engines.
+- **Verify:** `python -m pytest tests/test_engine_parity.py -q`
 
-### T2 — Implement Entry-Anchored Drift & Reversal in `strategy/live_trader.py` `[Backend/Logic]`
-- In `strategy/live_trader.py`:
-  - When `mstate.filled_up and not mstate.filled_down`:
-    - Reference: `entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else mstate.resting_up`.
-    - If `mstate.mid is not None` and `entry_up is not None`:
-      - `mstate.max_down_drift = max(mstate.max_down_drift, max(0.0, entry_up - mstate.mid))`.
-      - Check reversal: `if mstate.max_down_drift >= thresh and (entry_up - mstate.mid) < self.exit_reversal: mstate.reversal_seen_down = True`.
-  - When `mstate.filled_down and not mstate.filled_up`:
-    - Reference: `entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else mstate.resting_down`.
-    - If `mstate.mid is not None` and `entry_dn is not None`:
-      - `mstate.max_up_drift = max(mstate.max_up_drift, max(0.0, mstate.mid - (1.0 - entry_dn)))`.
-      - Check reversal: `if mstate.max_up_drift >= thresh and (mstate.mid - (1.0 - entry_dn)) < self.exit_reversal: mstate.reversal_seen_up = True`.
-  - While neither leg is filled, position drift remains 0.0.
-- **Target File:** `strategy/live_trader.py`
-- **Verification:** T1 tests turn green; all existing tests in `test_live_trader.py` pass.
+### T2 — `[Test/Harness]` Drive the live engine headlessly
+- **Files:** `tests/test_engine_parity.py`
+- **Build:** `live_outcome`. `LiveTraderEngine(load_persisted=False)`, `mode="paper"`,
+  `is_running=True`, CLOB client mocked out — the pattern already used by
+  `tests/test_entry_timeout.py:_late_start_engine`. Configure from the `BacktestParams` under
+  test via `update_config`, feed each poll at its own `now`, then read the surface off
+  `mstate`.
+- **Verify:** `python -m pytest tests/test_engine_parity.py -q`
 
-### T3 — Failing Tests for Backtest Replay Entry-Anchored Stop Loss `[Debug/Test]`
-- In `tests/test_backtest_engine.py`:
-  - Add unit tests verifying that `simulate_window` / `replay`:
-    - When UP fills at 0.45 with `exit_thresh = 0.05`, does NOT exit at mid 0.45 or 0.42.
-    - Exits at mid <= 0.40.
-    - Keeps `WindowResult.max_up` and `max_down` measuring window range from 0.50 for classification.
-- **Target File:** `tests/test_backtest_engine.py`
-- **Verification:** Run `python -m pytest tests/test_backtest_engine.py -q -k "anchored"` (fails before implementation).
+### T3 — `[Test/Harness]` The comparison
+- **Files:** `tests/test_engine_parity.py`
+- **Build:** `backtest_outcome` (project `WindowResult` onto the same keys) and
+  `assert_parity`. The failure message must name the field, both values, and the tick index —
+  a bare `assert a == b` on two dicts is not good enough to debug a 200-tick window.
+- **Verify:** deliberately break one engine's input and confirm the message is readable.
 
-### T4 — Implement Entry-Anchored Stop Loss & Parity in `backtest/engine.py` `[Backend/Logic]`
-- In `backtest/engine.py`:
-  - Preserve `max_up = max(mids) - 0.50` and `max_down = 0.50 - min(mids)` for `WindowResult` and `_classify`.
-  - Introduce dedicated position excursion tracking:
-    - `adverse_drift_up: float = 0.0`
-    - `adverse_drift_down: float = 0.0`
-  - When holding UP alone (`filled_up and not filled_down`):
-    - Track `entry = entry_price_up or resting_up`.
-    - Update `adverse_drift_up = max(adverse_drift_up, max(0.0, entry - mid))`.
-    - Check reversal against `(entry - mid) < params.exit_reversal`.
-  - When holding DOWN alone (`filled_down and not filled_up`):
-    - Track `entry = entry_price_down or resting_down`.
-    - Update `adverse_drift_down = max(adverse_drift_down, max(0.0, mid - (1.0 - entry)))`.
-    - Check reversal against `(mid - (1.0 - entry)) < params.exit_reversal`.
-  - Use `adverse_drift_up` / `adverse_drift_down` in stop loss exit conditions.
-- **Target File:** `backtest/engine.py`
-- **Verification:** T3 tests turn green; all tests in `test_backtest_engine.py` pass.
+### T4 — `[Test/Scenarios]` Seed the settled cases
+- **Files:** `tests/test_engine_parity.py`
+- **Build:** five scenarios, each asserting parity rather than a hard-coded price:
+  1. balanced open, both legs fill, pair merges;
+  2. opening quote anchored to the real mid (#206);
+  3. pair-cost cap does not block quoting (#204);
+  4. unpriceable leg skips the window (#207);
+  5. stop measured from the entry price (#209).
+- **Verify:** `python -m pytest tests/test_engine_parity.py -q`, under 5s.
 
-### T5 — Targeted Verification & Quality Gate `[Quality Gate]`
-- Run targeted test suites:
-  - `python -m pytest tests/test_live_trader.py -q`
-  - `python -m pytest tests/test_backtest_engine.py -q`
-  - `python -m pytest tests/test_entry_timeout.py -q`
-- Ensure zero regressions and strict adherence to `CONSTRAINTS.md`.
-- **Target Files:** `strategy/live_trader.py`, `backtest/engine.py`, `tests/test_live_trader.py`, `tests/test_backtest_engine.py`
-- **Verification:** All tests pass with zero warnings/errors.
+### T5 — `[Docs]` Point the rules of record at both documents
+- **Files:** `AGENTS.md`
+- **Build:** name `docs/engine-decision-rules.md` as the definition of the strategy's decision
+  rules, and `tests/test_engine_parity.py` as the gate that holds both engines to it. State the
+  rule: a change to either engine's decision logic adds or updates a parity scenario in the
+  same PR.
+- **Verify:** `python -m pytest tests/test_docstrings.py -q`
+
+---
+
+## Commit plan
+
+1. `add(tests): snap-to-poll adapter for the parity harness (#214)`
+2. `add(tests): drive the live decision path headlessly in paper mode (#214)`
+3. `add(tests): parity comparison with a readable failure diff (#214)`
+4. `add(tests): seed parity scenarios for #204/#206/#207/#209 (#214)`
+5. `docs(agents): name the decision-rules document and the parity gate (#214)`
+
+---
+
+## Follow-on issues from the 2026-09-16 rules session
+
+The rules themselves were redefined with the operator and split out. Suggested order — the
+invariants first, because every other rule reads the clock:
+
+| # | issue | closes |
+|---|---|---|
+| #224 | Invariants: no invented numbers, one window clock | |
+| #225 | Entry anchor: repriced until placed, two-sided mid only | |
+| #226 | One fill rule; remove the `fill_model` knob | explains #205 |
+| #227 | `max_pair_cost` caps the chase only | |
+| #228 | `quote_range` replaces `entry_band` and `adverse_open` | #213, half of #208 |
+| #229 | One dead zone at the end of the window | #211, rest of #208 |
+| #230 | One stop threshold | |
+| #231 | Time-proportional leg chase | #210 |
+| #232 | `fresh_start` — no memory inside a window | #212 |
+| #233 | Structural limits separated from tuning knobs | |
+
+Open measurements, deliberately not decided by argument:
+
+| # | question |
+|---|---|
+| #221 | Does a running backtest delay the live tick? |
+| #222 | Dead zone: percent of window or fixed seconds? |
+| #223 | Unpaired leg at expiry: close or hold? |

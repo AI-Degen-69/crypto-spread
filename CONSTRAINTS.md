@@ -1,52 +1,54 @@
-# CONSTRAINTS.md — Issue #209: stop loss must be measured from the entry price, not from 0.50
+# CONSTRAINTS.md — Issue #214: the engine parity harness
 
-Binding while working on Issue #209. These are gates, not suggestions: a violation blocks the PR.
+Binding while working on Issue #214. These are gates, not suggestions: a violation blocks the PR.
 
 ## 1. Zero Regressions
 
-- Targeted test suites must pass:
-  - `python -m pytest tests/test_live_trader.py -q`
+- Targeted test suites must pass before every commit:
+  - `python -m pytest tests/test_engine_parity.py -q` (new, this issue)
   - `python -m pytest tests/test_backtest_engine.py -q`
-- NEVER run the full test suite locally (`python -m pytest -q` is strictly forbidden per repo AGENTS.md; full suite is gated by CI in GitHub Actions).
-- All 141 existing tests in `test_live_trader.py` and all 136 tests in `test_backtest_engine.py` must remain green.
+  - `python -m pytest tests/test_live_trader.py -q`
+  - `python -m pytest tests/test_entry_timeout.py -q`
+- NEVER run the full test suite locally (`python -m pytest -q` is strictly forbidden per repo
+  `AGENTS.md` §Testing & Fast Iteration Policy; the full suite is gated by CI in GitHub Actions).
 
-## 2. Anti-Cheat & Quality Gates
+## 2. No behaviour change — no exceptions
 
-- No `@pytest.mark.skip`, `xfail`, deleted assertions, or loosened tolerances.
-- No `# noqa` / `# type: ignore` added to mask typing or linting errors.
-- Never hardcode 0.50 as the stop loss anchor for open positions.
+- **This issue changes zero strategy behaviour.** No edit to the decision logic of
+  `strategy/live_trader.py` or `backtest/engine.py`. The rule changes agreed on 2026-09-16 are
+  issues #224-#233 and land there, one reviewable change at a time. That separation is the
+  whole point of splitting them out: ten behaviour changes in one PR is exactly the condition
+  under which the divergences being fixed went unnoticed.
+- A divergence the harness discovers is **recorded**, not fixed: add it as
+  `xfail(strict=True)` with the issue number in the reason, and file the issue.
 
-## 3. Scope Discipline
+## 3. The harness must not encode the rules
 
-- Files touched:
-  - `strategy/live_trader.py` (measure adverse excursion & reversal from entry price per leg)
-  - `backtest/engine.py` (measure adverse excursion & reversal from entry price per leg, while keeping window max_up/max_down metrics intact for oscillation stats)
-  - `tests/test_live_trader.py` (add regression tests for entry-anchored stop loss and reversal)
-  - `tests/test_backtest_engine.py` (add parity & regression tests for entry-anchored stop loss and reversal)
-  - Station II planning files: `CONSTRAINTS.md`, `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`
-- Out of scope:
-  - Entry gate / decided market fixes (reserved for #208)
-  - Leg chase timing adjustments (reserved for #210)
-  - Naked leg timeout percentage calculation (reserved for #211)
-  - Re-entry mid updates (reserved for #212)
-  - Entry band anchoring (reserved for #213)
-  - General parity harness (reserved for #214)
-  - No new external dependencies
+- The harness compares the two engines against **each other**, never against a hard-coded
+  expected value. A scenario that asserts "the quote is 0.47" pins today's tuning; a scenario
+  that asserts "both engines quote the same thing" survives every rule change in #224-#233.
+- No model or knob name may be hard-coded in a way that makes a rule issue have to edit the
+  harness to land. The harness reads the engines' current configuration.
 
-## 4. Mathematical & Engine Correctness
+## 4. Anti-Cheat
 
-- For UP positions (`filled_up and not filled_down`):
-  - Reference price `entry_up = fill_price_up if fill_price_up is not None else resting_up`.
-  - Adverse excursion is `max(0.0, entry_up - mid)` when mid drops below entry.
-  - Stop loss triggers when `max_down_drift >= naked_thr` (or `exit_thresh`).
-  - Reversal detection triggers when `max_down_drift >= naked_thr` and `(entry_up - mid) < exit_reversal`.
-- For DOWN positions (`filled_down and not filled_up`):
-  - Reference price `entry_down = fill_price_down if fill_price_down is not None else resting_down`.
-  - Implied mid entry is `1.0 - entry_down`.
-  - Adverse excursion is `max(0.0, mid - (1.0 - entry_down))` when mid rallies above implied entry.
-  - Stop loss triggers when `max_up_drift >= naked_thr` (or `exit_thresh`).
-  - Reversal detection triggers when `max_up_drift >= naked_thr` and `(mid - (1.0 - entry_down)) < exit_reversal`.
-- While 0 legs are filled (resting orders):
-  - Position adverse drift is 0.0 — no open position exists to stop out.
-- Regression test requirement:
-  - A leg filled at 0.45 with `exit_thresh = 0.05` must NOT trigger stop loss until mid reaches 0.40 (UP) or 0.60 (DOWN).
+- No `@pytest.mark.skip`, no deleted assertions, no `pytest.approx` on a field that is exactly
+  comparable, no `# noqa` / `# type: ignore` to silence a real finding.
+- A parity failure is never resolved by loosening the comparison.
+
+## 5. Dependencies
+
+- No new external dependencies. `dataclasses`, `inspect`, `unittest.mock` and `pytest` cover
+  everything this needs.
+
+## 6. Performance and data
+
+- `tests/test_engine_parity.py` must run in **under 5 seconds**.
+- No test may read `run/ticks/*.jsonl` (the 700MB capture) or anything under `runs/`.
+  Synthetic snaps only, per the precedent in `tests/test_replay_shadow_check.py`.
+
+## 7. Scope discipline
+
+- May create: `tests/test_engine_parity.py`, and a helper module for it if it outgrows one file.
+- May modify: `SPEC.md`, `CONSTRAINTS.md`, `tasks/*`, and `AGENTS.md` (one pointer line).
+- Anything else needs an explicit operator decision.

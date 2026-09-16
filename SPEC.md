@@ -1,66 +1,74 @@
-# SPEC.md — Issue #209: stop loss must be measured from the entry price, not from 0.50
+# SPEC.md — Issue #214: the engine parity harness
 
 ## 1. Problem Statement
 
-In both `strategy/live_trader.py` and `backtest/engine.py`, adverse drift (the excursion that triggers the stop loss) is currently calculated against a hardcoded constant `0.50` base:
-```python
-if mid > 0.50:
-    mstate.max_up_drift = max(mstate.max_up_drift, mid - 0.50)
-elif mid < 0.50:
-    mstate.max_down_drift = max(mstate.max_down_drift, 0.50 - mid)
-```
+`strategy/live_trader.py` and `backtest/engine.py` implement the same strategy twice. They
+share knob *names* through `BacktestParams.param_spec()` (issue #164), which is what makes
+divergence invisible: the dashboard shows one name and one number for two different meanings.
 
-This leads to a catastrophic risk-management defect:
-1. **Premature stop exits**: If an UP leg fills at `0.45`, `0.50 - mid` is already `0.05` at the moment of fill. With the default `exit_thresh = 0.05` (or `exit_thresh_naked`), `max_down_drift >= 0.05` evaluates to `True` immediately on tick 1, exiting the leg before the market has moved a single cent against our entry!
-2. **Asymmetric risk allocation**: A leg filled at `0.50` receives the intended 5 cents of adverse room, while a leg filled at `0.45` gets 0 cents of room, and a leg filled at `0.55` gets 10 cents. The risk per trade becomes an arbitrary artifact of fill location.
-3. **Distorted reversal detection**: Reversal detection checks whether `(0.50 - mid) < exit_reversal` instead of checking whether the market retraced back towards the entry price.
+Three divergences were found by hand in a single afternoon and have since been fixed
+(#204/#217, #206/#218, #207/#219). Nothing in the repo would have caught them, and nothing
+would catch the next one. The rules session of 2026-09-16 then found three more in a few
+hours, the largest being that **the backtest ends a window at the first merge while the live
+engine opens a fresh round**, so the backtest has been under-reporting profit per window.
 
-## 2. Technical Specification & Mathematical Contracts
+## 2. What this issue delivers
 
-### 2.1 Entry-Anchored Adverse Excursion for Live Engine (`strategy/live_trader.py`)
+**The harness, and only the harness.** The strategy rules themselves were redefined in the
+same session and are tracked separately (#224-#233); `docs/engine-decision-rules.md` is their
+definition. This issue builds the machinery that holds both engines to whatever those rules
+say, and seeds it with the cases that are already settled.
 
-- When an UP leg is filled alone (`mstate.filled_up and not mstate.filled_down`):
-  - Reference entry price: `entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else mstate.resting_up`.
-  - If `mstate.mid is not None` and `entry_up is not None`:
-    - `adverse_drift = max(0.0, entry_up - mstate.mid)`
-    - `mstate.max_down_drift = max(mstate.max_down_drift, adverse_drift)`
-    - Reversal detection:
-      `if mstate.max_down_drift >= thresh and (entry_up - mstate.mid) < self.exit_reversal:`
-          `mstate.reversal_seen_down = True`
+- **G1 — A harness.** Given one synthetic book sequence and one parameter set, drive the live
+  decision path and `_simulate_window`, and compare their outcomes on a declared surface.
+- **G2 — Seed scenarios.** The three fixed divergences (#204, #206, #207) and the
+  entry-anchored stop (#209) are pinned so the fixes cannot silently unwind.
+- **G3 — An extension point.** Each rule issue adds its own scenarios to this harness rather
+  than inventing a second way to compare engines.
 
-- When a DOWN leg is filled alone (`mstate.filled_down and not mstate.filled_up`):
-  - Reference entry price: `entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else mstate.resting_down`.
-  - Implied UP mid at entry: `1.0 - entry_dn`.
-  - If `mstate.mid is not None` and `entry_dn is not None`:
-    - `adverse_drift = max(0.0, mstate.mid - (1.0 - entry_dn))`
-    - `mstate.max_up_drift = max(mstate.max_up_drift, adverse_drift)`
-    - Reversal detection:
-      `if mstate.max_up_drift >= thresh and (mstate.mid - (1.0 - entry_dn)) < self.exit_reversal:`
-          `mstate.reversal_seen_up = True`
+## 3. The parity contract
 
-- When neither leg is filled (`not mstate.filled_up and not mstate.filled_down`):
-  - No position is held; `max_up_drift` and `max_down_drift` remain `0.0`.
+**Live `mode="paper"` versus `_simulate_window`.** Live paper mode simulates fills from the
+book and the WebSocket tape; the backtest simulates them from the snapshot and its tape delta.
+Under the single fill rule agreed in #226 these are the same rule, which is what makes the
+comparison meaningful.
 
-- When both legs are filled (`mstate.filled_up and mstate.filled_down`):
-  - The pair is captured; stop loss does not monitor paired positions.
+Until #226 lands, the harness runs against the existing model that matches live paper mode.
+The harness must not hard-code a model name — it reads whatever the fill rule currently is, so
+that #226 changes the engines and not the harness.
 
-### 2.2 Entry-Anchored Adverse Excursion for Backtest Replay (`backtest/engine.py`)
+## 4. Comparable surface
 
-- Maintain `max_up` (`max(mids) - 0.50`) and `max_down` (`0.50 - min(mids)`) purely as window-level oscillation metrics returned in `WindowResult`.
-- Track dedicated position adverse drift:
-  - For UP: `adverse_drift_up` measured from `entry_price_up or resting_up`.
-  - For DOWN: `adverse_drift_down` measured from `1.0 - (entry_price_down or resting_down)`.
-- Trigger stop loss exits when:
-  - `filled_up and not filled_down and adverse_drift_up >= naked_thr`
-  - `filled_down and not filled_up and adverse_drift_down >= naked_thr`
-- Trigger reversal flags when:
-  - `adverse_drift_up >= naked_thr and (entry_price_up - mid) < params.exit_reversal`
-  - `adverse_drift_down >= naked_thr and (mid - (1.0 - entry_price_down)) < params.exit_reversal`
+Parity is asserted on the decision-visible subset of `WindowResult`:
 
-## 3. Acceptance Criteria
+`entered`, `filled_up`, `filled_down`, `entry_price_up`, `entry_price_down`, `pair_captured`,
+`exit_taken`, `exit_side`, `chased_leg`, and the number of completed rounds.
 
-1. A leg filled at `0.45` with `exit_thresh = 0.05` is NOT stopped out at `mid = 0.45`, `mid = 0.43`, or `mid = 0.41`.
-2. Stop loss triggers when `mid` reaches `<= 0.40` for UP (drift `0.45 - 0.40 = 0.05`).
-3. A DOWN leg filled at `0.45` (implied mid `0.55`) with `exit_thresh = 0.05` triggers stop loss only when `mid >= 0.60` (drift `0.60 - 0.55 = 0.05`).
-4. Reversal detection suppresses exit when price moves back to within `exit_reversal` of entry.
-5. All targeted unit tests in `test_live_trader.py` and `test_backtest_engine.py` pass cleanly.
+Explicitly **not** compared: `pnl_cents`, `fees_cents`, `settlement_mid`, `settle_source`,
+`class_label`, `max_up`, `max_down`, `n_snaps` — accounting and classification the live engine
+does not compute per window. Forcing them in would mean building a second P&L model to prove
+the first one.
+
+## 5. Acceptance Criteria
+
+- [ ] `snaps_to_polls` converts a backtest snap sequence into live `poll_data`, tick by tick.
+- [ ] `live_outcome` runs a `LiveTraderEngine(load_persisted=False)` in `mode="paper"` over
+      that sequence and returns the §4 surface.
+- [ ] `assert_parity` runs both engines on the same snaps and the same parameters and fails
+      with a readable diff naming the first field that disagrees and the tick it disagreed on.
+- [ ] Seed scenarios: balanced open through to a merged pair; opening quote anchored to the
+      real mid (#206); pair-cost cap not blocking quoting (#204); unpriceable leg skipping the
+      window (#207); stop anchored to the entry price (#209).
+- [ ] A divergence the harness finds is recorded as `xfail(strict=True)` with an issue number,
+      never fixed here — so the xfail goes stale loudly the day it is fixed.
+- [ ] `tests/test_engine_parity.py` runs in under 5 seconds on synthetic snaps.
+
+## 6. Out of Scope
+
+- **Every strategy rule change.** Tracked in #224-#233 against
+  `docs/engine-decision-rules.md`. This issue changes no behaviour in either engine.
+- **Extracting the shared decision logic into one module.** `_update_market_strategy` is
+  ~1,000 lines entangled with CLOB calls, WebSocket state, engine locks, telemetry and order
+  placement; `_simulate_window` is ~560 pure lines. Deferred by operator decision, with the
+  rules document as the map any future extraction starts from.
+- P&L, fee and settlement parity (see §4).
