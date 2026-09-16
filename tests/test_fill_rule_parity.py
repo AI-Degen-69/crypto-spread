@@ -93,7 +93,32 @@ def test_a_touch_fills_neither_engine():
     assert mstate.filled_up is False
 
 
-# --- 4. the entry itself never pays a fee -----------------------------------
+# --- 4. a quote placed onto a standing ask ----------------------------------
+
+def test_a_quote_placed_onto_a_standing_ask_fills_in_both_engines():
+    """The touch rule protects a quote that had to join the queue. One placed
+    at a price the market is already offering matches on arrival instead, and
+    both engines say so on the tick it is placed."""
+    # A single tick. Both legs are quoted 0.47/0.48, so the two-sided mid is
+    # still 0.50 and both quotes rest at exactly the 0.48 already on offer --
+    # a touch, on the tick they are placed.
+    snaps = [_snap(0.0, 0.47, 0.48, 0.47, 0.48, recorded_mid=0.50)]
+
+    w = _simulate_window(snaps, _params())
+    assert w.filled_up is True and w.filled_down is True
+    assert w.pair_captured is True
+    assert w.entry_price_up == pytest.approx(0.48)
+    assert w.entry_price_down == pytest.approx(0.48)
+
+    # Live pairs on the same tick and immediately re-quotes the next round,
+    # which clears its per-round `filled_*` flags -- so the fill is asserted
+    # where it lands permanently, on the merge count.
+    _engine, mstate = _drive_live(snaps, offset=OFFSET)
+    assert mstate.pairs_count == 1
+    assert round(mstate.realized_pnl_usd, 2) == 0.20
+
+
+# --- 5. the entry itself never pays a fee -----------------------------------
 
 def test_an_entry_fill_adds_no_fee_in_either_engine():
     """Both triggers book the same entry and neither charges for it. The
@@ -105,9 +130,10 @@ def test_an_entry_fill_adds_no_fee_in_either_engine():
     assert by_print.entry_price_up == by_book.entry_price_up
     assert by_print.fees_cents == pytest.approx(by_book.fees_cents)
 
-    # The live engine's realized P&L is gross: it carries a `taker_fee_rate`
-    # of 0.0 and charges nothing anywhere. A filled entry must not be the
-    # thing that changes that.
+    # Live books no fee either. Asserted against the money — a fee deducted
+    # inside the fill branches would move `realized_pnl_usd` without ever
+    # touching the engine's (unused) `taker_fee_rate`.
     engine, mstate = _drive_live(_place_then(0.479), offset=OFFSET)
     assert mstate.filled_up is True
+    assert mstate.realized_pnl_usd == 0.0
     assert engine.taker_fee_rate == 0.0

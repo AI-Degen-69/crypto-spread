@@ -4875,6 +4875,17 @@ class LiveTraderEngine:
             )
             if mstate.status in ("IDLE", "PRE_QUOTING"):
                 mstate.status = "NO_BOOK"
+        # Issue #226: a quote reaching the book on THIS tick is marketable on
+        # arrival -- it matches a standing ask rather than joining the queue
+        # behind one -- so the touch rule does not apply to it. Set where the
+        # order actually transitions to RESTING, not inferred from the
+        # fill-telemetry rest snapshot: that snapshot survives a post-merge
+        # re-quote (`_maybe_requote_after_merge` resets the order fields and
+        # leaves it alone), so round 2+ would have been read as already-resting.
+        placed_now_up = False
+        placed_now_dn = False
+        chased_now_up = False
+        chased_now_dn = False
         if can_place_entry:
             if self.mode == "live":
                 # In live mode, if opposite leg is being chased, cancel existing resting quote so replacement is submitted at chase price
@@ -4891,12 +4902,14 @@ class LiveTraderEngine:
                         mstate.order_id_up = res_up["order_id"]
                         mstate.order_time_up = time.strftime("%H:%M:%S")
                         mstate.order_status_up = "RESTING"
+                        placed_now_up = True
                 if not mstate.order_id_down and mstate.down_token:
                     res_dn = self.place_live_quote(mstate.down_token, resting_down, self.shares, "BUY")
                     if res_dn and res_dn.get("order_id"):
                         mstate.order_id_down = res_dn["order_id"]
                         mstate.order_time_down = time.strftime("%H:%M:%S")
                         mstate.order_status_down = "RESTING"
+                        placed_now_dn = True
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
                 self._finalize_reentry_telemetry(mstate, slug, mid)
@@ -4905,10 +4918,12 @@ class LiveTraderEngine:
                     mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
                     mstate.order_status_up = "RESTING"
                     mstate.order_time_up = mstate.order_time_up if mstate.order_time_up != "-" else time.strftime("%H:%M:%S")
+                    placed_now_up = True
                 if not mstate.filled_down and mstate.order_status_down != "RESTING":
                     mstate.order_id_down = mstate.order_id_down or f"paper_dn_{slug}"
                     mstate.order_status_down = "RESTING"
                     mstate.order_time_down = mstate.order_time_down if mstate.order_time_down != "-" else time.strftime("%H:%M:%S")
+                    placed_now_dn = True
                 if mstate.requote_round > 0:
                     self._finalize_requote_telemetry(mstate, slug, mid)
                 self._finalize_reentry_telemetry(mstate, slug, mid)
@@ -4931,14 +4946,6 @@ class LiveTraderEngine:
                 mstate.last_bids_down = dict(mstate.ws_bids_down)
             elif isinstance(dbook.get("bids"), dict) and dbook["bids"]:
                 mstate.last_bids_down = dict(dbook["bids"])
-        # Issue #226: a quote that is not resting yet is being *placed* on this
-        # tick, so it can be marketable on arrival. One already resting has to
-        # wait for the ask to pass fully through it. Read before the latch below
-        # consumes the distinction.
-        placed_now_up = mstate.rest_up_price is None
-        placed_now_dn = mstate.rest_dn_price is None
-        chased_now_up = False
-        chased_now_dn = False
         if up_active and mstate.rest_up_price is None:
             mstate.rest_up_price = resting_up
             mstate.rest_up_queue = _queue_ahead(mstate.last_bids_up, resting_up)

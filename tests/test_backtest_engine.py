@@ -864,6 +864,12 @@ def test_entry_delay_classifies_full_path():
                                                entry_timeout_pct=0.0))
     assert w.n_snaps == 70
     assert w.class_label == "oscillating"
+    # The fill the marketable-on-placement rule produces, asserted rather than
+    # dropped: the first quote after the delay rests DOWN at 0.53 with the ask
+    # already at 0.49. UP rests at 0.43, under the same ask, and does not fill.
+    assert w.filled_down is True
+    assert w.entry_price_down == pytest.approx(0.53)
+    assert w.filled_up is False
 
 
 def test_adverse_claimed_window_bypasses_band_then_reenters():

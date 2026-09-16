@@ -1138,8 +1138,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # exists. A later cancellation re-opens repricing via
             # `entry_cancelled` in the anchor block above.
             orders_live = True
-        up_prints: list[float] = []
-        dn_prints: list[float] = []
+        # Raw JSON values, not floats: `book_math._as_price` is what decides
+        # whether a recorded price is usable at all.
+        up_prints: list[Any] = []
+        dn_prints: list[Any] = []
         for trade in s.get("tape_delta") or []:
             tasset = str(trade.get("asset", "")).strip()
             if not tasset:

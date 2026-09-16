@@ -61,7 +61,7 @@ def test_live_trader_pair_merge_execution():
     # Initial round 0 quoting at 0.50 mid -> resting bids 0.48 / 0.48
     _open_50_50_quotes(engine, slug, fake_market, now - 1)
 
-    # First poll: resting bids 0.48 / 0.48, ask touches 0.48 on UP
+    # First poll: resting bids 0.48 / 0.48, ask passes through 0.48 on UP
     poll1 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
@@ -73,7 +73,7 @@ def test_live_trader_pair_merge_execution():
     assert mstate.filled_down is False
     assert mstate.status == "FILLED_UP"
 
-    # Second poll: ask touches 0.48 on DOWN -> PAIR MERGE!
+    # Second poll: ask passes through 0.48 on DOWN -> PAIR MERGE!
     poll2 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
@@ -2840,6 +2840,52 @@ def test_requote_after_merge_when_time_remains():
     assert m.pairs_count == 2
     assert round(m.realized_pnl_usd, 2) == 0.40
     assert len([t for t in engine.trades if t.action == "PAIR_MERGE"]) == 2
+
+
+def test_a_requoted_round_is_a_freshly_placed_quote_and_fills_on_a_touch():
+    """Issue #226: round 2's quote is placed, not resting, so it is marketable.
+
+    The touch rule protects a quote that joined the queue and has to wait. A
+    quote placed onto a standing ask matches on arrival with nobody ahead of
+    it, and a post-merge re-quote is exactly that. Review caught the first
+    version reading "is this newly placed?" off the fill-telemetry rest
+    snapshot, which `_maybe_requote_after_merge` does not reset -- so every
+    round after the first was treated as already-resting and needed a full
+    pass-through that round 0 did not.
+
+    Identical to the test above except the round-1 asks merely touch the new
+    anchors instead of passing through them.
+    """
+    engine = _fifteen_minute_engine()
+    engine.enable_leg_chase = False
+    engine.start()
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    m = engine.markets[slug]
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
+    }, now + 1)
+    assert m.pairs_count == 1
+    assert m.requote_round == 1
+
+    # Round 1 rests at 0.50 / 0.46 and both asks sit exactly there.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.50},
+        "down_book": {"best_bid": 0.45, "best_ask": 0.46},
+    }, now + 2)
+    assert m.pairs_count == 2, "a re-quoted round must fill on a touch"
+    assert round(m.realized_pnl_usd, 2) == 0.40
 
 
 def test_requote_dynamic_anchor_math():
