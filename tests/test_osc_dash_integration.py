@@ -442,6 +442,63 @@ def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
 
 
 
+def test_collector_status_large_tick_file_uses_size_estimate(tmp_path, monkeypatch):
+    """Issue #200: large today's tick file uses size//950 estimate, not a full scan."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    today = tmp_path / f"ticks_{time.strftime('%Y-%m-%d', time.gmtime())}.jsonl"
+    # 20 MB + 1 byte would hold ~21052 lines at the 950-bytes/line heuristic.
+    size = 20_000_001
+    today.write_bytes(b"x" * size)
+    called = {}
+    orig = osc_dash._count_lines_fast
+    def _boom(path):
+        called["hit"] = True
+        return orig(path)
+    monkeypatch.setattr(osc_dash, "_count_lines_fast", _boom)
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    assert "hit" not in called, "large tick file must not be fully scanned"
+    assert res.json()["total_ticks_collected"] == int(size / 950)
+    # exactly 20 MB is still estimated
+    today.write_bytes(b"x" * 20_000_000)
+    called.clear()
+    res = client.get("/api/collector/status")
+    assert "hit" not in called
+    assert res.json()["total_ticks_collected"] == int(20_000_000 / 950)
+
+
+def test_refresh_collector_status_no_empty_catch():
+    """Issue #200: refreshCollectorStatus must not swallow failures with an empty catch."""
+    html = client.get("/").text
+    # The function must not contain an empty catch block
+    import re
+    m = re.search(r"async function refreshCollectorStatus\(\)\{.*?\n\}", html, re.DOTALL)
+    assert m is not None
+    block = m.group(0)
+    assert "}catch{}" not in block and "} catch{}" not in block, "empty catch must be gone"
+    assert "}catch {}" not in block and "} catch {}" not in block
+    # It must log the failure visibly
+    assert "console.warn" in block or "console.error" in block or "console.log" in block
+
+
+def test_menu_collector_status_includes_failure_reason():
+    """Issue #200: menu collector status failure must interpolate the real exception."""
+    text = Path("scripts/crypto-spread-menu.ps1").read_text(encoding="utf-8")
+    # Collector block must include $_ like the Trading Engine block does
+    assert 'Csm-Warn "Collector: Could not query /api/collector/status ($_)"' in text
+    # Static-only string without $_ must be gone (every occurrence carries ($_) )
+    bare = text.count('Collector: Could not query /api/collector/status')
+    interp = text.count('Collector: Could not query /api/collector/status ($_)')
+    assert bare == interp and interp >= 1, "bare collector warning without $_ must be removed"
+    # Timeout must be generous enough for a large-file estimate (not the old 3s)
+    import re
+    collector_timeout = re.search(
+        r'Invoke-RestMethod -Uri "\$DashUrl/api/collector/status".*?TimeoutSec (\d+)', text, re.DOTALL)
+    assert collector_timeout is not None
+    assert int(collector_timeout.group(1)) >= 5
+
+
 def test_collector_status_external_only(tmp_path, monkeypatch):
     """Issue #151: fresh manifest + no dashboard child => source external."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)

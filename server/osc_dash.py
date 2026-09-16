@@ -1050,13 +1050,22 @@ def api_collector_status():
     """Return status of the background tick collector, today's ticks, and tape empty-rate health."""
     global _collector_proc
     running = _collector_proc is not None and _collector_proc.poll() is None
-    # Count total tick lines collected today
+    # Count total tick lines collected today -- cheap on large files (same
+    # 20 MB / 950-bytes heuristic as api_ticks_manifest) so a growing tick
+    # file cannot make status exceed the menu's timeout (issue #200).
     today_ticks = 0
     today_file = (
         TICKS_DIR / f"ticks_{time.strftime('%Y-%m-%d', time.gmtime())}.jsonl"
     )
     if today_file.exists():
-        today_ticks = _count_lines_fast(today_file)
+        try:
+            sz = today_file.stat().st_size
+            if sz >= 20_000_000:
+                today_ticks = int(sz / 950)
+            else:
+                today_ticks = _count_lines_fast(today_file)
+        except Exception:
+            today_ticks = 0
 
     tape_empty_rate = None
     tape_recent_empty_rate = None
@@ -3708,7 +3717,7 @@ async function refreshCollectorStatus(){
         tb.textContent = 'Tape: -';
       }
     }
-  }catch{}
+  }catch(e){ console.warn('refreshCollectorStatus failed', e); }
 }
 
 async function toggleCollector(){
