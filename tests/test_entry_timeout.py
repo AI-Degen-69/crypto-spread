@@ -299,7 +299,7 @@ def test_live_trader_keeps_opposite_leg_open_if_one_filled_before_timeout():
     # Tick 1: at t=1010s, UP ask drops to 0.48 -> UP fills!
     poll_1 = {
         "market": mkt,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.49, "best_ask": 0.52},
     }
     engine._update_market_strategy(slug, poll_1, now=1010.0)
@@ -323,7 +323,7 @@ def test_live_trader_keeps_opposite_leg_open_if_one_filled_before_timeout():
     poll_3 = {
         "market": mkt,
         "up_book": {"best_bid": 0.47, "best_ask": 0.49},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }
     engine._update_market_strategy(slug, poll_3, now=1050.0)
     assert mstate.filled_down is True

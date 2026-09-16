@@ -173,21 +173,21 @@ def test_pair_merge_blocked_when_stop_cancel_fails():
     engine._clob_client = fake_client
 
     # UP fill -> stop staged -> force it onto the book so cancellation matters
-    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.47, 0.48, 0.51, 0.52), now)
+    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.47, 0.479, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     mstate.stop_order_id = "ord_stop_resting"
     mstate.stop_order_status = "RESTING"
 
     # DOWN fills -> merge attempted -> stop cancel fails -> merge deferred
     with patch.object(engine, "cancel_live_order", return_value=False):
-        engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.48), now + 1)
+        engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.479), now + 1)
     assert mstate.pair_captured is False
     assert mstate.last_action == "Pair merge deferred: stop-loss cancellation failed"
     assert mstate.stop_order_id == "ord_stop_resting"
     assert mstate.stop_order_status == "CANCEL_FAILED"
 
     # Retry with a successful cancel -> merge proceeds and stop clears
-    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.48), now + 2)
+    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.479), now + 2)
     assert mstate.pair_captured is True
     assert mstate.status == "PAIR_MERGED"
     assert mstate.stop_order_id is None
@@ -219,7 +219,7 @@ def test_paper_stop_fills_on_bid_touch():
 
     _open_50_50_quotes(engine, SLUG, market, now - 1)
     # UP fills at 0.48 -> stop staged at 0.43
-    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.479, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
 
@@ -360,7 +360,7 @@ def test_single_leg_fill_places_stop_paper():
     market = _fake_market(now)
 
     _open_50_50_quotes(engine, SLUG, market, now - 1)
-    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.479, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
 
     assert mstate.filled_up is True
@@ -407,14 +407,14 @@ def test_pair_completion_cancels_stop_live():
     engine._clob_client = fake_client
 
     # UP leg fills live -> stop protection staged as zero-latency buffer
-    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.47, 0.48, 0.51, 0.52), now)
+    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.47, 0.479, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     assert mstate.filled_up is True
     assert mstate.stop_order_id == f"buffer_stop_{SLUG}"
     assert mstate.stop_order_status == "STAGED"
 
     # DOWN leg fills -> pair complete -> staged stop must be cleared (no venue call)
-    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.48), now + 1)
+    engine._update_market_strategy(SLUG, _poll(_fake_market(now), 0.51, 0.52, 0.47, 0.479), now + 1)
     assert mstate.pair_captured is True
     assert mstate.status == "PAIR_MERGED"
     assert mstate.stop_order_id is None
@@ -431,11 +431,11 @@ def test_pair_completion_clears_stop_paper():
     market = _fake_market(now)
 
     _open_50_50_quotes(engine, SLUG, market, now - 1)
-    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.479, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
 
-    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now + 1)
+    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.479), now + 1)
     assert mstate.pair_captured is True
     assert mstate.status == "PAIR_MERGED"
     assert mstate.stop_order_id is None
@@ -452,7 +452,7 @@ def test_stop_fill_triggers_stop_exit_paper():
 
     # UP leg fills at 0.48; stop staged at 0.43
     _open_50_50_quotes(engine, SLUG, market, now - 1)
-    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.48, 0.51, 0.52), now)
+    engine._update_market_strategy(SLUG, _poll(market, 0.47, 0.479, 0.51, 0.52), now)
     mstate = engine.markets[SLUG]
     assert mstate.stop_order_id == f"paper_stop_{SLUG}"
     assert mstate.order_status_down == "RESTING"
@@ -484,7 +484,7 @@ def test_stop_fill_triggers_stop_exit_down_paper():
 
     # DOWN leg fills at 0.48; stop staged at 0.45 (down_ask is 0.48 so DOWN fills)
     _open_50_50_quotes(engine, SLUG, market, now - 1)
-    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now)
+    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.479), now)
     mstate = engine.markets[SLUG]
     assert mstate.filled_down is True
     assert mstate.stop_side == "DOWN"
@@ -493,7 +493,7 @@ def test_stop_fill_triggers_stop_exit_down_paper():
     assert mstate.order_status_up == "RESTING"
 
     # Next tick: down_bid is 0.47 (above 0.45). Stop must NOT trigger!
-    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.48), now + 1)
+    engine._update_market_strategy(SLUG, _poll(market, 0.51, 0.52, 0.47, 0.479), now + 1)
     assert mstate.exit_taken is False
     assert mstate.status == "FILLED_DOWN"
     assert mstate.order_status_up == "RESTING"

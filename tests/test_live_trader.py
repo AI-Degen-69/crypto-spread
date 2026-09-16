@@ -64,7 +64,7 @@ def test_live_trader_pair_merge_execution():
     # First poll: resting bids 0.48 / 0.48, ask touches 0.48 on UP
     poll1 = {
         "market": fake_market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }
     engine._update_market_strategy(slug, poll1, now)
@@ -77,7 +77,7 @@ def test_live_trader_pair_merge_execution():
     poll2 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }
     engine._update_market_strategy(slug, poll2, now + 1)
     assert mstate.filled_down is True
@@ -258,7 +258,7 @@ def test_live_trader_stop_loss_exit():
     # Fill UP at 0.48
     poll1 = {
         "market": fake_market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }
     engine._update_market_strategy(slug, poll1, now)
@@ -2811,14 +2811,14 @@ def test_requote_after_merge_when_time_remains():
     # Round 0 fills at the static 0.48 / 0.48 anchor.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     assert m.filled_up is True
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     assert m.pairs_count == 1
     assert round(m.realized_pnl_usd, 2) == 0.20
@@ -2834,8 +2834,8 @@ def test_requote_after_merge_when_time_remains():
     # Round 1 completes into a second merge; PnL is cumulative.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.49, "best_ask": 0.50},
-        "down_book": {"best_bid": 0.45, "best_ask": 0.46},
+        "up_book": {"best_bid": 0.49, "best_ask": 0.499},
+        "down_book": {"best_bid": 0.45, "best_ask": 0.459},
     }, now + 2)
     assert m.pairs_count == 2
     assert round(m.realized_pnl_usd, 2) == 0.40
@@ -2863,7 +2863,7 @@ def test_requote_dynamic_anchor_math():
     # Skewed books (mid 0.60) whose asks still touch the 0.48 static anchor.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.27, "best_ask": 0.28},
     }, now + 1)
     assert m.pairs_count == 1
@@ -3035,13 +3035,13 @@ def test_no_requote_when_time_short():
     m = engine.markets[slug]
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     assert m.pairs_count == 1
     assert m.pair_captured is True
@@ -3051,8 +3051,8 @@ def test_no_requote_when_time_short():
     # Touching books afterwards must not open a new round.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 2)
     assert m.pairs_count == 1
     assert m.requote_round == 0
@@ -3069,7 +3069,7 @@ def test_no_requote_after_stop_exit():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     m = engine.markets[slug]
@@ -3086,8 +3086,8 @@ def test_no_requote_after_stop_exit():
 
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 2)
     assert m.requote_round == 0
     assert m.pairs_count == 0
@@ -3104,13 +3104,13 @@ def test_requote_telemetry_recorded():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     m = engine.markets[slug]
     assert m.requote_round == 1
@@ -3163,13 +3163,13 @@ def test_requote_boundary_time_remaining_equals_gate():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     m = engine.markets[slug]
     assert m.pairs_count == 1
@@ -3182,13 +3182,13 @@ def test_requote_boundary_time_remaining_equals_gate():
     _open_50_50_quotes(engine2, slug, market2, now2 - 1)
     engine2._update_market_strategy(slug, {
         "market": market2,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now2)
     engine2._update_market_strategy(slug, {
         "market": market2,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now2 + 1)
     m2 = engine2.markets[slug]
     assert m2.pairs_count == 1
@@ -3213,13 +3213,13 @@ def test_min_requote_remaining_sec_zero_disables():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     m = engine.markets[slug]
     assert m.pairs_count == 1
@@ -3238,13 +3238,13 @@ def test_rollover_resets_requote_round():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     m = engine.markets[slug]
     assert m.requote_round == 1
@@ -3318,7 +3318,7 @@ def test_naked_leg_stops_at_exit_thresh_naked():
     # Fill UP at 0.48
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     m = engine.markets[slug]
@@ -3348,13 +3348,13 @@ def test_paired_position_not_stopped_by_naked_threshold():
     # Fill UP, then DOWN -> PAIR_MERGED immediately (0.48 + 0.48)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     m = engine.markets[slug]
     assert m.pair_captured is True
@@ -3374,7 +3374,7 @@ def test_naked_timeout_force_exits_unpaired_leg():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     m = engine.markets[slug]
@@ -3384,7 +3384,7 @@ def test_naked_timeout_force_exits_unpaired_leg():
     # 70% of 300s = 210s after the fill, no drift beyond the stop: timeout fires.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now + 211.0)
     assert m.exit_taken is True
@@ -3402,7 +3402,7 @@ def test_naked_timeout_not_fired_before_horizon_or_disabled():
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now)
     m = engine.markets[slug]
@@ -3410,7 +3410,7 @@ def test_naked_timeout_not_fired_before_horizon_or_disabled():
     # 60s after the fill: well inside the 210s horizon.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now + 60.0)
     assert m.exit_taken is False
@@ -3419,7 +3419,7 @@ def test_naked_timeout_not_fired_before_horizon_or_disabled():
     engine.naked_leg_timeout_pct = 0.0
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now + 400.0)
     assert m.exit_taken is False
@@ -3525,7 +3525,7 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
     # DOWN quote steps up to min(0.51, 0.50) = 0.50, so it does NOT cross 0.51.
     poll1 = {
         "market": fake_market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.49, "best_ask": 0.51},
     }
     engine._update_market_strategy(slug, poll1, now)
@@ -3540,7 +3540,7 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
     poll2 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.48, "best_ask": 0.50},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.50},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.499},
     }
     engine._update_market_strategy(slug, poll2, now + 1)
     assert mstate.filled_down is True
@@ -3579,7 +3579,7 @@ def test_leg_chase_symmetric_down_first(monkeypatch):
     poll1 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.48, "best_ask": 0.49},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }
     engine._update_market_strategy(slug, poll1, now)
     mstate = engine.markets[slug]
@@ -3615,7 +3615,7 @@ def test_leg_chase_disabled_or_both_filled(monkeypatch):
     _open_50_50_quotes(engine, slug, fake_market, now - 1)
     poll1 = {
         "market": fake_market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.48},
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.49, "best_ask": 0.50},
     }
     engine._update_market_strategy(slug, poll1, now)
