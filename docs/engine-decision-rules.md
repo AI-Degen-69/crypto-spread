@@ -37,7 +37,7 @@ Known instances and their status:
 | `0.50` for an unpriceable leg | live `two_sided_mid_with_default` | fixed, #207 |
 | `0.50` for the entry anchor | live entry quoting | fixed, #206 |
 | `0.40` for the stop exit price | `live_trader.py:1735` | removed, rule 2 |
-| `0.50` for the re-entry mid | `live_trader.py:4744` | **open** |
+| `0.50` for the re-entry mid | `live_trader.py:4744` | removed, rule 6 / #228 |
 | window length guessed from the slug (`"15m" -> 900s`) | `live_trader.py:4483`, `:2628` | **open** |
 | elapsed seconds taken from the snapshot index | `backtest/engine.py:769` | **open** |
 
@@ -291,9 +291,10 @@ An instance of **Invariant 0**.
 **Action.** No quote is placed on **either** leg. The window waits and is re-evaluated on the
 next tick. Nothing is latched: this is a transient condition, not a skip decision.
 
-**Never** substitute a value for the unpriceable leg. Reporting a fabricated `0.50` tells the
-adverse-open gate the market is perfectly balanced when in truth nothing was priced at all —
-the gate exists to catch exactly that, and the substitution is what blinds it (issue #207).
+**Never** substitute a value for the unpriceable leg. Reporting a fabricated `0.50` told the
+historical adverse-open gate (deleted in #228, replaced by rule 6 `quote_range`) the market was
+perfectly balanced when in truth nothing was priced at all — the gate existed to catch exactly
+that, and the substitution is what blinded it (issue #207).
 ## 6. `quote_range` — which prices may be quoted at all  *(agreed 2026-09-16)*
 
 **Replaces both `entry_band` (issue #213) and `adverse_open` (issue #208), which are deleted.**

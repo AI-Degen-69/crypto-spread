@@ -9,4 +9,4 @@ Branch: `fix/quote-range-228`. Plan: `tasks/plan.md`. Spec: `SPEC.md`.
 - [x] **T4** `[API/Dashboard]` Band inputs → lo/hi range inputs, both tabs + query keys
 - [x] **T5** `[Backend/CLI]` Scripts + sims rename; `patient_band_maker` preset + its test file deleted
 - [x] **T6** `[Test]` Remove band/adverse/re-entry tests with the behaviour (folded per-file into T1/T2/T4/T5)
-- [ ] **T7** `[Docs]` Mark the surfaces that still describe the gates
+- [x] **T7** `[Docs]` Mark the surfaces that still describe the gates

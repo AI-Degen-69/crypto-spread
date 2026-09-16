@@ -122,7 +122,7 @@ everything else is a rename. Fold into T1/T2/T4/T5 per file (the #227 pattern:
 one pass per file keeps every commit green) rather than running last.
 **Verify**: the full targeted set from `CONSTRAINTS.md`.
 
-### [ ] T7 — `[Docs]` Surfaces that still describe the gates
+### [x] T7 — `[Docs]` Surfaces that still describe the gates
 **Files**: `docs/engine-decision-rules.md` §5 (`adverse-open` gate — now
 historical, mark it), `:523` (flag paragraph), `docs/operations.md` (band
 references), `AGENTS.md` (`/api/backtest` query list), research finding docs
