@@ -4452,20 +4452,32 @@ class LiveTraderEngine:
         else:
             mstate.chased_leg = None
 
-        # --- DRIFT TRACKING (vs 0.50 base) ---
+        # --- DRIFT TRACKING (vs entry price) ---
         # Issue #207: only track drift against a genuine two-sided mid, never a fabricated 0.50.
+        # Issue #209: measure adverse excursion and reversal from the actual entry price
+        # (fill_price_up / fill_price_down, falling back to resting_up / resting_down),
+        # not from a static 0.50 anchor. While no position is filled, position drift remains 0.0.
+        # Excursions are rounded to 6dp: prices are cents, and the raw subtraction
+        # (0.45 - 0.40 == 0.04999999999999999) would sit a hair under an exactly
+        # equal threshold and silently skip the stop.
         if mstate.mid is not None:
             mid = mstate.mid
-            if mid > 0.50:
-                mstate.max_up_drift = max(mstate.max_up_drift, mid - 0.50)
-            elif mid < 0.50:
-                mstate.max_down_drift = max(mstate.max_down_drift, 0.50 - mid)
-
-            # Reversal detection: mid retraced back towards 0.50
-            if mstate.max_down_drift >= self.exit_thresh and (0.50 - mid) < self.exit_reversal:
-                mstate.reversal_seen_down = True
-            if mstate.max_up_drift >= self.exit_thresh and (mid - 0.50) < self.exit_reversal:
-                mstate.reversal_seen_up = True
+            if mstate.filled_up and not mstate.filled_down:
+                entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                if entry_up is not None:
+                    excursion_down = round(entry_up - mid, 6)
+                    mstate.max_down_drift = max(mstate.max_down_drift, excursion_down)
+                    # Reversal detection: mid retraced back towards entry price
+                    if mstate.max_down_drift >= self._naked_exit_thresh() and excursion_down < self.exit_reversal:
+                        mstate.reversal_seen_down = True
+            elif mstate.filled_down and not mstate.filled_up:
+                entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                if entry_dn is not None:
+                    excursion_up = round(mid - (1.0 - entry_dn), 6)
+                    mstate.max_up_drift = max(mstate.max_up_drift, excursion_up)
+                    # Reversal detection: mid retraced back towards entry price
+                    if mstate.max_up_drift >= self._naked_exit_thresh() and excursion_up < self.exit_reversal:
+                        mstate.reversal_seen_up = True
 
         # Determine window duration & elapsed time (Issue #48)
         win_duration = (mstate.end_ts - mstate.start_ts) if (mstate.end_ts > mstate.start_ts) else (900.0 if "15m" in slug else 300.0)

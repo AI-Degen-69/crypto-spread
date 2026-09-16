@@ -896,11 +896,11 @@ def test_reentry_deferred_until_delay_expiry():
 # Issue #164: stop_loss_enabled — mirrors LiveTraderEngine
 # ===========================================================================
 
-def _drift_window(start_ts=1_760_000_000.0, duration=300):
+def _drift_window(start_ts=1_760_000_000.0, duration=300, mids=None):
     """One window where UP fills, then the mid drifts down past any stop."""
     snaps = []
     # tick 0: both sides quotable at 0.50, nothing filled yet
-    mids = [0.50, 0.50, 0.42, 0.38, 0.35, 0.33]
+    mids = mids or [0.50, 0.50, 0.42, 0.38, 0.35, 0.33]
     for i, m in enumerate(mids):
         up_bid, up_ask = round(m - 0.01, 3), round(m + 0.01, 3)
         dn_bid, dn_ask = round(1 - m - 0.01, 3), round(1 - m + 0.01, 3)
@@ -1058,9 +1058,15 @@ def test_naked_stop_may_tighten_the_paired_stop_but_never_loosen_it():
 
 
 def test_a_tighter_naked_stop_exits_a_drift_the_paired_stop_would_ride():
-    """The knob has to reach the exit comparison, not just the helper."""
-    wide = _simulate_window(_drift_window(), _params())
-    tight = _simulate_window(_drift_window(), _params(exit_thresh_naked=0.02))
+    """The knob has to reach the exit comparison, not just the helper.
+
+    UP enters at 0.48, so (issue #209) the 0.02 naked stop is reached at mid
+    0.46 and the 0.05 paired stop only at 0.43. The 0.45 tick sits between the
+    two: the tighter stop exits there, the wider one rides on to 0.38.
+    """
+    mids = [0.50, 0.50, 0.45, 0.38, 0.35, 0.33]
+    wide = _simulate_window(_drift_window(mids=mids), _params())
+    tight = _simulate_window(_drift_window(mids=mids), _params(exit_thresh_naked=0.02))
     assert wide.exit_taken and tight.exit_taken
     assert tight.exit_price > wide.exit_price, (
         "the tighter naked stop should have exited earlier, at a better bid")
@@ -1775,3 +1781,86 @@ def test_every_declared_settlement_source_is_reachable_and_tested():
         )
     }
     assert produced == set(SETTLE_SOURCES)
+
+
+# ===========================================================================
+# Issue #209: stop loss is measured from the entry price, not from 0.50
+# ===========================================================================
+
+def _anchored_window(mids, start_ts=1_760_000_000.0, duration=300):
+    """One window of plain two-sided books, one cent either side of each mid.
+
+    With `offset=0.05` the tick-0 anchor of 0.50 rests both legs at 0.45, so the
+    leg whose ask reaches 0.45 fills there and the rest of `mids` is the move
+    the filled leg has to survive.
+    """
+    snaps = []
+    for i, m in enumerate(mids):
+        up_bid, up_ask = round(m - 0.01, 3), round(m + 0.01, 3)
+        dn_bid, dn_ask = round(1 - m - 0.01, 3), round(1 - m + 0.01, 3)
+        snaps.append({
+            "ts": start_ts + i, "cid": "0x209", "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m", "start_ts": start_ts,
+            "end_ts": start_ts + duration, "duration": duration, "mid": m,
+            "up_book": {"best_bid": up_bid, "best_ask": up_ask,
+                        "bids": {str(up_bid): 500.0}, "asks": {str(up_ask): 500.0}},
+            "down_book": {"best_bid": dn_bid, "best_ask": dn_ask,
+                          "bids": {str(dn_bid): 500.0}, "asks": {str(dn_ask): 500.0}},
+            "tape_delta": [],
+        })
+    return snaps
+
+
+def test_backtest_stop_loss_anchored_to_entry_price_up():
+    """UP filled at 0.45 with exit_thresh 0.05 survives mid 0.42 and stops at 0.40."""
+    snaps = _anchored_window([0.50, 0.44, 0.42, 0.40])
+    w = _simulate_window(snaps, _params(offset=0.05))
+    assert w.filled_up is True
+    assert w.entry_price_up == pytest.approx(0.45, abs=1e-6)
+    assert w.exit_taken is True
+    assert w.exit_side == "up"
+    # Anchored on the 0.45 entry the stop waits for mid 0.40 (excursion 0.05);
+    # anchored on 0.50 it fired on the fill tick itself, at mid 0.44.
+    assert w.exit_price == pytest.approx(0.39, abs=1e-6)
+
+
+def test_backtest_stop_loss_anchored_to_entry_price_down():
+    """DOWN filled at 0.45 (implied mid 0.55) survives mid 0.58 and stops at 0.60."""
+    snaps = _anchored_window([0.50, 0.56, 0.58, 0.60])
+    w = _simulate_window(snaps, _params(offset=0.05))
+    assert w.filled_down is True
+    assert w.entry_price_down == pytest.approx(0.45, abs=1e-6)
+    assert w.exit_taken is True
+    assert w.exit_side == "down"
+    assert w.exit_price == pytest.approx(0.39, abs=1e-6)
+
+
+def test_backtest_window_range_metrics_stay_anchored_to_050():
+    """Position risk moves to the entry price; window oscillation stats do not.
+
+    `max_up` / `max_down` classify the window's range and feed the dashboard, so
+    they keep measuring from 0.50 even though the stop no longer does.
+    """
+    w = _simulate_window(_anchored_window([0.50, 0.44, 0.42, 0.40]),
+                         _params(offset=0.05))
+    assert w.max_down == pytest.approx(0.10, abs=1e-6)
+    assert w.max_up == pytest.approx(0.0, abs=1e-6)
+
+
+def test_backtest_stop_loss_anchored_to_an_entry_above_050():
+    """A leg filled above 0.50 was under-protected, the mirror of the #209 bug.
+
+    The old anchor only counted a down excursion once the mid was below 0.50, so
+    an UP leg entered at 0.55 could lose five cents on the way down to 0.50 with
+    `max_down` still reading 0.00 and the stop never arming. `entry_delay_sec`
+    anchors the quotes on the 0.60 tick, which is what rests UP at 0.55.
+    """
+    snaps = _anchored_window([0.50, 0.50, 0.60, 0.54, 0.52, 0.50])
+    w = _simulate_window(snaps, _params(offset=0.05, entry_delay_sec=2.0))
+    assert w.filled_up is True
+    assert w.filled_down is False
+    assert w.entry_price_up == pytest.approx(0.55, abs=1e-6)
+    # Excursion reaches 0.05 at mid 0.50, where the old code still had 0.00.
+    assert w.exit_taken is True
+    assert w.exit_side == "up"
+    assert w.exit_price == pytest.approx(0.49, abs=1e-6)

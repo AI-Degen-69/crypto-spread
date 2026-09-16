@@ -696,7 +696,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     mids: list[float] = []
     max_up = 0.0
     max_down = 0.0
-    reversal_seen_up = False          # mid came back toward 0.50 after excursion
+    # Window range (max_up / max_down, measured from 0.50) classifies the
+    # window and feeds the dashboard's oscillation stats. Position risk is a
+    # different quantity: the adverse excursion of a filled leg, measured from
+    # the price that leg actually entered at (issue #209). Keeping the two
+    # apart leaves the historical range metrics untouched while the stop and
+    # the reversal latch follow the position.
+    adverse_drift_up = 0.0            # mid above a filled DOWN leg's entry
+    adverse_drift_down = 0.0          # mid below a filled UP leg's entry
+    reversal_seen_up = False          # mid came back toward the entry after excursion
     reversal_seen_down = False
     pnl_cents = 0.0
     fees_cents = 0.0
@@ -796,11 +804,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         if 0.50 - mid > max_down:
             max_down = 0.50 - mid
 
-        # "reversal_seen_<side>" = mid has come back toward 0.50 after exceeding
-        # exit_thr on the adverse side -- the current drift is no longer
-        # monotonic, so don't exit. E.g. if max_down >= exit_thr and then mid
-        # is now back within exit_reversal of 0.50, the down excursion was a
-        # round-trip and the adverse drift is no longer sustained.
+        # Position excursion, measured from the filled leg's own entry price
+        # (issue #209). Rounded to 6dp because the raw subtraction
+        # (0.45 - 0.40 == 0.04999999999999999) sits a hair under an exactly
+        # equal threshold and would silently skip the stop. With no leg filled
+        # there is no position to stop out, so both stay at 0.0.
+        #
+        # "reversal_seen_<side>" = mid has come back toward the entry after
+        # exceeding exit_thr on the adverse side -- the current drift is no
+        # longer monotonic, so don't exit. E.g. if the down excursion passed
+        # the threshold and the mid is now back within exit_reversal of the
+        # entry, it was a round-trip and the adverse drift is not sustained.
+        #
         # Latched against `naked_thr`, not `exit_thr`, because every one of the
         # four exit sites below requires exactly one leg filled — they are all
         # naked exits, so the threshold that governs them is the one that must
@@ -810,10 +825,20 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # exit then fired on the stale drift because the latch was still waiting
         # for the looser paired threshold. `naked_thr` equals `exit_thr` unless
         # `exit_thresh_naked` tightens it, so the default path is unchanged.
-        if max_down >= naked_thr and (0.50 - mid) < params.exit_reversal:
-            reversal_seen_down = True
-        if max_up >= naked_thr and (mid - 0.50) < params.exit_reversal:
-            reversal_seen_up = True
+        if filled_up and not filled_down:
+            _entry_up = entry_price_up if entry_price_up is not None else resting_up
+            if _entry_up is not None:
+                _excursion_down = round(_entry_up - mid, 6)
+                adverse_drift_down = max(adverse_drift_down, _excursion_down)
+                if adverse_drift_down >= naked_thr and _excursion_down < params.exit_reversal:
+                    reversal_seen_down = True
+        elif filled_down and not filled_up:
+            _entry_dn = entry_price_down if entry_price_down is not None else resting_down
+            if _entry_dn is not None:
+                _excursion_up = round(mid - (1.0 - _entry_dn), 6)
+                adverse_drift_up = max(adverse_drift_up, _excursion_up)
+                if adverse_drift_up >= naked_thr and _excursion_up < params.exit_reversal:
+                    reversal_seen_up = True
 
         # Adverse-open gate (issue #92): evaluated once per window against the
         # first snapshot quoting two sides on both legs, so backtest and live
@@ -993,7 +1018,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # detection and pair completion run — costing the leg its chance to
             # pair on a tick where it could have.
             if (params.stop_loss_enabled
-                    and filled_up and not filled_down and max_down >= exit_thr
+                    and filled_up and not filled_down and adverse_drift_down >= exit_thr
                     and not reversal_seen_down and not exit_taken):
                 bb_up = ub.get("best_bid")
                 if bb_up is not None:
@@ -1004,7 +1029,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                     fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                     break
             if (params.stop_loss_enabled
-                    and filled_down and not filled_up and max_up >= exit_thr
+                    and filled_down and not filled_up and adverse_drift_up >= exit_thr
                     and not reversal_seen_up and not exit_taken):
                 bb_dn = db.get("best_bid")
                 if bb_dn is not None:
@@ -1115,7 +1140,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # tick is the exit tick (otherwise the flag toggles the same tick and
         # the exit is suppressed).
         if (params.stop_loss_enabled
-                and filled_up and not filled_down and max_down >= naked_thr
+                and filled_up and not filled_down and adverse_drift_down >= naked_thr
                 and not reversal_seen_down and not exit_taken):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
@@ -1126,7 +1151,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
         if (params.stop_loss_enabled
-                and filled_down and not filled_up and max_up >= naked_thr
+                and filled_down and not filled_up and adverse_drift_up >= naked_thr
                 and not reversal_seen_up and not exit_taken):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:
