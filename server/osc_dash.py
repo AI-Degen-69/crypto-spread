@@ -2166,6 +2166,12 @@ textarea:focus-visible,
 .btn-danger:hover{background:rgba(240,104,77,.3)}
 .form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
+/* Issue #201: the stop-loss thresholds are one toggled group in the markup but
+   must stay direct children of .form-grid, or the wrapper collapses into a
+   single grid cell. display:contents keeps the layout identical; the [hidden]
+   rule is required because the id selector would otherwise outrank the UA one. */
+#btStopLossFields{display:contents}
+#btStopLossFields[hidden]{display:none}
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
 .form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
@@ -2411,20 +2417,34 @@ textarea:focus-visible,
               <input type="number" step="0.005" id="btPairCost" data-param="pair_cost_gate" value="1.05" disabled style="opacity:0.45">
             </div>
             <div class="form-group">
-              <label>Exit Stop Loss 5m ($)</label>
-              <input type="number" step="0.01" id="btExit5m" value="0.05">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <label data-param-label="stop_loss_enabled"></label>
+                <label class="toggle-wrap" title="Turn every stop-loss threshold on or off">
+                  <span id="btStopLossToggleLabel" class="mono" style="font-size:10px;font-weight:700;color:var(--up)">ON</span>
+                  <div class="toggle-switch">
+                    <input type="checkbox" id="btStopLossEnabled" data-param="stop_loss_enabled" checked onchange="toggleStopLossInputs()">
+                    <span class="toggle-slider"></span>
+                  </div>
+                </label>
+              </div>
             </div>
-            <div class="form-group">
-              <label>Exit Stop Loss 15m ($)</label>
-              <input type="number" step="0.01" id="btExit15m" value="0.05">
-            </div>
-            <div class="form-group">
-              <label>BTC 5m Stop Loss ($)</label>
-              <input type="number" step="0.01" id="btExitBtc" value="0.05">
-            </div>
-            <div class="form-group">
-              <label>SOL 5m Stop Loss ($)</label>
-              <input type="number" step="0.01" id="btExitSol" value="0.05">
+            <div id="btStopLossFields">
+              <div class="form-group">
+                <label>Exit Stop Loss 5m ($)</label>
+                <input type="number" step="0.01" id="btExit5m" value="0.05">
+              </div>
+              <div class="form-group">
+                <label>Exit Stop Loss 15m ($)</label>
+                <input type="number" step="0.01" id="btExit15m" value="0.05">
+              </div>
+              <div class="form-group">
+                <label>BTC 5m Stop Loss ($)</label>
+                <input type="number" step="0.01" id="btExitBtc" value="0.05">
+              </div>
+              <div class="form-group">
+                <label>SOL 5m Stop Loss ($)</label>
+                <input type="number" step="0.01" id="btExitSol" value="0.05">
+              </div>
             </div>
             <div class="form-group">
               <label data-param-label="quote_shares"></label>
@@ -2457,13 +2477,6 @@ textarea:focus-visible,
             <div class="form-group">
               <label data-param-label="naked_leg_timeout_pct"></label>
               <input type="number" min="0" max="1" step="0.05" id="btNakedTimeout" data-param="naked_leg_timeout_pct" value="0">
-            </div>
-            <div class="form-group">
-              <label data-param-label="stop_loss_enabled"></label>
-              <select id="btStopLossEnabled" data-param="stop_loss_enabled">
-                <option value="1" selected>On — stop out an adverse naked leg</option>
-                <option value="0">Off — hold to settlement (patient_band_maker)</option>
-              </select>
             </div>
             <div class="form-group">
               <label data-param-label="enable_leg_chase"></label>
