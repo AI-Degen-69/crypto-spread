@@ -1,22 +1,31 @@
-# CONSTRAINTS — Issue #197: Interactive Column Header Sorting
+# CONSTRAINTS — Issue #205: Verify the fill-rate gap against the unified fill rule
+
+## Scope Lock (read first)
+1. **Verification only — no engine changes.** `backtest/engine.py`, `strategy/book_math.py`,
+   and `strategy/live_trader.py` must not be modified. ADR-0002 (issue #226) already resolved
+   the structural question; this issue measures whether the numbers agree. If the measurement
+   exposes a suspected code bug, **stop and re-plan** — do not fix silently inside a
+   verification issue.
+2. **No fabrication of results.** Every number published on the issue comes from an actual run
+   against `run/ticks/ticks_2026-09-13.jsonl` (or its stated replacement). No hand-computed
+   placeholders, no copying numbers from the issue body or ADR into the results table.
 
 ## Quality Guardrails
-1. **Zero Regressions**:
-   - All 33 existing tests in `tests/test_orders_trades_table.py` must continue to pass without modification or regression.
-   - All existing dashboard pages and endpoints (`/`, `/api/live/*`) must remain fully functional.
+3. **Zero regressions:** targeted suites covering anything touched must pass:
+   `tests/test_backtest_engine.py`, `tests/test_book_math.py`, plus any test file for a new
+   helper script. Full-repo sweeps stay with CI on push.
+4. **No new external dependencies.** Use the existing stack (`requests`, `pytest`, stdlib).
+5. **No suppression:** no skipping, deleting, or weakening existing tests; no lint suppression.
+6. **Gates-off equivalence is documented:** #229 replaced `max_start_elapsed_pct` with the
+   dead-zone entry rule, so the issue's `max_start_elapsed_pct=1.0` has no direct field. The
+   run must state exactly which `BacktestParams` values reproduce "all gates off" (entry delay,
+   band, pair-cost gate, queue gate, dead zone) and why each maps.
 
-2. **Vanilla JS Only (No New Dependencies)**:
-   - All sorting, DOM manipulation, and indicator styling must be pure vanilla JavaScript and CSS embedded in `server/osc_dash.py`. No external sorting libraries (e.g., DataTables, Lodash).
+## Performance Thresholds
+7. The 550-window measurement run completes in under 2 minutes on the local machine; a full
+   re-run must be cheap enough to repeat when challenged.
 
-3. **Pair-Group Structural Integrity**:
-   - In Tab 1 (Orders) and Tab 2 (Positions), multi-leg pair groups with `rowspan` must remain grouped together. Sorting must operate on the group level (or lead leg) rather than splitting paired UP and DOWN legs into disconnected table rows.
-
-4. **1-Second Live Refresh Persistence**:
-   - Cockpit tables are re-rendered frequently via live SSE ticks and polling in `renderCockpitUI(st)`. The user's chosen sort column and direction (`asc` / `desc`) must persist across updates without resetting to default order or causing visual jumps.
-
-5. **Type-Aware Parsing**:
-   - Prices (`$0.48`), sizes (`10`), dollar P&L (`+$0.20`, `-$0.50`), percentages (`+4.2%`), and timestamps (`14:00:01`) must sort by actual numeric or chronological value, never by naive lexicographical ASCII comparison (where `$10.00` would incorrectly sort before `$2.00`).
-
-6. **Accessibility & Clean Semantics**:
-   - Use proper `aria-sort="ascending"`, `aria-sort="descending"`, or `aria-sort="none"` on headers.
-   - Non-sortable columns (such as the Action/Cancel button column in Orders) must not show sort pointers or triggers.
+## Publication Rules
+8. The gh comment on #205 leads with the comparison table (old tape / old cross / new unified
+   rule), states the verdict in one sentence, and links ADR-0002 + `docs/engine-decision-rules.md`
+   §3. The issue is closed only after the comment is posted.
