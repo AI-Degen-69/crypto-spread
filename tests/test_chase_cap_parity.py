@@ -33,10 +33,9 @@ CEILING = 0.51
 
 
 def _params(**over) -> BacktestParams:
-    """Every gate off, chase on, so only the ceiling can decide the outcome."""
-    # Issue #229: the deleted timeout/stop knobs are gone; the dead zone
-    # (0.0) is disabled so only the ceiling decides the outcome.
-    base = dict(offset=OFFSET, dead_zone_val=0.0,
+    """Every gate off, chase on, dead zone defines the ladder ceiling."""
+    # Issue #229 / #231: dead zone cutoff defines the escalation ladder endpoint.
+    base = dict(offset=OFFSET, dead_zone_val=0.10,
                 enable_leg_chase=True, max_pair_cost=CAP)
     base.update(over)
     return BacktestParams(**base)
@@ -45,19 +44,18 @@ def _params(**over) -> BacktestParams:
 def _chase_window(dn_ask_after: float) -> list[dict]:
     """Rest at 0.48/0.48, fill UP on tick 1, then offer DOWN at `dn_ask_after`.
 
-    Tick 2 repeats tick 1's DOWN ask so the chase has a tick on which to run
-    with UP already filled; the backtest chases before fill detection, live
-    chases both before and inside its fill block.
+    Tick 2 reaches the dead zone (270.0s) so the time-escalating chase ladder
+    (issue #231) reaches its maximum ceiling, exercising the cap.
     """
     return [
         _snap(0.0, 0.495, 0.505, 0.495, 0.505, recorded_mid=0.50),
         _snap(20.0, 0.470, 0.479, 0.495, dn_ask_after, recorded_mid=0.50),
-        _snap(40.0, 0.470, 0.479, 0.495, dn_ask_after, recorded_mid=0.50),
+        _snap(270.0, 0.470, 0.479, 0.495, dn_ask_after, recorded_mid=0.50),
     ]
 
 
 def _live_chase(snaps: list[dict]):
-    _engine, mstate = _drive_live(snaps, offset=OFFSET,
+    _engine, mstate = _drive_live(snaps, offset=OFFSET, dead_zone_val=0.10,
                                   enable_leg_chase=True, max_pair_cost=CAP)
     return mstate
 

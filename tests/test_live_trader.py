@@ -2754,7 +2754,7 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
     # Poll 1: UP ask is 0.48 -> UP fills at 0.48.
     # DOWN ask is 0.51.
     # Max allowed DOWN bid with max_pair_cost=0.98 is 0.98 - 0.48 = 0.50.
-    # DOWN quote steps up to min(0.51, 0.50) = 0.50, so it does NOT cross 0.51.
+    # Issue #231: on fill tick (progress == 0), chase does not impulsively raise quote.
     poll1 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
@@ -2764,17 +2764,16 @@ def test_leg_chase_triggers_on_single_fill_and_respects_cap(monkeypatch):
     mstate = engine.markets[slug]
     assert mstate.filled_up is True
     assert mstate.filled_down is False
-    assert mstate.chased_leg == "DOWN"
-    assert mstate.resting_down == 0.50
-    assert mstate.chased_fill is False
-
-    # Poll 2: DOWN ask drops to 0.50 -> DOWN fills at 0.50!
+    assert mstate.chased_leg is None
+    # Poll 2 at dead zone (progress == 1.0):
+    # Ceiling reaches max allowed bid 0.50, DOWN ask is 0.499 -> DOWN fills at 0.50!
+    t_dz = now + 260
     poll2 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.48, "best_ask": 0.50},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.499},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.50},
     }
-    engine._update_market_strategy(slug, poll2, now + 1)
+    engine._update_market_strategy(slug, poll2, t_dz)
     assert mstate.filled_down is True
     assert mstate.pair_captured is True
     assert mstate.status == "PAIR_MERGED"
@@ -2816,11 +2815,12 @@ def test_the_chase_before_the_fill_block_also_marks_the_quote_as_placed(monkeypa
     assert mstate.filled_down is False, "a touch does not fill a queued quote"
     assert mstate.resting_down == 0.48, "nothing above 0.48 to chase to"
 
+    # Dead zone reached: progress reaches 1.0, enabling chase to 0.49
     engine._update_market_strategy(slug, {
         "market": fake_market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.48, "best_ask": 0.49},
-    }, now + 1)
+    }, now + 260)
     assert mstate.resting_down == 0.49
     assert mstate.filled_down is True, "a chased quote lands on the ask and fills"
     assert mstate.fill_price_down == 0.49
@@ -2849,7 +2849,6 @@ def test_leg_chase_symmetric_down_first(monkeypatch):
     _open_50_50_quotes(engine, slug, fake_market, now - 1)
     # DOWN fills at 0.48. UP ask is 0.49.
     # Allowed UP quote: 0.98 - 0.48 = 0.50.
-    # UP ask is 0.49 <= 0.50, so UP immediately chases and fills at 0.49.
     poll1 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.48, "best_ask": 0.49},
@@ -2858,7 +2857,11 @@ def test_leg_chase_symmetric_down_first(monkeypatch):
     engine._update_market_strategy(slug, poll1, now)
     mstate = engine.markets[slug]
     assert mstate.filled_down is True
-    # If DOWN filled first on this tick, UP chased to 0.49 and also filled!
+    # Issue #231: on fill tick (progress == 0), UP quote does not impulsively step up
+    assert mstate.filled_up is False
+
+    # Advance to dead zone (progress == 1.0) -> UP chases and fills at 0.49
+    engine._update_market_strategy(slug, poll1, now + 260)
     assert mstate.filled_up is True
     assert mstate.pair_captured is True
     assert mstate.chased_fill is True

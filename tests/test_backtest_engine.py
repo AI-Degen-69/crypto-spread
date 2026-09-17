@@ -1052,7 +1052,7 @@ def _chaseable_window(start_ts=1_760_000_000.0, duration=300,
     """
     after = dn_ask if dn_ask_after is None else dn_ask_after
     snaps = []
-    n = 12
+    n = 29
     for i in range(n):
         up_bid, up_ask = 0.49, (0.47 if i == 1 else 0.51)
         a = dn_ask if i <= 1 else after

@@ -761,6 +761,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     quote_lo, quote_hi = params.quote_range
     resting_up: float | None = None
     resting_down: float | None = None
+    original_resting_up: float | None = None
+    original_resting_down: float | None = None
     # Whether a quote has actually been exposed to the book (issue #225). The
     # backtest has no order object, so "an order is live" is "the quote reached
     # fill detection on some earlier tick and has not been cancelled since" --
@@ -932,31 +934,31 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # already half into is not a new entry, so a book that no longer meets
         # the entry gate must not strand the open leg — the same reasoning the
         # exit check below is placed there for.
+        # --- LEG CHASE AFTER ONE-SIDED FILL (rules §4, §8, §12) ---
+        # Issue #231: The chase ceiling walks from original resting quote up to
+        # max_affordable as time approaches the dead zone.
+        # At progress == 0.0, ceiling == original_resting (patience on first tick).
+        # At progress == 1.0 (dead zone), ceiling == max_affordable.
         chased_now_up = False
         chased_now_down = False
         if (params.enable_leg_chase and (filled_up != filled_down)
                 and not pair_captured and not exit_taken
                 and resting_up is not None and resting_down is not None):
             _cap = params.max_pair_cost
-            # No ask means nothing to anchor to, and live
-            # (`live_trader.py:4406/4421`) wraps its whole chase in
-            # `if <leg>_ask is not None`. Advancing to the cap ceiling on a
-            # blind tick would rest the leg where live never would — and since
-            # a tape print fills with no ask involved, manufacture a fill the
-            # live engine could not have produced.
-            #
-            # `min(ask, ...)` can land the chased quote exactly ON the ask, and
-            # such an order is matched on arrival rather than resting. It is
-            # still a limit order, so it books here as a maker fill at our
-            # price with no fee — knowingly understating cost by one taker fee
-            # in that one case (`SPEC.md`, issue #226). Our price *is* the ask
-            # there, so only the fee is at stake.
+            _dz_cutoff = book_math.dead_zone_cutoff_seconds(
+                window_length, params.dead_zone_val, params.dead_zone_unit)
+            _dead_zone_start_sec = window_length - _dz_cutoff
+            _went_naked = naked_since_elapsed if naked_since_elapsed is not None else elapsed
+            _prog = book_math.chase_progress(elapsed, _went_naked, _dead_zone_start_sec)
+
             if filled_up:
                 _ask = db.get("best_ask")
                 if _ask is not None:
                     _entry = entry_price_up if entry_price_up is not None else resting_up
                     _max_bid = book_math.chase_cap(_cap, _entry)
-                    _target = min(_ask, _max_bid)
+                    _orig = original_resting_down if original_resting_down is not None else resting_down
+                    _ceiling = book_math.chase_ceiling(_orig, _max_bid, _prog)
+                    _target = min(_ask, _ceiling)
                     if _target > resting_down:
                         resting_down = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "down"
@@ -966,11 +968,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 if _ask is not None:
                     _entry = entry_price_down if entry_price_down is not None else resting_down
                     _max_bid = book_math.chase_cap(_cap, _entry)
-                    _target = min(_ask, _max_bid)
+                    _orig = original_resting_up if original_resting_up is not None else resting_up
+                    _ceiling = book_math.chase_ceiling(_orig, _max_bid, _prog)
+                    _target = min(_ask, _ceiling)
                     if _target > resting_up:
                         resting_up = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "up"
                         chased_now_up = True
+
 
         if not queue_ok:
             if not filled_up and not filled_down:
@@ -986,8 +991,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         dn_token = (first.get("down_token") or (db.get("token_id") or "")).strip()
         quotable = (resting_up is not None and resting_down is not None
                     and not range_hold and not no_book_hold)
-        can_fill_up = (not filled_up) and not in_dead_zone and (not entry_cancelled or filled_down) and quotable
-        can_fill_down = (not filled_down) and not in_dead_zone and (not entry_cancelled or filled_up) and quotable
+        can_fill_up = (not filled_up) and (not in_dead_zone or filled_down) and (not entry_cancelled or filled_down) and quotable
+        can_fill_down = (not filled_down) and (not in_dead_zone or filled_up) and (not entry_cancelled or filled_up) and quotable
         # A quote that is not live yet is being *placed* on this tick, so it
         # can be marketable on arrival (issue #226). One already resting has to
         # wait for the ask to pass fully through it.
@@ -999,6 +1004,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # exists. A later cancellation re-opens repricing via
             # `entry_cancelled` in the anchor block above.
             orders_live = True
+            if original_resting_up is None:
+                original_resting_up = resting_up
+            if original_resting_down is None:
+                original_resting_down = resting_down
+
         # Raw JSON values, not floats: `book_math._as_price` is what decides
         # whether a recorded price is usable at all.
         up_prints: list[Any] = []
