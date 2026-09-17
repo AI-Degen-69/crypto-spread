@@ -121,12 +121,14 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
         str(src),
         "--offset", "0.03", "--queue", "0", "--pair-cost", "0.98",
         "--size", "5", "--entry-delay", "60", "--quote-lo", "0.10", "--quote-hi", "0.90",
+        "--dead-zone-val", "0.10", "--dead-zone-unit", "pct", "--naked-leg-at-expiry", "close",
         "--exit-default-5m", "0.49", "--exit-default-15m", "0.50",
         "--max-start-delay", "0",
     ]) == 0
     p = seen["params"]
     assert (p.offset, p.queue_gate, p.max_pair_cost) == (0.03, 0.0, 0.98)
     assert (p.entry_delay_sec, p.quote_range) == (60.0, (0.10, 0.90))
+    assert (p.dead_zone_val, p.dead_zone_unit, p.naked_leg_at_expiry) == (0.10, "pct", "close")
     assert p.quote_shares == 5
     assert p.exit_thresh_by_slug["default_5m"] == 0.49
     assert p.exit_thresh_by_slug["default_15m"] == 0.50

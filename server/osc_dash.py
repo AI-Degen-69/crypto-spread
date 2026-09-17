@@ -703,7 +703,10 @@ def api_backtest(
     # the engine itself refuses anything above 1.0, so the clamp must be
     # unit-aware or a pct request of 9999 would 500 at construction.
     dz_high = 1.0 if dz_unit == "pct" else 3600.0
-    dz_val = min(max(dead_zone_val, 0.0), dz_high)
+    if not math.isfinite(dead_zone_val):
+        dz_val = 0.10
+    else:
+        dz_val = min(max(dead_zone_val, 0.0), dz_high)
     naked_expiry = naked_leg_at_expiry if naked_leg_at_expiry in ("close", "hold") else "close"
     params = BacktestParams(
         offset=_clamp_to_spec("offset", offset),
@@ -2629,7 +2632,6 @@ textarea:focus-visible,
           <label data-param-label="offset"></label>
           <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" data-param="offset" value="0.02" oninput="validateCockpitInputs()">
         </div>
-        <div class="form-group">
         <div class="form-group">
           <label data-param-label="exit_thresh_by_slug"></label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">

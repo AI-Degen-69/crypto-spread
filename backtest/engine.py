@@ -1095,7 +1095,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             entry_cancelled = True
             if params.naked_leg_at_expiry == "close":
                 _book = ub if filled_up else db
-                _bb = _book.get("best_bid")
+                _bb = _quote(_book.get("best_bid"))
                 if _bb is not None:
                     exit_taken = True
                     exit_side = "up" if filled_up else "down"

@@ -510,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
             "preset": args.preset,
             "only": args.only,
             "size": size,
+            "max_start_delay_sec": max_delay,
             "count": args.count if args.preset == "random" else None,
             "seed": args.seed if args.preset == "random" else None,
             "n_runs": len(results),

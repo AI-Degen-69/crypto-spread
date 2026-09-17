@@ -909,8 +909,8 @@ class LiveTraderEngine:
         self.dead_zone_val: float = 0.10 if dead_zone_val is None else float(dead_zone_val)
         if self.dead_zone_unit not in ("pct", "sec"):
             raise ValueError(f"dead_zone_unit must be 'pct' or 'sec', got {self.dead_zone_unit!r}")
-        if self.dead_zone_val < 0.0 or (self.dead_zone_unit == "pct" and self.dead_zone_val > 1.0):
-            raise ValueError(f"dead_zone_val must be >= 0 (and <= 1.0 if pct), got {self.dead_zone_val!r}")
+        if not math.isfinite(self.dead_zone_val) or self.dead_zone_val < 0.0 or (self.dead_zone_unit == "pct" and self.dead_zone_val > 1.0):
+            raise ValueError(f"dead_zone_val must be a finite number >= 0 (and <= 1.0 if pct), got {self.dead_zone_val!r}")
 
         # Issue #229: what happens to an unpaired leg at window expiry (rule §14).
         # Replaces stop_loss_enabled. "close" (default) exits at the book; "hold" carries to settlement.
@@ -2743,8 +2743,8 @@ class LiveTraderEngine:
             if val_dead_zone_unit not in ("pct", "sec"):
                 raise ValueError(f"dead_zone_unit must be 'pct' or 'sec', got {val_dead_zone_unit!r}")
             val_dead_zone_val = self.dead_zone_val if dead_zone_val is None else float(dead_zone_val)
-            if val_dead_zone_val < 0.0 or (val_dead_zone_unit == "pct" and val_dead_zone_val > 1.0):
-                raise ValueError(f"dead_zone_val must be >= 0 (and <= 1.0 if pct), got {val_dead_zone_val!r}")
+            if not math.isfinite(val_dead_zone_val) or val_dead_zone_val < 0.0 or (val_dead_zone_unit == "pct" and val_dead_zone_val > 1.0):
+                raise ValueError(f"dead_zone_val must be a finite number >= 0 (and <= 1.0 if pct), got {val_dead_zone_val!r}")
             val_naked_leg_at_expiry = self.naked_leg_at_expiry if naked_leg_at_expiry is None else str(naked_leg_at_expiry)
             if val_naked_leg_at_expiry not in ("close", "hold"):
                 raise ValueError(f"naked_leg_at_expiry must be 'close' or 'hold', got {val_naked_leg_at_expiry!r}")
@@ -4930,7 +4930,9 @@ class LiveTraderEngine:
                 if self.naked_leg_at_expiry == "close":
                     naked_side = "UP" if mstate.filled_up else "DOWN"
                     naked_bid = mstate.up_bid if naked_side == "UP" else mstate.down_bid
-                    if naked_bid is not None:
+                    if naked_bid is None:
+                        naked_bid = self._resolve_exit_bid(slug, mstate, naked_side)
+                    if naked_bid is not None and naked_bid > 0.0:
                         with self._engine_lock:
                             mstate.status = "STOP_EXIT_PENDING"
                         if mstate.stop_order_id:

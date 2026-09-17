@@ -83,6 +83,7 @@ def build_params(gates_on: bool = True,
         quote_shares=SHARES,
         merge_gas_usd=0.0,
         entry_delay_sec=60.0 if gates_on else 0.0,
+        naked_leg_at_expiry="hold",
         # Issue #229: the deleted timeout/late-start clocks are gone; the
         # shadow dead zone (default 0.10 pct) is mirrored implicitly — a
         # drift there now fails the mirror like any other knob.

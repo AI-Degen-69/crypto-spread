@@ -189,7 +189,7 @@ def test_parity_unpaired_leg_close_in_dead_zone():
     # 2. LiveTrader engine
     engine = LiveTraderEngine(load_persisted=False, dead_zone_val=0.10, dead_zone_unit="pct", naked_leg_at_expiry="close")
     engine.mode = "paper"
-    engine.start()
+    engine.is_running = True
     mkt = LiveMarket(
         condition_id=CID,
         market_slug=SLUG,
@@ -245,7 +245,7 @@ def test_parity_unpaired_leg_hold_in_dead_zone():
     # 2. LiveTrader engine
     engine = LiveTraderEngine(load_persisted=False, dead_zone_val=0.10, dead_zone_unit="pct", naked_leg_at_expiry="hold")
     engine.mode = "paper"
-    engine.start()
+    engine.is_running = True
     mkt = LiveMarket(
         condition_id=CID,
         market_slug=SLUG,
