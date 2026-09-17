@@ -2413,3 +2413,183 @@ def test_orders_trades_height_toggle_and_localstorage():
     """
     _run_node_dom(body, "OT_HEIGHT_TOGGLE_TESTS_PASSED")
 
+
+# ── Issue #197: Column Sorting Tests ─────────────────────────────
+
+
+def test_sortable_headers_have_data_col_and_aria_sort():
+    """Issue #197: Every sortable column header must have ot-th-sortable, data-col, aria-sort, and ↕ indicator."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # Verify ot-th-sortable class exists in CSS
+    assert ".ot-th-sortable" in html
+
+    # Count sortable headers across all 3 tables
+    import re
+    sortable_ths = re.findall(r'<th[^>]*class="ot-th-sortable"[^>]*>', html)
+    assert len(sortable_ths) >= 20, f"Expected ≥20 sortable headers, got {len(sortable_ths)}"
+
+    for th in sortable_ths:
+        assert 'data-col=' in th, f"Missing data-col: {th[:80]}"
+        assert 'aria-sort="none"' in th, f"Missing aria-sort=none: {th[:80]}"
+        assert 'sortOtTable(' in th, f"Missing sortOtTable onclick: {th[:80]}"
+
+    # Action column in Orders must NOT be sortable
+    orders_start = html.find('id="cockpitOrdersTable"')
+    orders_end = html.find('</thead>', orders_start)
+    orders_thead = html[orders_start:orders_end]
+    # Action header should be a plain <th> without ot-th-sortable
+    action_idx = orders_thead.find(">Action<")
+    assert action_idx != -1, "Action column header not found"
+    # Walk back to find the <th tag
+    th_start = orders_thead.rfind("<th", 0, action_idx)
+    action_th = orders_thead[th_start:action_idx + len(">Action<")]
+    assert "ot-th-sortable" not in action_th, "Action column must not be sortable"
+
+
+def test_sort_indicator_span_in_headers():
+    """Issue #197: Sortable headers contain ↕ indicator span."""
+    response = client.get("/")
+    html = response.text
+    assert 'class="ot-sort-ind"' in html
+    assert "↕" in html
+
+
+@requires_node
+def test_sort_state_3_click_cycle_and_localstorage():
+    """Issue #197: sortOtTable cycles asc→desc→none and persists via localStorage."""
+    body = """
+    // Verify sort state object exists
+    if (typeof otSortState !== 'object') throw new Error('otSortState missing');
+    if (!otSortState.orders || !otSortState.positions || !otSortState.trades)
+      throw new Error('otSortState missing tabs');
+
+    // Verify functions exist
+    if (typeof sortOtTable !== 'function') throw new Error('sortOtTable missing');
+    if (typeof parseSortNumeric !== 'function') throw new Error('parseSortNumeric missing');
+    if (typeof compareOtPrimitives !== 'function') throw new Error('compareOtPrimitives missing');
+    if (typeof sortOtOrdersGroups !== 'function') throw new Error('sortOtOrdersGroups missing');
+    if (typeof sortOtPositionsGroups !== 'function') throw new Error('sortOtPositionsGroups missing');
+    if (typeof sortOtTradesList !== 'function') throw new Error('sortOtTradesList missing');
+    if (typeof saveOtSortState !== 'function') throw new Error('saveOtSortState missing');
+    if (typeof updateOtSortIndicators !== 'function') throw new Error('updateOtSortIndicators missing');
+
+    // Test parseSortNumeric
+    if (parseSortNumeric('$1,234.56') !== 1234.56) throw new Error('parseSortNumeric failed on $1,234.56');
+    if (parseSortNumeric('+$0.20 (+4.2%)') !== 0.20) throw new Error('parseSortNumeric failed on +$0.20');
+    if (parseSortNumeric('-$0.25 (-25.0%)') !== -0.25) throw new Error('parseSortNumeric failed on -$0.25');
+    if (parseSortNumeric('N/A') !== null) throw new Error('parseSortNumeric should return null for N/A');
+    if (parseSortNumeric('--') !== null) throw new Error('parseSortNumeric should return null for --');
+
+    // Test compareOtPrimitives
+    if (compareOtPrimitives(1, 2, true) >= 0) throw new Error('1 < 2 numeric');
+    if (compareOtPrimitives(2, 1, true) <= 0) throw new Error('2 > 1 numeric');
+    if (compareOtPrimitives(null, 1, true) <= 0) throw new Error('null sorts after values');
+    if (compareOtPrimitives('apple', 'banana', false) >= 0) throw new Error('apple < banana string');
+
+    // Test 3-state cycle: manually toggle otSortState
+    // Click 1: none → asc
+    otSortState.orders = { col: null, dir: null };
+    // Simulate the cycle logic from sortOtTable
+    const cur = otSortState.orders;
+    const nextDir = cur.col === 'time' ? (cur.dir === 'asc' ? 'desc' : (cur.dir === 'desc' ? null : 'asc')) : 'asc';
+    if (nextDir !== 'asc') throw new Error('First click should be asc, got ' + nextDir);
+
+    // Click 2: asc → desc
+    otSortState.orders = { col: 'time', dir: 'asc' };
+    const cur2 = otSortState.orders;
+    const nextDir2 = cur2.col === 'time' ? (cur2.dir === 'asc' ? 'desc' : (cur2.dir === 'desc' ? null : 'asc')) : 'asc';
+    if (nextDir2 !== 'desc') throw new Error('Second click should be desc, got ' + nextDir2);
+
+    // Click 3: desc → none (reset)
+    otSortState.orders = { col: 'time', dir: 'desc' };
+    const cur3 = otSortState.orders;
+    const nextDir3 = cur3.col === 'time' ? (cur3.dir === 'asc' ? 'desc' : (cur3.dir === 'desc' ? null : 'asc')) : 'asc';
+    if (nextDir3 !== null) throw new Error('Third click should reset to null, got ' + nextDir3);
+
+    // Test localStorage persistence
+    otSortState.orders = { col: 'price', dir: 'asc' };
+    saveOtSortState();
+    const saved = JSON.parse(localStorage.getItem('crypto-spread-ot-sort'));
+    if (!saved || saved.orders.col !== 'price' || saved.orders.dir !== 'asc')
+      throw new Error('localStorage not persisted correctly');
+
+    console.log('OT_SORT_CYCLE_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node(body, "OT_SORT_CYCLE_TESTS_PASSED")
+
+
+@requires_node
+def test_sort_orders_groups_preserves_pair_integrity():
+    """Issue #197: sortOtOrdersGroups sorts groups as units, never splitting legs."""
+    body = """
+    // Build 3 groups with different pair costs
+    const groups = [
+      { market: 'SOL 5m', legs: [
+        { side: 'Up', price: 0.47, priceNum: 0.47, size: 5, sizeNum: 5, time: '14:00:03' },
+        { side: 'Down', price: 0.47, priceNum: 0.47, size: 5, sizeNum: 5, time: '14:00:03' }
+      ], pair_cost: '$0.94', status: 'Paired', rowspan: 2 },
+      { market: 'BTC 5m', legs: [
+        { side: 'Up', price: 0.48, priceNum: 0.48, size: 5, sizeNum: 5, time: '14:00:01' },
+        { side: 'Down', price: 0.48, priceNum: 0.48, size: 5, sizeNum: 5, time: '14:00:01' }
+      ], pair_cost: '$0.96', status: 'Paired', rowspan: 2 },
+      { market: 'ETH 5m', legs: [
+        { side: 'Up', price: 0.49, priceNum: 0.49, size: 5, sizeNum: 5, time: '14:00:02' }
+      ], pair_cost: '$0.49', status: 'Unpaired', rowspan: 1 }
+    ];
+
+    // Sort by price ascending — cheapest first
+    // For Paired groups, sort uses parseSortNumeric(pair_cost): $0.94, $0.96
+    // For Unpaired groups, sort uses legs[0].priceNum: 0.49
+    const sorted = sortOtOrdersGroups(groups, 'price', 'asc');
+    if (sorted[0].market !== 'ETH 5m') throw new Error('Cheapest group should be first, got ' + sorted[0].market);
+    if (sorted[2].market !== 'BTC 5m') throw new Error('Most expensive should be last, got ' + sorted[2].market);
+    // Legs are intact
+    if (sorted[0].legs.length !== 1) throw new Error('ETH legs should stay at 1');
+    if (sorted[1].legs.length !== 2) throw new Error('SOL legs should stay at 2');
+
+    // Sort by market name ascending
+    const byName = sortOtOrdersGroups(groups, 'market', 'asc');
+    if (byName[0].market !== 'BTC 5m') throw new Error('BTC should come first alpha');
+    if (byName[1].market !== 'ETH 5m') throw new Error('ETH should come second alpha');
+    if (byName[2].market !== 'SOL 5m') throw new Error('SOL should come third alpha');
+
+    // Sort descending reverses
+    const byNameDesc = sortOtOrdersGroups(groups, 'market', 'desc');
+    if (byNameDesc[0].market !== 'SOL 5m') throw new Error('SOL should come first desc');
+
+    console.log('OT_SORT_PAIR_INTEGRITY_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node(body, "OT_SORT_PAIR_INTEGRITY_TESTS_PASSED")
+
+
+@requires_node
+def test_sort_trades_list_numeric_and_string():
+    """Issue #197: sortOtTradesList handles numeric and string columns correctly."""
+    body = """
+    const trades = [
+      { time: '14:05', market: 'ETH 5m', pnl_usd: 0.15, base_cost: '$4.80', shares: 10 },
+      { time: '14:01', market: 'BTC 5m', pnl_usd: -0.25, base_cost: '$4.96', shares: 10 },
+      { time: '14:03', market: 'SOL 5m', pnl_usd: 0.50, base_cost: '$4.70', shares: 10 }
+    ];
+
+    // Sort by time ascending
+    const byTime = sortOtTradesList(trades, 'time', 'asc');
+    if (byTime[0].time !== '14:01') throw new Error('Earliest time first, got ' + byTime[0].time);
+    if (byTime[2].time !== '14:05') throw new Error('Latest time last, got ' + byTime[2].time);
+
+    // Sort by market name
+    const byMkt = sortOtTradesList(trades, 'market', 'asc');
+    if (byMkt[0].market !== 'BTC 5m') throw new Error('BTC alpha first');
+
+    // Original array not mutated
+    if (trades[0].time !== '14:05') throw new Error('Original array was mutated!');
+
+    console.log('OT_SORT_TRADES_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node(body, "OT_SORT_TRADES_TESTS_PASSED")

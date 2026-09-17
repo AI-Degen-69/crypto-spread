@@ -2121,6 +2121,12 @@ textarea:focus-visible,
 .ot-pane-scroll{max-height:min(680px,72vh);overflow-y:auto;position:relative;border-radius:6px;transition:max-height .2s ease}
 .ot-pane-scroll.ot-expanded{max-height:88vh!important}
 .ot-pane .tbl thead th{position:sticky;top:0;z-index:10;background:var(--panel);box-shadow:0 1px 0 var(--line);padding:7px 8px}
+.ot-th-sortable{cursor:pointer;user-select:none;transition:color .15s ease,background .15s ease;position:relative;white-space:nowrap}
+.ot-th-sortable:hover{color:var(--tx);background:rgba(255,255,255,0.04)}
+.ot-th-sortable:focus-visible{outline:1px solid var(--gold);outline-offset:-1px}
+.ot-sort-ind{display:inline-block;margin-left:4px;font-size:9px;color:var(--dim);opacity:0.4;vertical-align:middle;transition:all .15s ease}
+.ot-th-sortable[aria-sort="ascending"] .ot-sort-ind{color:var(--gold);opacity:1}
+.ot-th-sortable[aria-sort="descending"] .ot-sort-ind{color:var(--gold);opacity:1}
 .ot-pane .tbl td{padding:6px 8px;font-size:12px}
 .ot-row-cancelled td{color:var(--dim)!important}
 .ot-cell-cancelled{color:var(--dim)!important}
@@ -2832,14 +2838,14 @@ textarea:focus-visible,
         <table class="tbl" id="cockpitOrdersTable">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Market</th>
-              <th>Side</th>
-              <th>Price</th>
-              <th>Size</th>
-              <th>Filled</th>
-              <th>Total Cost</th>
-              <th>Status</th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="time" onclick="sortOtTable('orders','time')" aria-sort="none" title="Sort by Time">Time <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="market" onclick="sortOtTable('orders','market')" aria-sort="none" title="Sort by Market">Market <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="side" onclick="sortOtTable('orders','side')" aria-sort="none" title="Sort by Side">Side <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="price" onclick="sortOtTable('orders','price')" aria-sort="none" title="Sort by Price">Price <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="size" onclick="sortOtTable('orders','size')" aria-sort="none" title="Sort by Size">Size <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="filled" onclick="sortOtTable('orders','filled')" aria-sort="none" title="Sort by Filled">Filled <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="cost" onclick="sortOtTable('orders','cost')" aria-sort="none" title="Sort by Total Cost">Total Cost <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="status" onclick="sortOtTable('orders','status')" aria-sort="none" title="Sort by Status">Status <span class="ot-sort-ind">↕</span></th>
               <th>Action</th>
             </tr>
           </thead>
@@ -2854,14 +2860,14 @@ textarea:focus-visible,
         <table class="tbl" id="cockpitPositionsTable">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Market</th>
-              <th>Side</th>
-              <th>Size</th>
-              <th>Base Cost</th>
-              <th>Market Value</th>
-              <th>Unrealized $ (%)</th>
-              <th>Realized $ (%)</th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="time" onclick="sortOtTable('positions','time')" aria-sort="none" title="Sort by Time">Time <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="market" onclick="sortOtTable('positions','market')" aria-sort="none" title="Sort by Market">Market <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="side" onclick="sortOtTable('positions','side')" aria-sort="none" title="Sort by Side">Side <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="size" onclick="sortOtTable('positions','size')" aria-sort="none" title="Sort by Size">Size <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="baseCost" onclick="sortOtTable('positions','baseCost')" aria-sort="none" title="Sort by Base Cost">Base Cost <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="marketValue" onclick="sortOtTable('positions','marketValue')" aria-sort="none" title="Sort by Market Value">Market Value <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="unrealized" onclick="sortOtTable('positions','unrealized')" aria-sort="none" title="Sort by Unrealized PnL">Unrealized $ (%) <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="realized" onclick="sortOtTable('positions','realized')" aria-sort="none" title="Sort by Realized PnL">Realized $ (%) <span class="ot-sort-ind">↕</span></th>
             </tr>
           </thead>
           <tbody id="cockpitPositionsBody">
@@ -2875,14 +2881,14 @@ textarea:focus-visible,
         <table class="tbl" id="cockpitTradesTable">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Market</th>
-              <th>Cause</th>
-              <th>Shares</th>
-              <th>Base Cost</th>
-              <th>Exit Price</th>
-              <th>Gain / Loss $ (%)</th>
-              <th>Details</th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="time" onclick="sortOtTable('trades','time')" aria-sort="none" title="Sort by Time">Time <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="market" onclick="sortOtTable('trades','market')" aria-sort="none" title="Sort by Market">Market <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="cause" onclick="sortOtTable('trades','cause')" aria-sort="none" title="Sort by Cause">Cause <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="shares" onclick="sortOtTable('trades','shares')" aria-sort="none" title="Sort by Shares">Shares <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="baseCost" onclick="sortOtTable('trades','baseCost')" aria-sort="none" title="Sort by Base Cost">Base Cost <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="exitPrice" onclick="sortOtTable('trades','exitPrice')" aria-sort="none" title="Sort by Exit Price">Exit Price <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="gainLoss" onclick="sortOtTable('trades','gainLoss')" aria-sort="none" title="Sort by Gain / Loss">Gain / Loss $ (%) <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="details" onclick="sortOtTable('trades','details')" aria-sort="none" title="Sort by Details">Details <span class="ot-sort-ind">↕</span></th>
             </tr>
           </thead>
           <tbody id="cockpitTradesBody">
@@ -3474,6 +3480,208 @@ function groupPositionsByPair(positions, markets) {
     }
   }
   return groups;
+}
+
+// Orders & Trades Table Sorting Engine (Issue #197)
+let otSortState = {
+  orders: { col: null, dir: 'asc' },
+  positions: { col: null, dir: 'asc' },
+  trades: { col: null, dir: 'desc' }
+};
+
+try {
+  if (typeof localStorage !== 'undefined') {
+    const saved = localStorage.getItem('crypto-spread-ot-sort');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.orders && typeof parsed.orders === 'object') otSortState.orders = parsed.orders;
+        if (parsed.positions && typeof parsed.positions === 'object') otSortState.positions = parsed.positions;
+        if (parsed.trades && typeof parsed.trades === 'object') otSortState.trades = parsed.trades;
+      }
+    }
+  }
+} catch (e) {}
+
+function saveOtSortState() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('crypto-spread-ot-sort', JSON.stringify(otSortState));
+    }
+  } catch (e) {}
+}
+
+function parseSortNumeric(val) {
+  if (val == null) return null;
+  if (typeof val === 'number') return isFinite(val) ? val : null;
+  const s = String(val).trim();
+  if (s === '' || s === '-' || s === '--') return null;
+  const cleaned = s.replace(/[$,]/g, '').replace(/^\+/, '');
+  const n = parseFloat(cleaned);
+  return isFinite(n) ? n : null;
+}
+
+function compareOtPrimitives(a, b, isNumeric) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (isNumeric) {
+    const numA = parseSortNumeric(a);
+    const numB = parseSortNumeric(b);
+    if (numA == null && numB == null) return 0;
+    if (numA == null) return 1;
+    if (numB == null) return -1;
+    return numA - numB;
+  }
+  const strA = String(a).toLowerCase();
+  const strB = String(b).toLowerCase();
+  return strA.localeCompare(strB);
+}
+
+function sortOtOrdersGroups(groupList, col, dir) {
+  if (!col || !dir) return groupList;
+  const mult = dir === 'desc' ? -1 : 1;
+  return groupList.slice().sort((gA, gB) => {
+    let diff = 0;
+    const legA = (gA.legs && gA.legs[0]) || {};
+    const legB = (gB.legs && gB.legs[0]) || {};
+    if (col === 'time') {
+      diff = compareOtPrimitives(legA.time, legB.time, false);
+    } else if (col === 'market') {
+      diff = compareOtPrimitives(gA.market, gB.market, false);
+    } else if (col === 'side') {
+      diff = compareOtPrimitives(legA.side, legB.side, false);
+    } else if (col === 'price') {
+      const pA = gA.status === 'Paired' ? parseSortNumeric(gA.pair_cost) : legA.priceNum;
+      const pB = gB.status === 'Paired' ? parseSortNumeric(gB.pair_cost) : legB.priceNum;
+      diff = compareOtPrimitives(pA, pB, true);
+    } else if (col === 'size') {
+      const sA = (gA.legs && gA.legs[0] && gA.legs[0].sizeNum) || 0;
+      const sB = (gB.legs && gB.legs[0] && gB.legs[0].sizeNum) || 0;
+      diff = compareOtPrimitives(sA, sB, true);
+    } else if (col === 'filled') {
+      const fA = (gA.legs || []).reduce((acc, l) => acc + (l.filledNum || 0), 0);
+      const fB = (gB.legs || []).reduce((acc, l) => acc + (l.filledNum || 0), 0);
+      diff = compareOtPrimitives(fA, fB, true);
+    } else if (col === 'cost') {
+      const cA = (gA.legs || []).reduce((acc, l) => acc + ((l.priceNum || 0) * (l.sizeNum || 0)), 0);
+      const cB = (gB.legs || []).reduce((acc, l) => acc + ((l.priceNum || 0) * (l.sizeNum || 0)), 0);
+      diff = compareOtPrimitives(cA, cB, true);
+    } else if (col === 'status') {
+      diff = compareOtPrimitives(gA.status, gB.status, false);
+    }
+    return diff * mult;
+  });
+}
+
+function sortOtPositionsGroups(groupList, col, dir) {
+  if (!col || !dir) return groupList;
+  const mult = dir === 'desc' ? -1 : 1;
+  return groupList.slice().sort((gA, gB) => {
+    let diff = 0;
+    const legA = (gA.legs && gA.legs[0]) || {};
+    const legB = (gB.legs && gB.legs[0]) || {};
+    if (col === 'time') {
+      diff = compareOtPrimitives(legA.time, legB.time, false);
+    } else if (col === 'market') {
+      diff = compareOtPrimitives(gA.market, gB.market, false);
+    } else if (col === 'side') {
+      diff = compareOtPrimitives(legA.side, legB.side, false);
+    } else if (col === 'size') {
+      const sA = (gA.legs && gA.legs[0] && gA.legs[0].sizeNum) || 0;
+      const sB = (gB.legs && gB.legs[0] && gB.legs[0].sizeNum) || 0;
+      diff = compareOtPrimitives(sA, sB, true);
+    } else if (col === 'baseCost') {
+      diff = compareOtPrimitives(legA.baseCost, legB.baseCost, true);
+    } else if (col === 'marketValue') {
+      diff = compareOtPrimitives(gA.market_val, gB.market_val, true);
+    } else if (col === 'unrealized') {
+      diff = compareOtPrimitives(gA.unrealized_usd, gB.unrealized_usd, true);
+    } else if (col === 'realized') {
+      diff = compareOtPrimitives(gA.realized_usd, gB.realized_usd, true);
+    }
+    return diff * mult;
+  });
+}
+
+function sortOtTradesList(tradesList, col, dir) {
+  if (!col || !dir) return tradesList;
+  const mult = dir === 'desc' ? -1 : 1;
+  return tradesList.slice().sort((tA, tB) => {
+    let diff = 0;
+    if (col === 'time') {
+      diff = compareOtPrimitives(tA.timestamp || tA.time, tB.timestamp || tB.time, false);
+    } else if (col === 'market') {
+      diff = compareOtPrimitives(tA.label || tA.market, tB.label || tB.market, false);
+    } else if (col === 'cause') {
+      diff = compareOtPrimitives(tA.action, tB.action, false);
+    } else if (col === 'shares') {
+      diff = compareOtPrimitives(tA.shares, tB.shares, true);
+    } else if (col === 'baseCost') {
+      const cA = (tA.entry_price_up != null && tA.entry_price_down != null)
+        ? (tA.entry_price_up + tA.entry_price_down)
+        : (tA.entry_price_up ?? tA.entry_price_down ?? tA.price ?? 0);
+      const cB = (tB.entry_price_up != null && tB.entry_price_down != null)
+        ? (tB.entry_price_up + tB.entry_price_down)
+        : (tB.entry_price_up ?? tB.entry_price_down ?? tB.price ?? 0);
+      diff = compareOtPrimitives(cA, cB, true);
+    } else if (col === 'exitPrice') {
+      diff = compareOtPrimitives(tA.exit_price, tB.exit_price, true);
+    } else if (col === 'gainLoss') {
+      diff = compareOtPrimitives(tA.pnl_usd, tB.pnl_usd, true);
+    } else if (col === 'details') {
+      diff = compareOtPrimitives(tA.notes || tA.details || tA.outcome, tB.notes || tB.details || tB.outcome, false);
+    }
+    return diff * mult;
+  });
+}
+
+function updateOtSortIndicators(tab) {
+  const tableIdMap = {
+    orders: 'cockpitOrdersTable',
+    positions: 'cockpitPositionsTable',
+    trades: 'cockpitTradesTable'
+  };
+  const table = $(tableIdMap[tab]);
+  if (!table) return;
+  const ths = table.querySelectorAll('th.ot-th-sortable');
+  const cur = (otSortState && otSortState[tab]) || { col: null, dir: 'asc' };
+  ths.forEach(th => {
+    const c = th.dataset.col;
+    const ind = th.querySelector('.ot-sort-ind');
+    if (cur.col && c === cur.col) {
+      const isAsc = cur.dir === 'asc';
+      th.setAttribute('aria-sort', isAsc ? 'ascending' : 'descending');
+      if (ind) ind.textContent = isAsc ? '▲' : '▼';
+    } else {
+      th.setAttribute('aria-sort', 'none');
+      if (ind) ind.textContent = '↕';
+    }
+  });
+}
+
+function sortOtTable(tab, col) {
+  if (!otSortState[tab]) otSortState[tab] = { col: null, dir: 'asc' };
+  const cur = otSortState[tab];
+  if (cur.col === col) {
+    if (cur.dir === 'asc') {
+      cur.dir = 'desc';
+    } else if (cur.dir === 'desc') {
+      // 3rd click: return to natural order
+      cur.col = null;
+      cur.dir = 'asc';
+    } else {
+      cur.dir = 'asc';
+    }
+  } else {
+    cur.col = col;
+    cur.dir = (col === 'time' || col === 'unrealized' || col === 'realized' || col === 'gainLoss') ? 'desc' : 'asc';
+  }
+  saveOtSortState();
+  updateOtSortIndicators(tab);
+  if (typeof cockpitState !== 'undefined' && cockpitState) {
+    renderCockpitUI(cockpitState);
+  }
 }
 
 function toggleSidebarPin(){
@@ -5607,6 +5815,7 @@ function setCockpitChartMode(mode) {
 
 function renderCockpitUI(st) {
   if (!st) return;
+  cockpitState = st;
 
   reconcileCockpitToasts(st);
 
@@ -5927,9 +6136,13 @@ function renderCockpitUI(st) {
       ordersBodyEl.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--dim);padding:18px">No orders are resting on the book.</td></tr>';
     } else {
       const groupedOrders = groupOrdersByPair(restingOrders);
+      // Issue #197: apply user sort before rendering
+      const ordGrpList = Object.keys(groupedOrders).map(k => groupedOrders[k]);
+      const sortedOrdGrps = otSortState.orders.col
+        ? sortOtOrdersGroups(ordGrpList, otSortState.orders.col, otSortState.orders.dir)
+        : ordGrpList;
       let ordHtml = '';
-      for (const mktKey of Object.keys(groupedOrders)) {
-        const grp = groupedOrders[mktKey];
+      for (const grp of sortedOrdGrps) {
         // Issue #100: two-way link with the matrix card — shared data-market
         // key on both ends lets hover/select highlight card and orders group
         // together.
@@ -6037,9 +6250,13 @@ function renderCockpitUI(st) {
       posBodyEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:18px">No open positions held in account.</td></tr>';
     } else {
       const groupedPos = groupPositionsByPair(openPos, st.markets);
+      // Issue #197: apply user sort before rendering
+      const posGrpList = Object.keys(groupedPos).map(k => groupedPos[k]);
+      const sortedPosGrps = otSortState.positions.col
+        ? sortOtPositionsGroups(posGrpList, otSortState.positions.col, otSortState.positions.dir)
+        : posGrpList;
       let posHtml = '';
-      for (const mktKey of Object.keys(groupedPos)) {
-        const grp = groupedPos[mktKey];
+      for (const grp of sortedPosGrps) {
         const statusBadgeCls = grp.status === 'Paired' ? 'ot-tag-paired' : (grp.status === 'Partial' ? 'ot-tag-partial' : 'ot-tag-unpaired');
         const statusBorderColor = grp.status === 'Paired' ? 'var(--up)' : (grp.status === 'Partial' ? 'var(--gold)' : 'var(--line)');
         
@@ -6106,8 +6323,12 @@ function renderCockpitUI(st) {
     if (st.trades.length === 0) {
       bodyEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:20px">No closed trades recorded in this session.</td></tr>';
     } else {
+      // Issue #197: apply user sort before rendering
+      const sortedTrades = otSortState.trades.col
+        ? sortOtTradesList(st.trades, otSortState.trades.col, otSortState.trades.dir)
+        : st.trades;
       let rowsHtml = '';
-      for (const t of st.trades) {
+      for (const t of sortedTrades) {
         const pnlCol = t.pnl_usd >= 0 ? 'var(--up)' : 'var(--down)';
         const causeBadge = t.action === 'PAIR_MERGE'
           ? '<span class="pill pill-osc">Merged</span>'
@@ -6154,6 +6375,11 @@ function renderCockpitUI(st) {
 
   // 7. Render Chart
   renderCockpitChart(st.timeline, activeCockpitChartMode, st.starting_balance);
+
+  // 8. Issue #197: sync sort indicators after DOM update
+  updateOtSortIndicators('orders');
+  updateOtSortIndicators('positions');
+  updateOtSortIndicators('trades');
 }
 
 let activeCockpitChartContext = null;
