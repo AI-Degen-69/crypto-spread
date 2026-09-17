@@ -2426,15 +2426,20 @@ def test_sortable_headers_have_data_col_and_aria_sort():
     # Verify ot-th-sortable class exists in CSS
     assert ".ot-th-sortable" in html
 
-    # Count sortable headers across all 3 tables
+    # Count sortable headers across all 3 tables (header blocks include the inner sort button)
     import re
-    sortable_ths = re.findall(r'<th[^>]*class="ot-th-sortable"[^>]*>', html)
-    assert len(sortable_ths) >= 20, f"Expected ≥20 sortable headers, got {len(sortable_ths)}"
+    sortable_blocks = re.findall(r'<th[^>]*class="ot-th-sortable"[^>]*>.*?</th>', html)
+    assert len(sortable_blocks) >= 20, f"Expected ≥20 sortable headers, got {len(sortable_blocks)}"
 
-    for th in sortable_ths:
-        assert 'data-col=' in th, f"Missing data-col: {th[:80]}"
-        assert 'aria-sort="none"' in th, f"Missing aria-sort=none: {th[:80]}"
-        assert 'sortOtTable(' in th, f"Missing sortOtTable onclick: {th[:80]}"
+    for block in sortable_blocks:
+        th_tag = block.split(">", 1)[0] + ">"
+        assert 'data-col=' in th_tag, f"Missing data-col: {th_tag[:80]}"
+        assert 'aria-sort="none"' in th_tag, f"Missing aria-sort=none: {th_tag[:80]}"
+        # A11y: the th itself is not clickable — a native button inside carries the handler
+        assert 'onclick=' not in th_tag, f"th must not carry onclick (use inner button): {th_tag[:80]}"
+        assert 'class="ot-sort-button"' in block, f"Missing sort button: {block[:120]}"
+        assert 'sortOtTable(' in block, f"Missing sortOtTable onclick: {block[:120]}"
+        assert 'aria-hidden="true"' in block, f"Indicator must be aria-hidden: {block[:120]}"
 
     # Action column in Orders must NOT be sortable
     orders_start = html.find('id="cockpitOrdersTable"')
@@ -2593,3 +2598,41 @@ def test_sort_trades_list_numeric_and_string():
     process.exit(0);
     """
     _run_node(body, "OT_SORT_TRADES_TESTS_PASSED")
+
+
+@requires_node
+def test_sort_positions_groups_preserves_pair_integrity():
+    """Issue #197: sortOtPositionsGroups sorts position groups as units, never splitting legs."""
+    body = """
+    const posGroups = [
+      { market: 'SOL 5m', legs: [
+        { side: 'Up', sizeNum: 5, baseCost: 2.35, time: '14:00:03' },
+        { side: 'Down', sizeNum: 5, baseCost: 2.35, time: '14:00:03' }
+      ], status: 'Paired', market_val: 5.00, unrealized_usd: 0.30, realized_usd: 0 },
+      { market: 'BTC 5m', legs: [
+        { side: 'Up', sizeNum: 5, baseCost: 2.40, time: '14:00:01' },
+        { side: 'Down', sizeNum: 5, baseCost: 2.40, time: '14:00:01' }
+      ], status: 'Paired', market_val: 5.00, unrealized_usd: 0.20, realized_usd: 0 },
+      { market: 'ETH 5m', legs: [
+        { side: 'Up', sizeNum: 3, baseCost: 1.47, time: '14:00:02' }
+      ], status: 'Unpaired', market_val: 1.50, unrealized_usd: 0.03, realized_usd: 0 }
+    ];
+
+    // Sort by market ascending
+    const byMkt = sortOtPositionsGroups(posGroups, 'market', 'asc');
+    if (byMkt[0].market !== 'BTC 5m') throw new Error('BTC alpha first, got ' + byMkt[0].market);
+    if (byMkt[1].market !== 'ETH 5m') throw new Error('ETH alpha second');
+    if (byMkt[2].market !== 'SOL 5m') throw new Error('SOL alpha third');
+    // Legs intact
+    if (byMkt[0].legs.length !== 2) throw new Error('BTC paired legs should stay at 2');
+    if (byMkt[2].legs.length !== 2) throw new Error('SOL paired legs should stay at 2');
+    if (byMkt[1].legs.length !== 1) throw new Error('ETH unpaired should stay at 1');
+
+    // Sort by unrealized descending
+    const byPnl = sortOtPositionsGroups(posGroups, 'unrealized', 'desc');
+    if (byPnl[0].market !== 'SOL 5m') throw new Error('Highest unrealized first, got ' + byPnl[0].market);
+
+    console.log('OT_SORT_POSITIONS_PAIR_TESTS_PASSED');
+    process.exit(0);
+    """
+    _run_node(body, "OT_SORT_POSITIONS_PAIR_TESTS_PASSED")

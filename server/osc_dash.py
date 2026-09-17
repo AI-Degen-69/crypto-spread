@@ -2124,6 +2124,9 @@ textarea:focus-visible,
 .ot-th-sortable{cursor:pointer;user-select:none;transition:color .15s ease,background .15s ease;position:relative;white-space:nowrap}
 .ot-th-sortable:hover{color:var(--tx);background:rgba(255,255,255,0.04)}
 .ot-th-sortable:focus-visible{outline:1px solid var(--gold);outline-offset:-1px}
+.ot-sort-button{background:none;border:none;padding:0;margin:0;font:inherit;color:inherit;cursor:pointer;white-space:nowrap}
+.ot-sort-button:hover{color:var(--tx)}
+.ot-sort-button:focus-visible{outline:1px solid var(--gold);outline-offset:-1px}
 .ot-sort-ind{display:inline-block;margin-left:4px;font-size:9px;color:var(--dim);opacity:0.4;vertical-align:middle;transition:all .15s ease}
 .ot-th-sortable[aria-sort="ascending"] .ot-sort-ind{color:var(--gold);opacity:1}
 .ot-th-sortable[aria-sort="descending"] .ot-sort-ind{color:var(--gold);opacity:1}
@@ -2838,14 +2841,14 @@ textarea:focus-visible,
         <table class="tbl" id="cockpitOrdersTable">
           <thead>
             <tr>
-              <th class="ot-th-sortable" data-tab="orders" data-col="time" onclick="sortOtTable('orders','time')" aria-sort="none" title="Sort by Time">Time <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="market" onclick="sortOtTable('orders','market')" aria-sort="none" title="Sort by Market">Market <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="side" onclick="sortOtTable('orders','side')" aria-sort="none" title="Sort by Side">Side <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="price" onclick="sortOtTable('orders','price')" aria-sort="none" title="Sort by Price">Price <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="size" onclick="sortOtTable('orders','size')" aria-sort="none" title="Sort by Size">Size <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="filled" onclick="sortOtTable('orders','filled')" aria-sort="none" title="Sort by Filled">Filled <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="cost" onclick="sortOtTable('orders','cost')" aria-sort="none" title="Sort by Total Cost">Total Cost <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="orders" data-col="status" onclick="sortOtTable('orders','status')" aria-sort="none" title="Sort by Status">Status <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="time" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','time')" title="Sort by Time">Time <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="market" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','market')" title="Sort by Market">Market <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="side" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','side')" title="Sort by Side">Side <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="price" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','price')" title="Sort by Price">Price <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="size" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','size')" title="Sort by Size">Size <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="filled" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','filled')" title="Sort by Filled">Filled <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="cost" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','cost')" title="Sort by Total Cost">Total Cost <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="orders" data-col="status" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('orders','status')" title="Sort by Status">Status <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
               <th>Action</th>
             </tr>
           </thead>
@@ -2860,14 +2863,14 @@ textarea:focus-visible,
         <table class="tbl" id="cockpitPositionsTable">
           <thead>
             <tr>
-              <th class="ot-th-sortable" data-tab="positions" data-col="time" onclick="sortOtTable('positions','time')" aria-sort="none" title="Sort by Time">Time <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="market" onclick="sortOtTable('positions','market')" aria-sort="none" title="Sort by Market">Market <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="side" onclick="sortOtTable('positions','side')" aria-sort="none" title="Sort by Side">Side <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="size" onclick="sortOtTable('positions','size')" aria-sort="none" title="Sort by Size">Size <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="baseCost" onclick="sortOtTable('positions','baseCost')" aria-sort="none" title="Sort by Base Cost">Base Cost <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="marketValue" onclick="sortOtTable('positions','marketValue')" aria-sort="none" title="Sort by Market Value">Market Value <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="unrealized" onclick="sortOtTable('positions','unrealized')" aria-sort="none" title="Sort by Unrealized PnL">Unrealized $ (%) <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="positions" data-col="realized" onclick="sortOtTable('positions','realized')" aria-sort="none" title="Sort by Realized PnL">Realized $ (%) <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="time" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','time')" title="Sort by Time">Time <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="market" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','market')" title="Sort by Market">Market <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="side" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','side')" title="Sort by Side">Side <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="size" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','size')" title="Sort by Size">Size <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="baseCost" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','baseCost')" title="Sort by Base Cost">Base Cost <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="marketValue" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','marketValue')" title="Sort by Market Value">Market Value <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="unrealized" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','unrealized')" title="Sort by Unrealized PnL">Unrealized $ (%) <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="positions" data-col="realized" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('positions','realized')" title="Sort by Realized PnL">Realized $ (%) <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
             </tr>
           </thead>
           <tbody id="cockpitPositionsBody">
@@ -2881,14 +2884,14 @@ textarea:focus-visible,
         <table class="tbl" id="cockpitTradesTable">
           <thead>
             <tr>
-              <th class="ot-th-sortable" data-tab="trades" data-col="time" onclick="sortOtTable('trades','time')" aria-sort="none" title="Sort by Time">Time <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="market" onclick="sortOtTable('trades','market')" aria-sort="none" title="Sort by Market">Market <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="cause" onclick="sortOtTable('trades','cause')" aria-sort="none" title="Sort by Cause">Cause <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="shares" onclick="sortOtTable('trades','shares')" aria-sort="none" title="Sort by Shares">Shares <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="baseCost" onclick="sortOtTable('trades','baseCost')" aria-sort="none" title="Sort by Base Cost">Base Cost <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="exitPrice" onclick="sortOtTable('trades','exitPrice')" aria-sort="none" title="Sort by Exit Price">Exit Price <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="gainLoss" onclick="sortOtTable('trades','gainLoss')" aria-sort="none" title="Sort by Gain / Loss">Gain / Loss $ (%) <span class="ot-sort-ind">↕</span></th>
-              <th class="ot-th-sortable" data-tab="trades" data-col="details" onclick="sortOtTable('trades','details')" aria-sort="none" title="Sort by Details">Details <span class="ot-sort-ind">↕</span></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="time" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','time')" title="Sort by Time">Time <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="market" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','market')" title="Sort by Market">Market <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="cause" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','cause')" title="Sort by Cause">Cause <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="shares" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','shares')" title="Sort by Shares">Shares <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="baseCost" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','baseCost')" title="Sort by Base Cost">Base Cost <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="exitPrice" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','exitPrice')" title="Sort by Exit Price">Exit Price <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="gainLoss" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','gainLoss')" title="Sort by Gain / Loss">Gain / Loss $ (%) <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
+              <th class="ot-th-sortable" data-tab="trades" data-col="details" aria-sort="none"><button type="button" class="ot-sort-button" onclick="sortOtTable('trades','details')" title="Sort by Details">Details <span class="ot-sort-ind" aria-hidden="true">↕</span></button></th>
             </tr>
           </thead>
           <tbody id="cockpitTradesBody">
