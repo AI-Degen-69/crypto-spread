@@ -95,7 +95,7 @@ def test_compute_metrics_positive_and_drawdown():
 
 def test_generate_sensitivity_grid():
     base = BacktestParams(offset=0.02, queue_gate=50)
-    grid = generate_sensitivity_grid(base)
+    grid = generate_sensitivity_grid(base, include_structural=True)
     assert len(grid) > 10
     labels = [label for label, _params in grid]
     assert "Baseline" in labels
@@ -124,13 +124,14 @@ def test_generate_joint_grid():
 
 
 def test_generate_joint_grid_sweeps_quote_range():
-    """The joint grid sweeps quote range bounds."""
+    """The joint grid sweeps quote range bounds when explicitly provided."""
     grid = generate_joint_grid(
         offsets=[0.015, 0.020],
         queues=[0.0, 50.0],
         exit_5ms=[0.08, 0.12],
         exit_reversals=[0.02],
         quote_ranges=[(0.05, 0.95), (0.10, 0.90), (0.15, 0.85)],
+        include_structural=True,
     )
     # 2 * 2 * 2 * 1 * 3 = 24 combinations
     assert len(grid) == 24
@@ -139,9 +140,9 @@ def test_generate_joint_grid_sweeps_quote_range():
     labels = [label for label, _ in grid]
     assert all("_qr=" in label for label in labels)
 
-    # The CLI grid preset defaults vary quote_range.
+    # The CLI grid preset default now holds quote_range at baseline (#233).
     default_grid = generate_joint_grid()
-    assert len({p.quote_range for _, p in default_grid}) == 4
+    assert len({p.quote_range for _, p in default_grid}) == 1
 
 
 def test_run_sweep_with_grouped_windows():
@@ -175,6 +176,118 @@ def test_generate_random_grid():
     label, p = grid1[0]
     assert isinstance(p, BacktestParams)
     assert "rand_off=" in label
+
+
+def test_default_joint_grid_holds_structural_limits():
+    """Issue #233: the default joint grid varies tuning knobs only.
+
+    Structural limits (`max_pair_cost`, `quote_range`) sit at the BacktestParams
+    baseline unless the caller opts in with `include_structural=True`.
+    """
+    grid = generate_joint_grid()
+    assert grid
+    assert all(p.max_pair_cost == 0.99 for _, p in grid)
+    assert all(p.quote_range == (0.10, 0.90) for _, p in grid)
+    assert not any("_qr=" in label for label, _ in grid)
+
+
+def test_joint_grid_include_structural_sweeps_structural_limits():
+    """Explicit opt-in sweeps the structural axes as before."""
+    grid = generate_joint_grid(include_structural=True)
+    assert len({p.quote_range for _, p in grid}) == 4
+    assert all(p.max_pair_cost == 1.00 for _, p in grid)
+
+
+def test_default_random_grid_holds_structural_limits():
+    """Issue #233: the random sampler holds structural limits at baseline by default."""
+    grid = generate_random_grid(count=20, seed=7)
+    assert len(grid) == 20
+    assert all(p.max_pair_cost == 0.99 for _, p in grid)
+    assert all(p.quote_range == (0.10, 0.90) for _, p in grid)
+    assert not any("_qr=" in label for label, _ in grid)
+    # Still varies the tuning knobs.
+    assert len({p.offset for _, p in grid}) > 1
+    assert len({p.exit_reversal for _, p in grid}) > 1
+
+
+def test_random_grid_include_structural_varies_structural_limits():
+    """Explicit opt-in restores the structural axes in the random sampler."""
+    grid = generate_random_grid(count=20, seed=7, include_structural=True)
+    assert len({p.quote_range for _, p in grid}) > 1
+
+
+def test_sensitivity_grid_defaults_to_tuning_knobs_only():
+    """Issue #233: the 1D sensitivity grid sweeps tuning knobs only by default.
+
+    The structural axes (`pair_cost`, `quote_range`) are dropped from the
+    default grid; they remain reachable via `--only pair_cost` / `--only
+    quote_range`, which is explicit operator intent.
+    """
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base)
+    labels = [lbl for lbl, _ in grid]
+    assert "Baseline" in labels
+    assert not any(lbl.startswith("pair_cost=") for lbl in labels)
+    assert not any(lbl.startswith("quote_range=") for lbl in labels)
+    # Tuning axes are all still present.
+    assert any(lbl.startswith("offset=") for lbl in labels)
+    assert any(lbl.startswith("queue=") for lbl in labels)
+    assert any(lbl.startswith("exit_5m=") for lbl in labels)
+    assert any(lbl.startswith("exit_rev=") for lbl in labels)
+
+
+def test_sensitivity_grid_include_structural_restores_structural_axes():
+    """Explicit opt-in restores the structural 1D axes."""
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base, include_structural=True)
+    labels = [lbl for lbl, _ in grid]
+    assert any(lbl.startswith("pair_cost=") for lbl in labels)
+    assert any(lbl.startswith("quote_range=") for lbl in labels)
+
+
+def test_cli_include_structural_flag_exists(tmp_path: Path):
+    """--include-structural opts the grid preset into structural axes."""
+    dummy_tick_file = tmp_path / "ticks_test.jsonl"
+    snap = {
+        "cid": "0x1", "series": "btc-up-or-down-5m", "slug": "btc-up-or-down-5m",
+        "duration": 300, "ts": 100.0, "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    dummy_tick_file.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+    out_default = tmp_path / "sweep_default.json"
+    out_struct = tmp_path / "sweep_struct.json"
+    assert main([str(dummy_tick_file), "--preset", "grid", "--out", str(out_default)]) == 0
+    assert main([str(dummy_tick_file), "--preset", "grid",
+                 "--include-structural", "--out", str(out_struct)]) == 0
+    d_def = json.loads(out_default.read_text(encoding="utf-8"))
+    d_str = json.loads(out_struct.read_text(encoding="utf-8"))
+    assert d_def["include_structural"] is False
+    assert d_str["include_structural"] is True
+    assert d_str["runs"] and d_def["runs"]
+
+
+def test_cli_only_pair_cost_is_explicit_structural_opt_in(tmp_path: Path):
+    """--only pair_cost sweeps the structural axis despite the tuning-only default."""
+    dummy_tick_file = tmp_path / "ticks_test.jsonl"
+    snap = {
+        "cid": "0x1", "series": "btc-up-or-down-5m", "slug": "btc-up-or-down-5m",
+        "duration": 300, "ts": 100.0, "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    dummy_tick_file.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+    out_json = tmp_path / "sweep_pc.json"
+    code = main([str(dummy_tick_file), "--preset", "sensitivity",
+                 "--only", "pair_cost", "--out", str(out_json)])
+    assert code == 0
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    # Baseline + the 5 pair-cost points (0.99 is the baseline row itself).
+    assert data["only"] == "pair_cost"
+    labels = [r["param_label"] for r in data["runs"]]
+    assert labels[0] == "Baseline"
+    assert all(l == "Baseline" or l.startswith("pair_cost=") for l in labels)
+    assert len(data["runs"]) == 5
 
 
 def test_format_markdown_table():

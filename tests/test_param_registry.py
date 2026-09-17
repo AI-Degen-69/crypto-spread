@@ -49,25 +49,74 @@ def test_registry_cannot_name_a_field_that_does_not_exist():
         "and no test covers them")
 
 
+VALID_PARAM_CLASSES = ("tuning", "structural", "assumption")
+
+
 def test_every_raw_entry_has_the_expected_tuple_shape():
     """A short tuple would unpack-error only when param_spec() is first called.
 
-    Six elements, plus an optional seventh holding per-surface bound overrides
-    for knobs whose research and live ranges legitimately differ.
+    Issue #233: exactly seven elements — the six classic ones plus a
+    `param_class` in {"tuning", "structural", "assumption"}. The optional
+    per-surface override dict is gone: no knob declares one today, and
+    `param_class` now occupies the 7th position.
     """
     for group, entries in BacktestParams._PARAM_GROUPS.items():
         for entry in entries:
-            assert len(entry) in (6, 7), (
-                f"{group} entry {entry[0]!r} has {len(entry)} elements, need 6 "
-                "(field, label, why, unit, bounds, surfaces) or 7 with "
-                "per-surface overrides")
-            if len(entry) == 7:
-                assert isinstance(entry[6], dict), (
-                    f"{group} entry {entry[0]!r}: the 7th element must map "
-                    "surface -> (low, high)")
-                assert set(entry[6]) <= set(entry[5]), (
-                    f"{group} entry {entry[0]!r} overrides a surface it does "
-                    "not declare")
+            assert len(entry) == 7, (
+                f"{group} entry {entry[0]!r} has {len(entry)} elements, need 7 "
+                "(field, label, why, unit, bounds, surfaces, param_class)")
+            assert entry[6] in VALID_PARAM_CLASSES, (
+                f"{group} entry {entry[0]!r}: param_class {entry[6]!r} must be "
+                f"one of {VALID_PARAM_CLASSES}")
+
+
+def test_every_field_declares_a_valid_param_class():
+    """Issue #233: every registered knob carries a valid class.
+
+    Read through `param_spec()` so the serialized form consumers (the API, the
+    sweep driver, the UI) actually see is what gets validated.
+    """
+    for group, entries in SPEC.items():
+        for name, spec in entries.items():
+            assert "param_class" in spec, f"{group}.{name} has no param_class"
+            assert spec["param_class"] in VALID_PARAM_CLASSES, (
+                f"{group}.{name} declares invalid param_class {spec['param_class']!r}")
+
+
+def test_param_class_assignments_match_the_spec():
+    """The agreed classification (`docs/engine-decision-rules.md` §Parameter classes)."""
+    tuning = {"offset", "queue_gate", "quote_shares", "entry_delay_sec",
+              "exit_thresh_by_slug", "exit_thresh_naked", "exit_reversal",
+              "enable_leg_chase"}
+    structural = {"max_pair_cost", "quote_range", "dead_zone_val",
+                  "dead_zone_unit", "naked_leg_at_expiry"}
+    assumption = {"taker_fee_rate", "tick_size", "min_quote_shares",
+                  "merge_gas_usd"}
+    assert BacktestParams.tuning_knobs() == tuning
+    assert BacktestParams.structural_limits() == structural
+    assert BacktestParams.execution_assumptions() == assumption
+
+
+def test_param_class_for_covers_every_registered_field():
+    """`param_class_for` answers for every field, and raises for unknown ones."""
+    for name in BacktestParams.tuning_knobs():
+        assert BacktestParams.param_class_for(name) == "tuning"
+    for name in BacktestParams.structural_limits():
+        assert BacktestParams.param_class_for(name) == "structural"
+    for name in BacktestParams.execution_assumptions():
+        assert BacktestParams.param_class_for(name) == "assumption"
+    with pytest.raises(KeyError):
+        BacktestParams.param_class_for("not_a_real_field")
+
+
+def test_class_partition_is_disjoint_and_complete():
+    """Every knob is in exactly one class — no overlap, no gap."""
+    a, b, c = (BacktestParams.tuning_knobs(),
+               BacktestParams.structural_limits(),
+               BacktestParams.execution_assumptions())
+    assert not (a & b or b & c or a & c)
+    registered = {name for group in SPEC.values() for name in group}
+    assert a | b | c == registered
 
 
 def test_every_default_lies_inside_its_own_bounds():

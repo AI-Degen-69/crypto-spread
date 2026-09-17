@@ -2189,6 +2189,9 @@ textarea:focus-visible,
 .bt-section-desc{font:500 10px var(--mono);color:var(--faint);margin:0 0 8px;line-height:1.5}
 .bt-section-dot{display:inline-block;width:8px;height:8px;border-radius:50%}
 .bt-section-dot-green{background:var(--up)}
+.bt-section-dot-red{background:var(--down)}
+.param-structural-badge{display:inline-block;font:700 9px var(--disp);letter-spacing:.05em;color:var(--down);border:1px solid var(--down);border-radius:4px;padding:1px 5px;margin-left:6px;vertical-align:middle}
+.param-structural{border-left:2px solid var(--down) !important;padding-left:8px;border-radius:2px}
 .bt-section-dot-amber{background:var(--gold)}
 .bt-section-dot-blue{background:var(--proj)}
 </style></head><body>
@@ -2313,14 +2316,15 @@ textarea:focus-visible,
         <div class="bt-section" id="btSecOperator">
           <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperatorBody')">
             <span class="bt-section-dot bt-section-dot-green"></span>
-            <span>Operator Controls — set these live on the book</span>
+            <span>Tuning Knobs — set these live on the book</span>
             <span class="bt-section-chevron" aria-hidden="true">▾</span>
           </button>
           <div class="bt-section-body" id="btSecOperatorBody">
           <div class="bt-section-desc">
-            These are the parameters you actually control when trading live:
-            where you rest, how much book you clear through, your cost ceiling,
-            your stop placement, your sizing, and which windows you allow.
+            These are the parameters you actually tune when trading live:
+            where you rest, how much book you clear through, your stop
+            placement, your sizing, and when quoting starts. Structural
+            limits (engine invariants) have their own section below.
           </div>
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
@@ -2340,18 +2344,6 @@ textarea:focus-visible,
             <div class="form-group">
               <label data-param-label="entry_delay_sec"></label>
               <input type="number" min="0" max="3600" step="1" id="btEntryDelay" data-param="entry_delay_sec" value="0">
-            </div>
-            <div class="form-group">
-              <label for="btQuoteLo">Quotable Range Lo</label>
-              <input type="number" min="0" max="1" step="0.05" id="btQuoteLo" data-param="quote_range" value="0.10">
-            </div>
-            <div class="form-group">
-              <label for="btQuoteHi">Quotable Range Hi</label>
-              <input type="number" min="0" max="1" step="0.05" id="btQuoteHi" data-param="quote_range" value="0.90">
-            </div>
-            <div class="form-group">
-              <label for="btPairCost" data-param-label="max_pair_cost"></label>
-              <input type="number" min="0.5" max="1" step="0.005" id="btPairCost" data-param="max_pair_cost" value="0.99">
             </div>
             <div id="btStopLossFields">
               <div class="form-group">
@@ -2380,26 +2372,8 @@ textarea:focus-visible,
               <input type="number" min="0" max="0.5" step="0.005" id="btExitReversal" data-param="exit_reversal" value="0.02">
             </div>
             <div class="form-group">
-              <label data-param-label="dead_zone_val"></label>
-              <input type="number" min="0" max="3600" step="0.01" id="btDeadZoneVal" data-param="dead_zone_val" value="0.10">
-            </div>
-            <div class="form-group">
-              <label data-param-label="dead_zone_unit"></label>
-              <select id="btDeadZoneUnit" data-param="dead_zone_unit">
-                <option value="pct" selected>% of window</option>
-                <option value="sec">Seconds</option>
-              </select>
-            </div>
-            <div class="form-group">
               <label data-param-label="exit_thresh_naked"></label>
               <input type="number" min="0" max="0.5" step="0.01" id="btExitNaked" data-param="exit_thresh_naked" value="0">
-            </div>
-            <div class="form-group">
-              <label data-param-label="naked_leg_at_expiry"></label>
-              <select id="btNakedLegAtExpiry" data-param="naked_leg_at_expiry">
-                <option value="close" selected>Close at Book</option>
-                <option value="hold">Hold to Settlement</option>
-              </select>
             </div>
             <div class="form-group">
               <label data-param-label="enable_leg_chase"></label>
@@ -2414,6 +2388,54 @@ textarea:focus-visible,
                 <option value="0" selected>All (No filter)</option>
                 <option value="5.0">Full Windows Only (≤5s delay)</option>
                 <option value="2.0">Strict Full Windows (≤2s delay)</option>
+              </select>
+            </div>
+          </div>
+          </div>
+        </div>
+
+        <!-- ── 1b. STRUCTURAL LIMITS (engine invariants, issue #233) ───── -->
+        <div class="bt-section" id="btSecStructural">
+          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecStructuralBody" onclick="toggleBtSection(this,'btSecStructuralBody')">
+            <span class="bt-section-dot bt-section-dot-red"></span>
+            <span>Structural Limits — Engine Invariants &amp; Safety Bounds</span>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecStructuralBody">
+          <div class="bt-section-desc">
+            These bound what the engine may do at all (ADR-0003). They are not
+            daily tuning dials: a sweep changes them only with explicit intent
+            (<code>--include-structural</code>). Badged <span class="param-structural-badge">STRUCTURAL</span> here and in the Cockpit.
+          </div>
+          <div class="form-grid" style="margin-top:6px">
+            <div class="form-group">
+              <label for="btQuoteLo">Quotable Range Lo</label>
+              <input type="number" min="0" max="1" step="0.05" id="btQuoteLo" data-param="quote_range" value="0.10">
+            </div>
+            <div class="form-group">
+              <label for="btQuoteHi">Quotable Range Hi</label>
+              <input type="number" min="0" max="1" step="0.05" id="btQuoteHi" data-param="quote_range" value="0.90">
+            </div>
+            <div class="form-group">
+              <label for="btPairCost" data-param-label="max_pair_cost"></label>
+              <input type="number" min="0.5" max="1" step="0.005" id="btPairCost" data-param="max_pair_cost" value="0.99">
+            </div>
+            <div class="form-group">
+              <label data-param-label="dead_zone_val"></label>
+              <input type="number" min="0" max="3600" step="0.01" id="btDeadZoneVal" data-param="dead_zone_val" value="0.10">
+            </div>
+            <div class="form-group">
+              <label data-param-label="dead_zone_unit"></label>
+              <select id="btDeadZoneUnit" data-param="dead_zone_unit">
+                <option value="pct" selected>% of window</option>
+                <option value="sec">Seconds</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label data-param-label="naked_leg_at_expiry"></label>
+              <select id="btNakedLegAtExpiry" data-param="naked_leg_at_expiry">
+                <option value="close" selected>Close at Book</option>
+                <option value="hold">Hold to Settlement</option>
               </select>
             </div>
           </div>
@@ -2641,13 +2663,6 @@ textarea:focus-visible,
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" data-param="exit_thresh_naked" value="0.05" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
-          <label data-param-label="naked_leg_at_expiry"></label>
-          <select id="cockpitNakedLegAtExpiry" data-param="naked_leg_at_expiry">
-            <option value="close" selected>Close at Book</option>
-            <option value="hold">Hold to Settlement</option>
-          </select>
-        </div>
-        <div class="form-group">
           <label data-param-label="exit_reversal"></label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitReversal" data-param="exit_reversal" value="0.02" oninput="validateCockpitInputs()">
         </div>
@@ -2658,18 +2673,6 @@ textarea:focus-visible,
         <div class="form-group">
           <label data-param-label="entry_delay_sec"></label>
           <input type="number" min="0" max="3600" step="5" id="cockpitEntryDelay" data-param="entry_delay_sec" value="0" placeholder="0 = off" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label for="cockpitQuoteLo">Quotable Range Lo</label>
-          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteLo" data-param="quote_range" value="0.10" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label for="cockpitQuoteHi">Quotable Range Hi</label>
-          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteHi" data-param="quote_range" value="0.90" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="max_pair_cost"></label>
-          <input type="number" min="0.5" max="1" step="0.005" id="cockpitPairCost" data-param="max_pair_cost" value="0.99" placeholder="max pair cost" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="enable_leg_chase"></label>
@@ -2685,6 +2688,34 @@ textarea:focus-visible,
             <option value="live">Real Money — Polymarket orders</option>
           </select>
         </div>
+      </div>
+
+      <!-- Structural Limits — engine invariants, badged apart from tuning dials (issue #233) -->
+      <div id="cockpitStructuralGroup" style="margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-left:2px solid var(--down);border-radius:8px;background:var(--panel2)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font:700 11px var(--disp);color:var(--down);text-transform:uppercase;letter-spacing:0.06em">Structural Limits — Engine Invariants &amp; Safety Bounds</span>
+          <span class="param-structural-badge">STRUCTURAL</span>
+        </div>
+        <div class="form-grid">
+        <div class="form-group">
+          <label data-param-label="naked_leg_at_expiry"></label>
+          <select id="cockpitNakedLegAtExpiry" data-param="naked_leg_at_expiry">
+            <option value="close" selected>Close at Book</option>
+            <option value="hold">Hold to Settlement</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="cockpitQuoteLo">Quotable Range Lo</label>
+          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteLo" data-param="quote_range" value="0.10" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label for="cockpitQuoteHi">Quotable Range Hi</label>
+          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteHi" data-param="quote_range" value="0.90" oninput="validateCockpitInputs()">
+        </div>
+        <div class="form-group">
+          <label data-param-label="max_pair_cost"></label>
+          <input type="number" min="0.5" max="1" step="0.005" id="cockpitPairCost" data-param="max_pair_cost" value="0.99" placeholder="max pair cost" oninput="validateCockpitInputs()">
+        </div>
         <div class="form-group">
           <label data-param-label="dead_zone_val"></label>
           <input type="number" min="0" max="3600" step="0.01" id="cockpitDeadZoneVal" data-param="dead_zone_val" value="0.10" placeholder="0.10 or sec" oninput="validateCockpitInputs()">
@@ -2696,6 +2727,10 @@ textarea:focus-visible,
             <option value="sec">Seconds</option>
           </select>
         </div>
+        </div>
+      </div>
+
+      <div class="form-grid" style="margin-top:10px">
         <div class="form-group" style="grid-column:span 2">
           <label id="lblCockpitWallet">Polymarket Wallet Address (Optional)</label>
           <input type="text" id="cockpitWallet" placeholder="0x... (fetches real balance)" onchange="if ($('cockpitMode').value === 'live') onCockpitModeChange()">
@@ -3551,6 +3586,10 @@ async function applyParamSpec(root){
     const spec = paramSpecFor(el.getAttribute('data-param'));
     if(!spec) return;
     if(spec.why) el.title = spec.why;
+    // Issue #233: badge structural limits so an operator can tell a safety
+    // ceiling from a daily tuning dial at a glance, straight from the served
+    // param_class — no second hard-coded list in the page to drift.
+    if(spec.param_class === 'structural') el.classList.add('param-structural');
     // Per-surface bounds: an id prefix tells us which tab this control is on,
     // and each tab gets the range it actually enforces. Falling back to the
     // shared pair would have widened the Cockpit's pair-cost input to the

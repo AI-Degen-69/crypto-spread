@@ -2314,6 +2314,80 @@ def test_the_old_drifted_wordings_are_gone():
         assert stale not in html, f"drifted label still in the page: {stale!r}"
 
 
+# ===========================================================================
+# Issue #233: structural limits render apart from tuning knobs
+# ===========================================================================
+
+STRUCTURAL_FIELDS = ("max_pair_cost", "quote_range", "dead_zone_val",
+                     "dead_zone_unit", "naked_leg_at_expiry")
+
+
+def test_params_spec_serves_param_class_for_every_knob():
+    body = client.get("/api/params/spec").json()
+    for group, entries in body["groups"].items():
+        for name, v in entries.items():
+            assert v["param_class"] in ("tuning", "structural", "assumption"), (
+                f"{group}.{name} has no valid param_class: {v.get('param_class')!r}")
+    assert body["groups"]["trading_knobs"]["max_pair_cost"]["param_class"] == "structural"
+    assert body["groups"]["trading_knobs"]["offset"]["param_class"] == "tuning"
+
+
+def test_backtest_tab_renders_a_dedicated_structural_limits_section():
+    """The Backtest tab separates structural limits into their own card/section."""
+    html = client.get("/").text
+    assert "btSecStructural" in html, "no dedicated Structural Limits section on the Backtest tab"
+    assert "Structural Limits" in html
+    # The section header names what it is, so an operator cannot mistake a
+    # safety ceiling for a daily dial.
+    assert "Engine Invariants" in html
+
+
+def test_backtest_structural_section_contains_all_structural_controls():
+    """Every structural control's markup sits inside the structural section."""
+    html = client.get("/").text
+    sec_start = html.index("btSecStructural")
+    sec_end = html.index("btSecExecutionBody")
+    section = html[sec_start:sec_end]
+    for frag in ('data-param="max_pair_cost"', 'id="btQuoteLo"', 'id="btQuoteHi"',
+                 'data-param="dead_zone_val"', 'data-param="dead_zone_unit"',
+                 'data-param="naked_leg_at_expiry"'):
+        assert frag in section, f"structural control {frag!r} not inside btSecStructural"
+    # And the tuning controls stayed behind in the operator section.
+    op_start = html.index("btSecOperatorBody")
+    operator = html[op_start:sec_start]
+    assert 'data-param="offset"' in operator
+    assert 'data-param="max_pair_cost"' not in operator
+
+
+def test_backtest_tuning_section_is_relabelled_as_tuning_knobs():
+    """The operator section says what it is: tuning knobs, not all controls."""
+    html = client.get("/").text
+    assert "Tuning Knobs" in html
+
+
+def test_cockpit_renders_a_structural_limits_grouping_with_badges():
+    """The Cockpit demarcates structural limits with a badged sub-group."""
+    html = client.get("/").text
+    assert 'id="cockpitStructuralGroup"' in html
+    assert "Structural" in html   # badged header text
+    grp_start = html.index("cockpitStructuralGroup")
+    grp_end = html.index('id="cockpitWallet"')
+    group = html[grp_start:grp_end]
+    for frag in ('id="cockpitQuoteLo"', 'id="cockpitQuoteHi"',
+                 'data-param="max_pair_cost"', 'data-param="dead_zone_val"',
+                 'data-param="naked_leg_at_expiry"'):
+        assert frag in group, f"structural control {frag!r} not inside cockpitStructuralGroup"
+    # Structural controls carry a badge marker class.
+    assert "param-structural" in html
+
+
+def test_js_helper_badges_structural_inputs_via_the_registry():
+    """applyParamSpec tags structural controls from the served param_class."""
+    html = client.get("/").text
+    assert "param_class" in html, "page never reads param_class from the spec"
+    assert "classList.add('param-structural')" in html
+
+
 def test_backtest_sends_the_new_knobs():
     html = client.get("/").text
     for q in ("exit_reversal=", "dead_zone_val=", "dead_zone_unit=",
