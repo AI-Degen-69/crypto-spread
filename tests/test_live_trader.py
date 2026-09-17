@@ -1899,11 +1899,10 @@ def test_update_config_quote_range_roundtrip_and_refusals():
 
 
 def test_zeroed_skip_tallies_appear_in_get_state():
-    """Issue #228: with both gates and re-entry deleted, the operator-facing
-    tallies sit at zero. The keys stay until T4 removes them from the payload."""
+    """Issue #228/232: with re-entry deleted, reentry_stats is removed from get_state."""
     engine = _drift_engine()
     state = engine.get_state()
-    assert state["reentry_stats"]["reentries"] == 0
+    assert "reentry_stats" not in state
     assert state["band_skip_stats"]["band_skips"] == 0
 
 
@@ -2024,7 +2023,7 @@ def _fifteen_minute_engine(slug="btc-up-or-down-15m", **kwargs):
 
 
 def test_requote_after_merge_when_time_remains():
-    """A 15m merge with ~890s left opens round 2 instead of going terminal."""
+    """A 15m merge with time left allows fresh start instead of going terminal."""
     engine = _fifteen_minute_engine()
     engine.enable_leg_chase = False
     engine.start()
@@ -2034,7 +2033,7 @@ def test_requote_after_merge_when_time_remains():
 
     _open_50_50_quotes(engine, slug, market, now - 1)
     m = engine.markets[slug]
-    # Round 0 fills at the static 0.48 / 0.48 anchor.
+    # Round 1 fills at the 0.48 / 0.48 anchor.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
@@ -2048,16 +2047,10 @@ def test_requote_after_merge_when_time_remains():
     }, now + 1)
     assert m.pairs_count == 1
     assert round(m.realized_pnl_usd, 2) == 0.20
+    assert m.pair_captured is True
+    assert m.status == "PAIR_MERGED"
 
-    # Merge tick re-quotes immediately: per-round flags reset, round counter up.
-    assert m.pair_captured is False
-    assert m.requote_round == 1
-    assert m.status == "QUOTING"
-    assert m.filled_up is False and m.filled_down is False
-    assert m.order_status_up in ("NONE", "RESTING")
-    assert m.order_status_down in ("NONE", "RESTING")
-
-    # Round 1 completes into a second merge; PnL is cumulative.
+    # Fresh start on next tick completes into a second merge; PnL is cumulative.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.49, "best_ask": 0.499},
@@ -2069,19 +2062,7 @@ def test_requote_after_merge_when_time_remains():
 
 
 def test_a_requoted_round_is_a_freshly_placed_quote_and_fills_on_a_touch():
-    """Issue #226: round 2's quote is placed, not resting, so it is marketable.
-
-    The touch rule protects a quote that joined the queue and has to wait. A
-    quote placed onto a standing ask matches on arrival with nobody ahead of
-    it, and a post-merge re-quote is exactly that. Review caught the first
-    version reading "is this newly placed?" off the fill-telemetry rest
-    snapshot, which `_maybe_requote_after_merge` does not reset -- so every
-    round after the first was treated as already-resting and needed a full
-    pass-through that round 0 did not.
-
-    Identical to the test above except the round-1 asks merely touch the new
-    anchors instead of passing through them.
-    """
+    """Issue #226/#232: round 2's quote is placed, not resting, so it is marketable."""
     engine = _fifteen_minute_engine()
     engine.enable_leg_chase = False
     engine.start()
@@ -2102,20 +2083,19 @@ def test_a_requoted_round_is_a_freshly_placed_quote_and_fills_on_a_touch():
         "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     assert m.pairs_count == 1
-    assert m.requote_round == 1
 
-    # Round 1 rests at 0.50 / 0.46 and both asks sit exactly there.
+    # Round 2 quotes fresh and both asks touch the new anchors.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.49, "best_ask": 0.50},
         "down_book": {"best_bid": 0.45, "best_ask": 0.46},
     }, now + 2)
-    assert m.pairs_count == 2, "a re-quoted round must fill on a touch"
+    assert m.pairs_count == 2, "a fresh-start round must fill on a touch"
     assert round(m.realized_pnl_usd, 2) == 0.40
 
 
 def test_requote_dynamic_anchor_math():
-    """Round-1 resting prices anchor to mid - offset, summing to 1 - 2*offset."""
+    """Fresh start resting prices anchor to mid - offset, summing to 1 - 2*offset."""
     engine = _fifteen_minute_engine()
     engine.start()
     slug = "btc-up-or-down-15m"
@@ -2130,14 +2110,19 @@ def test_requote_dynamic_anchor_math():
     }, now)
     m = engine.markets[slug]
 
-    # Skewed books (mid 0.60) whose asks still touch the 0.48 static anchor.
+    # Skewed books whose asks touch the 0.48 static anchor.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.27, "best_ask": 0.28},
     }, now + 1)
     assert m.pairs_count == 1
-    assert m.requote_round == 1
+    # Next tick with mid 0.60 anchors fresh:
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.59, "best_ask": 0.61},
+        "down_book": {"best_bid": 0.39, "best_ask": 0.41},
+    }, now + 2)
     assert m.resting_up == round(0.60 - engine.offset, 3) == 0.58
     assert m.resting_down == round((1.0 - 0.60) - engine.offset, 3) == 0.38
     assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
@@ -2186,7 +2171,7 @@ def test_initial_entry_anchors_to_live_mid():
 
     # Context: this is the opening round on a window nothing held, and the
     # prices above are what was actually quoted, not merely computed.
-    assert m.requote_round == 0, "still the opening round, not a re-quote"
+    assert m.pairs_count == 0, "still the opening round, not a re-quote"
     assert m.filled_up is False and m.filled_down is False
     assert m.order_status_up == "RESTING" and m.order_status_down == "RESTING"
 
@@ -2283,10 +2268,9 @@ def test_initial_entry_price_is_taken_at_placement_not_at_open():
 
 
 def test_no_requote_when_time_short():
-    """A 5m merge with ~60s left stays terminal: no second round."""
-    # Dead-zone guard disabled: this test isolates the re-quote time gate,
-    # not the mid-window-start behavior (240s elapsed would skip entry).
-    engine = LiveTraderEngine(dead_zone_val=0.0)
+    """A merge inside dead zone stays terminal: no second round."""
+    # Under fresh_start (rule 13), dead zone (default 10% = 30s for 5m) is the sole time gate.
+    engine = LiveTraderEngine()
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -2295,8 +2279,8 @@ def test_no_requote_when_time_short():
         market_slug="btc-up-down-5m",
         up_token="tok_up",
         down_token="tok_dn",
-        start_ts=now - 240.0,
-        end_ts=now + 60.0,
+        start_ts=now - 265.0,
+        end_ts=now + 35.0,
         tick_size=0.01,
         neg_risk=False,
     )
@@ -2315,20 +2299,18 @@ def test_no_requote_when_time_short():
     assert m.pairs_count == 1
     assert m.pair_captured is True
     assert m.status == "PAIR_MERGED"
-    assert m.requote_round == 0
 
-    # Touching books afterwards must not open a new round.
+    # Touching books afterwards inside dead zone (remaining 29s <= 30s) must not open a new round.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.47, "best_ask": 0.479},
-    }, now + 2)
+    }, now + 6)
     assert m.pairs_count == 1
-    assert m.requote_round == 0
 
 
 def test_no_requote_after_stop_exit():
-    """STOP_EXIT is terminal even with time remaining; only merges re-quote."""
+    """Under fresh_start (rule 13), a stop exit outside dead zone allows fresh entry when conditions hold."""
     engine = _fifteen_minute_engine("eth-up-or-down-15m")
     engine.start()
     slug = "eth-up-or-down-15m"
@@ -2351,83 +2333,29 @@ def test_no_requote_after_stop_exit():
         "down_book": {"best_bid": 0.55, "best_ask": 0.57},
     }, now + 1)
     assert m.exit_taken is True
-    assert m.requote_round == 0
+    assert m.stops_count == 1
 
+    # Fresh start on next tick outside dead zone: enters fresh quotes!
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
     }, now + 2)
-    assert m.requote_round == 0
-    assert m.pairs_count == 0
+    assert m.exit_taken is False
+    assert m.order_status_up in ("RESTING", "NONE")
+    assert m.order_status_down in ("RESTING", "NONE")
+    assert m.stops_count == 1
 
 
-def test_requote_telemetry_recorded():
-    """Each re-quote captures mid_at_calc, order prices, resting confirmation."""
+def test_dead_zone_is_sole_time_gate_for_fresh_start():
+    """Under fresh_start (rule 13), the dead zone is the sole time gate."""
+    # 15m window = 900s, dead zone 10% = 90s cutoff.
+    # At elapsed 800s, remaining is 100s > 90s: outside dead zone, fresh start quotes.
     engine = _fifteen_minute_engine()
-    engine.start()
+    _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
-    market = _fifteen_minute_market(now, condition_id="0xtelemetry15m")
-
-    _open_50_50_quotes(engine, slug, market, now - 1)
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
-        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
-    }, now)
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
-    }, now + 1)
-    m = engine.markets[slug]
-    assert m.requote_round == 1
-    tel = m.last_requote_telemetry
-    assert tel is not None
-    assert tel["round"] == 1
-    assert tel["mid_at_calc"] == pytest.approx(0.52, abs=0.001)
-    assert tel["order_prices"]["up"] == m.resting_up
-    assert tel["order_prices"]["down"] == m.resting_down
-    # Resting confirmation is still pending: the new round has not quoted yet.
-    assert tel["mid_at_resting"] is None
-
-    # Next tick the new round rests both legs: confirmation is finalised.
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
-    }, now + 2)
-    tel = m.last_requote_telemetry
-    assert tel["mid_at_resting"] is not None
-    assert tel["latency_ms"] is not None and tel["latency_ms"] >= 0.0
-    assert "drift" in tel
-    assert tel["drift"] == pytest.approx(abs(tel["mid_at_resting"] - tel["mid_at_calc"]), abs=1e-9)
-
-
-def test_min_requote_remaining_sec_config():
-    """Knob defaults to 300s, is runtime-configurable while stopped, locked while running."""
-    engine = LiveTraderEngine()
-    assert engine.min_requote_remaining_sec == 300.0
-    assert engine.get_state()["params"]["min_requote_remaining_sec"] == 300.0
-
-    engine.update_config(min_requote_remaining_sec=120.0)
-    assert engine.min_requote_remaining_sec == 120.0
-
-    engine.start()
-    with pytest.raises(ValueError):
-        engine.update_config(min_requote_remaining_sec=600.0)
-    assert engine.min_requote_remaining_sec == 120.0
-
-
-def test_requote_boundary_time_remaining_equals_gate():
-    """remaining == gate still re-quotes (gate uses <); one second less stays terminal."""
-    # Dead-zone guard disabled: elapsed 599s/900s would otherwise skip entry.
-    engine = _fifteen_minute_engine(dead_zone_val=0.0)
-    engine.start()
-    slug = "btc-up-or-down-15m"
-    now = time.time()
-    market = _fifteen_minute_market(now, condition_id="0xboundary15m", start_offset=599.0)
+    market = _fifteen_minute_market(now, condition_id="0xdzgate15m", start_offset=800.0)
 
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
@@ -2442,12 +2370,21 @@ def test_requote_boundary_time_remaining_equals_gate():
     }, now + 1)
     m = engine.markets[slug]
     assert m.pairs_count == 1
-    assert m.requote_round == 1  # remaining was exactly 300.0 >= gate
 
-    engine2 = _fifteen_minute_engine(dead_zone_val=0.0)
-    engine2.start()
+    # At now + 2, elapsed is 802s, remaining 98s > 90s cutoff: fresh start quotes!
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now + 2)
+    assert m.order_status_up == "RESTING"
+    assert m.order_status_down == "RESTING"
+
+    # In contrast, when the window reaches the dead zone (elapsed 815s, remaining 85s <= 90s cutoff):
+    engine2 = _fifteen_minute_engine()
+    _quiet_start(engine2)
     now2 = time.time()
-    market2 = _fifteen_minute_market(now2, condition_id="0xboundary15m_b", start_offset=600.0)
+    market2 = _fifteen_minute_market(now2, condition_id="0xdzgate15m_b", start_offset=800.0)
     _open_50_50_quotes(engine2, slug, market2, now2 - 1)
     engine2._update_market_strategy(slug, {
         "market": market2,
@@ -2461,39 +2398,16 @@ def test_requote_boundary_time_remaining_equals_gate():
     }, now2 + 1)
     m2 = engine2.markets[slug]
     assert m2.pairs_count == 1
-    assert m2.requote_round == 0  # remaining was 299.0 < gate
-    assert m2.status == "PAIR_MERGED"
+    assert m2.pair_captured is True
 
-
-def test_negative_requote_gate_clamped_to_zero():
-    """A negative gate clamps to 0.0 in __init__, matching update_config."""
-    engine = _fifteen_minute_engine(min_requote_remaining_sec=-30.0)
-    assert engine.min_requote_remaining_sec == 0.0
-
-
-def test_min_requote_remaining_sec_zero_disables():
-    """A zero gate disables re-quoting entirely, even on 15m windows."""
-    engine = _fifteen_minute_engine(min_requote_remaining_sec=0.0)
-    engine.start()
-    slug = "btc-up-or-down-15m"
-    now = time.time()
-    market = _fifteen_minute_market(now, condition_id="0xdisabled15m")
-
-    _open_50_50_quotes(engine, slug, market, now - 1)
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
-        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
-    }, now)
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
-    }, now + 1)
-    m = engine.markets[slug]
-    assert m.pairs_count == 1
-    assert m.pair_captured is True
-    assert m.requote_round == 0
+    # At now2 + 15, elapsed is 815s, remaining 85s <= 90s cutoff (in dead zone): no fresh start!
+    engine2._update_market_strategy(slug, {
+        "market": market2,
+        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
+    }, now2 + 15)
+    assert m2.pairs_count == 1
+    assert m2.pair_captured is True
 
 
 def test_rollover_resets_requote_round():
@@ -2516,11 +2430,12 @@ def test_rollover_resets_requote_round():
         "down_book": {"best_bid": 0.47, "best_ask": 0.479},
     }, now + 1)
     m = engine.markets[slug]
-    assert m.requote_round == 1
+    assert m.pairs_count == 1
 
     engine._handle_window_rollover(m, now + 2, "0xroll15m_next")
-    assert m.requote_round == 0
-    assert m.last_requote_telemetry is None
+    assert m.pairs_count == 1
+    assert m.pair_captured is False
+    assert m.exit_taken is False
     assert m.status == "QUOTING"
 
 
@@ -2694,16 +2609,13 @@ def test_update_config_dead_zone_knobs_roundtrip_and_clamp():
         dead_zone_val=15.0,
         dead_zone_unit="sec",
         naked_leg_at_expiry="hold",
-        reentry_require_pairable=False,
     )
     assert engine.dead_zone_val == 15.0
     assert engine.dead_zone_unit == "sec"
     assert engine.naked_leg_at_expiry == "hold"
-    assert engine.reentry_require_pairable is False
     assert state["params"]["dead_zone_val"] == 15.0
     assert state["params"]["dead_zone_unit"] == "sec"
     assert state["params"]["naked_leg_at_expiry"] == "hold"
-    assert state["params"]["reentry_require_pairable"] is False
 
     # Validation: dead_zone_val must be >= 0; pct must be <= 1.0.
     with pytest.raises(ValueError, match="dead_zone_val"):
@@ -2917,8 +2829,6 @@ def test_leg_chase_disabled_or_both_filled(monkeypatch):
     m2.pair_captured = True
     engine2._update_market_strategy(slug, poll1, now)
     assert m2.chased_leg is None
-    assert m2.resting_down == 0.48
-    assert m2.resting_up == 0.48
 
 
 def test_update_config_leg_chase_knobs():

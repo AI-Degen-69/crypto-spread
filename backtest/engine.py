@@ -491,6 +491,8 @@ class WindowResult:
     settled_unmarked: bool = False
     settle_source: str = ""
     entered: bool = False
+    pairs_count: int = 0
+    stops_count: int = 0
 
 
 # Issue #170: these used to be local copies that disagreed with the collector
@@ -715,6 +717,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
 
     filled_up = False
     filled_down = False
+    ever_filled_up = False
+    ever_filled_down = False
+    first_entry_price_up = None
+    first_entry_price_down = None
+    last_exit_price = None
     entry_price_up = None
     entry_price_down = None
     exit_price = None
@@ -724,6 +731,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     exit_taken = False
     exit_side = ""
     pair_captured = False
+    pairs_count = 0
+    stops_count = 0
     mids: list[float] = []
     max_up = 0.0
     max_down = 0.0
@@ -747,6 +756,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # Which leg (if any) the chase moved, so the entry price recorded for it is
     # the price it actually rested at when it filled, not a later chase step.
     chased_leg = ""
+    last_chased_leg = ""
+    last_chased_resting: float | None = None
 
     # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
     # holds all quoting until that far into the window (0 = off).
@@ -942,7 +953,6 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         chased_now_up = False
         chased_now_down = False
         if (params.enable_leg_chase and (filled_up != filled_down)
-                and not pair_captured and not exit_taken
                 and resting_up is not None and resting_down is not None):
             _cap = params.max_pair_cost
             _dz_cutoff = book_math.dead_zone_cutoff_seconds(
@@ -963,6 +973,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                         resting_down = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "down"
                         chased_now_down = True
+                        last_chased_leg = "down"
+                        last_chased_resting = resting_down
             else:
                 _ask = ub.get("best_ask")
                 if _ask is not None:
@@ -975,6 +987,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                         resting_up = round(min(0.99, max(0.01, _target)), 3)
                         chased_leg = "up"
                         chased_now_up = True
+                        last_chased_leg = "up"
+                        last_chased_resting = resting_up
 
 
         if not queue_ok:
@@ -1025,11 +1039,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 resting_up, up_ask, up_prints, params.tick_size,
                 newly_placed=placed_now or chased_now_up):
             filled_up = True
+            ever_filled_up = True
             can_fill_up = False
         if can_fill_down and book_math.resting_bid_filled(
                 resting_down, dn_ask, dn_prints, params.tick_size,
                 newly_placed=placed_now or chased_now_down):
             filled_down = True
+            ever_filled_down = True
             can_fill_down = False
 
         # Latch each leg's entry price the tick it fills. Without this, a
@@ -1037,17 +1053,37 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # computed against (issue #164).
         if filled_up and entry_price_up is None:
             entry_price_up = resting_up
+            if first_entry_price_up is None:
+                first_entry_price_up = resting_up
         if filled_down and entry_price_down is None:
             entry_price_down = resting_down
+            if first_entry_price_down is None:
+                first_entry_price_down = resting_down
 
         # --- PAIR COMPLETION ---
-        if filled_up and filled_down and not pair_captured and not exit_taken:
+        if filled_up and filled_down:
+            pairs_count += 1
             pair_captured = True
             pnl_cents += (1.00 - (resting_up + resting_down)) * 100.0
             # merge_gas_usd is a per-transaction cost; amortize over the
             # actual shares in the pair so pnl_cents stays per-share.
             pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
-            break
+            orders_live = False
+            resting_up = None
+            resting_down = None
+            filled_up = False
+            filled_down = False
+            entry_price_up = None
+            entry_price_down = None
+            chased_leg = ""
+            original_resting_up = None
+            original_resting_down = None
+            naked_since_elapsed = None
+            adverse_drift_up = 0.0
+            adverse_drift_down = 0.0
+            reversal_seen_up = False
+            reversal_seen_down = False
+            continue
 
         # --- NAKED LEG CLOCK (issue #164, mirrors live `naked_since_ts`) ---
         # Starts when exactly one leg is filled and resets the moment that
@@ -1063,19 +1099,36 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # In the dead zone: cancel unfilled resting quotes. If one leg is filled,
         # close it at best bid if naked_leg_at_expiry == "close", or hold to settlement
         # if naked_leg_at_expiry == "hold".
-        if in_dead_zone and _one_leg and not exit_taken and not pair_captured:
+        if in_dead_zone and _one_leg:
             entry_cancelled = True
             if params.naked_leg_at_expiry == "close":
                 _book = ub if filled_up else db
                 _bb = _quote(_book.get("best_bid"))
                 if _bb is not None:
+                    stops_count += 1
                     exit_taken = True
                     exit_side = "up" if filled_up else "down"
                     exit_price = _bb
+                    last_exit_price = _bb
                     _rest = resting_up if filled_up else resting_down
                     pnl_cents += (_bb - _rest) * 100.0
                     fees_cents += _taker_fee(_bb, params.taker_fee_rate) * 100.0
-                    break
+                    orders_live = False
+                    resting_up = None
+                    resting_down = None
+                    filled_up = False
+                    filled_down = False
+                    entry_price_up = None
+                    entry_price_down = None
+                    chased_leg = ""
+                    original_resting_up = None
+                    original_resting_down = None
+                    naked_since_elapsed = None
+                    adverse_drift_up = 0.0
+                    adverse_drift_down = 0.0
+                    reversal_seen_up = False
+                    reversal_seen_down = False
+                    continue
 
         # --- EXIT (one side filled, mid drifted past thresh without reversal) ---
         # Check BEFORE we update the reversal flag this tick so the crossing
@@ -1083,25 +1136,59 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # the exit is suppressed).
         # Issue #230: Governed by single `exit_thr`.
         if (filled_up and not filled_down and adverse_drift_down >= exit_thr
-                and not reversal_seen_down and not exit_taken):
+                and not reversal_seen_down):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
+                stops_count += 1
                 exit_taken = True
                 exit_side = "up"
                 exit_price = bb_up
+                last_exit_price = bb_up
                 pnl_cents += (bb_up - resting_up) * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
-                break
+                orders_live = False
+                resting_up = None
+                resting_down = None
+                filled_up = False
+                filled_down = False
+                entry_price_up = None
+                entry_price_down = None
+                chased_leg = ""
+                original_resting_up = None
+                original_resting_down = None
+                naked_since_elapsed = None
+                adverse_drift_up = 0.0
+                adverse_drift_down = 0.0
+                reversal_seen_up = False
+                reversal_seen_down = False
+                continue
         if (filled_down and not filled_up and adverse_drift_up >= exit_thr
-                and not reversal_seen_up and not exit_taken):
+                and not reversal_seen_up):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:
+                stops_count += 1
                 exit_taken = True
                 exit_side = "down"
                 exit_price = bb_dn
+                last_exit_price = bb_dn
                 pnl_cents += (bb_dn - resting_down) * 100.0
                 fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
-                break
+                orders_live = False
+                resting_up = None
+                resting_down = None
+                filled_up = False
+                filled_down = False
+                entry_price_up = None
+                entry_price_down = None
+                chased_leg = ""
+                original_resting_up = None
+                original_resting_down = None
+                naked_since_elapsed = None
+                adverse_drift_up = 0.0
+                adverse_drift_down = 0.0
+                reversal_seen_up = False
+                reversal_seen_down = False
+                continue
 
     # Fallback for windows where the chase never ran: the resting price at
     # loop end is the price the leg rested at throughout.
@@ -1121,7 +1208,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # redeems when no stage resolves. Taker fee is charged only on a real
         # mark; a redemption is not a closing trade. Pair-capture and exit
         # behaviour above are untouched.
-        if not pair_captured and not exit_taken and (filled_up != filled_down):
+        if (filled_up != filled_down):
             _resting = resting_up if filled_up else resting_down
             if _resting is not None:
                 mark, delta, src = resolve_naked_settlement(
@@ -1140,7 +1227,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         n_snaps=len(window_snaps),
         class_label=_classify(mids),
         max_up=round(max_up, 4), max_down=round(max_down, 4),
-        filled_up=filled_up, filled_down=filled_down,
+        filled_up=ever_filled_up, filled_down=ever_filled_down,
         pair_captured=pair_captured, exit_taken=exit_taken, exit_side=exit_side,
         pnl_cents=round(pnl_cents, 4),
         fees_cents=round(fees_cents, 4),
@@ -1150,16 +1237,19 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Issue #228: the re-entry mechanism is deleted, so this is always
         # 0 (the field itself goes in T5 with its last readers).
         reentry_count=0,
-        entry_price_up=entry_price_up,
-        entry_price_down=entry_price_down,
-        exit_price=exit_price,
+        entry_price_up=first_entry_price_up if first_entry_price_up is not None else entry_price_up,
+        entry_price_down=first_entry_price_down if first_entry_price_down is not None else entry_price_down,
+        exit_price=last_exit_price if last_exit_price is not None else exit_price,
         settlement_mid=settlement_mid,
-        chased_leg=chased_leg,
-        chased_resting=(resting_down if chased_leg == "down"
-                        else resting_up if chased_leg == "up" else None),
+        chased_leg=last_chased_leg if last_chased_leg else chased_leg,
+        chased_resting=last_chased_resting if last_chased_resting is not None else (
+            resting_down if chased_leg == "down"
+            else resting_up if chased_leg == "up" else None),
         settled_unmarked=settled_unmarked,
         settle_source=settle_source,
         entered=window_entered,
+        pairs_count=pairs_count,
+        stops_count=stops_count,
     )
 
 
@@ -1251,6 +1341,10 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             a["pair"] += 1
         if w.exit_taken:
             a["exit"] += 1
+        a.setdefault("pairs_count", 0)
+        a["pairs_count"] += w.pairs_count
+        a.setdefault("stops_count", 0)
+        a["stops_count"] += w.stops_count
         if w.filled_up and not w.filled_down:
             a["filled_up_only"] += 1
         if w.filled_down and not w.filled_up:
@@ -1298,6 +1392,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "win_rate": round(d.get("wins", 0) / n, 4) if n else 0.0,
             "reentry_count": d.get("reentry_count", 0),
             "reentry_pnl_cents": round(d.get("reentry_pnl_cents", 0.0), 4),
+            "pairs_count": d.get("pairs_count", 0),
+            "stops_count": d.get("stops_count", 0),
         }
 
     overall = {
@@ -1306,6 +1402,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "entered_windows": sum(s.get("entered", 0) for s in per_series.values()),
         "pair": sum(s["pair"] for s in per_series.values()),
         "exit": sum(s["exit"] for s in per_series.values()),
+        "pairs_count": sum(s.get("pairs_count", 0) for s in per_series.values()),
+        "stops_count": sum(s.get("stops_count", 0) for s in per_series.values()),
         "total_pnl_cents": sum(s["total_pnl_cents"] for s in per_series.values()),
         "total_fees_cents": sum(s["total_fees_cents"] for s in per_series.values()),
         "wins": wins_count,

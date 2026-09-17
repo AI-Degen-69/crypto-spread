@@ -66,12 +66,6 @@ TRADES_FILE = RUN_DIR / "live_trades.jsonl"
 META_FILE = RUN_DIR / "live_trades_meta.json"
 
 
-def _empty_reentry_stats() -> Dict[str, int]:
-    """A zeroed re-entry tally, one counter per outcome plus the reached-book count."""
-    return {"reentries": 0, "reached_book": 0, "paired": 0, "single_leg": 0,
-            "exited": 0, "both_no_merge": 0, "no_fill": 0,
-            "chased_fills": 0, "passive_fills": 0}
-
 
 def _empty_band_skip_stats() -> Dict[str, int]:
     """A zeroed entry-band skip tally (issue #137 observability)."""
@@ -625,10 +619,6 @@ def _resolve_series_selection(
 
 
 
-# Minimum window time remaining that still justifies opening a fresh quoting
-# round after a pair merge (issue #89). 300s keeps 5m windows single-round
-# while letting 15m windows recycle; 0 disables re-quoting entirely.
-DEFAULT_MIN_REQUOTE_REMAINING_SEC = 300.0
 
 # Named live-trading presets (issue #137). `patient_band_maker` encodes the
 # EV-research-winning configuration: delay entry 60s, only enter undecided
@@ -744,13 +734,6 @@ class MarketLiveState:
     # than on every tick for its whole length.
     clock_skip_start_ts: Optional[float] = None
 
-    # Issue #228: the drift-skip re-entry state stood here. Deleted with the
-    # mechanism; declarations stay until T5 (dashboard payload shape) and are
-    # never written.
-    reentry_count: int = 0
-    reentry_mid: Optional[float] = None
-    reentry_drift: Optional[float] = None
-    reentry_telemetry: Optional[Dict[str, Any]] = None
 
     # Advance Pre-Quoting (Upcoming Window T+1)
     next_condition_id: str = ""
@@ -798,11 +781,6 @@ class MarketLiveState:
     chased_leg: Optional[str] = None
     chased_fill: bool = False
 
-    # Multi-merge re-quoting (issue #89): completed merges in the current
-    # window. Round 0 is the initial static-anchor quote; each re-quote opens
-    # the next round anchored to the live mid minus offset. Reset on rollover.
-    requote_round: int = 0
-    last_requote_telemetry: Optional[Dict[str, Any]] = None
     
     # Adverse drift tracking
     max_up_drift: float = 0.0
@@ -887,7 +865,6 @@ class LiveTraderEngine:
         dead_zone_val: Optional[float] = None,
         dead_zone_unit: Optional[str] = None,
         naked_leg_at_expiry: Optional[str] = None,
-        min_requote_remaining_sec: Optional[float] = None,
     ):
         """Initialize the live trading engine with default parameters and selected markets."""
         _load_env_file()
@@ -912,12 +889,6 @@ class LiveTraderEngine:
         # Issue #229: what happens to an unpaired leg at window expiry (rule §14).
         # Replaces stop_loss_enabled. "close" (default) exits at the book; "hold" carries to settlement.
         self.naked_leg_at_expiry: str = "close" if naked_leg_at_expiry is None else str(naked_leg_at_expiry)
-        if self.naked_leg_at_expiry not in ("close", "hold"):
-            raise ValueError(f"naked_leg_at_expiry must be 'close' or 'hold', got {self.naked_leg_at_expiry!r}")
-        # Issue #124: `reentry_require_pairable` only ever gated drift-skip
-        # re-entry. Issue #228: inert with the mechanism (see above); the
-        # field stays until T5 removes its last senders (cockpit input, tests).
-        self.reentry_require_pairable: bool = True
         # Issue #123: actively chase second leg after a one-sided fill by stepping
         # up the opposite leg quote toward the ask, capped so pair cost <= max_pair_cost.
         self.enable_leg_chase: bool = True
@@ -943,17 +914,8 @@ class LiveTraderEngine:
         self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
         self.shares: int = 5
         self.taker_fee_rate: float = 0.0
-        # Re-quote time gate (issue #89): a fresh round after a pair merge only
-        # opens when at least this much window time remains. 0 disables it.
-        # (Issue #228: the drift-skip re-entry that shared this knob is deleted;
-        # what remains is the post-merge re-quoting gate.)
-        self.min_requote_remaining_sec: float = (
-            max(0.0, float(min_requote_remaining_sec)) if min_requote_remaining_sec is not None
-            else DEFAULT_MIN_REQUOTE_REMAINING_SEC
-        )
-        # Issue #228: empty stats dicts kept for backward compatibility with
+        # Issue #228: empty stats dict kept for backward compatibility with
         # callers/state consumers (observe_paper, shadow_ev_pilot, cockpit).
-        self.reentry_stats: Dict[str, int] = _empty_reentry_stats()
         self.band_skip_stats: Dict[str, int] = _empty_band_skip_stats()
         # Issue #138: fill-telemetry worker mode. True (default) joins tape
         # and appends off the hot path in a daemon thread; False runs inline
@@ -1987,8 +1949,6 @@ class LiveTraderEngine:
         with self._engine_lock:
             if not self.is_running or self.quoting_halted:
                 return
-            if m.pair_captured or m.exit_taken:
-                return
             if leg == "UP" and m.filled_up:
                 return
             if leg == "DOWN" and m.filled_down:
@@ -2013,8 +1973,6 @@ class LiveTraderEngine:
             return
         # Perform instant fill (re-checked under lock — state may have changed since guards)
         with self._engine_lock:
-            if m.pair_captured or m.exit_taken:
-                return
             if leg == "UP":
                 if m.filled_up or m.order_status_up != "RESTING" or not m.order_id_up:
                     return
@@ -2041,7 +1999,7 @@ class LiveTraderEngine:
                 if not m.filled_up:
                     self.place_stop_order(m, "DOWN")
         # Pair completion check (post-fill)
-        if m.filled_up and m.filled_down and not m.pair_captured:
+        if m.filled_up and m.filled_down:
             self._complete_ws_pair(m)
 
     def _complete_ws_pair(self, m: "MarketLiveState") -> None:
@@ -2049,7 +2007,7 @@ class LiveTraderEngine:
         if not self._cancel_stop_order(m, reason="pair completed (WS)"):
             return
         with self._engine_lock:
-            if m.pair_captured:
+            if m.pair_captured or not (m.filled_up and m.filled_down):
                 return
             m.pair_captured = True
             m.status = "PAIR_MERGED"
@@ -2370,7 +2328,7 @@ class LiveTraderEngine:
         # In paper mode, expose resting simulation orders for active quoting markets
         if self.mode == "paper" and self.is_running:
             for m in self.markets.values():
-                if m.pair_captured or m.exit_taken or m.entry_cancelled_timeout:
+                if m.entry_cancelled_timeout:
                     continue
                 # Only include active quoting markets with resolved tokens within active window
                 if m.status in ("QUOTING", "PRE_QUOTING") and m.up_token and m.down_token:
@@ -2506,7 +2464,7 @@ class LiveTraderEngine:
         positions: List[Dict[str, Any]] = []
         now_str = time.strftime("%H:%M:%S")
         for m in self.markets.values():
-            if m.pair_captured or m.exit_taken:
+            if not (m.filled_up or m.filled_down) or m.pair_captured or m.exit_taken:
                 continue
             if m.filled_up:
                 entry_px = m.fill_price_up if m.fill_price_up is not None else m.resting_up
@@ -2584,7 +2542,6 @@ class LiveTraderEngine:
         # Copied under the lock its writer holds, so the dashboard can never read a
         # tally mid-update with `reentries` bumped but the outcome bucket not yet.
         with self._engine_lock:
-            reentry_stats_snapshot = dict(self.reentry_stats)
             band_skip_stats_snapshot = dict(self.band_skip_stats)
         
         # Format timeline for chart
@@ -2619,7 +2576,7 @@ class LiveTraderEngine:
             "active_exposure": round(sum(
                 (m.order_shares * ((m.fill_price_up if m.fill_price_up is not None else m.resting_up) if m.filled_up else 0) +
                  m.order_shares * ((m.fill_price_down if m.fill_price_down is not None else m.resting_down) if m.filled_down else 0))
-                for m in self.markets.values() if not m.pair_captured
+                for m in self.markets.values() if (m.filled_up or m.filled_down)
             ), 2),
             "params": {
                 "offset": self.offset,
@@ -2627,17 +2584,14 @@ class LiveTraderEngine:
                 "dead_zone_val": self.dead_zone_val,
                 "dead_zone_unit": self.dead_zone_unit,
                 "naked_leg_at_expiry": self.naked_leg_at_expiry,
-                "reentry_require_pairable": self.reentry_require_pairable,
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
-                "min_requote_remaining_sec": self.min_requote_remaining_sec,
                 "enable_leg_chase": self.enable_leg_chase,
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
                 "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
             },
             "active_preset": self.active_preset,
-            "reentry_stats": reentry_stats_snapshot,
             "band_skip_stats": band_skip_stats_snapshot,
             "markets": mkts_dict,
             "timeline": recent_timeline,
@@ -2676,8 +2630,6 @@ class LiveTraderEngine:
                       dead_zone_unit: Optional[str] = None,
                       naked_leg_at_expiry: Optional[str] = None,
                       exit_reversal: Optional[float] = None,
-                      min_requote_remaining_sec: Optional[float] = None,
-                      reentry_require_pairable: Optional[bool] = None,
                       enable_leg_chase: Optional[bool] = None,
                       max_pair_cost: Optional[float] = None,
                       entry_delay_sec: Optional[float] = None,
@@ -2803,10 +2755,6 @@ class LiveTraderEngine:
                     param_changed = True
                 if exit_reversal is not None and abs(float(exit_reversal) - self.exit_reversal) > 1e-6:
                     param_changed = True
-                if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
-                    param_changed = True
-                if reentry_require_pairable is not None and bool(reentry_require_pairable) != self.reentry_require_pairable:
-                    param_changed = True
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
                     param_changed = True
                 if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
@@ -2901,7 +2849,9 @@ class LiveTraderEngine:
                 if mode in ("paper", "live"):
                     if self.mode == "live" and mode == "paper":
                         has_active_live_exposure = any(
-                            (m.filled_up or m.filled_down) and not m.pair_captured and not m.exit_taken
+                            (m.filled_up or m.filled_down)
+                            and not m.pair_captured
+                            and not m.exit_taken
                             for m in self.markets.values()
                         ) or bool(self.open_positions)
                         if has_active_live_exposure:
@@ -2928,10 +2878,6 @@ class LiveTraderEngine:
                 if exit_reversal is not None:
                     # Mercy-rule disarm distance; unified with BacktestParams (issue #111).
                     self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
-                if min_requote_remaining_sec is not None:
-                    self.min_requote_remaining_sec = max(0.0, float(min_requote_remaining_sec))
-                if reentry_require_pairable is not None:
-                    self.reentry_require_pairable = bool(reentry_require_pairable)
                 if enable_leg_chase is not None:
                     self.enable_leg_chase = bool(enable_leg_chase)
                 if max_pair_cost is not None:
@@ -2958,11 +2904,6 @@ class LiveTraderEngine:
                     m.resting_up = round(0.50 - self.offset, 3)
                     m.resting_down = round(0.50 - self.offset, 3)
                     m.order_shares = self.shares
-                    # Issue #89: a stopped config change drops any latched
-                    # re-quote round, so the next tick re-anchors from the
-                    # static base instead of a stale dynamic price.
-                    m.requote_round = 0
-                    m.last_requote_telemetry = None
 
         # Perform remote account fetch outside _engine_lock so network I/O never blocks stop()
         if fetch_live_balance:
@@ -3430,9 +3371,6 @@ class LiveTraderEngine:
         m.order_id_exit_down = None
         m.order_status_exit_up = "NONE"
         m.order_status_exit_down = "NONE"
-        # Issue #89: a reset market restarts at round 0 with no stale telemetry.
-        m.requote_round = 0
-        m.last_requote_telemetry = None
 
     def reset_pnl(self) -> Dict[str, Any]:
         """Reset session PnL, trade history, and outstanding order state.
@@ -3604,8 +3542,7 @@ class LiveTraderEngine:
                 m.late_start_skip = False
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
-            self.reentry_stats = _empty_reentry_stats()
-            # Issue #137: band-skip telemetry resets with the re-entry tally.
+            # Issue #137: band-skip telemetry resets.
             self.band_skip_stats = _empty_band_skip_stats()
             cleared_count = 0
             for m in self.markets.values():
@@ -4172,46 +4109,6 @@ class LiveTraderEngine:
                 mstate.status = "IDLE"
             return
 
-        # Target resting prices. Anchor the opening quotes symmetrically to the
-        # live synthetic mid computed above: mid - offset on UP, its complement
-        # (1 - mid) - offset on DOWN, so the pair costs 1 - 2*offset. Same
-        # formula as the re-quote path below and as backtest/engine.py:786.
-        #
-        # Issue #206: this block used to read `up_mid` / `down_mid`, names bound
-        # nowhere in this scope, so `'up_mid' in locals()` was always False and
-        # both legs were priced off a hardcoded 0.50 on every window -- ignoring
-        # `entry_delay_sec` entirely and systematically resting the adverse leg
-        # in any market that had moved. `mstate.mid` was already sitting right
-        # there, and is what the original comment was describing.
-        #
-        # Recomputed on every tick until an order actually exists, which is what
-        # makes the submitted price the mid at placement time rather than one
-        # carried over from before the entry delay expired. Once orders are
-        # placed or a window has merged and re-quoted, prices latch.
-        if mstate.requote_round <= 0:
-            if not mstate.order_id_up and not mstate.order_id_down and not mstate.filled_up and not mstate.filled_down:
-                # Issue #207: Anchor quotes only when a real two-sided mid exists.
-                # Never substitute 0.50 for an unpriceable book.
-                if mstate.mid is not None:
-                    resting_up = round(min(0.99, max(0.01, mstate.mid - self.offset)), 3)
-                    resting_down = round(min(0.99, max(0.01, (1.0 - mstate.mid) - self.offset)), 3)
-                    mstate.resting_up = resting_up
-                    mstate.resting_down = resting_down
-                else:
-                    resting_up = mstate.resting_up
-                    resting_down = mstate.resting_down
-            else:
-                resting_up = mstate.resting_up
-                resting_down = mstate.resting_down
-        else:
-            resting_up = mstate.resting_up
-            resting_down = mstate.resting_down
-        mstate.order_shares = self.shares
-        if mstate.original_resting_up is None and resting_up is not None:
-            mstate.original_resting_up = resting_up
-        if mstate.original_resting_down is None and resting_down is not None:
-            mstate.original_resting_down = resting_down
-
         # Determine window duration & elapsed time (Issue #48, Invariant 1 / #224).
         # No clock means no time gate may be evaluated, so the window is not
         # traded at all -- a visible skip on the first tick, instead of an
@@ -4243,6 +4140,43 @@ class LiveTraderEngine:
             win_duration > 0
             and book_math.is_in_dead_zone(remaining_sec, win_duration, self.dead_zone_val, self.dead_zone_unit)
         )
+
+        # Fresh start (rule 13): if a previous round completed (pair merged or stopped out),
+        # the engine keeps no memory inside a window. Whenever clean, evaluate fresh entry
+        # subject only to standing conditions (mid in quote_range, not in dead zone, priceable book).
+        if (mstate.pair_captured or mstate.exit_taken) and not in_dead_zone and not no_clock and mstate.mid is not None:
+            quote_lo, quote_hi = self.quote_range
+            if quote_lo <= mstate.mid <= quote_hi and not self.quoting_halted:
+                self._reset_round_to_clean(mstate)
+
+        # Target resting prices. Anchor the opening quotes symmetrically to the
+        # live synthetic mid computed above: mid - offset on UP, its complement
+        # (1 - mid) - offset on DOWN, so the pair costs 1 - 2*offset. Same
+        # formula as the re-quote path below and as backtest/engine.py:786.
+        #
+        # Recomputed on every tick until an order actually exists, which is what
+        # makes the submitted price the mid at placement time rather than one
+        # carried over from before the entry delay expired. Once orders are
+        # placed, prices latch (rules 1, 13).
+        if not mstate.order_id_up and not mstate.order_id_down and not mstate.filled_up and not mstate.filled_down:
+            # Issue #207: Anchor quotes only when a real two-sided mid exists.
+            # Never substitute 0.50 for an unpriceable book.
+            if mstate.mid is not None:
+                resting_up = round(min(0.99, max(0.01, mstate.mid - self.offset)), 3)
+                resting_down = round(min(0.99, max(0.01, (1.0 - mstate.mid) - self.offset)), 3)
+                mstate.resting_up = resting_up
+                mstate.resting_down = resting_down
+            else:
+                resting_up = mstate.resting_up
+                resting_down = mstate.resting_down
+        else:
+            resting_up = mstate.resting_up
+            resting_down = mstate.resting_down
+        mstate.order_shares = self.shares
+        if mstate.original_resting_up is None and resting_up is not None:
+            mstate.original_resting_up = resting_up
+        if mstate.original_resting_down is None and resting_down is not None:
+            mstate.original_resting_down = resting_down
 
         # Issue #226: a quote the chase raises onto the ask is marketable on
         # arrival, the same as one being placed for the first time. The chase
@@ -4493,8 +4427,6 @@ class LiveTraderEngine:
         no_book_hold = (mstate.mid is None)
         can_place_entry = (
             not self.quoting_halted
-            and not mstate.pair_captured
-            and not mstate.exit_taken
             and not mstate.entry_cancelled_timeout
             and not in_dead_zone
             and not mstate.late_start_skip
@@ -4504,6 +4436,8 @@ class LiveTraderEngine:
             # Invariant 1 (#224): no clock, no new exposure. Reached only when a
             # leg is already filled -- an unfilled window returns much earlier.
             and not no_clock
+            and mstate.status != "STOP_EXIT_PENDING"
+            and not (mstate.filled_up and mstate.filled_down)
         )
         if entry_delay_pending and not mstate.entry_cancelled_timeout:
             mstate.last_action = (
@@ -4528,7 +4462,7 @@ class LiveTraderEngine:
         # behind one -- so the touch rule does not apply to it. Set where the
         # order actually transitions to RESTING, not inferred from the
         # fill-telemetry rest snapshot: that snapshot survives a post-merge
-        # re-quote (`_maybe_requote_after_merge` resets the order fields and
+        # fresh-start round (`_reset_round_to_clean` resets the order fields and
         # leaves it alone), so round 2+ would have been read as already-resting.
         placed_now_up = False
         placed_now_dn = False
@@ -4556,8 +4490,6 @@ class LiveTraderEngine:
                         mstate.order_time_down = time.strftime("%H:%M:%S")
                         mstate.order_status_down = "RESTING"
                         placed_now_dn = True
-                if mstate.requote_round > 0:
-                    self._finalize_requote_telemetry(mstate, slug, mid)
             else:
                 if not mstate.filled_up and mstate.order_status_up != "RESTING":
                     mstate.order_id_up = mstate.order_id_up or f"paper_up_{slug}"
@@ -4569,8 +4501,6 @@ class LiveTraderEngine:
                     mstate.order_status_down = "RESTING"
                     mstate.order_time_down = mstate.order_time_down if mstate.order_time_down != "-" else time.strftime("%H:%M:%S")
                     placed_now_dn = True
-                if mstate.requote_round > 0:
-                    self._finalize_requote_telemetry(mstate, slug, mid)
 
         # --- FILL-TELEMETRY REST SNAPSHOT (issue #138, unified #166) ---
         # Observation only: stash the full bid books for the stream fill path
@@ -4612,7 +4542,7 @@ class LiveTraderEngine:
             mstate.status = "QUOTING"
             mstate.last_action = f"Quoting bids @ {resting_up:.2f} / {resting_down:.2f}"
 
-        if not mstate.pair_captured and not mstate.exit_taken:
+        if not (mstate.filled_up and mstate.filled_down) and mstate.status != "STOP_EXIT_PENDING":
             # In LIVE mode, verify true fill status directly from Polymarket CLOB
             if self.mode == "live":
                 client = self.get_clob_client()
@@ -4787,58 +4717,54 @@ class LiveTraderEngine:
                                         self._record_fill_telemetry(
                                             mstate, "UP", mstate.fill_price_up, self.shares, now)
 
-            # --- PAIR COMPLETION & MERGE ---
-            if mstate.filled_up and mstate.filled_down:
-                mstate.chased_leg = None
-                # OCO Case A: cancel the stop-loss before the merge — a hedged
-                # pair must never keep protection working against one leg (issue #87).
-                # If a venue-side cancellation fails, block the merge and retry next tick.
-                if not self._cancel_stop_order(mstate, reason="pair completed"):
-                    mstate.last_action = "Pair merge deferred: stop-loss cancellation failed"
-                    log.warning(
-                        "[%s] Pair merge deferred until stop-loss cancellation succeeds",
-                        slug,
-                    )
-                    return
-                denom = max(0.01, ((mstate.fill_price_up if mstate.fill_price_up is not None else resting_up) + (mstate.fill_price_down if mstate.fill_price_down is not None else resting_down)) * max(1, self.shares))
-                # Atomic claim vs WS path (_complete_ws_pair): everything under one lock
-                with self._engine_lock:
-                    if mstate.pair_captured:
-                        return
-                    mstate.pair_captured = True
-                    mstate.status = "PAIR_MERGED"
-                    mstate.naked_since_ts = None
-                    fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
-                    fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
-                    pair_profit_usd = (1.00 - (fill_up + fill_dn)) * self.shares
-                    mstate.realized_pnl_usd += pair_profit_usd
-                    mstate.unrealized_pnl_usd = 0.0
-                    mstate.total_pnl_usd = mstate.realized_pnl_usd
-                    mstate.pairs_count += 1
-                    mstate.trades_count += 1
-                    mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
-                    log.info("[%s] PAIR MERGED! Profit: +$%.2f (entry=%.3f+%.3f)", slug, pair_profit_usd, fill_up, fill_dn)
-                    self.trades.append(TradeEvent(
-                        id=f"{slug}_{int(now)}",
-                        timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                        slug=slug,
-                        label=mstate.label,
-                        action="PAIR_MERGE",
-                        shares=self.shares,
-                        entry_price_up=fill_up,
-                        entry_price_down=fill_dn,
-                        exit_price=1.00,
-                        pnl_usd=round(pair_profit_usd, 3),
-                        pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
-                        notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
-                        market_slug=mstate.market_slug or "",
-                    ))
-                    self._save_persisted_trades()
-                # Issue #89: recycle into a fresh quoting round when the window
-                # has enough life left; otherwise stay terminal until rollover.
-                if mid is not None:
-                    self._maybe_requote_after_merge(mstate, slug, mid, now)
+        # --- PAIR COMPLETION & MERGE ---
+        if mstate.filled_up and mstate.filled_down:
+            mstate.chased_leg = None
+            # OCO Case A: cancel the stop-loss before the merge — a hedged
+            # pair must never keep protection working against one leg (issue #87).
+            # If a venue-side cancellation fails, block the merge and retry next tick.
+            if not self._cancel_stop_order(mstate, reason="pair completed"):
+                mstate.last_action = "Pair merge deferred: stop-loss cancellation failed"
+                log.warning(
+                    "[%s] Pair merge deferred until stop-loss cancellation succeeds",
+                    slug,
+                )
                 return
+            denom = max(0.01, ((mstate.fill_price_up if mstate.fill_price_up is not None else resting_up) + (mstate.fill_price_down if mstate.fill_price_down is not None else resting_down)) * max(1, self.shares))
+            # Atomic claim vs WS path (_complete_ws_pair): everything under one lock
+            with self._engine_lock:
+                if mstate.pair_captured:
+                    return
+                mstate.pair_captured = True
+                mstate.status = "PAIR_MERGED"
+                mstate.naked_since_ts = None
+                fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                pair_profit_usd = (1.00 - (fill_up + fill_dn)) * self.shares
+                mstate.realized_pnl_usd += pair_profit_usd
+                mstate.unrealized_pnl_usd = 0.0
+                mstate.total_pnl_usd = mstate.realized_pnl_usd
+                mstate.pairs_count += 1
+                mstate.trades_count += 1
+                mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
+                log.info("[%s] PAIR MERGED! Profit: +$%.2f (entry=%.3f+%.3f)", slug, pair_profit_usd, fill_up, fill_dn)
+                self.trades.append(TradeEvent(
+                    id=f"{slug}_{int(now)}",
+                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                    slug=slug,
+                    label=mstate.label,
+                    action="PAIR_MERGE",
+                    shares=self.shares,
+                    entry_price_up=fill_up,
+                    entry_price_down=fill_dn,
+                    exit_price=1.00,
+                    pnl_usd=round(pair_profit_usd, 3),
+                    pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
+                    notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
+                    market_slug=mstate.market_slug or "",
+                ))
+                self._save_persisted_trades()
+            return
 
         # --- RECONCILE STAGED STOP-LOSS (issue #87) ---
         if mstate.stop_order_id and not mstate.exit_taken:
@@ -4889,10 +4815,7 @@ class LiveTraderEngine:
         # --- DEAD ZONE EXPIRY FOR NAKED LEG (issue #229, superseding #124) ---
         # In the dead zone: cancel any unfilled opposite resting quote, and for an unpaired leg:
         # if naked_leg_at_expiry == "close": exit at the live book bid.
-        # if naked_leg_at_expiry == "hold": carry to settlement.
-        if not mstate.exit_taken and not mstate.pair_captured:
-            _one_leg = (mstate.filled_up and not mstate.filled_down) or (mstate.filled_down and not mstate.filled_up)
-            if _one_leg and in_dead_zone:
+        if (mstate.filled_up != mstate.filled_down) and mstate.status != "STOP_EXIT_PENDING" and in_dead_zone:
                 # Cancel opposite resting buy order if still active
                 opposite_attr = "order_id_down" if mstate.filled_up else "order_id_up"
                 opp_status_attr = "order_status_down" if mstate.filled_up else "order_status_up"
@@ -4978,7 +4901,7 @@ class LiveTraderEngine:
                 return
 
         # --- UNREALIZED PnL CALCULATION ---
-        if mstate.pair_captured or mstate.exit_taken:
+        if not (mstate.filled_up or mstate.filled_down):
             mstate.unrealized_pnl_usd = 0.0
         else:
             unrealized = 0.0
@@ -4992,30 +4915,16 @@ class LiveTraderEngine:
 
         mstate.total_pnl_usd = round(mstate.realized_pnl_usd + mstate.unrealized_pnl_usd, 3)
 
-    def _maybe_requote_after_merge(self, mstate: MarketLiveState, slug: str, mid: float, now: float) -> bool:
-        """Open a fresh quoting round after a pair merge when time allows (issue #89).
+    def _reset_round_to_clean(self, mstate: MarketLiveState) -> None:
+        """Reset per-round state under fresh_start (rule 13).
 
-        Only PAIR_MERGED windows qualify — stop-loss exits stay terminal for the
-        window. The new round anchors resting bids to the live mid minus offset
-        (`target_up = mid - offset`, `target_down = (1 - mid) - offset`, so the
-        pair still sums to `1 - 2 * offset`) instead of the static 0.50 base,
-        resets per-round fill/order/drift state while keeping cumulative PnL,
-        trade history, and pair counts, and records decision-time telemetry that
-        `_finalize_requote_telemetry` completes once the round reaches the book.
-
-        Returns True when a new round opened.
+        The engine keeps no memory inside a window. Whenever an open round
+        completes (pair merged or stopped out), all per-round order, fill,
+        chase, and drift fields reset to clean so standing conditions can
+        evaluate a fresh entry. Cumulative metrics (pairs_count, stops_count,
+        realized_pnl_usd, trades) are preserved.
         """
-        if mid is None:
-            return False
-        gate = self.min_requote_remaining_sec
-        if gate is None or gate <= 0:
-            return False
-        if mstate.time_remaining_sec < gate:
-            return False
-        anchor_up = round(min(0.99, max(0.01, mid - self.offset)), 3)
-        anchor_down = round(min(0.99, max(0.01, (1.0 - mid) - self.offset)), 3)
         with self._engine_lock:
-            mstate.requote_round += 1
             mstate.filled_up = False
             mstate.filled_down = False
             mstate.fill_price_up = None
@@ -5026,74 +4935,33 @@ class LiveTraderEngine:
             mstate.order_time_down = "-"
             mstate.order_status_up = "NONE"
             mstate.order_status_down = "NONE"
+            mstate.resting_up = None
+            mstate.resting_down = None
+            mstate.original_resting_up = None
+            mstate.original_resting_down = None
             mstate.pair_captured = False
-            mstate.status = "QUOTING"
+            mstate.exit_taken = False
+            mstate.exit_side = None
+            mstate.entry_placed = False
+            mstate.chased_leg = None
+            mstate.chased_fill = False
+            mstate.chase_step = 0
             mstate.max_up_drift = 0.0
             mstate.max_down_drift = 0.0
             mstate.reversal_seen_up = False
             mstate.reversal_seen_down = False
-            mstate.resting_up = anchor_up
-            mstate.resting_down = anchor_down
-            mstate.last_requote_telemetry = {
-                "round": mstate.requote_round,
-                "mid_at_calc": round(mid, 4),
-                "order_prices": {"up": anchor_up, "down": anchor_down},
-                "mid_at_submit": round(mid, 4),
-                "submitted_at": datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                "perf_start": time.perf_counter(),
-                "mid_at_resting": None,
-                "latency_ms": None,
-                "drift": None,
-            }
-            mstate.last_action = (
-                f"Re-quoting round {mstate.requote_round} @ {anchor_up:.2f}/{anchor_down:.2f} "
-                f"(mid {mid:.3f}, {mstate.time_remaining_sec:.0f}s left)"
-            )
-        log.info(
-            "[%s] Re-quote round %d @ %.3f/%.3f (mid=%.4f, %.0fs left)",
-            slug, mstate.requote_round, anchor_up, anchor_down, mid, mstate.time_remaining_sec,
-        )
-        return True
-
-    def _finalize_requote_telemetry(self, mstate: MarketLiveState, slug: str, mid: float) -> None:
-        """Complete the re-quote resting snapshot once the new round reaches the book.
-
-        No-op for round 0, for already-finalised telemetry, and until both legs
-        are confirmed RESTING or FILLED. Logs a warning when the mid escaped
-        beyond the offset between the re-quote decision and the resting
-        confirmation, so operators can see adverse slippage on entry.
-        """
-        tel = mstate.last_requote_telemetry
-        if not isinstance(tel, dict) or tel.get("mid_at_resting") is not None:
-            return
-        if mstate.order_status_up not in ("RESTING", "FILLED"):
-            return
-        if mstate.order_status_down not in ("RESTING", "FILLED"):
-            return
-        try:
-            perf_start = float(tel.get("perf_start") or time.perf_counter())
-        except (TypeError, ValueError):
-            perf_start = time.perf_counter()
-        latency_ms = round((time.perf_counter() - perf_start) * 1000.0, 2)
-        try:
-            mid_at_calc = float(tel.get("mid_at_calc") if tel.get("mid_at_calc") is not None else mid)
-        except (TypeError, ValueError):
-            mid_at_calc = mid
-        drift = round(abs(mid - mid_at_calc), 4)
-        with self._engine_lock:
-            tel["mid_at_resting"] = round(mid, 4)
-            tel["latency_ms"] = latency_ms
-            tel["drift"] = drift
-        if drift > self.offset:
-            log.warning(
-                "[%s] Re-quote round %s: mid drifted %.3f between decision and resting (offset %.3f)",
-                slug, tel.get("round"), drift, self.offset,
-            )
-        else:
-            log.info(
-                "[%s] Re-quote round %s resting confirmed (mid=%.4f, latency=%.1fms, drift=%.4f)",
-                slug, tel.get("round"), mid, latency_ms, drift,
-            )
+            mstate.naked_since_ts = None
+            mstate.stop_order_id = None
+            mstate.stop_order_status = "NONE"
+            mstate.stop_price = None
+            mstate.stop_side = None
+            mstate.stop_order_time = "-"
+            mstate.order_id_exit_up = None
+            mstate.order_id_exit_down = None
+            mstate.order_status_exit_up = "NONE"
+            mstate.order_status_exit_down = "NONE"
+            mstate.exit_price_up = None
+            mstate.exit_price_down = None
 
     def _resolve_exit_bid(self, mstate: MarketLiveState, side: str) -> Tuple[float, str]:
         """Resolve executable exit bid price for a naked leg at window rollover.
@@ -5298,8 +5166,6 @@ class LiveTraderEngine:
             mstate.original_resting_up = None
             mstate.original_resting_down = None
             mstate.entry_cancelled_timeout = False
-            mstate.requote_round = 0
-            mstate.last_requote_telemetry = None
             mstate.rest_up_price = None
             mstate.rest_up_queue = None
             mstate.rest_up_ts = None
