@@ -1,14 +1,16 @@
-# TODO — Issue #205: Verify fill-rate gap against unified fill rule
+# TODO — Issue #208: measure the shipped entry-gate defaults (quote_range + dead zone)
 
-- [x] TASK-1 [Research/Logic]: Gates-off replay over `run/ticks/ticks_2026-09-13.jsonl` under
-  the unified fill rule; count fills like the #205 table (any-leg / up / down / both / pairs).
-  → `research/sweeps/verify_205_fill_rate.py`; all 4 datasets run; deterministic.
-- [x] TASK-2 [Research/Logic]: Interpret result against pre-registered expectation band
-  (between tape 3.6% and cross 57%, near cross; monotone offset sweep preserved).
-  → **Band failed**: unified 99.1%, tape-only 16.7%, ask-only 99.1%. See
-  `docs/issue-205-verification-results.md`.
-- [ ] TASK-3 [Docs]: Post comparison table + verdict as gh comment on #205, link ADR-0002,
-  close the issue. → **Blocked on operator**: result outside expectation band; publishing
-  "close as answered" would misrepresent it.
-- [x] TASK-4 [QA/Tests]: `python -m pytest tests/test_backtest_engine.py tests/test_book_math.py -q`
-  passes; no production code modified (CONSTRAINTS §1). → 171 passed in 0.82s.
+- [x] TASK-1 [Code/Logic]: Dead-zone 1D sensitivity axes (pct + sec) in
+  `scripts/sweep_backtest.py` under `--include-structural`, with `dead_zone` filter key;
+  unit tests in `tests/test_sweep_backtest.py`.
+- [x] TASK-2 [Research/Logic]: Verify datasets (`scripts/verify_tick_data.py`), then run
+  `--preset sensitivity --include-structural --only quote_range|dead_zone` on every
+  `run/ticks/*.jsonl`; record tables in `docs/issue-208-entry-gates-measurement.md`.
+- [x] TASK-3 [Research/Logic]: Apply the pre-registered reading rule; verdict per knob
+  (quote_range bounds, dead-zone size, pct vs sec); adjustment candidates flagged for operator.
+- [x] TASK-4 [Docs]: Verdict tables + one-sentence verdicts posted as gh comment on #208
+  (2026-09-17); issue left open pending the operator's decision on the two adjustment
+  candidates (quote_range (0.30,0.70); dead zone 0.30 pct) — closing would misrepresent an
+  undecided outcome. pct-vs-sec resolved: keep pct.
+- [x] TASK-5 [QA/Tests]: `python -m pytest tests/test_sweep_backtest.py tests/test_backtest_engine.py tests/test_book_math.py -q`
+  passes (198 in 0.71s, incl. the review-round CLI test); CI on PR #250 is the merge gate.
