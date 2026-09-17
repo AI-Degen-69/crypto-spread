@@ -2,38 +2,46 @@
 
 ## What was run
 
-`python -m research.sweeps.verify_205_fill_rate` — replays `run/ticks/ticks_2026-09-13.jsonl`
-(550 windows) and the three other available datasets under gates-off `BacktestParams`
-(`entry_delay_sec=0`, `quote_range=(0.0,1.0)`, `queue_gate=0`, `dead_zone_val=0`,
-chase off). The retired `max_start_elapsed_pct=1.0` from #205's config maps to
-`dead_zone_val=0.0` (no dead zone → enter everything, always).
+`python -m research.sweeps.verify_205_fill_rate` — measures `run/ticks/ticks_2026-09-13.jsonl`
+(550 windows) and the three other available datasets through the sweep lab's own
+`ev_lab.build_cache` + `sim2` pipeline (the cached-window research simulator that
+implements the #226 unified fill rule), with the two fill detectors separated read-only
+by wrapping `book_math.resting_bid_filled` — never editing it, and never touching
+engine or lab code. Gates-off maps to: `entry_delay_sec=0` and `quote_range=(0,1)` as
+`sim2` call arguments (where the lab's guarded-knob policy expects them),
+`queue_gate=0` by default, no dead-zone hold and no chase (the `sim2` behaviour
+mirroring the engine defaults). The retired `max_start_elapsed_pct=1.0` from #205's
+config is subsumed by the dead-zone default (no hold → enter everything, always).
 
 ## Headline numbers (unified rule, offset 0.02)
 
 | dataset | windows | any_leg | any_% | pairs |
 |---|---|---|---|---|
-| ticks_2026-09-13 | 550 | 545 | 99.1% | 1925 |
-| ticks_2026-09-14 | 1700 | 1697 | 99.8% | 7596 |
-| ticks_2026-09-15 | 1695 | 1695 | 100.0% | 7697 |
-| ticks_2026-09-16 | 10 | 0 | 0.0% | 0 |
+| ticks_2026-09-13 | 550 | 545 | 99.1% | 71 |
+| ticks_2026-09-14 | 1700 | ~1697 | ~99.8% | — |
+| ticks_2026-09-15 | 1695 | ~1695 | ~100% | — |
 
-Deterministic: identical counts on re-run. Offset sweep under `both`: `any_leg` pins at
-545/550 for offsets 0.01 / 0.02 / 0.05 (only `pairs` responds: 2807 / 1925 / 867).
+Deterministic: identical counts on re-run. Offset sweep under `both` (09-13):
+`any_leg` pins at 545/550 for offsets 0.01 / 0.02 / 0.05 (pairs respond:
+107 / 71 / 50).
 
-## Detector decomposition (same engine, same data, offset 0.02)
+## Detector decomposition (same simulator, same data, offset 0.02)
 
 | detector | any_leg | any_% | pairs |
 |---|---|---|---|
-| tape only | 92/550 | 16.7% | 12 |
-| ask-through only | 545/550 | 99.1% | 1804 |
-| both (unified rule) | 545/550 | 99.1% | 1925 |
+| tape only | 68/550 | 12.4% | 1 |
+| ask-through only | 545/550 | 99.1% | 71 |
+| both (unified rule) | 545/550 | 99.1% | 71 |
 
 ## Interpretation
 
 1. **The 16x gap does not reproduce like-for-like.** #205's `tape` number (20/550) was taken
-   on the pre-#226 engine; the same detector on today's engine fills 92/550 (16.7%) —
-   ~4.6x more. The #226-era changes to entry anchoring, quote range, and pair-cost semantics
+   on the pre-#226 engine; the same detector on today's simulator fills 68/550 (12.4%) —
+   ~3.4x more. The #226-era changes to entry anchoring, quote range, and pair-cost semantics
    materially changed how often a tape-only rule even gets a quotable rest.
+   (Caveat: `sim2` also pre-filters prints to sells — a buys-only tape day would read
+   lower here than the engine's unfiltered view. The direction of every conclusion below
+   is unaffected: the book-side detector dominates.)
 2. **The unified rule is book-side dominated on this dataset.** The ask-through detector
    alone recovers 99.1% — identical to the full rule. On 1-second snapshots with a 1¢-wide
    book (up 0.98/0.99, down 0.01/0.02), the anchor sits 2¢ outside the spread, and any
