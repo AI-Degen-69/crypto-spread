@@ -168,8 +168,12 @@ class BacktestParams:
     # Separates operator-controlled (live-replicable) knobs from execution
     # assumptions and internal window policy so the UI and API can render them
     # in distinct sections without touching any field names or the hash contract.
-    # Each group lists (field_name, label, why, unit, bounds, surfaces) and
-    # optionally a 7th element: per-surface bound overrides.
+    # Each group lists (field_name, label, why, unit, bounds, surfaces,
+    # param_class). `param_class` (issue #233) is one of "tuning", "structural",
+    # or "assumption": a tuning knob is swept in daily operation, a structural
+    # limit bounds what the engine may do at all (ADR-0003), an execution
+    # assumption is model-side cost. Query via `tuning_knobs()` /
+    # `structural_limits()` / `execution_assumptions()` / `param_class_for()`.
     # `bounds` is the (low, high) range the UI renders and the API clamps to —
     # not a claim about `__post_init__`, which validates only a subset (see
     # `param_spec`). `surfaces` names which tabs may render the knob.
@@ -183,53 +187,53 @@ class BacktestParams:
     _PARAM_GROUPS: ClassVar[dict[str, list[tuple]]] = {
         "trading_knobs": [
             ("offset", "Spread Offset ($)", "You set this live on the book",
-             "$", (0.001, 0.49), ("backtest", "cockpit")),
+             "$", (0.001, 0.49), ("backtest", "cockpit"), "tuning"),
             ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
-             "shares", (0.0, 100000.0), ("backtest",)),
+             "shares", (0.0, 100000.0), ("backtest",), "tuning"),
             # A structural limit, not a tuning knob (ADR-0003): it bounds what
             # the chase may do at all rather than tuning how it performs. One
             # range on both surfaces — issue #227 deleted the entry-side block
             # whose disabling was the only reason the Backtest wanted 2.0.
             ("max_pair_cost", "Max Pair Cost ($)", "The most the chase may pay to complete a pair",
-             "$", (0.50, 1.00), ("backtest", "cockpit")),
+             "$", (0.50, 1.00), ("backtest", "cockpit"), "structural"),
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
-             "shares", (5, 10000), ("backtest", "cockpit")),
+             "shares", (5, 10000), ("backtest", "cockpit"), "tuning"),
             ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
-             "s", (0.0, 3600.0), ("backtest", "cockpit")),
+             "s", (0.0, 3600.0), ("backtest", "cockpit"), "tuning"),
             # Issue #228: structural limit (ADR-0003) replacing the band and
             # the adverse-open gate. Bounds are the price domain itself; the
             # dashboard renders two inputs (lo/hi), not one knob.
             ("quote_range", "Quotable Range (mid lo/hi)", "You quote only while the two-sided mid is inside this range",
-             "$", (0.0, 1.0), ("backtest", "cockpit")),
+             "$", (0.0, 1.0), ("backtest", "cockpit"), "structural"),
             ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
-             "$", None, ("backtest", "cockpit")),
+             "$", None, ("backtest", "cockpit"), "tuning"),
             ("exit_thresh_naked", "Naked Leg Stop ($)", "Tighter stop for a leg still unpaired; 0 follows the paired stop",
-             "$", (0.0, 0.50), ("backtest", "cockpit")),
+             "$", (0.0, 0.50), ("backtest", "cockpit"), "tuning"),
             # Issue #229 / rule §14: what happens to an unpaired leg in the dead zone.
             ("naked_leg_at_expiry", "Naked Leg at Expiry", "close at book (default) or hold to settlement",
-             "str", None, ("backtest", "cockpit")),
+             "str", None, ("backtest", "cockpit"), "structural"),
             ("enable_leg_chase", "Leg Chase Enabled", "After one leg fills, re-anchor the other toward its ask within the pair-cost cap",
-             "bool", None, ("backtest", "cockpit")),
+             "bool", None, ("backtest", "cockpit"), "tuning"),
             ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
-             "$", (0.001, 0.50), ("backtest", "cockpit")),
+             "$", (0.001, 0.50), ("backtest", "cockpit"), "tuning"),
         ],
         "execution_assumptions": [
             ("merge_gas_usd", "Gas Merge Cost ($)", "Real cost, not a tuning knob",
-             "$", (0.0, 100.0), ("backtest",)),
+             "$", (0.0, 100.0), ("backtest",), "assumption"),
             ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption",
-             "coef", (0.0, 1.0), ("backtest",)),
+             "coef", (0.0, 1.0), ("backtest",), "assumption"),
             ("tick_size", "Tick Size ($)", "Price granularity assumption",
-             "$", (0.0, 1.0), ("backtest",)),
+             "$", (0.0, 1.0), ("backtest",), "assumption"),
             ("min_quote_shares", "Min Quote Shares", "Minimum order size floor",
-             "shares", (1, 100000), ("backtest",)),
+             "shares", (1, 100000), ("backtest",), "assumption"),
         ],
         "window_policy": [
             # Issue #229: Dead zone governs the end of the window (rules §8 & §14).
             # Structural limits (ADR-0003), not tuning knobs.
             ("dead_zone_val", "Dead Zone Threshold", "Tail of window that is untradeable (0.10 default; 0 disables)",
-             "% or s", (0.0, 3600.0), ("backtest", "cockpit")),
+             "% or s", (0.0, 3600.0), ("backtest", "cockpit"), "structural"),
             ("dead_zone_unit", "Dead Zone Unit", "Whether threshold is % of window or absolute seconds",
-             "str", None, ("backtest", "cockpit")),
+             "str", None, ("backtest", "cockpit"), "structural"),
         ],
     }
 
@@ -302,36 +306,57 @@ class BacktestParams:
         for group_name, entries in cls._PARAM_GROUPS.items():
             grp: dict[str, dict[str, Any]] = {}
             for entry in entries:
-                fname, label, why, unit, bounds, surfaces = entry[:6]
+                fname, label, why, unit, bounds, surfaces, param_class = entry
                 if fname not in defaults:
                     continue
                 grp[fname] = {
                     "label": label, "why": why, "unit": unit,
                     "default": defaults[fname], "bounds": bounds,
                     "surfaces": tuple(surfaces),
-                    # Per-surface overrides where research and live legitimately
-                    # differ; a surface with no entry uses `bounds`.
-                    "surface_bounds": dict(entry[6]) if len(entry) > 6 else {},
+                    "param_class": param_class,
                 }
             out[group_name] = grp
         return out
 
     @classmethod
     def bounds_for(cls, name: str, surface: str = "") -> "tuple[float, float] | None":
-        """Bounds for one knob on one surface, falling back to the shared pair.
+        """Bounds for one knob.
 
-        Issue #164 added per-surface overrides for one case: `pair_cost_gate`
-        swept above 1.00 to switch an entry gate off, while live capped
-        `max_pair_cost` at 1.00. Issue #227 deleted that gate and unified the
-        field, so **no knob declares an override today** — the mechanism stays
-        because the next research/live split will want it, and because the
-        registry test that guards it (an override may tighten a surface, never
-        loosen it) is cheaper to keep than to re-derive.
+        Issue #233: the optional per-surface override (7th tuple element) was
+        replaced by `param_class`; no knob declared an override anyway, so the
+        mechanism is gone rather than kept unused.
         """
         spec = cls.spec_for(name)
-        if surface and surface in spec.get("surface_bounds", {}):
-            return spec["surface_bounds"][surface]
         return spec["bounds"]
+
+    @classmethod
+    def param_class_for(cls, name: str) -> str:
+        """The class of one knob: "tuning", "structural", or "assumption" (issue #233)."""
+        return cls.spec_for(name)["param_class"]
+
+    @classmethod
+    def _names_in_class(cls, klass: str) -> set[str]:
+        return {
+            entry[0]
+            for entries in cls._PARAM_GROUPS.values()
+            for entry in entries
+            if entry[6] == klass
+        }
+
+    @classmethod
+    def structural_limits(cls) -> set[str]:
+        """Knobs that bound what the engine may do at all (ADR-0003) — not swept casually."""
+        return cls._names_in_class("structural")
+
+    @classmethod
+    def tuning_knobs(cls) -> set[str]:
+        """Operator-tunable knobs, live-replicable — the default sweep axes."""
+        return cls._names_in_class("tuning")
+
+    @classmethod
+    def execution_assumptions(cls) -> set[str]:
+        """Model-side cost/assumption knobs, not set on live orders."""
+        return cls._names_in_class("assumption")
 
     @classmethod
     def spec_for(cls, name: str) -> dict[str, Any]:
