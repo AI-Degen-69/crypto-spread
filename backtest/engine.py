@@ -336,12 +336,16 @@ class BacktestParams:
 
     @classmethod
     def _names_in_class(cls, klass: str) -> set[str]:
-        return {
-            entry[0]
-            for entries in cls._PARAM_GROUPS.values()
-            for entry in entries
-            if entry[6] == klass
-        }
+        out: set[str] = set()
+        for entries in cls._PARAM_GROUPS.values():
+            for entry in entries:
+                if len(entry) != 7:
+                    raise ValueError(
+                        f"_PARAM_GROUPS entry {entry[0]!r} has {len(entry)} "
+                        "elements, need 7 including param_class")
+                if entry[6] == klass:
+                    out.add(entry[0])
+        return out
 
     @classmethod
     def structural_limits(cls) -> set[str]:
