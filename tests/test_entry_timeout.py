@@ -1,20 +1,24 @@
-"""Unit tests for Issue #48: Cancel unfilled entry orders once 10% of window elapsed.
+"""Unit tests for Issue #229 (superseding #48 / #96): the dead zone governs the end of the window.
 
-Tests coverage:
-1. LiveTrader cancels resting entry orders after 10% of window elapsed if 0 legs filled.
-2. LiveTrader skips placing orders if a window is detected late (> 10% elapsed).
-3. LiveTrader keeps the opposite leg open if 1 leg filled before the 10% timeout.
-4. LiveTrader rollover resets entry_cancelled_timeout for the new window.
-5. Backtest replay engine cancels unfilled orders after 10% elapsed.
-6. Backtest replay engine skips fills when start_delay_sec >= 10% duration.
-7. Backtest replay engine completes pair merge if leg 1 filled before 10% and leg 2 filled after 10%.
+The 10% entry timeout, the naked-leg timeout and the late-start clock are all
+deleted; one rule now owns the tail of the window. Tests cover:
+
+1. LiveTrader cancels resting entry orders on entering the dead zone (0 legs filled).
+2. LiveTrader skips a window whose first observed tick lands inside the dead zone.
+3. LiveTrader keeps quoting the whole window when the dead zone is disabled (0.0).
+4. LiveTrader rollover re-arms the dead-zone latch for the next window.
+5. Backtest skips a window whose first snapshot lands in the dead zone.
+6. Backtest cancels unfilled quotes on entering the dead zone.
+7. Backtest under "close": an unpaired leg exits at book bid in the dead zone.
+8. Backtest under "hold": an unpaired leg carries to settlement.
+9. Both engines validate and default the dead-zone knobs identically.
 """
 
 import time
 from unittest.mock import MagicMock
 import pytest
 
-from strategy.live_trader import LiveTraderEngine, DEFAULT_MAX_START_ELAPSED_PCT
+from strategy.live_trader import LiveTraderEngine
 from backtest import BacktestParams
 from backtest.engine import _simulate_window
 
@@ -26,17 +30,21 @@ SLUG = "btc-updown-5m-1788500000"
 SERIES = "btc-up-or-down-5m"
 DUR = 300
 
+# 5m window at start_ts=1000.0; dead zone 10% -> untradeable from t=1270.0.
+START = 1000.0
+DEAD_ZONE_AT = 1270.0
+
 
 def _make_snap(ts: float, mid: float = 0.50, up_ask: float = 0.49, down_ask: float = 0.49,
-               start_ts: float = 1000.0, tape: list | None = None,
-               down_bid: float | None = None) -> dict:
+               start_ts: float = START, tape: list | None = None,
+               down_bid: float | None = None, up_bid: float | None = None) -> dict:
     # Both legs are pinned so the *two-sided* mid is `mid` too: UP at `mid`,
     # DOWN at its complement. Centring DOWN on `down_ask` instead described a
     # book no real binary pair produces, and nothing noticed while the engine
     # anchored off the one-sided `s["mid"]` (issue #225).
     half = 0.005
     ba_up = round(mid + half, 4) if up_ask is None else up_ask
-    bb_up = round(2.0 * mid - ba_up, 4)
+    bb_up = round(2.0 * mid - ba_up, 4) if up_bid is None else up_bid
     # `down_bid` opts out of the pinning, for the tests whose whole subject is a
     # leg-imbalanced book.
     bb_dn = round(2.0 * (1.0 - mid) - down_ask, 4) if down_bid is None else down_bid
@@ -83,398 +91,9 @@ def _make_snap(ts: float, mid: float = 0.50, up_ask: float = 0.49, down_ask: flo
 # LIVE TRADER TESTS
 # ============================================================================
 
-def test_live_trader_cancels_unfilled_entry_at_10_percent_elapsed():
-    """If 0 legs filled and 10% of window elapsed (30s on 5m), cancel both resting orders."""
-    engine = LiveTraderEngine(entry_timeout_pct=0.10)
-    engine.mode = "live"
-    engine.is_running = True
-    slug = "btc-up-or-down-5m"
-    start_time = 1000.0
-
-    placed_orders = []
-    def mock_place(token_id, price, size, side):
-        oid = f"ord_{token_id}_{len(placed_orders)}"
-        placed_orders.append(oid)
-        return {"order_id": oid, "status": "RESTING"}
-
-    cancelled_orders = []
-    def mock_cancel(order_id):
-        cancelled_orders.append(order_id)
-        return True
-
-    engine.get_clob_client = MagicMock(return_value=None)
-    engine.place_live_quote = MagicMock(side_effect=mock_place)
-    engine.cancel_live_order = MagicMock(side_effect=mock_cancel)
-
-    mkt = {
-        "conditionId": "0xwin1",
-        "slug": "btc-up-down-01",
-        "up_token": "tok_up",
-        "down_token": "tok_dn",
-        "start_ts": start_time,
-        "end_ts": start_time + 300.0,
-    }
-    poll_data = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
-    }
-
-    # Tick 1: at t=1005s (elapsed 5s < 30s cutoff) -> orders placed
-    engine._update_market_strategy(slug, poll_data, now=1005.0)
-    mstate = engine.markets[slug]
-    assert mstate.order_id_up is not None
-    assert mstate.order_id_down is not None
-    assert mstate.order_status_up == "RESTING"
-    assert mstate.order_status_down == "RESTING"
-    assert mstate.entry_cancelled_timeout is False
-
-    # Tick 2: at t=1031s (elapsed 31s >= 30s cutoff) -> cancel both orders
-    engine._update_market_strategy(slug, poll_data, now=1031.0)
-    assert mstate.entry_cancelled_timeout is True
-    assert mstate.order_status_up == "CANCELLED"
-    assert mstate.order_status_down == "CANCELLED"
-    assert mstate.status == "TIMEOUT_NO_FILL"
-    assert "10% window timeout" in mstate.last_action
-    assert len(cancelled_orders) == 2
-
-
-def test_live_trader_full_window_default_keeps_orders_resting_past_10_percent():
-    """By default (entry_timeout_pct=1.0), entry orders remain resting after 10% elapsed."""
-    engine = LiveTraderEngine()
-    engine.mode = "live"
-    engine.is_running = True
-    slug = "btc-up-or-down-5m"
-    start_time = 1000.0
-
-    placed_orders = []
-    def mock_place(token_id, price, size, side):
-        oid = f"ord_{token_id}_{len(placed_orders)}"
-        placed_orders.append(oid)
-        return {"order_id": oid, "status": "RESTING"}
-
-    engine.get_clob_client = MagicMock(return_value=None)
-    engine.place_live_quote = MagicMock(side_effect=mock_place)
-    engine.cancel_live_order = MagicMock(return_value=True)
-
-    mkt = {
-        "conditionId": "0xwin_full",
-        "slug": "btc-up-down-full",
-        "up_token": "tok_up",
-        "down_token": "tok_dn",
-        "start_ts": start_time,
-        "end_ts": start_time + 300.0,
-    }
-    poll_data = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
-    }
-
-    # Tick 1: at t=1005s -> orders placed
-    engine._update_market_strategy(slug, poll_data, now=1005.0)
-    mstate = engine.markets[slug]
-    assert mstate.order_status_up == "RESTING"
-    assert mstate.order_status_down == "RESTING"
-    assert mstate.entry_cancelled_timeout is False
-
-    # Tick 2: at t=1040s (elapsed 40s > 30s) -> orders remain resting
-    engine._update_market_strategy(slug, poll_data, now=1040.0)
-    assert mstate.entry_cancelled_timeout is False
-    assert mstate.order_status_up == "RESTING"
-    assert mstate.order_status_down == "RESTING"
-    assert engine.cancel_live_order.call_count == 0
-
-
-def test_live_trader_failed_cancel_retains_resting_and_retries():
-    """If cancel_live_order fails, order stays RESTING and retries on next tick."""
-    engine = LiveTraderEngine(entry_timeout_pct=0.10)
-    engine.mode = "live"
-    engine.is_running = True
-    slug = "btc-up-or-down-5m"
-    start_time = 1000.0
-
-    engine.get_clob_client = MagicMock(return_value=None)
-    engine.place_live_quote = MagicMock(return_value={"order_id": "ord_1", "status": "RESTING"})
-    cancel_attempts = []
-    def failing_cancel(oid):
-        cancel_attempts.append(oid)
-        return False  # Remote cancel failed
-
-    engine.cancel_live_order = MagicMock(side_effect=failing_cancel)
-
-    mkt = {
-        "conditionId": "0xwin_retry",
-        "slug": "btc-up-down-retry",
-        "up_token": "tok_up",
-        "down_token": "tok_dn",
-        "start_ts": start_time,
-        "end_ts": start_time + 300.0,
-    }
-    poll_data = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
-    }
-
-    # Tick 1: at t=1005s -> orders placed
-    engine._update_market_strategy(slug, poll_data, now=1005.0)
-    mstate = engine.markets[slug]
-    assert mstate.order_status_up == "RESTING"
-
-    # Tick 2: at t=1031s -> cancel fails
-    engine._update_market_strategy(slug, poll_data, now=1031.0)
-    assert mstate.entry_cancelled_timeout is False
-    assert mstate.order_status_up == "RESTING"
-    assert len(cancel_attempts) == 2
-
-    # Now make cancel succeed
-    engine.cancel_live_order = MagicMock(return_value=True)
-    # Tick 3: at t=1032s -> cancel retries and succeeds
-    engine._update_market_strategy(slug, poll_data, now=1032.0)
-    assert mstate.entry_cancelled_timeout is True
-    assert mstate.order_status_up == "CANCELLED"
-    assert mstate.status == "TIMEOUT_NO_FILL"
-
-
-def test_live_trader_skips_orders_on_late_start_window():
-    """If bot attaches to a window with > 10% elapsed, skip opening quotes entirely."""
-    engine = LiveTraderEngine(entry_timeout_pct=0.10)
-    engine.mode = "live"
-    engine.is_running = True
-    slug = "btc-up-or-down-5m"
-    start_time = 1000.0
-
-    engine.place_live_quote = MagicMock()
-
-    mkt = {
-        "conditionId": "0xwin_late",
-        "slug": "btc-up-down-late",
-        "up_token": "tok_up",
-        "down_token": "tok_dn",
-        "start_ts": start_time,
-        "end_ts": start_time + 300.0,
-    }
-    poll_data = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
-    }
-
-    # First update at t=1035s (elapsed 35s > 30s)
-    engine._update_market_strategy(slug, poll_data, now=1035.0)
-    mstate = engine.markets[slug]
-    assert mstate.entry_cancelled_timeout is True
-    assert mstate.order_id_up is None
-    assert mstate.order_id_down is None
-    assert engine.place_live_quote.call_count == 0
-    assert mstate.status == "LATE_START_SKIPPED"
-
-
-def test_live_trader_keeps_opposite_leg_open_if_one_filled_before_timeout():
-    """If 1 leg filled before timeout, the other leg stays open hoping to complete pair merge."""
-    engine = LiveTraderEngine(entry_timeout_pct=0.10)
-    engine.enable_leg_chase = False
-    engine.mode = "paper"
-    engine.is_running = True
-    slug = "btc-up-or-down-5m"
-    start_time = 1000.0
-
-    mkt = {
-        "conditionId": "0xwin_leg1",
-        "slug": "btc-up-down-leg1",
-        "up_token": "tok_up",
-        "down_token": "tok_dn",
-        "start_ts": start_time,
-        "end_ts": start_time + 300.0,
-    }
-
-    # Open quotes at 50/50 mid (resting bids 0.48/0.48)
-    engine._update_market_strategy(slug, {
-        "market": mkt,
-        "up_book": {"best_bid": 0.49, "best_ask": 0.51},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.51},
-    }, now=1005.0)
-
-    # Tick 1: at t=1010s, UP ask drops to 0.48 -> UP fills!
-    poll_1 = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
-        "down_book": {"best_bid": 0.49, "best_ask": 0.52},
-    }
-    engine._update_market_strategy(slug, poll_1, now=1010.0)
-    mstate = engine.markets[slug]
-    assert mstate.filled_up is True
-    assert mstate.filled_down is False
-    assert mstate.entry_cancelled_timeout is False
-
-    # Tick 2: at t=1035s (elapsed 35s >= 30s cutoff)
-    # Opposite leg (DOWN) must NOT be cancelled because 1 leg already filled
-    poll_2 = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.49},
-        "down_book": {"best_bid": 0.48, "best_ask": 0.51},
-    }
-    engine._update_market_strategy(slug, poll_2, now=1035.0)
-    assert mstate.entry_cancelled_timeout is False
-    assert mstate.order_status_down != "CANCELLED"
-
-    # Tick 3: at t=1050s, DOWN ask drops to 0.48 -> DOWN fills and completes pair!
-    poll_3 = {
-        "market": mkt,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.49},
-        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
-    }
-    engine._update_market_strategy(slug, poll_3, now=1050.0)
-    assert mstate.filled_down is True
-    assert mstate.pair_captured is True
-    assert mstate.status == "PAIR_MERGED"
-
-
-def test_live_trader_rollover_resets_timeout_state():
-    """After window rollover, entry_cancelled_timeout resets to False for the next window."""
-    engine = LiveTraderEngine(entry_timeout_pct=0.10)
-    engine.mode = "live"
-    engine.is_running = True
-    slug = "btc-up-or-down-5m"
-    start_1 = 1000.0
-
-    engine.place_live_quote = MagicMock(return_value={"order_id": "ord_1", "status": "RESTING"})
-    engine.cancel_live_order = MagicMock(return_value=True)
-
-    mkt_1 = {
-        "conditionId": "0xwin1",
-        "slug": "btc-01",
-        "up_token": "tok_up_1",
-        "down_token": "tok_dn_1",
-        "start_ts": start_1,
-        "end_ts": start_1 + 300.0,
-    }
-    # Times out in window 1
-    engine._update_market_strategy(slug, {"market": mkt_1, "up_book": {}, "down_book": {}}, now=1035.0)
-    mstate = engine.markets[slug]
-    assert mstate.entry_cancelled_timeout is True
-
-    # Rollover to window 2 at t=1305s (5s into new window)
-    start_2 = 1300.0
-    mkt_2 = {
-        "conditionId": "0xwin2",
-        "slug": "btc-02",
-        "up_token": "tok_up_2",
-        "down_token": "tok_dn_2",
-        "start_ts": start_2,
-        "end_ts": start_2 + 300.0,
-    }
-    engine._update_market_strategy(slug, {"market": mkt_2, "up_book": {}, "down_book": {}}, now=1305.0)
-    assert mstate.entry_cancelled_timeout is False
-    assert mstate.condition_id == "0xwin2"
-
-
-# ============================================================================
-# BACKTEST REPLAY ENGINE TESTS
-# ============================================================================
-
-def test_backtest_cancels_unfilled_at_10_percent_elapsed():
-    """Ticks that only cross resting price after 10% window elapsed are not filled."""
-    # 5m window starts at 1000.0; 10% cutoff is at 1030.0 (30s)
-    snaps = [
-        _make_snap(1005.0, mid=0.50, up_ask=0.51, down_ask=0.51),
-        _make_snap(1015.0, mid=0.50, up_ask=0.51, down_ask=0.51),
-        _make_snap(1025.0, mid=0.50, up_ask=0.51, down_ask=0.51),
-        # At 1040s (> 1030s), price crosses to 0.48
-        _make_snap(1040.0, mid=0.48, up_ask=0.48, down_ask=0.54,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
-    ]
-
-    # With default 10% entry timeout: cancelled, 0 fills
-    p_timeout = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-    res_timeout = _simulate_window(snaps, p_timeout)
-    assert res_timeout.filled_up is False
-    assert res_timeout.filled_down is False
-    assert res_timeout.pair_captured is False
-
-    # With entry timeout disabled (0.0): fill is captured
-    p_no_timeout = BacktestParams(offset=0.02, entry_timeout_pct=0.0)
-    res_no_timeout = _simulate_window(snaps, p_no_timeout)
-    assert res_no_timeout.filled_up is True
-
-
-def test_backtest_skips_window_with_late_start_delay():
-    """If first tick delay >= 10% duration (e.g. 35s in 5m), quotes are cancelled immediately."""
-    snaps = [
-        # First tick is at 1035s (start_ts = 1000.0, delay = 35s > 30s)
-        _make_snap(1035.0, mid=0.48, up_ask=0.48, down_ask=0.52,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
-    ]
-    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-    res = _simulate_window(snaps, p)
-    assert res.filled_up is False
-    assert res.filled_down is False
-
-
-def test_backtest_allows_second_leg_fill_after_timeout_if_first_filled_early():
-    """If leg 1 fills before 10% cutoff, leg 2 is allowed to fill after 10% cutoff."""
-    snaps = [
-        # Leg 1 (UP) fills at t=1010s (< 1030s cutoff)
-        _make_snap(1010.0, mid=0.50, up_ask=0.48, down_ask=0.52,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
-        # Leg 2 (DOWN) fills at t=1045s (> 1030s cutoff)
-        _make_snap(1045.0, mid=0.50, up_ask=0.52, down_ask=0.48,
-                   tape=[{"asset": DN_TOKEN, "price": 0.48}]),
-    ]
-    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-    res = _simulate_window(snaps, p)
-    assert res.filled_up is True
-    assert res.filled_down is True
-    assert res.pair_captured is True
-
-
-# ============================================================================
-# Entry controls: a balanced open fills, a one-sided open holds without a latch
-# (Issue #228: the adverse-open gate these controlled for is deleted)
-# ============================================================================
-
-
-def test_backtest_enters_window_with_balanced_open():
-    """A mid at 0.50 — inside the quotable range — still fills normally."""
-    snaps = [
-        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
-    ]
-    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-    res = _simulate_window(snaps, p)
-    assert res.filled_up is True
-
-
-def test_backtest_one_sided_open_book_does_not_cancel_entry():
-    """A one-sided book at open holds quoting without latching a cancel.
-
-    It is not quoted either (issue #225): with one leg unpriceable there is no
-    two-sided mid and so no anchor. What must not happen is a *latched* cancel
-    -- the next tick that prices both legs still enters.
-    """
-    one_sided = _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
-                           tape=[{"asset": UP_TOKEN, "price": 0.48}])
-    # Strip the DOWN ask so the opening mid cannot be evaluated on this tick.
-    one_sided["down_book"]["best_ask"] = None
-    p = BacktestParams(offset=0.02, entry_timeout_pct=0.10)
-
-    assert _simulate_window([one_sided], p).filled_up is False, (
-        "a book that priced one leg was quoted anyway")
-
-    priced = _make_snap(1010.0, mid=0.50, up_ask=0.505, down_ask=0.505,
-                        tape=[{"asset": UP_TOKEN, "price": 0.48}])
-    assert _simulate_window([one_sided, priced], p).filled_up is True, (
-        "the one-sided open latched a cancel the drift gate never evaluated")
-
-
-# ============================================================================
-# ISSUE #96 — LATE-START GUARD (independent of entry_timeout_pct)
-# ============================================================================
-
-def _late_start_engine(entry_timeout_pct=1.0, **kwargs):
-    """LiveTraderEngine in live mode with the CLOB calls mocked out."""
-    engine = LiveTraderEngine(entry_timeout_pct=entry_timeout_pct, **kwargs)
+def _live_engine(**kwargs):
+    """LiveTraderEngine with the dead-zone default and CLOB calls mocked out."""
+    engine = LiveTraderEngine(load_persisted=False, **kwargs)
     engine.mode = "live"
     engine.is_running = True
     engine.get_clob_client = MagicMock(return_value=None)
@@ -505,13 +124,63 @@ def _poll(start_ts, cid="0xwin_a", slug="btc-updown-a", mid=0.50):
     }
 
 
-def test_live_trader_mid_window_start_places_no_entry_at_full_window_timeout():
-    """entry_timeout_pct=1.0 must still not enter a window the engine joined 270s in."""
-    engine = _late_start_engine(entry_timeout_pct=1.0)
+def test_live_trader_cancels_unfilled_entry_on_entering_dead_zone():
+    """0 legs filled, remaining time crosses the cutoff -> cancel both resting orders."""
+    engine = _live_engine(dead_zone_val=0.10)
     slug = "btc-up-or-down-5m"
 
-    # First tick 270s into a 300s window -- 30s of window left.
-    engine._update_market_strategy(slug, _poll(1000.0), now=1270.0)
+    # Tick 1 at t=1005s (remaining 295s > 30s cutoff) -> orders placed and resting.
+    engine._update_market_strategy(slug, _poll(START), now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_id_up is not None
+    assert mstate.order_id_down is not None
+    assert mstate.order_status_up == "RESTING"
+    assert mstate.order_status_down == "RESTING"
+    assert mstate.entry_cancelled_timeout is False
+
+    # Tick 2 at t=1275s (remaining 25s <= 30s cutoff) -> cancel both orders.
+    engine._update_market_strategy(slug, _poll(START), now=1275.0)
+    assert mstate.entry_cancelled_timeout is True
+    assert mstate.order_status_up == "CANCELLED"
+    assert mstate.order_status_down == "CANCELLED"
+    assert mstate.status == "DEAD_ZONE_NO_FILL"
+    assert "Dead zone" in mstate.last_action
+    assert engine.cancel_live_order.call_count == 2
+
+
+def test_live_trader_failed_cancel_retains_resting_and_retries():
+    """If cancel_live_order fails, order stays RESTING and retries on next tick."""
+    engine = _live_engine(dead_zone_val=0.10)
+    slug = "btc-up-or-down-5m"
+    cancel_attempts = []
+    engine.cancel_live_order = MagicMock(
+        side_effect=lambda oid: (cancel_attempts.append(oid), False)[1])
+
+    engine._update_market_strategy(slug, _poll(START, cid="0xr", slug="btc-r"), now=1005.0)
+    mstate = engine.markets[slug]
+    assert mstate.order_status_up == "RESTING"
+
+    # Tick 2 crosses the cutoff -> cancel fails.
+    engine._update_market_strategy(slug, _poll(START, cid="0xr", slug="btc-r"), now=1275.0)
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.order_status_up == "RESTING"
+    assert len(cancel_attempts) == 2
+
+    # Now make cancel succeed -> retries and succeeds on the next tick.
+    engine.cancel_live_order = MagicMock(return_value=True)
+    engine._update_market_strategy(slug, _poll(START, cid="0xr", slug="btc-r"), now=1276.0)
+    assert mstate.entry_cancelled_timeout is True
+    assert mstate.order_status_up == "CANCELLED"
+    assert mstate.status == "DEAD_ZONE_NO_FILL"
+
+
+def test_live_trader_first_tick_in_dead_zone_skips_window():
+    """A window the engine joined inside the dead zone is never opened."""
+    engine = _live_engine(dead_zone_val=0.10)
+    slug = "btc-up-or-down-5m"
+
+    # First tick 275s into a 300s window — inside the dead zone.
+    engine._update_market_strategy(slug, _poll(START), now=1275.0)
 
     mstate = engine.markets[slug]
     assert mstate.late_start_skip is True
@@ -522,119 +191,89 @@ def test_live_trader_mid_window_start_places_no_entry_at_full_window_timeout():
     assert "waiting for next window" in mstate.last_action
 
 
-def test_live_trader_mid_window_start_does_not_latch_adverse_open():
-    """A skewed mid observed mid-window is owned by the late-start skip alone."""
-    engine = _late_start_engine(entry_timeout_pct=1.0)
+def test_live_trader_disabled_dead_zone_quotes_the_whole_window():
+    """dead_zone_val=0.0 disables the rule: orders keep resting deep into the window."""
+    engine = _live_engine(dead_zone_val=0.0)
     slug = "btc-up-or-down-5m"
 
-    # mid 0.44, observed 270s into the window: the late-start skip owns it.
-    engine._update_market_strategy(slug, _poll(1000.0, mid=0.44), now=1270.0)
-
+    engine._update_market_strategy(slug, _poll(START), now=1005.0)
     mstate = engine.markets[slug]
-    assert mstate.status == "LATE_START_SKIPPED"
-    assert mstate.status != "DRIFT_SKIPPED"
-
-
-def test_live_trader_window_after_late_start_quotes_normally():
-    """The rollover following a late start quotes normally."""
-    engine = _late_start_engine(entry_timeout_pct=1.0)
-    slug = "btc-up-or-down-5m"
-
-    engine._update_market_strategy(slug, _poll(1000.0, mid=0.44), now=1270.0)
-    mstate = engine.markets[slug]
-    assert mstate.late_start_skip is True
-
-    # New window opens at 1300.0; first tick 1s later.
-    engine._update_market_strategy(
-        slug, _poll(1300.0, cid="0xwin_b", slug="btc-updown-b", mid=0.50), now=1301.0)
-
-    assert mstate.late_start_skip is False
-    assert mstate.entry_cancelled_timeout is False
-    assert mstate.order_status_up == "RESTING"
-    assert mstate.order_status_down == "RESTING"
-
-
-def test_live_trader_start_at_open_still_quotes_whole_window():
-    """The latch is per-window, not per-tick: a normal start keeps quoting to expiry."""
-    engine = _late_start_engine(entry_timeout_pct=1.0)
-    slug = "btc-up-or-down-5m"
-    poll = _poll(1000.0)
-
-    engine._update_market_strategy(slug, poll, now=1005.0)
-    mstate = engine.markets[slug]
-    assert mstate.late_start_skip is False
     assert mstate.order_status_up == "RESTING"
 
-    # 280s in -- far past the 30s late-start cutoff, but this engine saw the open.
-    engine._update_market_strategy(slug, poll, now=1280.0)
-    assert mstate.late_start_skip is False
+    # 280s in — far past where the 10% zone would have cancelled.
+    engine._update_market_strategy(slug, _poll(START), now=1280.0)
     assert mstate.entry_cancelled_timeout is False
+    assert mstate.late_start_skip is False
     assert mstate.order_status_up == "RESTING"
     assert mstate.order_status_down == "RESTING"
     assert engine.cancel_live_order.call_count == 0
 
 
-def test_live_trader_late_start_guard_can_be_disabled():
-    """max_start_elapsed_pct=0.0 restores the pre-#96 behaviour for operators who want it."""
-    engine = _late_start_engine(entry_timeout_pct=1.0, max_start_elapsed_pct=0.0)
+def test_live_trader_dead_zone_cancel_leaves_a_filled_leg_open_until_its_own_rule():
+    """One leg filled before the cutoff: the dead zone cancels the *opposite*
+    unfilled order, and the filled leg is governed by naked_leg_at_expiry —
+    not by the entry-cancel path."""
+    engine = _live_engine(dead_zone_val=0.10)
+    engine.enable_leg_chase = False
+    engine.mode = "paper"
+    engine.is_running = True
     slug = "btc-up-or-down-5m"
 
-    engine._update_market_strategy(slug, _poll(1000.0), now=1270.0)
+    # Open quotes at the 50/50 mid (resting bids 0.48/0.48).
+    engine._update_market_strategy(slug, _poll(START), now=1005.0)
 
+    # Tick 2: UP ask drops to 0.479 -> UP fills before the cutoff.
+    poll_fill = {
+        "market": _poll(START)["market"],
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.49, "best_ask": 0.52},
+    }
+    engine._update_market_strategy(slug, poll_fill, now=1010.0)
     mstate = engine.markets[slug]
+    assert mstate.filled_up is True
+    assert mstate.filled_down is False
+    assert mstate.entry_cancelled_timeout is False
+
+    # Tick 3 crosses into the dead zone: the naked leg rule owns the window
+    # from here — under the default "close" the unpaired UP exits at book bid
+    # instead of the entry-cancel flag firing.
+    poll_naked = {
+        "market": _poll(START)["market"],
+        "up_book": {"best_bid": 0.46, "best_ask": 0.49},
+        "down_book": {"best_bid": 0.45, "best_ask": 0.55},
+    }
+    engine._update_market_strategy(slug, poll_naked, now=1275.0)
+    assert mstate.exit_taken is True
+    assert mstate.status == "STOP_EXIT"
+    assert engine.trades[-1].action == "STOP_EXIT_UP"
+
+
+def test_live_trader_rollover_rearms_the_dead_zone_latch():
+    """After window rollover, a fresh window quotes even if the old one was skipped."""
+    engine = _live_engine(dead_zone_val=0.10)
+    slug = "btc-up-or-down-5m"
+
+    # Window 1 first tick inside the dead zone -> skipped.
+    engine._update_market_strategy(slug, _poll(START, cid="0xwin1", slug="btc-01"), now=1275.0)
+    mstate = engine.markets[slug]
+    assert mstate.late_start_skip is True
+
+    # Rollover to window 2 at t=1305s (5s into the new window) -> quotes normally.
+    engine._update_market_strategy(
+        slug, _poll(1300.0, cid="0xwin2", slug="btc-02"), now=1305.0)
     assert mstate.late_start_skip is False
+    assert mstate.entry_cancelled_timeout is False
+    assert mstate.condition_id == "0xwin2"
     assert mstate.order_status_up == "RESTING"
-
-
-def test_backtest_late_start_cancels_entry_at_full_entry_timeout():
-    """Backtest parity: a 270s-late first snapshot is skipped even at entry_timeout_pct=1.0."""
-    snaps = [
-        _make_snap(1270.0, mid=0.50, up_ask=0.48, down_ask=0.48,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48},
-                         {"asset": DN_TOKEN, "price": 0.48}]),
-    ]
-
-    guarded = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert guarded.filled_up is False
-    assert guarded.filled_down is False
-    assert guarded.pair_captured is False
-
-    # Guard disabled -> the same window enters, proving the guard is what blocked it.
-    unguarded = _simulate_window(
-        snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0, max_start_elapsed_pct=0.0))
-    assert unguarded.filled_up is True
-
-
-def test_backtest_start_within_threshold_still_enters_at_full_entry_timeout():
-    """A 5s start delay is inside the 30s cutoff, so the window is entered normally."""
-    snaps = [
-        _make_snap(1005.0, mid=0.50, up_ask=0.51, down_ask=0.51),
-        _make_snap(1240.0, mid=0.50, up_ask=0.48, down_ask=0.48,
-                   tape=[{"asset": UP_TOKEN, "price": 0.48},
-                         {"asset": DN_TOKEN, "price": 0.48}]),
-    ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert res.filled_up is True
-    assert res.filled_down is True
-
-
-def test_backtest_late_start_threshold_matches_live_default():
-    """The two engines must agree on which windows are entered."""
-    assert BacktestParams().max_start_elapsed_pct == DEFAULT_MAX_START_ELAPSED_PCT
-    assert LiveTraderEngine(load_persisted=False).max_start_elapsed_pct == DEFAULT_MAX_START_ELAPSED_PCT
-
-
-def test_backtest_rejects_out_of_range_max_start_elapsed_pct():
-    with pytest.raises(ValueError):
-        BacktestParams(max_start_elapsed_pct=1.5)
+    assert mstate.order_status_down == "RESTING"
 
 
 def test_live_trader_shifting_start_ts_does_not_re_arm_a_quoted_window():
     """A market loader with an unstable start_ts must not turn a live window late."""
-    engine = _late_start_engine(entry_timeout_pct=1.0)
+    engine = _live_engine(dead_zone_val=0.0)
     slug = "btc-up-or-down-5m"
 
-    engine._update_market_strategy(slug, _poll(1000.0), now=1005.0)
+    engine._update_market_strategy(slug, _poll(START), now=1005.0)
     mstate = engine.markets[slug]
     assert mstate.order_status_up == "RESTING"
 
@@ -648,9 +287,158 @@ def test_live_trader_shifting_start_ts_does_not_re_arm_a_quoted_window():
 
 
 # ============================================================================
-# No re-entry without the mechanism (issue #228): timeout and late-start
-# windows stay unfilled even when the mid is healthy. The re-entry tests that
-# stood here were removed with the behaviour.
+# BACKTEST REPLAY ENGINE TESTS
+# ============================================================================
+
+def test_backtest_first_tick_in_dead_zone_skips_window():
+    """A window whose first snapshot lands in the dead zone is not entered."""
+    snaps = [
+        _make_snap(1275.0, mid=0.48, up_ask=0.48, down_ask=0.52,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, dead_zone_val=0.10))
+    assert res.entered is False
+    assert res.filled_up is False
+    assert res.filled_down is False
+    assert res.pair_captured is False
+
+
+def test_backtest_cancels_unfilled_at_dead_zone_entry():
+    """Prints that only cross the resting price inside the dead zone are not filled."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.51, down_ask=0.51),
+        _make_snap(1015.0, mid=0.50, up_ask=0.51, down_ask=0.51),
+        _make_snap(1025.0, mid=0.50, up_ask=0.51, down_ask=0.51),
+        # At 1280s (inside the dead zone), price crosses to 0.48.
+        _make_snap(1280.0, mid=0.48, up_ask=0.48, down_ask=0.54,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, dead_zone_val=0.10))
+    assert res.filled_up is False
+    assert res.filled_down is False
+    assert res.pair_captured is False
+
+    # With the dead zone disabled the same print fills.
+    res_off = _simulate_window(
+        snaps, BacktestParams(offset=0.02, dead_zone_val=0.0))
+    assert res_off.filled_up is True
+
+
+def test_backtest_unpaired_leg_closes_in_dead_zone_by_default():
+    """Default naked_leg_at_expiry="close": the unpaired leg exits at book bid."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.48, down_ask=0.52,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+        _make_snap(1275.0, mid=0.50, up_bid=0.46, up_ask=0.48, down_ask=0.55),
+    ]
+    res = _simulate_window(
+        snaps, BacktestParams(offset=0.02, dead_zone_val=0.10, naked_leg_at_expiry="close"))
+    assert res.filled_up is True
+    assert res.filled_down is False
+    assert res.exit_taken is True
+    assert res.exit_side == "up"
+    assert res.exit_price == 0.46
+
+
+def test_backtest_unpaired_leg_holds_in_dead_zone_under_hold():
+    """naked_leg_at_expiry="hold": the unpaired leg carries to settlement."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.48, down_ask=0.52,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+        _make_snap(1275.0, mid=0.50, up_bid=0.46, up_ask=0.48, down_ask=0.55),
+    ]
+    res = _simulate_window(
+        snaps, BacktestParams(offset=0.02, dead_zone_val=0.10, naked_leg_at_expiry="hold"))
+    assert res.filled_up is True
+    assert res.filled_down is False
+    assert res.exit_taken is False
+
+
+def test_backtest_sec_unit_matches_pct_semantics():
+    """30 seconds absolute on a 300s window behaves like 10 percent."""
+    early_then_print = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.51, down_ask=0.51),
+        _make_snap(1280.0, mid=0.48, up_ask=0.48, down_ask=0.54,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    res_pct = _simulate_window(
+        early_then_print, BacktestParams(offset=0.02, dead_zone_val=0.10, dead_zone_unit="pct"))
+    res_sec = _simulate_window(
+        early_then_print, BacktestParams(offset=0.02, dead_zone_val=30.0, dead_zone_unit="sec"))
+    assert res_pct.filled_up is False
+    assert res_sec.filled_up is False
+    assert res_pct.entered == res_sec.entered
+
+
+# ============================================================================
+# Entry controls: a balanced open fills, a one-sided open holds without a latch
+# (Issue #228: the adverse-open gate these controlled for is deleted)
+# ============================================================================
+
+
+def test_backtest_enters_window_with_balanced_open():
+    """A mid at 0.50 — inside the quotable range — still fills normally."""
+    snaps = [
+        _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                   tape=[{"asset": UP_TOKEN, "price": 0.48}]),
+    ]
+    res = _simulate_window(snaps, BacktestParams(offset=0.02))
+    assert res.filled_up is True
+
+
+def test_backtest_one_sided_open_book_does_not_cancel_entry():
+    """A one-sided book at open holds quoting without latching a cancel.
+
+    It is not quoted either (issue #225): with one leg unpriceable there is no
+    two-sided mid and so no anchor. What must not happen is a *latched* cancel
+    -- the next tick that prices both legs still enters.
+    """
+    one_sided = _make_snap(1005.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                           tape=[{"asset": UP_TOKEN, "price": 0.48}])
+    # Strip the DOWN ask so the opening mid cannot be evaluated on this tick.
+    one_sided["down_book"]["best_ask"] = None
+    p = BacktestParams(offset=0.02)
+
+    assert _simulate_window([one_sided], p).filled_up is False, (
+        "a book that priced one leg was quoted anyway")
+
+    priced = _make_snap(1010.0, mid=0.50, up_ask=0.505, down_ask=0.505,
+                        tape=[{"asset": UP_TOKEN, "price": 0.48}])
+    assert _simulate_window([one_sided, priced], p).filled_up is True, (
+        "the one-sided open latched a cancel the drift gate never evaluated")
+
+
+# ============================================================================
+# VALIDATION — the dead-zone knobs carry the invariants the deleted clocks had
+# ============================================================================
+
+def test_backtest_rejects_out_of_range_dead_zone_val():
+    with pytest.raises(ValueError):
+        BacktestParams(dead_zone_val=1.5)  # pct unit: fraction of window
+    with pytest.raises(ValueError):
+        BacktestParams(dead_zone_val=-0.01)
+    with pytest.raises(ValueError):
+        BacktestParams(dead_zone_val=30.0, dead_zone_unit="min")
+
+
+def test_backtest_rejects_unknown_naked_leg_at_expiry():
+    with pytest.raises(ValueError):
+        BacktestParams(naked_leg_at_expiry="keep")
+
+
+def test_dead_zone_defaults_match_across_engines():
+    """The two engines must ship the same dead-zone definition."""
+    bt = BacktestParams()
+    lt = LiveTraderEngine(load_persisted=False)
+    assert bt.dead_zone_val == lt.dead_zone_val
+    assert bt.dead_zone_unit == lt.dead_zone_unit
+    assert bt.naked_leg_at_expiry == lt.naked_leg_at_expiry
+
+
+# ============================================================================
+# No re-entry without the mechanism (issue #228): a dead-zone-cancelled window
+# stays cancelled even when the mid is healthy. The re-entry tests that stood
+# here were removed with the behaviour.
 # ============================================================================
 
 # The balanced book puts the mid at 0.50 with asks above the 0.48 resting
@@ -665,45 +453,29 @@ def _fill_tape():
             {"asset": DN_TOKEN, "price": 0.48}]
 
 
-def test_backtest_timeout_cancelled_window_never_reenters_even_at_mid_050():
-    """A window cancelled by the entry timeout stays cancelled at a healthy mid."""
+def test_backtest_dead_zone_cancelled_window_never_reenters_even_at_mid_050():
+    """A window cancelled by the dead zone stays cancelled at a healthy mid."""
     snaps = [
         _make_snap(1005.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
-        # 100s in -- far past the 30s cutoff at entry_timeout_pct=0.10 -- with
-        # the mid still healthy. The skip reason was the timeout.
-        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
+        # Inside the dead zone, with the mid still healthy and a fill print waiting.
+        _make_snap(1280.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
                    tape=_fill_tape()),
     ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=0.10))
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, dead_zone_val=0.10))
     assert res.filled_up is False
     assert res.filled_down is False
     assert res.pair_captured is False
     assert res.reentry_count == 0
 
 
-def test_backtest_timeout_cancel_is_not_reentered_with_the_time_gate_open():
-    """A timeout cancel stays cancelled with the time gate deliberately open."""
+def test_backtest_late_first_tick_is_never_reentered():
+    """A window skipped for a first tick inside the dead zone stays skipped."""
     snaps = [
-        _make_snap(1005.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
-        _make_snap(1040.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
-        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
+        # First snapshot lands 280s into a 300s window: inside the dead zone.
+        _make_snap(1280.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
+        _make_snap(1285.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
                    tape=_fill_tape()),
     ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=0.10))
+    res = _simulate_window(snaps, BacktestParams(offset=0.02, dead_zone_val=0.10))
     assert res.reentry_count == 0
     assert res.filled_up is False
-    assert res.filled_down is False
-
-
-def test_backtest_late_start_skip_is_never_reentered():
-    """Parity with live: an issue #96 late start stays skipped."""
-    snaps = [
-        # First snapshot lands 40s into a 300s window: past max_start_elapsed_pct.
-        _make_snap(1040.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN),
-        _make_snap(1100.0, mid=0.50, up_ask=_BALANCED_UP, down_ask=_BALANCED_DN,
-                   tape=_fill_tape()),
-    ]
-    res = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=1.0))
-    assert res.reentry_count == 0
-    assert res.filled_up is False
-

@@ -22,8 +22,9 @@ RECORDED = {
     "exit_thresh_naked": 0.05,
     "exit_reversal": 0.5,
     "shares": 5,
-    "entry_timeout_pct": 1.0,
-    "max_start_elapsed_pct": 0.1,
+    # Issue #229: entry_timeout_pct / max_start_elapsed_pct were deleted from
+    # the engine, so the mirror no longer compares them; the shadow's dead
+    # zone (default 0.10 pct) is mirrored implicitly by build_params().
     "max_pair_cost": 0.98,
     "entry_delay_sec": 60.0,
 }

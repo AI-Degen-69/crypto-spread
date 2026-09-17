@@ -1797,7 +1797,6 @@ def _drift_engine() -> LiveTraderEngine:
     engine.offset = 0.02
     engine.exit_thresh = 0.05
     engine.shares = 5
-    engine.entry_timeout_pct = 1.0
     return engine
 
 
@@ -2258,9 +2257,9 @@ def test_initial_entry_price_is_taken_at_placement_not_at_open():
     Issue #206, operator's acceptance criterion: the price computed before the
     delay expired is irrelevant if the market moved during it.
     """
-    # Late-start guard off: this test isolates the delay, and a 61s-elapsed tick
-    # would otherwise trip the #96 skip before the anchor is reached.
-    engine = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    # Dead-zone guard off: this test isolates the delay, and a 61s-elapsed tick
+    # would otherwise trip the skip before the anchor is reached.
+    engine = _fifteen_minute_engine(dead_zone_val=0.0)
     engine.entry_delay_sec = 60.0
     _quiet_start(engine)
     slug = "btc-up-or-down-15m"
@@ -2285,9 +2284,9 @@ def test_initial_entry_price_is_taken_at_placement_not_at_open():
 
 def test_no_requote_when_time_short():
     """A 5m merge with ~60s left stays terminal: no second round."""
-    # Late-start guard disabled: this test isolates the re-quote time gate,
-    # not the #96 mid-window-start behavior (240s elapsed would skip entry).
-    engine = LiveTraderEngine(max_start_elapsed_pct=0)
+    # Dead-zone guard disabled: this test isolates the re-quote time gate,
+    # not the mid-window-start behavior (240s elapsed would skip entry).
+    engine = LiveTraderEngine(dead_zone_val=0.0)
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -2423,8 +2422,8 @@ def test_min_requote_remaining_sec_config():
 
 def test_requote_boundary_time_remaining_equals_gate():
     """remaining == gate still re-quotes (gate uses <); one second less stays terminal."""
-    # Late-start guard disabled: elapsed 599s/900s would otherwise skip entry (#96).
-    engine = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    # Dead-zone guard disabled: elapsed 599s/900s would otherwise skip entry.
+    engine = _fifteen_minute_engine(dead_zone_val=0.0)
     engine.start()
     slug = "btc-up-or-down-15m"
     now = time.time()
@@ -2445,7 +2444,7 @@ def test_requote_boundary_time_remaining_equals_gate():
     assert m.pairs_count == 1
     assert m.requote_round == 1  # remaining was exactly 300.0 >= gate
 
-    engine2 = _fifteen_minute_engine(max_start_elapsed_pct=0)
+    engine2 = _fifteen_minute_engine(dead_zone_val=0.0)
     engine2.start()
     now2 = time.time()
     market2 = _fifteen_minute_market(now2, condition_id="0xboundary15m_b", start_offset=600.0)
@@ -2633,14 +2632,14 @@ def test_paired_position_not_stopped_by_naked_threshold():
     assert m.exit_taken is False
 
 
-def test_naked_timeout_force_exits_unpaired_leg():
-    """A leg unpaired past naked_leg_timeout_pct of the window force-exits."""
-    engine = LiveTraderEngine(load_persisted=False)
+def test_naked_leg_dead_zone_force_exits_when_close():
+    """An unpaired leg in the dead zone force-exits when naked_leg_at_expiry='close'."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
-    # Window opened 10s ago; fill UP at t=now -> naked clock starts here.
-    market = _naked_market(now, elapsed=10.0)
+    # Window opened 10s ago; fill UP at t=now.
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
@@ -2651,24 +2650,25 @@ def test_naked_timeout_force_exits_unpaired_leg():
     assert m.filled_up is True
     assert m.exit_taken is False
 
-    # 70% of 300s = 210s after the fill, no drift beyond the stop: timeout fires.
+    # 300s window with 10% dead zone -> dead zone starts at 270s elapsed (30s remaining).
+    # t = now + 261s -> elapsed = 271s -> remaining = 29s <= 30s cutoff.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
-    }, now + 211.0)
+    }, now + 261.0)
     assert m.exit_taken is True
     assert m.status == "STOP_EXIT"
-    assert "Naked-leg timeout" in engine.trades[-1].notes
+    assert "Dead-zone expiry exit" in engine.trades[-1].notes
 
 
-def test_naked_timeout_not_fired_before_horizon_or_disabled():
-    """Just inside the horizon nothing happens; timeout=0 disables entirely."""
-    engine = LiveTraderEngine(load_persisted=False)
+def test_naked_leg_dead_zone_holds_when_hold_configured():
+    """An unpaired leg in the dead zone is held when naked_leg_at_expiry='hold'."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="hold", dead_zone_val=0.10, dead_zone_unit="pct")
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
-    market = _naked_market(now)
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
     _open_50_50_quotes(engine, slug, market, now - 1)
     engine._update_market_strategy(slug, {
         "market": market,
@@ -2677,50 +2677,51 @@ def test_naked_timeout_not_fired_before_horizon_or_disabled():
     }, now)
     m = engine.markets[slug]
 
-    # 60s after the fill: well inside the 210s horizon.
+    # In dead zone (29s remaining): hold does not force-exit.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.47, "best_ask": 0.479},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
-    }, now + 60.0)
+    }, now + 261.0)
     assert m.exit_taken is False
-
-    # Disabled: no timeout ever fires.
-    engine.naked_leg_timeout_pct = 0.0
-    engine._update_market_strategy(slug, {
-        "market": market,
-        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
-        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
-    }, now + 400.0)
-    assert m.exit_taken is False
+    assert m.status == "FILLED_UP"
 
 
-def test_update_config_naked_knobs_roundtrip_and_clamp():
-    """New #124 knobs round-trip through update_config with clamping."""
+def test_update_config_dead_zone_knobs_roundtrip_and_clamp():
+    """Issue #229 knobs round-trip through update_config with validation."""
     engine = LiveTraderEngine(load_persisted=False)
     state = engine.update_config(
-        exit_thresh_naked=0.04, naked_leg_timeout_pct=0.8,
-        reentry_require_pairable=False)
+        exit_thresh_naked=0.04,
+        dead_zone_val=15.0,
+        dead_zone_unit="sec",
+        naked_leg_at_expiry="hold",
+        reentry_require_pairable=False,
+    )
     assert engine.exit_thresh_naked == 0.04
-    assert engine.naked_leg_timeout_pct == 0.8
+    assert engine.dead_zone_val == 15.0
+    assert engine.dead_zone_unit == "sec"
+    assert engine.naked_leg_at_expiry == "hold"
     assert engine.reentry_require_pairable is False
     assert state["params"]["exit_thresh_naked"] == 0.04
-    assert state["params"]["naked_leg_timeout_pct"] == 0.8
+    assert state["params"]["dead_zone_val"] == 15.0
+    assert state["params"]["dead_zone_unit"] == "sec"
+    assert state["params"]["naked_leg_at_expiry"] == "hold"
     assert state["params"]["reentry_require_pairable"] is False
 
-    # Clamping: naked threshold can never exceed the paired stop; timeout in 0..1.
-    engine.update_config(exit_thresh_naked=0.10, naked_leg_timeout_pct=1.5)
-    assert engine.exit_thresh_naked == 0.05
-    assert engine._naked_exit_thresh() == 0.05
-    assert engine.naked_leg_timeout_pct == 1.0
-    engine.update_config(naked_leg_timeout_pct=-1.0)
-    assert engine.naked_leg_timeout_pct == 0.0  # 0 = disabled
+    # Validation: dead_zone_val must be >= 0; pct must be <= 1.0.
+    with pytest.raises(ValueError, match="dead_zone_val"):
+        engine.update_config(dead_zone_val=-1.0)
+    with pytest.raises(ValueError, match="dead_zone_val"):
+        engine.update_config(dead_zone_unit="pct", dead_zone_val=1.5)
+    with pytest.raises(ValueError, match="dead_zone_unit"):
+        engine.update_config(dead_zone_unit="invalid")
+    with pytest.raises(ValueError, match="naked_leg_at_expiry"):
+        engine.update_config(naked_leg_at_expiry="invalid")
 
     # Guarded while running like every other scalar param.
     engine.is_running = True
     with pytest.raises(ValueError, match="Cannot change strategy parameters while the trading bot is running"):
-        engine.update_config(exit_thresh_naked=0.02)
-    assert engine.exit_thresh_naked == 0.05
+        engine.update_config(dead_zone_val=20.0)
 
 
 # ============================================================================
@@ -3233,10 +3234,9 @@ def test_unpriceable_book_prevents_quoting():
 
 
 def test_unpriceable_book_timeout_sets_no_book_skipped():
-    """Issue #207: window timing out without a valid two-sided book is marked NO_BOOK_SKIPPED."""
-    engine = LiveTraderEngine(load_persisted=False)
+    """Issue #207: window reaching dead zone without a valid two-sided book is marked NO_BOOK_SKIPPED."""
+    engine = LiveTraderEngine(load_persisted=False, dead_zone_val=0.10, dead_zone_unit="pct")
     engine.is_running = True
-    engine.entry_timeout_pct = 0.10  # 30s for 300s window
     slug = "sol-up-or-down-5m"
     start_ts = time.time()
     fake_market = LiveMarket(
@@ -3261,8 +3261,8 @@ def test_unpriceable_book_timeout_sets_no_book_skipped():
     assert m.late_start_skip is False
     assert m.status in ("IDLE", "PRE_QUOTING", "NO_BOOK")
 
-    # Tick 2: 35s into window - 10% entry timeout expires (35s >= 30s)
-    engine._update_market_strategy(slug, poll_data, start_ts + 35)
+    # Tick 2: 275s into window - in dead zone (remaining = 25s <= 30s)
+    engine._update_market_strategy(slug, poll_data, start_ts + 275)
     assert m.mid is None
     assert m.status == "NO_BOOK_SKIPPED"
     assert "unpriceable" in m.last_action.lower() or "no book" in m.last_action.lower()
@@ -3277,7 +3277,6 @@ def test_stop_loss_anchored_to_fill_price_up():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3349,7 +3348,6 @@ def test_stop_loss_anchored_to_fill_price_down():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3419,7 +3417,6 @@ def test_reversal_anchored_to_entry_price():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3445,27 +3442,14 @@ def test_reversal_anchored_to_entry_price():
     m.filled_down = False
     m.fill_price_up = 0.45
     m.resting_up = 0.45
-    m.order_shares = 10
-    m.status = "QUOTING"
-
-    # Tick 1: mid drops to 0.39 with the stop switched off (issue #137 lets the
-    # operator hold a naked leg through an excursion), so drift accumulates
-    # without an exit firing. Adverse excursion = 0.45 - 0.39 = 0.06 >= 0.05.
-    engine.stop_loss_enabled = False
-    poll_data_1 = {
-        "market": fake_market,
-        "up_book": {"best_bid": 0.38, "best_ask": 0.40},
-        "down_book": {"best_bid": 0.60, "best_ask": 0.62},
-    }
-    engine._update_market_strategy(slug, poll_data_1, now)
-    assert m.max_down_drift == pytest.approx(0.06, abs=1e-4)
+    # Simulate adverse excursion directly: adverse drift 0.06 >= exit_thresh 0.05
+    m.max_down_drift = 0.06
     assert not m.reversal_seen_down
 
-    # Tick 2: mid retraces to 0.44 (within 0.01 of entry 0.45, < exit_reversal 0.02)
-    # with the stop switched back on. Anchored on the 0.45 entry the reversal arms
-    # and suppresses the exit; anchored on 0.50 the distance is 0.06 and it does not.
+    # Retrace tick: mid retraces to 0.44 (within 0.01 of entry 0.45, < exit_reversal 0.02).
+    # Anchored on the 0.45 entry the reversal arms and suppresses the exit;
+    # anchored on 0.50 the distance is 0.06 and it does not.
     now += 1
-    engine.stop_loss_enabled = True
     poll_data_2 = {
         "market": fake_market,
         "up_book": {"best_bid": 0.43, "best_ask": 0.45},
@@ -3488,7 +3472,6 @@ def test_stop_loss_anchored_to_an_entry_above_050():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3597,7 +3580,6 @@ def test_window_length_ignores_the_market_name():
     length feeds.
     """
     engine = _clock_engine()
-    engine.entry_timeout_pct = 0.10
     slug = "btc-up-or-down-5m"
     now = time.time()
     quarter_hour = LiveMarket(

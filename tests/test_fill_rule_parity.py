@@ -25,10 +25,9 @@ PRICED = dict(up_bid=0.495, up_ask=0.505, dn_bid=0.495, dn_ask=0.505)
 
 def _params() -> BacktestParams:
     """Gates off, so only the fill rule can decide the outcome."""
-    return BacktestParams(offset=OFFSET, entry_timeout_pct=0.0,
-                          max_start_elapsed_pct=0.0,
-                          enable_leg_chase=False, stop_loss_enabled=False,
-                          naked_leg_timeout_pct=0.0)
+    # Issue #229: the deleted timeout/stop knobs are gone; dead zone off.
+    return BacktestParams(offset=OFFSET, dead_zone_val=0.0,
+                          enable_leg_chase=False)
 
 
 def _tape(price: float) -> list[dict]:

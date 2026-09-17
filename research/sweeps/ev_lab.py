@@ -287,11 +287,11 @@ def _taker_fee(p: float, rate: float) -> float:
 #: Fields `engine._simulate_window` honours that neither research simulator
 #: implements. Issue #164 added all four to `BacktestParams`; measured on 400
 #: real windows, flipping any one of them changes nothing in `sim2`'s output.
-#: `max_start_delay_sec` predates them and has the same problem: the engine
-#: drops late-start windows at `engine.py:1083`, neither simulator here does.
-ENGINE_ONLY_KNOBS = ("stop_loss_enabled", "exit_thresh_naked",
-                     "naked_leg_timeout_pct", "enable_leg_chase",
-                     "max_start_delay_sec")
+#: Issue #229: the engine drops dead-zone-blocked windows via `book_math
+#: .is_in_dead_zone` on `dead_zone_val`/`dead_zone_unit`, and exits an
+#: unpaired leg per `naked_leg_at_expiry` — neither simulator here does.
+ENGINE_ONLY_KNOBS = ("exit_thresh_naked", "enable_leg_chase",
+                     "dead_zone_val", "dead_zone_unit", "naked_leg_at_expiry")
 
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
 #: The first three are implemented by `sim2` as its own call arguments, so
@@ -305,9 +305,9 @@ def _non_default_knobs(p: BacktestParams, names: tuple[str, ...]) -> list[str]:
     """Which of `names` `p` sets away from its dataclass default.
 
     Compared against the declared default rather than tested for truthiness,
-    because `stop_loss_enabled` defaults to `True`: a truthiness test would
-    reject every ordinary config and wave through `stop_loss_enabled=False`,
-    the one value that changes what is being simulated.
+    because `enable_leg_chase` is a bool and `dead_zone_val=0.0` — the disable
+    value — is a legitimate non-default: a truthiness test would wave through
+    exactly the configurations that change what is being simulated.
     """
     defaults = {}
     for f in fields(BacktestParams):
@@ -351,8 +351,8 @@ def reject_knobs_sim2_ignores(p: BacktestParams) -> None:
             f"sim2 ignores {', '.join(ignored)} on BacktestParams; pass "
             "entry_delay_sec / quote_range / max_pair_cost (as `chase_cap`) "
             f"as sim2() arguments, and note that {', '.join(ENGINE_ONLY_KNOBS)} "
-            "are not implemented in research/ at all — express "
-            "hold-to-settlement through exit_thresh_by_slug."
+            "are not implemented in research/ at all — the dead zone and the "
+            "naked-leg-at-expiry policy are engine-only (issue #229)."
         )
 
 
@@ -375,10 +375,9 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
     raw_delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
     start_delay_sec = round(raw_delay, 2)
     is_partial = bool(raw_delay > 5.0)
-    late_start = bool(
-        p.max_start_elapsed_pct and p.max_start_elapsed_pct > 0
-        and duration > 0 and raw_delay >= p.max_start_elapsed_pct * duration
-    )
+    # Issue #229: the deleted `max_start_elapsed_pct` gate is gone; the dead
+    # zone (`ENGINE_ONLY_KNOBS`) owns the tail of the window and is rejected
+    # above rather than simulated, so late-start handling is none of ours.
 
     exit_thr = p.exit_thresh(w.slug, duration, series=w.series)
 
@@ -400,7 +399,7 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
     resting_dn = round(min(0.99, max(0.01, (1.0 - init_mid) - p.offset)), 3)
 
     filled_up = filled_dn = False
-    entry_cancelled = late_start
+    entry_cancelled = False
     orders_live = False
     adverse_skipped = False
     gate_evaluated = False
@@ -413,20 +412,11 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
     pnl = fees = 0.0
     cap_up = cap_dn = 0.0  # capital deployed (cents) per leg
 
-    timeout_on = p.entry_timeout_pct is not None and p.entry_timeout_pct > 0 and duration > 0
-    if timeout_on and raw_delay >= p.entry_timeout_pct * duration:
-        entry_cancelled = True
-
     n = len(w.ts)
     for i in range(n):
         requoted_now = False
         cur_ts = w.ts[i]
         elapsed = max(0.0, cur_ts - start_ts) if (cur_ts > 0.0 and start_ts > 0.0) else float(i)
-
-        if timeout_on and not entry_cancelled:
-            if elapsed > (p.entry_timeout_pct * duration):
-                if not filled_up and not filled_dn:
-                    entry_cancelled = True
 
         mid = _mid_from(w.up_bb[i], w.up_ba[i])
         if mid is None:
@@ -540,11 +530,6 @@ def fast_simulate(w: Win, p: BacktestParams) -> dict:
                 fees += _taker_fee(bb, p.taker_fee_rate) * 100.0
                 cap_dn = resting_dn * 100.0
                 break
-
-        if timeout_on and not entry_cancelled:
-            if elapsed >= (p.entry_timeout_pct * duration):
-                if not filled_up and not filled_dn:
-                    entry_cancelled = True
 
     if filled_up:
         cap_up = resting_up * 100.0
@@ -840,8 +825,7 @@ def default_base_params() -> BacktestParams:
     return BacktestParams(
         offset=0.02, queue_gate=0.0,
         merge_gas_usd=0.0, taker_fee_rate=0.07,
-        quote_shares=5, entry_timeout_pct=0.0,
-        max_start_elapsed_pct=0.0,
+        quote_shares=5,
     )
 
 
@@ -1065,15 +1049,10 @@ def _parity(file_substr: str = "") -> int:
         replace(default_base_params(), offset=0.01),
         replace(default_base_params(), offset=0.04, queue_gate=50.0),
         replace(default_base_params(), exit_reversal=0.03),
-        replace(default_base_params(), entry_timeout_pct=0.10),
-        replace(default_base_params(), entry_timeout_pct=0.10, max_start_elapsed_pct=0.10),
         replace(default_base_params(), queue_gate=25.0),
         replace(default_base_params(), exit_thresh_by_slug={
             "default_5m": 0.05, "default_15m": 0.06,
             "btc-up-or-down-5m": 0.05, "sol-up-or-down-5m": 0.06}),
-        replace(default_base_params(), reentry_drift_band=0.015,
-                min_requote_remaining_sec=60.0, reentry_min_remaining_pct=0.30,
-                max_reentries_per_window=1),
         replace(default_base_params(), merge_gas_usd=0.05, quote_shares=5),
     ]
     fails = 0

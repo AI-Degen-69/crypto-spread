@@ -79,8 +79,7 @@ def test_entry_delay_and_quote_range_default_to_baseline(tmp_path, monkeypatch):
         offset=0.020, queue_gate=50.0, max_pair_cost=0.99,
         exit_thresh_by_slug=seen["params"].exit_thresh_by_slug,
         exit_reversal=0.02, quote_shares=120,
-        merge_gas_usd=0.0, max_start_delay_sec=0.0,
-        entry_timeout_pct=0.10).params_hash()
+        merge_gas_usd=0.0).params_hash()
 
 
 def test_the_two_knobs_change_the_params_hash(tmp_path, monkeypatch):
@@ -122,12 +121,14 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
         str(src),
         "--offset", "0.03", "--queue", "0", "--pair-cost", "0.98",
         "--size", "5", "--entry-delay", "60", "--quote-lo", "0.10", "--quote-hi", "0.90",
+        "--dead-zone-val", "0.10", "--dead-zone-unit", "pct", "--naked-leg-at-expiry", "close",
         "--exit-default-5m", "0.49", "--exit-default-15m", "0.50",
         "--max-start-delay", "0",
     ]) == 0
     p = seen["params"]
     assert (p.offset, p.queue_gate, p.max_pair_cost) == (0.03, 0.0, 0.98)
     assert (p.entry_delay_sec, p.quote_range) == (60.0, (0.10, 0.90))
+    assert (p.dead_zone_val, p.dead_zone_unit, p.naked_leg_at_expiry) == (0.10, "pct", "close")
     assert p.quote_shares == 5
     assert p.exit_thresh_by_slug["default_5m"] == 0.49
     assert p.exit_thresh_by_slug["default_15m"] == 0.50
@@ -145,5 +146,73 @@ def test_help_renders_instead_of_crashing(capsys):
         cli.main(["--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "--entry-timeout" in out
-    assert "10% (0 disables)" in out
+    # Issue #229: the dead-zone flags replaced --entry-timeout.
+    assert "--dead-zone-val" in out
+    assert "--dead-zone-unit" in out
+    assert "--naked-leg-at-expiry" in out
+    assert "--entry-timeout" not in out
+
+
+def test_max_start_delay_and_filter_partial_filter_dataset(tmp_path, monkeypatch):
+    """--max-start-delay and --filter-partial filter late-started windows before replay."""
+    path = tmp_path / "ticks_multi.jsonl"
+    rows = []
+    # Window 1: on time (first tick at start)
+    start1 = 1_760_000_000.0
+    for i in range(2):
+        rows.append({
+            "ts": start1 + i,
+            "cid": "0xwin1",
+            "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m",
+            "start_ts": start1,
+            "end_ts": start1 + 300.0,
+            "up": {"best_bid": 0.49, "best_ask": 0.51},
+            "down": {"best_bid": 0.49, "best_ask": 0.51},
+        })
+    # Window 2: late start (first tick 10s after open)
+    start2 = 1_760_001_000.0
+    for i in range(2):
+        rows.append({
+            "ts": start2 + 10.0 + i,
+            "cid": "0xwin2",
+            "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m",
+            "start_ts": start2,
+            "end_ts": start2 + 300.0,
+            "up": {"best_bid": 0.49, "best_ask": 0.51},
+            "down": {"best_bid": 0.49, "best_ask": 0.51},
+        })
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    captured_snaps = []
+
+    def _fake_replay(snaps, params):
+        captured_snaps.append(list(snaps))
+        return {
+            "n_windows": len(set(s["cid"] for s in snaps)),
+            "aggregate": {
+                "overall": {
+                    "windows": 1, "pair_rate": 0.0, "exit_rate": 0.0,
+                    "total_pnl_cents": 0.0, "avg_pnl_cents": 0.0, "total_fees_cents": 0.0
+                },
+                "per_series": {}
+            }
+        }
+
+    monkeypatch.setattr(cli, "replay", _fake_replay)
+
+    # 1. No filter -> all 4 snaps (both windows) passed
+    cli.main([str(path), "--max-start-delay", "0"])
+    assert len(captured_snaps[-1]) == 4
+
+    # 2. --max-start-delay 5 -> only on-time window (2 snaps) passed
+    cli.main([str(path), "--max-start-delay", "5"])
+    assert len(captured_snaps[-1]) == 2
+    assert {s["cid"] for s in captured_snaps[-1]} == {"0xwin1"}
+
+    # 3. --filter-partial -> defaults to 5s delay -> only 2 snaps passed
+    cli.main([str(path), "--filter-partial"])
+    assert len(captured_snaps[-1]) == 2
+    assert {s["cid"] for s in captured_snaps[-1]} == {"0xwin1"}
+

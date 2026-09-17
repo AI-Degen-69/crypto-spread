@@ -154,10 +154,9 @@ def test_the_registry_does_not_claim_post_init_enforces_every_bound():
 
 
 @pytest.mark.parametrize("name,low,high", [
-    ("entry_timeout_pct", 0.0, 1.0),
-    ("max_start_elapsed_pct", 0.0, 1.0),
     ("entry_delay_sec", 0.0, 3600.0),
     ("max_pair_cost", 0.50, 1.00),
+    ("exit_thresh_naked", 0.0, 0.50),
 ])
 def test_registered_bounds_match_post_init_validation(name, low, high):
     """The UI must refuse exactly what the engine refuses, not a wider range."""
@@ -181,11 +180,32 @@ def test_quote_range_registered_bounds_match_post_init_validation():
         BacktestParams(quote_range=(0.90, 0.10))
 
 
+def test_dead_zone_knobs_match_post_init_validation():
+    """Issue #229: the dead-zone trio is validated at construction.
+
+    `dead_zone_val` is unit-dependent — a fraction of the window under "pct",
+    absolute seconds under "sec" — so the registry bound (0.0, 3600.0) is the
+    union across units and the unit-specific ceiling lives in __post_init__.
+    """
+    unit_spec = next(g["dead_zone_unit"] for g in SPEC.values() if "dead_zone_unit" in g)
+    assert unit_spec["bounds"] is None  # a choice ("pct" | "sec"), not a range
+    with pytest.raises(ValueError):
+        BacktestParams(dead_zone_unit="min")
+    with pytest.raises(ValueError):
+        BacktestParams(dead_zone_val=-0.01)
+    with pytest.raises(ValueError):
+        BacktestParams(dead_zone_val=1.01)  # > 1.0 is only valid under "sec"
+    assert BacktestParams(dead_zone_val=30.0, dead_zone_unit="sec").dead_zone_val == 30.0
+    assert BacktestParams(dead_zone_val=0.0).dead_zone_val == 0.0  # 0 disables
+    with pytest.raises(ValueError, match="naked_leg_at_expiry"):
+        BacktestParams(naked_leg_at_expiry="keep")
+
+
 def test_knobs_the_live_engine_exposes_are_marked_for_the_cockpit():
     """The Cockpit exposes every trading knob settable on the live engine."""
     for name in ("entry_delay_sec", "max_pair_cost", "offset",
-                 "quote_shares", "entry_timeout_pct", "exit_reversal",
-                 "quote_range"):
+                 "quote_shares", "dead_zone_val", "dead_zone_unit", "exit_reversal",
+                 "quote_range", "naked_leg_at_expiry"):
         spec = next(g[name] for g in SPEC.values() if name in g)
         assert "cockpit" in spec["surfaces"], (
             f"{name} is settable on the live engine but not marked for the Cockpit")

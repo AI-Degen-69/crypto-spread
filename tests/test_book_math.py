@@ -258,3 +258,52 @@ def test_chase_cap_of_an_unparseable_entry_is_unknown():
     assert chase_cap(0.99, None) is None
     assert chase_cap(0.99, "abc") is None
     assert chase_cap("abc", 0.48) is None
+
+
+# --- dead zone (issue #229) ----------------------------------------------
+
+def test_dead_zone_cutoff_pct_and_sec():
+    from strategy.book_math import dead_zone_cutoff_seconds
+
+    # 10% of a 300s window is 30s
+    assert dead_zone_cutoff_seconds(300.0, 0.10, "pct") == 30.0
+    # 10% of a 900s window is 90s
+    assert dead_zone_cutoff_seconds(900.0, 0.10, "pct") == 90.0
+    # Absolute seconds: 45s is 45s regardless of window length
+    assert dead_zone_cutoff_seconds(300.0, 45.0, "sec") == 45.0
+    assert dead_zone_cutoff_seconds(900.0, 45.0, "sec") == 45.0
+    # Value 0 disables cutoff
+    assert dead_zone_cutoff_seconds(300.0, 0.0, "pct") == 0.0
+    assert dead_zone_cutoff_seconds(300.0, 0.0, "sec") == 0.0
+    # Invalid window length returns 0.0
+    assert dead_zone_cutoff_seconds(0.0, 0.10, "pct") == 0.0
+    assert dead_zone_cutoff_seconds(-10.0, 0.10, "pct") == 0.0
+
+
+def test_dead_zone_start_ts():
+    from strategy.book_math import dead_zone_start_ts
+
+    # 5m window from 1000 to 1300: 10% dead zone starts at 1270
+    assert dead_zone_start_ts(1000.0, 1300.0, 0.10, "pct") == 1270.0
+    # 30s dead zone on same window starts at 1270
+    assert dead_zone_start_ts(1000.0, 1300.0, 30.0, "sec") == 1270.0
+
+
+def test_is_in_dead_zone():
+    from strategy.book_math import is_in_dead_zone
+
+    # 300s window, 10% dead zone (30s)
+    # remaining 31s -> outside dead zone
+    assert is_in_dead_zone(31.0, 300.0, 0.10, "pct") is False
+    # remaining 30s -> inside dead zone
+    assert is_in_dead_zone(30.0, 300.0, 0.10, "pct") is True
+    # remaining 10s -> inside dead zone
+    assert is_in_dead_zone(10.0, 300.0, 0.10, "pct") is True
+    # remaining 0s / negative -> inside dead zone
+    assert is_in_dead_zone(0.0, 300.0, 0.10, "pct") is True
+    assert is_in_dead_zone(-5.0, 300.0, 0.10, "pct") is True
+
+    # When disabled (0.0), only expired windows are in dead zone
+    assert is_in_dead_zone(10.0, 300.0, 0.0, "pct") is False
+    assert is_in_dead_zone(0.0, 300.0, 0.0, "pct") is True
+

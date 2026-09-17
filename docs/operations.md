@@ -69,8 +69,13 @@ http://127.0.0.1:8802/api/ticks/manifest
 CLI flags map 1:1 to `BacktestParams` fields — `--offset`, `--queue`,
 `--pair-cost` (the `max_pair_cost` chase ceiling, 0.50-1.00),
 `--quote-lo` and `--quote-hi` (bounds on quotable two-sided mid, 0.00-1.00),
-`--exit <slug>=<thresh>` (repeatable), `--exit-default-5m`,
-`--exit-default-15m`, `--size`, `--gas`.
+`--dead-zone-val` and `--dead-zone-unit` (the tail of the window that is
+untradeable — `pct` fraction 0.00-1.00 or absolute `sec`),
+`--naked-leg-at-expiry close|hold` (what an unpaired leg does in the dead
+zone), `--exit <slug>=<thresh>` (repeatable), `--exit-default-5m`,
+`--exit-default-15m`, `--size`, `--gas`. `--max-start-delay` and
+`--filter-partial` filter the *dataset* before replay; they are not engine
+parameters (issue #229 deleted `max_start_delay_sec`).
 
 **There is no fill model to choose.** One rule, hard-coded, the same one the
 live engine runs: a resting buy fills when a trade prints at our price *or*

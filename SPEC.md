@@ -1,82 +1,69 @@
-# SPEC — Issue #228: `quote_range` replaces `entry_band` and `adverse_open`
+# SPEC — Issue #229: `dead_zone` governs the end of the window
 
-Binding while `fix/quote-range-228` is live. Supersedes the #227 spec, which is
-merged and closed. Per-issue working file (`docs/git-workflow.md` §5) — not an
-architecture document.
+Binding while `feat/dead-zone-229` is live. Per-issue working file (`docs/git-workflow.md` §5)
+— not an architecture document.
 
-The rule itself is already written and agreed: `docs/engine-decision-rules.md` §6
-(`quote_range`). That file is the definition. This spec is the work that makes the
-code match it.
+The rule itself is agreed: `docs/engine-decision-rules.md` §8 (`dead_zone`) and §14
+(`naked_leg_at_expiry`). That file is the definition; this spec is the work that makes
+the code match it.
 
 ## Goal
 
-One quotable range, evaluated every tick, latching nothing: inside it, quote;
-outside it, do not. The two `|mid - 0.50|` gates and their permanent latches go,
-together with the re-entry workaround that existed only to undo one of them.
+One rule governs the end of the window across both engines:
+> **In the dead zone: open nothing, and close what is open.**
 
-## Acceptance criteria
+Delete the obsolete giving-up clocks and redundant timeout gates (`entry_timeout_pct`,
+`naked_leg_timeout_pct`, `max_start_elapsed_pct`, `max_start_delay_sec`, and
+`stop_loss_enabled`), replacing them with the single switchable dead-zone limit and the
+`naked_leg_at_expiry` close/hold policy.
 
-1. **Both gates gone from both engines.** `entry_band` (field, validation,
-   registry entry, band block, `band_hold`, `band_gate_evaluated`, `band_skip`
-   flags/stats/status) and `adverse_open` (open snapshot, `open_drift`,
-   `open_gate_evaluated`, `adverse_skipped`, `entry_cancelled` sets that belong
-   to these two gates) are deleted. `entry_cancelled` sets owned by the entry
-   timeout and the late-start skip stay — #229/#230 own those.
-2. **`quote_range` exists in both**, default `(0.10, 0.90)`, validated
-   (`0.0 <= lo < hi <= 1.0`, else `ValueError`; live clamps through
-   `update_config` like its other knobs), classified as a structural limit in
-   the registry (no per-surface override).
-3. **Evaluated every tick on the two-sided mid, never latched.** A mid outside
-   the range holds placement on that tick only; already-resting quotes are
-   unaffected (the order is on the venue); already-filled legs are unaffected
-   (the chase and the exits are not entry). No `band_hold`-style pre-evaluation
-   hold: before the first two-sided tick there is no mid to judge, which is the
-   existing `no_book_hold`, not a new gate.
-4. **Leave-and-return is quotable.** A market that exits the range and re-enters
-   is quoted again in the same window (parity test, both engines).
-5. **The drift-skip re-entry mechanism is deleted in both engines** (backtest
-   `adverse_skipped` block; live `_maybe_reenter_drift_skipped` + re-entry
-   telemetry + `reentry_mid/drift` state). It resurrected adverse-skipped
-   windows only, and with no latch there is nothing to resurrect. `reentry_*`
-   knobs with no remaining readers (`reentry_drift_band`,
-   `max_reentries_per_window`, `min_requote_remaining_sec`,
-   `reentry_min_remaining_pct`) go with it; any knob #229 still needs is
-   reintroduced there, not kept warm here.
-6. **The patient preset is deleted** (`PATIENT_BAND_MAKER`, its table entry, its
-   config plumbing, its tests). Operator decision 2026-09-16: the preset's
-   identity was the undecided-band maker, and the band is gone. No replacement
-   preset in this issue.
-7. **Every surface follows.** CLI `--entry-band` becomes `--quote-lo/--quote-hi`
-   (defaults 0.10/0.90); dashboard Backtest + Cockpit band inputs become
-   lo/hi inputs with `min="0" max="1"` (plain fields, no toggle — the #227
-   pattern); `/api/backtest` `entry_band` query key becomes `quote_lo/quote_hi`;
-   `sim2`'s `entry_band` argument becomes `quote_range` (same per-tick,
-   never-latched semantics); `ev_lab.UNSUPPORTED_KNOBS` and `selection_bias`
-   band configs follow the rename. `replay_shadow_check` gates legs keep
-   `entry_delay` as the gates axis; the `entry_band` leg of the mirror is
-   deleted.
-8. **Closes #213** (entry_band's own issue). First half of #208; the issue body
-   names it. #212 (re-entry resurrects adverse windows without re-pricing) is
-   mooted by criterion 5 — the PR body proposes closing it, operator confirms
-   at merge.
+## Acceptance Criteria
 
-## Out of scope
+1. **One Dead-Zone definition in both engines (`backtest/engine.py` & `strategy/live_trader.py`):**
+   - Structural limit with switchable unit: `dead_zone_unit` (`"pct"` [default] or `"sec"`).
+   - Default value: `dead_zone_val = 0.10` (10% of window remaining).
+   - Validation: `dead_zone_unit in ("pct", "sec")`; `dead_zone_val >= 0.0` (and `<= 1.0` if `unit == "pct"`).
+   - Invariant 1 clock compliant: `window_length = end_ts - start_ts`; `remaining = end_ts - now` (live) / `end_ts - snapshot_ts` (backtest).
+2. **Dead-Zone Actions on Trigger (`remaining <= dead_zone_cutoff`):**
+   - **Open nothing:** No new entry quotes placed. A window whose first observed tick lands inside the dead zone is not entered at all (replaces `max_start_elapsed_pct` / `max_start_delay_sec`).
+   - **Cancel unfilled resting quotes:** Any unfilled open buy orders are immediately cancelled.
+   - **Handle unpaired leg:** If an unpaired leg is filled, take action per `naked_leg_at_expiry`:
+     - `"close"` (default): cancel opposite resting buy quote (OCO) and sell filled leg at best executable bid (cross book, pays taker fee).
+     - `"hold"`: cancel opposite resting buy quote, hold filled leg to settlement (pays 1.00 on win or 0.00 on loss; stop loss remains armed during hold if adverse move occurs before settlement).
+   - **No fresh start:** Windows in the dead zone are ineligible for re-entry / fresh start.
+3. **Five obsolete parameters completely deleted from both engines, parameter registry, schemas, and UI:**
+   - `entry_timeout_pct` — deleted.
+   - `naked_leg_timeout_pct` — deleted.
+   - `max_start_elapsed_pct` — deleted.
+   - `max_start_delay_sec` — deleted.
+   - `stop_loss_enabled` — deleted, replaced by `naked_leg_at_expiry`.
+4. **`naked_leg_at_expiry` parameter introduced in both engines:**
+   - Values: `"close"` (default) and `"hold"`.
+   - Replaces `stop_loss_enabled` with explicit intent and semantics.
+5. **Shared pure calculation in `strategy/book_math.py`:**
+   - `dead_zone_cutoff_seconds(window_length: float, dead_zone_val: float, dead_zone_unit: str) -> float`
+   - `is_in_dead_zone(remaining_sec: float, window_length: float, dead_zone_val: float, dead_zone_unit: str) -> bool`
+   - `dead_zone_start_ts(start_ts: float, end_ts: float, dead_zone_val: float, dead_zone_unit: str) -> float`
+6. **Parity test (`tests/test_dead_zone_parity.py`):**
+   - Drives a window into the dead zone with an unpaired leg and asserts both engines take the exact same action under both switch values (`"close"` and `"hold"`).
+   - Verifies entry is blocked in the dead zone, unfilled quotes are cancelled, and units (`pct` and `sec`) evaluate identically.
+7. **Every surface updated:**
+   - Parameter registry (`BacktestParams._PARAM_GROUPS`): `dead_zone_val` and `dead_zone_unit` classified as structural limits, `naked_leg_at_expiry` registered.
+   - Dashboard (`server/osc_dash.py`): Backtest and Cockpit tab inputs updated, `/api/backtest` and `/api/live/config` schemas updated.
+   - Scripts and sweeps: `scripts/backtest.py` and `scripts/sweep_backtest.py` updated to support `--dead-zone-val`, `--dead-zone-unit`, and `--naked-leg-at-expiry`.
+8. **Closes #229, closes #211, and closes the second half of #208.**
 
-- The dead zone (#229), the stop threshold (#230), the entry timeout /
-  late-start skip, the chase, the exits. Untouched.
-- The full registry structural-vs-tuning split (#233): this issue classifies
-  only `quote_range` as structural; the rest waits for #233.
-- New presets. None in this issue.
+## Out of Scope
 
-## Edge cases
+- Leg chase escalation ladder (#231): Will use `dead_zone_start_ts` from `book_math`, but the chase ladder implementation itself belongs to #231.
+- Fresh start cleanup (#232): Rule 13 full cleanup belongs to #232.
+- Stop threshold cleanup (#230): Deleting `exit_thresh_naked` belongs to #230.
+- Structural limits separation in UI (#233): Belongs to #233.
 
-- Mid exactly on a boundary (0.10 / 0.90): inside — the range is inclusive.
-  Pin with a test.
-- No two-sided mid on a tick: no judgement possible — placement holds via the
-  existing `no_book_hold`, resting quotes stand. Not a range rejection.
-- `quote_range` narrower than the resting spread (e.g. mid 0.89, offset 0.03
-  rests the cheap leg at 0.08): fine — the range judges the market, not the
-  order prices (rule text: "Measured on the mid").
-- `max_reentries_per_window` / `reentry_*` readers: verified zero at build
-  time; if a reader outside the re-entry path surfaces, it is kept and named
-  in the commit body rather than deleted.
+## Edge Cases
+
+- `dead_zone_val == 0.0`: Dead zone is disabled (quotes stand until end of window).
+- `remaining_sec <= 0`: Window is expired, dead zone applies.
+- `window_length <= 0`: Invalid clock, Invariant 1 forbids trading.
+- First tick already in dead zone: Window is not entered (`entered = False`), no orders placed.
+- Book has no bid when closing in dead zone: Fallback through `_resolve_exit_bid` ladder; if unpriceable, re-evaluate next tick.

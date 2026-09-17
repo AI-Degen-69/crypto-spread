@@ -475,21 +475,20 @@ def test_build_cache_rejects_a_tick_file_that_is_not_per_cid_ascending(tmp_path)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("kwargs", [
-    {"stop_loss_enabled": False},
     {"exit_thresh_naked": 0.03},
-    {"naked_leg_timeout_pct": 0.5},
     {"enable_leg_chase": True},
-    {"max_start_delay_sec": 5.0},
+    {"dead_zone_val": 0.20},
+    {"dead_zone_unit": "sec"},
+    {"naked_leg_at_expiry": "hold"},
 ])
 def test_sim2_rejects_knobs_no_research_simulator_implements(kwargs):
-    """Issue #164 put four knobs on `BacktestParams` that `sim2` never reads.
+    """Issue #164 put knobs on `BacktestParams` that `sim2` never reads.
 
     Measured before the guard: flipping any of them left `sim2`'s output
-    identical across 400 real windows. `patient_band_maker` *is*
-    `stop_loss_enabled=False`, so a sweep configured that way would have
-    reported numbers for a strategy with a stop loss still armed — exactly the
-    defect #182 fixed for `entry_delay_sec`/`entry_band`, reopened by #164.
-    `max_start_delay_sec` is older and has the same gap (`engine.py:1083`).
+    identical across 400 real windows — exactly the defect #182 fixed for
+    `entry_delay_sec`/`entry_band`, reopened by #164. Issue #229 replaced the
+    deleted stop-loss/timeout knobs with the dead-zone trio, which the engine
+    applies and no research simulator implements; the guard moves with it.
     """
     from backtest.engine import BacktestParams
     with pytest.raises(ValueError, match="sim2 ignores"):
@@ -511,7 +510,7 @@ def test_sim2_itself_enforces_the_guard():
     from backtest.engine import BacktestParams
     w = _one_tick_window()
     with pytest.raises(ValueError, match="sim2 ignores"):
-        sim2(w, BacktestParams(stop_loss_enabled=False))
+        sim2(w, BacktestParams(dead_zone_val=0.20))
     # The supported path is untouched: defaults simulate, and the two research
     # knobs still work when passed as arguments.
     assert isinstance(sim2(w, BacktestParams()), dict)
@@ -537,14 +536,19 @@ def test_sim2_refuses_a_chase_cap_above_one():
 
 
 def test_the_guard_compares_against_defaults_not_truthiness():
-    """`stop_loss_enabled` defaults to True, so `if getattr(p, k)` — the shape
-    the guard had — would reject every ordinary config and wave through
-    `stop_loss_enabled=False`, the one value that changes the simulation."""
+    """`if getattr(p, k)` — the shape the guard had — would wave through any
+    knob whose changed value is falsy, e.g. `dead_zone_val=0.0`.
+
+    The comparison is against the declared default, so the disable value and
+    the default are distinguished even when both are falsy.
+    """
     from backtest.engine import BacktestParams
-    ev_lab.reject_knobs_sim2_ignores(BacktestParams(stop_loss_enabled=True))
-    ev_lab._reject_unsupported_knobs(BacktestParams(stop_loss_enabled=True))
+    # The default itself never trips the guard, on any knob.
+    ev_lab.reject_knobs_sim2_ignores(BacktestParams())
+    ev_lab._reject_unsupported_knobs(BacktestParams())
+    # A non-default value — even a falsy one — does.
     with pytest.raises(ValueError):
-        ev_lab.reject_knobs_sim2_ignores(BacktestParams(stop_loss_enabled=False))
+        ev_lab.reject_knobs_sim2_ignores(BacktestParams(dead_zone_val=0.0))
 
 
 def test_no_backtest_param_is_silently_unread_by_the_research_simulators():

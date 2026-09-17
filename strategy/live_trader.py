@@ -625,10 +625,6 @@ def _resolve_series_selection(
 
 
 
-# Fraction of a window that may already have elapsed when the engine observes its
-# first tick for that window and still count as "started at the open" (issue #96).
-# 30s of a 5m window, 90s of a 15m window.
-DEFAULT_MAX_START_ELAPSED_PCT = 0.10
 # Minimum window time remaining that still justifies opening a fresh quoting
 # round after a pair merge (issue #89). 300s keeps 5m windows single-round
 # while letting 15m windows recycle; 0 disables re-quoting entirely.
@@ -733,11 +729,10 @@ class MarketLiveState:
     fill_telemetry_done_up: bool = False
     fill_telemetry_done_down: bool = False
 
-    # Late-start guard (issue #96). `first_seen_start_ts` records which window the
+    # Dead-zone late-start guard (issue #229, superseding #96). `first_seen_start_ts` records which window the
     # latch belongs to, `first_tick_elapsed_sec` how far into that window the
-    # engine's first observed tick landed, and `late_start_skip` whether that is
-    # past `max_start_elapsed_pct` -- in which case the engine never witnessed the
-    # open, so it neither quotes the window nor snapshots its mid.
+    # engine's first observed tick landed, and `late_start_skip` whether the first tick
+    # arrived inside the dead zone -- in which case the engine opens nothing for this window.
     first_seen_start_ts: Optional[float] = None
     first_tick_elapsed_sec: Optional[float] = None
     late_start_skip: bool = False
@@ -887,8 +882,9 @@ class LiveTraderEngine:
         selected_markets: Optional[Sequence[str]] = None,
         tokens: Optional[Sequence[str]] = None,
         durations: Optional[Sequence[int]] = None,
-        entry_timeout_pct: Optional[float] = None,
-        max_start_elapsed_pct: Optional[float] = None,
+        dead_zone_val: Optional[float] = None,
+        dead_zone_unit: Optional[str] = None,
+        naked_leg_at_expiry: Optional[str] = None,
         min_requote_remaining_sec: Optional[float] = None,
     ):
         """Initialize the live trading engine with default parameters and selected markets."""
@@ -907,11 +903,20 @@ class LiveTraderEngine:
         # tighter stop. A leg is "naked" whenever exactly one side is filled; a
         # paired position (both filled) keeps the standard `exit_thresh`.
         self.exit_thresh_naked: float = 0.05
-        # Issue #124: force-exit a leg still unpaired after this fraction of the
-        # window has elapsed, regardless of drift. 0 disables the timeout. This
-        # bounds the worst case where the mid hovers just inside the stop so the
-        # naked leg rides all the way to the wall.
-        self.naked_leg_timeout_pct: float = 0.70
+        # Issue #229: Dead zone governs the end of the window (rules §8 and §14).
+        # "In the dead zone: open nothing, and close what is open."
+        self.dead_zone_unit: str = "pct" if dead_zone_unit is None else str(dead_zone_unit)
+        self.dead_zone_val: float = 0.10 if dead_zone_val is None else float(dead_zone_val)
+        if self.dead_zone_unit not in ("pct", "sec"):
+            raise ValueError(f"dead_zone_unit must be 'pct' or 'sec', got {self.dead_zone_unit!r}")
+        if not math.isfinite(self.dead_zone_val) or self.dead_zone_val < 0.0 or (self.dead_zone_unit == "pct" and self.dead_zone_val > 1.0):
+            raise ValueError(f"dead_zone_val must be a finite number >= 0 (and <= 1.0 if pct), got {self.dead_zone_val!r}")
+
+        # Issue #229: what happens to an unpaired leg at window expiry (rule §14).
+        # Replaces stop_loss_enabled. "close" (default) exits at the book; "hold" carries to settlement.
+        self.naked_leg_at_expiry: str = "close" if naked_leg_at_expiry is None else str(naked_leg_at_expiry)
+        if self.naked_leg_at_expiry not in ("close", "hold"):
+            raise ValueError(f"naked_leg_at_expiry must be 'close' or 'hold', got {self.naked_leg_at_expiry!r}")
         # Issue #124: `reentry_require_pairable` only ever gated drift-skip
         # re-entry. Issue #228: inert with the mechanism (see above); the
         # field stays until T5 removes its last senders (cockpit input, tests).
@@ -924,9 +929,6 @@ class LiveTraderEngine:
         # to [0.50, 1.00]. `PATIENT_BAND_MAKER` pins 0.98 explicitly; this is
         # what an unconfigured engine starts at.
         self.max_pair_cost: float = 0.99
-        # Issue #137: patient entry delay. `entry_delay_sec` holds all quoting
-        # until that many seconds into the window (0 = off);
-        # `stop_loss_enabled=False` holds a filled naked leg to
         # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
         # holds all quoting until that far into the window (0 = off).
         self.entry_delay_sec: float = 0.0
@@ -936,7 +938,6 @@ class LiveTraderEngine:
         # outside it placement holds for that tick only — evaluated every tick
         # on the two-sided mid, never latched. Inclusive on both ends.
         self.quote_range: Tuple[float, float] = (0.10, 0.90)
-        self.stop_loss_enabled: bool = True
         # Name of the active named preset, or None for a manual/custom
         # configuration. Set by update_config(preset=...), cleared as soon as
         # a manual change to a preset-table knob diverges from the table.
@@ -945,16 +946,6 @@ class LiveTraderEngine:
         self.exit_reversal: float = 0.02  # unified with BacktestParams (issue #111)
         self.shares: int = 5
         self.taker_fee_rate: float = 0.0
-        self.entry_timeout_pct: float = float(entry_timeout_pct) if entry_timeout_pct is not None else 1.0
-        # Late-start guard (issue #96), independent of `entry_timeout_pct`: the
-        # fraction of a window that may already have elapsed when the engine sees
-        # its first tick for that window. Past it the window is left alone, so a
-        # restart mid-window neither rests unhedgeable legs nor latches an
-        # adverse-drift snapshot from a mid-window mid. 0 or >= 1.0 disables.
-        self.max_start_elapsed_pct: float = (
-            float(max_start_elapsed_pct) if max_start_elapsed_pct is not None
-            else DEFAULT_MAX_START_ELAPSED_PCT
-        )
         # Re-quote time gate (issue #89): a fresh round after a pair merge only
         # opens when at least this much window time remains. 0 disables it.
         # (Issue #228: the drift-skip re-entry that shared this knob is deleted;
@@ -1338,13 +1329,6 @@ class LiveTraderEngine:
         existing _execute_stop_exit path. Paper mode stages a simulated
         order that fills when the bid touches the stop price.
         """
-        # Issue #137: with the stop-loss disabled the preset holds naked legs
-        # to settlement/rollover instead, so no protection is ever staged.
-        # Staging choke point covering the live-buffered, paper-simulated, and
-        # polling fill paths; the drift-stop triggers are gated separately
-        # below (naked-timeout and rollover stay authoritative).
-        if not self.stop_loss_enabled:
-            return
         is_up = (side.upper() == "UP")
         with self._engine_lock:
             if mstate.stop_order_id:
@@ -1639,10 +1623,7 @@ class LiveTraderEngine:
                 if m.spot_open_price and m.spot_open_price > 0:
                     m.spot_drift = (price - m.spot_open_price) / m.spot_open_price
 
-                # Issue #137: the streaming fast-stop path honors
-                # stop_loss_enabled like every other stop trigger — a disabled
-                # stop holds naked legs through spot drift too.
-                if self.is_running and not self.quoting_halted and self.stop_loss_enabled:
+                if self.is_running and not self.quoting_halted:
                     # Fast stop loss execution on adverse leading spot drift
                     if m.filled_up and not m.filled_down and not m.exit_taken and m.status != "STOP_EXIT_PENDING":
                         if m.spot_drift <= -self.spot_exit_drift:
@@ -2647,18 +2628,17 @@ class LiveTraderEngine:
                 "offset": self.offset,
                 "exit_thresh": self.exit_thresh,
                 "exit_thresh_naked": self._naked_exit_thresh(),
-                "naked_leg_timeout_pct": self.naked_leg_timeout_pct,
+                "dead_zone_val": self.dead_zone_val,
+                "dead_zone_unit": self.dead_zone_unit,
+                "naked_leg_at_expiry": self.naked_leg_at_expiry,
                 "reentry_require_pairable": self.reentry_require_pairable,
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
-                "entry_timeout_pct": self.entry_timeout_pct,
-                "max_start_elapsed_pct": self.max_start_elapsed_pct,
                 "min_requote_remaining_sec": self.min_requote_remaining_sec,
                 "enable_leg_chase": self.enable_leg_chase,
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
                 "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
-                "stop_loss_enabled": self.stop_loss_enabled,
             },
             "active_preset": self.active_preset,
             "reentry_stats": reentry_stats_snapshot,
@@ -2696,17 +2676,17 @@ class LiveTraderEngine:
                       selected_markets: Optional[Iterable[str]] = None,
                       tokens: Optional[Iterable[str]] = None,
                       durations: Optional[Iterable[int]] = None,
-                      entry_timeout_pct: Optional[float] = None,
+                      dead_zone_val: Optional[float] = None,
+                      dead_zone_unit: Optional[str] = None,
+                      naked_leg_at_expiry: Optional[str] = None,
                       exit_reversal: Optional[float] = None,
                       min_requote_remaining_sec: Optional[float] = None,
                       exit_thresh_naked: Optional[float] = None,
-                      naked_leg_timeout_pct: Optional[float] = None,
                       reentry_require_pairable: Optional[bool] = None,
                       enable_leg_chase: Optional[bool] = None,
                       max_pair_cost: Optional[float] = None,
                       entry_delay_sec: Optional[float] = None,
                       quote_range: Optional[Sequence[float]] = None,
-                      stop_loss_enabled: Optional[bool] = None,
                       preset: Optional[str] = None) -> Dict[str, Any]:
         """Update strategy configuration parameters and market selection.
 
@@ -2737,10 +2717,14 @@ class LiveTraderEngine:
                     entry_delay_sec = table["entry_delay_sec"]
                 if quote_range is None and "quote_range" in table:
                     quote_range = table["quote_range"]
-                if stop_loss_enabled is None and "stop_loss_enabled" in table:
-                    stop_loss_enabled = table["stop_loss_enabled"]
                 if max_pair_cost is None and "max_pair_cost" in table:
                     max_pair_cost = table["max_pair_cost"]
+                if dead_zone_val is None and "dead_zone_val" in table:
+                    dead_zone_val = table["dead_zone_val"]
+                if dead_zone_unit is None and "dead_zone_unit" in table:
+                    dead_zone_unit = table["dead_zone_unit"]
+                if naked_leg_at_expiry is None and "naked_leg_at_expiry" in table:
+                    naked_leg_at_expiry = table["naked_leg_at_expiry"]
                 if selected_markets is None and tokens is None and durations is None and "selected_markets" in table:
                     selected_markets = list(table["selected_markets"])
             # Market selection is resolved and checked before any scalar field is
@@ -2753,6 +2737,17 @@ class LiveTraderEngine:
                 # concurrent start cannot slip in between the check and the mutation.
                 if self.is_running and new_slugs != set(self.markets.keys()):
                     raise ValueError("Cannot change market selection while the trading bot is running. Stop the bot first.")
+
+            # Issue #229: validate dead zone and expiry exit knobs before any mutation
+            val_dead_zone_unit = self.dead_zone_unit if dead_zone_unit is None else str(dead_zone_unit)
+            if val_dead_zone_unit not in ("pct", "sec"):
+                raise ValueError(f"dead_zone_unit must be 'pct' or 'sec', got {val_dead_zone_unit!r}")
+            val_dead_zone_val = self.dead_zone_val if dead_zone_val is None else float(dead_zone_val)
+            if not math.isfinite(val_dead_zone_val) or val_dead_zone_val < 0.0 or (val_dead_zone_unit == "pct" and val_dead_zone_val > 1.0):
+                raise ValueError(f"dead_zone_val must be a finite number >= 0 (and <= 1.0 if pct), got {val_dead_zone_val!r}")
+            val_naked_leg_at_expiry = self.naked_leg_at_expiry if naked_leg_at_expiry is None else str(naked_leg_at_expiry)
+            if val_naked_leg_at_expiry not in ("close", "hold"):
+                raise ValueError(f"naked_leg_at_expiry must be 'close' or 'hold', got {val_naked_leg_at_expiry!r}")
 
             # Issue #228: validate and stage quote_range before any mutation (atomic all-or-nothing).
             validated_quote_range = None
@@ -2788,7 +2783,7 @@ class LiveTraderEngine:
             if self.is_running:
                 # Each parameter is checked independently. An elif chain would let an
                 # unchanged leading parameter mask a changed trailing one: the dashboard
-                # always posts `offset`, so a changed entry_timeout_pct went undetected
+                # always posts `offset`, so a changed knob went undetected
                 # and the "stop the bot first" guard silently failed to fire.
                 param_changed = False
                 if offset is not None:
@@ -2805,15 +2800,17 @@ class LiveTraderEngine:
                     param_changed = True
                 if starting_balance is not None and abs(float(starting_balance) - self.starting_balance) > 1e-6:
                     param_changed = True
-                if entry_timeout_pct is not None and abs(float(entry_timeout_pct) - self.entry_timeout_pct) > 1e-6:
+                if dead_zone_val is not None and abs(float(dead_zone_val) - self.dead_zone_val) > 1e-6:
+                    param_changed = True
+                if dead_zone_unit is not None and str(dead_zone_unit) != self.dead_zone_unit:
+                    param_changed = True
+                if naked_leg_at_expiry is not None and str(naked_leg_at_expiry) != self.naked_leg_at_expiry:
                     param_changed = True
                 if exit_reversal is not None and abs(float(exit_reversal) - self.exit_reversal) > 1e-6:
                     param_changed = True
                 if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
                     param_changed = True
                 if exit_thresh_naked is not None and abs(float(exit_thresh_naked) - self._naked_exit_thresh()) > 1e-6:
-                    param_changed = True
-                if naked_leg_timeout_pct is not None and abs(float(naked_leg_timeout_pct) - self.naked_leg_timeout_pct) > 1e-6:
                     param_changed = True
                 if reentry_require_pairable is not None and bool(reentry_require_pairable) != self.reentry_require_pairable:
                     param_changed = True
@@ -2829,8 +2826,6 @@ class LiveTraderEngine:
                         or abs(validated_quote_range[1] - self.quote_range[1]) > 1e-9
                     ):
                         param_changed = True
-                if stop_loss_enabled is not None and bool(stop_loss_enabled) != self.stop_loss_enabled:
-                    param_changed = True
                 if preset is not None and preset != self.active_preset:
                     param_changed = True
 
@@ -2931,8 +2926,12 @@ class LiveTraderEngine:
                 else:
                     if starting_balance is not None and starting_balance >= 0:
                         self.starting_balance = float(starting_balance)
-                if entry_timeout_pct is not None:
-                    self.entry_timeout_pct = max(0.0, min(1.0, float(entry_timeout_pct)))
+                if dead_zone_val is not None:
+                    self.dead_zone_val = val_dead_zone_val
+                if dead_zone_unit is not None:
+                    self.dead_zone_unit = val_dead_zone_unit
+                if naked_leg_at_expiry is not None:
+                    self.naked_leg_at_expiry = val_naked_leg_at_expiry
                 if exit_reversal is not None:
                     # Mercy-rule disarm distance; unified with BacktestParams (issue #111).
                     self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
@@ -2943,10 +2942,6 @@ class LiveTraderEngine:
                     # Values at/above the paired stop or <= 0 fall back to exit_thresh
                     # via _naked_exit_thresh(), which is the single read path.
                     self.exit_thresh_naked = max(0.0, min(self.exit_thresh, float(exit_thresh_naked)))
-                if naked_leg_timeout_pct is not None:
-                    # Fraction of the window after which an unpaired leg force-exits.
-                    # 0 disables the timeout.
-                    self.naked_leg_timeout_pct = max(0.0, min(1.0, float(naked_leg_timeout_pct)))
                 if reentry_require_pairable is not None:
                     self.reentry_require_pairable = bool(reentry_require_pairable)
                 if enable_leg_chase is not None:
@@ -2959,8 +2954,6 @@ class LiveTraderEngine:
                     self.entry_delay_sec = max(0.0, float(entry_delay_sec))
                 if validated_quote_range is not None:
                     self.quote_range = validated_quote_range
-                if stop_loss_enabled is not None:
-                    self.stop_loss_enabled = bool(stop_loss_enabled)
                 # Issue #137: latch only a preset the resulting configuration
                 # still matches. An explicit override — or a partially failed
                 # market removal that leaves a hybrid universe — yields a
@@ -3965,7 +3958,11 @@ class LiveTraderEngine:
                 return False
         if "entry_delay_sec" in table and abs(self.entry_delay_sec - float(table["entry_delay_sec"])) > 1e-9:
             return False
-        if "stop_loss_enabled" in table and self.stop_loss_enabled != bool(table["stop_loss_enabled"]):
+        if "dead_zone_val" in table and abs(self.dead_zone_val - float(table["dead_zone_val"])) > 1e-9:
+            return False
+        if "dead_zone_unit" in table and self.dead_zone_unit != str(table["dead_zone_unit"]):
+            return False
+        if "naked_leg_at_expiry" in table and self.naked_leg_at_expiry != str(table["naked_leg_at_expiry"]):
             return False
         if "max_pair_cost" in table and abs(self.max_pair_cost - float(table["max_pair_cost"])) > 1e-9:
             return False
@@ -4016,28 +4013,6 @@ class LiveTraderEngine:
         if end_ts <= start_ts:
             return None
         return (end_ts - start_ts, max(0.0, now - start_ts))
-
-    def _naked_timeout_elapsed(self, mstate: MarketLiveState, now: float, win_duration: float) -> bool:
-        """True when a naked leg has exceeded `naked_leg_timeout_pct` of its window.
-
-        Issue #124: bounds the worst case where the mid hovers just inside the
-        stop so the leg rides to the wall. 0 disables. The clock starts when the
-        leg went naked (`naked_since_ts`), not at window open, so a late fill
-        still gets its full horizon and a just-completed pair is never killed.
-        Returns False when both legs are filled (no naked exposure), the fill
-        time is unknown, or the window geometry is unknown.
-        """
-        if self.naked_leg_timeout_pct is None or self.naked_leg_timeout_pct <= 0:
-            return False
-        if not ((mstate.filled_up and not mstate.filled_down) or (mstate.filled_down and not mstate.filled_up)):
-            return False
-        if mstate.exit_taken or mstate.pair_captured:
-            return False
-        if win_duration <= 0 or not mstate.naked_since_ts:
-            return False
-        naked_elapsed = max(0.0, now - mstate.naked_since_ts)
-        return naked_elapsed >= self.naked_leg_timeout_pct * win_duration
-
     def _update_market_strategy(self, slug: str, poll_data: Dict[str, Any], now: float):
         """Update trading state machine, advance pre-quoting, fills, stop-loss exits, and pair merges."""
         mstate = self.markets[slug]
@@ -4360,12 +4335,11 @@ class LiveTraderEngine:
             win_duration, elapsed_sec = 0.0, 0.0
         else:
             win_duration, elapsed_sec = _clock
-        if self.entry_timeout_pct is not None and 0.0 < self.entry_timeout_pct < 1.0:
-            entry_timeout_sec = self.entry_timeout_pct * win_duration
-            is_late_start = (elapsed_sec >= entry_timeout_sec)
-        else:
-            entry_timeout_sec = win_duration
-            is_late_start = False
+        remaining_sec = max(0.0, win_duration - elapsed_sec)
+        in_dead_zone = (
+            win_duration > 0
+            and book_math.is_in_dead_zone(remaining_sec, win_duration, self.dead_zone_val, self.dead_zone_unit)
+        )
 
         # --- ENTRY DELAY (issue #137) ---
         # While the window is younger than `entry_delay_sec`, no quotes are
@@ -4380,22 +4354,13 @@ class LiveTraderEngine:
             and not mstate.filled_down
         )
 
-        # Late-start latch (issue #96). Evaluated once per window from the first
-        # tick the engine observes for it, keyed on `start_ts` so it re-arms on every
-        # rollover. Gating on the latched value rather than on the live `elapsed_sec`
-        # is what keeps a normally-started window quoting for its whole duration at
-        # `entry_timeout_pct = 1.0`.
-        late_start_cutoff_sec = (
-            self.max_start_elapsed_pct * win_duration
-            if (self.max_start_elapsed_pct is not None and 0.0 < self.max_start_elapsed_pct < 1.0)
-            else None
-        )
+        # Dead-zone late-start latch (issue #229, superseding #96). Evaluated once per window
+        # from the first tick the engine observes for it, keyed on `start_ts` so it re-arms
+        # on every rollover. If the first tick observed arrives already inside the dead zone,
+        # open nothing for this window.
         if mstate.first_seen_start_ts != mstate.start_ts:
             mstate.first_seen_start_ts = mstate.start_ts
-            # Never re-arm a window the engine is already trading. Not every market
-            # loader reports a stable `start_ts` (`strategy/markets.py:170` derives one
-            # from `time.time()`), and a shifting value must not turn a live, quoted
-            # window into a late start half way through it.
+            # Never re-arm a window the engine is already trading.
             window_engaged = bool(
                 mstate.order_id_up or mstate.order_id_down
                 or mstate.filled_up or mstate.filled_down
@@ -4403,16 +4368,12 @@ class LiveTraderEngine:
             )
             if not window_engaged:
                 mstate.first_tick_elapsed_sec = elapsed_sec
-                mstate.late_start_skip = (
-                    late_start_cutoff_sec is not None and elapsed_sec >= late_start_cutoff_sec
-                )
+                mstate.late_start_skip = in_dead_zone
         first_tick_elapsed = (
             mstate.first_tick_elapsed_sec if mstate.first_tick_elapsed_sec is not None else elapsed_sec
         )
-        late_cutoff_txt = f"{late_start_cutoff_sec:.0f}s" if late_start_cutoff_sec is not None else "n/a"
         late_start_action = (
-            f"Engine started {first_tick_elapsed:.0f}s into window (>= {late_cutoff_txt}) "
-            f"— waiting for next window"
+            f"Engine started {first_tick_elapsed:.0f}s into window (dead zone) — waiting for next window"
         )
 
         # --- QUOTABLE RANGE (issue #228) ---
@@ -4434,10 +4395,10 @@ class LiveTraderEngine:
             and not mstate.filled_down
         )
 
-        # --- LATE-START SKIP (issue #96) ---
-        # The engine attached to this window after `max_start_elapsed_pct`
-        # elapsed, so there is nothing to cancel: no entry was ever placed for
-        # it. Mark the window skipped and wait for the next rollover.
+        # --- LATE-START SKIP (issue #229, #96) ---
+        # The engine attached to this window inside the dead zone, so there is
+        # nothing to cancel: no entry was ever placed for it. Mark the window
+        # skipped and wait for the next rollover.
         if (mstate.late_start_skip and not mstate.entry_cancelled_timeout
                 and not mstate.filled_up and not mstate.filled_down
                 and not mstate.order_id_up and not mstate.order_id_down):
@@ -4445,11 +4406,12 @@ class LiveTraderEngine:
                 mstate.entry_cancelled_timeout = True
                 mstate.status = "LATE_START_SKIPPED"
                 mstate.last_action = late_start_action
-            log.info("[%s] Window skipped: engine started %.1fs in (cutoff=%s)",
-                     slug, first_tick_elapsed, late_cutoff_txt)
+            log.info("[%s] Window skipped: engine started %.1fs in (in dead zone)",
+                     slug, first_tick_elapsed)
 
-        # --- ENTRY TIMEOUT CANCELLATION ---
-        if (is_late_start or mstate.late_start_skip) and not mstate.entry_cancelled_timeout:
+        # --- DEAD ZONE CANCELLATION (issue #229) ---
+        # In the dead zone: open nothing, and cancel unfilled resting quotes.
+        if (in_dead_zone or mstate.late_start_skip) and not mstate.entry_cancelled_timeout:
             if not mstate.filled_up and not mstate.filled_down:
                 now_str = datetime.datetime.now().strftime("%H:%M:%S")
                 if self.mode == "live":
@@ -4537,18 +4499,18 @@ class LiveTraderEngine:
                     if mstate.late_start_skip:
                         mstate.status = "LATE_START_SKIPPED"
                         mstate.last_action = late_start_action
-                        log.info("[%s] Window skipped: engine started %.1fs in (cutoff=%s)",
-                                 slug, first_tick_elapsed, late_cutoff_txt)
+                        log.info("[%s] Window skipped: engine started %.1fs in (in dead zone)",
+                                 slug, first_tick_elapsed)
                     elif mstate.mid is None:
                         # Issue #207: unpriceable book throughout entry window
                         mstate.status = "NO_BOOK_SKIPPED"
                         mstate.last_action = "Window skipped — unpriceable book (never formed two-sided quotes)"
                         log.info("[%s] Window skipped: unpriceable book throughout entry window", slug)
                     else:
-                        mstate.status = "TIMEOUT_NO_FILL"
-                        pct_val = int(round(self.entry_timeout_pct * 100)) if self.entry_timeout_pct is not None else 10
-                        mstate.last_action = f"{pct_val}% window timeout ({elapsed_sec:.0f}s >= {entry_timeout_sec:.0f}s) — entry cancelled"
-                        log.info("[%s] Entry orders cancelled due to %d%% elapsed timeout (elapsed=%.1fs, cutoff=%.1fs)", slug, pct_val, elapsed_sec, entry_timeout_sec)
+                        mstate.status = "DEAD_ZONE_NO_FILL"
+                        mstate.last_action = f"Dead zone reached ({remaining_sec:.0f}s left) — entry cancelled"
+                        log.info("[%s] Entry orders cancelled due to dead zone (remaining=%.1fs, cutoff_val=%s, unit=%s)",
+                                 slug, remaining_sec, self.dead_zone_val, self.dead_zone_unit)
 
         # --- ORDER PLACEMENT (Live CLOB or Paper Simulation) ---
         no_book_hold = (mstate.mid is None)
@@ -4557,7 +4519,7 @@ class LiveTraderEngine:
             and not mstate.pair_captured
             and not mstate.exit_taken
             and not mstate.entry_cancelled_timeout
-            and not is_late_start
+            and not in_dead_zone
             and not mstate.late_start_skip
             and not entry_delay_pending
             and not range_hold
@@ -4578,7 +4540,7 @@ class LiveTraderEngine:
                 f"Mid {mstate.mid:.4f} outside quotable range "
                 f"[{quote_lo:.2f}, {quote_hi:.2f}] — quoting held"
             )
-        elif no_book_hold and not mstate.entry_cancelled_timeout and not is_late_start and not mstate.late_start_skip:
+        elif no_book_hold and not mstate.entry_cancelled_timeout and not in_dead_zone and not mstate.late_start_skip:
             mstate.last_action = (
                 "Waiting for two-sided book (unpriceable leg) — quoting held"
             )
@@ -4945,44 +4907,53 @@ class LiveTraderEngine:
             )
             if mstate.exit_taken:
                 return
-
-        # --- NAKED-LEG TIMEOUT (issue #124) ---
-        # A leg still unpaired after `naked_leg_timeout_pct` of the window force-
-        # exits at the live bid with a WINDOW_SETTLE-style trade event, so a mid
-        # hovering just inside the stop cannot ride the naked leg to the wall.
+        # --- DEAD ZONE EXPIRY FOR NAKED LEG (issue #229, superseding #124) ---
+        # In the dead zone: cancel any unfilled opposite resting quote, and for an unpaired leg:
+        # if naked_leg_at_expiry == "close": exit at the live book bid.
+        # if naked_leg_at_expiry == "hold": carry to settlement.
         if not mstate.exit_taken and not mstate.pair_captured:
-            _naked_clock = self._window_clock(mstate, now)
-            win_dur_naked = _naked_clock[0] if _naked_clock is not None else 0.0
-            if self._naked_timeout_elapsed(mstate, now, win_dur_naked):
-                naked_side = "UP" if mstate.filled_up else "DOWN"
-                naked_bid = mstate.up_bid if naked_side == "UP" else mstate.down_bid
-                if naked_bid is not None:
-                    with self._engine_lock:
-                        mstate.status = "STOP_EXIT_PENDING"
-                    if mstate.stop_order_id:
-                        mstate.stop_order_status = "FILLED"
-                        mstate.stop_order_id = None
-                        mstate.stop_price = None
-                        mstate.stop_side = None
-                    trigger_note = (
-                        f"Naked-leg timeout: unpaired {naked_side} after "
-                        f"{self.naked_leg_timeout_pct:.0%} of window"
-                    )
-                    self._execute_stop_exit(slug, mstate, naked_side, naked_bid, trigger_note, now)
-                    return
+            _one_leg = (mstate.filled_up and not mstate.filled_down) or (mstate.filled_down and not mstate.filled_up)
+            if _one_leg and in_dead_zone:
+                # Cancel opposite resting buy order if still active
+                opposite_attr = "order_id_down" if mstate.filled_up else "order_id_up"
+                opp_status_attr = "order_status_down" if mstate.filled_up else "order_status_up"
+                opp_oid = getattr(mstate, opposite_attr, None)
+                if opp_oid and getattr(mstate, opp_status_attr, None) == "RESTING":
+                    if self.mode == "live":
+                        if self.cancel_live_order(opp_oid):
+                            with self._engine_lock:
+                                setattr(mstate, opp_status_attr, "CANCELLED")
+                    else:
+                        with self._engine_lock:
+                            setattr(mstate, opp_status_attr, "CANCELLED")
+
+                if self.naked_leg_at_expiry == "close":
+                    naked_side = "UP" if mstate.filled_up else "DOWN"
+                    naked_bid = mstate.up_bid if naked_side == "UP" else mstate.down_bid
+                    if naked_bid is None:
+                        naked_bid = self._resolve_exit_bid(slug, mstate, naked_side)
+                    if naked_bid is not None and naked_bid > 0.0:
+                        with self._engine_lock:
+                            mstate.status = "STOP_EXIT_PENDING"
+                        if mstate.stop_order_id:
+                            mstate.stop_order_status = "FILLED"
+                            mstate.stop_order_id = None
+                            mstate.stop_price = None
+                            mstate.stop_side = None
+                        trigger_note = f"Dead-zone expiry exit: unpaired {naked_side} closed at book bid"
+                        self._execute_stop_exit(slug, mstate, naked_side, naked_bid, trigger_note, now)
+                        return
 
         # --- STOP LOSS EXIT TRIGGER ---
         # Holding UP alone and mid dropped adversely (max_down >= exit_thresh).
         # In paper mode the staged stop also fills when the protected leg's bid
-        # touches the staged stop price (issue #87).
-        # Issue #137: the whole trigger is gated on `stop_loss_enabled` — with
-        # the stop off, naked-timeout and rollover below stay authoritative.
+        # touches the staged stop price (issue #87). Stop loss is always active.
         paper_stop_hit_up = (
             self.mode != "live" and mstate.stop_order_id and mstate.stop_side == "UP"
             and mstate.up_bid is not None and mstate.stop_price is not None
             and mstate.up_bid <= mstate.stop_price
         )
-        if self.stop_loss_enabled and ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
+        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
                 or paper_stop_hit_up)
                 and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.up_bid
@@ -5008,7 +4979,7 @@ class LiveTraderEngine:
             and mstate.down_bid is not None and mstate.stop_price is not None
             and mstate.down_bid <= mstate.stop_price
         )
-        if self.stop_loss_enabled and ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
+        if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
                 or paper_stop_hit_down)
                 and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.down_bid
