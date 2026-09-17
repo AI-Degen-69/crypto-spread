@@ -51,7 +51,9 @@ run per dataset, no engine changes. The two code complaints in #208 were already
   - Target files: gh comment on issue #208; findings folded into
     `docs/issue-208-entry-gates-measurement.md`.
   - Build: comment leads with the verdict table per knob, links
-    `docs/engine-decision-rules.md` §6/§8, labels datasets; close the issue after posting.
+    `docs/engine-decision-rules.md` §6/§8, labels datasets; **post the verdict and leave the
+    issue open when adjustment candidates require an operator decision** — close only after
+    the operator rules on the candidates.
   - Helper skill: `documentation-and-adrs`.
   - **Done:** comment posted 2026-09-17; verdicts: quote_range (0.10,0.90) does not hold
     (candidate (0.30,0.70), operator decision), dead zone 10% too small (candidate 0.30 pct),
@@ -60,9 +62,9 @@ run per dataset, no engine changes. The two code complaints in #208 were already
   - Build: no engine changes (CONSTRAINTS §1), so the gate is the touched-file suites:
     `python -m pytest tests/test_sweep_backtest.py tests/test_backtest_engine.py tests/test_book_math.py -q`.
   - Helper skill: `test-driven-development` (as gate only).
-  - **Done:** 197 passed in 0.86s (sweep + engine + book_math). Committed on master
-    (3bd47e9) — per docs/git-workflow.md §1 this issue is a measurement/tooling change made
-    directly on the base branch; CI on push remains the merge gate.
+  - **Done:** 198 passed in 0.71s after the review-round CLI test (sweep + engine + book_math).
+    Committed on branch `feat/208-dead-zone-sweep-axes` (3bd47e9 + review commit) and opened
+    PR #250 — per docs/git-workflow.md §1 work ships via PR; CI on the PR is the merge gate.
 
 ## Verification Matrix
 | Task | Method |

@@ -12,5 +12,5 @@
   (2026-09-17); issue left open pending the operator's decision on the two adjustment
   candidates (quote_range (0.30,0.70); dead zone 0.30 pct) — closing would misrepresent an
   undecided outcome. pct-vs-sec resolved: keep pct.
-- [ ] TASK-5 [QA/Tests]: `python -m pytest tests/test_sweep_backtest.py tests/test_backtest_engine.py tests/test_book_math.py -q`
-  passes; CI remains the merge gate.
+- [x] TASK-5 [QA/Tests]: `python -m pytest tests/test_sweep_backtest.py tests/test_backtest_engine.py tests/test_book_math.py -q`
+  passes (198 in 0.71s, incl. the review-round CLI test); CI on PR #250 is the merge gate.
