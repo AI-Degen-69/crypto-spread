@@ -33,6 +33,13 @@ Deterministic: identical counts on re-run. Offset sweep under `both` (09-13):
 | ask-through only | 545/550 | 99.1% | 71 |
 | both (unified rule) | 545/550 | 99.1% | 71 |
 
+The ask-only row pins `newly_placed=False`, so it isolates the ask-*through*
+trigger from the marketable-arrival exception (an ask merely touching a
+freshly placed quote). The unified `both` mode keeps that exception, exactly
+as both engines run it. Measured result: identical 545/550 — the
+marketable-arrival exception contributes nothing to any-leg fill rates on
+this dataset.
+
 ## Interpretation
 
 1. **The 16x gap does not reproduce like-for-like.** #205's `tape` number (20/550) was taken

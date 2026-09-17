@@ -80,12 +80,17 @@ def apply_detector(detector: str):
 
     def wrapped(resting, best_ask, tape_prices, tick, newly_placed=False):
         if detector == "tape":
-            # Detector (a) alone: blind the rule to the book.
+            # Detector (a) alone: blind the rule to the book. The rule's own
+            # marketable-arrival branch reads only `best_ask`, which is None
+            # here, so passing False changes nothing on this path.
             return orig(resting, None, tape_prices, tick, False)
-        # Detector (b) alone ("cross"): blind the rule to the tape. The
-        # marketable-arrival exception (`newly_placed`) is a book-side rule
-        # and is kept, so a freshly placed marketable quote still fills.
-        return orig(resting, best_ask, (), tick, newly_placed)
+        # Detector (b) alone ("cross"): blind the rule to the tape AND pin
+        # `newly_placed=False`. With it kept, the marketable-arrival branch
+        # (ask touching the quote, not through it) would mix into this row,
+        # making it combined book-side behaviour rather than a pure
+        # ask-through decomposition. The unified "both" mode keeps the
+        # exception untouched.
+        return orig(resting, best_ask, (), tick, False)
 
     book_math.resting_bid_filled = wrapped
     sim2_mod.resting_bid_filled = wrapped
