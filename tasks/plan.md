@@ -83,7 +83,7 @@ Branch `feat/one-stop-threshold-230` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 - Retarget tests that asserted naked vs paired stop differences to assert single `exit_thresh` behavior.
 **Verify**: Run all targeted test files.
 
-### [ ] T6 — `[Review/Ship]` Verification and Station IV handoff
+### [x] T6 — `[Review/Ship]` Verification and Station IV handoff
 **Do**:
 - Run all targeted test gates.
 - Verify zero regressions and clean git status.

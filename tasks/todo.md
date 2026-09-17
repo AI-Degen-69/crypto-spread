@@ -6,4 +6,4 @@
 - [x] **T3**: Stop Loss dedicated parity test suite (`tests/test_stop_loss_parity.py`)
 - [x] **T4**: Dashboard API, schemas, and UI cleanup (`server/osc_dash.py`)
 - [x] **T5**: Retarget existing test suites, sweeps, and scripts
-- [ ] **T6**: Full targeted gates verification & Station IV handoff
+- [x] **T6**: Full targeted gates verification & Station IV handoff
