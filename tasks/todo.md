@@ -1,11 +1,9 @@
-# TODO — Issue #232: Rule: fresh_start — the engine keeps no memory inside a window
+# Tasks Checklist — Issue #214: Engine Parity Test Harness
 
-- [x] **T0**: Branch `feat/fresh-start-rule-232` off `master` & lock specs
-- [x] **T1**: Remove legacy re-entry knobs (`min_requote_remaining_sec`, `requote_round`, `reentry_stats`) from `strategy/live_trader.py`
-- [x] **T2**: Implement `fresh_start` clean-state quoting in `strategy/live_trader.py`
-- [x] **T3**: Implement `fresh_start` loop continuation on pair-merge and stop in `backtest/engine.py`
-- [x] **T4**: Dedicated fresh_start parity test suite (`tests/test_fresh_start_parity.py`)
-- [x] **T5**: Retarget existing test suites (`test_live_trader.py`, `test_backtest_engine.py`, etc.)
-- [x] **T6**: Full targeted gates verification & Station IV handoff
-
-
+- [x] **T0 — Branch + spec lock**: `feat/parity-harness-214` checked out, `SPEC.md`, `CONSTRAINTS.md`, `tasks/plan.md`, `tasks/todo.md` created.
+- [x] **T1 — [Test/Harness] Snap-to-poll adapter**: Implement `snaps_to_polls` in `tests/test_engine_parity.py`.
+- [x] **T2 — [Test/Harness] Headless live driver**: Implement `live_outcome` in `tests/test_engine_parity.py`.
+- [x] **T3 — [Test/Harness] Backtest extractor & diff assertion**: Implement `backtest_outcome` and `assert_parity`.
+- [x] **T4 — [Test/Scenarios] Seed scenarios**: Add tests for balanced open, mid anchor, pair-cost cap, unpriceable leg, stop loss, fresh start, and parameter matrix.
+- [x] **T5 — [Docs] Documentation updates**: Update `AGENTS.md` with parity harness gate documentation.
+- [x] **T6 — [Review/Ship] Verification**: Run targeted test suites and prepare for Station IV.
