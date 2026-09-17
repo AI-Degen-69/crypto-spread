@@ -634,7 +634,6 @@ def api_backtest(
     quote_lo: float = 0.10,
     quote_hi: float = 0.90,
     entry_delay_sec: float = 0.0,
-    exit_thresh_naked: float = 0.0,
     dead_zone_val: float = 0.10,
     dead_zone_unit: str = "pct",
     naked_leg_at_expiry: str = "close",
@@ -718,7 +717,6 @@ def api_backtest(
         merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
         quote_range=(quote_lo, quote_hi),
         entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
-        exit_thresh_naked=_clamp_to_spec("exit_thresh_naked", exit_thresh_naked),
         dead_zone_val=dz_val,
         dead_zone_unit=dz_unit,
         naked_leg_at_expiry=naked_expiry,
@@ -1344,9 +1342,6 @@ class LiveConfigPayload(BaseModel):
     exit_reversal: Optional[float] = Field(default=None, ge=0.001, le=0.50)
     # Issue #228: the re-entry payload fields stood here. Removed with the
     # mechanism; the engine still accepts the knobs (inert) until T5.
-    # 0 = off, matching `max(0.0, ...)` in the engine's own clamp; a 0.001
-    # floor here made the naked stop impossible to switch back off.
-    exit_thresh_naked: Optional[float] = Field(default=None, ge=0.0, le=0.50)
     # Issue #137: patient entry delay. entry_delay_sec has no
     # upper bound (a delay past the window simply never quotes).
     # (Issue #228: the entry_band field stood here. Removed with the band
@@ -1405,20 +1400,6 @@ class LiveConfigPayload(BaseModel):
                 pass
         return v
 
-    @field_validator("exit_thresh_naked", mode="before")
-    @classmethod
-    def normalize_exit_thresh_naked(cls, v: Any) -> Any:
-        """Normalize whole-number naked stop values (1-50) entered as cents to decimals."""
-        if v is not None:
-            try:
-                fv = float(v)
-                if fv.is_integer() and 1.0 <= fv <= 50.0:
-                    return fv / 100.0
-                return fv
-            except (ValueError, TypeError):
-                pass
-        return v
-
 
 @app.post("/api/live/config")
 def api_live_config(payload: LiveConfigPayload, request: Request):
@@ -1440,7 +1421,6 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             dead_zone_unit=payload.dead_zone_unit,
             naked_leg_at_expiry=payload.naked_leg_at_expiry,
             exit_reversal=payload.exit_reversal,
-            exit_thresh_naked=payload.exit_thresh_naked,
             enable_leg_chase=payload.enable_leg_chase,
             max_pair_cost=payload.max_pair_cost,
             entry_delay_sec=payload.entry_delay_sec,
@@ -2372,10 +2352,6 @@ textarea:focus-visible,
               <input type="number" min="0" max="0.5" step="0.005" id="btExitReversal" data-param="exit_reversal" value="0.02">
             </div>
             <div class="form-group">
-              <label data-param-label="exit_thresh_naked"></label>
-              <input type="number" min="0" max="0.5" step="0.01" id="btExitNaked" data-param="exit_thresh_naked" value="0">
-            </div>
-            <div class="form-group">
               <label data-param-label="enable_leg_chase"></label>
               <select id="btLegChase" data-param="enable_leg_chase">
                 <option value="0" selected>Off — passive quote only</option>
@@ -2657,10 +2633,6 @@ textarea:focus-visible,
         <div class="form-group">
           <label data-param-label="exit_thresh_by_slug"></label>
           <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
-        </div>
-        <div class="form-group">
-          <label data-param-label="exit_thresh_naked"></label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitNaked" data-param="exit_thresh_naked" value="0.05" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="exit_reversal"></label>
@@ -3901,7 +3873,6 @@ async function runBacktest(fileOverride){
     const deadZoneVal = getVal('btDeadZoneVal', 0.10);
     const deadZoneUnit = $('btDeadZoneUnit') ? $('btDeadZoneUnit').value : 'pct';
     const nakedLegAtExpiry = $('btNakedLegAtExpiry') ? $('btNakedLegAtExpiry').value : 'close';
-    const exitNaked = getVal('btExitNaked', 0.0);
     const legChase = $('btLegChase') ? $('btLegChase').value : '0';
     // Rendered from the registry, so they must actually reach the engine.
     const takerFee = getVal('btTakerFee', 0.07);
@@ -3913,7 +3884,7 @@ async function runBacktest(fileOverride){
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_sec=${entryDelay}&exit_reversal=${exitReversal}&dead_zone_val=${deadZoneVal}&dead_zone_unit=${deadZoneUnit}&naked_leg_at_expiry=${nakedLegAtExpiry}&exit_thresh_naked=${exitNaked}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_sec=${entryDelay}&exit_reversal=${exitReversal}&dead_zone_val=${deadZoneVal}&dead_zone_unit=${deadZoneUnit}&naked_leg_at_expiry=${nakedLegAtExpiry}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -5563,10 +5534,6 @@ async function applyCockpitConfig() {
     dead_zone_unit,
     naked_leg_at_expiry,
   };
-  const nakedEl = $('cockpitExitNaked');
-  if (nakedEl && nakedEl.value) {
-    body.exit_thresh_naked = parseFloat(nakedEl.value);
-  }
   // Issue #228: the quotable range is two ends in one knob. Read off the two
   // dedicated inputs and post the pair; `update_config` clamps each end and
   // refuses an inverted pair (400, surfaced by the error path below).
@@ -5682,7 +5649,6 @@ function renderCockpitUI(st) {
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
       if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
-      if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
       if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
       if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
@@ -5704,7 +5670,6 @@ function renderCockpitUI(st) {
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
       if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
-      if ($('cockpitExitNaked') && st.params.exit_thresh_naked != null) $('cockpitExitNaked').value = st.params.exit_thresh_naked;
       if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
       if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
