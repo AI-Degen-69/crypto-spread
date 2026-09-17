@@ -9,7 +9,6 @@ Fast synthetic execution (<5s total).
 from __future__ import annotations
 
 import pytest
-from typing import Any, Dict, List, Tuple
 
 from backtest.engine import BacktestParams, _simulate_window
 from strategy.live_trader import LiveTraderEngine
@@ -122,6 +121,21 @@ def snaps_to_polls(snaps: list[dict]) -> list[tuple[float, dict]]:
 
 def live_outcome(snaps: list[dict], params: BacktestParams) -> dict:
     """Run the live decision path headlessly in paper mode; return the SPEC §2 surface."""
+    if not snaps:
+        return {
+            "entered": False,
+            "filled_up": False,
+            "filled_down": False,
+            "entry_price_up": None,
+            "entry_price_down": None,
+            "pair_captured": False,
+            "exit_taken": False,
+            "exit_side": "",
+            "chased_leg": "",
+            "pairs_count": 0,
+            "stops_count": 0,
+        }
+
     slug = snaps[0].get("slug", SLUG)
     dur = int(snaps[0].get("duration", DURATION))
     exit_th = params.exit_thresh(slug, dur)
@@ -136,12 +150,13 @@ def live_outcome(snaps: list[dict], params: BacktestParams) -> dict:
     engine.mode = "paper"
     engine.is_running = True
 
-    # Disable async background and network side-effects
+    # Disable async background, network, and disk persistence side-effects
     engine.stream_bridge.start = lambda *a, **k: None
     engine.stream_bridge.update_market_tokens = lambda *a, **k: None
     engine._schedule_wallet_balance_fetch = lambda *a, **k: None
     engine.ensure_telemetry_streaming = lambda *a, **k: None
     engine._record_fill_telemetry = lambda *a, **k: None
+    engine._save_persisted_trades = lambda *a, **k: None
     engine.fill_telemetry_async = False
 
     # Mirror BacktestParams configuration
@@ -154,9 +169,17 @@ def live_outcome(snaps: list[dict], params: BacktestParams) -> dict:
     engine.exit_thresh = exit_th
     engine.shares = params.quote_shares
     engine.quoting_halted = False
-    engine.is_running = True
 
     ever_entered = False
+    ever_filled_up = False
+    ever_filled_down = False
+    first_entry_price_up = None
+    first_entry_price_down = None
+    ever_pair_captured = False
+    ever_exit_taken = False
+    last_exit_side = ""
+    last_chased_leg = ""
+
     for now_ts, poll_data in snaps_to_polls(snaps):
         engine._update_market_strategy(slug, poll_data, now=now_ts)
         mstate = engine.markets[slug]
@@ -171,21 +194,34 @@ def live_outcome(snaps: list[dict], params: BacktestParams) -> dict:
             or mstate.stops_count > 0
         ):
             ever_entered = True
+        if mstate.filled_up:
+            ever_filled_up = True
+            if first_entry_price_up is None:
+                first_entry_price_up = mstate.fill_price_up
+        if mstate.filled_down:
+            ever_filled_down = True
+            if first_entry_price_down is None:
+                first_entry_price_down = mstate.fill_price_down
+        if mstate.pair_captured or mstate.pairs_count > 0:
+            ever_pair_captured = True
+        if mstate.exit_taken or mstate.stops_count > 0:
+            ever_exit_taken = True
+            if mstate.exit_side:
+                last_exit_side = mstate.exit_side.lower()
+        if mstate.chased_leg:
+            last_chased_leg = mstate.chased_leg.lower()
 
     mstate = engine.markets[slug]
-    exit_side = (mstate.exit_side or "").lower()
-    chased_leg = (mstate.chased_leg or "").lower()
-
     return {
         "entered": ever_entered,
-        "filled_up": bool(mstate.filled_up),
-        "filled_down": bool(mstate.filled_down),
-        "entry_price_up": mstate.fill_price_up,
-        "entry_price_down": mstate.fill_price_down,
-        "pair_captured": bool(mstate.pair_captured),
-        "exit_taken": bool(mstate.exit_taken),
-        "exit_side": exit_side,
-        "chased_leg": chased_leg,
+        "filled_up": ever_filled_up,
+        "filled_down": ever_filled_down,
+        "entry_price_up": first_entry_price_up,
+        "entry_price_down": first_entry_price_down,
+        "pair_captured": ever_pair_captured,
+        "exit_taken": ever_exit_taken,
+        "exit_side": last_exit_side or (mstate.exit_side or "").lower(),
+        "chased_leg": last_chased_leg or (mstate.chased_leg or "").lower(),
         "pairs_count": int(mstate.pairs_count),
         "stops_count": int(mstate.stops_count),
     }
