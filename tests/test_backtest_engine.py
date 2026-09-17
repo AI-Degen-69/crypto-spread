@@ -1011,32 +1011,19 @@ def test_a_completed_pair_is_never_timed_out():
     assert w.exit_taken is False, "a merged pair was killed by the dead zone"
 
 
-def test_naked_stop_may_tighten_the_paired_stop_but_never_loosen_it():
-    """Mirrors live `_naked_exit_thresh`: 0 or >= paired falls back to paired."""
-    p = _params(exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
-    assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
-    tight = _params(exit_thresh_naked=0.02,
-                    exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
-    assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.02)
-    loose = _params(exit_thresh_naked=0.09,
-                    exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
-    assert loose.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05), (
-        "a naked stop above the paired stop must not loosen risk")
+def test_a_tighter_stop_threshold_exits_a_drift_a_looser_one_would_ride():
+    """Tighter stop threshold exits earlier at a better bid.
 
-
-def test_a_tighter_naked_stop_exits_a_drift_the_paired_stop_would_ride():
-    """The knob has to reach the exit comparison, not just the helper.
-
-    UP enters at 0.48, so (issue #209) the 0.02 naked stop is reached at mid
-    0.46 and the 0.05 paired stop only at 0.43. The 0.45 tick sits between the
-    two: the tighter stop exits there, the wider one rides on to 0.38.
+    UP enters at 0.48, so with 0.02 stop the stop is reached at mid 0.46
+    and with 0.05 stop only at 0.43. The 0.45 tick sits between the two:
+    the tighter stop exits there, the wider one rides on to 0.38.
     """
     mids = [0.50, 0.50, 0.45, 0.38, 0.35, 0.33]
-    wide = _simulate_window(_drift_window(mids=mids), _params())
-    tight = _simulate_window(_drift_window(mids=mids), _params(exit_thresh_naked=0.02))
+    wide = _simulate_window(_drift_window(mids=mids), _params(exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05}))
+    tight = _simulate_window(_drift_window(mids=mids), _params(exit_thresh_by_slug={"default_5m": 0.02, "default_15m": 0.02}))
     assert wide.exit_taken and tight.exit_taken
     assert tight.exit_price > wide.exit_price, (
-        "the tighter naked stop should have exited earlier, at a better bid")
+        "the tighter stop should have exited earlier, at a better bid")
 
 
 @pytest.mark.parametrize("kw", [
@@ -1044,8 +1031,6 @@ def test_a_tighter_naked_stop_exits_a_drift_the_paired_stop_would_ride():
     {"dead_zone_val": -0.01},
     {"dead_zone_unit": "hours"},
     {"naked_leg_at_expiry": "sell"},
-    {"exit_thresh_naked": 0.51},
-    {"exit_thresh_naked": -0.01},
 ])
 def test_out_of_range_dead_zone_knobs_are_refused(kw):
     with pytest.raises(ValueError):
@@ -1196,30 +1181,21 @@ def _blocked_exit_then_reversion():
     return snaps
 
 
-def test_a_tight_naked_stop_arms_the_reversal_guard_at_its_own_threshold():
-    """A round trip must suppress the stop that the round trip round-tripped.
-
-    Regression: `exit_thresh_naked` tightened the exit comparison to
-    `naked_thr` while the reversal latch still waited for the looser paired
-    `exit_thr`. A drift past 0.03 that the book could not act on, followed by a
-    full reversion to 0.499, then exited at 0.489 — selling into a recovered
-    market on a stale drift.
-    """
+def test_a_tight_stop_arms_the_reversal_guard_at_its_own_threshold():
+    """A round trip must suppress the stop that the round trip round-tripped."""
     w = _simulate_window(_blocked_exit_then_reversion(),
-                         _params(exit_thresh_naked=0.03))
+                         _params(exit_thresh_by_slug={"default_5m": 0.03, "default_15m": 0.03}))
     assert w.filled_up is True, "fixture never entered"
     assert w.max_down >= 0.03, "fixture never crossed the tight stop"
     assert w.exit_taken is False, (
-        f"stopped out at {w.exit_price} after the mid had reverted to 0.499 — "
-        "the reversal guard is armed at the paired threshold, not the naked one")
+        f"stopped out at {w.exit_price} after the mid had reverted to 0.499"
+    )
 
 
-def test_the_reversal_guard_is_unchanged_when_the_naked_stop_is_not_tightened():
-    """`naked_thr` equals `exit_thr` by default, so this path must not move."""
+def test_the_reversal_guard_is_unchanged_with_default_stop():
+    """Reversal guard suppresses exit on round-trip."""
     w = _simulate_window(_blocked_exit_then_reversion(), _params())
     assert w.exit_taken is False
-    tight = _params(exit_thresh_naked=0.05)   # equal to paired: falls back
-    assert tight.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
 
 
 def test_the_chase_does_not_move_a_quote_with_no_ask_to_anchor_to():
@@ -1262,13 +1238,6 @@ def test_nothing_closes_a_naked_leg_when_held_to_settlement():
     assert w.settlement_mid is not None, (
         "a naked leg carried to settlement was never marked to settlement")
     assert w.pnl_cents != 0.0, "the held leg contributed no P&L at all"
-
-
-def test_a_naked_stop_equal_to_the_paired_stop_falls_back_to_it():
-    """The `>=` boundary, not just the strictly-looser case."""
-    p = _params(exit_thresh_naked=0.05,
-                exit_thresh_by_slug={"default_5m": 0.05, "default_15m": 0.05})
-    assert p.naked_exit_thresh("eth-up-or-down-5m", 300) == pytest.approx(0.05)
 
 
 def test_a_naked_leg_always_reaches_the_naked_threshold_check():

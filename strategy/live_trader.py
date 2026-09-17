@@ -898,11 +898,6 @@ class LiveTraderEngine:
         # Strategy Parameters
         self.offset: float = 0.02
         self.exit_thresh: float = 0.05
-        # Issue #124: naked legs (one side filled, other cancelled or never filled)
-        # bleed far more per stop than paired positions earn, so they get their own
-        # tighter stop. A leg is "naked" whenever exactly one side is filled; a
-        # paired position (both filled) keeps the standard `exit_thresh`.
-        self.exit_thresh_naked: float = 0.05
         # Issue #229: Dead zone governs the end of the window (rules §8 and §14).
         # "In the dead zone: open nothing, and close what is open."
         self.dead_zone_unit: str = "pct" if dead_zone_unit is None else str(dead_zone_unit)
@@ -1337,7 +1332,7 @@ class LiveTraderEngine:
             token = mstate.up_token if is_up else mstate.down_token
             if fill_price is None or not token:
                 return
-            stop_price = round(min(0.99, max(0.01, fill_price - self._naked_exit_thresh())), 2)
+            stop_price = round(min(0.99, max(0.01, fill_price - self.exit_thresh)), 2)
 
         if self.mode == "live":
             stop_order_id = f"buffer_stop_{mstate.slug}"
@@ -2627,7 +2622,6 @@ class LiveTraderEngine:
             "params": {
                 "offset": self.offset,
                 "exit_thresh": self.exit_thresh,
-                "exit_thresh_naked": self._naked_exit_thresh(),
                 "dead_zone_val": self.dead_zone_val,
                 "dead_zone_unit": self.dead_zone_unit,
                 "naked_leg_at_expiry": self.naked_leg_at_expiry,
@@ -2681,7 +2675,6 @@ class LiveTraderEngine:
                       naked_leg_at_expiry: Optional[str] = None,
                       exit_reversal: Optional[float] = None,
                       min_requote_remaining_sec: Optional[float] = None,
-                      exit_thresh_naked: Optional[float] = None,
                       reentry_require_pairable: Optional[bool] = None,
                       enable_leg_chase: Optional[bool] = None,
                       max_pair_cost: Optional[float] = None,
@@ -2810,8 +2803,6 @@ class LiveTraderEngine:
                     param_changed = True
                 if min_requote_remaining_sec is not None and abs(float(min_requote_remaining_sec) - self.min_requote_remaining_sec) > 1e-6:
                     param_changed = True
-                if exit_thresh_naked is not None and abs(float(exit_thresh_naked) - self._naked_exit_thresh()) > 1e-6:
-                    param_changed = True
                 if reentry_require_pairable is not None and bool(reentry_require_pairable) != self.reentry_require_pairable:
                     param_changed = True
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
@@ -2937,11 +2928,6 @@ class LiveTraderEngine:
                     self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
                 if min_requote_remaining_sec is not None:
                     self.min_requote_remaining_sec = max(0.0, float(min_requote_remaining_sec))
-                if exit_thresh_naked is not None:
-                    # Issue #124: tighter naked-leg stop; clamped to (0, exit_thresh).
-                    # Values at/above the paired stop or <= 0 fall back to exit_thresh
-                    # via _naked_exit_thresh(), which is the single read path.
-                    self.exit_thresh_naked = max(0.0, min(self.exit_thresh, float(exit_thresh_naked)))
                 if reentry_require_pairable is not None:
                     self.reentry_require_pairable = bool(reentry_require_pairable)
                 if enable_leg_chase is not None:
@@ -3970,19 +3956,6 @@ class LiveTraderEngine:
             return False
         return True
 
-    def _naked_exit_thresh(self) -> float:
-        """Adverse-drift stop distance for a single (naked) leg — issue #124.
-
-        A naked leg exits at `exit_thresh_naked` (tighter than the paired
-        `exit_thresh`); a config of 0 or a value above `exit_thresh` falls back
-        to `exit_thresh` so the knob can never loosen risk beyond the paired
-        stop.
-        """
-        naked = self.exit_thresh_naked
-        if naked is None or naked <= 0 or naked >= self.exit_thresh:
-            return self.exit_thresh
-        return naked
-
     @staticmethod
     def _window_clock(mstate: MarketLiveState, now: float) -> Optional[Tuple[float, float]]:
         """Return `(window_length, elapsed)` for this window, or None when it has no clock.
@@ -4298,7 +4271,7 @@ class LiveTraderEngine:
                     excursion_down = round(entry_up - mid, 6)
                     mstate.max_down_drift = max(mstate.max_down_drift, excursion_down)
                     # Reversal detection: mid retraced back towards entry price
-                    if mstate.max_down_drift >= self._naked_exit_thresh() and excursion_down < self.exit_reversal:
+                    if mstate.max_down_drift >= self.exit_thresh and excursion_down < self.exit_reversal:
                         mstate.reversal_seen_down = True
             elif mstate.filled_down and not mstate.filled_up:
                 entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
@@ -4306,7 +4279,7 @@ class LiveTraderEngine:
                     excursion_up = round(mid - (1.0 - entry_dn), 6)
                     mstate.max_up_drift = max(mstate.max_up_drift, excursion_up)
                     # Reversal detection: mid retraced back towards entry price
-                    if mstate.max_up_drift >= self._naked_exit_thresh() and excursion_up < self.exit_reversal:
+                    if mstate.max_up_drift >= self.exit_thresh and excursion_up < self.exit_reversal:
                         mstate.reversal_seen_up = True
 
         # Determine window duration & elapsed time (Issue #48, Invariant 1 / #224).
@@ -4953,7 +4926,7 @@ class LiveTraderEngine:
             and mstate.up_bid is not None and mstate.stop_price is not None
             and mstate.up_bid <= mstate.stop_price
         )
-        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self._naked_exit_thresh()
+        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
                 or paper_stop_hit_up)
                 and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.up_bid
@@ -4968,7 +4941,7 @@ class LiveTraderEngine:
                     mstate.stop_order_id = None
                     mstate.stop_price = None
                     mstate.stop_side = None
-                trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self._naked_exit_thresh():.2f}"
+                trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
                 self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
                 return
 
@@ -4979,7 +4952,7 @@ class LiveTraderEngine:
             and mstate.down_bid is not None and mstate.stop_price is not None
             and mstate.down_bid <= mstate.stop_price
         )
-        if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self._naked_exit_thresh()
+        if ((mstate.filled_down and not mstate.filled_up and mstate.max_up_drift >= self.exit_thresh
                 or paper_stop_hit_down)
                 and not mstate.reversal_seen_up and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.down_bid
@@ -4994,7 +4967,7 @@ class LiveTraderEngine:
                     mstate.stop_order_id = None
                     mstate.stop_price = None
                     mstate.stop_side = None
-                trigger_note = f"Adverse drift {mstate.max_up_drift:.3f} >= {self._naked_exit_thresh():.2f}"
+                trigger_note = f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}"
                 self._execute_stop_exit(slug, mstate, "DOWN", sell_bid, trigger_note, now)
                 return
 

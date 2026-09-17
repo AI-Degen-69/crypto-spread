@@ -124,7 +124,7 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
         assert got == want, f"config mirror broken: {field}={got!r} want {want!r}"
     assert params.queue_gate == 0.0, "queue gate must stay off (paper has none)"
     assert params.merge_gas_usd == 0.0, "merge gas must stay 0 (gasless merges)"
-    assert recorded["exit_thresh"] == 0.05 and recorded["exit_thresh_naked"] == 0.05
+    assert recorded["exit_thresh"] == 0.05
     for key, want in (("default_5m", 0.05), ("default_15m", 0.05)):
         assert params.exit_thresh_by_slug.get(key) == want, f"exit mirror gap: {key}"
     for slug in UNIVERSE:

@@ -152,11 +152,6 @@ class BacktestParams:
     # Replaces stop_loss_enabled. "close" (default) exits at the book; "hold" carries
     # the leg to settlement (pays 1.00 or 0.00).
     naked_leg_at_expiry: str = "close" # "close" | "hold"
-    # Issue #164: mirrors LiveTraderEngine.exit_thresh_naked (issue #124). A
-    # single unpaired leg may carry a tighter stop than the paired one. 0 or a
-    # value at/above the paired `exit_thresh` falls back to `exit_thresh`, so
-    # the knob can never loosen risk beyond the paired stop. 0 = off = today.
-    exit_thresh_naked: float = 0.0
     # Issue #164: mirrors LiveTraderEngine.enable_leg_chase (issue #123). Once
     # one leg fills, the other is re-anchored each tick toward its ask, capped
     # so the pair still costs at most `max_pair_cost` — converting a naked leg
@@ -207,8 +202,6 @@ class BacktestParams:
              "$", (0.0, 1.0), ("backtest", "cockpit"), "structural"),
             ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
              "$", None, ("backtest", "cockpit"), "tuning"),
-            ("exit_thresh_naked", "Naked Leg Stop ($)", "Tighter stop for a leg still unpaired; 0 follows the paired stop",
-             "$", (0.0, 0.50), ("backtest", "cockpit"), "tuning"),
             # Issue #229 / rule §14: what happens to an unpaired leg in the dead zone.
             ("naked_leg_at_expiry", "Naked Leg at Expiry", "close at book (default) or hold to settlement",
              "str", None, ("backtest", "cockpit"), "structural"),
@@ -412,11 +405,6 @@ class BacktestParams:
             raise ValueError(
                 f"max_pair_cost must be between 0.50 and 1.00, got {self.max_pair_cost}"
             )
-        if self.exit_thresh_naked is not None:
-            if not math.isfinite(self.exit_thresh_naked) or not (0.0 <= self.exit_thresh_naked <= 0.50):
-                raise ValueError(
-                    f"exit_thresh_naked must be between 0.0 and 0.50, got {self.exit_thresh_naked}"
-                )
         # Issue #228: a structural limit, enforced here and not only at the API
         # clamp (the #227 pattern). Every driver in `research/sweeps/` builds
         # this dataclass directly. No "off": a (lo, hi) pair with
@@ -451,19 +439,6 @@ class BacktestParams:
                 return float(v)
         key = f"default_{'5m' if duration == 300 else '15m'}"
         return float(self.exit_thresh_by_slug.get(key, 0.05))
-
-    def naked_exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
-        """Stop distance for a leg still unpaired — mirrors live `_naked_exit_thresh`.
-
-        Issue #164/#124: a naked leg may carry a tighter stop than the paired
-        one, but never a looser one. 0, or any value at or above the paired
-        threshold, falls back to the paired threshold.
-        """
-        paired = self.exit_thresh(slug, duration, series=series)
-        naked = self.exit_thresh_naked
-        if naked is None or naked <= 0 or naked >= paired:
-            return paired
-        return float(naked)
 
     def params_hash(self) -> str:
         """Stable hash for cache keying slider sweeps (Plan D8)."""
@@ -768,12 +743,6 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     window_entered = False
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
-    # Issue #164: a leg still unpaired may carry a tighter stop than the paired
-    # one, and may be timed out entirely. `naked_since_elapsed` is the moment
-    # the leg went naked — not window open — so a late fill still gets its full
-    # horizon and a just-completed pair is never killed (mirrors live
-    # `_naked_timeout_hit`).
-    naked_thr = params.naked_exit_thresh(slug, duration, series=series)
     naked_since_elapsed: float | None = None
     # Which leg (if any) the chase moved, so the entry price recorded for it is
     # the price it actually rested at when it filled, not a later chase step.
@@ -892,28 +861,20 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # the threshold and the mid is now back within exit_reversal of the
         # entry, it was a round-trip and the adverse drift is not sustained.
         #
-        # Latched against `naked_thr`, not `exit_thr`, because every one of the
-        # four exit sites below requires exactly one leg filled — they are all
-        # naked exits, so the threshold that governs them is the one that must
-        # arm the round-trip guard. Tightening the stop without tightening this
-        # left a reachable hole (issue #164): a drift past `naked_thr` while the
-        # book had no best_bid blocked the exit, the mid fully reverted, and the
-        # exit then fired on the stale drift because the latch was still waiting
-        # for the looser paired threshold. `naked_thr` equals `exit_thr` unless
-        # `exit_thresh_naked` tightens it, so the default path is unchanged.
+        # Issue #230: Latched against `exit_thr`, the single stop threshold.
         if filled_up and not filled_down:
             _entry_up = entry_price_up if entry_price_up is not None else resting_up
             if _entry_up is not None:
                 _excursion_down = round(_entry_up - mid, 6)
                 adverse_drift_down = max(adverse_drift_down, _excursion_down)
-                if adverse_drift_down >= naked_thr and _excursion_down < params.exit_reversal:
+                if adverse_drift_down >= exit_thr and _excursion_down < params.exit_reversal:
                     reversal_seen_down = True
         elif filled_down and not filled_up:
             _entry_dn = entry_price_down if entry_price_down is not None else resting_down
             if _entry_dn is not None:
                 _excursion_up = round(mid - (1.0 - _entry_dn), 6)
                 adverse_drift_up = max(adverse_drift_up, _excursion_up)
-                if adverse_drift_up >= naked_thr and _excursion_up < params.exit_reversal:
+                if adverse_drift_up >= exit_thr and _excursion_up < params.exit_reversal:
                     reversal_seen_up = True
 
         # --- QUOTABLE RANGE (issue #228) ---
@@ -1012,39 +973,6 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                         chased_now_up = True
 
         if not queue_ok:
-            # An already-filled position must still be eligible to exit even
-            # if the live book no longer meets the entry gate. Check exit
-            # BEFORE updating the reversal flag, otherwise the crossing tick
-            # sets the flag and the exit is suppressed.
-            #
-            # These two deliberately keep the *paired* `exit_thr` while the
-            # main-path pair below uses the tighter `naked_thr` (issue #164).
-            # The asymmetry is safe and intentional: the `continue` at the end
-            # of this branch only fires when NEITHER leg is filled, so a naked
-            # leg always falls through to the `naked_thr` check on this same
-            # tick. Tightening these would make the stop fire *before* fill
-            # detection and pair completion run — costing the leg its chance to
-            # pair on a tick where it could have.
-            if (filled_up and not filled_down and adverse_drift_down >= exit_thr
-                    and not reversal_seen_down and not exit_taken):
-                bb_up = ub.get("best_bid")
-                if bb_up is not None:
-                    exit_taken = True
-                    exit_side = "up"
-                    exit_price = bb_up
-                    pnl_cents += (bb_up - resting_up) * 100.0
-                    fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
-                    break
-            if (filled_down and not filled_up and adverse_drift_up >= exit_thr
-                    and not reversal_seen_up and not exit_taken):
-                bb_dn = db.get("best_bid")
-                if bb_dn is not None:
-                    exit_taken = True
-                    exit_side = "down"
-                    exit_price = bb_dn
-                    pnl_cents += (bb_dn - resting_down) * 100.0
-                    fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
-                    break
             if not filled_up and not filled_down:
                 continue
 
@@ -1143,7 +1071,8 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         # Check BEFORE we update the reversal flag this tick so the crossing
         # tick is the exit tick (otherwise the flag toggles the same tick and
         # the exit is suppressed).
-        if (filled_up and not filled_down and adverse_drift_down >= naked_thr
+        # Issue #230: Governed by single `exit_thr`.
+        if (filled_up and not filled_down and adverse_drift_down >= exit_thr
                 and not reversal_seen_down and not exit_taken):
             bb_up = ub.get("best_bid")
             if bb_up is not None:
@@ -1153,7 +1082,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
                 pnl_cents += (bb_up - resting_up) * 100.0
                 fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
                 break
-        if (filled_down and not filled_up and adverse_drift_up >= naked_thr
+        if (filled_down and not filled_up and adverse_drift_up >= exit_thr
                 and not reversal_seen_up and not exit_taken):
             bb_dn = db.get("best_bid")
             if bb_dn is not None:

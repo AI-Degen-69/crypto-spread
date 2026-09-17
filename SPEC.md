@@ -1,69 +1,65 @@
-# SPEC — Issue #229: `dead_zone` governs the end of the window
+# SPEC — Issue #230: Rule: one stop threshold — delete `exit_thresh_naked`
 
-Binding while `feat/dead-zone-229` is live. Per-issue working file (`docs/git-workflow.md` §5)
+Binding while `feat/one-stop-threshold-230` is live. Per-issue working file (`docs/git-workflow.md` §5)
 — not an architecture document.
 
-The rule itself is agreed: `docs/engine-decision-rules.md` §8 (`dead_zone`) and §14
-(`naked_leg_at_expiry`). That file is the definition; this spec is the work that makes
+The rule itself is agreed: `docs/engine-decision-rules.md` §2 (`stop_loss`) and §10
+(`naked_leg_stop`). That file is the definition; this spec is the work that makes
 the code match it.
 
 ## Goal
 
-One rule governs the end of the window across both engines:
-> **In the dead zone: open nothing, and close what is open.**
+Unify the stop-loss mechanism across both engines to exactly one threshold:
+> **There is one stop threshold, not two.** `exit_thresh_naked` is deleted from both engines.
+> A completed pair cannot lose (`1 - 2*offset` settles at 1.00); there is nothing for a paired stop to protect.
 
-Delete the obsolete giving-up clocks and redundant timeout gates (`entry_timeout_pct`,
-`naked_leg_timeout_pct`, `max_start_elapsed_pct`, `max_start_delay_sec`, and
-`stop_loss_enabled`), replacing them with the single switchable dead-zone limit and the
-`naked_leg_at_expiry` close/hold policy.
+Delete the redundant, dead-code `exit_thresh_naked` parameter from both engines, parameter
+registries, API schemas, and dashboard UI, establishing a single authoritative stop-loss rule.
 
 ## Acceptance Criteria
 
-1. **One Dead-Zone definition in both engines (`backtest/engine.py` & `strategy/live_trader.py`):**
-   - Structural limit with switchable unit: `dead_zone_unit` (`"pct"` [default] or `"sec"`).
-   - Default value: `dead_zone_val = 0.10` (10% of window remaining).
-   - Validation: `dead_zone_unit in ("pct", "sec")`; `dead_zone_val >= 0.0` (and `<= 1.0` if `unit == "pct"`).
-   - Invariant 1 clock compliant: `window_length = end_ts - start_ts`; `remaining = end_ts - now` (live) / `end_ts - snapshot_ts` (backtest).
-2. **Dead-Zone Actions on Trigger (`remaining <= dead_zone_cutoff`):**
-   - **Open nothing:** No new entry quotes placed. A window whose first observed tick lands inside the dead zone is not entered at all (replaces `max_start_elapsed_pct` / `max_start_delay_sec`).
-   - **Cancel unfilled resting quotes:** Any unfilled open buy orders are immediately cancelled.
-   - **Handle unpaired leg:** If an unpaired leg is filled, take action per `naked_leg_at_expiry`:
-     - `"close"` (default): cancel opposite resting buy quote (OCO) and sell filled leg at best executable bid (cross book, pays taker fee).
-     - `"hold"`: cancel opposite resting buy quote, hold filled leg to settlement (pays 1.00 on win or 0.00 on loss; stop loss remains armed during hold if adverse move occurs before settlement).
-   - **No fresh start:** Windows in the dead zone are ineligible for re-entry / fresh start.
-3. **Five obsolete parameters completely deleted from both engines, parameter registry, schemas, and UI:**
-   - `entry_timeout_pct` — deleted.
-   - `naked_leg_timeout_pct` — deleted.
-   - `max_start_elapsed_pct` — deleted.
-   - `max_start_delay_sec` — deleted.
-   - `stop_loss_enabled` — deleted, replaced by `naked_leg_at_expiry`.
-4. **`naked_leg_at_expiry` parameter introduced in both engines:**
-   - Values: `"close"` (default) and `"hold"`.
-   - Replaces `stop_loss_enabled` with explicit intent and semantics.
-5. **Shared pure calculation in `strategy/book_math.py`:**
-   - `dead_zone_cutoff_seconds(window_length: float, dead_zone_val: float, dead_zone_unit: str) -> float`
-   - `is_in_dead_zone(remaining_sec: float, window_length: float, dead_zone_val: float, dead_zone_unit: str) -> bool`
-   - `dead_zone_start_ts(start_ts: float, end_ts: float, dead_zone_val: float, dead_zone_unit: str) -> float`
-6. **Parity test (`tests/test_dead_zone_parity.py`):**
-   - Drives a window into the dead zone with an unpaired leg and asserts both engines take the exact same action under both switch values (`"close"` and `"hold"`).
-   - Verifies entry is blocked in the dead zone, unfilled quotes are cancelled, and units (`pct` and `sec`) evaluate identically.
-7. **Every surface updated:**
-   - Parameter registry (`BacktestParams._PARAM_GROUPS`): `dead_zone_val` and `dead_zone_unit` classified as structural limits, `naked_leg_at_expiry` registered.
-   - Dashboard (`server/osc_dash.py`): Backtest and Cockpit tab inputs updated, `/api/backtest` and `/api/live/config` schemas updated.
-   - Scripts and sweeps: `scripts/backtest.py` and `scripts/sweep_backtest.py` updated to support `--dead-zone-val`, `--dead-zone-unit`, and `--naked-leg-at-expiry`.
-8. **Closes #229, closes #211, and closes the second half of #208.**
+1. **One Stop Threshold in Both Engines (`strategy/live_trader.py` & `backtest/engine.py`):**
+   - Live engine: Governed strictly by `self.exit_thresh` (default 0.05).
+   - Backtest engine: Governed strictly by `params.exit_thresh(slug, duration, series=series)` (from `exit_thresh_by_slug`).
+   - `exit_thresh_naked` and all helper wrappers (`_naked_exit_thresh`, `naked_exit_thresh`) are completely removed.
+2. **Identical Stop Arming (`docs/engine-decision-rules.md` §2):**
+   - Armed the moment an entry leg fills.
+   - Price calculation:
+     `stop_price = clamp(round(entry_fill_price - stop_threshold, 2), 0.01, 0.99)`
+   - Held in memory (`STAGED`), zero venue exposure until trigger.
+3. **Identical Stop Trigger Math:**
+   - Adverse excursion measured from leg's actual entry price, rounded to 6 decimal places:
+     - Filled UP leg: `excursion = round(entry_price - mid, 6)`
+     - Filled DOWN leg: `excursion = round(mid - (1.0 - entry_price), 6)`
+   - Stop fires when `max_excursion >= exit_thresh` and no reversal is seen (`excursion < exit_reversal`).
+4. **Identical Action on Trigger (OCO):**
+   - Cancel opposite resting buy order.
+   - Sell filled leg at best executable bid (crosses book, pays taker fee in backtest; zero fallback to fabricated prices like 0.40).
+   - If opposite leg fills before stop trigger fires, cancel staged stop and complete pair merge. Exactly one outcome occurs.
+   - If no executable bid is available, hold and re-evaluate on the next tick.
+5. **Full Surface Deletion of `exit_thresh_naked`:**
+   - `backtest/engine.py`: Removed from `BacktestParams`, `param_spec`, `_PARAM_GROUPS`, and `__post_init__`.
+   - `strategy/live_trader.py`: Removed from constructor, `get_state()`, `update_config()`, and internal drift/exit checks.
+   - `server/osc_dash.py`: Removed from `/api/backtest` query params, `/api/live/config` schemas, HTML inputs (`btExitNaked`, `cockpitExitNaked`), and JavaScript bindings.
+   - `research/sweeps/ev_lab.py`: Removed from `ENGINE_ONLY_KNOBS`.
+   - `scripts/replay_shadow_check.py`: Updated assertion.
+6. **Executable Parity Harness (`tests/test_stop_loss_parity.py`):**
+   - Parity 1: Identical stop arming calculation.
+   - Parity 2: UP leg fill adverse drift triggers stop at the identical tick and cancels DOWN order (OCO).
+   - Parity 3: DOWN leg fill adverse drift triggers stop at the identical tick and cancels UP order (OCO).
+   - Parity 4: Reversal detection suppresses stop identically when price retraces.
+   - Parity 5: Second leg fill completes pair and cancels staged stop identically.
+7. **Zero Regressions:**
+   - All targeted test suites (`test_backtest_engine.py`, `test_live_trader.py`, `test_param_registry.py`, `test_osc_dash_integration.py`, `test_stop_orders.py`, etc.) pass cleanly.
 
 ## Out of Scope
 
-- Leg chase escalation ladder (#231): Will use `dead_zone_start_ts` from `book_math`, but the chase ladder implementation itself belongs to #231.
-- Fresh start cleanup (#232): Rule 13 full cleanup belongs to #232.
-- Stop threshold cleanup (#230): Deleting `exit_thresh_naked` belongs to #230.
-- Structural limits separation in UI (#233): Belongs to #233.
+- Leg chase escalation ladder (#231): Chasing unfilled leg with elapsed time belongs to #231.
+- Fresh start cleanup (#232): Multi-round replay without memory belongs to #232.
+- Parity test harness for remaining unmigrated rules (#214): Belongs to #214 after #230, #231, and #232 land.
 
 ## Edge Cases
 
-- `dead_zone_val == 0.0`: Dead zone is disabled (quotes stand until end of window).
-- `remaining_sec <= 0`: Window is expired, dead zone applies.
-- `window_length <= 0`: Invalid clock, Invariant 1 forbids trading.
-- First tick already in dead zone: Window is not entered (`entered = False`), no orders placed.
-- Book has no bid when closing in dead zone: Fallback through `_resolve_exit_bid` ladder; if unpriceable, re-evaluate next tick.
+- No executable bid at trigger: Engine waits for next tick; no fabricated fallback.
+- Exact floating point boundary: 6dp rounding prevents `0.0499999999999` from skipping stop when threshold is `0.05`.
+- Reversal boundary: Excursion re-entering `exit_reversal` latches `reversal_seen` and suppresses stop exit.
