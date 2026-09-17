@@ -300,3 +300,48 @@ def is_in_dead_zone(remaining_sec: float,
         return False
     return remaining_sec <= cutoff + 1e-6
 
+
+# --- chase escalation ladder (issue #231 / engine-decision-rules.md §12) ---
+
+def chase_progress(now: float,
+                   went_naked_at: float,
+                   dead_zone_start: float) -> float:
+    """Fractional progress of the chase escalation between naked-time and dead zone.
+
+    `clamp((now - went_naked_at) / (dead_zone_start - went_naked_at), 0.0, 1.0)`.
+    If dead_zone_start <= went_naked_at, returns 1.0 (already at/past dead zone).
+    If now <= went_naked_at, returns 0.0.
+    """
+    if dead_zone_start <= went_naked_at:
+        return 1.0
+    if now <= went_naked_at:
+        return 0.0
+    progress = (now - went_naked_at) / (dead_zone_start - went_naked_at)
+    return min(1.0, max(0.0, float(progress)))
+
+
+def chase_ceiling(original_resting: float,
+                  max_affordable: float,
+                  progress: float) -> float:
+    """Current ceiling the chase may quote at given progress toward dead zone.
+
+    `ceiling = original_resting + progress * (max_affordable - original_resting)`.
+    Floored to whole cents (2dp) so we never breach max_affordable through rounding.
+    If progress <= 0.0, returns round(original_resting, 2).
+    If progress >= 1.0, returns round(max_affordable, 2).
+    If max_affordable <= original_resting, returns round(original_resting, 2).
+    """
+    orig = _as_price(original_resting)
+    max_aff = _as_price(max_affordable)
+    prog = min(1.0, max(0.0, _as_price(progress) or 0.0))
+    if orig is None or max_aff is None:
+        return 0.0
+    if max_aff <= orig or prog <= 0.0:
+        return round(orig, 2)
+    if prog >= 1.0:
+        return round(max_aff, 2)
+    raw = orig + prog * (max_aff - orig)
+    # + 1e-9 before floor to prevent floating point precision truncations
+    return round(math.floor((raw + 1e-9) * 100.0) / 100.0, 2)
+
+

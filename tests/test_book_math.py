@@ -307,3 +307,55 @@ def test_is_in_dead_zone():
     assert is_in_dead_zone(10.0, 300.0, 0.0, "pct") is False
     assert is_in_dead_zone(0.0, 300.0, 0.0, "pct") is True
 
+
+# --- chase escalation ladder (issue #231) --------------------------------
+
+def test_chase_progress_clamping_and_scaling():
+    from strategy.book_math import chase_progress
+
+    went_naked_at = 100.0
+    dead_zone_start = 200.0
+
+    # At or before went_naked_at -> 0.0
+    assert chase_progress(100.0, went_naked_at, dead_zone_start) == 0.0
+    assert chase_progress(50.0, went_naked_at, dead_zone_start) == 0.0
+
+    # Halfway -> 0.5
+    assert chase_progress(150.0, went_naked_at, dead_zone_start) == pytest.approx(0.5)
+
+    # At or after dead zone start -> 1.0
+    assert chase_progress(200.0, went_naked_at, dead_zone_start) == 1.0
+    assert chase_progress(250.0, went_naked_at, dead_zone_start) == 1.0
+
+    # Degenerate: dead_zone_start <= went_naked_at -> 1.0 immediately
+    assert chase_progress(100.0, 200.0, 150.0) == 1.0
+    assert chase_progress(100.0, 200.0, 200.0) == 1.0
+
+
+def test_chase_ceiling_scaling_and_flooring():
+    from strategy.book_math import chase_ceiling
+
+    original_resting = 0.48
+    max_affordable = 0.54
+
+    # progress == 0.0 -> original_resting
+    assert chase_ceiling(original_resting, max_affordable, 0.0) == 0.48
+    assert chase_ceiling(original_resting, max_affordable, -0.1) == 0.48
+
+    # progress == 1.0 -> max_affordable
+    assert chase_ceiling(original_resting, max_affordable, 1.0) == 0.54
+    assert chase_ceiling(original_resting, max_affordable, 1.5) == 0.54
+
+    # intermediate progress:
+    # 0.48 + 0.5 * (0.54 - 0.48) = 0.48 + 0.03 = 0.51
+    assert chase_ceiling(original_resting, max_affordable, 0.5) == 0.51
+
+    # flooring check:
+    # 0.48 + 0.25 * (0.53 - 0.48) = 0.48 + 0.0125 = 0.4925 -> floors to 0.49
+    assert chase_ceiling(0.48, 0.53, 0.25) == 0.49
+
+    # max_affordable <= original_resting: returns original_resting
+    assert chase_ceiling(0.50, 0.48, 0.5) == 0.50
+    assert chase_ceiling(0.50, 0.50, 0.5) == 0.50
+
+
