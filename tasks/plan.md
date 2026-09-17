@@ -56,11 +56,13 @@ run per dataset, no engine changes. The two code complaints in #208 were already
   - **Done:** comment posted 2026-09-17; verdicts: quote_range (0.10,0.90) does not hold
     (candidate (0.30,0.70), operator decision), dead zone 10% too small (candidate 0.30 pct),
     unit=pct confirmed. Issue left open for the operator's decision on the candidates.
-- [ ] **TASK-5 [QA/Tests]**: Regression gate
+- [x] **TASK-5 [QA/Tests]**: Regression gate
   - Build: no engine changes (CONSTRAINTS §1), so the gate is the touched-file suites:
     `python -m pytest tests/test_sweep_backtest.py tests/test_backtest_engine.py tests/test_book_math.py -q`.
   - Helper skill: `test-driven-development` (as gate only).
-  - Verify: all three suites pass; CI (push) remains the merge gate per AGENTS.md.
+  - **Done:** 197 passed in 0.86s (sweep + engine + book_math). Committed on master
+    (3bd47e9) — per docs/git-workflow.md §1 this issue is a measurement/tooling change made
+    directly on the base branch; CI on push remains the merge gate.
 
 ## Verification Matrix
 | Task | Method |
