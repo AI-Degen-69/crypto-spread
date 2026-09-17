@@ -379,6 +379,74 @@ def test_filter_sensitivity_grid_only_exit_rev():
     assert covered == pytest.approx([0.010, 0.015, 0.020, 0.025, 0.030])
 
 
+def test_sensitivity_grid_dead_zone_axes_structural_opt_in():
+    """Issue #208: the dead-zone 1D axes are structural and opt-in only.
+
+    Two axes are generated under include_structural: dead_zone_pct (fraction
+    of window remaining, default 0.10 held by the Baseline row) and
+    dead_zone_sec (absolute seconds). Both must be absent by default, per
+    ADR-0003, and both must leave every tuning knob at the baseline value.
+    """
+    base = BacktestParams()
+    default_labels = [lbl for lbl, _ in generate_sensitivity_grid(base)]
+    assert not any(lbl.startswith("dead_zone") for lbl in default_labels)
+
+    grid = generate_sensitivity_grid(base, include_structural=True)
+    by_label = dict(grid)
+    pct_rows = {lbl: p for lbl, p in grid if lbl.startswith("dead_zone_pct=")}
+    sec_rows = {lbl: p for lbl, p in grid if lbl.startswith("dead_zone_sec=")}
+    # The baseline value (0.10 pct) is the Baseline row itself, so the pct
+    # axis spans the remaining six points of the declared range.
+    assert sorted(pct_rows) == [
+        "dead_zone_pct=0.000",
+        "dead_zone_pct=0.050",
+        "dead_zone_pct=0.150",
+        "dead_zone_pct=0.200",
+        "dead_zone_pct=0.300",
+    ]
+    assert all(p.dead_zone_unit == "pct" for p in pct_rows.values())
+    assert sorted(p.dead_zone_val for p in pct_rows.values()) == pytest.approx(
+        [0.0, 0.05, 0.15, 0.20, 0.30])
+    assert all(p.dead_zone_unit == "sec" for p in sec_rows.values())
+    assert all(p.dead_zone_val == float(v) for v, p in
+               ((lbl.split("=")[1], p) for lbl, p in sec_rows.items()))
+    # The dead-zone rows must touch nothing else: one knob at a time.
+    for p in list(pct_rows.values()) + list(sec_rows.values()):
+        assert p.offset == base.offset
+        assert p.queue_gate == base.queue_gate
+        assert p.quote_range == base.quote_range
+        assert p.max_pair_cost == base.max_pair_cost
+        assert by_label["Baseline"].offset == base.offset
+
+
+def test_dead_zone_sec_axis_values():
+    """Issue #208: the sec axis covers the 5m and 15m 10% tails plus context."""
+    grid = generate_sensitivity_grid(BacktestParams(), include_structural=True)
+    sec_vals = sorted(float(lbl.split("=")[1]) for lbl, _ in grid
+                      if lbl.startswith("dead_zone_sec="))
+    # 30s is the 10% tail of a 5m window and 90s of a 15m window — the two
+    # readings of the shipped default; the axis must include both plus
+    # neighbors on each side and the disabled point.
+    assert sec_vals == [0.0, 15.0, 30.0, 60.0, 90.0, 120.0]
+
+
+def test_filter_sensitivity_grid_only_dead_zone():
+    """Issue #208: --only dead_zone keeps Baseline + BOTH dead-zone axes.
+
+    This is the accepted improvement from planning: one run per dataset
+    answers the pct-vs-sec question from a single execution environment.
+    """
+    grid = generate_sensitivity_grid(BacktestParams(), include_structural=True)
+    filtered = filter_sensitivity_grid(grid, "dead_zone")
+    labels = [lbl for lbl, _ in filtered]
+    assert labels[0] == "Baseline"
+    assert all(lbl == "Baseline" or lbl.startswith("dead_zone_pct=")
+               or lbl.startswith("dead_zone_sec=") for lbl in labels)
+    assert any(lbl.startswith("dead_zone_pct=") for lbl in labels)
+    assert any(lbl.startswith("dead_zone_sec=") for lbl in labels)
+    assert len(filtered) == 12  # 1 baseline + 5 pct + 6 sec
+
+
 def test_cli_only_rejects_unknown_axis(tmp_path: Path):
     """Issue #110: an unknown --only axis fails fast with exit code 2."""
     dummy_tick_file = tmp_path / "ticks_test.jsonl"

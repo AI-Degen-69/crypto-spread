@@ -219,6 +219,26 @@ def generate_sensitivity_grid(
                 p = replace(base, quote_range=qr)
                 grid.append((f"quote_range={qr[0]:.2f}-{qr[1]:.2f}", p))
 
+    # 8. Dead zone (issue #208) — a STRUCTURAL limit (issue #233, ADR-0003):
+    # only on explicit opt-in. Two separate axes answer the two open questions
+    # from docs/engine-decision-rules.md §8: how wide the untradeable tail
+    # should be (pct axis), and whether the tail should be measured as a
+    # fraction of the window or as absolute seconds (sec axis). The baseline
+    # value (0.10 pct) is covered by the Baseline row itself; 0.0 on either
+    # axis disables the guard and shows the cost of having none.
+    if include_structural:
+        dead_zone_pcts = [0.0, 0.05, 0.15, 0.20, 0.30]
+        for dv in dead_zone_pcts:
+            if dv != base.dead_zone_val or base.dead_zone_unit != "pct":
+                p = replace(base, dead_zone_val=dv, dead_zone_unit="pct")
+                grid.append((f"dead_zone_pct={dv:.3f}", p))
+        # 30s is the 10% tail of a 5m window and 90s of a 15m window — the
+        # two readings of the shipped default; 0.0 disables the guard.
+        dead_zone_secs = [0.0, 15.0, 30.0, 60.0, 90.0, 120.0]
+        for dv in dead_zone_secs:
+            p = replace(base, dead_zone_val=dv, dead_zone_unit="sec")
+            grid.append((f"dead_zone_sec={dv:.0f}", p))
+
     return grid
 
 
@@ -226,7 +246,7 @@ def generate_sensitivity_grid(
 #: "Baseline" row plus rows whose label starts with one of these prefixes.
 SENSITIVITY_AXES = (
     "offset", "queue", "exit_5m", "exit_rev", "pair_cost",
-    "quote_range",
+    "quote_range", "dead_zone_pct", "dead_zone_sec",
 )
 
 
@@ -238,7 +258,16 @@ def filter_sensitivity_grid(
 
     The value equal to the baseline is covered by the "Baseline" row itself
     (each axis loop skips it), so the filtered grid still spans the full axis.
+
+    Issue #208: the compound axis "dead_zone" keeps the Baseline row plus
+    BOTH dead-zone axes (pct and sec) in one run, so the pct-vs-sec question
+    is answered from a single execution environment per dataset.
     """
+    if only == "dead_zone":
+        return [row for row in grid
+                if row[0] == "Baseline"
+                or row[0].startswith("dead_zone_pct=")
+                or row[0].startswith("dead_zone_sec=")]
     prefix = only + "="
     return [row for row in grid if row[0] == "Baseline" or row[0].startswith(prefix)]
 
@@ -440,11 +469,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="ticks directory or .jsonl[.gz] file")
     ap.add_argument("--preset", choices=["sensitivity", "grid", "assets", "random"], default="sensitivity",
                     help="Sweep preset: sensitivity (1D), grid (joint), assets (universe), random (stochastic)")
-    ap.add_argument("--only", choices=list(SENSITIVITY_AXES), default=None,
+    ap.add_argument("--only", choices=list(SENSITIVITY_AXES) + ["dead_zone"], default=None,
                     help="Sensitivity preset only: run Baseline plus a single 1D axis "
                          "(e.g. --only exit_rev for the issue #110 mercy-distance sweep). "
                          "A structural axis (--only pair_cost / --only quote_range) is "
-                         "explicit opt-in on its own.")
+                         "explicit opt-in on its own; --only dead_zone keeps BOTH "
+                         "dead-zone axes (pct and sec) in one run (issue #208).")
     ap.add_argument("--include-structural", action="store_true",
                     help="Issue #233: also sweep structural limits (max_pair_cost, "
                          "quote_range). Default presets sweep tuning knobs only.")
@@ -472,7 +502,8 @@ def main(argv: list[str] | None = None) -> int:
         max_delay = 5.0
     # Issue #233: naming a structural axis with --only IS explicit intent,
     # so it implies --include-structural for the sensitivity grid.
-    include_structural = args.include_structural or args.only in ("pair_cost", "quote_range")
+    include_structural = args.include_structural or args.only in (
+        "pair_cost", "quote_range", "dead_zone_pct", "dead_zone_sec", "dead_zone")
 
     whitelist = set(s.strip() for s in args.series.split(",") if s.strip()) if args.series else None
 

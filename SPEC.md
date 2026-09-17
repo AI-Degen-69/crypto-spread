@@ -1,33 +1,61 @@
-# SPEC — Issue #205: Verify the fill-rate gap against the unified fill rule
+# SPEC — Issue #208: entry-gate defaults measurement (quote_range + dead zone)
+
+## Context
+Issue #208's two code complaints were resolved before this plan opened:
+- The `adverse_open` gate (which borrowed `exit_thresh`) and `entry_band` were **deleted** and
+  replaced by `quote_range=(0.10, 0.90)` — issue #228, PR #241, `docs/engine-decision-rules.md` §6.
+- The end-of-window guard now exists as the **dead zone** (`dead_zone_val=0.10`, unit `pct|sec`),
+  "open nothing, close what is open" — issue #229, PR #242, rules §8. `naked_leg_timeout_pct`
+  was deleted in its favor, which is the reconciliation the issue demanded.
+The blocker it cited (#204: backtest gate rejecting every window) is closed.
+
+What remains is the issue's own last requirement: **"Sweep the proposed thresholds against
+real tick data before changing any default."** The new defaults shipped unmeasured, and §6/§8
+both explicitly defer to data (§8: "Which unit is actually right is an open question,
+deliberately. … the switch exists so it can be measured").
 
 ## Goal
-Re-run the exact measurement issue #205 reported (gates off, 550 windows of
-`run/ticks/ticks_2026-09-13.jsonl`) under the current engine — which since issue #226 /
-ADR-0002 has one fill rule (`book_math.resting_bid_filled`: print at our price OR best ask
-fully through) and no `fill_model` knob — and publish whether the 16x tape-vs-cross gap is
-closed.
+Produce measured evidence for or against the shipped defaults, via the existing sweep engine,
+and publish a verdict per knob on #208.
+
+## Questions the sweep must answer
+1. **quote_range width:** does (0.10, 0.90) beat tighter (0.15-0.85 … 0.30-0.70) and looser
+   (0.05-0.95, 0.00-1.00) bounds on net P&L, win rate, and drawdown across the available
+   datasets? (Axis already exists in `generate_sensitivity_grid` under `--include-structural`.)
+2. **dead zone size (pct):** is 10% the right tail? Sweep 0 / 0.05 / 0.10 / 0.15 / 0.20 /
+   0.30 with unit=pct and compare.
+3. **dead zone unit:** with the *same absolute seconds* as 10% of a 5m window (30s) and of a
+   15m window (90s), does unit=sec beat unit=pct across both window lengths? This is §8's
+   open question and needs the new axis (sec unit is currently absent from the sweep grids).
 
 ## Acceptance Criteria
-1. A deterministic, repeatable replay produces fill counts comparable to the issue's table
-   (any-leg / up / down / both / pairs) for the unified rule on the same dataset.
-2. The run's gate mapping is documented (dead-zone entry rule standing in for the retired
-   `max_start_elapsed_pct`; entry delay, band, pair-cost gate, queue gate all off).
-3. A gh comment on #205 shows: comparison table (old tape 20/550, old cross 314/550, new
-   unified number), one-sentence verdict, links to ADR-0002 and `docs/engine-decision-rules.md` §3.
-4. The verdict uses a pre-registered expectation band (see tasks/plan.md TASK-2); a result
-   outside the band is reported as "needs re-plan", never spun as a pass.
-5. Zero modifications to `backtest/engine.py`, `strategy/book_math.py`, `strategy/live_trader.py`.
-6. Targeted suites `tests/test_backtest_engine.py` + `tests/test_book_math.py` pass.
+1. Sensitivity sweeps run against every file present in `run/ticks/`, results labeled per
+   dataset; baseline row included per run.
+2. Dead-zone axes (`dead_zone_val` with unit=pct, and unit=sec) exist as 1D sensitivity rows
+   gated behind `--include-structural`, plus a `--only dead_zone` filter path, mirroring the
+   existing `quote_range` axis; `tests/test_sweep_backtest.py` covers the new rows.
+3. A verdict table is produced per knob: for each variant — n_windows, pair_rate, win_rate,
+   total/avg P&L, max drawdown, profit factor — computed by `run_sweep`/`compute_metrics`
+   (no new metrics code).
+4. A gh comment on #208 presents the tables, one-sentence verdicts, and dataset labels, and
+   links `docs/engine-decision-rules.md` §6 and §8. Recommendation, not silent change: any
+   proposed default adjustment is flagged for operator decision.
+5. Zero modifications to `backtest/engine.py`, `strategy/live_trader.py`, `strategy/book_math.py`.
+6. Targeted suites `tests/test_sweep_backtest.py`, `tests/test_backtest_engine.py`,
+   `tests/test_book_math.py` pass.
 
 ## Edge Cases
-- The 2026-09-13 file may have thin tape coverage that day — cross-check `run/ticks/manifest.json`
-  tape stats before interpreting; if tape is near-empty the unified rule degenerates toward
-  the book detector and that must be stated in the comment.
-- Windows missing from the file vs the issue's 550 count — state the actual denominator used.
-- Dataset drift: `run/` is gitignored and regenerable; if the file no longer exists, fall back
-  to the newest available date and label every number with its dataset.
+- Datasets with few windows (collector started late / gaps): state the per-dataset window
+  count next to every number; never pool datasets without labeling the pool.
+- `dead_zone_val=0.0` disables the guard — a valid sweep point showing the cost of no guard,
+  but never a recommended default without evidence.
+- Sec-unit rows on mixed 5m/15m datasets must be read per window length, not pooled, or the
+  comparison is meaningless — the report must split them.
+- If a dataset fails `scripts/verify_tick_data.py` checks, exclude it and say so.
 
 ## Out of Scope
-- Any change to fill behavior, entry gates, or the collector.
-- Reopening the `fill_model` knob (ADR-0002 is accepted; not relitigated here).
-- Fixing #204 (entry-gate blocking) — separate issue, referenced only.
+- Any change to engine decision logic, BacktestParams fields, or shipped defaults.
+- Re-litigating the deletion of `adverse_open`/`entry_band`/`naked_leg_timeout_pct` (#228/#229).
+- #210 (leg chase condition), #212 (re-entry paths), #221/#222/#223 (their own measurement
+  questions) — referenced only.
+- Live (real money) execution changes of any kind.
