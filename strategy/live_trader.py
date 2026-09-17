@@ -4715,54 +4715,54 @@ class LiveTraderEngine:
                                         self._record_fill_telemetry(
                                             mstate, "UP", mstate.fill_price_up, self.shares, now)
 
-            # --- PAIR COMPLETION & MERGE ---
-            if mstate.filled_up and mstate.filled_down:
-                mstate.chased_leg = None
-                # OCO Case A: cancel the stop-loss before the merge — a hedged
-                # pair must never keep protection working against one leg (issue #87).
-                # If a venue-side cancellation fails, block the merge and retry next tick.
-                if not self._cancel_stop_order(mstate, reason="pair completed"):
-                    mstate.last_action = "Pair merge deferred: stop-loss cancellation failed"
-                    log.warning(
-                        "[%s] Pair merge deferred until stop-loss cancellation succeeds",
-                        slug,
-                    )
-                    return
-                denom = max(0.01, ((mstate.fill_price_up if mstate.fill_price_up is not None else resting_up) + (mstate.fill_price_down if mstate.fill_price_down is not None else resting_down)) * max(1, self.shares))
-                # Atomic claim vs WS path (_complete_ws_pair): everything under one lock
-                with self._engine_lock:
-                    if mstate.pair_captured:
-                        return
-                    mstate.pair_captured = True
-                    mstate.status = "PAIR_MERGED"
-                    mstate.naked_since_ts = None
-                    fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
-                    fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
-                    pair_profit_usd = (1.00 - (fill_up + fill_dn)) * self.shares
-                    mstate.realized_pnl_usd += pair_profit_usd
-                    mstate.unrealized_pnl_usd = 0.0
-                    mstate.total_pnl_usd = mstate.realized_pnl_usd
-                    mstate.pairs_count += 1
-                    mstate.trades_count += 1
-                    mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
-                    log.info("[%s] PAIR MERGED! Profit: +$%.2f (entry=%.3f+%.3f)", slug, pair_profit_usd, fill_up, fill_dn)
-                    self.trades.append(TradeEvent(
-                        id=f"{slug}_{int(now)}",
-                        timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
-                        slug=slug,
-                        label=mstate.label,
-                        action="PAIR_MERGE",
-                        shares=self.shares,
-                        entry_price_up=fill_up,
-                        entry_price_down=fill_dn,
-                        exit_price=1.00,
-                        pnl_usd=round(pair_profit_usd, 3),
-                        pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
-                        notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
-                        market_slug=mstate.market_slug or "",
-                    ))
-                    self._save_persisted_trades()
+        # --- PAIR COMPLETION & MERGE ---
+        if mstate.filled_up and mstate.filled_down:
+            mstate.chased_leg = None
+            # OCO Case A: cancel the stop-loss before the merge — a hedged
+            # pair must never keep protection working against one leg (issue #87).
+            # If a venue-side cancellation fails, block the merge and retry next tick.
+            if not self._cancel_stop_order(mstate, reason="pair completed"):
+                mstate.last_action = "Pair merge deferred: stop-loss cancellation failed"
+                log.warning(
+                    "[%s] Pair merge deferred until stop-loss cancellation succeeds",
+                    slug,
+                )
                 return
+            denom = max(0.01, ((mstate.fill_price_up if mstate.fill_price_up is not None else resting_up) + (mstate.fill_price_down if mstate.fill_price_down is not None else resting_down)) * max(1, self.shares))
+            # Atomic claim vs WS path (_complete_ws_pair): everything under one lock
+            with self._engine_lock:
+                if mstate.pair_captured:
+                    return
+                mstate.pair_captured = True
+                mstate.status = "PAIR_MERGED"
+                mstate.naked_since_ts = None
+                fill_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                fill_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                pair_profit_usd = (1.00 - (fill_up + fill_dn)) * self.shares
+                mstate.realized_pnl_usd += pair_profit_usd
+                mstate.unrealized_pnl_usd = 0.0
+                mstate.total_pnl_usd = mstate.realized_pnl_usd
+                mstate.pairs_count += 1
+                mstate.trades_count += 1
+                mstate.last_action = f"Pair Merged! +${pair_profit_usd:.2f}"
+                log.info("[%s] PAIR MERGED! Profit: +$%.2f (entry=%.3f+%.3f)", slug, pair_profit_usd, fill_up, fill_dn)
+                self.trades.append(TradeEvent(
+                    id=f"{slug}_{int(now)}",
+                    timestamp=datetime.datetime.fromtimestamp(now).strftime("%H:%M:%S"),
+                    slug=slug,
+                    label=mstate.label,
+                    action="PAIR_MERGE",
+                    shares=self.shares,
+                    entry_price_up=fill_up,
+                    entry_price_down=fill_dn,
+                    exit_price=1.00,
+                    pnl_usd=round(pair_profit_usd, 3),
+                    pnl_pct=round(((pair_profit_usd) / denom) * 100.0, 1),
+                    notes=f"Complete spread capture @ {fill_up:.2f} + {fill_dn:.2f}",
+                    market_slug=mstate.market_slug or "",
+                ))
+                self._save_persisted_trades()
+            return
 
         # --- RECONCILE STAGED STOP-LOSS (issue #87) ---
         if mstate.stop_order_id and not mstate.exit_taken:
