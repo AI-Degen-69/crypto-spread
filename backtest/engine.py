@@ -336,6 +336,11 @@ class BacktestParams:
 
     @classmethod
     def _names_in_class(cls, klass: str) -> set[str]:
+        """Field names whose registry entry declares `param_class` == `klass`.
+
+        Raises rather than silently skipping a malformed entry: a tuple missing
+        `param_class` is a defect to surface, not one to hide (#233).
+        """
         out: set[str] = set()
         for entries in cls._PARAM_GROUPS.values():
             for entry in entries:
