@@ -290,6 +290,32 @@ def test_cli_only_pair_cost_is_explicit_structural_opt_in(tmp_path: Path):
     assert len(data["runs"]) == 5
 
 
+def test_cli_only_dead_zone_is_explicit_structural_opt_in(tmp_path: Path):
+    """Issue #208: --only dead_zone sweeps BOTH dead-zone axes structurally."""
+    dummy_tick_file = tmp_path / "ticks_test.jsonl"
+    snap = {
+        "cid": "0x1", "series": "btc-up-or-down-5m", "slug": "btc-up-or-down-5m",
+        "duration": 300, "ts": 100.0, "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    dummy_tick_file.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+    out_json = tmp_path / "sweep_dz.json"
+    code = main([str(dummy_tick_file), "--preset", "sensitivity",
+                 "--only", "dead_zone", "--out", str(out_json)])
+    assert code == 0
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    assert data["only"] == "dead_zone"
+    labels = [r["param_label"] for r in data["runs"]]
+    assert labels[0] == "Baseline"
+    assert all(l == "Baseline" or l.startswith(("dead_zone_pct=", "dead_zone_sec="))
+               for l in labels)
+    # 1 baseline + 5 pct + 6 sec; the structural opt-in must have been
+    # implied, or the dead-zone rows would be missing entirely.
+    assert len(data["runs"]) == 12
+    assert any(l.startswith("dead_zone_sec=") for l in labels)
+
+
 def test_format_markdown_table():
     """Verify markdown table formatting with proper headers and rank."""
     p = BacktestParams()
