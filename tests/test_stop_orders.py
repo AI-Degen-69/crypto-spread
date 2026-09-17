@@ -473,10 +473,10 @@ def test_stop_fill_triggers_stop_exit_paper():
 
 def test_stop_fill_triggers_stop_exit_down_paper():
     """OCO Case B (paper for DOWN): DOWN fills at 0.48, stop staged at 0.45
-    (naked threshold, issue #124); down_bid of 0.47 does NOT trigger stop,
+    (stop threshold, issue #230); down_bid of 0.47 does NOT trigger stop,
     but dropping to <= 0.45 triggers stop exit and cancels resting UP entry."""
     engine = LiveTraderEngine()
-    engine.exit_thresh_naked = 0.03
+    engine.update_config(exit_thresh=0.03)
     engine.enable_leg_chase = False
     engine.is_running = True
     now = time.time()

@@ -34,7 +34,7 @@ Branch `feat/one-stop-threshold-230` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_backtest_engine.py -q`.
 
-### [ ] T2 — `[Backend/Logic]` Live engine: delete `exit_thresh_naked` and unify on `self.exit_thresh`
+### [x] T2 — `[Backend/Logic]` Live engine: delete `exit_thresh_naked` and unify on `self.exit_thresh`
 **Files**: `strategy/live_trader.py`.
 **Do**:
 - Remove `self.exit_thresh_naked` and helper `_naked_exit_thresh()`.
@@ -46,7 +46,7 @@ Branch `feat/one-stop-threshold-230` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_live_trader.py -q`.
 
-### [ ] T3 — `[Test/Parity]` Stop Loss parity test suite
+### [x] T3 — `[Test/Parity]` Stop Loss parity test suite
 **Files**: `tests/test_stop_loss_parity.py`.
 **Do**:
 - Implement parity test suite driving both engines through identical snapshots:
@@ -58,7 +58,7 @@ Branch `feat/one-stop-threshold-230` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_stop_loss_parity.py -q`.
 
-### [ ] T4 — `[API/Dashboard]` Remove `exit_thresh_naked` from dashboard API, schemas, and UI
+### [x] T4 — `[API/Dashboard]` Remove `exit_thresh_naked` from dashboard API, schemas, and UI
 **Files**: `server/osc_dash.py`.
 **Do**:
 - Remove `exit_thresh_naked` query parameter from `/api/backtest`.
@@ -68,7 +68,7 @@ Branch `feat/one-stop-threshold-230` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skills**: `frontend-ui-engineering`, `api-and-interface-design`.
 **Verify**: `python -m pytest tests/test_osc_dash_integration.py -q`.
 
-### [ ] T5 — `[Tests/Refactor]` Retarget existing test suites, sweeps, and scripts
+### [x] T5 — `[Tests/Refactor]` Retarget existing test suites, sweeps, and scripts
 **Files**:
 - `tests/test_param_registry.py`
 - `tests/test_backtest_engine.py`

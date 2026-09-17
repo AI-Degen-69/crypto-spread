@@ -86,7 +86,7 @@ def test_every_field_declares_a_valid_param_class():
 def test_param_class_assignments_match_the_spec():
     """The agreed classification (`docs/engine-decision-rules.md` §Parameter classes)."""
     tuning = {"offset", "queue_gate", "quote_shares", "entry_delay_sec",
-              "exit_thresh_by_slug", "exit_thresh_naked", "exit_reversal",
+              "exit_thresh_by_slug", "exit_reversal",
               "enable_leg_chase"}
     structural = {"max_pair_cost", "quote_range", "dead_zone_val",
                   "dead_zone_unit", "naked_leg_at_expiry"}
@@ -205,7 +205,6 @@ def test_the_registry_does_not_claim_post_init_enforces_every_bound():
 @pytest.mark.parametrize("name,low,high", [
     ("entry_delay_sec", 0.0, 3600.0),
     ("max_pair_cost", 0.50, 1.00),
-    ("exit_thresh_naked", 0.0, 0.50),
 ])
 def test_registered_bounds_match_post_init_validation(name, low, high):
     """The UI must refuse exactly what the engine refuses, not a wider range."""

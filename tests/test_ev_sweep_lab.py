@@ -475,7 +475,6 @@ def test_build_cache_rejects_a_tick_file_that_is_not_per_cid_ascending(tmp_path)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("kwargs", [
-    {"exit_thresh_naked": 0.03},
     {"enable_leg_chase": True},
     {"dead_zone_val": 0.20},
     {"dead_zone_unit": "sec"},

@@ -1540,39 +1540,18 @@ def test_api_live_config_exit_reversal():
         engine.is_running = orig_running
 
 
-def test_api_live_config_naked_leg_stop_stays_settable():
-    """Issue #229: exit_thresh_naked survives (its deletion is #230's scope),
+def test_api_live_config_exit_thresh_naked_deleted():
+    """Issue #230: exit_thresh_naked is deleted across both engines and API.
 
-    but the timeout beside it is gone — posting `naked_leg_timeout_pct` is a
-    422 at the payload model, and the field no longer appears in state params.
+    Posting `exit_thresh_naked` is not accepted as an active param, and the
+    field no longer appears in state params.
     """
     engine = osc_dash.get_live_trader_engine()
-    orig_running = engine.is_running
-    engine.is_running = False
-    orig_naked = engine.exit_thresh_naked
-    orig_mode = engine.mode
-    engine.mode = "paper"
-    try:
-        res = client.post("/api/live/config", json={"exit_thresh_naked": 0.04})
-        assert res.status_code == 200
-        assert abs(res.json()["params"]["exit_thresh_naked"] - 0.04) < 1e-9
-
-        # Cents normalization: 3 -> 0.03.
-        res_norm = client.post("/api/live/config", json={"exit_thresh_naked": 3})
-        assert res_norm.status_code == 200
-        assert abs(res_norm.json()["params"]["exit_thresh_naked"] - 0.03) < 1e-9
-
-        # Out of range rejected by the payload model.
-        assert client.post("/api/live/config", json={"exit_thresh_naked": 0.9}).status_code == 422
-
-        # The timeout this issue deleted must not be silently ignored
-        # (pydantic's extra="ignore" would turn the post into a no-op).
-        state = client.get("/api/live/state").json()
-        assert "naked_leg_timeout_pct" not in state["params"]
-    finally:
-        engine.update_config(exit_thresh_naked=orig_naked)
-        engine.mode = orig_mode
-        engine.is_running = orig_running
+    assert not hasattr(engine, "exit_thresh_naked")
+    state = client.get("/api/live/state").json()
+    assert "exit_thresh_naked" not in state["params"]
+    from server.osc_dash import LiveConfigPayload
+    assert "exit_thresh_naked" not in LiveConfigPayload.model_fields
 
 
 def test_api_live_config_quote_range():
@@ -2391,18 +2370,18 @@ def test_js_helper_badges_structural_inputs_via_the_registry():
 def test_backtest_sends_the_new_knobs():
     html = client.get("/").text
     for q in ("exit_reversal=", "dead_zone_val=", "dead_zone_unit=",
-              "naked_leg_at_expiry=", "exit_thresh_naked=",
+              "naked_leg_at_expiry=",
               "enable_leg_chase=", "quote_lo=", "quote_hi="):
         assert q in html, f"the Backtest run URL never sends {q}"
     for stale in ("entry_timeout_pct=", "naked_leg_timeout_pct=",
-                  "stop_loss_enabled=", "max_start_elapsed_pct="):
+                  "stop_loss_enabled=", "max_start_elapsed_pct=",
+                  "exit_thresh_naked="):
         assert stale not in html, f"the Backtest run URL still sends deleted knob {stale}"
 
 
 @pytest.mark.parametrize("field,over,clamped", [
     ("entry_delay_sec", 999999.0, 3600.0),
     ("dead_zone_val", 9999.0, 3600.0),
-    ("exit_thresh_naked", 9.0, 0.50),
 ])
 def test_backtest_api_clamps_to_the_registry_bounds(field, over, clamped, tmp_path,
                                                     monkeypatch):
@@ -2475,7 +2454,6 @@ REGISTRY_TO_PAYLOAD = {
     "quote_shares": "shares",
     "max_pair_cost": "max_pair_cost",
     "exit_reversal": "exit_reversal",
-    "exit_thresh_naked": "exit_thresh_naked",
     "dead_zone_val": "dead_zone_val",
     "entry_delay_sec": "entry_delay_sec",
     "quote_range": "quote_range",
@@ -2572,19 +2550,20 @@ def test_every_declared_payload_knob_reaches_the_engine():
     forwarded = set(re.findall(r"(\w+)=payload\.\w+", src))
     accepted = set(inspect.signature(lt.LiveTraderEngine.update_config).parameters)
     for name in ("offset", "entry_delay_sec", "quote_range",
-                 "exit_thresh_naked", "dead_zone_val", "dead_zone_unit",
+                 "dead_zone_val", "dead_zone_unit",
                  "naked_leg_at_expiry"):
         assert name in LiveConfigPayload.model_fields, f"{name} not declared"
         assert name in accepted, f"update_config does not accept {name}"
         assert name in forwarded, (
             f"{name} is declared on the payload but never passed to "
             "update_config — the request succeeds and changes nothing")
-    # Issues #228/#229: the retired gates must not be declared anymore —
+    # Issues #228/#229/#230: the retired gates must not be declared anymore —
     # pydantic's `extra="ignore"` would turn a Cockpit post into a silent no-op.
     for name in ("entry_band", "reentry_drift_band",
                  "min_requote_remaining_sec", "reentry_min_remaining_pct",
                  "max_reentries_per_window", "reentry_require_pairable",
-                 "entry_timeout_pct", "naked_leg_timeout_pct", "stop_loss_enabled"):
+                 "entry_timeout_pct", "naked_leg_timeout_pct", "stop_loss_enabled",
+                 "exit_thresh_naked"):
         assert name not in LiveConfigPayload.model_fields, (
             f"{name} is still declared after its mechanism was deleted")
 

@@ -290,7 +290,7 @@ def _taker_fee(p: float, rate: float) -> float:
 #: Issue #229: the engine drops dead-zone-blocked windows via `book_math
 #: .is_in_dead_zone` on `dead_zone_val`/`dead_zone_unit`, and exits an
 #: unpaired leg per `naked_leg_at_expiry` — neither simulator here does.
-ENGINE_ONLY_KNOBS = ("exit_thresh_naked", "enable_leg_chase",
+ENGINE_ONLY_KNOBS = ("enable_leg_chase",
                      "dead_zone_val", "dead_zone_unit", "naked_leg_at_expiry")
 
 #: Fields `engine._simulate_window` honours that `fast_simulate` does not.
