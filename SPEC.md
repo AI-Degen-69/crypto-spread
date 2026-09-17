@@ -1,78 +1,70 @@
-# SPEC — Issue #214: Engine Parity Test Harness
+# SPEC — Issue #197: Interactive Column Header Sorting (ASC / DESC) Across All Cockpit Tabs
 
-Binding while `feat/parity-harness-214` is live. Per-issue working file (`docs/git-workflow.md` §5)
-— not an architecture document.
+## Overview
+Operators managing high-frequency 5m/15m crypto spread positions require the ability to interactively sort tables in the Live Cockpit (`#orders-trades-card`):
+- Tab 1: Open Orders (`#cockpitOrdersTable`)
+- Tab 2: Positions (`#cockpitPositionsTable`)
+- Tab 3: Closed Trades (`#cockpitTradesTable`)
 
-## 1. Goal
+Sorting must be interactive, visual, type-aware, group-aware (retaining paired rows together), and persist seamlessly across 1-second live data updates.
 
-Provide an automated, executable, high-fidelity parity test harness that enforces behavioral identity
-between the live execution path (`strategy/live_trader.py:LiveTraderEngine` in `mode="paper"`)
-and the offline backtest engine (`backtest/engine.py:_simulate_window`).
+---
 
-Whenever an identical tick stream and parameter set is fed to both engines, both must make identical
-quoting, filling, chasing, stop-loss, and fresh-start decisions.
+## 1. Table Columns & Sort Keys
 
-## 2. Parity Contract & Comparable Surface
+### Tab 1: Open Orders (`#cockpitOrdersTable`)
+| Column | Sortable | Sort Data Type | Comparator Logic |
+|---|---|---|---|
+| Time | Yes | Chronological / Timestamp | `legs[0].time` (or group timestamp) |
+| Market | Yes | Alphabetical | `grp.market` string compare |
+| Side | Yes | Alphabetical / Priority | `legs[0].side` (e.g. Up vs Down) |
+| Price | Yes | Numeric ($) | `legs[0].priceNum` (or pair cost) |
+| Size | Yes | Numeric | `legs[0].sizeNum` |
+| Filled | Yes | Numeric | `legs[0].filledNum` |
+| Total Cost | Yes | Numeric ($) | Total cost of leg / group |
+| Status | Yes | Alphabetical | `grp.status` ('Paired', 'Partial', 'Unpaired', 'Cancelled') |
+| Action | **No** | N/A | Excluded from sorting |
 
-Both engines process the same ticks. Parity is asserted on the decision-visible state surface:
+### Tab 2: Positions (`#cockpitPositionsTable`)
+| Column | Sortable | Sort Data Type | Comparator Logic |
+|---|---|---|---|
+| Time | Yes | Chronological / Timestamp | `legs[0].time` (or group timestamp) |
+| Market | Yes | Alphabetical | `grp.market` string compare |
+| Side | Yes | Alphabetical | `legs[0].side` |
+| Size | Yes | Numeric | Total size or `legs[0].sizeNum` |
+| Base Cost | Yes | Numeric ($) | `legs[0].baseCost` |
+| Market Value | Yes | Numeric ($) | `grp.market_val` |
+| Unrealized $ (%) | Yes | Numeric ($/%) | `grp.unrealized_usd` |
+| Realized $ (%) | Yes | Numeric ($/%) | `grp.realized_usd` |
 
-| Key | Description |
-|---|---|
-| `entered` | Whether initial quotes were rested |
-| `filled_up` | Whether the UP leg filled |
-| `filled_down` | Whether the DOWN leg filled |
-| `entry_price_up` | UP leg entry/fill price |
-| `entry_price_down` | DOWN leg entry/fill price |
-| `pair_captured` | Whether at least one pair was completed |
-| `exit_taken` | Whether a stop-loss or dead-zone exit fired |
-| `exit_side` | Which leg exited ("up", "down", or "") |
-| `chased_leg` | Which leg was chased, if any ("up", "down", or "") |
-| `pairs_count` | Number of completed pair merges across the window |
-| `stops_count` | Number of stop-loss exits across the window |
+### Tab 3: Closed Trades (`#cockpitTradesTable`)
+| Column | Sortable | Sort Data Type | Comparator Logic |
+|---|---|---|---|
+| Time | Yes | Chronological / Timestamp | `t.timestamp` |
+| Market | Yes | Alphabetical | `t.label || t.market` |
+| Cause | Yes | Alphabetical | `t.action` ('PAIR_MERGE', 'STOP', etc.) |
+| Shares | Yes | Numeric | `t.shares` |
+| Base Cost | Yes | Numeric ($) | Numeric entry price calculation |
+| Exit Price | Yes | Numeric ($) | `t.exit_price` |
+| Gain / Loss $ (%) | Yes | Numeric ($/%) | `t.pnl_usd` |
+| Details | Yes | Alphabetical | `t.details` / outcome |
 
-Explicitly **not** compared (out of scope):
-- `pnl_cents` vs `realized_pnl_usd` (different unit bases / share sizes).
-- `fees_cents` (accounting detail).
-- `settlement_mid`, `settle_source`, `class_label` (offline classification).
+---
 
-## 3. Harness Architecture (`tests/test_engine_parity.py`)
+## 2. Behavioral Specifications
 
-1. **`snaps_to_polls(snaps: list[dict]) -> list[tuple[float, dict]]`**:
-   - Converts backtest tick/snap dicts into `(now, poll_data)` tuples compatible with `LiveTraderEngine._update_market_strategy`.
-   - Constructs a synthetic `LiveMarket` with correct tokens, duration, and timestamps.
-2. **`live_outcome(snaps: list[dict], params: BacktestParams) -> dict`**:
-   - Spawns `LiveTraderEngine(load_persisted=False)` in `mode="paper"`.
-   - Injects mock bridges to prevent network / wallet calls.
-   - Applies `params` to engine configuration (offset, dead_zone_val, exit_thresh, enable_leg_chase, max_pair_cost, etc.).
-   - Feeds each poll tick at its exact `now` timestamp.
-   - Extracts the comparable surface from `mstate`.
-3. **`backtest_outcome(snaps: list[dict], params: BacktestParams) -> dict`**:
-   - Executes pure `_simulate_window(snaps, params)`.
-   - Extracts the identical comparable surface from `WindowResult`.
-4. **`assert_parity(snaps: list[dict], params: BacktestParams) -> None`**:
-   - Runs both engines.
-   - Compares the outcome dicts key by key.
-   - On mismatch, raises `AssertionError` with a structured, crystal-clear diff showing the differing field, both values, and context.
+1. **Header Interaction**:
+   - Clicking an unsorted column sets sort to `asc` (or `desc` for metrics like P&L/Time where descending is the natural inspection order).
+   - Clicking an already-sorted column toggles direction: `asc` ↔ `desc`.
+   - Optional 3rd click: resets to natural/default order (`none`).
+   - Active column header displays a distinct visual indicator (`▲` for ASC, `▼` for DESC).
+   - Sets accessible attribute `aria-sort="ascending"` or `aria-sort="descending"`. Inactive headers have `aria-sort="none"`.
 
-## 4. Seed Scenarios
+2. **Group-Aware Sorting**:
+   - Paired orders and positions are displayed as multi-row groupings with merged cells (`rowspan`).
+   - The sorting engine sorts the group entities (`groupedOrders` keys / `groupedPos` keys) using group properties or lead-leg metrics before rendering the HTML table.
+   - Rows within a pair remain intact and structurally ordered (e.g. UP before DOWN).
 
-1. **Balanced Open to Merge**: Both legs fill and pair merges.
-2. **Real Mid Anchor**: Opening quotes anchored to mid, not hardcoded 0.50 (#206).
-3. **Pair-Cost Cap**: `max_pair_cost` caps chase without blocking quoting (#204).
-4. **Unpriceable Leg**: Window skipped when book has no two-sided mid (#207).
-5. **Stop-Loss Anchored to Entry**: Stop triggers based on drift from fill price (#209 / #230).
-6. **Multi-Round Fresh Start**: Clean market re-enters and captures subsequent pairs outside dead zone (#232).
-
-## 5. Acceptance Criteria
-
-- [ ] `tests/test_engine_parity.py` implements `snaps_to_polls`, `live_outcome`, `backtest_outcome`, `assert_parity`.
-- [ ] All seed scenarios pass cleanly with exact parity.
-- [ ] Mismatch failure formatting is tested and confirmed human-readable.
-- [ ] Test execution time for the entire parity module is under 5.0 seconds.
-- [ ] `AGENTS.md` is updated to record `test_engine_parity.py` as the canonical gate.
-- [ ] Zero regressions across existing targeted test suites.
-
-## 6. Out of Scope
-
-- Modifying existing strategy decision rules (all covered in #224–#233).
-- Extracting shared live/backtest monolithic code into a separate library (deferred).
+3. **Live Refresh Persistence**:
+   - Sort state is maintained in memory (`otSortState[tab] = { col: key, dir: 'asc'|'desc' }`) and saved to `localStorage` (e.g. `crypto-spread-ot-sort`).
+   - Whenever new cockpit data arrives via SSE or polling, `renderCockpitUI(st)` applies the active sort parameters before injecting HTML into the DOM.

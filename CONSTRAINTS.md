@@ -1,32 +1,22 @@
-# CONSTRAINTS — Issue #214
+# CONSTRAINTS — Issue #197: Interactive Column Header Sorting
 
-Binding while `feat/parity-harness-214` is live. Per-issue working file
-(`docs/git-workflow.md` §5); it stops binding the moment the issue merges.
+## Quality Guardrails
+1. **Zero Regressions**:
+   - All 33 existing tests in `tests/test_orders_trades_table.py` must continue to pass without modification or regression.
+   - All existing dashboard pages and endpoints (`/`, `/api/live/*`) must remain fully functional.
 
-## Zero Regressions
+2. **Vanilla JS Only (No New Dependencies)**:
+   - All sorting, DOM manipulation, and indicator styling must be pure vanilla JavaScript and CSS embedded in `server/osc_dash.py`. No external sorting libraries (e.g., DataTables, Lodash).
 
-- Targeted gates, run before each commit — never the full suite locally
-  (`AGENTS.md` §Testing):
-  - `tests/test_engine_parity.py` (new parity suite for this issue, must run in < 5.0s)
-  - `tests/test_backtest_engine.py`
-  - `tests/test_live_trader.py`
-  - `tests/test_fresh_start_parity.py`
-  - `tests/test_leg_chase_parity.py`
-  - `tests/test_stop_loss_parity.py`
-- GitHub Actions CI on the PR is the merge gate for the full suite.
+3. **Pair-Group Structural Integrity**:
+   - In Tab 1 (Orders) and Tab 2 (Positions), multi-leg pair groups with `rowspan` must remain grouped together. Sorting must operate on the group level (or lead leg) rather than splitting paired UP and DOWN legs into disconnected table rows.
 
-## Anti-Cheat
+4. **1-Second Live Refresh Persistence**:
+   - Cockpit tables are re-rendered frequently via live SSE ticks and polling in `renderCockpitUI(st)`. The user's chosen sort column and direction (`asc` / `desc`) must persist across updates without resetting to default order or causing visual jumps.
 
-- No `skip`, `xfail`, deleted assertion, or loosened tolerance to make tests pass.
-- Any legitimate divergence discovered by the harness must be declared as a known exception or strict xfail with an issue number, not swept under the rug.
-- Parity tests must compare actual execution state surfaces between live and backtest engines.
+5. **Type-Aware Parsing**:
+   - Prices (`$0.48`), sizes (`10`), dollar P&L (`+$0.20`, `-$0.50`), percentages (`+4.2%`), and timestamps (`14:00:01`) must sort by actual numeric or chronological value, never by naive lexicographical ASCII comparison (where `$10.00` would incorrectly sort before `$2.00`).
 
-## Performance Threshold
-
-- `tests/test_engine_parity.py` execution must complete in under 5.0 seconds total on synthetic test snaps.
-
-## Boundaries
-
-- No new external dependencies (pure Python 3 stdlib + pytest).
-- Harness-only scope: no modifications to production trading logic or decision rules unless adapting harness parameters.
-- Reusable harness design: must easily accommodate future scenarios added by other issues.
+6. **Accessibility & Clean Semantics**:
+   - Use proper `aria-sort="ascending"`, `aria-sort="descending"`, or `aria-sort="none"` on headers.
+   - Non-sortable columns (such as the Action/Cancel button column in Orders) must not show sort pointers or triggers.
