@@ -246,6 +246,8 @@ def generate_joint_grid(
     """Generate multi-dimensional Cartesian grid across controllable parameters.
 
     `quote_ranges` (issue #228) sweeps the quotable two-sided mid bounds.
+    `max_start_delay` is a dataset filter applied by `run_sweep`, not an
+    engine parameter (issue #229 deleted `max_start_delay_sec`).
     """
     size = max(5, int(size))
     grid: list[tuple[str, BacktestParams]] = []
@@ -269,7 +271,6 @@ def generate_joint_grid(
             quote_shares=size,
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
-            max_start_delay_sec=max_start_delay,
             quote_range=qr,
         )
         grid.append((label, p))
@@ -332,7 +333,6 @@ def generate_random_grid(
             quote_shares=size,
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
-            max_start_delay_sec=max_start_delay,
             quote_range=qr,
         )
         grid.append((label, p))
@@ -344,8 +344,14 @@ def run_sweep(
     grid: list[tuple[str, BacktestParams]],
     series_whitelist: set[str] | None = None,
     size: int = 5,
+    max_start_delay_sec: float = 0.0,
 ) -> list[SweepRunResult]:
-    """Execute parameter sweep against pre-grouped condition windows."""
+    """Execute parameter sweep against pre-grouped condition windows.
+
+    `max_start_delay_sec` filters the *dataset* (windows that started more
+    than N seconds after their open are dropped before replay); it is not an
+    engine parameter — issue #229 deleted that knob.
+    """
     size = max(5, int(size))
     results: list[SweepRunResult] = []
 
@@ -362,11 +368,11 @@ def run_sweep(
         for _cid, snaps in filtered_windows:
             if not snaps:
                 continue
-            if params.max_start_delay_sec > 0:
+            if max_start_delay_sec > 0:
                 first_ts = float(snaps[0].get("ts", 0.0) or 0.0)
                 start_ts = float(snaps[0].get("start_ts", 0.0) or 0.0)
                 delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
-                if delay > params.max_start_delay_sec:
+                if delay > max_start_delay_sec:
                     continue
             w_res = _simulate_window(snaps, params)
             window_results.append(w_res)
@@ -443,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Grouped into {len(grouped)} condition windows. Running '{args.preset}' sweep (size={size} shares)...")
 
     # Build grid based on preset
-    base = BacktestParams(max_start_delay_sec=max_delay, quote_shares=size)
+    base = BacktestParams(quote_shares=size)
 
     if args.preset == "sensitivity":
         grid = generate_sensitivity_grid(base, size=size)
@@ -483,10 +489,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.preset == "assets":
         results = []
         for name, s_set in asset_configs:
-            res = run_sweep(grouped, [(name, base)], series_whitelist=s_set, size=size)
+            res = run_sweep(grouped, [(name, base)], series_whitelist=s_set, size=size,
+                            max_start_delay_sec=max_delay)
             results.extend(res)
     else:
-        results = run_sweep(grouped, grid, series_whitelist=whitelist, size=size)
+        results = run_sweep(grouped, grid, series_whitelist=whitelist, size=size,
+                            max_start_delay_sec=max_delay)
     t_sweep = time.perf_counter() - t_sweep_start
 
     print(f"Completed {len(results)} backtest runs in {t_sweep:.2f}s "

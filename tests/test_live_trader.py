@@ -1797,7 +1797,6 @@ def _drift_engine() -> LiveTraderEngine:
     engine.offset = 0.02
     engine.exit_thresh = 0.05
     engine.shares = 5
-    engine.entry_timeout_pct = 1.0
     return engine
 
 
@@ -3278,7 +3277,6 @@ def test_stop_loss_anchored_to_fill_price_up():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3350,7 +3348,6 @@ def test_stop_loss_anchored_to_fill_price_down():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3420,7 +3417,6 @@ def test_reversal_anchored_to_entry_price():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3476,7 +3472,6 @@ def test_stop_loss_anchored_to_an_entry_above_050():
     engine = LiveTraderEngine(load_persisted=False)
     engine.mode = "paper"
     engine.is_running = True
-    engine.stop_loss_enabled = True
     engine.exit_thresh = 0.05
     engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
@@ -3585,7 +3580,6 @@ def test_window_length_ignores_the_market_name():
     length feeds.
     """
     engine = _clock_engine()
-    engine.entry_timeout_pct = 0.10
     slug = "btc-up-or-down-5m"
     now = time.time()
     quarter_hour = LiveMarket(

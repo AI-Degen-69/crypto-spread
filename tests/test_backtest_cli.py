@@ -79,8 +79,7 @@ def test_entry_delay_and_quote_range_default_to_baseline(tmp_path, monkeypatch):
         offset=0.020, queue_gate=50.0, max_pair_cost=0.99,
         exit_thresh_by_slug=seen["params"].exit_thresh_by_slug,
         exit_reversal=0.02, quote_shares=120,
-        merge_gas_usd=0.0, max_start_delay_sec=0.0,
-        entry_timeout_pct=0.10).params_hash()
+        merge_gas_usd=0.0).params_hash()
 
 
 def test_the_two_knobs_change_the_params_hash(tmp_path, monkeypatch):
@@ -145,5 +144,8 @@ def test_help_renders_instead_of_crashing(capsys):
         cli.main(["--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "--entry-timeout" in out
-    assert "10% (0 disables)" in out
+    # Issue #229: the dead-zone flags replaced --entry-timeout.
+    assert "--dead-zone-val" in out
+    assert "--dead-zone-unit" in out
+    assert "--naked-leg-at-expiry" in out
+    assert "--entry-timeout" not in out

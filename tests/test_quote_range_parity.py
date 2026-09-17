@@ -24,8 +24,7 @@ OFFSET = 0.02
 
 
 def _bt_params(**overrides):
-    base = dict(offset=OFFSET, entry_timeout_pct=0.0,
-                max_start_elapsed_pct=0.0)
+    base = dict(offset=OFFSET, dead_zone_val=0.0)
     base.update(overrides)
     return BacktestParams(**base)
 
@@ -123,19 +122,25 @@ def test_boundary_mid_090_is_inside():
 
 
 def test_resting_quote_stands_while_the_mid_is_outside():
-    """An already-resting quote is on the venue: the 0.92 mid cancels nothing.
+    """The range cancels nothing, but the stop is always armed (#229).
 
-    The stop is off so only the range can touch the orders. The 0.085 down ask
-    crashes through the resting 0.48 down bid — the venue fills it, correctly —
-    while the resting up leg stands uncancelled. The backtest fills both off
-    the tape and captures the pair.
+    The 0.085 down ask crashes through the resting 0.48 down bid — the venue
+    fills it, correctly — while the up leg stands uncancelled by the range.
+    Issue #229 deleted `stop_loss_enabled`, so the armed stop (rules §2) is the
+    only thing that can touch the position now: the 0.92 mid is 0.40 adverse
+    to the DOWN entry, and both engines stop the naked leg out rather than
+    holding it. The range itself is not what acted.
     """
     _engine, mstate = _drive_live(
-        RESTING_THEN_OUTSIDE, offset=OFFSET, stop_loss_enabled=False)
+        RESTING_THEN_OUTSIDE, offset=OFFSET, dead_zone_val=0.0)
     assert mstate.filled_down is True
-    assert mstate.order_status_up == "RESTING"
+    # The range did not cancel the standing up order — the stop did.
+    assert mstate.exit_taken is True
+    assert mstate.exit_side == "DOWN"
     assert mstate.entry_cancelled_timeout is False
 
+    # Backtest parity: with the tape filling BOTH legs the pair completes on
+    # the same tick, and a completed pair is never stopped.
     snaps = [dict(s) for s in RESTING_THEN_OUTSIDE]
     snaps[-1] = {**snaps[-1], "tape_delta": [
         {"asset": UP_TOKEN, "price": 0.48, "size": 10.0},

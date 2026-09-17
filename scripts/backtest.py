@@ -9,6 +9,7 @@ is reproducible here:
   python -m scripts.backtest run/ticks \
       --offset 0.03 --queue 0 --pair-cost 0.98 --size 5 \
       --entry-delay 60 --quote-lo 0.10 --quote-hi 0.90 \
+      --dead-zone-val 0.10 --dead-zone-unit pct --naked-leg-at-expiry close \
       --exit-default-5m 0.49 --exit-default-15m 0.50 --max-start-delay 0
 
 There is no fill model to choose (issue #226): one rule, the same one the live
@@ -60,8 +61,15 @@ def main(argv: list[str] | None = None):
                     help="filter late-started windows where first tick > N seconds after window open (0 disables)")
     ap.add_argument("--filter-partial", action="store_true",
                     help="shorthand to filter late-started partial windows (>5s delay)")
-    ap.add_argument("--entry-timeout", type=float, default=0.10,
-                    help="cancel unfilled entry quotes once N fraction of window elapsed, e.g. 0.10 for 10%% (0 disables)")
+    # Issue #229: the dead zone owns the tail of the window — no entry timeout,
+    # no late-start clock. `--filter-partial`/`--max-start-delay` survive as a
+    # *dataset filter* only; they no longer touch engine parameters.
+    ap.add_argument("--dead-zone-val", type=float, default=0.10,
+                    help="tail of the window that is untradeable: fraction (pct) or seconds (sec); 0 disables")
+    ap.add_argument("--dead-zone-unit", choices=("pct", "sec"), default="pct",
+                    help="whether --dead-zone-val is a fraction of the window (pct) or absolute seconds (sec)")
+    ap.add_argument("--naked-leg-at-expiry", choices=("close", "hold"), default="close",
+                    help="unpaired leg in the dead zone: close at book bid (default) or hold to settlement")
     # The winning preset is defined by these two knobs as much as by --offset,
     # so without them the CLI could only replay a different strategy than the
     # one the bot runs, and the tape-vs-book comparison proved nothing about it.
@@ -94,14 +102,17 @@ def main(argv: list[str] | None = None):
         max_pair_cost=args.pair_cost, exit_thresh_by_slug=exit_thresh,
         exit_reversal=args.exit_reversal, quote_shares=args.size,
         merge_gas_usd=args.gas,
-        max_start_delay_sec=max_start_delay,
-        entry_timeout_pct=args.entry_timeout,
+        dead_zone_val=args.dead_zone_val,
+        dead_zone_unit=args.dead_zone_unit,
+        naked_leg_at_expiry=args.naked_leg_at_expiry,
         entry_delay_sec=args.entry_delay,
         quote_range=(args.quote_lo, args.quote_hi),
     )
     print(f"source={args.source} offset={params.offset} queue={params.queue_gate} "
           f"pair_cost={params.max_pair_cost} "
-          f"max_delay={params.max_start_delay_sec}s entry_timeout={params.entry_timeout_pct:.2%} "
+          f"dead_zone={params.dead_zone_val}({params.dead_zone_unit}) "
+          f"naked_leg_at_expiry={params.naked_leg_at_expiry} "
+          f"filter_max_delay={max_start_delay}s "
           f"entry_delay={params.entry_delay_sec}s quote_range={params.quote_range} "
           f"params_hash={params.params_hash()}")
 

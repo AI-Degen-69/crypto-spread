@@ -37,28 +37,25 @@ def build_engine(delay: float, shares: int, starting_balance: float) -> LiveTrad
     """Paper-only engine pinned to the hold-to-settle winner preset; refuses live/stop modes."""
     eng = LiveTraderEngine(load_persisted=False)
     # Pinned to the hold-to-settle winner configuration (offset 0.03 /
-    # delay 60s / quote_range (0.10, 0.90) / no-stop / max_pair_cost 0.98 /
-    # xrp15+bnb15+eth5 universe):
-    #  - naked_leg_timeout_pct=0  -> never force-exit an unpaired leg
-    #  - entry_timeout_pct=1.0    -> never cancel unfilled entry quotes early
-    #  - exit_reversal wide       -> mercy rule cannot fire without a stop
+    # delay 60s / quote_range (0.10, 0.90) / max_pair_cost 0.98 /
+    # xrp15+bnb15+eth5 universe). Issue #229 deleted stop_loss_enabled and the
+    # timeout clocks: hold-to-settle is now naked_leg_at_expiry="hold", and
+    # the exit_reversal mercy rule stays wide for the same reason as before.
     eng.update_config(
         mode="paper",
         offset=0.03,
         entry_delay_sec=delay,
         quote_range=(0.10, 0.90),
-        stop_loss_enabled=False,
+        naked_leg_at_expiry="hold",
         max_pair_cost=0.98,
         selected_markets=["xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"],
         shares=shares,
         starting_balance=starting_balance,
         enable_leg_chase=True,
-        naked_leg_timeout_pct=0.0,
-        entry_timeout_pct=1.0,
         exit_reversal=0.50,
     )
-    if eng.stop_loss_enabled is not False:
-        raise RuntimeError("shadow pilot requires stop_loss_enabled=False")
+    if eng.naked_leg_at_expiry != "hold":
+        raise RuntimeError("shadow pilot requires naked_leg_at_expiry='hold'")
     if eng.mode != "paper":
         raise RuntimeError("shadow pilot must run in paper mode — refusing to start")
     return eng
@@ -128,10 +125,8 @@ async def amain(hours: float, delay: float, shares: int,
         "offset": 0.03,
         "quote_range": [0.10, 0.90],
         "entry_delay_sec": delay,
-        "stop_loss_enabled": False,
+        "naked_leg_at_expiry": "hold",
         "hold_to_settle": True,
-        "naked_leg_timeout_pct": 0.0,
-        "entry_timeout_pct": 1.0,
         "enable_leg_chase": True,
         "max_pair_cost": 0.98,
         "shares": shares,
@@ -159,7 +154,7 @@ async def amain(hours: float, delay: float, shares: int,
     eng.start()
     print(f"[shadow] engine started mode={eng.mode} preset={eng.active_preset} "
           f"delay={eng.entry_delay_sec} "
-          f"stop_loss={eng.stop_loss_enabled} shares={eng.shares}", flush=True)
+          f"naked_leg_at_expiry={eng.naked_leg_at_expiry} shares={eng.shares}", flush=True)
     print(f"[shadow] snapshots -> {snap_file}", flush=True)
 
     deadline = time.time() + hours * 3600

@@ -53,8 +53,7 @@ def _live_engine(offset: float, **overrides) -> LiveTraderEngine:
     engine.is_running = True
     engine.offset = offset
     engine.enable_leg_chase = False
-    engine.entry_timeout_pct = None
-    engine.max_start_elapsed_pct = 0.0
+    engine.dead_zone_val = 0.0
     for name, value in overrides.items():
         setattr(engine, name, value)
     return engine
@@ -103,8 +102,7 @@ def test_neither_engine_quotes_a_book_it_cannot_price():
     assert not mstate.filled_up and not mstate.filled_down
 
     w = _simulate_window(ONE_SIDED_THEN_PRICED[:1],
-                         BacktestParams(offset=0.02, entry_timeout_pct=0.0,
-                                         max_start_elapsed_pct=0.0))
+                         BacktestParams(offset=0.02, dead_zone_val=0.0))
     assert not w.filled_up and not w.filled_down
     assert w.entered is False
 
@@ -124,8 +122,7 @@ def test_both_engines_anchor_at_the_mid_of_the_tick_that_places():
         {"asset": UP_TOKEN, "price": mstate.resting_up, "size": 10.0},
         {"asset": DN_TOKEN, "price": mstate.resting_down, "size": 10.0},
     ]}
-    w = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=0.0,
-                                               max_start_elapsed_pct=0.0))
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, dead_zone_val=0.0))
     assert w.filled_up and w.filled_down
     assert w.entry_price_up == pytest.approx(mstate.resting_up)
     assert w.entry_price_down == pytest.approx(mstate.resting_down)
@@ -142,6 +139,5 @@ def test_the_backtest_no_longer_rests_where_the_recorded_mid_pointed():
         {"asset": UP_TOKEN, "price": 0.48, "size": 10.0},
         {"asset": DN_TOKEN, "price": 0.48, "size": 10.0},
     ]}
-    w = _simulate_window(snaps, BacktestParams(offset=0.02, entry_timeout_pct=0.0,
-                                               max_start_elapsed_pct=0.0))
+    w = _simulate_window(snaps, BacktestParams(offset=0.02, dead_zone_val=0.0))
     assert not w.filled_up and not w.filled_down

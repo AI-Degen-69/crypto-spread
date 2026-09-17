@@ -796,6 +796,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
         in_dead_zone = book_math.is_in_dead_zone(rem_sec, window_length, params.dead_zone_val, params.dead_zone_unit)
 
         # Check dead zone for unentered / unfilled windows (rule §8):
+        # A filled leg is governed by the naked-leg rule below, not by the
+        # entry-cancel path — otherwise "close" could never fire because the
+        # naked-leg handler requires `not exit_taken`, which entry-cancel
+        # pre-empts by breaking the leg out of the fill detector.
         if in_dead_zone and not entry_cancelled:
             if not filled_up and not filled_down:
                 entry_cancelled = True

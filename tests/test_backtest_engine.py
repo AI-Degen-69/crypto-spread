@@ -879,7 +879,7 @@ def test_quote_range_changes_hash():
 
 
 # ===========================================================================
-# Issue #164: stop_loss_enabled — mirrors LiveTraderEngine
+# Issue #164 knobs, as retargeted by #229: naked_leg_at_expiry — mirrors LiveTraderEngine
 # ===========================================================================
 
 def _drift_window(start_ts=1_760_000_000.0, duration=300, mids=None):
@@ -936,7 +936,7 @@ def test_naked_leg_at_expiry_is_part_of_the_params_hash():
 
 
 # ===========================================================================
-# Issue #164: naked_leg_timeout_pct + exit_thresh_naked
+# Issue #164's time stop, superseded by #229's dead zone + naked_leg_at_expiry
 # ===========================================================================
 
 def _flat_naked_window(n_ticks=29, start_ts=1_760_000_000.0, duration=300,

@@ -81,10 +81,9 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     first_ts = w.first_ts
     raw_delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
     start_delay_sec = round(raw_delay, 2)
-    late_start = bool(
-        p.max_start_elapsed_pct and p.max_start_elapsed_pct > 0
-        and duration > 0 and raw_delay >= p.max_start_elapsed_pct * duration
-    )
+    # Issue #229: the deleted `max_start_elapsed_pct` gate is gone; the dead
+    # zone (`ENGINE_ONLY_KNOBS` in ev_lab) owns the tail of the window and is
+    # rejected rather than simulated, so late-start handling is none of ours.
 
     exit_thr = p.exit_thresh(w.slug, duration, series=w.series)
 
@@ -104,7 +103,7 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
     resting_dn = round(min(0.99, max(0.01, (1.0 - init_mid) - p.offset)), 3)
 
     filled_up = filled_dn = False
-    entry_cancelled = late_start
+    entry_cancelled = False
     adverse_skipped = False
     gate_evaluated = False
     reentry_count = 0
@@ -118,10 +117,6 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
 
     chased_leg = ""
 
-    timeout_on = p.entry_timeout_pct is not None and p.entry_timeout_pct > 0 and duration > 0
-    if timeout_on and raw_delay >= p.entry_timeout_pct * duration:
-        entry_cancelled = True
-
     chase_on = chase_cap is not None and chase_cap > 0
     orders_live = False
     n = len(w.ts)
@@ -129,11 +124,6 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
         requoted_now = False
         cur_ts = w.ts[i]
         elapsed = max(0.0, cur_ts - start_ts) if (cur_ts > 0.0 and start_ts > 0.0) else float(i)
-
-        if timeout_on and not entry_cancelled:
-            if elapsed > (p.entry_timeout_pct * duration):
-                if not filled_up and not filled_dn:
-                    entry_cancelled = True
 
         mid = _mid_from(w.up_bb[i], w.up_ba[i])
         if mid is None:
@@ -267,11 +257,6 @@ def sim2(w: Win, p: BacktestParams, chase_cap: float | None = None,
                 fees += _taker_fee(bb, p.taker_fee_rate) * 100.0
                 cap_dn = resting_dn * 100.0
                 break
-
-        if timeout_on and not entry_cancelled:
-            if elapsed >= (p.entry_timeout_pct * duration):
-                if not filled_up and not filled_dn:
-                    entry_cancelled = True
 
     if filled_up:
         cap_up = resting_up * 100.0

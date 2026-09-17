@@ -82,10 +82,10 @@ def build_params(gates_on: bool = True,
         exit_reversal=0.5,
         quote_shares=SHARES,
         merge_gas_usd=0.0,
-        max_start_delay_sec=0.0,
-        entry_timeout_pct=1.0,
-        max_start_elapsed_pct=0.1,
         entry_delay_sec=60.0 if gates_on else 0.0,
+        # Issue #229: the deleted timeout/late-start clocks are gone; the
+        # shadow dead zone (default 0.10 pct) is mirrored implicitly — a
+        # drift there now fails the mirror like any other knob.
     )
 
 
@@ -116,8 +116,6 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
         ("max_pair_cost", pair_cap),
         ("exit_reversal", recorded["exit_reversal"]),
         ("quote_shares", recorded["shares"]),
-        ("entry_timeout_pct", recorded["entry_timeout_pct"]),
-        ("max_start_elapsed_pct", recorded["max_start_elapsed_pct"]),
         ("entry_delay_sec", recorded["entry_delay_sec"] if gates_on else 0.0),
     ]
     for field, want in pairs:
