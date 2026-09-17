@@ -257,18 +257,12 @@ def test_issue138_clob_fill_appends_line_with_venue_price(monkeypatch, tmp_path)
 def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
     path = _telemetry_env(monkeypatch, tmp_path)
     engine = _paper_engine()
-    # This one IS about the chase. 0.98 rather than the #227 default of 0.99
-    # keeps the ceiling at 0.50, which is what the ticks below are built around.
-    # Belt and braces rather than load-bearing: the tick-2 ask of 0.55 is above
-    # either ceiling, so the assertions below hold at 0.99 too. Unlike
-    # test_leg_chase_triggers_on_single_fill_and_respects_cap, where the pin is
-    # the only thing keeping the cap from landing on the ask.
     engine.enable_leg_chase = True
-    engine.max_pair_cost = 0.98
+    engine.max_pair_cost = 1.00
     slug = "btc-up-or-down-5m"
     engine._update_market_strategy(
         slug, _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0}), now=1000.0)
-    # Tick 2: UP fills; DOWN ask 0.55 chases the DOWN quote to 0.50 w/o filling.
+    # Tick 2 (1001.0s): UP fills; progress == 0 so DOWN quote stays at 0.48.
     tick2 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0, 0.50: 200.0})
     tick2["up_book"]["best_ask"] = 0.46
     tick2["down_book"]["best_bid"] = 0.48
@@ -277,14 +271,24 @@ def test_issue138_chased_fill_flagged_chased(monkeypatch, tmp_path):
     m = engine.markets[slug]
     assert m.filled_up is True
     assert m.filled_down is False
-    assert m.chased_leg == "DOWN"
-    # Tick 3: DOWN ask passes through the chased 0.50 quote. It rested on tick
-    # 2, so a mere touch is no longer a fill (issue #226).
+
+    # Tick 3 (1150.0s): midway to dead zone cutoff, chase ceiling reaches 0.50.
+    # DOWN ask 0.55 chases DOWN quote to 0.50 w/o filling.
     tick3 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0, 0.50: 200.0})
     tick3["up_book"]["best_ask"] = 0.46
     tick3["down_book"]["best_bid"] = 0.48
-    tick3["down_book"]["best_ask"] = 0.499
-    engine._update_market_strategy(slug, tick3, now=1002.0)
+    tick3["down_book"]["best_ask"] = 0.55
+    engine._update_market_strategy(slug, tick3, now=1150.0)
+    assert m.chased_leg == "DOWN"
+    assert m.resting_down == 0.50
+
+    # Tick 4 (1151.0s): DOWN ask passes through the chased 0.50 quote. It rested on tick
+    # 3, so a mere touch is no longer a fill (issue #226).
+    tick4 = _books_poll(1000.0, {0.48: 120.0}, {0.48: 80.0, 0.50: 200.0})
+    tick4["up_book"]["best_ask"] = 0.46
+    tick4["down_book"]["best_bid"] = 0.48
+    tick4["down_book"]["best_ask"] = 0.499
+    engine._update_market_strategy(slug, tick4, now=1151.0)
     assert m.filled_down is True
     by_leg = {r["leg"]: r for r in _fill_lines(path)}
     assert set(by_leg) == {"UP", "DOWN"}
