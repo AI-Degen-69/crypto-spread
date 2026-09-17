@@ -119,6 +119,9 @@ def main(argv: list[str]) -> int:
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a in ("--detector", "--offset") and i + 1 >= len(argv):
+            print(f"{a} requires a value", file=sys.stderr)
+            return 1
         if a == "--detector":
             detector = argv[i + 1]
             i += 2
