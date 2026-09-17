@@ -56,7 +56,7 @@ Update `_PARAM_GROUPS` to register `dead_zone_val` and `dead_zone_unit` as struc
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_backtest_engine.py -q`.
 
-### [ ] T3 — `[Backend/Logic]` Live: delete timeout knobs, add Dead Zone & `naked_leg_at_expiry`
+### [x] T3 — `[Backend/Logic]` Live: delete timeout knobs, add Dead Zone & `naked_leg_at_expiry`
 **Files**: `strategy/live_trader.py`.
 **Do**: Delete `entry_timeout_pct`, `naked_leg_timeout_pct`, `max_start_elapsed_pct`,
 and `stop_loss_enabled`.
@@ -69,7 +69,7 @@ Implement dead-zone trigger:
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_live_trader.py -q`.
 
-### [ ] T4 — `[Test/Parity]` Dead Zone parity test
+### [x] T4 — `[Test/Parity]` Dead Zone parity test
 **Files**: `tests/test_dead_zone_parity.py`.
 **Do**: Drive both engines through shared snapshot streams:
 - Outside dead zone: quotes sit and wait, no early cancellation.
@@ -80,7 +80,7 @@ Implement dead-zone trigger:
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_dead_zone_parity.py -q`.
 
-### [ ] T5 — `[API/Dashboard]` Update API schemas, registry, and Cockpit/Backtest UI
+### [x] T5 — `[API/Dashboard]` Update API schemas, registry, and Cockpit/Backtest UI
 **Files**: `server/osc_dash.py`.
 **Do**: Update `BacktestRequest` and `LiveConfigPayload` models.
 Replace timeout / late-start inputs in Backtest & Cockpit tabs with Dead Zone controls:
@@ -89,7 +89,7 @@ Update `/api/backtest` query parameter mapping.
 **Skills**: `frontend-ui-engineering`, `api-and-interface-design`.
 **Verify**: `python -m pytest tests/test_osc_dash_integration.py tests/test_param_registry.py -q`.
 
-### [ ] T6 — `[CLI/Research]` Retarget CLI, sweeps, and existing test suites
+### [x] T6 — `[CLI/Research]` Retarget CLI, sweeps, and existing test suites
 **Files**: `scripts/backtest.py`, `scripts/sweep_backtest.py`, `research/sweeps/sim2.py`,
 `research/sweeps/ev_lab.py`, `tests/test_entry_timeout.py`, `tests/test_backtest_cli.py`,
 `tests/test_sweep_backtest.py`.
@@ -97,7 +97,7 @@ Update `/api/backtest` query parameter mapping.
 retarget `tests/test_entry_timeout.py` to assert dead-zone rules instead of obsolete 10% timeout.
 **Verify**: Run all targeted test files.
 
-### [ ] T7 — `[Review/Ship]` Review verification, docs update, and PR presentation
+### [x] T7 — `[Review/Ship]` Review verification, docs update, and PR presentation
 **Do**: Ensure all targeted tests pass. Hand off to Station IV.
 
 
