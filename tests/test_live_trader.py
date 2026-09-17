@@ -2574,10 +2574,10 @@ def _naked_market(now, elapsed=10.0, duration=300.0):
     )
 
 
-def test_naked_leg_stops_at_exit_thresh_naked():
-    """A naked UP leg exits at drift 0.04 (naked 0.03), not at 0.05."""
+def test_naked_leg_stops_at_exit_thresh():
+    """A naked UP leg exits at drift 0.04 when exit_thresh is 0.03."""
     engine = LiveTraderEngine(load_persisted=False)
-    engine.exit_thresh_naked = 0.03
+    engine.exit_thresh = 0.03
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -2593,7 +2593,7 @@ def test_naked_leg_stops_at_exit_thresh_naked():
     m = engine.markets[slug]
     assert m.filled_up is True and m.filled_down is False
 
-    # Drift 0.04: past the naked threshold 0.03, inside the paired 0.05.
+    # Drift 0.04: reaches exit_thresh 0.03.
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.45, "best_ask": 0.47},
@@ -2607,7 +2607,7 @@ def test_naked_leg_stops_at_exit_thresh_naked():
 def test_paired_position_not_stopped_by_naked_threshold():
     """Drift 0.04 does NOT exit a position once both legs are filled (pair path)."""
     engine = LiveTraderEngine(load_persisted=False)
-    engine.exit_thresh_naked = 0.03
+    engine.exit_thresh = 0.03
     engine.start()
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -2691,18 +2691,15 @@ def test_update_config_dead_zone_knobs_roundtrip_and_clamp():
     """Issue #229 knobs round-trip through update_config with validation."""
     engine = LiveTraderEngine(load_persisted=False)
     state = engine.update_config(
-        exit_thresh_naked=0.04,
         dead_zone_val=15.0,
         dead_zone_unit="sec",
         naked_leg_at_expiry="hold",
         reentry_require_pairable=False,
     )
-    assert engine.exit_thresh_naked == 0.04
     assert engine.dead_zone_val == 15.0
     assert engine.dead_zone_unit == "sec"
     assert engine.naked_leg_at_expiry == "hold"
     assert engine.reentry_require_pairable is False
-    assert state["params"]["exit_thresh_naked"] == 0.04
     assert state["params"]["dead_zone_val"] == 15.0
     assert state["params"]["dead_zone_unit"] == "sec"
     assert state["params"]["naked_leg_at_expiry"] == "hold"
@@ -3278,7 +3275,6 @@ def test_stop_loss_anchored_to_fill_price_up():
     engine.mode = "paper"
     engine.is_running = True
     engine.exit_thresh = 0.05
-    engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
     slug = "btc-up-or-down-5m"
     now = time.time()
@@ -3349,7 +3345,6 @@ def test_stop_loss_anchored_to_fill_price_down():
     engine.mode = "paper"
     engine.is_running = True
     engine.exit_thresh = 0.05
-    engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
     slug = "eth-up-or-down-5m"
     now = time.time()
@@ -3418,7 +3413,6 @@ def test_reversal_anchored_to_entry_price():
     engine.mode = "paper"
     engine.is_running = True
     engine.exit_thresh = 0.05
-    engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
     slug = "sol-up-or-down-5m"
     now = time.time()
@@ -3473,7 +3467,6 @@ def test_stop_loss_anchored_to_an_entry_above_050():
     engine.mode = "paper"
     engine.is_running = True
     engine.exit_thresh = 0.05
-    engine.exit_thresh_naked = 0.05
     engine.exit_reversal = 0.02
     # The DOWN book sits close enough to the cap here that the chase would pair
     # the window on tick 1; this test is about the naked UP leg's stop.

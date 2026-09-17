@@ -23,7 +23,7 @@ and a dedicated parity test (`tests/test_stop_loss_parity.py`).
 Branch `feat/one-stop-threshold-230` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 `tasks/plan.md`, `tasks/todo.md` written.
 
-### [ ] T1 — `[Backend/Logic]` Backtest: delete `exit_thresh_naked` and unify on `exit_thr`
+### [x] T1 — `[Backend/Logic]` Backtest: delete `exit_thresh_naked` and unify on `exit_thr`
 **Files**: `backtest/engine.py`.
 **Do**:
 - Remove `exit_thresh_naked` from `BacktestParams` dataclass fields and `__post_init__` validation.
