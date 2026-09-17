@@ -17,11 +17,11 @@ def chase_ceiling(original_resting: float, max_affordable: float, progress: floa
 
 ## Tasks
 
-### [ ] T0 — Branch + spec lock (done in Station II)
+### [x] T0 — Branch + spec lock (done in Station II)
 Branch `feat/leg-chase-ladder-231` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 `tasks/plan.md`, `tasks/todo.md` written.
 
-### [ ] T1 — `[Backend/Math]` Shared chase escalation math in `strategy/book_math.py`
+### [x] T1 — `[Backend/Math]` Shared chase escalation math in `strategy/book_math.py`
 **Files**: `strategy/book_math.py`.
 **Do**:
 - Implement `chase_progress(now, went_naked_at, dead_zone_start) -> float` clamped to `[0.0, 1.0]`.
@@ -30,7 +30,7 @@ Branch `feat/leg-chase-ladder-231` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_book_math.py -q`.
 
-### [ ] T2 — `[Backend/Logic]` Backtest engine escalation ladder
+### [x] T2 — `[Backend/Logic]` Backtest engine escalation ladder
 **Files**: `backtest/engine.py`.
 **Do**:
 - When one leg fills (`filled_up != filled_down`), record `went_naked_elapsed`.
@@ -42,7 +42,7 @@ Branch `feat/leg-chase-ladder-231` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_backtest_engine.py -q`.
 
-### [ ] T3 — `[Backend/Logic]` Live engine escalation ladder & cleanup
+### [x] T3 — `[Backend/Logic]` Live engine escalation ladder & cleanup
 **Files**: `strategy/live_trader.py`.
 **Do**:
 - In `_update_market_strategy`: calculate `dead_zone_start_ts` from window bounds.
@@ -53,7 +53,7 @@ Branch `feat/leg-chase-ladder-231` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_live_trader.py -q`.
 
-### [ ] T4 — `[Test/Parity]` Leg chase dedicated parity test suite
+### [x] T4 — `[Test/Parity]` Leg chase dedicated parity test suite
 **Files**: `tests/test_leg_chase_parity.py`.
 **Do**:
 - Implement dedicated parity test suite driving both engines through identical snapshots:
@@ -65,7 +65,7 @@ Branch `feat/leg-chase-ladder-231` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_leg_chase_parity.py -q`.
 
-### [ ] T5 — `[Tests/Refactor]` Retarget existing test suites
+### [x] T5 — `[Tests/Refactor]` Retarget existing test suites
 **Files**:
 - `tests/test_stop_orders.py`
 - `tests/test_live_trader.py`
@@ -75,7 +75,7 @@ Branch `feat/leg-chase-ladder-231` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 - Validate zero regressions across all targeted test gates.
 **Verify**: Run all targeted test files.
 
-### [ ] T6 — `[Review/Ship]` Verification and Station IV handoff
+### [x] T6 — `[Review/Ship]` Verification and Station IV handoff
 **Do**:
 - Run all targeted test gates.
 - Verify zero regressions and clean git status.
