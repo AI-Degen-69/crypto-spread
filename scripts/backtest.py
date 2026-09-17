@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from backtest import BacktestParams, iter_ticks, replay
+from backtest import BacktestParams, group_by_cid, iter_ticks, replay
 
 DEFAULT_TICKS = Path(__file__).resolve().parent.parent / "run" / "ticks"
 
@@ -129,6 +129,17 @@ def main(argv: list[str] | None = None):
         start_ts = _to_ts(args.start) if args.start else 0.0
         end_ts = _to_ts(args.end) if args.end else float("inf")
         snaps = [s for s in snaps if start_ts <= s.get("ts", 0) <= end_ts]
+    if max_start_delay > 0:
+        filtered_snaps: list[dict] = []
+        for _cid, group in group_by_cid(snaps):
+            if not group:
+                continue
+            first_ts = float(group[0].get("ts", 0.0) or 0.0)
+            start_ts_win = float(group[0].get("start_ts", 0.0) or 0.0)
+            delay = max(0.0, first_ts - start_ts_win) if (first_ts and start_ts_win) else 0.0
+            if delay <= max_start_delay:
+                filtered_snaps.extend(group)
+        snaps = filtered_snaps
     elapsed_load = time.perf_counter() - t0
     if not snaps:
         print("no ticks found", file=sys.stderr)

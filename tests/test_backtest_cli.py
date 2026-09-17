@@ -149,3 +149,68 @@ def test_help_renders_instead_of_crashing(capsys):
     assert "--dead-zone-unit" in out
     assert "--naked-leg-at-expiry" in out
     assert "--entry-timeout" not in out
+
+
+def test_max_start_delay_and_filter_partial_filter_dataset(tmp_path, monkeypatch):
+    """--max-start-delay and --filter-partial filter late-started windows before replay."""
+    path = tmp_path / "ticks_multi.jsonl"
+    rows = []
+    # Window 1: on time (first tick at start)
+    start1 = 1_760_000_000.0
+    for i in range(2):
+        rows.append({
+            "ts": start1 + i,
+            "cid": "0xwin1",
+            "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m",
+            "start_ts": start1,
+            "end_ts": start1 + 300.0,
+            "up": {"best_bid": 0.49, "best_ask": 0.51},
+            "down": {"best_bid": 0.49, "best_ask": 0.51},
+        })
+    # Window 2: late start (first tick 10s after open)
+    start2 = 1_760_001_000.0
+    for i in range(2):
+        rows.append({
+            "ts": start2 + 10.0 + i,
+            "cid": "0xwin2",
+            "series": "eth-up-or-down-5m",
+            "slug": "eth-up-or-down-5m",
+            "start_ts": start2,
+            "end_ts": start2 + 300.0,
+            "up": {"best_bid": 0.49, "best_ask": 0.51},
+            "down": {"best_bid": 0.49, "best_ask": 0.51},
+        })
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    captured_snaps = []
+
+    def _fake_replay(snaps, params):
+        captured_snaps.append(list(snaps))
+        return {
+            "n_windows": len(set(s["cid"] for s in snaps)),
+            "aggregate": {
+                "overall": {
+                    "windows": 1, "pair_rate": 0.0, "exit_rate": 0.0,
+                    "total_pnl_cents": 0.0, "avg_pnl_cents": 0.0, "total_fees_cents": 0.0
+                },
+                "per_series": {}
+            }
+        }
+
+    monkeypatch.setattr(cli, "replay", _fake_replay)
+
+    # 1. No filter -> all 4 snaps (both windows) passed
+    cli.main([str(path), "--max-start-delay", "0"])
+    assert len(captured_snaps[-1]) == 4
+
+    # 2. --max-start-delay 5 -> only on-time window (2 snaps) passed
+    cli.main([str(path), "--max-start-delay", "5"])
+    assert len(captured_snaps[-1]) == 2
+    assert {s["cid"] for s in captured_snaps[-1]} == {"0xwin1"}
+
+    # 3. --filter-partial -> defaults to 5s delay -> only 2 snaps passed
+    cli.main([str(path), "--filter-partial"])
+    assert len(captured_snaps[-1]) == 2
+    assert {s["cid"] for s in captured_snaps[-1]} == {"0xwin1"}
+
