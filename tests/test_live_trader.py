@@ -2352,7 +2352,7 @@ def test_dead_zone_is_sole_time_gate_for_fresh_start():
     # 15m window = 900s, dead zone 10% = 90s cutoff.
     # At elapsed 800s, remaining is 100s > 90s: outside dead zone, fresh start quotes.
     engine = _fifteen_minute_engine()
-    engine.start()
+    _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
     market = _fifteen_minute_market(now, condition_id="0xdzgate15m", start_offset=800.0)
@@ -2382,7 +2382,7 @@ def test_dead_zone_is_sole_time_gate_for_fresh_start():
 
     # In contrast, when the window reaches the dead zone (elapsed 815s, remaining 85s <= 90s cutoff):
     engine2 = _fifteen_minute_engine()
-    engine2.start()
+    _quiet_start(engine2)
     now2 = time.time()
     market2 = _fifteen_minute_market(now2, condition_id="0xdzgate15m_b", start_offset=800.0)
     _open_50_50_quotes(engine2, slug, market2, now2 - 1)

@@ -13,7 +13,7 @@ dedicated parity test (`tests/test_fresh_start_parity.py`), and test suite retar
 Branch `feat/fresh-start-rule-232` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 `tasks/plan.md`, `tasks/todo.md` written.
 
-### [ ] T1 — `[Backend/Clean]` Remove legacy re-entry knobs and special-paths from `strategy/live_trader.py`
+### [x] T1 — `[Backend/Clean]` Remove legacy re-entry knobs and special-paths from `strategy/live_trader.py`
 **Files**: `strategy/live_trader.py`.
 **Do**:
 - Remove `min_requote_remaining_sec`, `DEFAULT_MIN_REQUOTE_REMAINING_SEC`, and related config handling in `__init__`, `update_config`, `get_state`.
@@ -23,7 +23,7 @@ Branch `feat/fresh-start-rule-232` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `incremental-implementation`.
 **Verify**: `python -m pytest tests/test_live_trader.py -q`.
 
-### [ ] T2 — `[Backend/Logic]` Implement `fresh_start` in `strategy/live_trader.py`
+### [x] T2 — `[Backend/Logic]` Implement `fresh_start` in `strategy/live_trader.py`
 **Files**: `strategy/live_trader.py`.
 **Do**:
 - Update `_update_market_strategy`:
@@ -36,7 +36,7 @@ Branch `feat/fresh-start-rule-232` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_live_trader.py -q`.
 
-### [ ] T3 — `[Backend/Logic]` Implement `fresh_start` in `backtest/engine.py`
+### [x] T3 — `[Backend/Logic]` Implement `fresh_start` in `backtest/engine.py`
 **Files**: `backtest/engine.py`.
 **Do**:
 - In `_simulate_window`:
@@ -48,7 +48,7 @@ Branch `feat/fresh-start-rule-232` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_backtest_engine.py -q`.
 
-### [ ] T4 — `[Test/Parity]` Dedicated behavioral parity test suite `tests/test_fresh_start_parity.py`
+### [x] T4 — `[Test/Parity]` Dedicated behavioral parity test suite `tests/test_fresh_start_parity.py`
 **Files**: `tests/test_fresh_start_parity.py`.
 **Do**:
 - Parity 1: Multi-round window completing two pairs at identical prices and ticks in both engines.
@@ -58,7 +58,7 @@ Branch `feat/fresh-start-rule-232` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 **Skill**: `test-driven-development`.
 **Verify**: `python -m pytest tests/test_fresh_start_parity.py -q`.
 
-### [ ] T5 — `[Tests/Refactor]` Retarget existing tests
+### [x] T5 — `[Tests/Refactor]` Retarget existing tests
 **Files**:
 - `tests/test_live_trader.py`
 - `tests/test_backtest_engine.py`
@@ -68,7 +68,7 @@ Branch `feat/fresh-start-rule-232` off `master`. `SPEC.md`, `CONSTRAINTS.md`,
 - Verify zero regressions across all targeted test suites.
 **Verify**: Run targeted test gates.
 
-### [ ] T6 — `[Review/Ship]` Verification and Station IV handoff
+### [x] T6 — `[Review/Ship]` Verification and Station IV handoff
 **Do**:
 - Run all targeted test gates.
 - Verify zero regressions and clean git status.

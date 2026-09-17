@@ -2007,7 +2007,7 @@ class LiveTraderEngine:
         if not self._cancel_stop_order(m, reason="pair completed (WS)"):
             return
         with self._engine_lock:
-            if not (m.filled_up and m.filled_down):
+            if m.pair_captured or not (m.filled_up and m.filled_down):
                 return
             m.pair_captured = True
             m.status = "PAIR_MERGED"
@@ -2850,6 +2850,8 @@ class LiveTraderEngine:
                     if self.mode == "live" and mode == "paper":
                         has_active_live_exposure = any(
                             (m.filled_up or m.filled_down)
+                            and not m.pair_captured
+                            and not m.exit_taken
                             for m in self.markets.values()
                         ) or bool(self.open_positions)
                         if has_active_live_exposure:
