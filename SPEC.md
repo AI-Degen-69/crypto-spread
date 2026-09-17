@@ -1,60 +1,78 @@
-# SPEC — Issue #232: Rule: fresh_start — the engine keeps no memory inside a window
+# SPEC — Issue #214: Engine Parity Test Harness
 
-Binding while `feat/fresh-start-rule-232` is live. Per-issue working file (`docs/git-workflow.md` §5)
+Binding while `feat/parity-harness-214` is live. Per-issue working file (`docs/git-workflow.md` §5)
 — not an architecture document.
 
-The rule itself is agreed: `docs/engine-decision-rules.md` §13 (`fresh_start`).
-That file is the definition; this spec is the work that makes the code match it.
+## 1. Goal
 
-## Goal
+Provide an automated, executable, high-fidelity parity test harness that enforces behavioral identity
+between the live execution path (`strategy/live_trader.py:LiveTraderEngine` in `mode="paper"`)
+and the offline backtest engine (`backtest/engine.py:_simulate_window`).
 
-Whenever the market is clean, the engine evaluates the window exactly as if it had just opened.
-No record of what happened earlier in it, and no special path back in.
+Whenever an identical tick stream and parameter set is fed to both engines, both must make identical
+quoting, filling, chasing, stop-loss, and fresh-start decisions.
 
-**Clean** means: no open position **and** no resting orders.
-That is true in four situations, and the engine does not distinguish between them:
-1. Nothing has been tried yet;
-2. A pair merged successfully;
-3. An unpaired leg was stopped out (or closed at dead zone);
-4. The orders were cancelled.
+## 2. Parity Contract & Comparable Surface
 
-**Trigger:** The market is clean and all three standing conditions hold:
-- The mid is inside `quote_range` (rule §6)
-- The window has not reached the dead zone (rule §8)
-- Both legs are priceable (rule §5 / Invariant 0)
+Both engines process the same ticks. Parity is asserted on the decision-visible state surface:
 
-**Action:** Quote, exactly as a window that has just opened.
+| Key | Description |
+|---|---|
+| `entered` | Whether initial quotes were rested |
+| `filled_up` | Whether the UP leg filled |
+| `filled_down` | Whether the DOWN leg filled |
+| `entry_price_up` | UP leg entry/fill price |
+| `entry_price_down` | DOWN leg entry/fill price |
+| `pair_captured` | Whether at least one pair was completed |
+| `exit_taken` | Whether a stop-loss or dead-zone exit fired |
+| `exit_side` | Which leg exited ("up", "down", or "") |
+| `chased_leg` | Which leg was chased, if any ("up", "down", or "") |
+| `pairs_count` | Number of completed pair merges across the window |
+| `stops_count` | Number of stop-loss exits across the window |
 
-## What is Replaced / Deleted
+Explicitly **not** compared (out of scope):
+- `pnl_cents` vs `realized_pnl_usd` (different unit bases / share sizes).
+- `fees_cents` (accounting detail).
+- `settlement_mid`, `settle_source`, `class_label` (offline classification).
 
-1. `reentry_drift_band` — deleted.
-2. `min_requote_remaining_sec` — deleted (the dead zone is the sole time gate).
-3. `reentry_min_remaining_pct` — deleted.
-4. `max_reentries_per_window` — deleted.
-5. `_maybe_requote_after_merge` and `requote_round` — deleted (subsumed by standard clean-market evaluation).
-6. `_maybe_reenter_drift_skipped` — already deleted in #228.
-7. `reentry_require_pairable` & `reentry_stats` — removed from active logic and state dicts.
+## 3. Harness Architecture (`tests/test_engine_parity.py`)
 
-## Engine Divergence Fix (Backtest vs. Live)
+1. **`snaps_to_polls(snaps: list[dict]) -> list[tuple[float, dict]]`**:
+   - Converts backtest tick/snap dicts into `(now, poll_data)` tuples compatible with `LiveTraderEngine._update_market_strategy`.
+   - Constructs a synthetic `LiveMarket` with correct tokens, duration, and timestamps.
+2. **`live_outcome(snaps: list[dict], params: BacktestParams) -> dict`**:
+   - Spawns `LiveTraderEngine(load_persisted=False)` in `mode="paper"`.
+   - Injects mock bridges to prevent network / wallet calls.
+   - Applies `params` to engine configuration (offset, dead_zone_val, exit_thresh, enable_leg_chase, max_pair_cost, etc.).
+   - Feeds each poll tick at its exact `now` timestamp.
+   - Extracts the comparable surface from `mstate`.
+3. **`backtest_outcome(snaps: list[dict], params: BacktestParams) -> dict`**:
+   - Executes pure `_simulate_window(snaps, params)`.
+   - Extracts the identical comparable surface from `WindowResult`.
+4. **`assert_parity(snaps: list[dict], params: BacktestParams) -> None`**:
+   - Runs both engines.
+   - Compares the outcome dicts key by key.
+   - On mismatch, raises `AssertionError` with a structured, crystal-clear diff showing the differing field, both values, and context.
 
-- Previously in `backtest/engine.py`, both pair-completion (`filled_up and filled_down`) and stop-loss (`bb_up`/`bb_dn`) exited the tick loop via `break`.
-- Under `fresh_start`, neither branch breaks out of the tick loop.
-- When a pair completes or an exit triggers:
-  - Account P&L / fees / telemetry for that round.
-  - Reset round execution state (`orders_live = False`, `resting_up = None`, `resting_down = None`, `filled_up = False`, `filled_down = False`, `entry_price_up = None`, `entry_price_down = None`, `naked_since_elapsed = None`, `chased_leg = ""`, `max_up_drift = 0.0`, `max_down_drift = 0.0`, `reversal_seen_up = False`, `reversal_seen_down = False`).
-  - Continue tick loop: if the market is clean and standing conditions hold, place fresh quotes at the current mid minus offset!
-  - If a clean market enters the dead zone, no new quotes are placed.
+## 4. Seed Scenarios
 
-## Acceptance Criteria
+1. **Balanced Open to Merge**: Both legs fill and pair merges.
+2. **Real Mid Anchor**: Opening quotes anchored to mid, not hardcoded 0.50 (#206).
+3. **Pair-Cost Cap**: `max_pair_cost` caps chase without blocking quoting (#204).
+4. **Unpriceable Leg**: Window skipped when book has no two-sided mid (#207).
+5. **Stop-Loss Anchored to Entry**: Stop triggers based on drift from fill price (#209 / #230).
+6. **Multi-Round Fresh Start**: Clean market re-enters and captures subsequent pairs outside dead zone (#232).
 
-1. All re-entry knobs (`min_requote_remaining_sec`, `reentry_stats`, `reentry_require_pairable`) and special-path methods (`_maybe_requote_after_merge`, `requote_round`) are removed from `LiveTraderEngine` and `MarketLiveState`.
-2. `backtest/engine.py` continues the tick loop after pair merge and after stop exit, subject only to standing conditions.
-3. Dedicated parity test suite `tests/test_fresh_start_parity.py` runs multi-round windows (e.g. 2 pairs completed in one 15m window, or 1 stop followed by a completed pair) and verifies both engines place identical quotes and fills at identical ticks.
-4. A window that becomes clean inside the dead zone is **never** re-entered in either engine.
-5. Zero regressions across all targeted test gates.
+## 5. Acceptance Criteria
 
-## Out of Scope
+- [ ] `tests/test_engine_parity.py` implements `snaps_to_polls`, `live_outcome`, `backtest_outcome`, `assert_parity`.
+- [ ] All seed scenarios pass cleanly with exact parity.
+- [ ] Mismatch failure formatting is tested and confirmed human-readable.
+- [ ] Test execution time for the entire parity module is under 5.0 seconds.
+- [ ] `AGENTS.md` is updated to record `test_engine_parity.py` as the canonical gate.
+- [ ] Zero regressions across existing targeted test suites.
 
-- Parity test harness for remaining knobs (belongs to #214).
-- Dead-zone empirical duration measurements (#222, #223).
+## 6. Out of Scope
 
+- Modifying existing strategy decision rules (all covered in #224–#233).
+- Extracting shared live/backtest monolithic code into a separate library (deferred).
