@@ -148,8 +148,15 @@ def compute_metrics(
 def generate_sensitivity_grid(
     base_params: BacktestParams | None = None,
     size: int = 5,
+    include_structural: bool = False,
 ) -> list[tuple[str, BacktestParams]]:
-    """Generate 1D sensitivity parameter variations against a fixed baseline."""
+    """Generate 1D sensitivity parameter variations against a fixed baseline.
+
+    Issue #233: tuning knobs only by default. Structural limits (`max_pair_cost`,
+    `quote_range`) are held at baseline unless `include_structural=True` (CLI:
+    `--include-structural`); they are always reachable via `--only pair_cost` /
+    `--only quote_range`, which is explicit operator intent on its own.
+    """
     size = max(5, int(size))
     base = base_params or BacktestParams(quote_shares=size)
     grid: list[tuple[str, BacktestParams]] = []
@@ -188,25 +195,29 @@ def generate_sensitivity_grid(
             p = replace(base, exit_reversal=r)
             grid.append((f"exit_rev={r:.3f}", p))
 
-    # 6. Pair cost gate variations
-    # Issue #227 hard-caps this at 1.00 (a binary pair settles there), so the
-    # old [1.01 .. 1.10] sweep is five values the engine now refuses. Same
-    # five-point shape, inside the legal range.
+    # 6. Pair cost gate variations — a STRUCTURAL limit (issue #233), so
+    # only generated when the caller explicitly opts in. Issue #227 hard-caps
+    # this at 1.00 (a binary pair settles there), so the old [1.01 .. 1.10]
+    # sweep is five values the engine now refuses. Same five-point shape,
+    # inside the legal range.
     pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
-    for pc in pair_costs:
-        if pc != base.max_pair_cost:
-            p = replace(base, max_pair_cost=pc)
-            grid.append((f"pair_cost={pc:.2f}", p))
+    if include_structural:
+        for pc in pair_costs:
+            if pc != base.max_pair_cost:
+                p = replace(base, max_pair_cost=pc)
+                grid.append((f"pair_cost={pc:.2f}", p))
 
-    # 7. Quote range (issue #228). Varies the quotable mid bounds.
-    quote_ranges = [
-        (0.00, 1.00), (0.05, 0.95), (0.10, 0.90), (0.15, 0.85),
-        (0.20, 0.80), (0.25, 0.75), (0.30, 0.70),
-    ]
-    for qr in quote_ranges:
-        if qr != base.quote_range:
-            p = replace(base, quote_range=qr)
-            grid.append((f"quote_range={qr[0]:.2f}-{qr[1]:.2f}", p))
+    # 7. Quote range (issue #228) — a STRUCTURAL limit (issue #233): only on
+    # explicit opt-in. Varies the quotable mid bounds.
+    if include_structural:
+        quote_ranges = [
+            (0.00, 1.00), (0.05, 0.95), (0.10, 0.90), (0.15, 0.85),
+            (0.20, 0.80), (0.25, 0.75), (0.30, 0.70),
+        ]
+        for qr in quote_ranges:
+            if qr != base.quote_range:
+                p = replace(base, quote_range=qr)
+                grid.append((f"quote_range={qr[0]:.2f}-{qr[1]:.2f}", p))
 
     return grid
 
@@ -237,19 +248,26 @@ def generate_joint_grid(
     queues: Sequence[float] = (0.0, 25.0, 50.0, 100.0),
     exit_5ms: Sequence[float] = (0.08, 0.10, 0.12, 0.14),
     exit_reversals: Sequence[float] = (0.015, 0.020),
-    quote_ranges: Sequence[tuple[float, float]] = (
-        (0.05, 0.95), (0.10, 0.90), (0.15, 0.85), (0.20, 0.80)
-    ),
+    quote_ranges: Sequence[tuple[float, float]] | None = None,
     max_start_delay: float = 0.0,
     size: int = 5,
+    include_structural: bool = False,
 ) -> list[tuple[str, BacktestParams]]:
-    """Generate multi-dimensional Cartesian grid across controllable parameters.
+    """Generate multi-dimensional Cartesian grid across tuning knobs.
 
-    `quote_ranges` (issue #228) sweeps the quotable two-sided mid bounds.
+    Issue #233: tuning knobs only by default — structural limits (`quote_range`,
+    `max_pair_cost`) hold at the dataclass baseline. Pass `include_structural=True`
+    (CLI: `--include-structural`) to sweep `quote_ranges` as well; `max_pair_cost`
+    stays at the grid's historical 1.00 in that mode.
+
     `max_start_delay` is a dataset filter applied by `run_sweep`, not an
     engine parameter (issue #229 deleted `max_start_delay_sec`).
     """
     size = max(5, int(size))
+    explicit_qr = quote_ranges is not None
+    if quote_ranges is None:
+        quote_ranges = ((0.10, 0.90),) if not include_structural else (
+            (0.05, 0.95), (0.10, 0.90), (0.15, 0.85), (0.20, 0.80))
     grid: list[tuple[str, BacktestParams]] = []
     for off, q, e5, rev, qr in itertools.product(
             offsets, queues, exit_5ms, exit_reversals, quote_ranges):
@@ -261,11 +279,13 @@ def generate_joint_grid(
             "btc-up-or-down-15m": round(e5 + 0.01, 2),
             "sol-up-or-down-15m": round(e5 + 0.01, 2),
         }
-        label = f"off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_qr={qr[0]:.2f}-{qr[1]:.2f}"
+        label = f"off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}"
+        if include_structural or explicit_qr:
+            label += f"_qr={qr[0]:.2f}-{qr[1]:.2f}"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
-            max_pair_cost=1.00,
+            max_pair_cost=1.00 if include_structural else 0.99,
             exit_thresh_by_slug=ex_dict,
             exit_reversal=rev,
             quote_shares=size,
@@ -282,17 +302,23 @@ def generate_random_grid(
     seed: int = 42,
     max_start_delay: float = 0.0,
     size: int = 5,
+    include_structural: bool = False,
 ) -> list[tuple[str, BacktestParams]]:
-    """Sample random parameter configurations from declared ranges with a deterministic seed."""
+    """Sample random parameter configurations from declared ranges with a deterministic seed.
+
+    Issue #233: structural limits (`max_pair_cost`, `quote_range`) hold at the
+    dataclass baseline unless `include_structural=True` (CLI:
+    `--include-structural`), in which case they vary as before.
+    """
     rng = random.Random(seed)
     size = max(5, int(size))
     offsets = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040]
     queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
     exit_5ms = [0.06, 0.08, 0.09, 0.10, 0.11, 0.12, 0.14, 0.16]
     exit_reversals = [0.010, 0.015, 0.020, 0.030]
-    # Issue #227 hard-caps this at 1.00 (a binary pair settles there), so the
-    # old [1.01 .. 1.10] sweep is five values the engine now refuses. Same
-    # five-point shape, inside the legal range.
+    # Structural axes (issue #233): only sampled when explicitly opted in.
+    # Issue #227 hard-caps max_pair_cost at 1.00 (a binary pair settles there),
+    # so the old [1.01 .. 1.10] sweep is five values the engine now refuses.
     pair_costs = [0.96, 0.97, 0.98, 0.99, 1.00]
     quote_ranges = [
         (0.00, 1.00), (0.05, 0.95), (0.10, 0.90), (0.15, 0.85),
@@ -300,7 +326,7 @@ def generate_random_grid(
     ]
 
     grid: list[tuple[str, BacktestParams]] = []
-    seen: set[tuple[float, float, float, float, float, tuple[float, float]]] = set()
+    seen: set[tuple] = set()
     for _ in range(count * 5):
         if len(grid) >= count:
             break
@@ -308,8 +334,12 @@ def generate_random_grid(
         q = rng.choice(queues)
         e5 = rng.choice(exit_5ms)
         rev = rng.choice(exit_reversals)
-        pc = rng.choice(pair_costs)
-        qr = rng.choice(quote_ranges)
+        if include_structural:
+            pc = rng.choice(pair_costs)
+            qr = rng.choice(quote_ranges)
+        else:
+            pc = 0.99
+            qr = (0.10, 0.90)
         key = (off, q, e5, rev, pc, qr)
         if key in seen:
             continue
@@ -323,7 +353,9 @@ def generate_random_grid(
             "btc-up-or-down-15m": round(e5 + 0.01, 2),
             "sol-up-or-down-15m": round(e5 + 0.01, 2),
         }
-        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}_qr={qr[0]:.2f}-{qr[1]:.2f}"
+        label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}"
+        if include_structural:
+            label += f"_qr={qr[0]:.2f}-{qr[1]:.2f}"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
@@ -410,7 +442,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Sweep preset: sensitivity (1D), grid (joint), assets (universe), random (stochastic)")
     ap.add_argument("--only", choices=list(SENSITIVITY_AXES), default=None,
                     help="Sensitivity preset only: run Baseline plus a single 1D axis "
-                         "(e.g. --only exit_rev for the issue #110 mercy-distance sweep)")
+                         "(e.g. --only exit_rev for the issue #110 mercy-distance sweep). "
+                         "A structural axis (--only pair_cost / --only quote_range) is "
+                         "explicit opt-in on its own.")
+    ap.add_argument("--include-structural", action="store_true",
+                    help="Issue #233: also sweep structural limits (max_pair_cost, "
+                         "quote_range). Default presets sweep tuning knobs only.")
     ap.add_argument("--count", type=int, default=50,
                     help="Sample count for random sweep (default: 50)")
     ap.add_argument("--seed", type=int, default=42,
@@ -433,6 +470,9 @@ def main(argv: list[str] | None = None) -> int:
     max_delay = args.max_start_delay
     if args.filter_partial and max_delay <= 0:
         max_delay = 5.0
+    # Issue #233: naming a structural axis with --only IS explicit intent,
+    # so it implies --include-structural for the sensitivity grid.
+    include_structural = args.include_structural or args.only in ("pair_cost", "quote_range")
 
     whitelist = set(s.strip() for s in args.series.split(",") if s.strip()) if args.series else None
 
@@ -452,17 +492,20 @@ def main(argv: list[str] | None = None) -> int:
     base = BacktestParams(quote_shares=size)
 
     if args.preset == "sensitivity":
-        grid = generate_sensitivity_grid(base, size=size)
+        grid = generate_sensitivity_grid(base, size=size,
+                                         include_structural=include_structural)
         if args.only is not None:
             grid = filter_sensitivity_grid(grid, args.only)
     elif args.preset == "grid":
-        grid = generate_joint_grid(max_start_delay=max_delay, size=size)
+        grid = generate_joint_grid(max_start_delay=max_delay, size=size,
+                                   include_structural=args.include_structural)
     elif args.preset == "random":
         grid = generate_random_grid(
             count=args.count,
             seed=args.seed,
             max_start_delay=max_delay,
             size=size,
+            include_structural=args.include_structural,
         )
     elif args.preset == "assets":
         # Asset whitelist sweep
@@ -509,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
             "source": str(args.source),
             "preset": args.preset,
             "only": args.only,
+            "include_structural": args.include_structural,
             "size": size,
             "max_start_delay_sec": max_delay,
             "count": args.count if args.preset == "random" else None,
