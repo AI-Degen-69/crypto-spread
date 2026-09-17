@@ -690,6 +690,8 @@ class MarketLiveState:
     # Strategy orders
     resting_up: float = 0.48
     resting_down: float = 0.48
+    original_resting_up: Optional[float] = None
+    original_resting_down: Optional[float] = None
     order_shares: int = 5
     
     # Live Order Tracking (Current Window)
@@ -4205,82 +4207,10 @@ class LiveTraderEngine:
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down
         mstate.order_shares = self.shares
-
-        # Issue #226: a quote the chase raises onto the ask is marketable on
-        # arrival, the same as one being placed for the first time. The chase
-        # runs here AND again inside the paper fill block below, so the flags
-        # are initialised before the first of the two and carry to the fill
-        # check at the end of the tick.
-        chased_now_up = False
-        chased_now_dn = False
-
-        # --- LEG CHASE AFTER ONE-SIDED FILL (Issue #123) ---
-        # When one leg fills, step up the opposite leg's quote towards the ask,
-        # strictly capped so pair cost stays <= max_pair_cost (default 0.99).
-        if self.enable_leg_chase and not mstate.pair_captured and not mstate.exit_taken:
-            if mstate.filled_up and not mstate.filled_down:
-                entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
-                max_down_bid = book_math.chase_cap(self.max_pair_cost, entry_up)
-                if mstate.down_ask is not None:
-                    target_down = min(mstate.down_ask, max_down_bid)
-                    if target_down > resting_down:
-                        resting_down = target_down
-                        mstate.resting_down = resting_down
-                        mstate.chased_leg = "DOWN"
-                        chased_now_dn = True
-                    elif target_down == max_down_bid and target_down >= resting_down:
-                        if max_down_bid > resting_down:
-                            resting_down = max_down_bid
-                            mstate.resting_down = resting_down
-                            mstate.chased_leg = "DOWN"
-                            chased_now_dn = True
-            elif mstate.filled_down and not mstate.filled_up:
-                entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
-                max_up_bid = book_math.chase_cap(self.max_pair_cost, entry_dn)
-                if mstate.up_ask is not None:
-                    target_up = min(mstate.up_ask, max_up_bid)
-                    if target_up > resting_up:
-                        resting_up = target_up
-                        mstate.resting_up = resting_up
-                        mstate.chased_leg = "UP"
-                        chased_now_up = True
-                    elif target_up == max_up_bid and target_up >= resting_up:
-                        if max_up_bid > resting_up:
-                            resting_up = max_up_bid
-                            mstate.resting_up = resting_up
-                            mstate.chased_leg = "UP"
-                            chased_now_up = True
-            else:
-                mstate.chased_leg = None
-        else:
-            mstate.chased_leg = None
-
-        # --- DRIFT TRACKING (vs entry price) ---
-        # Issue #207: only track drift against a genuine two-sided mid, never a fabricated 0.50.
-        # Issue #209: measure adverse excursion and reversal from the actual entry price
-        # (fill_price_up / fill_price_down, falling back to resting_up / resting_down),
-        # not from a static 0.50 anchor. While no position is filled, position drift remains 0.0.
-        # Excursions are rounded to 6dp: prices are cents, and the raw subtraction
-        # (0.45 - 0.40 == 0.04999999999999999) would sit a hair under an exactly
-        # equal threshold and silently skip the stop.
-        if mstate.mid is not None:
-            mid = mstate.mid
-            if mstate.filled_up and not mstate.filled_down:
-                entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
-                if entry_up is not None:
-                    excursion_down = round(entry_up - mid, 6)
-                    mstate.max_down_drift = max(mstate.max_down_drift, excursion_down)
-                    # Reversal detection: mid retraced back towards entry price
-                    if mstate.max_down_drift >= self.exit_thresh and excursion_down < self.exit_reversal:
-                        mstate.reversal_seen_down = True
-            elif mstate.filled_down and not mstate.filled_up:
-                entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
-                if entry_dn is not None:
-                    excursion_up = round(mid - (1.0 - entry_dn), 6)
-                    mstate.max_up_drift = max(mstate.max_up_drift, excursion_up)
-                    # Reversal detection: mid retraced back towards entry price
-                    if mstate.max_up_drift >= self.exit_thresh and excursion_up < self.exit_reversal:
-                        mstate.reversal_seen_up = True
+        if mstate.original_resting_up is None and resting_up is not None:
+            mstate.original_resting_up = resting_up
+        if mstate.original_resting_down is None and resting_down is not None:
+            mstate.original_resting_down = resting_down
 
         # Determine window duration & elapsed time (Issue #48, Invariant 1 / #224).
         # No clock means no time gate may be evaluated, so the window is not
@@ -4313,6 +4243,80 @@ class LiveTraderEngine:
             win_duration > 0
             and book_math.is_in_dead_zone(remaining_sec, win_duration, self.dead_zone_val, self.dead_zone_unit)
         )
+
+        # Issue #226: a quote the chase raises onto the ask is marketable on
+        # arrival, the same as one being placed for the first time. The chase
+        # runs here AND again inside the paper fill block below, so the flags
+        # are initialised before the first of the two and carry to the fill
+        # check at the end of the tick.
+        chased_now_up = False
+        chased_now_dn = False
+
+        # --- LEG CHASE AFTER ONE-SIDED FILL (Issue #123, #231 / rules §4, §8, §12) ---
+        # When one leg fills, step up the opposite leg's quote towards the ask,
+        # escalating with time toward the dead zone.
+        if self.enable_leg_chase and not mstate.pair_captured and not mstate.exit_taken:
+            dz_start_ts = book_math.dead_zone_start_ts(
+                mstate.start_ts, mstate.end_ts, self.dead_zone_val, self.dead_zone_unit)
+            went_naked_ts = mstate.naked_since_ts if mstate.naked_since_ts is not None else now
+            prog = book_math.chase_progress(now, went_naked_ts, dz_start_ts)
+
+            if mstate.filled_up and not mstate.filled_down:
+                entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                max_down_bid = book_math.chase_cap(self.max_pair_cost, entry_up)
+                if mstate.down_ask is not None:
+                    orig_dn = mstate.original_resting_down if mstate.original_resting_down is not None else resting_down
+                    ceiling_dn = book_math.chase_ceiling(orig_dn, max_down_bid, prog)
+                    target_down = min(mstate.down_ask, ceiling_dn)
+                    if target_down > resting_down:
+                        resting_down = target_down
+                        mstate.resting_down = resting_down
+                        mstate.chased_leg = "DOWN"
+                        chased_now_dn = True
+            elif mstate.filled_down and not mstate.filled_up:
+                entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                max_up_bid = book_math.chase_cap(self.max_pair_cost, entry_dn)
+                if mstate.up_ask is not None:
+                    orig_up = mstate.original_resting_up if mstate.original_resting_up is not None else resting_up
+                    ceiling_up = book_math.chase_ceiling(orig_up, max_up_bid, prog)
+                    target_up = min(mstate.up_ask, ceiling_up)
+                    if target_up > resting_up:
+                        resting_up = target_up
+                        mstate.resting_up = resting_up
+                        mstate.chased_leg = "UP"
+                        chased_now_up = True
+            else:
+                mstate.chased_leg = None
+        else:
+            mstate.chased_leg = None
+
+        # --- DRIFT TRACKING (vs entry price) ---
+        # Issue #207: only track drift against a genuine two-sided mid, never a fabricated 0.50.
+        # Issue #209: measure adverse excursion and reversal from the actual entry price
+        # (fill_price_up / fill_price_down, falling back to resting_up / resting_down),
+        # not from a static 0.50 anchor. While no position is filled, position drift remains 0.0.
+        # Excursions are rounded to 6dp: prices are cents, and the raw subtraction
+        # (0.45 - 0.40 == 0.04999999999999999) would sit a hair under an exactly
+        # equal threshold and silently skip the stop.
+        if mstate.mid is not None:
+            mid = mstate.mid
+            if mstate.filled_up and not mstate.filled_down:
+                entry_up = mstate.fill_price_up if mstate.fill_price_up is not None else resting_up
+                if entry_up is not None:
+                    excursion_down = round(entry_up - mid, 6)
+                    mstate.max_down_drift = max(mstate.max_down_drift, excursion_down)
+                    # Reversal detection: mid retraced back towards entry price
+                    if mstate.max_down_drift >= self.exit_thresh and excursion_down < self.exit_reversal:
+                        mstate.reversal_seen_down = True
+            elif mstate.filled_down and not mstate.filled_up:
+                entry_dn = mstate.fill_price_down if mstate.fill_price_down is not None else resting_down
+                if entry_dn is not None:
+                    excursion_up = round(mid - (1.0 - entry_dn), 6)
+                    mstate.max_up_drift = max(mstate.max_up_drift, excursion_up)
+                    # Reversal detection: mid retraced back towards entry price
+                    if mstate.max_up_drift >= self.exit_thresh and excursion_up < self.exit_reversal:
+                        mstate.reversal_seen_up = True
+
 
         # --- ENTRY DELAY (issue #137) ---
         # While the window is younger than `entry_delay_sec`, no quotes are
@@ -4711,17 +4715,18 @@ class LiveTraderEngine:
                             mstate, "UP", mstate.fill_price_up, self.shares, now)
                         # If DOWN is not yet filled, step up DOWN quote towards ask within cap
                         if not mstate.filled_down and self.enable_leg_chase:
+                            dz_start_ts = book_math.dead_zone_start_ts(
+                                mstate.start_ts, mstate.end_ts, self.dead_zone_val, self.dead_zone_unit)
+                            went_naked_ts = mstate.naked_since_ts if mstate.naked_since_ts is not None else now
+                            prog = book_math.chase_progress(now, went_naked_ts, dz_start_ts)
                             entry_up = mstate.fill_price_up
                             max_down_bid = book_math.chase_cap(self.max_pair_cost, entry_up)
                             if mstate.down_ask is not None:
-                                target_down = min(mstate.down_ask, max_down_bid)
+                                orig_dn = mstate.original_resting_down if mstate.original_resting_down is not None else resting_down
+                                ceiling_dn = book_math.chase_ceiling(orig_dn, max_down_bid, prog)
+                                target_down = min(mstate.down_ask, ceiling_dn)
                                 if target_down > resting_down:
                                     resting_down = target_down
-                                    mstate.resting_down = resting_down
-                                    mstate.chased_leg = "DOWN"
-                                    chased_now_dn = True
-                                elif target_down == max_down_bid and target_down >= resting_down and max_down_bid > resting_down:
-                                    resting_down = max_down_bid
                                     mstate.resting_down = resting_down
                                     mstate.chased_leg = "DOWN"
                                     chased_now_dn = True
@@ -4751,17 +4756,18 @@ class LiveTraderEngine:
                             self.place_stop_order(mstate, "DOWN")
                             # If UP is not yet filled, step up UP quote towards ask within cap
                             if self.enable_leg_chase:
+                                dz_start_ts = book_math.dead_zone_start_ts(
+                                    mstate.start_ts, mstate.end_ts, self.dead_zone_val, self.dead_zone_unit)
+                                went_naked_ts = mstate.naked_since_ts if mstate.naked_since_ts is not None else now
+                                prog = book_math.chase_progress(now, went_naked_ts, dz_start_ts)
                                 entry_dn = mstate.fill_price_down
                                 max_up_bid = book_math.chase_cap(self.max_pair_cost, entry_dn)
                                 if mstate.up_ask is not None:
-                                    target_up = min(mstate.up_ask, max_up_bid)
+                                    orig_up = mstate.original_resting_up if mstate.original_resting_up is not None else resting_up
+                                    ceiling_up = book_math.chase_ceiling(orig_up, max_up_bid, prog)
+                                    target_up = min(mstate.up_ask, ceiling_up)
                                     if target_up > resting_up:
                                         resting_up = target_up
-                                        mstate.resting_up = resting_up
-                                        mstate.chased_leg = "UP"
-                                        chased_now_up = True
-                                    elif target_up == max_up_bid and target_up >= resting_up and max_up_bid > resting_up:
-                                        resting_up = max_up_bid
                                         mstate.resting_up = resting_up
                                         mstate.chased_leg = "UP"
                                         chased_now_up = True
@@ -5289,6 +5295,8 @@ class LiveTraderEngine:
             mstate.exit_taken = False
             mstate.chased_leg = None
             mstate.chased_fill = False
+            mstate.original_resting_up = None
+            mstate.original_resting_down = None
             mstate.entry_cancelled_timeout = False
             mstate.requote_round = 0
             mstate.last_requote_telemetry = None
