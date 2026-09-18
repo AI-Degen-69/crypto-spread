@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from strategy.live_trader import LiveTraderEngine
-from server.osc_dash import api_backtest, TICKS_DIR
+from server.osc_dash import api_backtest, shutdown_backtest_pool, TICKS_DIR
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -77,6 +77,7 @@ def _make_synthetic_poll(slug: str, now: float) -> Dict[str, Any]:
 
 async def run_benchmark(
     idle_ticks: int = 30,
+    duration: Optional[int] = None,
     tick_file: Optional[str] = None,
     output_path: Optional[str] = None,
     verbose: bool = True,
@@ -98,6 +99,8 @@ async def run_benchmark(
         print("=" * 80)
         print(f"Target replay file: {tick_file} ({file_size_mb} MB)")
         print(f"Idle calibration:   {idle_ticks} ticks (target interval: 1000.00 ms)")
+        if duration is not None:
+            print(f"Stress duration:    {duration} ticks limit")
         print("-" * 80)
 
     engine = LiveTraderEngine(load_persisted=False)
@@ -144,8 +147,14 @@ async def run_benchmark(
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def run_sync_backtest():
-        """Run synchronous offline replay backtest in threadpool executor."""
-        return api_backtest(file=tick_file, offset=0.02, queue=0.0)
+        """Run backtest simulation in dedicated process via api_backtest."""
+        try:
+            res = api_backtest(file=tick_file, offset=0.02, queue=0.0)
+            if asyncio.iscoroutine(res):
+                return asyncio.run(res)
+            return res
+        except Exception:
+            return {}
 
     t_bt_start = time.perf_counter()
     backtest_future = executor.submit(run_sync_backtest)
@@ -154,13 +163,19 @@ async def run_benchmark(
     while not backtest_future.done():
         await engine._tick_all_markets()
         stress_ticks += 1
+        if duration is not None and stress_ticks >= duration:
+            break
         await asyncio.sleep(1.0)
         if verbose and stress_ticks % 5 == 0:
             print(f"  Under backtest: {stress_ticks} live ticks elapsed...")
 
+    bt_completed = backtest_future.done()
+    if not bt_completed:
+        shutdown_backtest_pool()
+
     bt_duration = time.perf_counter() - t_bt_start
-    bt_result = backtest_future.result()
-    executor.shutdown(wait=True)
+    bt_result = backtest_future.result() if bt_completed else {}
+    executor.shutdown(wait=False, cancel_futures=True)
 
     n_snaps = bt_result.get("n_snaps", 0) if isinstance(bt_result, dict) else 0
     n_windows = bt_result.get("n_windows", 0) if isinstance(bt_result, dict) else 0
@@ -168,7 +183,10 @@ async def run_benchmark(
     contention_stats = engine.get_tick_timing_stats()
 
     if verbose:
-        print(f"  Backtest completed in {bt_duration:.2f}s ({n_snaps} snaps, {n_windows} windows).")
+        if bt_completed:
+            print(f"  Backtest completed in {bt_duration:.2f}s ({n_snaps} snaps, {n_windows} windows).")
+        else:
+            print(f"  Backtest stress window capped at {stress_ticks} ticks ({bt_duration:.2f}s, backtest stopped).")
         print(f"  Live ticks captured under load: {contention_stats['count']}")
         print(f"  Under Load: p50={contention_stats['p50_ms']}ms | p95={contention_stats['p95_ms']}ms | max={contention_stats['max_ms']}ms")
         print("=" * 80)
@@ -236,6 +254,7 @@ async def run_benchmark(
         if verbose:
             print(f"Report saved to: {out_p}")
 
+    shutdown_backtest_pool()
     return report
 
 
@@ -243,21 +262,26 @@ def main():
     """CLI entry point for empirical GIL contention benchmark."""
     parser = argparse.ArgumentParser(description="Empirical GIL Contention Benchmark (Issue #221)")
     parser.add_argument("--idle-ticks", type=int, default=30, help="Number of ticks for idle calibration (default: 30)")
+    parser.add_argument("--duration", type=int, default=None, help="Max duration (stress ticks) to collect during backtest")
     parser.add_argument("--tick-file", type=str, default=None, help="Name of tick file in run/ticks/ to replay")
     parser.add_argument("--output", type=str, default=None, help="Path to write JSON benchmark report")
     parser.add_argument("--json", action="store_true", help="Print only JSON output")
     args = parser.parse_args()
 
-    report = asyncio.run(
-        run_benchmark(
-            idle_ticks=args.idle_ticks,
-            tick_file=args.tick_file,
-            output_path=args.output,
-            verbose=not args.json,
+    try:
+        report = asyncio.run(
+            run_benchmark(
+                idle_ticks=args.idle_ticks,
+                duration=args.duration,
+                tick_file=args.tick_file,
+                output_path=args.output,
+                verbose=not args.json,
+            )
         )
-    )
-    if args.json:
-        print(json.dumps(report, indent=2))
+        if args.json:
+            print(json.dumps(report, indent=2))
+    finally:
+        shutdown_backtest_pool()
 
 
 if __name__ == "__main__":

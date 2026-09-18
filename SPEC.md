@@ -1,81 +1,35 @@
-# SPEC — Issues #222 + #223: Dead-zone unit & unpaired-leg-at-expiry measurements
+# SPEC — Issue #259: Isolate backtest execution into ProcessPoolExecutor to eliminate GIL contention
 
 ## Goal
+Isolate `/api/backtest` simulation workloads from FastAPI's shared threadpool into a dedicated `ProcessPoolExecutor(max_workers=1)` with an `asyncio.Semaphore(1)` concurrency cap, giving CPU replay loops an independent Python process and GIL, and completely preventing tail latency / tick starvation on the live trading engine.
 
-Two measurement questions, one shared per-window base table, two reports — no engine
-changes:
+## Problem Statement
+In Issue #221, empirical measurement proved that CPU-heavy backtest sweeps running in the default threadpool hold the Python GIL, causing severe tail starvation on the live trader engine's 1-second ticks (p99 latency jumping from idle 1,029 ms to 3,286 ms, skipping 2-3 tick intervals). In 5-minute binary markets, multi-second stalls risk missed quote cancellations, late entries, and delayed stop-loss executions.
 
-1. **#222 — dead-zone unit.** Should `dead_zone_unit` be `"pct"` (default 10% of window
-   remaining) or `"sec"` (absolute seconds)? Answer from data:
-   - Distribution of time-to-first-fill and time-to-pair, measured from quote placement,
-     split by window length (5m vs 15m).
-   - Mid volatility per remaining-time bucket, split by window length.
-   - Outcome of windows entered inside each candidate dead zone (paired vs naked leg).
-   - Verdict rule: if time-to-pair is roughly constant across window lengths → `sec`
-     wins; if the dead tail scales with the window → `pct` stands.
+## Architectural Design
+1. **Process Pool Management**:
+   - A single-worker `ProcessPoolExecutor(max_workers=1)` managed cleanly within `server/osc_dash.py`.
+   - Lazy initialization on first use (or app startup), with graceful shutdown on app exit (`app.add_event_handler("shutdown", ...)` or lifespan).
+2. **Top-Level Picklable Worker**:
+   - Extraction of pure simulation and aggregation logic into a top-level module function `_run_backtest_simulation_worker(...)`.
+   - Passes path strings, scalar values, and plain dicts across the process boundary (guaranteeing Windows `spawn` compatibility).
+   - Returns the complete result dictionary formatted identically to the current `/api/backtest` response.
+3. **Endpoint Concurrency Control**:
+   - `/api/backtest` converted to an `async def` endpoint.
+   - Guarded with an `asyncio.Semaphore(1)`: if a backtest is already in flight, return immediate HTTP 429 (`{"error": "Backtest simulation already in progress. Please retry shortly."}`).
+   - Asynchronously awaits `loop.run_in_executor(pool, _run_backtest_simulation_worker, ...)` so the FastAPI event loop remains 100% free and responsive.
+4. **Benchmark Script Compatibility**:
+   - Support `--duration` flag in `scripts/measure_gil_contention.py` to cap stress execution.
+   - Adapt `scripts/measure_gil_contention.py` to test the new isolated backtest execution flow without blocking.
 
-2. **#223 — unpaired leg at expiry.** Should `naked_leg_at_expiry` stay `"close"`
-   (default) or become `"hold"`? Answer from data, over legs that reached the dead zone
-   unpaired:
-   - Bucket by the leg's mid on entering the dead zone (0.05-wide buckets). Realised
-     settlement rate per bucket vs the bucket's own price (measures favourite-longshot
-     bias directly).
-   - Best bid actually available in the dead zone vs the mid (real cost of closing).
-   - Realised value of `hold` vs `close` including taker fees, per bucket, with the
-     distribution of outcomes (mean, median, std, quartiles, n) — not only the mean.
+## Acceptance Criteria
+1. `/api/backtest` simulation executes in a `ProcessPoolExecutor` separate from the main server event loop.
+2. Concurrency is capped with `asyncio.Semaphore(1)`, returning clean 429 if a backtest is already in flight.
+3. Existing `/api/backtest` response schemas (summary metrics, PnL histogram, equity curve, per-series breakdown) remain 100% identical.
+4. `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q` passes without regressions.
+5. `python -m scripts.measure_gil_contention --idle-ticks 5 --duration 5 --json` runs successfully.
 
-## Acceptance criteria
-
-1. A single research script (`research/sweeps/dead_zone_lab.py`) builds the per-window
-   base table in one pass over the `ev_lab` window cache, reusing:
-   - `book_math.resting_bid_filled` — the one fill rule (issue #226, ADR-0002) — never a
-     reimplemented variant;
-   - the sell-print pre-filter (issue #182) as `sim2` applies it;
-   - the sim2 anchoring rule (first valid mid inside `quote_range`, quotes at
-     `mid - offset`, `newly_placed` semantics on the placement tick).
-2. `research/sweeps/dead_zone_222.json` — fill/pair time distributions by duration,
-   volatility profile by remaining time, candidate dead-zone outcome table, and the
-   machine-readable verdict with its rationale.
-3. `research/sweeps/naked_leg_223.json` — per-bucket settlement rate, bid-vs-mid gap,
-   close-vs-hold realised values with fees, and full distribution stats per bucket.
-4. `docs/dead-zone-naked-leg-measurements.md` — the report: method, tables, verdicts,
-   caveats (dataset span, proxy settlement, sample sizes).
-5. `docs/engine-decision-rules.md` §8 and §14 gain the measured verdict in their "open
-   question" / "deliberately" passages — cross-referencing the report. **No engine
-   default changes unless the data is unambiguous; any default flip is a separate,
-   operator-approved change.**
-6. A targeted test file (`tests/test_dead_zone_lab.py`) covers the pure logic:
-   fill-timeline detection, dead-zone boundary (pct and sec units), bucketing,
-   settlement proxy, and close-vs-hold arithmetic — on synthetic windows.
-7. Targeted suites stay green: `tests/test_dead_zone_lab.py`,
-   `tests/test_ev_sweep_lab.py`, `tests/test_backtest_engine.py` (engine untouched —
-   regression guard).
-
-## Edge cases
-
-- `None` mids/books inside a window: skip ticks exactly as `sim2` does. The #223
-  valuation point is the held leg's book at the **first dead-zone tick**; if that book
-  has no bid (`None`), the leg cannot be valued as `close` — record and exclude from
-  the close-vs-hold arithmetic with a counter (`n_close_impossible`), while the
-  settlement proxy still resolves from the window's final mid.
-- Settlement proxy: captured data ends at window end; the winner is inferred from the
-  **final** two-sided mid of the window (the same convention `audit_settlement.py`
-  uses), resolved **after** the walk completes — never from the dead-zone entry tick.
-  Exact rule: `won = (held_side == up) == (final_mid > 0.5)`; mids with
-  `|final_mid − 0.5| < 0.02` (band exclusive of its edges: `0.48 ≤ m ≤ 0.52`, e.g.
-  0.505) are **ambiguous** — counted, never guessed; a missing final mid is ambiguous
-  too.
-- Late-start windows: the dead-zone boundary is measured on remaining time from the
-  window's nominal `start_ts`/`duration` (rule 8 semantics), not from first tick.
-- Buckets with tiny n: report n per bucket; verdict logic weights only buckets with
-  n ≥ 30; smaller buckets are listed but never cited alone.
-- Tape-empty days: fills come from the book detector too (ask-through), not only tape;
-  windows with no prints at all still contribute via ask-through fills.
-
-## Explicit out-of-scope
-
-- Any change to `backtest/engine.py`, `strategy/live_trader.py`, or engine defaults
-  (beyond the §8/§14 doc verdicts).
-- Editing `sim2`/`ev_lab` shared code — the lab script consumes them read-only.
-- Live-side behaviour, streaming, dashboard changes.
-- Re-running stale-sweep numbers (`fill_model`-era reports) — out of scope.
+## Explicit Out of Scope
+- Rewriting the core simulation engine in `backtest/engine.py`.
+- Altering dashboard frontend UI or client-side charts.
+- Splitting the web dashboard and live trader into separate microservices or repositories.
