@@ -1,16 +1,20 @@
-# CONSTRAINTS — Issue #198: interactive visual parameter preview grid for backtest sweeper
+# CONSTRAINTS — Issue #213: Quoting around current price across tradeable range & replacing entry_band veto
 
-## Scope Lock (read first)
-1. **Backtest engine untouched:** `backtest/engine.py` and its core simulation logic must not be modified. This is strictly a frontend UI/visualization addition.
-2. **Backtest tab only:** Scope is strictly `#tab-backtest` and `setupBacktestInputListeners()` in `server/osc_dash.py`. Do not alter Live Cockpit, collector controls, or market data tabs.
-3. **Pure client-side SVG rendering:** Rendered using lightweight vanilla DOM/SVG inside `server/osc_dash.py`. No external charting libraries, no npm packages, no server-side image generation, no new pip dependencies.
-4. **No backend API or query parameter changes:** `/api/backtest` endpoints, parameters, and signatures remain 100% unchanged.
+## Scope Lock
+1. **Decision Rules Compliance:** Strictly conform to `docs/engine-decision-rules.md` §6 and ADR-0003: `quote_range` is a structural limit, not a 0.50-anchored tuning knob.
+2. **No 0.50 Anchors:** Never re-introduce hardcoded 0.50 distance checks (`abs(mid - 0.50)`) into quoting gates or order pricing.
+3. **No Latched Window Vetoes:** Out-of-range market conditions must hold quoting per-tick only; do not set permanent window-cancelling flags (`entry_cancelled_timeout`, `band_skip`) on mid range checks.
+4. **Shared Behavioral Parity:** Both engines (`strategy/live_trader.py` and `backtest/engine.py`) must evaluate `quote_range` identically on the two-sided mid.
 
 ## Quality Guardrails
-5. **Zero regressions:** Targeted test suite covering modified files must pass:
-   `python -m pytest tests/test_osc_dash_integration.py -q`.
-   Full-repo sweeps stay with CI on push (AGENTS.md testing policy).
-6. **Zero runtime errors / Degenerate case safety:** Degenerate parameter inputs (`btOffset=0`, disabled stops, `btEntryDelay=0`, inverted quote range) must clamp gracefully without throwing JavaScript exceptions, NaN SVG coordinates, or broken layout.
-7. **Performance budget:** Client-side preview redraw execution time must remain < 16ms (60 FPS smooth interaction on standard browser event loop) without triggering network activity.
-8. **No suppression:** Strictly forbid skipping, disabling, weakening existing tests, or suppressing linters.
+5. **Zero Regressions on Targeted Suites:**
+   - `python -m pytest tests/test_quote_range_parity.py -q` (all 7 scenarios green).
+   - `python -m pytest tests/test_engine_parity.py -q` (all 18 scenarios green).
+   - `python -m pytest tests/test_live_trader.py -q` (all 110 tests green).
+   - `python -m pytest tests/test_backtest_engine.py -q` (all 136 tests green).
+   - `python -m pytest tests/test_osc_dash_integration.py -q` (all integration tests green).
+6. **Anti-Cheat:**
+   - Strictly forbid disabling, skipping, or weakening tests.
+   - Do not suppress linters or error logs.
+   - No new external dependencies.
 
