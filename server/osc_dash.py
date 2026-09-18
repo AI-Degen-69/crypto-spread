@@ -2181,7 +2181,7 @@ FULL_APP_HTML = r"""<!doctype html><html lang="en" dir="ltr"><head>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-:root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--proj:#7b9bf7;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui;--sidebar-w-collapsed: 48px;--sidebar-w-expanded: 220px}
+:root{--bg:#0a0d12;--panel:#12161d;--panel2:#171c24;--line:#232a35;--line-hi:#364152;--line-dark:#1a2029;--tx:#e7ebf3;--dim:#8792a6;--faint:#535e70;--up:#33c9b5;--up-hi:#2bb5a2;--upS:#12302c;--down:#f0684d;--downS:#311b18;--gold:#e8b84b;--warn:#f0b90b;--proj:#7b9bf7;--cyan:#38bdf8;--disp:'Space Grotesk',system-ui;--mono:'IBM Plex Mono',monospace;--body:'IBM Plex Sans',system-ui;--sidebar-w-collapsed: 48px;--sidebar-w-expanded: 220px}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--tx);font:13px/1.5 var(--body);-webkit-font-smoothing:antialiased;padding-left:var(--sidebar-w-collapsed);transition:padding-left .25s cubic-bezier(.16,1,.3,1)}
 body.sidebar-pinned{padding-left:var(--sidebar-w-expanded)}
 .cui-sidebar{position:fixed;top:0;left:0;bottom:0;width:var(--sidebar-w-collapsed);background:var(--bg);border-right:1px solid var(--line);z-index:1000;display:flex;flex-direction:column;transition:width .25s cubic-bezier(.16,1,.3,1);overflow:hidden;box-shadow:2px 0 10px rgba(0,0,0,.35)}
@@ -2251,7 +2251,7 @@ textarea:focus-visible,
 .fill.up{background:var(--up)} .fill.warn{background:var(--proj)} .fill.gold{background:var(--gold)} .fill.down{background:var(--down)}
 .tbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
 .tbl th{font:700 11px var(--disp);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
-.tbl td{padding:10px 8px;border-bottom:1px solid #1a2029;font-size:13px;vertical-align:middle}
+.tbl td{padding:10px 8px;border-bottom:1px solid var(--line-dark);font-size:13px;vertical-align:middle}
 .price-up{color:var(--up);font-weight:700;font-family:var(--mono)}
 .price-down{color:var(--down);font-weight:700;font-family:var(--mono)}
 .price-small{font-size:10px;font-weight:500;opacity:.85}
@@ -2268,8 +2268,8 @@ textarea:focus-visible,
 .liveBox{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
 .btn{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:6px 12px;font:600 12px var(--disp);cursor:pointer;display:inline-flex;align-items:center;gap:6px}
 .btn:hover{background:var(--line);border-color:var(--line-hi)}
-.btn-primary{background:var(--up);color:#0a0d12;border:none;font-weight:700;position:relative;transition:all .2s ease}
-.btn-primary:hover{background:#2bb5a2}
+.btn-primary{background:var(--up);color:var(--bg);border:none;font-weight:700;position:relative;transition:all .2s ease}
+.btn-primary:hover{background:var(--up-hi)}
 .btn-primary:disabled{opacity:0.75;cursor:wait}
 /* A locked control is not a broken one: it stays legible, shows a
    not-allowed cursor, and does not invite a hover. Used when a
@@ -2278,12 +2278,12 @@ textarea:focus-visible,
 .btn-locked{background:rgba(51,201,181,0.10);color:var(--up);border:1px solid rgba(51,201,181,0.35);font-weight:700}
 .btn:disabled,.btn-locked:disabled{cursor:not-allowed;opacity:1}
 .btn:disabled:hover,.btn-locked:disabled:hover{background:rgba(51,201,181,0.10);border-color:rgba(51,201,181,0.35)}
-.btn-primary.thinking{background:#2bb5a2;box-shadow:0 0 12px rgba(51,201,181,0.45);animation:pulse-glow 1.4s infinite alternate;pointer-events:none}
+.btn-primary.thinking{background:var(--up-hi);box-shadow:0 0 12px rgba(51,201,181,0.45);animation:pulse-glow 1.4s infinite alternate;pointer-events:none}
 @keyframes pulse-glow{0%{box-shadow:0 0 4px rgba(51,201,181,0.3);transform:scale(0.995)}100%{box-shadow:0 0 16px rgba(51,201,181,0.7);transform:scale(1.015)}}
-.spinner{width:12px;height:12px;border:2px solid rgba(10,13,18,0.25);border-top-color:#0a0d12;border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:middle;margin-left:4px}
+.spinner{width:12px;height:12px;border:2px solid rgba(10,13,18,0.25);border-top-color:var(--bg);border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:middle;margin-left:4px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .thinking-dots{display:inline-flex;align-items:center;gap:3px;margin-right:2px}
-.thinking-dots span{width:4px;height:4px;background:#0a0d12;border-radius:50%;display:inline-block;animation:dot-blink 1.2s infinite ease-in-out}
+.thinking-dots span{width:4px;height:4px;background:var(--bg);border-radius:50%;display:inline-block;animation:dot-blink 1.2s infinite ease-in-out}
 .thinking-dots span:nth-child(2){animation-delay:0.2s}
 .thinking-dots span:nth-child(3){animation-delay:0.4s}
 @keyframes dot-blink{0%,80%,100%{opacity:0.2;transform:scale(0.8)}40%{opacity:1;transform:scale(1.2)}}
@@ -2301,10 +2301,10 @@ textarea:focus-visible,
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
 .form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
-.form-group input::placeholder{color:var(--faint,#78879b);opacity:0.75}
-.form-group input.input-invalid{border:1px solid var(--down,#f0684d) !important;box-shadow:0 0 6px rgba(240,104,77,0.45) !important;background:rgba(240,104,77,0.06) !important}
-.form-group .input-hint{font:500 10px var(--mono);color:var(--faint,#78879b);margin-top:2px;display:block}
-.form-group .input-hint.err{color:var(--down,#f0684d);font-weight:600}
+.form-group input::placeholder{color:var(--faint);opacity:0.75}
+.form-group input.input-invalid{border:1px solid var(--down) !important;box-shadow:0 0 6px rgba(240,104,77,0.45) !important;background:rgba(240,104,77,0.06) !important}
+.form-group .input-hint{font:500 10px var(--mono);color:var(--faint);margin-top:2px;display:block}
+.form-group .input-hint.err{color:var(--down);font-weight:600}
 .tab-content{display:none}
 .tab-content.active{display:block}
 .toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
@@ -2693,8 +2693,8 @@ textarea:focus-visible,
           </svg>
         </div>
         <div id="btParamPreviewLegend" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:11px;color:var(--dim);font-family:var(--mono)">
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(56,189,248,0.2);border:1px solid #38bdf8;border-radius:2px"></span> Quotable Corridor</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:#38bdf8;display:inline-block"></span> Long Bid (0.50 - offset)</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(56,189,248,0.2);border:1px solid var(--cyan);border-radius:2px"></span> Quotable Corridor</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--cyan);display:inline-block"></span> Long Bid (0.50 - offset)</span>
           <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--up);display:inline-block"></span> Short Complement (0.50 + offset)</span>
           <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--down);display:inline-block"></span> Stop Loss (0.50 - offset - stop)</span>
           <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(235,178,58,0.2);border:1px dashed var(--gold);border-radius:2px"></span> Reversal Buffer</span>
@@ -2972,7 +2972,7 @@ textarea:focus-visible,
           <input type="number" min="5" step="10" id="cockpitStartBal" value="1000.00" placeholder="≥ 5.00" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group" style="justify-content:flex-end;align-items:flex-end;gap:6px">
-          <span id="cockpitParamsLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn,#f0b90b);letter-spacing:0.04em;text-align:right">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS</span>
+          <span id="cockpitParamsLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn);letter-spacing:0.04em;text-align:right">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE PARAMETERS</span>
           <button id="btnApplyParams" class="btn" style="background:rgba(51,201,181,0.15);border-color:var(--up);color:var(--up);font-weight:700;height:35px" onclick="applyCockpitConfig()">💾 APPLY PARAMETERS</button>
         </div>
       </div>
@@ -2990,7 +2990,7 @@ textarea:focus-visible,
           </div>
           <button type="button" id="btnTokensAll" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(true)">All</button>
           <button type="button" id="btnTokensClear" class="btn" style="font-size:10px;padding:2px 8px" onclick="setCockpitTokensAll(false)">Clear</button>
-          <span id="cockpitFilterLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn,#f0b90b);letter-spacing:0.04em">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE MARKETS</span>
+          <span id="cockpitFilterLockHint" style="display:none;font:700 10px var(--disp);color:var(--warn);letter-spacing:0.04em">🔒 LOCKED WHILE BOT IS RUNNING — STOP THE BOT TO CHANGE MARKETS</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <span style="font:700 11px var(--disp);color:var(--faint);text-transform:uppercase;letter-spacing:0.06em">Duration:</span>
@@ -3161,6 +3161,37 @@ const $=s=>document.getElementById(s);
 const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const pct=(a,b)=> b?Math.round(a/b*100):0;
 const hms=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`;};
+const getThemeToken = name => {
+  if (typeof document === 'undefined') return '';
+  const prop = name.startsWith('--') ? name : `--${name}`;
+  return getComputedStyle(document.documentElement).getPropertyValue(prop).trim();
+};
+const getThemeTokens = () => ({
+  bg: getThemeToken('bg'),
+  panel: getThemeToken('panel'),
+  panel2: getThemeToken('panel2'),
+  line: getThemeToken('line'),
+  lineHi: getThemeToken('line-hi'),
+  lineDark: getThemeToken('line-dark'),
+  tx: getThemeToken('tx'),
+  dim: getThemeToken('dim'),
+  faint: getThemeToken('faint'),
+  up: getThemeToken('up'),
+  upHi: getThemeToken('up-hi'),
+  down: getThemeToken('down'),
+  gold: getThemeToken('gold'),
+  warn: getThemeToken('warn'),
+  proj: getThemeToken('proj'),
+  cyan: getThemeToken('cyan'),
+});
+const hexToRgba = (hex, alpha) => {
+  if (!hex || typeof hex !== 'string' || !hex.startsWith('#')) return hex;
+  const h = hex.slice(1);
+  const r = parseInt(h.length === 3 ? h[0]+h[0] : h.slice(0, 2), 16);
+  const g = parseInt(h.length === 3 ? h[1]+h[1] : h.slice(2, 4), 16);
+  const b = parseInt(h.length === 3 ? h[2]+h[2] : h.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+};
 // Issue #100: seeker-bar math for the market cards. Returns the fill percent
 // (0-100) of a depleting time bar and its urgency colour — normal while plenty
 // of window remains, gold in the final 60s or final 10% (whichever is larger),
@@ -4397,6 +4428,7 @@ async function runBacktest(fileOverride){
 
     destroyChartInstance('chartEquity');
     const ctx = $('chartEquity').getContext('2d');
+    const theme = getThemeTokens();
     equityChartInstance = new Chart(ctx, {
       type: 'line',
       data: {
@@ -4404,8 +4436,8 @@ async function runBacktest(fileOverride){
         datasets: [{
           label: 'Cumulative PnL ($)',
           data: pnlValues,
-          borderColor: (ov.total_pnl_cents||0)>=0 ? '#33c9b5' : '#f0684d',
-          backgroundColor: (ov.total_pnl_cents||0)>=0 ? 'rgba(51,201,181,0.1)' : 'rgba(240,104,77,0.1)',
+          borderColor: (ov.total_pnl_cents||0)>=0 ? theme.up : theme.down,
+          backgroundColor: (ov.total_pnl_cents||0)>=0 ? hexToRgba(theme.up, 0.1) : hexToRgba(theme.down, 0.1),
           fill: true,
           tension: 0.1,
           pointRadius: labels.length > 100 ? 0 : 2,
@@ -4416,17 +4448,17 @@ async function runBacktest(fileOverride){
         plugins: { legend: { display: false } },
         scales: {
           x: {
-            title: { display: true, text: 'Window', color: '#8792a6' },
-            ticks: { color: '#8792a6', maxTicksLimit: 12 },
-            grid: { color: '#232a35' }
+            title: { display: true, text: 'Window', color: theme.dim },
+            ticks: { color: theme.dim, maxTicksLimit: 12 },
+            grid: { color: theme.line }
           },
           y: {
-            title: { display: true, text: 'Cumulative P&L ($)', color: '#8792a6' },
+            title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
             ticks: {
-              color: '#8792a6',
+              color: theme.dim,
               callback: function(v){ return '$' + Number(v).toFixed(2); }
             },
-            grid: { color: '#232a35' }
+            grid: { color: theme.line }
           }
         }
       }
@@ -4463,14 +4495,14 @@ async function runBacktest(fileOverride){
       });
       const histCounts = histBuckets.map(b => b.count);
       const histBgColors = histBuckets.map(b => {
-        if (b.hi <= 0) return 'rgba(240,104,77,0.7)';
-        if (b.lo >= 0) return 'rgba(51,201,181,0.7)';
-        return 'rgba(135,146,166,0.6)';
+        if (b.hi <= 0) return hexToRgba(theme.down, 0.7);
+        if (b.lo >= 0) return hexToRgba(theme.up, 0.7);
+        return hexToRgba(theme.dim, 0.6);
       });
       const histBorderColors = histBuckets.map(b => {
-        if (b.hi <= 0) return '#f0684d';
-        if (b.lo >= 0) return '#33c9b5';
-        return '#8792a6';
+        if (b.hi <= 0) return theme.down;
+        if (b.lo >= 0) return theme.up;
+        return theme.dim;
       });
 
       pnlHistChartInstance = new Chart(histCtx, {
@@ -4511,14 +4543,14 @@ async function runBacktest(fileOverride){
           },
           scales: {
             x: {
-              title: { display: true, text: 'P&L Range ($)', color: '#8792a6' },
-              ticks: { color: '#8792a6', maxRotation: 45, minRotation: 0, autoSkip: true, maxTicksLimit: 14 },
-              grid: { color: '#232a35' }
+              title: { display: true, text: 'P&L Range ($)', color: theme.dim },
+              ticks: { color: theme.dim, maxRotation: 45, minRotation: 0, autoSkip: true, maxTicksLimit: 14 },
+              grid: { color: theme.line }
             },
             y: {
-              title: { display: true, text: 'Windows Count', color: '#8792a6' },
-              ticks: { color: '#8792a6', precision: 0 },
-              grid: { color: '#232a35' },
+              title: { display: true, text: 'Windows Count', color: theme.dim },
+              ticks: { color: theme.dim, precision: 0 },
+              grid: { color: theme.line },
               beginAtZero: true
             }
           }
@@ -4711,6 +4743,7 @@ function destroyChartInstance(canvasId){
 async function renderSummaryCharts(){
   const d=await (await fetch('/api/oscillation',{cache:'no-store'})).json();
   renderOscillationHero(d.summary);
+  const theme = getThemeTokens();
   const sum=d.summary.per_series||{};
   const order=['BTC 5m','ETH 5m','BNB 5m','SOL 5m','XRP 5m','BTC 15m','ETH 15m','BNB 15m','SOL 15m','XRP 15m'];
   const osc=[], mono=[];
@@ -4731,16 +4764,16 @@ async function renderSummaryCharts(){
       data:{
         labels:order,
         datasets:[
-          {label:'oscillating',data:osc,backgroundColor:'#33c9b5'},
-          {label:'monotonic',data:mono,backgroundColor:'#f0684d'}
+          {label:'oscillating',data:osc,backgroundColor:theme.up},
+          {label:'monotonic',data:mono,backgroundColor:theme.down}
         ]
       },
       options:{
         responsive:true,
-        plugins:{legend:{position:'bottom',labels:{color:'#8792a6'}}},
+        plugins:{legend:{position:'bottom',labels:{color:theme.dim}}},
         scales:{
-          x:{ticks:{color:'#8792a6'},grid:{color:'#232a35'}},
-          y:{ticks:{color:'#8792a6'},grid:{color:'#232a35'}}
+          x:{ticks:{color:theme.dim},grid:{color:theme.line}},
+          y:{ticks:{color:theme.dim},grid:{color:theme.line}}
         }
       }
     });
@@ -4770,8 +4803,8 @@ async function renderSummaryCharts(){
     destroyChartInstance('cHist');
     new Chart(canvasHist,{
       type:'bar',
-      data:{labels:bLabels,datasets:[{label:'Windows',data:bCounts,backgroundColor:'#e8b84b'}]},
-      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8792a6'}},y:{ticks:{color:'#8792a6'},grid:{color:'#232a35'}}}}
+      data:{labels:bLabels,datasets:[{label:'Windows',data:bCounts,backgroundColor:theme.gold}]},
+      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:theme.dim}},y:{ticks:{color:theme.dim},grid:{color:theme.line}}}}
     });
   }
 
@@ -4798,8 +4831,8 @@ async function renderSummaryCharts(){
     destroyChartInstance('cStart');
     new Chart(canvasStart,{
       type:'doughnut',
-      data:{labels:sBuckets,datasets:[{data:sCounts,backgroundColor:['#33c9b5','#7b9bf7','#e8b84b','#f0684d','#535e70']}]},
-      options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:'#8792a6'}}}}
+      data:{labels:sBuckets,datasets:[{data:sCounts,backgroundColor:[theme.up,theme.proj,theme.gold,theme.down,theme.faint]}]},
+      options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:theme.dim}}}}
     });
   }
 
@@ -4816,8 +4849,8 @@ async function renderSummaryCharts(){
     destroyChartInstance('cPair');
     new Chart(canvasPair,{
       type:'bar',
-      data:{labels:pBuckets,datasets:[{data:pCounts,backgroundColor:'#7b9bf7'}]},
-      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8792a6'}},y:{ticks:{color:'#8792a6'},grid:{color:'#232a35'}}}}
+      data:{labels:pBuckets,datasets:[{data:pCounts,backgroundColor:theme.proj}]},
+      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:theme.dim}},y:{ticks:{color:theme.dim},grid:{color:theme.line}}}}
     });
   }
 }
@@ -6809,7 +6842,8 @@ function renderCockpitChart(timeline, mode, startingBalance) {
     const lastVal = vals[vals.length - 1];
     const diffVal = lastVal - startingBalance;
     const diffPct = startingBalance > 0 ? (diffVal / startingBalance) * 100 : 0.0;
-    const lineColor = diffVal >= 0 ? '#33c9b5' : '#f0684d';
+    const theme = getThemeTokens();
+    const lineColor = diffVal >= 0 ? theme.up : theme.down;
 
     // Y Axis 5 Levels
     const yLevels = [minV, minV + range * 0.25, minV + range * 0.5, minV + range * 0.75, maxV];
@@ -6871,7 +6905,7 @@ function renderCockpitChart(timeline, mode, startingBalance) {
         <!-- Interactive Crosshair Layer -->
         <g id="cockpitCrosshairG" style="display:none;pointer-events:none">
           <line id="cockpitCrossLine" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(255,255,255,0.4)" stroke-width="1.2" stroke-dasharray="3,3"/>
-          <circle id="cockpitCrossDot" cx="0" cy="0" r="5" fill="#fff" stroke="${lineColor}" stroke-width="2.5"/>
+          <circle id="cockpitCrossDot" cx="0" cy="0" r="5" fill="var(--tx)" stroke="${lineColor}" stroke-width="2.5"/>
         </g>
 
         <!-- Transparent Event Capture Rect -->
@@ -7079,7 +7113,7 @@ function onCockpitChartMouseMove(evt) {
         activeSeries.forEach(s => {
           const v = src[s.slug] != null ? src[s.slug] : 0.0;
           const yPos = ctx.getY(v);
-          dotsSvg += `<circle cx="${xPos.toFixed(1)}" cy="${yPos.toFixed(1)}" r="4.5" fill="${s.color}" stroke="#fff" stroke-width="1.5"/>`;
+          dotsSvg += `<circle cx="${xPos.toFixed(1)}" cy="${yPos.toFixed(1)}" r="4.5" fill="${s.color}" stroke="var(--tx)" stroke-width="1.5"/>`;
         });
         multiDotsG.innerHTML = dotsSvg;
       }
@@ -7232,7 +7266,7 @@ function updateBacktestParamPreview(){
   const qHeight = Math.max(0, qLoY - qHiY);
   let quotableSvg = `
     <rect x="${padL}" y="${qHiY.toFixed(1)}" width="${plotW}" height="${qHeight.toFixed(1)}" fill="rgba(56,189,248,0.04)" stroke="rgba(56,189,248,0.22)" stroke-width="1" stroke-dasharray="4,2"/>
-    <text x="${padL + plotW + 6}" y="${((qHiY + qLoY)/2 + 3.5).toFixed(1)}" fill="#38bdf8" font-size="10" font-family="var(--mono)" opacity="0.8">Quotable [$${quoteLo.toFixed(2)}..$${quoteHi.toFixed(2)}]</text>
+    <text x="${padL + plotW + 6}" y="${((qHiY + qLoY)/2 + 3.5).toFixed(1)}" fill="var(--cyan)" font-size="10" font-family="var(--mono)" opacity="0.8">Quotable [$${quoteLo.toFixed(2)}..$${quoteHi.toFixed(2)}]</text>
   `;
 
   // Time Zones Shading
@@ -7302,10 +7336,10 @@ function updateBacktestParamPreview(){
       <text x="${midX.toFixed(1)}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--tx)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">2×off: ${(offset*200).toFixed(1)}¢</text>
 
       <!-- Long Bid Line -->
-      <line x1="${activeStartX.toFixed(1)}" y1="${yLong.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="#38bdf8" stroke-width="2"/>
-      <circle cx="${activeStartX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="#38bdf8"/>
-      <circle cx="${activeEndX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="#38bdf8"/>
-      <text x="${padL + plotW + 6}" y="${(yLong + 3.5).toFixed(1)}" fill="#38bdf8" font-size="10.5" font-family="var(--mono)" font-weight="700">Long Bid: $${longBid.toFixed(3)}</text>
+      <line x1="${activeStartX.toFixed(1)}" y1="${yLong.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="var(--cyan)" stroke-width="2"/>
+      <circle cx="${activeStartX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="var(--cyan)"/>
+      <circle cx="${activeEndX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="var(--cyan)"/>
+      <text x="${padL + plotW + 6}" y="${(yLong + 3.5).toFixed(1)}" fill="var(--cyan)" font-size="10.5" font-family="var(--mono)" font-weight="700">Long Bid: $${longBid.toFixed(3)}</text>
 
       <!-- Short Complement Line -->
       <line x1="${activeStartX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yShort.toFixed(1)}" stroke="var(--up)" stroke-width="2"/>

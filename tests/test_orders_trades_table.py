@@ -2174,7 +2174,8 @@ function getOrCreate(id) {
 }
 const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
 globalThis.window = window;
-const document = { getElementById: getOrCreate, querySelectorAll: () => [] };
+const document = { getElementById: getOrCreate, querySelectorAll: () => [], documentElement: getOrCreate('_root') };
+const getComputedStyle = () => ({ getPropertyValue: () => '' });
 const localStorage = {
   _data: {},
   getItem(k) { return this._data[k] || null; },
