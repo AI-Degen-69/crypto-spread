@@ -1,6 +1,7 @@
-# TODO — Issue #136: Add per-window return distribution histogram to backtest dashboard view
+# TODO — Issue #198: feat(backtest-ui): interactive visual parameter preview grid for backtest sweeper
 
-- [x] TASK-1 [Backend/Logic]: Compute `pnl_histogram` in `/api/backtest` in `server/osc_dash.py` with bucket counts invariant `sum(count) == n_windows`.
-- [x] TASK-2 [Design/UI]: Add `#chartPnlHist` canvas and container to `#tab-backtest` in `server/osc_dash.py`.
-- [x] TASK-3 [Frontend/Logic]: Implement Chart.js histogram rendering in `runBacktest()` in `server/osc_dash.py`.
-- [x] TASK-4 [QA/Tests]: Add/update test coverage in `tests/test_osc_dash_integration.py` and ensure `python -m pytest tests/test_osc_dash_integration.py -q` passes cleanly.
+- [x] TASK-1 [Design/UI]: Add `#btParamPreviewWrap` container, SVG structure, and CSS styles in `server/osc_dash.py`.
+- [x] TASK-2 [Frontend/Logic]: Implement pure client-side SVG renderer `updateBacktestParamPreview()` in `server/osc_dash.py`.
+- [x] TASK-3 [Frontend/Logic]: Wire reactive event listeners in `setupBacktestInputListeners()` in `server/osc_dash.py`.
+- [x] TASK-4 [QA/Tests]: Add integration tests in `tests/test_osc_dash_integration.py` and verify `python -m pytest tests/test_osc_dash_integration.py -q` passes 100%.
+

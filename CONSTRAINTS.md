@@ -1,15 +1,16 @@
-# CONSTRAINTS — Issue #136: Add per-window return distribution histogram to backtest dashboard view
+# CONSTRAINTS — Issue #198: interactive visual parameter preview grid for backtest sweeper
 
 ## Scope Lock (read first)
-1. **Backtest engine untouched:** `backtest/engine.py` and its core simulation logic must not be modified. All histogram data is derived in `server/osc_dash.py` from the existing `per_window` result list.
-2. **Dashboard backtest tab only:** Scope is strictly `/api/backtest` and the backtest tab (`#tab-backtest`) in `server/osc_dash.py`. Do not modify `/oscillation` or `/analysis` pages.
-3. **Pure client-side chart rendering:** Rendered using the existing Chart.js 4.4.0 library in `server/osc_dash.py`. No server-side PNG generation, no new external npm or pip dependencies.
-4. **No query parameter changes:** Do not introduce new query parameters to `/api/backtest`.
+1. **Backtest engine untouched:** `backtest/engine.py` and its core simulation logic must not be modified. This is strictly a frontend UI/visualization addition.
+2. **Backtest tab only:** Scope is strictly `#tab-backtest` and `setupBacktestInputListeners()` in `server/osc_dash.py`. Do not alter Live Cockpit, collector controls, or market data tabs.
+3. **Pure client-side SVG rendering:** Rendered using lightweight vanilla DOM/SVG inside `server/osc_dash.py`. No external charting libraries, no npm packages, no server-side image generation, no new pip dependencies.
+4. **No backend API or query parameter changes:** `/api/backtest` endpoints, parameters, and signatures remain 100% unchanged.
 
 ## Quality Guardrails
-5. **Zero regressions:** Targeted suite covering modified files must pass:
+5. **Zero regressions:** Targeted test suite covering modified files must pass:
    `python -m pytest tests/test_osc_dash_integration.py -q`.
    Full-repo sweeps stay with CI on push (AGENTS.md testing policy).
-6. **Histogram invariant:** For any non-empty backtest result, `sum(bucket["count"] for bucket in pnl_histogram["buckets"]) == n_windows`.
-7. **Empty & degenerate state resilience:** When `n_windows == 0`, zero fills occur, or variance is zero, `/api/backtest` returns a well-formed empty/degenerate structure (`buckets: []` or single bar) and the UI renders without JavaScript errors or leaked chart instances.
+6. **Zero runtime errors / Degenerate case safety:** Degenerate parameter inputs (`btOffset=0`, disabled stops, `btEntryDelay=0`, inverted quote range) must clamp gracefully without throwing JavaScript exceptions, NaN SVG coordinates, or broken layout.
+7. **Performance budget:** Client-side preview redraw execution time must remain < 16ms (60 FPS smooth interaction on standard browser event loop) without triggering network activity.
 8. **No suppression:** Strictly forbid skipping, disabling, weakening existing tests, or suppressing linters.
+
