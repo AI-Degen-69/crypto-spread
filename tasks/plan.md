@@ -13,7 +13,7 @@
 - [x] **TASK-1 [Performance/Architecture]**: Extract picklable worker function and implement persistent ProcessPoolExecutor
   - Target: `server/osc_dash.py`
   - What is built:
-    - Define top-level module function `_run_backtest_in_process(...)` taking picklable parameters (paths, knob values) and returning the full backtest results dictionary.
+    - Define top-level module function `_run_backtest_simulation_worker(...)` taking picklable parameters (paths, knob values) and returning the full backtest results dictionary.
     - Implement persistent lazy-initialized `ProcessPoolExecutor(max_workers=1)` with clean FastAPI shutdown hook.
     - Maintain Windows spawn-compatibility (all arguments/returns strictly pickleable).
   - Helper skill: `performance-optimization`
@@ -25,7 +25,7 @@
     - Convert `api_backtest` to `async def api_backtest(...)`.
     - Introduce `_BACKTEST_SEMAPHORE = asyncio.Semaphore(1)`.
     - If semaphore is locked, immediately return HTTP 429 `{"error": "Backtest simulation already in progress. Please retry shortly."}`.
-    - Run simulation via `await loop.run_in_executor(_get_backtest_pool(), _run_backtest_in_process, ...)`.
+    - Run simulation via `await loop.run_in_executor(get_backtest_pool(), _run_backtest_simulation_worker, ...)`.
   - Helper skill: `performance-optimization`
   - Verify: Existing endpoint response schemas match 100%.
 

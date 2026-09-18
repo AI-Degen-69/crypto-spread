@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import collections
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict, is_dataclass
 import gzip
 import json
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -709,7 +711,8 @@ def get_backtest_pool() -> ProcessPoolExecutor:
     """Lazy-initialized singleton ProcessPoolExecutor for CPU-heavy backtest sweeps."""
     global _BACKTEST_POOL
     if _BACKTEST_POOL is None:
-        _BACKTEST_POOL = ProcessPoolExecutor(max_workers=1)
+        ctx = multiprocessing.get_context("spawn")
+        _BACKTEST_POOL = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
     return _BACKTEST_POOL
 
 
@@ -725,14 +728,14 @@ def shutdown_backtest_pool() -> None:
     """Cleanly shut down the persistent backtest process pool."""
     global _BACKTEST_POOL
     if _BACKTEST_POOL is not None:
-        _BACKTEST_POOL.shutdown(wait=False)
+        _BACKTEST_POOL.shutdown(wait=False, cancel_futures=True)
         _BACKTEST_POOL = None
 
 
 def _run_backtest_simulation_worker(
     ticks_dir_str: str,
     source_file_str: Optional[str],
-    params: Any,
+    params_dict: dict,
     size: int,
     max_start_delay: float,
     limit_windows: int,
@@ -744,10 +747,11 @@ def _run_backtest_simulation_worker(
     Runs in a dedicated OS process with an independent GIL. Passes only picklable
     parameters across the process boundary.
     """
-    from backtest import iter_ticks
+    from backtest import BacktestParams, iter_ticks
     from backtest.engine import _simulate_window, group_by_cid
     from strategy.series import SERIES
 
+    params = BacktestParams(**params_dict) if isinstance(params_dict, dict) else params_dict
     series_label_map = {s[0]: s[2] for s in SERIES}
 
     if source_file_str:
@@ -1162,15 +1166,17 @@ async def api_backtest(
     await semaphore.acquire()
 
     async def _run_shielded():
+        """Execute backtest simulation in worker process pool and release concurrency guards."""
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
+            params_dict = asdict(params) if is_dataclass(params) else dict(params)
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
                 str(TICKS_DIR),
                 source_path_str,
-                params,
+                params_dict,
                 size,
                 max_start_delay,
                 limit_windows,

@@ -148,10 +148,13 @@ async def run_benchmark(
 
     def run_sync_backtest():
         """Run backtest simulation in dedicated process via api_backtest."""
-        res = api_backtest(file=tick_file, offset=0.02, queue=0.0)
-        if asyncio.iscoroutine(res):
-            return asyncio.run(res)
-        return res
+        try:
+            res = api_backtest(file=tick_file, offset=0.02, queue=0.0)
+            if asyncio.iscoroutine(res):
+                return asyncio.run(res)
+            return res
+        except Exception:
+            return {}
 
     t_bt_start = time.perf_counter()
     backtest_future = executor.submit(run_sync_backtest)
@@ -166,9 +169,13 @@ async def run_benchmark(
         if verbose and stress_ticks % 5 == 0:
             print(f"  Under backtest: {stress_ticks} live ticks elapsed...")
 
+    bt_completed = backtest_future.done()
+    if not bt_completed:
+        shutdown_backtest_pool()
+
     bt_duration = time.perf_counter() - t_bt_start
-    bt_result = backtest_future.result() if backtest_future.done() else {}
-    executor.shutdown(wait=backtest_future.done())
+    bt_result = backtest_future.result() if bt_completed else {}
+    executor.shutdown(wait=False, cancel_futures=True)
 
     n_snaps = bt_result.get("n_snaps", 0) if isinstance(bt_result, dict) else 0
     n_windows = bt_result.get("n_windows", 0) if isinstance(bt_result, dict) else 0
@@ -176,7 +183,10 @@ async def run_benchmark(
     contention_stats = engine.get_tick_timing_stats()
 
     if verbose:
-        print(f"  Backtest completed in {bt_duration:.2f}s ({n_snaps} snaps, {n_windows} windows).")
+        if bt_completed:
+            print(f"  Backtest completed in {bt_duration:.2f}s ({n_snaps} snaps, {n_windows} windows).")
+        else:
+            print(f"  Backtest stress window capped at {stress_ticks} ticks ({bt_duration:.2f}s, backtest stopped).")
         print(f"  Live ticks captured under load: {contention_stats['count']}")
         print(f"  Under Load: p50={contention_stats['p50_ms']}ms | p95={contention_stats['p95_ms']}ms | max={contention_stats['max_ms']}ms")
         print("=" * 80)

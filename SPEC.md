@@ -11,13 +11,13 @@ In Issue #221, empirical measurement proved that CPU-heavy backtest sweeps runni
    - A single-worker `ProcessPoolExecutor(max_workers=1)` managed cleanly within `server/osc_dash.py`.
    - Lazy initialization on first use (or app startup), with graceful shutdown on app exit (`app.add_event_handler("shutdown", ...)` or lifespan).
 2. **Top-Level Picklable Worker**:
-   - Extraction of pure simulation and aggregation logic into a top-level module function `_run_backtest_in_process(...)`.
+   - Extraction of pure simulation and aggregation logic into a top-level module function `_run_backtest_simulation_worker(...)`.
    - Passes path strings, scalar values, and plain dicts across the process boundary (guaranteeing Windows `spawn` compatibility).
    - Returns the complete result dictionary formatted identically to the current `/api/backtest` response.
 3. **Endpoint Concurrency Control**:
    - `/api/backtest` converted to an `async def` endpoint.
    - Guarded with an `asyncio.Semaphore(1)`: if a backtest is already in flight, return immediate HTTP 429 (`{"error": "Backtest simulation already in progress. Please retry shortly."}`).
-   - Asynchronously awaits `loop.run_in_executor(pool, _run_backtest_in_process, ...)` so the FastAPI event loop remains 100% free and responsive.
+   - Asynchronously awaits `loop.run_in_executor(pool, _run_backtest_simulation_worker, ...)` so the FastAPI event loop remains 100% free and responsive.
 4. **Benchmark Script Compatibility**:
    - Support `--duration` flag in `scripts/measure_gil_contention.py` to cap stress execution.
    - Adapt `scripts/measure_gil_contention.py` to test the new isolated backtest execution flow without blocking.

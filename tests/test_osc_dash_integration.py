@@ -669,13 +669,68 @@ def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
     fake_file = tmp_path / "fake_round.jsonl"
     fake_file.write_text('{"cid": "0x1", "slug": "btc-updown-5m", "ts": 1000.0, "start_ts": 1000.0, "mid": 0.50, "bids": [], "asks": []}\n', encoding="utf-8")
 
-    # Simulate an in-flight backtest
-    monkeypatch.setattr(osc_dash, "_BACKTEST_RUNNING", True)
-    response = client.get(f"/api/backtest?file={fake_file.name}")
-    assert response.status_code == 429
-    data = response.json()
-    assert "error" in data
-    assert "already in progress" in data["error"].lower()
+    import concurrent.futures
+    import threading
+
+    mock_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: mock_pool)
+
+    started_event = threading.Event()
+    release_event = threading.Event()
+
+    def blocking_worker(*args, **kwargs):
+        started_event.set()
+        release_event.wait(timeout=5.0)
+        return {
+            "params_hash": "test",
+            "params": {},
+            "params_groups": {},
+            "overall": {
+                "windows": 0,
+                "entered_windows": 0,
+                "pairs": 0,
+                "pair_rate": 0.0,
+                "exits": 0,
+                "exit_rate": 0.0,
+                "total_pnl_cents": 0.0,
+                "avg_pnl_cents": 0.0,
+                "max_drawdown_cents": 0.0,
+                "win_rate": 0.0,
+            },
+            "per_series": {},
+            "equity_curve": [],
+            "trades_sample": [],
+            "pnl_histogram": dict(osc_dash.EMPTY_PNL_HISTOGRAM),
+        }
+
+    monkeypatch.setattr(osc_dash, "_run_backtest_simulation_worker", blocking_worker)
+
+    responses = {}
+
+    def run_first():
+        responses["first"] = client.get(f"/api/backtest?file={fake_file.name}")
+
+    t1 = threading.Thread(target=run_first)
+    t1.start()
+
+    # Wait until the first request acquires the lock and enters the worker
+    assert started_event.wait(timeout=3.0), "First backtest request did not start in time"
+
+    # Concurrently issue a second request while first is in flight
+    res_second = client.get(f"/api/backtest?file={fake_file.name}")
+    assert res_second.status_code == 429
+    data_second = res_second.json()
+    assert "error" in data_second
+    assert "already in progress" in data_second["error"].lower()
+
+    # Release worker and wait for first request to complete
+    release_event.set()
+    t1.join(timeout=5.0)
+    mock_pool.shutdown(wait=True)
+    assert responses["first"].status_code == 200
+
+    # Verify that concurrency guards are fully released
+    assert not osc_dash._BACKTEST_RUNNING
 
 
 def test_shutdown_backtest_pool():
