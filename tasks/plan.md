@@ -23,11 +23,11 @@
   - Helper skill: `test-driven-development`
   - Verify: Run `python -m pytest tests/test_backtest_engine.py -q`.
 
-- [x] **TASK-3 [QA/Parity]**: Run targeted parity test suites proving behavioral parity
-  - Target files: `tests/test_quote_range_parity.py`, `tests/test_engine_parity.py`
-  - Build/Verify: Execute all parity scenarios (outside-at-open, leave-and-return, boundary mids 0.10/0.90, resting quote stability, custom range limits).
+- [x] **TASK-3 [QA/Parity]**: Run targeted parity and dashboard integration test suites proving behavioral parity and UI controls
+  - Target files: `tests/test_quote_range_parity.py`, `tests/test_engine_parity.py`, `tests/test_osc_dash_integration.py`
+  - Build/Verify: Execute all parity scenarios (outside-at-open, leave-and-return, boundary mids 0.10/0.90, resting quote stability, custom range limits) and verify dashboard `quote_lo`/`quote_hi` controls.
   - Helper skill: `verification-loop`
-  - Verify: `python -m pytest tests/test_quote_range_parity.py tests/test_engine_parity.py -q`.
+  - Verify: `python -m pytest tests/test_quote_range_parity.py tests/test_engine_parity.py tests/test_osc_dash_integration.py -q`.
 
 - [x] **TASK-4 [Documentation & Closure]**: Generate verification evidence artifact and prepare issue closure
   - Target files: `docs/issues/213-verification-entry-band-quote-range.md` (or artifact)
@@ -40,7 +40,7 @@
 |---|---|
 | TASK-1 | `python -m pytest tests/test_live_trader.py -q` |
 | TASK-2 | `python -m pytest tests/test_backtest_engine.py -q` |
-| TASK-3 | `python -m pytest tests/test_quote_range_parity.py tests/test_engine_parity.py -q` |
+| TASK-3 | `python -m pytest tests/test_quote_range_parity.py tests/test_engine_parity.py tests/test_osc_dash_integration.py -q` |
 | TASK-4 | Review verification findings against SPEC.md & GitHub PR #241 |
 
 
