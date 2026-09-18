@@ -53,12 +53,18 @@ changes:
 
 ## Edge cases
 
-- `None` mids/books inside a window: skip ticks exactly as `sim2` does; a window whose
-  last book is `None` cannot value a leg — record and exclude from #223 with a counter.
+- `None` mids/books inside a window: skip ticks exactly as `sim2` does. The #223
+  valuation point is the held leg's book at the **first dead-zone tick**; if that book
+  has no bid (`None`), the leg cannot be valued as `close` — record and exclude from
+  the close-vs-hold arithmetic with a counter (`n_close_impossible`), while the
+  settlement proxy still resolves from the window's final mid.
 - Settlement proxy: captured data ends at window end; the winner is inferred from the
-  last two-sided mid (`> 0.5` → up won), the same convention `audit_settlement.py`
-  uses. Record the convention in the report; count ambiguous mids (`≈ 0.5`, or missing)
-  separately.
+  **final** two-sided mid of the window (the same convention `audit_settlement.py`
+  uses), resolved **after** the walk completes — never from the dead-zone entry tick.
+  Exact rule: `won = (held_side == up) == (final_mid > 0.5)`; mids with
+  `|final_mid − 0.5| < 0.02` (band exclusive of its edges: `0.48 ≤ m ≤ 0.52`, e.g.
+  0.505) are **ambiguous** — counted, never guessed; a missing final mid is ambiguous
+  too.
 - Late-start windows: the dead-zone boundary is measured on remaining time from the
   window's nominal `start_ts`/`duration` (rule 8 semantics), not from first tick.
 - Buckets with tiny n: report n per bucket; verdict logic weights only buckets with

@@ -1,17 +1,17 @@
 {
  "files": [
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-13.jsonl",
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-14.jsonl",
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-15.jsonl",
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-16.jsonl",
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-18.jsonl"
+  "run/ticks/ticks_2026-09-13.jsonl",
+  "run/ticks/ticks_2026-09-14.jsonl",
+  "run/ticks/ticks_2026-09-15.jsonl",
+  "run/ticks/ticks_2026-09-16.jsonl",
+  "run/ticks/ticks_2026-09-18.jsonl"
  ],
  "lines": {
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-13.jsonl": 164260,
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-14.jsonl": 509402,
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-15.jsonl": 549261,
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-16.jsonl": 10,
-  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-18.jsonl": 7180
+  "run/ticks/ticks_2026-09-13.jsonl": 164260,
+  "run/ticks/ticks_2026-09-14.jsonl": 509402,
+  "run/ticks/ticks_2026-09-15.jsonl": 549261,
+  "run/ticks/ticks_2026-09-16.jsonl": 10,
+  "run/ticks/ticks_2026-09-18.jsonl": 7180
  },
  "params": {
   "offset": 0.02,
@@ -29,7 +29,7 @@
   "entered": 3973,
   "pairs": 2986,
   "naked": 937,
-  "naked_valued": 0,
+  "naked_valued": 87,
   "naked_no_dz_book": 0,
   "excluded_starts_in_dead_zone": 7,
   "ambiguous_settlement": 850

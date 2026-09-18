@@ -204,6 +204,25 @@ def test_naked_leg_reaches_dead_zone_with_price_and_bid():
     assert rec["won"] is False                        # last mid 0.97 -> up won
 
 
+def test_settlement_resolves_from_final_tick_not_dead_zone_entry():
+    # the dead zone opens with the market undecided (mid ~0.50) but the final
+    # tick is decisive: the proxy must read the FINAL mid, not the entry one.
+    w = _naked_down_window(dz_up_mid=0.51, final_mid_up=0.90)
+    rec = lab.simulate_window_timeline(w)
+    assert rec["won"] is False   # final mid 0.90 -> up won; held side was dn
+
+
+def test_settlement_uses_final_mid_even_when_dz_entry_was_decided():
+    # dead zone opens pinned near 0.97 (looks like up won) but the final mid
+    # settles at 0.80 (two-sided 0.805 — decisive up win): the proxy follows
+    # the final tick — dn lost. (A mid below ~0.50 would cross the up book
+    # under our resting up bid and spuriously pair at the last tick — a
+    # synthetic-fixture artifact, not engine behaviour.)
+    w = _naked_down_window(dz_up_mid=0.60, final_mid_up=0.80)
+    rec = lab.simulate_window_timeline(w)
+    assert rec["won"] is False
+
+
 def test_settlement_proxy_ambiguity_is_none_not_a_guess():
     assert lab.settlement_won(0.60, held_up=True) is True
     assert lab.settlement_won(0.60, held_up=False) is False

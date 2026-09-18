@@ -59,10 +59,11 @@ by the leg's mid on entering the dead zone (0.05 wide):
 **Key findings:**
 
 1. **Favourite-longshot bias, measured directly: not present in the losing direction.**
-   Legs priced at 0.01–0.07 settled at 1.00 **0 times in 84 valued observations**
-   (settlement rate 0.00 vs the ~0.05 the price itself claims). If anything the market
-   *overprices these legs relative to realised outcomes* — holding a cheap leg is
-   strictly worse than its price suggests on this dataset.
+   Across all **87 valued legs** (the 0.00–0.40 dead-zone-mid buckets), the settlement
+   proxy fired at 1.00 **0 times** — legs priced 0.01–0.43 never won. If anything the
+   market *overprices these legs relative to realised outcomes* — holding a cheap leg is
+   strictly worse than its price suggests on this dataset. (Proxy settlement: inferred
+   from the window's final two-sided mid, not observed redemption.)
 2. **Closing realises less than mid arithmetic assumes, as feared.** The dead-zone bid
    sits on average 0.7¢–8.5¢ below the mid (widest in the 0.15–0.30 buckets where the
    book thins). But even after that haircut and the taker fee, the realised close
@@ -75,12 +76,15 @@ by the leg's mid on entering the dead zone (0.05 wide):
    numbers are dominated by entry cost: these legs enter near 0.50-worth of paired
    context and expire nearly worthless — the comparison is close vs hold on the same
    entry, which is what the switch actually decides.)
+4. **The gap widens with price.** In the 0.30–0.40 buckets closing realises 20–35¢
+   more than holding (e.g. 0.40: close −9.6¢ vs hold −45.0¢) — exactly where hold's
+   theoretical cent-edge should have shown up, it shows up in close's favour instead.
 
 **Verdict: `close` — the default stands, decisively.**
 
 This is the opposite of rule 14's theoretical concern: the favourite-longshot bias
 that could make holding lose does exactly that here, in the direction that favours
-closing. Only 60 of 937 naked legs had a last-mid decisive enough to value (850
+closing. Only 87 of 937 naked legs had a final mid decisive enough to value (850
 ambiguous — most naked legs die with the market already pinned near 0/1, which is
 itself the story: legs this dead never come back). **Caveat:** the valued sample is
 biased toward cheap legs (0.00–0.20); expensive naked legs (mid > 0.30, where hold
@@ -92,8 +96,10 @@ naked legs to higher mids, re-measure.
 ## Method notes & caveats (both measurements)
 
 - **Settlement proxy:** capture ends at window end, so the winner is inferred from the
-  last two-sided mid (decisively > 0.5 → up won; within ±0.02 of 0.5 → ambiguous, excluded).
-  Same convention as `audit_settlement.py`.
+  **final** two-sided mid, resolved after the walk completes (decisively > 0.5 → up won;
+  within `0.48 ≤ m ≤ 0.52` → ambiguous, excluded). This is proxy settlement inferred
+  from the final mid — **not observed redemption**. Same convention as
+  `audit_settlement.py`.
 - **Fill rule:** the paper rule is a promise of fewer fills than the market would give;
   absolute fill rates are conservative, but the *relative* shape (5m vs 15m, close vs hold)
   is what the verdicts read.

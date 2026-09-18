@@ -247,8 +247,11 @@ def simulate_window_timeline(w: Win, offset: float = DEFAULT_OFFSET,
 
         if filled_up != filled_dn and in_dz and not dz_seen:
             # first dead-zone tick of a leg that will expire naked (#223).
-            # Capture the held leg's dead-zone book once; later ticks cannot
-            # improve the measurement and the last book may have vanished.
+            # Capture the held leg's dead-zone book once (valuation point);
+            # settlement itself is resolved after the loop from the FINAL
+            # two-sided mid — the market can still decide after the dead zone
+            # opens, and guessing the winner from the entry tick would score
+            # close-vs-hold against a stale outcome.
             dz_seen = True
             held_up = bool(filled_up)
             held_bb, held_ba = (ubb, uba) if held_up else (dbb, dba)
@@ -259,14 +262,17 @@ def simulate_window_timeline(w: Win, offset: float = DEFAULT_OFFSET,
             rec["dz_elapsed"] = round(elapsed, 3)
             rec["dz_leg_mid"] = None if held_mid is None else round(held_mid, 4)
             rec["dz_leg_bid"] = held_bb
-            rec["won"] = settlement_won(last_two_sided, held_up)
-            close_net, hold_net = close_hold_values(
-                rec["entry_price"], rec["dz_leg_bid"],
-                bool(rec["won"]) if rec["won"] is not None else False,
-                taker_fee_rate)
-            rec["close_net_cents"] = None if close_net is None else round(close_net, 4)
-            rec["hold_net_cents"] = None if hold_net is None or rec["won"] is None \
-                else round((1.00 if rec["won"] else 0.00) - rec["entry_price"], 4) * 100.0
+    # settlement proxy resolved from the FINAL two-sided mid of the window
+    if dz_seen:
+        held_up = rec["held_side"] == "up"
+        rec["won"] = settlement_won(last_two_sided, held_up)
+        close_net, hold_net = close_hold_values(
+            rec["entry_price"], rec["dz_leg_bid"],
+            bool(rec["won"]) if rec["won"] is not None else False,
+            taker_fee_rate)
+        rec["close_net_cents"] = None if close_net is None else round(close_net, 4)
+        rec["hold_net_cents"] = None if hold_net is None or rec["won"] is None \
+            else round((1.00 if rec["won"] else 0.00) - rec["entry_price"], 4) * 100.0
     return rec
 
 
@@ -365,16 +371,26 @@ def verdict_naked_leg_223(buckets: dict, total_naked: int) -> dict:
                             "valuable legs; nothing to decide on")
         return out
 
-    sides = {nm: e["winner"] for nm, e in cited}
-    decisive = {nm: e for nm, e in cited
-                if e["winner"] == "hold"
-                and (e["hold_stats"]["mean"] - e["close_stats"]["mean"])
-                > HOLD_EDGE_CENTS}
+    # Decision rule (issue #223): a hold edge at or below HOLD_EDGE_CENTS
+    # counts as "close" — the variance cost outweighs a thin edge (rule 14).
+    # Normalize every cited bucket's side through that rule BEFORE the
+    # close/hold/threshold selection, so a 0.5c hold-leaning bucket never
+    # fabricates a price-dependent threshold verdict on its own.
+    sides = {}
+    decisive_hold = True
+    for nm, e in cited:
+        edge = e["hold_stats"]["mean"] - e["close_stats"]["mean"]
+        if edge > HOLD_EDGE_CENTS:
+            sides[nm] = "hold"
+        else:
+            sides[nm] = "close"
+            decisive_hold = False
+    all_hold = all(w == "hold" for w in sides.values())
     if all(w == "close" for w in sides.values()):
         out["verdict"] = "close"
         out["rationale"] = ("every cited bucket realises more by closing — "
                             "the default stands")
-    elif decisive and len(decisive) == len(cited):
+    elif all_hold and decisive_hold:
         out["verdict"] = "hold"
         out["rationale"] = ("every cited bucket realises more than the "
                             f"variance edge ({HOLD_EDGE_CENTS}c) by holding")
@@ -418,7 +434,15 @@ def _default_datasets() -> list[Path]:
 def _get_lab_cache(datasets: list[Path]):
     """Load the ev_lab window cache over exactly the given files (scratch
     cache pattern from verify_205_fill_rate.py — the lab's own cache path is
-    restored afterwards and never rebuilt in place)."""
+    restored afterwards and never rebuilt in place).
+
+    `ev_lab.build_cache()` ignores arguments and globs TICKS_DIR itself, so a
+    caller-selected subset must be selected *after* the cache loads: when the
+    user passes explicit paths, the cache is loaded/built once over the full
+    directory and then filtered to the requested files by their stamped `day`
+    (cache records carry the source file's day). The header the caller
+    receives still describes exactly what was measured.
+    """
     import ev_lab
     ticks_dir = datasets[0].parent
     old_ticks, old_cache = ev_lab.TICKS_DIR, ev_lab.CACHE_PATH
@@ -428,7 +452,10 @@ def _get_lab_cache(datasets: list[Path]):
     ev_lab.CACHE_PATH = scratch / "window_cache.pkl"
     try:
         ev_lab.build_cache(force=False)
-        return ev_lab.load_cache()
+        windows = ev_lab.load_cache()
+        wanted_days = {p.stem.replace(".jsonl", "").replace("ticks_", "")
+                       for p in datasets}
+        return [w for w in windows if getattr(w, "day", None) in wanted_days]
     finally:
         ev_lab.TICKS_DIR, ev_lab.CACHE_PATH = old_ticks, old_cache
 
@@ -467,6 +494,7 @@ def run_measurement(datasets: list[Path]):
                 if rec["won"]:
                     b["wins"] += 1
                 b["n_valued"] += 1
+                counters["naked_valued"] += 1
                 b["leg_prices"].append(rec["dz_leg_mid"])
                 b["dz_bids"].append(rec["dz_leg_bid"])
                 b["bid_minus_mid"].append(rec["dz_leg_bid"] - rec["dz_leg_mid"])
@@ -517,12 +545,22 @@ def main(argv: list[str]) -> int:
         with op(p, "rt", encoding="utf-8") as f:
             for _ in f:
                 n += 1
-        line_counts[str(p)] = n
+        line_counts[p] = n
     print(f"total lines: {sum(line_counts.values())}")
 
     records, out_buckets, counters = run_measurement(datasets)
 
-    header = dataset_header([str(p) for p in datasets], line_counts)
+    # Stamp repository-relative paths: the committed artifacts must not carry
+    # a contributor-specific checkout path (reproducibility metadata).
+    def rel(p: Path) -> str:
+        try:
+            return str(p.resolve().relative_to(REPO_ROOT)).replace("\\", "/")
+        except ValueError:
+            return str(p)
+
+    rel_datasets = [rel(p) for p in datasets]
+    rel_counts = {rel(p): n for p, n in line_counts.items()}
+    header = dataset_header(rel_datasets, rel_counts)
     out_dir = SWEEPS
     v222 = verdict_dead_zone_222(records)
     v223 = verdict_naked_leg_223(out_buckets, counters["naked"])

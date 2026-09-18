@@ -21,8 +21,11 @@ reproducible run producing the artifacts).
 - Fill decisions reuse `book_math.resting_bid_filled` (one rule, #226/ADR-0002) with
   the sell-print pre-filter (#182); anchoring follows `sim2` (first valid mid inside
   `quote_range`, quotes at `mid - offset`, `newly_placed` on the placement tick).
-- Settlement is proxied from the last two-sided mid (`> 0.5` → up won), the same
-  convention `audit_settlement.py` uses; ambiguity is counted, not guessed.
+- Settlement is proxied from the window's **final** two-sided mid (`> 0.5` → up won;
+  ambiguity band `0.48 ≤ m ≤ 0.52` inclusive — e.g. 0.505 is ambiguous, counted not
+  guessed), resolved after the walk completes; the same convention
+  `audit_settlement.py` uses. The #223 valuation point (leg mid/bid for close) is the
+  held leg's book at the first dead-zone tick.
 
 ## Tasks
 
