@@ -616,6 +616,88 @@ def _clamp_to_spec(name: str, value: Any) -> Any:
     return int(num) if isinstance(spec["default"], int) else num
 
 
+EMPTY_PNL_HISTOGRAM: Dict[str, Any] = {
+    "bucket_width_cents": 1.0,
+    "buckets": [],
+    "n": 0,
+    "mean_cents": 0.0,
+    "median_cents": 0.0,
+}
+
+
+def _choose_bucket_width(span: float) -> float:
+    """Choose clean, human-readable bucket width in cents targeting ~15 buckets."""
+    raw_step = span / 15.0
+    steps = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
+    for s in steps:
+        if s >= raw_step:
+            return s
+    return float(math.ceil(raw_step / 500.0) * 500.0)
+
+
+def _compute_pnl_histogram(per_window: list, size: int) -> dict:
+    """Compute bucketed distribution of per-window P&L for backtest diagnostics (Issue #136).
+
+    Guarantees sum(b['count'] for b in buckets) == len(per_window).
+    Anchors edges to multiples of the bucket width so 0.0 is always a boundary.
+    """
+    if not per_window:
+        return dict(EMPTY_PNL_HISTOGRAM)
+
+    pnls = [round(w.pnl_cents * size, 2) for w in per_window]
+    n = len(pnls)
+    mean_cents = round(sum(pnls) / n, 2)
+    s_pnls = sorted(pnls)
+    mid_idx = n // 2
+    median_cents = round(s_pnls[mid_idx] if n % 2 != 0 else (s_pnls[mid_idx - 1] + s_pnls[mid_idx]) / 2.0, 2)
+
+    p_min = s_pnls[0]
+    p_max = s_pnls[-1]
+
+    if p_min == p_max:
+        return {
+            "bucket_width_cents": 1.0,
+            "buckets": [{"lo": round(p_min - 0.5, 2), "hi": round(p_min + 0.5, 2), "count": n}],
+            "n": n,
+            "mean_cents": mean_cents,
+            "median_cents": median_cents,
+        }
+
+    step = _choose_bucket_width(p_max - p_min)
+    lo_edge = math.floor(p_min / step) * step
+    hi_edge = math.ceil(p_max / step) * step
+    if hi_edge == lo_edge:
+        hi_edge += step
+
+    num_buckets = int(round((hi_edge - lo_edge) / step))
+    counts = [0] * num_buckets
+    for v in pnls:
+        if v >= hi_edge:
+            idx = num_buckets - 1
+        elif v <= lo_edge:
+            idx = 0
+        else:
+            idx = int(math.floor(round((v - lo_edge) / step, 6)))
+            idx = max(0, min(num_buckets - 1, idx))
+        counts[idx] += 1
+
+    buckets = []
+    for i in range(num_buckets):
+        buckets.append({
+            "lo": round(lo_edge + i * step, 2),
+            "hi": round(lo_edge + (i + 1) * step, 2),
+            "count": counts[i],
+        })
+
+    return {
+        "bucket_width_cents": round(step, 2),
+        "buckets": buckets,
+        "n": n,
+        "mean_cents": mean_cents,
+        "median_cents": median_cents,
+    }
+
+
 @app.get("/api/backtest")
 def api_backtest(
     file: str = "",
@@ -734,6 +816,7 @@ def api_backtest(
             "per_series": {},
             "equity_curve": [],
             "trades_sample": [],
+            "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             "n_snaps": 0,
             "n_windows": 0,
         }
@@ -743,6 +826,7 @@ def api_backtest(
             return {
                 "error": "invalid file param",
                 "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             }
         source = (TICKS_DIR / file).resolve()
         try:
@@ -751,11 +835,13 @@ def api_backtest(
             return {
                 "error": "invalid file path",
                 "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             }
         if not source.exists() or not source.is_file():
             return {
                 "error": f"file not found: {file}",
                 "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             }
         snaps = list(iter_ticks(source))
     else:
@@ -798,6 +884,7 @@ def api_backtest(
             "per_series": {},
             "equity_curve": [],
             "trades_sample": [],
+            "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             "n_snaps": 0,
             "n_windows": 0,
         }
@@ -992,6 +1079,7 @@ def api_backtest(
         "per_series": per_series_out,
         "equity_curve": equity_curve,
         "trades_sample": trades_sample,
+        "pnl_histogram": _compute_pnl_histogram(per_window, size),
     }
 
 
@@ -2483,6 +2571,16 @@ textarea:focus-visible,
           <span id="btEquityWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run. Check tape data density for this dataset.</span>
         </div>
         <canvas id="chartEquity" height="140"></canvas>
+      </div>
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px">
+          <h4 style="margin:0;font:700 11px var(--disp);color:var(--faint)">Per-Window P&amp;L Distribution (Histogram)</h4>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="btPnlHistStats" class="mono" style="font-size:11px;color:var(--dim)"></span>
+            <span id="btPnlHistWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run.</span>
+          </div>
+        </div>
+        <canvas id="chartPnlHist" height="140"></canvas>
       </div>
     </div>
 
@@ -3986,6 +4084,7 @@ async function tick(){
 
 // Backtest execution
 let equityChartInstance = null;
+let pnlHistChartInstance = null;
 window.selectedBacktestFile = "";
 
 function setBacktestLoadingState(isLoading){
@@ -4176,6 +4275,100 @@ async function runBacktest(fileOverride){
         }
       }
     });
+
+    // Per-Window P&L Distribution Histogram (Issue #136)
+    const histData = data.pnl_histogram || { buckets: [], n: 0, bucket_width_cents: 1.0, mean_cents: 0.0, median_cents: 0.0 };
+    const histBuckets = histData.buckets || [];
+    const histStatsEl = $('btPnlHistStats');
+    const histWarnEl = $('btPnlHistWarning');
+    if (histStatsEl) {
+      if (histData.n > 0) {
+        const meanStr = fmtUsd(histData.mean_cents || 0, true);
+        const medStr = fmtUsd(histData.median_cents || 0, true);
+        const bwStr = ((histData.bucket_width_cents || 0) / 100).toFixed(2);
+        histStatsEl.textContent = `n=${histData.n} · Δ=$${bwStr} · Mean ${meanStr} · Median ${medStr}`;
+      } else {
+        histStatsEl.textContent = '';
+      }
+    }
+    if (histWarnEl) {
+      histWarnEl.style.display = (!hasFills && histData.n > 0) ? 'inline-block' : 'none';
+    }
+
+    destroyChartInstance('chartPnlHist');
+    if ($('chartPnlHist')) {
+      const histCtx = $('chartPnlHist').getContext('2d');
+      const histLabels = histBuckets.map(b => {
+        const loSign = b.lo < 0 ? '-$' : '$';
+        const hiSign = b.hi < 0 ? '-$' : '$';
+        const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
+        const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
+        return `${loStr}..${hiStr}`;
+      });
+      const histCounts = histBuckets.map(b => b.count);
+      const histBgColors = histBuckets.map(b => {
+        if (b.hi <= 0) return 'rgba(240,104,77,0.7)';
+        if (b.lo >= 0) return 'rgba(51,201,181,0.7)';
+        return 'rgba(135,146,166,0.6)';
+      });
+      const histBorderColors = histBuckets.map(b => {
+        if (b.hi <= 0) return '#f0684d';
+        if (b.lo >= 0) return '#33c9b5';
+        return '#8792a6';
+      });
+
+      pnlHistChartInstance = new Chart(histCtx, {
+        type: 'bar',
+        data: {
+          labels: histLabels,
+          datasets: [{
+            label: 'Windows',
+            data: histCounts,
+            backgroundColor: histBgColors,
+            borderColor: histBorderColors,
+            borderWidth: 1,
+            borderRadius: 3,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: function(items) {
+                  if (!items.length) return '';
+                  const b = histBuckets[items[0].dataIndex];
+                  if (!b) return items[0].label;
+                  const loSign = b.lo < 0 ? '-$' : '$';
+                  const hiSign = b.hi < 0 ? '-$' : '$';
+                  const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
+                  const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
+                  return `P&L Range: ${loStr} to ${hiStr}`;
+                },
+                label: function(item) {
+                  const pct = histData.n ? ((item.parsed.y / histData.n) * 100).toFixed(1) : '0.0';
+                  return ` ${item.parsed.y} windows (${pct}%)`;
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              title: { display: true, text: 'P&L Range ($)', color: '#8792a6' },
+              ticks: { color: '#8792a6', maxRotation: 45, minRotation: 0, autoSkip: true, maxTicksLimit: 14 },
+              grid: { color: '#232a35' }
+            },
+            y: {
+              title: { display: true, text: 'Windows Count', color: '#8792a6' },
+              ticks: { color: '#8792a6', precision: 0 },
+              grid: { color: '#232a35' },
+              beginAtZero: true
+            }
+          }
+        }
+      });
+    }
 
     // Per series table with tooltips and execution vs oscillation clarity
     let stbl = '<table class="tbl"><thead><tr>'

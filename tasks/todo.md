@@ -1,16 +1,6 @@
-# TODO — Issue #208: measure the shipped entry-gate defaults (quote_range + dead zone)
+# TODO — Issue #136: Add per-window return distribution histogram to backtest dashboard view
 
-- [x] TASK-1 [Code/Logic]: Dead-zone 1D sensitivity axes (pct + sec) in
-  `scripts/sweep_backtest.py` under `--include-structural`, with `dead_zone` filter key;
-  unit tests in `tests/test_sweep_backtest.py`.
-- [x] TASK-2 [Research/Logic]: Verify datasets (`scripts/verify_tick_data.py`), then run
-  `--preset sensitivity --include-structural --only quote_range|dead_zone` on every
-  `run/ticks/*.jsonl`; record tables in `docs/issue-208-entry-gates-measurement.md`.
-- [x] TASK-3 [Research/Logic]: Apply the pre-registered reading rule; verdict per knob
-  (quote_range bounds, dead-zone size, pct vs sec); adjustment candidates flagged for operator.
-- [x] TASK-4 [Docs]: Verdict tables + one-sentence verdicts posted as gh comment on #208
-  (2026-09-17); issue left open pending the operator's decision on the two adjustment
-  candidates (quote_range (0.30,0.70); dead zone 0.30 pct) — closing would misrepresent an
-  undecided outcome. pct-vs-sec resolved: keep pct.
-- [x] TASK-5 [QA/Tests]: `python -m pytest tests/test_sweep_backtest.py tests/test_backtest_engine.py tests/test_book_math.py -q`
-  passes (198 in 0.71s, incl. the review-round CLI test); CI on PR #250 is the merge gate.
+- [x] TASK-1 [Backend/Logic]: Compute `pnl_histogram` in `/api/backtest` in `server/osc_dash.py` with bucket counts invariant `sum(count) == n_windows`.
+- [x] TASK-2 [Design/UI]: Add `#chartPnlHist` canvas and container to `#tab-backtest` in `server/osc_dash.py`.
+- [x] TASK-3 [Frontend/Logic]: Implement Chart.js histogram rendering in `runBacktest()` in `server/osc_dash.py`.
+- [x] TASK-4 [QA/Tests]: Add/update test coverage in `tests/test_osc_dash_integration.py` and ensure `python -m pytest tests/test_osc_dash_integration.py -q` passes cleanly.
