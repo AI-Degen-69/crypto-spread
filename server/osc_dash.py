@@ -7031,15 +7031,22 @@ function updateBacktestParamPreview(){
   const svg = $('btParamPreviewSvg');
   if(!svg) return;
 
-  // Safe numeric extraction with sensible fallbacks
-  const offset = Math.max(0, parseFloat($('btOffset')?.value) || 0.02);
-  const pairCostMax = Math.max(0, parseFloat($('btPairCost')?.value) || 0.99);
-  const exitStop = Math.max(0, parseFloat($('btExit5m')?.value) || 0.05);
-  const exitReversal = Math.max(0, parseFloat($('btExitReversal')?.value) || 0.02);
-  const entryDelay = Math.max(0, parseFloat($('btEntryDelay')?.value) || 0);
-  const quoteLo = Math.max(0, Math.min(1.0, parseFloat($('btQuoteLo')?.value) || 0.10));
-  const quoteHi = Math.max(0, Math.min(1.0, parseFloat($('btQuoteHi')?.value) || 0.90));
-  const deadZoneVal = Math.max(0, parseFloat($('btDeadZoneVal')?.value) || 0.10);
+  // Safe numeric extraction with sensible fallbacks (preserves valid zeroes)
+  const readFinite = (id, fallback) => {
+    const raw = $(id)?.value;
+    if(raw == null || String(raw).trim() === '') return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : fallback;
+  };
+
+  const offset = Math.max(0, readFinite('btOffset', 0.02));
+  const pairCostMax = Math.max(0, readFinite('btPairCost', 0.99));
+  const exitStop = Math.max(0, readFinite('btExit5m', 0.05));
+  const exitReversal = Math.max(0, readFinite('btExitReversal', 0.02));
+  const entryDelay = Math.max(0, readFinite('btEntryDelay', 0));
+  const quoteLo = Math.max(0, Math.min(1.0, readFinite('btQuoteLo', 0.10)));
+  const quoteHi = Math.max(0, Math.min(1.0, readFinite('btQuoteHi', 0.90)));
+  const deadZoneVal = Math.max(0, readFinite('btDeadZoneVal', 0.10));
   const deadZoneUnit = $('btDeadZoneUnit')?.value || 'pct';
 
   // Time calculations (5m reference window = 300s)

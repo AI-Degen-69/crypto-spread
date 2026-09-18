@@ -2987,8 +2987,110 @@ def test_backtest_param_preview_grid_in_html():
     # JavaScript rendering & reactive bindings
     assert "function updateBacktestParamPreview()" in html
     assert "function setupBacktestInputListeners()" in html
+    assert "readFinite" in html
     assert "updateBacktestParamPreview();" in html
     assert "setupBacktestInputListeners();" in html
+
+
+def test_backtest_param_preview_zero_handling_node():
+    """Verify updateBacktestParamPreview correctly preserves valid zero values in Node.js."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    script = html[start + len("<script>"):end]
+
+    dom_prelude = """
+    let networkCalls = 0;
+    let trackNetwork = false;
+    const elements = {};
+    const makeElem = (id) => {
+      if (!elements[id]) {
+        elements[id] = {
+          id: id,
+          style: {},
+          textContent: '',
+          innerHTML: '',
+          value: '',
+          appendChild: () => {},
+          classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+          addEventListener: () => {},
+          querySelectorAll: () => []
+        };
+      }
+      return elements[id];
+    };
+    const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
+    globalThis.window = window;
+    const document = {
+      getElementById: (id) => makeElem(id),
+      querySelectorAll: () => []
+    };
+    globalThis.document = document;
+    globalThis.$ = (id) => makeElem(id);
+    const fetch = () => {
+      if (trackNetwork) networkCalls++;
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    };
+    globalThis.fetch = fetch;
+    """
+
+    test_js = """
+    if (typeof updateBacktestParamPreview !== 'function') {
+      throw new Error('updateBacktestParamPreview function is not defined');
+    }
+
+    // Set zero values for backtest inputs
+    $('btOffset').value = '0';
+    $('btExit5m').value = '0';
+    $('btExitReversal').value = '0';
+    $('btEntryDelay').value = '0';
+    $('btQuoteLo').value = '0';
+    $('btDeadZoneVal').value = '0';
+
+    trackNetwork = true;
+    updateBacktestParamPreview();
+    trackNetwork = false;
+
+    if (networkCalls > 0) {
+      throw new Error(`expected 0 network calls during preview, got: ${networkCalls}`);
+    }
+
+    const pillsHtml = $('btPreviewMetricsPills').innerHTML;
+    if (!pillsHtml.includes('0.0') || !pillsHtml.includes('Spread:')) {
+      throw new Error(`expected Spread: 0.0 when btOffset=0, got: ${pillsHtml}`);
+    }
+    if (!pillsHtml.includes('Stop: <b>-0.0')) {
+      throw new Error(`expected Stop: -0.0 when btExit5m=0, got: ${pillsHtml}`);
+    }
+
+    const svgHtml = $('btParamPreviewSvg').innerHTML;
+    if (!svgHtml.includes('Long Bid: $0.500') || !svgHtml.includes('Short Comp: $0.500')) {
+      throw new Error(`expected Long Bid & Short Comp at $0.500 for zero offset, got: ${svgHtml}`);
+    }
+
+    console.log('BT_PARAM_PREVIEW_ZERO_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run(
+        [node_bin],
+        input=dom_prelude + "\n" + script + "\n" + test_js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "BT_PARAM_PREVIEW_ZERO_TESTS_PASSED" in res.stdout
+
 
 
 
