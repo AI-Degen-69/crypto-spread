@@ -40,7 +40,7 @@
     - Phase 2: Concurrently launch real backtest sweep in a background worker thread via `api_backtest` / `_simulate_window` while live loop runs.
     - Phase 3: Collect tick intervals under active backtest load.
     - Phase 4: Output comparison table (idle vs backtest) and compute GIL contention jitter delta.
-    - Phase 5: Conclude with definitive verdict on whether delay is negligible for 5m window entry timing.
+    - Phase 5: Conclude with analysis of observed interval jitter and its potential effect on 5m window entry timing.
   - Helper skill: `performance-optimization`
   - Verify: `python -m scripts.measure_gil_contention --idle-ticks 5` smoke run.
 

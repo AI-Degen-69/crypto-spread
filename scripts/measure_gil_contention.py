@@ -82,6 +82,9 @@ async def run_benchmark(
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """Execute the two-phase GIL contention measurement."""
+    if idle_ticks < 2:
+        raise ValueError("idle_ticks must be at least 2 to compute interval timing")
+
     if tick_file is None:
         tick_file = _find_default_tick_file()
 
@@ -102,6 +105,7 @@ async def run_benchmark(
 
     # Monkeypatch poll_single_market to isolate pure GIL contention from network jitter
     def synthetic_poll(slug: str) -> Dict[str, Any]:
+        """Generate synthetic market poll snapshot for deterministic timing."""
         return _make_synthetic_poll(slug, time.time())
 
     engine._poll_single_market = synthetic_poll  # type: ignore[assignment]
@@ -140,6 +144,7 @@ async def run_benchmark(
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def run_sync_backtest():
+        """Run synchronous offline replay backtest in threadpool executor."""
         return api_backtest(file=tick_file, offset=0.02, queue=0.0)
 
     t_bt_start = time.perf_counter()
@@ -171,9 +176,12 @@ async def run_benchmark(
     # -------------------------------------------------------------------------
     # PHASE 3: Comparison & Analysis
     # -------------------------------------------------------------------------
-    delta_p50 = (contention_stats["p50_ms"] or 0.0) - (idle_stats["p50_ms"] or 0.0)
-    delta_p95 = (contention_stats["p95_ms"] or 0.0) - (idle_stats["p95_ms"] or 0.0)
-    delta_max = (contention_stats["max_ms"] or 0.0) - (idle_stats["max_ms"] or 0.0)
+    if not idle_stats["count"] or not contention_stats["count"]:
+        raise RuntimeError("Insufficient tick interval samples for comparison")
+
+    delta_p50 = contention_stats["p50_ms"] - idle_stats["p50_ms"]
+    delta_p95 = contention_stats["p95_ms"] - idle_stats["p95_ms"]
+    delta_max = contention_stats["max_ms"] - idle_stats["max_ms"]
 
     # Verdict criteria:
     # A tick target is 1000ms. In a 5-minute (300s) window:
@@ -232,6 +240,7 @@ async def run_benchmark(
 
 
 def main():
+    """CLI entry point for empirical GIL contention benchmark."""
     parser = argparse.ArgumentParser(description="Empirical GIL Contention Benchmark (Issue #221)")
     parser.add_argument("--idle-ticks", type=int, default=30, help="Number of ticks for idle calibration (default: 30)")
     parser.add_argument("--tick-file", type=str, default=None, help="Name of tick file in run/ticks/ to replay")

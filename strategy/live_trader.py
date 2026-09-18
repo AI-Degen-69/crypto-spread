@@ -721,9 +721,6 @@ class MarketLiveState:
     fill_telemetry_done_up: bool = False
     fill_telemetry_done_down: bool = False
     
-    # Tick interval timing / GIL contention instrumentation (issue #221)
-    _last_strategy_tick_perf: Optional[float] = None
-    _tick_intervals: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
 
     # Dead-zone late-start guard (issue #229, superseding #96). `first_seen_start_ts` records which window the
     # latch belongs to, `first_tick_elapsed_sec` how far into that window the
@@ -815,6 +812,11 @@ class MarketLiveState:
     stops_count: int = 0
     last_action: str = "Ready"
     last_update_ts: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        """Initialize non-serialized telemetry runtime attributes (issue #221)."""
+        self._last_strategy_tick_perf: Optional[float] = None
+        self._tick_intervals: deque[float] = deque(maxlen=1000)
 
 
 @dataclass
@@ -5282,6 +5284,7 @@ class LiveTraderEngine:
         If slug is None, computes across all configured markets and includes per_market breakdown.
         """
         def _calc_stats(samples: Sequence[float]) -> Dict[str, Any]:
+            """Compute summary metrics and percentiles for a sequence of millisecond intervals."""
             if not samples:
                 return {
                     "count": 0,
@@ -5296,6 +5299,7 @@ class LiveTraderEngine:
             n = len(sorted_s)
 
             def _quantile(q: float) -> float:
+                """Calculate empirical quantile via linear interpolation between sample ranks."""
                 idx = (n - 1) * q
                 lo = int(math.floor(idx))
                 hi = int(math.ceil(idx))
