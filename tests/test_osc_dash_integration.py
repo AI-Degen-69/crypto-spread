@@ -638,6 +638,15 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert "trades_sample" in data
     assert len(data["trades_sample"]) == 4
     assert data["n_windows"] == 4
+    # Issue #136: per-window return distribution histogram
+    assert "pnl_histogram" in data
+    hist = data["pnl_histogram"]
+    assert "bucket_width_cents" in hist
+    assert "buckets" in hist
+    assert hist["n"] == 4
+    assert sum(b["count"] for b in hist["buckets"]) == 4
+    assert "mean_cents" in hist
+    assert "median_cents" in hist
     # Issue #228: the re-entry mechanism is deleted, so the summary carries
     # no re-entry telemetry at either level.
     assert "reentry_count" not in data["overall"]
@@ -2892,4 +2901,57 @@ def test_dash_no_book_status_labels_and_cockpit_styling():
     assert "NOT QUOTED (UNPRICEABLE BOOK)" in html
     assert "WAITING FOR BOOK" in html
     assert "Skipped — unpriceable book" in html
+
+
+def test_api_backtest_pnl_histogram_invariant_and_edge_cases():
+    """Issue #136: Verify pnl_histogram computation, edge cases, and bucket count invariant."""
+    from types import SimpleNamespace
+    from server.osc_dash import _compute_pnl_histogram, EMPTY_PNL_HISTOGRAM
+
+    # 1. Empty windows list returns well-formed empty structure
+    empty_res = _compute_pnl_histogram([], size=10)
+    assert empty_res == EMPTY_PNL_HISTOGRAM
+    assert empty_res["buckets"] == []
+    assert empty_res["n"] == 0
+
+    # 2. Degenerate zero-variance case (all windows zero or identical)
+    flat_windows = [SimpleNamespace(pnl_cents=0.0) for _ in range(10)]
+    flat_res = _compute_pnl_histogram(flat_windows, size=5)
+    assert flat_res["n"] == 10
+    assert flat_res["mean_cents"] == 0.0
+    assert flat_res["median_cents"] == 0.0
+    assert len(flat_res["buckets"]) == 1
+    assert flat_res["buckets"][0]["count"] == 10
+    assert sum(b["count"] for b in flat_res["buckets"]) == 10
+
+    # 3. Multiple windows with variance: invariant sum(count) == n and 0.0 edge alignment
+    mixed_windows = [
+        SimpleNamespace(pnl_cents=-0.05),
+        SimpleNamespace(pnl_cents=-0.02),
+        SimpleNamespace(pnl_cents=0.0),
+        SimpleNamespace(pnl_cents=0.03),
+        SimpleNamespace(pnl_cents=0.08),
+        SimpleNamespace(pnl_cents=0.15),
+    ]
+    mixed_res = _compute_pnl_histogram(mixed_windows, size=100)
+    assert mixed_res["n"] == 6
+    assert sum(b["count"] for b in mixed_res["buckets"]) == 6
+    assert mixed_res["bucket_width_cents"] > 0
+    # Edges should be aligned so 0.0 is an exact boundary
+    zero_edges = [b["lo"] for b in mixed_res["buckets"]] + [mixed_res["buckets"][-1]["hi"]]
+    assert any(abs(edge) < 1e-6 for edge in zero_edges)
+
+
+def test_backtest_pnl_histogram_in_html():
+    """Issue #136: Dashboard backtest tab includes histogram canvas, stats header, and JS render logic."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    assert 'id="chartPnlHist"' in html
+    assert 'id="btPnlHistStats"' in html
+    assert 'id="btPnlHistWarning"' in html
+    assert "Per-Window P&amp;L Distribution (Histogram)" in html
+    assert "destroyChartInstance('chartPnlHist')" in html
+    assert "pnlHistChartInstance = new Chart" in html
+
 
