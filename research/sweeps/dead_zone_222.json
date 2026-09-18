@@ -1,0 +1,49 @@
+{
+ "files": [
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-13.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-14.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-15.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-16.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-18.jsonl"
+ ],
+ "lines": {
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-13.jsonl": 164260,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-14.jsonl": 509402,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-15.jsonl": 549261,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-16.jsonl": 10,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-18.jsonl": 7180
+ },
+ "params": {
+  "offset": 0.02,
+  "quote_range": [
+   0.1,
+   0.9
+  ],
+  "taker_fee_rate": 0.07,
+  "bucket_width": 0.05,
+  "settlement_proxy": "last two-sided mid > 0.5 -> up won",
+  "dead_zone": "book_math.is_in_dead_zone @ 0.10 pct"
+ },
+ "counters": {
+  "windows": 3985,
+  "entered": 3973,
+  "pairs": 2986,
+  "naked": 937,
+  "naked_valued": 0,
+  "naked_no_dz_book": 0,
+  "excluded_starts_in_dead_zone": 7,
+  "ambiguous_settlement": 850
+ },
+ "verdict_222": {
+  "median_ttp_by_duration": {
+   "300": 33.77,
+   "900": 84.05
+  },
+  "median_ttp_5m": 33.77,
+  "median_ttp_15m": 84.05,
+  "min_pairs_per_duration": 10,
+  "verdict": "inconclusive",
+  "ratio_15m_over_5m": 2.489,
+  "rationale": "ratio sits in the ambiguous band (1.5-2.5x); neither reading is established"
+ }
+}

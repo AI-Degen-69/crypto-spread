@@ -1,0 +1,475 @@
+{
+ "files": [
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-13.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-14.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-15.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-16.jsonl",
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-18.jsonl"
+ ],
+ "lines": {
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-13.jsonl": 164260,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-14.jsonl": 509402,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-15.jsonl": 549261,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-16.jsonl": 10,
+  "C:\\Users\\Tiger\\Agents\\Projects\\AI Trading\\crypto-spread\\run\\ticks\\ticks_2026-09-18.jsonl": 7180
+ },
+ "params": {
+  "offset": 0.02,
+  "quote_range": [
+   0.1,
+   0.9
+  ],
+  "taker_fee_rate": 0.07,
+  "bucket_width": 0.05,
+  "settlement_proxy": "last two-sided mid > 0.5 -> up won",
+  "dead_zone": "book_math.is_in_dead_zone @ 0.10 pct"
+ },
+ "counters": {
+  "windows": 3985,
+  "entered": 3973,
+  "pairs": 2986,
+  "naked": 937,
+  "naked_valued": 0,
+  "naked_no_dz_book": 0,
+  "excluded_starts_in_dead_zone": 7,
+  "ambiguous_settlement": 850
+ },
+ "verdict_223": {
+  "total_naked": 937,
+  "min_bucket_n": 30,
+  "hold_edge_cents": 1.0,
+  "per_bucket": {
+   "0.0": {
+    "n": 908,
+    "n_valued": 60,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.0173,
+    "mean_dz_bid": 0.0103,
+    "mean_bid_minus_mid": -0.007,
+    "close_stats": {
+     "n": 60,
+     "mean": -46.5556,
+     "median": -47.3533,
+     "std": 5.955,
+     "p25": -50.407,
+     "p75": -44.1443
+    },
+    "hold_stats": {
+     "n": 60,
+     "mean": -47.5133,
+     "median": -48.5,
+     "std": 6.0474,
+     "p25": -51.3,
+     "p75": -45.35
+    },
+    "close_minus_hold": 0.9577,
+    "winner": "close",
+    "cited": true
+   },
+   "0.05": {
+    "n": 12,
+    "n_valued": 11,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.0714,
+    "mean_dz_bid": 0.0455,
+    "mean_bid_minus_mid": -0.0259,
+    "close_stats": {
+     "n": 11,
+     "mean": -46.5904,
+     "median": -46.3372,
+     "std": 9.1141,
+     "p25": -49.0693,
+     "p75": -39.9557
+    },
+    "hold_stats": {
+     "n": 11,
+     "mean": -50.8364,
+     "median": -49.5,
+     "std": 7.9604,
+     "p25": -52.5,
+     "p75": -46.5
+    },
+    "close_minus_hold": 4.246,
+    "winner": "close",
+    "cited": false
+   },
+   "0.1": {
+    "n": 5,
+    "n_valued": 4,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.1159,
+    "mean_dz_bid": 0.097,
+    "mean_bid_minus_mid": -0.0189,
+    "close_stats": {
+     "n": 4,
+     "mean": -37.2872,
+     "median": -36.1577,
+     "std": 7.4919,
+     "p25": -46.0601,
+     "p75": -29.6438
+    },
+    "hold_stats": {
+     "n": 4,
+     "mean": -46.375,
+     "median": -46.0,
+     "std": 6.6368,
+     "p25": -53.875,
+     "p75": -39.25
+    },
+    "close_minus_hold": 9.0878,
+    "winner": "close",
+    "cited": false
+   },
+   "0.15": {
+    "n": 6,
+    "n_valued": 6,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.1756,
+    "mean_dz_bid": 0.0983,
+    "mean_bid_minus_mid": -0.0772,
+    "close_stats": {
+     "n": 6,
+     "mean": -44.7958,
+     "median": -43.0957,
+     "std": 10.0562,
+     "p25": -51.7703,
+     "p75": -35.5192
+    },
+    "hold_stats": {
+     "n": 6,
+     "mean": -54.0333,
+     "median": -53.25,
+     "std": 9.0869,
+     "p25": -63.05,
+     "p75": -45.625
+    },
+    "close_minus_hold": 9.2375,
+    "winner": "close",
+    "cited": false
+   },
+   "0.2": {
+    "n": 3,
+    "n_valued": 3,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.22,
+    "mean_dz_bid": 0.1533,
+    "mean_bid_minus_mid": -0.0667,
+    "close_stats": {
+     "n": 3,
+     "mean": -40.6177,
+     "median": -34.0773,
+     "std": 15.2267,
+     "p25": -61.6557,
+     "p75": -26.12
+    },
+    "hold_stats": {
+     "n": 3,
+     "mean": -55.0667,
+     "median": -52.0,
+     "std": 9.7164,
+     "p25": -68.2,
+     "p75": -45.0
+    },
+    "close_minus_hold": 14.449,
+    "winner": "close",
+    "cited": false
+   },
+   "0.3": {
+    "n": 1,
+    "n_valued": 1,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.305,
+    "mean_dz_bid": 0.22,
+    "mean_bid_minus_mid": -0.085,
+    "close_stats": {
+     "n": 1,
+     "mean": -15.201199999999998,
+     "median": -15.201199999999998,
+     "std": 0.0,
+     "p25": -15.201199999999998,
+     "p75": -15.201199999999998
+    },
+    "hold_stats": {
+     "n": 1,
+     "mean": -36.0,
+     "median": -36.0,
+     "std": 0.0,
+     "p25": -36.0,
+     "p75": -36.0
+    },
+    "close_minus_hold": 20.7988,
+    "winner": "close",
+    "cited": false
+   },
+   "0.35": {
+    "n": 1,
+    "n_valued": 1,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.375,
+    "mean_dz_bid": 0.32,
+    "mean_bid_minus_mid": -0.055,
+    "close_stats": {
+     "n": 1,
+     "mean": -17.5232,
+     "median": -17.5232,
+     "std": 0.0,
+     "p25": -17.5232,
+     "p75": -17.5232
+    },
+    "hold_stats": {
+     "n": 1,
+     "mean": -48.0,
+     "median": -48.0,
+     "std": 0.0,
+     "p25": -48.0,
+     "p75": -48.0
+    },
+    "close_minus_hold": 30.4768,
+    "winner": "close",
+    "cited": false
+   },
+   "0.4": {
+    "n": 1,
+    "n_valued": 1,
+    "n_close_impossible": 0,
+    "settlement_rate": 0.0,
+    "mean_leg_price": 0.43,
+    "mean_dz_bid": 0.37,
+    "mean_bid_minus_mid": -0.06,
+    "close_stats": {
+     "n": 1,
+     "mean": -9.631700000000002,
+     "median": -9.631700000000002,
+     "std": 0.0,
+     "p25": -9.631700000000002,
+     "p75": -9.631700000000002
+    },
+    "hold_stats": {
+     "n": 1,
+     "mean": -45.0,
+     "median": -45.0,
+     "std": 0.0,
+     "p25": -45.0,
+     "p75": -45.0
+    },
+    "close_minus_hold": 35.3683,
+    "winner": "close",
+    "cited": false
+   }
+  },
+  "verdict": "close",
+  "price_dependent": false,
+  "low_side": null,
+  "high_side": null,
+  "rationale": "every cited bucket realises more by closing \u2014 the default stands"
+ },
+ "buckets": {
+  "0.0": {
+   "n": 908,
+   "n_valued": 60,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.0173,
+   "mean_dz_bid": 0.0103,
+   "mean_bid_minus_mid": -0.007,
+   "close_stats": {
+    "n": 60,
+    "mean": -46.5556,
+    "median": -47.3533,
+    "std": 5.955,
+    "p25": -50.407,
+    "p75": -44.1443
+   },
+   "hold_stats": {
+    "n": 60,
+    "mean": -47.5133,
+    "median": -48.5,
+    "std": 6.0474,
+    "p25": -51.3,
+    "p75": -45.35
+   }
+  },
+  "0.35": {
+   "n": 1,
+   "n_valued": 1,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.375,
+   "mean_dz_bid": 0.32,
+   "mean_bid_minus_mid": -0.055,
+   "close_stats": {
+    "n": 1,
+    "mean": -17.5232,
+    "median": -17.5232,
+    "std": 0.0,
+    "p25": -17.5232,
+    "p75": -17.5232
+   },
+   "hold_stats": {
+    "n": 1,
+    "mean": -48.0,
+    "median": -48.0,
+    "std": 0.0,
+    "p25": -48.0,
+    "p75": -48.0
+   }
+  },
+  "0.15": {
+   "n": 6,
+   "n_valued": 6,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.1756,
+   "mean_dz_bid": 0.0983,
+   "mean_bid_minus_mid": -0.0772,
+   "close_stats": {
+    "n": 6,
+    "mean": -44.7958,
+    "median": -43.0957,
+    "std": 10.0562,
+    "p25": -51.7703,
+    "p75": -35.5192
+   },
+   "hold_stats": {
+    "n": 6,
+    "mean": -54.0333,
+    "median": -53.25,
+    "std": 9.0869,
+    "p25": -63.05,
+    "p75": -45.625
+   }
+  },
+  "0.2": {
+   "n": 3,
+   "n_valued": 3,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.22,
+   "mean_dz_bid": 0.1533,
+   "mean_bid_minus_mid": -0.0667,
+   "close_stats": {
+    "n": 3,
+    "mean": -40.6177,
+    "median": -34.0773,
+    "std": 15.2267,
+    "p25": -61.6557,
+    "p75": -26.12
+   },
+   "hold_stats": {
+    "n": 3,
+    "mean": -55.0667,
+    "median": -52.0,
+    "std": 9.7164,
+    "p25": -68.2,
+    "p75": -45.0
+   }
+  },
+  "0.05": {
+   "n": 12,
+   "n_valued": 11,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.0714,
+   "mean_dz_bid": 0.0455,
+   "mean_bid_minus_mid": -0.0259,
+   "close_stats": {
+    "n": 11,
+    "mean": -46.5904,
+    "median": -46.3372,
+    "std": 9.1141,
+    "p25": -49.0693,
+    "p75": -39.9557
+   },
+   "hold_stats": {
+    "n": 11,
+    "mean": -50.8364,
+    "median": -49.5,
+    "std": 7.9604,
+    "p25": -52.5,
+    "p75": -46.5
+   }
+  },
+  "0.1": {
+   "n": 5,
+   "n_valued": 4,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.1159,
+   "mean_dz_bid": 0.097,
+   "mean_bid_minus_mid": -0.0189,
+   "close_stats": {
+    "n": 4,
+    "mean": -37.2872,
+    "median": -36.1577,
+    "std": 7.4919,
+    "p25": -46.0601,
+    "p75": -29.6438
+   },
+   "hold_stats": {
+    "n": 4,
+    "mean": -46.375,
+    "median": -46.0,
+    "std": 6.6368,
+    "p25": -53.875,
+    "p75": -39.25
+   }
+  },
+  "0.4": {
+   "n": 1,
+   "n_valued": 1,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.43,
+   "mean_dz_bid": 0.37,
+   "mean_bid_minus_mid": -0.06,
+   "close_stats": {
+    "n": 1,
+    "mean": -9.631700000000002,
+    "median": -9.631700000000002,
+    "std": 0.0,
+    "p25": -9.631700000000002,
+    "p75": -9.631700000000002
+   },
+   "hold_stats": {
+    "n": 1,
+    "mean": -45.0,
+    "median": -45.0,
+    "std": 0.0,
+    "p25": -45.0,
+    "p75": -45.0
+   }
+  },
+  "0.3": {
+   "n": 1,
+   "n_valued": 1,
+   "n_close_impossible": 0,
+   "settlement_rate": 0.0,
+   "mean_leg_price": 0.305,
+   "mean_dz_bid": 0.22,
+   "mean_bid_minus_mid": -0.085,
+   "close_stats": {
+    "n": 1,
+    "mean": -15.201199999999998,
+    "median": -15.201199999999998,
+    "std": 0.0,
+    "p25": -15.201199999999998,
+    "p75": -15.201199999999998
+   },
+   "hold_stats": {
+    "n": 1,
+    "mean": -36.0,
+    "median": -36.0,
+    "std": 0.0,
+    "p25": -36.0,
+    "p75": -36.0
+   }
+  }
+ }
+}
