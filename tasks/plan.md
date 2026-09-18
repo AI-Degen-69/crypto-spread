@@ -1,46 +1,44 @@
-# Task Plan — Issue #136: Add per-window return distribution histogram to backtest dashboard view
+# Task Plan — Issue #198: feat(backtest-ui): interactive visual parameter preview grid for backtest sweeper
 
-**Size tier:** Small — 2 files (`server/osc_dash.py` and `tests/test_osc_dash_integration.py`).
-**Task type:** Code + Design/UI.
+**Size tier:** Standard — 2 files (`server/osc_dash.py` and `tests/test_osc_dash_integration.py`).
+**Task type:** Design/UI + Core.
 
 ## Context
-- `/api/backtest` simulates every window and returns `equity_curve` and `trades_sample`.
-- Aggregate stats (`win_rate`, `avg_pnl_cents`) hide outcome skew, tail risk, and dispersion.
-- Adding a bucketed per-window P&L histogram to `/api/backtest` and rendering it with Chart.js on the backtest tab makes distribution shape instantly visible on every parameter sweep.
+- The Backtest Parameters card (`#tab-backtest` in `server/osc_dash.py`) presents trading controls as isolated numeric inputs (`btOffset`, `btPairCost`, `btExit5m`, `btExitReversal`, `btEntryDelay`, `btQuoteLo`, `btQuoteHi`, `btDeadZoneVal`, `btDeadZoneUnit`).
+- Operators currently cannot visualize how these parameters interact geometrically on the price-time grid prior to running sweeps.
+- Adding an interactive 2D SVG preview grid directly inside the Backtest Parameters card provides instant visual feedback on price boundaries, spread offsets, stop loss levels, and time gating as inputs change.
 
 ## Tasks
 
-- [x] **TASK-1 [Backend/Logic]**: Compute `pnl_histogram` in `/api/backtest`
+- [x] **TASK-1 [Design/UI]**: Add `#btParamPreviewWrap` container, SVG structure, and CSS styles
   - Target files: `server/osc_dash.py`
-  - Build: Implement helper `_compute_pnl_histogram(per_window, size)` returning `{bucket_width_cents, buckets: [{lo, hi, count}], n, mean_cents, median_cents}`. Handle empty dataset, single-value/zero-variance degenerate cases, and ensure `sum(count) == n_windows`. Return `pnl_histogram` on success and the empty fallback shape on early error returns.
-  - Helper skill: `api-and-interface-design`
-  - Verify: Targeted pytest assertions on `/api/backtest` response.
-
-- [x] **TASK-2 [Design/UI]**: Add `#chartPnlHist` canvas and container to `#tab-backtest`
-  - Target files: `server/osc_dash.py`
-  - Build: Add a dedicated card/panel directly below `#chartEquity` in `#btOverallCard` with header "Per-Window P&L Distribution (Histogram)", statistical badge `<span id="btPnlHistStats"></span>`, and `<canvas id="chartPnlHist" height="140"></canvas>`.
+  - Build: In `#tab-backtest`, add `#btParamPreviewWrap` containing `#btPreviewMetricsPills`, the `<svg id="btParamPreviewSvg">` element, and legend chips. Add clean CSS matching dashboard palette (`--panel2`, `--line`, `--up`, `--down`, `--gold`, `--cyan`, `--dim`).
   - Helper skill: `frontend-ui-engineering`
-  - Verify: HTML structure test in `tests/test_osc_dash_integration.py`.
+  - Verify: HTML structure checks in `tests/test_osc_dash_integration.py`.
 
-- [x] **TASK-3 [Frontend/Logic]**: Render Chart.js histogram in `runBacktest()`
+- [x] **TASK-2 [Frontend/Logic]**: Implement pure client-side SVG renderer `updateBacktestParamPreview()`
   - Target files: `server/osc_dash.py`
-  - Build: Hook into `runBacktest()`. Destroy any existing `chartPnlHist` instance via `destroyChartInstance('chartPnlHist')`. Format bucket labels (e.g. `-$0.05..$0.00`), color bars by sign (green `--up`, red `--down`, neutral for zero), populate stats header (`n`, `Δ`, `mean`, `median`), and handle empty/zero-fill states gracefully without errors.
+  - Build: Implement `updateBacktestParamPreview()` in the SPA JavaScript block. Render Price Y-axis (0.00 to 1.00, quotable range corridor, 0.50 mid reference, resting long/short bids, stop loss boundary, reversal buffer) and Time X-axis (0 to 300s, entry delay zone, active trading corridor, dead zone tail). Update summary pill chips with calculated values. Clamps edge cases (0 offset, 0 stop, inverted bounds).
   - Helper skill: `frontend-ui-engineering`
-  - Verify: Integration test checking JavaScript render logic and canvas bindings.
+  - Verify: Client script checks and DOM structure verification.
 
-- [x] **TASK-4 [QA/Tests]**: Integration test coverage for histogram endpoint and UI
+- [x] **TASK-3 [Frontend/Logic]**: Wire reactive event listeners in `setupBacktestInputListeners()`
+  - Target files: `server/osc_dash.py`
+  - Build: Attach `input` and `change` listeners to all relevant input fields (`btOffset`, `btPairCost`, `btExit5m`, `btExit15m`, `btExitBtc`, `btExitSol`, `btExitReversal`, `btEntryDelay`, `btQuoteLo`, `btQuoteHi`, `btDeadZoneVal`, `btDeadZoneUnit`). Call `updateBacktestParamPreview()` on init and tab switch.
+  - Helper skill: `frontend-ui-engineering`
+  - Verify: Integration test checking JavaScript event bindings in served HTML.
+
+- [x] **TASK-4 [QA/Tests]**: Add integration tests and verify zero regressions
   - Target files: `tests/test_osc_dash_integration.py`
-  - Build: Extend `test_api_backtest_simulation` and add targeted tests validating:
-    1. `pnl_histogram` shape and bucket count sum invariant (`sum(count) == n_windows`).
-    2. Empty/error response returns well-formed empty `pnl_histogram`.
-    3. HTML contains `#chartPnlHist` canvas and histogram update code.
+  - Build: Add `test_backtest_param_preview_grid_present()` asserting the container, SVG, metric chips, legend, and update function exist in the served HTML.
   - Helper skill: `test-driven-development`
   - Verify: `python -m pytest tests/test_osc_dash_integration.py -q` passes 100%.
 
 ## Verification Matrix
 | Task | Method |
 |---|---|
-| TASK-1 | `pytest tests/test_osc_dash_integration.py -k test_api_backtest` |
-| TASK-2 | `pytest tests/test_osc_dash_integration.py -k test_backtest_html` |
-| TASK-3 | `pytest tests/test_osc_dash_integration.py -k test_backtest_html` |
+| TASK-1 | `pytest tests/test_osc_dash_integration.py -k test_backtest_param_preview` |
+| TASK-2 | `pytest tests/test_osc_dash_integration.py -k test_backtest_param_preview` |
+| TASK-3 | `pytest tests/test_osc_dash_integration.py -k test_backtest_param_preview` |
 | TASK-4 | `python -m pytest tests/test_osc_dash_integration.py -q` (all green) |
+

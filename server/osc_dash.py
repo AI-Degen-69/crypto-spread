@@ -2271,6 +2271,15 @@ textarea:focus-visible,
 .param-structural{border-left:2px solid var(--down) !important;padding-left:8px;border-radius:2px}
 .bt-section-dot-amber{background:var(--gold)}
 .bt-section-dot-blue{background:var(--proj)}
+/* ── Backtest Parameter 2D Preview Grid (Issue #198) ────────────────────────── */
+#btParamPreviewWrap{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:14px;transition:border-color .15s ease}
+#btParamPreviewWrap:hover{border-color:var(--line-hi)}
+.bt-preview-pill{font:600 10.5px var(--mono);padding:2px 8px;border-radius:99px;border:1px solid var(--line);background:var(--panel);display:inline-flex;align-items:center;gap:4px}
+.bt-preview-pill b{color:var(--tx)}
+.bt-preview-pill-up{color:var(--up);border-color:rgba(51,201,181,0.3);background:rgba(51,201,181,0.08)}
+.bt-preview-pill-down{color:var(--down);border-color:rgba(240,104,77,0.3);background:rgba(240,104,77,0.08)}
+.bt-preview-pill-gold{color:var(--gold);border-color:rgba(235,178,58,0.3);background:rgba(235,178,58,0.08)}
+.bt-preview-pill-cyan{color:var(--cyan);border-color:rgba(56,189,248,0.3);background:rgba(56,189,248,0.08)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -2550,6 +2559,34 @@ textarea:focus-visible,
         </div>
 
       </div>
+
+      <!-- ── 3. STRATEGY GEOMETRY PREVIEW (2D Price-Time Grid, Issue #198) ── -->
+      <div id="btParamPreviewWrap">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <h4 style="margin:0;font:700 11.5px var(--disp);color:var(--tx);letter-spacing:.04em;text-transform:uppercase">📐 Strategy Geometry Preview</h4>
+            <span style="font-size:10.5px;color:var(--dim);font-family:var(--mono)">(2D Price × Time Coordinate Grid)</span>
+          </div>
+          <div id="btPreviewMetricsPills" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <!-- Dynamic metric summary pills rendered by updateBacktestParamPreview() -->
+          </div>
+        </div>
+        <div style="position:relative;width:100%;background:rgba(10,13,18,0.55);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+          <svg id="btParamPreviewSvg" viewBox="0 0 760 260" preserveAspectRatio="none" style="width:100%;height:260px;display:block">
+            <!-- Rendered by updateBacktestParamPreview() -->
+          </svg>
+        </div>
+        <div id="btParamPreviewLegend" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:11px;color:var(--dim);font-family:var(--mono)">
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(56,189,248,0.2);border:1px solid #38bdf8;border-radius:2px"></span> Quotable Corridor</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:#38bdf8;display:inline-block"></span> Long Bid (0.50 - offset)</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--up);display:inline-block"></span> Short Complement (0.50 + offset)</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--down);display:inline-block"></span> Stop Loss (0.50 - offset - stop)</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(235,178,58,0.2);border:1px dashed var(--gold);border-radius:2px"></span> Reversal Buffer</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(235,178,58,0.15);border:1px solid rgba(235,178,58,0.4);border-radius:2px"></span> Entry Delay</span>
+          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(240,104,77,0.15);border:1px solid rgba(240,104,77,0.4);border-radius:2px"></span> Dead Zone (No Entry)</span>
+        </div>
+      </div>
+
       <div style="margin-top:14px;display:flex;gap:8px">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
@@ -3813,7 +3850,10 @@ function switchTab(name){
   if(btn) btn.classList.add('active');
   if(cont) cont.classList.add('active');
   if(name==='cockpit') fetchCockpitState();
-  if(name==='backtest' && !equityChartInstance) runBacktest();
+  if(name==='backtest'){
+    updateBacktestParamPreview();
+    if(!equityChartInstance) runBacktest();
+  }
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
 }
@@ -4537,8 +4577,12 @@ function resetBtParams(){
   if ($('btQuoteLo')) $('btQuoteLo').value = "0.10";
   if ($('btQuoteHi')) $('btQuoteHi').value = "0.90";
   if ($('btEntryDelay')) $('btEntryDelay').value = "0";
+  if ($('btExitReversal')) $('btExitReversal').value = "0.02";
+  if ($('btDeadZoneVal')) $('btDeadZoneVal').value = "0.10";
+  if ($('btDeadZoneUnit')) $('btDeadZoneUnit').value = "pct";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
+  updateBacktestParamPreview();
   runBacktest();
 }
 
@@ -6982,12 +7026,202 @@ function onCockpitChartMouseLeave() {
   if (tooltip) tooltip.style.display = 'none';
 }
 
+// ── Backtest Parameter 2D Preview Grid (Issue #198) ──────────────────────────
+function updateBacktestParamPreview(){
+  const svg = $('btParamPreviewSvg');
+  if(!svg) return;
+
+  // Safe numeric extraction with sensible fallbacks
+  const offset = Math.max(0, parseFloat($('btOffset')?.value) || 0.02);
+  const pairCostMax = Math.max(0, parseFloat($('btPairCost')?.value) || 0.99);
+  const exitStop = Math.max(0, parseFloat($('btExit5m')?.value) || 0.05);
+  const exitReversal = Math.max(0, parseFloat($('btExitReversal')?.value) || 0.02);
+  const entryDelay = Math.max(0, parseFloat($('btEntryDelay')?.value) || 0);
+  const quoteLo = Math.max(0, Math.min(1.0, parseFloat($('btQuoteLo')?.value) || 0.10));
+  const quoteHi = Math.max(0, Math.min(1.0, parseFloat($('btQuoteHi')?.value) || 0.90));
+  const deadZoneVal = Math.max(0, parseFloat($('btDeadZoneVal')?.value) || 0.10);
+  const deadZoneUnit = $('btDeadZoneUnit')?.value || 'pct';
+
+  // Time calculations (5m reference window = 300s)
+  const windowDur = 300;
+  let deadSec = deadZoneUnit === 'sec' ? deadZoneVal : windowDur * deadZoneVal;
+  deadSec = Math.max(0, Math.min(windowDur, deadSec));
+  const delaySec = Math.max(0, Math.min(windowDur, entryDelay));
+  const activeSec = Math.max(0, windowDur - delaySec - deadSec);
+
+  // Price calculations
+  const mid = 0.50;
+  const longBid = Math.max(0, mid - offset);
+  const shortComp = Math.min(1.0, mid + offset);
+  const pairCost = Math.max(0, (mid - offset) * 2);
+  const stopPrice = Math.max(0, longBid - exitStop);
+  const revPrice = Math.min(1.0, stopPrice + exitReversal);
+
+  // Update Summary Pills
+  const pillsEl = $('btPreviewMetricsPills');
+  if (pillsEl) {
+    pillsEl.innerHTML = `
+      <span class="bt-preview-pill bt-preview-pill-cyan" title="Quoted spread width (2 × offset)">Spread: <b>${(offset * 200).toFixed(1)}¢</b></span>
+      <span class="bt-preview-pill ${pairCost <= pairCostMax ? 'bt-preview-pill-up' : 'bt-preview-pill-down'}" title="Calculated pair cost vs max limit">Pair Cost: <b>$${pairCost.toFixed(3)}</b> <span style="font-size:9.5px;opacity:.7">/ max $${pairCostMax.toFixed(2)}</span></span>
+      <span class="bt-preview-pill bt-preview-pill-down" title="Adverse distance to trigger stop exit">Stop: <b>-${(exitStop * 100).toFixed(1)}¢</b></span>
+      <span class="bt-preview-pill bt-preview-pill-gold" title="Active quoting window duration">Active: <b>${Math.round(activeSec)}s</b> <span style="font-size:9.5px;opacity:.7">(${((activeSec / windowDur) * 100).toFixed(0)}%)</span></span>
+    `;
+  }
+
+  // Dimensions
+  const w = 760;
+  const h = 260;
+  const padL = 58;
+  const padR = 155;
+  const padT = 18;
+  const padB = 28;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  const getX = (sec) => padL + (Math.max(0, Math.min(windowDur, sec)) / windowDur) * plotW;
+  const getY = (p) => padT + (1.0 - Math.max(0.0, Math.min(1.0, p))) * plotH;
+
+  // Background Gridlines
+  let gridSvg = '';
+  // Horizontal Price Lines (0.10 steps)
+  for(let p = 0.0; p <= 1.001; p += 0.10){
+    const yPos = getY(p);
+    const isMid = Math.abs(p - 0.50) < 0.001;
+    gridSvg += `
+      <line x1="${padL}" y1="${yPos.toFixed(1)}" x2="${padL + plotW}" y2="${yPos.toFixed(1)}" stroke="${isMid ? 'rgba(243,186,47,0.45)' : 'rgba(255,255,255,0.06)'}" stroke-width="${isMid ? 1.5 : 1}" stroke-dasharray="${isMid ? '4,3' : '2,3'}"/>
+      <text x="${padL - 6}" y="${(yPos + 3.5).toFixed(1)}" fill="${isMid ? 'var(--gold)' : 'var(--dim)'}" font-size="10" font-family="var(--mono)" font-weight="${isMid ? '700' : '400'}" text-anchor="end">$${p.toFixed(2)}</text>
+    `;
+  }
+
+  // Vertical Time Lines (60s steps)
+  for(let sec = 0; sec <= windowDur; sec += 60){
+    const xPos = getX(sec);
+    const minStr = Math.floor(sec / 60) + 'm';
+    gridSvg += `
+      <line x1="${xPos.toFixed(1)}" y1="${padT}" x2="${xPos.toFixed(1)}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.05)" stroke-width="1" stroke-dasharray="2,3"/>
+      <text x="${xPos.toFixed(1)}" y="${h - 10}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="middle">${sec}s (${minStr})</text>
+    `;
+  }
+
+  // Quotable Range Corridor Shading
+  const qLoY = getY(Math.min(quoteLo, quoteHi));
+  const qHiY = getY(Math.max(quoteLo, quoteHi));
+  const qHeight = Math.max(0, qLoY - qHiY);
+  let quotableSvg = `
+    <rect x="${padL}" y="${qHiY.toFixed(1)}" width="${plotW}" height="${qHeight.toFixed(1)}" fill="rgba(56,189,248,0.04)" stroke="rgba(56,189,248,0.22)" stroke-width="1" stroke-dasharray="4,2"/>
+    <text x="${padL + plotW + 6}" y="${((qHiY + qLoY)/2 + 3.5).toFixed(1)}" fill="#38bdf8" font-size="10" font-family="var(--mono)" opacity="0.8">Quotable [$${quoteLo.toFixed(2)}..$${quoteHi.toFixed(2)}]</text>
+  `;
+
+  // Time Zones Shading
+  let timeZonesSvg = '';
+  // Entry Delay Zone
+  if (delaySec > 0) {
+    const delayW = getX(delaySec) - padL;
+    timeZonesSvg += `
+      <rect x="${padL}" y="${padT}" width="${delayW.toFixed(1)}" height="${plotH}" fill="rgba(235,178,58,0.12)" stroke="rgba(235,178,58,0.4)" stroke-width="1" stroke-dasharray="3,2"/>
+      <text x="${(padL + delayW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--gold)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">DELAY (${delaySec}s)</text>
+    `;
+  }
+
+  // Dead Zone Tail
+  if (deadSec > 0) {
+    const deadX = getX(windowDur - deadSec);
+    const deadW = padL + plotW - deadX;
+    timeZonesSvg += `
+      <rect x="${deadX.toFixed(1)}" y="${padT}" width="${deadW.toFixed(1)}" height="${plotH}" fill="rgba(240,104,77,0.12)" stroke="rgba(240,104,77,0.4)" stroke-width="1" stroke-dasharray="3,2"/>
+      <text x="${(deadX + deadW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--down)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">DEAD ZONE (${Math.round(deadSec)}s)</text>
+    `;
+  }
+
+  // Active Trading Span Coordinates
+  const activeStartX = getX(delaySec);
+  const activeEndX = getX(windowDur - deadSec);
+  const activeWidth = Math.max(0, activeEndX - activeStartX);
+
+  let activeContentSvg = '';
+  if (activeWidth <= 0) {
+    activeContentSvg = `
+      <text x="${(padL + plotW / 2).toFixed(1)}" y="${(padT + plotH / 2).toFixed(1)}" fill="var(--down)" font-size="12" font-family="var(--disp)" font-weight="700" text-anchor="middle">⚠️ Quoting Window Blocked (Delay + Dead Zone ≥ Window Duration)</text>
+    `;
+  } else {
+    // Stop Loss & Reversal Buffer
+    let stopSvg = '';
+    if (exitStop > 0) {
+      const yStop = getY(stopPrice);
+      const yRev = getY(revPrice);
+      const revH = Math.max(0, yStop - yRev);
+
+      // Reversal Buffer zone
+      if (exitReversal > 0 && revH > 0) {
+        stopSvg += `
+          <rect x="${activeStartX.toFixed(1)}" y="${yRev.toFixed(1)}" width="${activeWidth.toFixed(1)}" height="${revH.toFixed(1)}" fill="rgba(235,178,58,0.16)" stroke="rgba(235,178,58,0.4)" stroke-width="1" stroke-dasharray="2,2"/>
+          <line x1="${activeStartX.toFixed(1)}" y1="${yRev.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yRev.toFixed(1)}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="2,2"/>
+          <text x="${padL + plotW + 6}" y="${(yRev + 3).toFixed(1)}" fill="var(--gold)" font-size="9.5" font-family="var(--mono)">Reversal: $${revPrice.toFixed(3)} (+${(exitReversal*100).toFixed(1)}¢)</text>
+        `;
+      }
+
+      // Stop Loss Line
+      stopSvg += `
+        <line x1="${activeStartX.toFixed(1)}" y1="${yStop.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yStop.toFixed(1)}" stroke="var(--down)" stroke-width="2" stroke-dasharray="4,2"/>
+        <text x="${padL + plotW + 6}" y="${(yStop + 3.5).toFixed(1)}" fill="var(--down)" font-size="10" font-family="var(--mono)" font-weight="700">Stop Loss: $${stopPrice.toFixed(3)} (-${(exitStop*100).toFixed(1)}¢)</text>
+      `;
+    }
+
+    // Resting Bids
+    const yLong = getY(longBid);
+    const yShort = getY(shortComp);
+    const midX = activeStartX + activeWidth * 0.5;
+
+    const bidsSvg = `
+      <!-- Spread bracket line -->
+      <line x1="${midX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${midX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="rgba(255,255,255,0.2)" stroke-width="1.2" stroke-dasharray="2,2"/>
+      <rect x="${(midX - 35).toFixed(1)}" y="${(getY(mid) - 7).toFixed(1)}" width="70" height="14" rx="3" fill="var(--panel)" stroke="rgba(255,255,255,0.15)"/>
+      <text x="${midX.toFixed(1)}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--tx)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">2×off: ${(offset*200).toFixed(1)}¢</text>
+
+      <!-- Long Bid Line -->
+      <line x1="${activeStartX.toFixed(1)}" y1="${yLong.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="#38bdf8" stroke-width="2"/>
+      <circle cx="${activeStartX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="#38bdf8"/>
+      <circle cx="${activeEndX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="#38bdf8"/>
+      <text x="${padL + plotW + 6}" y="${(yLong + 3.5).toFixed(1)}" fill="#38bdf8" font-size="10.5" font-family="var(--mono)" font-weight="700">Long Bid: $${longBid.toFixed(3)}</text>
+
+      <!-- Short Complement Line -->
+      <line x1="${activeStartX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yShort.toFixed(1)}" stroke="var(--up)" stroke-width="2"/>
+      <circle cx="${activeStartX.toFixed(1)}" cy="${yShort.toFixed(1)}" r="3.5" fill="var(--up)"/>
+      <circle cx="${activeEndX.toFixed(1)}" cy="${yShort.toFixed(1)}" r="3.5" fill="var(--up)"/>
+      <text x="${padL + plotW + 6}" y="${(yShort + 3.5).toFixed(1)}" fill="var(--up)" font-size="10.5" font-family="var(--mono)" font-weight="700">Short Comp: $${shortComp.toFixed(3)}</text>
+    `;
+
+    activeContentSvg = stopSvg + bidsSvg;
+  }
+
+  // Mid 0.50 label on the right
+  const midLabelSvg = `
+    <text x="${padL + plotW + 6}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--gold)" font-size="10" font-family="var(--mono)" font-weight="700">Mid: $0.500</text>
+  `;
+
+  // Spines
+  const spinesSvg = `
+    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="var(--line-hi)" stroke-width="1.2"/>
+    <line x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}" stroke="var(--line-hi)" stroke-width="1.2"/>
+  `;
+
+  svg.innerHTML = `
+    ${gridSvg}
+    ${quotableSvg}
+    ${timeZonesSvg}
+    ${activeContentSvg}
+    ${midLabelSvg}
+    ${spinesSvg}
+  `;
+}
+
 function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol',
     'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
-    'btQuoteLo', 'btQuoteHi', 'btEntryDelay'
+    'btQuoteLo', 'btQuoteHi', 'btEntryDelay',
+    'btExitReversal', 'btDeadZoneVal', 'btDeadZoneUnit'
   ];
 
   inputIds.forEach(id => {
@@ -7002,12 +7236,20 @@ function setupBacktestInputListeners(){
       }
     });
 
-    if (el.tagName === 'SELECT') {
-      el.addEventListener('change', () => {
+    el.addEventListener('input', () => {
+      updateBacktestParamPreview();
+    });
+
+    el.addEventListener('change', () => {
+      updateBacktestParamPreview();
+      if (el.tagName === 'SELECT' && (id === 'btFileSelect' || id === 'btMaxStartDelay')) {
         runBacktest();
-      });
-    }
+      }
+    });
   });
+
+  // Initial preview render
+  updateBacktestParamPreview();
 }
 
 let liveEventSource = null;

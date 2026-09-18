@@ -2955,3 +2955,40 @@ def test_backtest_pnl_histogram_in_html():
     assert "pnlHistChartInstance = new Chart" in html
 
 
+def test_backtest_param_preview_grid_in_html():
+    """Issue #198: Dashboard backtest tab includes 2D parameter preview grid container, SVG, and reactive updater."""
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+
+    # Container & SVG elements
+    assert 'id="btParamPreviewWrap"' in html
+    assert 'id="btParamPreviewSvg"' in html
+    assert 'id="btPreviewMetricsPills"' in html
+    assert 'id="btParamPreviewLegend"' in html
+    assert "Strategy Geometry Preview" in html
+
+    # Legend elements
+    assert "Quotable Corridor" in html
+    assert "Long Bid (0.50 - offset)" in html
+    assert "Short Complement (0.50 + offset)" in html
+    assert "Stop Loss (0.50 - offset - stop)" in html
+    assert "Reversal Buffer" in html
+    assert "Entry Delay" in html
+    assert "Dead Zone (No Entry)" in html
+
+    # CSS styles
+    assert "#btParamPreviewWrap" in html
+    assert ".bt-preview-pill" in html
+    assert ".bt-preview-pill-cyan" in html
+    assert ".bt-preview-pill-up" in html
+    assert ".bt-preview-pill-down" in html
+
+    # JavaScript rendering & reactive bindings
+    assert "function updateBacktestParamPreview()" in html
+    assert "function setupBacktestInputListeners()" in html
+    assert "updateBacktestParamPreview();" in html
+    assert "updateBacktestParamPreview();" in html
+
+
+
