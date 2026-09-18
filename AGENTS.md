@@ -51,7 +51,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `runs/` — gitignored (`.gitignore:7`). Self-contained `paper|live` run folders (`runs/paper|live/YYYY-MM-DD_HH-MM_TZ/`); convention in `docs/run-conventions.md`.
 - `docs/` — `operations.md` (runbook for capture + replay), `run-conventions.md` (the `/runs` paper|live layout), `live-dashboard-streaming-spec.md` (RTDS & WebSocket live dashboard blueprint), `rtds-clob-latency-audit.md`, `research-spread-bot-conclusions.md` (findings), `backtest-optimization-results.md` (sweep report), `issue-workflow.md` (canonical agent pipeline) + `git-workflow.md` (branching, commits, PR/CI merge gate), `glossary.md` (agreed names), `engine-decision-rules.md` (what the strategy does), `adr/` (why the system is shaped this way); the old `ecc-flow-guide.md` was superseded by the former and removed.
-- Other dirs: `bot/paper_bot.py` (deprecated legacy reference script; see entrypoints table below), `tasks/plan.md` + `tasks/todo.md` (working plans).
+- Other dirs: `tasks/plan.md` + `tasks/todo.md` (working plans).
 
 ## Execution Entrypoints & Ownership
 
@@ -62,7 +62,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 | `server/osc_dash.py` | **Canonical** | Operations & Cockpit | Sole canonical dashboard server (FastAPI on `:8802`). Serves UI tabs and exposes `/api/live/*` endpoints controlling the active `LiveTraderEngine` instance. |
 | `scripts/collect_ticks.py` | **Canonical** | Market Data | Sole replay-grade tick data collector. Captures order books and tape deltas for the 10 series to `run/ticks/`. |
 | `scripts/backtest.py` & `backtest/engine.py` | **Canonical** | Quantitative Research | Pure offline simulation engine and CLI for replaying tick datasets and running quantitative parameter sweeps. |
-| `bot/paper_bot.py` | **Deprecated** | Legacy | Legacy standalone polling script from early exploratory phase. Superseded by `LiveTraderEngine` and `scripts.shadow_ev_pilot`. Deprecated with CLI guard; live order placement is disabled. |
+| `bot/paper_bot.py` | **Removed** | Legacy | Historical standalone polling script from early exploratory phase. Removed from repository following micro-pilot validation (Issue #148); superseded by `LiveTraderEngine` and `scripts.shadow_ev_pilot`. |
 | `ten-bankrolls/` | **Removed** | Legacy | Historical bankroll-farm experiment. Removed from repository following micro-pilot validation (Issue #148); parameter sweeps are now handled by `scripts.sweep_backtest`. |
 
 ## Data Model / Classification
