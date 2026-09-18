@@ -701,7 +701,8 @@ def _compute_pnl_histogram(per_window: list, size: int) -> dict:
 
 _BACKTEST_POOL: Optional[ProcessPoolExecutor] = None
 _BACKTEST_SEMAPHORE: Optional[asyncio.Semaphore] = None
-_SEMAPHORE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_BACKTEST_LOCK = threading.Lock()
+_BACKTEST_RUNNING = False
 
 
 def get_backtest_pool() -> ProcessPoolExecutor:
@@ -714,15 +715,9 @@ def get_backtest_pool() -> ProcessPoolExecutor:
 
 def get_backtest_semaphore() -> asyncio.Semaphore:
     """Lazy-initialized asyncio semaphore capping concurrent backtests to 1."""
-    global _BACKTEST_SEMAPHORE, _SEMAPHORE_LOOP
-    try:
-        current_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        current_loop = None
-
-    if _BACKTEST_SEMAPHORE is None or (_SEMAPHORE_LOOP is not None and _SEMAPHORE_LOOP is not current_loop):
+    global _BACKTEST_SEMAPHORE
+    if _BACKTEST_SEMAPHORE is None:
         _BACKTEST_SEMAPHORE = asyncio.Semaphore(1)
-        _SEMAPHORE_LOOP = current_loop
     return _BACKTEST_SEMAPHORE
 
 
@@ -967,7 +962,13 @@ def _run_backtest_simulation_worker(
     }
 
 
-@app.get("/api/backtest")
+@app.get(
+    "/api/backtest",
+    responses={
+        200: {"description": "Backtest simulation results"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
 async def api_backtest(
     file: str = "",
     offset: float = 0.02,
@@ -1144,33 +1145,46 @@ async def api_backtest(
         "entry_delay_sec": entry_delay_sec,
     }
 
+    global _BACKTEST_RUNNING
     semaphore = get_backtest_semaphore()
-    if semaphore.locked():
-        return JSONResponse(
-            status_code=429,
-            content={
-                "error": "Backtest simulation already in progress. Please retry shortly.",
-                "params_hash": params.params_hash(),
-                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-            },
-        )
+    with _BACKTEST_LOCK:
+        if _BACKTEST_RUNNING or semaphore.locked():
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "Backtest simulation already in progress. Please retry shortly.",
+                    "params_hash": params.params_hash(),
+                    "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+                },
+            )
+        _BACKTEST_RUNNING = True
 
-    async with semaphore:
-        loop = asyncio.get_running_loop()
-        pool = get_backtest_pool()
-        result = await loop.run_in_executor(
-            pool,
-            _run_backtest_simulation_worker,
-            str(TICKS_DIR),
-            source_path_str,
-            params,
-            size,
-            max_start_delay,
-            limit_windows,
-            raw_params,
-            empty_params,
-        )
-        return result
+    await semaphore.acquire()
+
+    async def _run_shielded():
+        try:
+            loop = asyncio.get_running_loop()
+            pool = get_backtest_pool()
+            return await loop.run_in_executor(
+                pool,
+                _run_backtest_simulation_worker,
+                str(TICKS_DIR),
+                source_path_str,
+                params,
+                size,
+                max_start_delay,
+                limit_windows,
+                raw_params,
+                empty_params,
+            )
+        finally:
+            semaphore.release()
+            with _BACKTEST_LOCK:
+                global _BACKTEST_RUNNING
+                _BACKTEST_RUNNING = False
+
+    worker_task = asyncio.create_task(_run_shielded())
+    return await asyncio.shield(worker_task)
 
 
 @app.get("/api/analysis")

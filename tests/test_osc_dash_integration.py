@@ -669,19 +669,13 @@ def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
     fake_file = tmp_path / "fake_round.jsonl"
     fake_file.write_text('{"cid": "0x1", "slug": "btc-updown-5m", "ts": 1000.0, "start_ts": 1000.0, "mid": 0.50, "bids": [], "asks": []}\n', encoding="utf-8")
 
-    sem = osc_dash.get_backtest_semaphore()
-    assert not sem.locked()
-
-    # When the semaphore is held by an in-flight backtest
-    sem._value = 0
-    try:
-        response = client.get(f"/api/backtest?file={fake_file.name}")
-        assert response.status_code == 429
-        data = response.json()
-        assert "error" in data
-        assert "already in progress" in data["error"].lower()
-    finally:
-        sem._value = 1
+    # Simulate an in-flight backtest
+    monkeypatch.setattr(osc_dash, "_BACKTEST_RUNNING", True)
+    response = client.get(f"/api/backtest?file={fake_file.name}")
+    assert response.status_code == 429
+    data = response.json()
+    assert "error" in data
+    assert "already in progress" in data["error"].lower()
 
 
 def test_shutdown_backtest_pool():

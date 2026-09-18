@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from strategy.live_trader import LiveTraderEngine
-from server.osc_dash import api_backtest, TICKS_DIR
+from server.osc_dash import api_backtest, shutdown_backtest_pool, TICKS_DIR
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -244,6 +244,7 @@ async def run_benchmark(
         if verbose:
             print(f"Report saved to: {out_p}")
 
+    shutdown_backtest_pool()
     return report
 
 
@@ -257,17 +258,20 @@ def main():
     parser.add_argument("--json", action="store_true", help="Print only JSON output")
     args = parser.parse_args()
 
-    report = asyncio.run(
-        run_benchmark(
-            idle_ticks=args.idle_ticks,
-            duration=args.duration,
-            tick_file=args.tick_file,
-            output_path=args.output,
-            verbose=not args.json,
+    try:
+        report = asyncio.run(
+            run_benchmark(
+                idle_ticks=args.idle_ticks,
+                duration=args.duration,
+                tick_file=args.tick_file,
+                output_path=args.output,
+                verbose=not args.json,
+            )
         )
-    )
-    if args.json:
-        print(json.dumps(report, indent=2))
+        if args.json:
+            print(json.dumps(report, indent=2))
+    finally:
+        shutdown_backtest_pool()
 
 
 if __name__ == "__main__":
