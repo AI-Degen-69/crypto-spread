@@ -1,59 +1,61 @@
-# Task Plan — Issue #259: Isolate backtest execution into ProcessPoolExecutor to eliminate GIL contention
+# Task Plan — Issue #148: Post-pilot: unify execution entrypoints
 
-**Size tier:** Standard — refactoring `/api/backtest` execution into a dedicated process pool with semaphore concurrency control in `server/osc_dash.py`, integration tests with concurrency gates in `tests/test_osc_dash_integration.py`, and benchmark script alignment in `scripts/measure_gil_contention.py`.
-**Task type:** Performance / Code (multiprocessing execution isolation & concurrency capping).
+**Size tier:** Standard — auditing and documenting entrypoints across `AGENTS.md`, deprecating legacy `bot/paper_bot.py`, deleting dead `ten-bankrolls/`, and adding targeted regression tests in `tests/test_entrypoints.py`.
+**Task type:** Docs / Code (entrypoint auditing, deprecation instrumentation, architecture documentation, test coverage).
 
 ## Context & Problem
-- Issue #221 confirmed that running CPU-intensive backtest sweeps via `/api/backtest` inside FastAPI's shared threadpool locks the Python GIL, delaying the live trading engine's 1s ticks up to 3.28s (p99 blowup).
-- Issue #259 resolves this by executing the simulation inside an isolated `ProcessPoolExecutor(max_workers=1)`. Because it runs in an independent OS process with its own GIL, the main process event loop and live trader experience 0ms GIL delay.
-- An `asyncio.Semaphore(1)` ensures only one backtest runs at a time, rejecting concurrent sweeps with HTTP 429 to avoid CPU thrashing.
+- Prior to the live micro-pilot, multiple overlapping execution scripts were introduced: `bot/paper_bot.py` (legacy standalone polling script with non-functional `--live` stub), `ten-bankrolls/` (isolated bankroll experiments), alongside `strategy/live_trader.py` (the canonical production live/paper engine).
+- Now that the pilot has concluded and `strategy/live_trader.py` is the established single source of truth for trading execution, the repository needs unambiguous entrypoint ownership documented in `AGENTS.md`, dead entrypoints (`ten-bankrolls/` and `bot/`) completely deleted, and verification tests in place.
+
+## Proposed Improvement (Adopted by default)
+- Under the completely-dead code exception and operator instruction ("אז אם הוא מיושן למה לא לנקות את התיקיות משם"), both unmaintained legacy directories (`ten-bankrolls/` and `bot/`) are pruned cleanly, leaving zero dead code or non-functional stubs.
 
 ## Tasks
 
-- [x] **TASK-1 [Performance/Architecture]**: Extract picklable worker function and implement persistent ProcessPoolExecutor
-  - Target: `server/osc_dash.py`
+- [x] **TASK-1 [Docs/Architecture]**: Document execution entrypoints and ownership in `AGENTS.md`
+  - Target: `AGENTS.md`
   - What is built:
-    - Define top-level module function `_run_backtest_simulation_worker(...)` taking picklable parameters (paths, knob values) and returning the full backtest results dictionary.
-    - Implement persistent lazy-initialized `ProcessPoolExecutor(max_workers=1)` with clean FastAPI shutdown hook.
-    - Maintain Windows spawn-compatibility (all arguments/returns strictly pickleable).
-  - Helper skill: `performance-optimization`
-  - Verify: Pure function unit invocation test and clean process pool execution.
+    - Add dedicated section `## Execution Entrypoints & Ownership` in `AGENTS.md`.
+    - Provide a single clear table covering each entrypoint: File, Role, Status (Canonical vs Removed), and Owner.
+    - Reconcile `strategy/live_trader.py` (sole canonical engine for live/paper) vs `scripts/shadow_ev_pilot.py` (paper EV runner) vs `server/osc_dash.py` (cockpit) vs `bot/paper_bot.py` (removed) vs `ten-bankrolls/` (removed).
+  - Helper skill: `documentation-and-adrs`
+  - Verify: Section present and accurately cross-referenced.
 
-- [x] **TASK-2 [Backend/Logic]**: Update `/api/backtest` to async endpoint with semaphore concurrency capping
-  - Target: `server/osc_dash.py`
+- [x] **TASK-2 [Code/Pruning]**: Remove legacy `bot/` directory under completely-dead exception
+  - Target: `bot/paper_bot.py`
   - What is built:
-    - Convert `api_backtest` to `async def api_backtest(...)`.
-    - Introduce `_BACKTEST_SEMAPHORE = asyncio.Semaphore(1)`.
-    - If semaphore is locked, immediately return HTTP 429 `{"error": "Backtest simulation already in progress. Please retry shortly."}`.
-    - Run simulation via `await loop.run_in_executor(get_backtest_pool(), _run_backtest_simulation_worker, ...)`.
-  - Helper skill: `performance-optimization`
-  - Verify: Existing endpoint response schemas match 100%.
+    - Entire `bot/` directory deleted from filesystem and git index following operator directive.
+    - Remove `bot/` references from `.gitignore` and documentation.
+    - Verified absent via `test_bot_directory_deleted()`.
+  - Helper skill: `code-simplification`
+  - Verify: Directory removed, git status clean of untracked files in that path.
 
-- [x] **TASK-3 [QA/TDD]**: Add integration tests for process isolation, response parity, and 429 concurrency capping
-  - Target: `tests/test_osc_dash_integration.py`
+- [x] **TASK-3 [Cleanup/Pruning]**: Remove dead `ten-bankrolls/` directory from repository
+  - Target: `ten-bankrolls/`
   - What is built:
-    - Ensure all existing `test_api_backtest_*` tests pass without regression.
-    - Add test verifying concurrent requests return 429 when a backtest is already running.
-    - Verify pickling and process execution on temporary fixture datasets.
-  - Helper skill: `test-driven-development`
-  - Verify: `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q`.
+    - Delete `ten-bankrolls/` directory and its contents (`run_one.py`, `watcher.py`, `100/`..`1000/`, `README.md`).
+    - Remove references to `ten-bankrolls/` from `AGENTS.md`.
+  - Helper skill: `code-simplification`
+  - Verify: Directory removed, git status clean of untracked files in that path.
 
-- [x] **TASK-4 [Research/Benchmark]**: Update and verify empirical benchmark runner
-  - Target: `scripts/measure_gil_contention.py`
+- [x] **TASK-4 [QA/TDD]**: Add targeted tests in `tests/test_entrypoints.py`
+  - Target: `tests/test_entrypoints.py`
   - What is built:
-    - Add `--duration` CLI option to cap benchmark stress phase.
-    - Ensure script successfully runs both idle baseline and under-load stress test with isolated backtest execution.
-  - Helper skill: `performance-optimization`
-  - Verify: `python -m scripts.measure_gil_contention --idle-ticks 5 --duration 5 --json`.
+    - Test that `strategy.live_trader.LiveTraderEngine` is importable as the canonical engine.
+    - Test that `AGENTS.md` explicitly documents entrypoint statuses.
+    - Test that `ten-bankrolls/` and `bot/` directories are absent from the filesystem.
+    - Verify `tests/test_docstrings.py` achieves 100% coverage across all files.
+  - Helper skill: `python-testing`
+  - Verify: `python -m pytest tests/test_entrypoints.py tests/test_docstrings.py -q`.
 
 ## Verification Matrix
 | Task | Method |
 |---|---|
-| TASK-1 | Process worker serialization test |
-| TASK-2 | `client.get("/api/backtest")` endpoint test in `test_osc_dash_integration.py` |
-| TASK-3 | `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q` |
-| TASK-4 | `python -m scripts.measure_gil_contention --idle-ticks 5 --duration 5 --json` |
+| TASK-1 | Inspection of `AGENTS.md` |
+| TASK-2 | Path absence check for `bot/` (`test_bot_directory_deleted`) |
+| TASK-3 | Path absence check for `ten-bankrolls/` (`test_ten_bankrolls_deleted`) |
+| TASK-4 | `python -m pytest tests/test_entrypoints.py tests/test_docstrings.py tests/test_live_trader.py -q` |
 
 ## Post-build gates (Station IV)
-- `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q` passes with 0 failures (<2s).
-- Benchmark script confirms negligible GIL contention under backtest load.
+- `python -m pytest tests/test_entrypoints.py tests/test_docstrings.py -q` passes in <2s.
+- `python -m pytest tests/test_live_trader.py -q` passes without regression.
