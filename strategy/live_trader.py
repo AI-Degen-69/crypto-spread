@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from collections import defaultdict
+from collections import defaultdict, deque
 import datetime
 import json
 import logging
@@ -720,6 +720,10 @@ class MarketLiveState:
     last_bids_down: Dict[float, float] = field(default_factory=dict)
     fill_telemetry_done_up: bool = False
     fill_telemetry_done_down: bool = False
+    
+    # Tick interval timing / GIL contention instrumentation (issue #221)
+    _last_strategy_tick_perf: Optional[float] = None
+    _tick_intervals: deque[float] = field(default_factory=lambda: deque(maxlen=1000))
 
     # Dead-zone late-start guard (issue #229, superseding #96). `first_seen_start_ts` records which window the
     # latch belongs to, `first_tick_elapsed_sec` how far into that window the
@@ -3540,6 +3544,8 @@ class LiveTraderEngine:
                 m.first_seen_start_ts = None
                 m.first_tick_elapsed_sec = None
                 m.late_start_skip = False
+                m._tick_intervals.clear()
+                m._last_strategy_tick_perf = None
                 m.status = "QUOTING" if self.is_running else "IDLE"
                 m.last_action = "PnL Reset"
             # Issue #137: band-skip telemetry resets.
@@ -3928,6 +3934,14 @@ class LiveTraderEngine:
     def _update_market_strategy(self, slug: str, poll_data: Dict[str, Any], now: float):
         """Update trading state machine, advance pre-quoting, fills, stop-loss exits, and pair merges."""
         mstate = self.markets[slug]
+
+        # Tick interval timing / GIL contention instrumentation (issue #221)
+        t_perf = time.perf_counter()
+        if mstate._last_strategy_tick_perf is not None:
+            interval = t_perf - mstate._last_strategy_tick_perf
+            mstate._tick_intervals.append(interval)
+        mstate._last_strategy_tick_perf = t_perf
+
         minfo = poll_data.get("market")
         next_minfo = poll_data.get("next_market")
         ubook = poll_data.get("up_book") or {}
@@ -5260,6 +5274,68 @@ class LiveTraderEngine:
         self.timeline.append(point)
         if len(self.timeline) > 1800:
             self.timeline.pop(0)
+
+    def get_tick_timing_stats(self, slug: Optional[str] = None) -> Dict[str, Any]:
+        """Compute tick interval distribution percentiles and metrics (issue #221).
+
+        Returns count, min_ms, p50_ms, p95_ms, p99_ms, max_ms, mean_ms.
+        If slug is None, computes across all configured markets and includes per_market breakdown.
+        """
+        def _calc_stats(samples: Sequence[float]) -> Dict[str, Any]:
+            if not samples:
+                return {
+                    "count": 0,
+                    "min_ms": None,
+                    "p50_ms": None,
+                    "p95_ms": None,
+                    "p99_ms": None,
+                    "max_ms": None,
+                    "mean_ms": None,
+                }
+            sorted_s = sorted(samples)
+            n = len(sorted_s)
+
+            def _quantile(q: float) -> float:
+                idx = (n - 1) * q
+                lo = int(math.floor(idx))
+                hi = int(math.ceil(idx))
+                if lo == hi:
+                    return sorted_s[lo]
+                return sorted_s[lo] * (hi - idx) + sorted_s[hi] * (idx - lo)
+
+            return {
+                "count": n,
+                "min_ms": round(sorted_s[0] * 1000.0, 2),
+                "p50_ms": round(_quantile(0.50) * 1000.0, 2),
+                "p95_ms": round(_quantile(0.95) * 1000.0, 2),
+                "p99_ms": round(_quantile(0.99) * 1000.0, 2),
+                "max_ms": round(sorted_s[-1] * 1000.0, 2),
+                "mean_ms": round((sum(sorted_s) / n) * 1000.0, 2),
+            }
+
+        with self._engine_lock:
+            if slug is not None:
+                m = self.markets.get(slug)
+                samples = list(m._tick_intervals) if m else []
+                return _calc_stats(samples)
+
+            all_samples: List[float] = []
+            per_market: Dict[str, Any] = {}
+            for s, m in self.markets.items():
+                m_samples = list(m._tick_intervals)
+                all_samples.extend(m_samples)
+                per_market[s] = _calc_stats(m_samples)
+
+            overall = _calc_stats(all_samples)
+            overall["per_market"] = per_market
+            return overall
+
+    def reset_tick_timing_stats(self) -> None:
+        """Clear recorded tick timing intervals across all markets (issue #221)."""
+        with self._engine_lock:
+            for m in self.markets.values():
+                m._tick_intervals.clear()
+                m._last_strategy_tick_perf = None
 
 
 # Global singleton engine

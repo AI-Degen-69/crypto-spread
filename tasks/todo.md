@@ -1,6 +1,6 @@
-# TODO — Issue #255: Document sample discrepancies in tick data and how the backtester treats them
+# TODO — Issue #221: Measure whether a running backtest delays the live tick (GIL contention)
 
-- [x] TASK-1 [Docs]: Add `## Sample Discrepancies & Replay Integrity` section to `docs/operations.md`.
-- [x] TASK-2 [Docs/CLI]: Align CLI help & verbose labels in `scripts/verify_tick_data.py`.
-- [x] TASK-3 [QA/Verification]: Run `tests/test_verify_tick_data.py` test suite gate.
-
+- [x] TASK-1 [Performance/Instrumentation]: Instrument per-market live tick intervals in `LiveTraderEngine` (`strategy/live_trader.py`).
+- [x] TASK-2 [QA/TDD]: Add unit tests for timing instrumentation (`tests/test_gil_contention_instrumentation.py`).
+- [x] TASK-3 [Research/Benchmark]: Create measurement runner script (`scripts/measure_gil_contention.py`).
+- [x] TASK-4 [Execution & Report]: Run benchmark on real tick data and record empirical findings.

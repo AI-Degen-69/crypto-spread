@@ -1,17 +1,17 @@
-# CONSTRAINTS — Issue #255: Document sample discrepancies in tick data and how the backtester treats them
+# CONSTRAINTS — Issue #221: Measure whether a running backtest delays the live tick (GIL contention)
 
 ## Scope Lock
-1. **Target Documentation**: Add a dedicated section `## Sample Discrepancies & Replay Integrity` in `docs/operations.md`.
-2. **Glossary Integrity**: Must reference `docs/glossary.md` regarding the distinction between `mid` (two-sided mid across both legs) and `the recorded mid` (`"mid"` field in tick files, up leg alone), without conflating them with sample discrepancies.
-3. **Zero Behavior Changes**: Strictly no changes to the backtest engine skip contract (`backtest/engine.py:_json_or_skip`), verification thresholds or logic (`scripts/verify_tick_data.py`), or dashboard rendering (`server/osc_dash.py`).
-4. **Data Contract Preservation**: All JSON report structures and dictionary keys (`sample_issues`, `corrupt_lines`, etc.) must remain 100% intact and backward-compatible. Only human-facing CLI output labels / `--help` text in `scripts/verify_tick_data.py` may be aligned with documentation terminology.
-5. **No New Dependencies**: Stdlib and existing dependencies only.
+1. **Measurement Only**: Strictly no architecture redesign, no process separation, no yielding modifications to replay loops, and no changes to live engine decision/order-flow logic.
+2. **Timing Source Integrity**: Tick interval deltas must use monotonic high-resolution time (`time.perf_counter()`) to prevent NTP/wall-clock skew.
+3. **Bounded Memory**: Any in-memory recording buffers must be strictly bounded (e.g. `deque(maxlen=1000)`) with zero memory leak risk.
+4. **No New Dependencies**: Stdlib and existing dependencies only (no new packages).
+5. **No Regressions**: Existing trading state machine transitions, order tracking, and parity invariants must remain 100% identical.
 
 ## Quality Guardrails
 6. **Targeted Test Gate**:
-   - `python -m pytest tests/test_verify_tick_data.py -q` must pass with 0 failures.
+   - `python -m pytest tests/test_gil_contention_instrumentation.py tests/test_engine_parity.py -q` must pass with 0 failures (<2s).
 7. **Anti-Cheat**:
    - No disabling, skipping, or weakening tests.
    - No suppressing warnings or linters.
-8. **CLI Verification**:
-   - `python -m scripts.verify_tick_data --help` must run cleanly and display updated descriptions without syntax errors.
+8. **Empirical Measurement Standard**:
+   - Benchmark script must report concrete p50, p95, p99, and max interval values for both idle baseline and under-load backtest sweep.
