@@ -110,6 +110,64 @@ that the data says are reachable. Pair cost is not a candidate: issue #227
 deleted the entry-side pair-cost block, and `max_pair_cost` now bounds the
 leg chase only.
 
+## Sample Discrepancies & Replay Integrity
+
+The **Sample Discrepancies** panel on the dashboard's Tick Files tab (and `--verbose` output in `scripts/verify_tick_data.py`) surfaces line-level issues discovered during dataset validation.
+
+### The Three Discrepancy Families
+
+The tick verifier (`scripts/verify_tick_data.py`) classifies row-level issues into three distinct families:
+
+1. **JSON Decode Errors (`json_decode_error`)**:
+   - The raw line is unparseable as JSON (e.g. truncated line, write collision, non-JSON bytes).
+   - Tracked in the `corrupt_lines` counter. These rows cannot be parsed into a dictionary and convey no market state.
+2. **Schema & Book Issues (`schema_or_book_issue`)**:
+   - The line is valid JSON, but violates structural or value invariants verified by `verify_tick_record`:
+     - Missing or null required fields (`ts`, `start_ts`, `end_ts`, `mid`, `up_book`, `down_book`).
+     - Invalid timestamps (`ts <= 0`, non-numeric, or `start_ts > end_ts`).
+     - Value bounds violations (`mid` outside `[-0.01, 1.01]`, or `touch_pair` outside `[0.50, 1.50]`).
+     - Structural book anomalies (non-dict book, unparseable level entries) or **crossed books** (`best_bid >= best_ask`).
+     - Malformed tape deltas (non-list `tape_delta` or malformed trade objects).
+   - Tracked in `schema_errors`, with `crossed_books` and `book_anomalies` counted separately.
+3. **Collector Errors (`err` field)**:
+   - Snapshots where the collector failed to query a leg from the venue (e.g. HTTP 429 rate limit or read timeout) and recorded `{"err": ...}`.
+   - Tracked in `collector_errors`.
+
+### Sample Capping vs Full-Population Counters
+
+- **Capped Debug Samples:** To protect memory and network payload sizes on multi-gigabyte tick files, `verify_tick_file` caps `sample_issues` at **20 entries per file** (`max_sample_issues=20`).
+- **Dashboard Slicing:** The dashboard's Tick Files tab displays the first **10 entries** of `sample_issues` (`server/osc_dash.py:4994`).
+- **Full-Population Totals:** The scalar metrics (`corrupt_lines`, `schema_errors`, `crossed_books`, `book_anomalies`, `collector_errors`) reflect the **entire file population**. A short list in the Sample Discrepancies box does **not** mean the file has few errors; always inspect the aggregated totals above the sample box.
+
+### The Backtest Engine's Silent-Skip Contract
+
+During replay, the backtest engine intentionally tolerates malformed rows:
+- `backtest/engine.py:74` (`_json_or_skip`) returns `None` for empty lines, non-dict payloads, or JSON parse errors.
+- `backtest/engine.py:87` (`iter_ticks`) silently discards `None` items.
+- Replay executes without raising exceptions or logging skipped lines.
+
+Because replay never warns about dropped rows, a backtest on corrupted data will still exit cleanly with "success". **Running the verifier (`python -m scripts.verify_tick_data run/ticks`) or reading the Tick Files tab is a required pre-flight data-quality gate**, not an optional diagnostic.
+
+### Operational Guidance: When to Care
+
+Not every reported discrepancy invalidates a backtest run:
+
+| Severity | Discrepancy Type | Impact on Replay | Operational Action |
+|---|---|---|---|
+| **Tolerable Noise** | Isolated late start (<5s) or early cutoff (<5s) | Negligible; window simply lacks warmup or cooldown tail ticks | Acceptable if valid ticks cover the core trading duration |
+| **Tolerable Noise** | Occasional collector `err` (<0.1% of ticks) | Brief 1-tick hiatus in state; trade tape catches up next round | Safe to replay; check that total window count matches expected |
+| **Tolerable Noise** | Rare corrupt line (`corrupt_lines` < 0.01% of total) | Silent drop of a single tick | Safe if isolated and not at quote placement or fill moments |
+| **Replay Gate (Warning)** | Frequent sampling gaps (>2s or >6s) | Trajectory discontinuity; fills or price excursions may be missed | Review capture health; results carry lower temporal confidence |
+| **Replay Invalidation (Hard Gate)** | **Crossed books (`crossed_books > 0`)** | Inverts the spread (`best_bid >= best_ask`); distorts resting maker fill logic | **Do not trust fills in windows with crossed books** |
+| **Replay Invalidation (Hard Gate)** | Out-of-bounds `mid` or missing book legs | Distorts quote placement and offset calculation | Quarantine or re-capture the file |
+
+### Related Reading Hazard: `mid` vs `the recorded mid`
+
+As defined in [`docs/glossary.md`](glossary.md):
+- **`mid`** means the true two-sided mid (`book_math.two_sided_mid`), requiring valid books on both legs. If either leg cannot be priced, it is `None`.
+- **`the recorded mid`** is the `"mid"` field in tick JSONL files (`book_math.mid(up_book)`), reflecting the **up leg alone**.
+This distinction is an intentional data-model rule and must not be conflated with a schema error or sample discrepancy.
+
 ## Tuning hints
 
 1. **Set `queue_gate=0` to see what fills look like with no queue

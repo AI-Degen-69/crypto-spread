@@ -625,7 +625,7 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"Collector Errors    : {report.get('collector_errors', 0):,}")
 
         if verbose and report.get("sample_issues"):
-            lines.append("\nSample Issues:")
+            lines.append("\nSample Discrepancies (sample_issues, max 20 — see docs/operations.md):")
             for issue in report["sample_issues"]:
                 lines.append(f"  • Line {issue.get('line')}: {issue.get('detail')}")
 
@@ -646,7 +646,12 @@ def main() -> int:
         help="Path to ticks directory or specific .jsonl/.jsonl.gz file (default: run/ticks)",
     )
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show sample issues")
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show sample discrepancies (see docs/operations.md#sample-discrepancies--replay-integrity)",
+    )
     parser.add_argument(
         "--strict",
         action="store_true",

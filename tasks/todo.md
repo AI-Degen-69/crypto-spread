@@ -1,6 +1,6 @@
-# TODO — Issues #222 + #223: Dead-zone unit & unpaired-leg-at-expiry measurements
+# TODO — Issue #255: Document sample discrepancies in tick data and how the backtester treats them
 
-- [x] TASK-1 [Research/Core]: Pure measurement logic in `research/sweeps/dead_zone_lab.py` (fill timelines, dead-zone boundaries, buckets, settlement proxy, close-vs-hold arithmetic).
-- [x] TASK-2 [QA/Tests]: `tests/test_dead_zone_lab.py` on synthetic windows — written first (TDD).
-- [x] TASK-3 [Research/Measurement]: Run the lab → `research/sweeps/dead_zone_222.json` + `research/sweeps/naked_leg_223.json` (≤120s on the built cache).
-- [x] TASK-4 [Docs]: `docs/dead-zone-naked-leg-measurements.md` + measured verdicts into `docs/engine-decision-rules.md` §8/§14.
+- [x] TASK-1 [Docs]: Add `## Sample Discrepancies & Replay Integrity` section to `docs/operations.md`.
+- [x] TASK-2 [Docs/CLI]: Align CLI help & verbose labels in `scripts/verify_tick_data.py`.
+- [x] TASK-3 [QA/Verification]: Run `tests/test_verify_tick_data.py` test suite gate.
+

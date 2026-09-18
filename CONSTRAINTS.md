@@ -1,35 +1,17 @@
-# CONSTRAINTS — Issues #222 + #223: Dead-zone unit & unpaired-leg-at-expiry measurements
+# CONSTRAINTS — Issue #255: Document sample discrepancies in tick data and how the backtester treats them
 
 ## Scope Lock
-1. **Measurement only.** No changes to `backtest/engine.py`, `strategy/live_trader.py`,
-   `research/sweeps/sim2.py`, or `research/sweeps/ev_lab.py`. New code lives in
-   `research/sweeps/dead_zone_lab.py` + `tests/test_dead_zone_lab.py` + docs.
-2. **One fill rule.** Every fill decision goes through
-   `strategy.book_math.resting_bid_filled` (issue #226 / ADR-0002) with the sell-print
-   pre-filter (issue #182). Reimplementing the fill rule in the lab is forbidden.
-3. **No engine-default flip inside this task.** The reports may recommend; the
-   `dead_zone_unit` / `naked_leg_at_expiry` defaults change only in a follow-up approved
-   by the operator.
-4. **Doc verdicts only where the issues live:** §8 (`dead_zone`) and §14
-   (`naked_leg_at_expiry`) of `docs/engine-decision-rules.md` gain the measured verdict
-   and a link to the report. No other sections touched.
-5. **Naming per `docs/glossary.md`:** "dead zone" (not entry timeout), "unpaired leg"
-   (not naked position), "tradeable range" wording for quote_range.
+1. **Target Documentation**: Add a dedicated section `## Sample Discrepancies & Replay Integrity` in `docs/operations.md`.
+2. **Glossary Integrity**: Must reference `docs/glossary.md` regarding the distinction between `mid` (two-sided mid across both legs) and `the recorded mid` (`"mid"` field in tick files, up leg alone), without conflating them with sample discrepancies.
+3. **Zero Behavior Changes**: Strictly no changes to the backtest engine skip contract (`backtest/engine.py:_json_or_skip`), verification thresholds or logic (`scripts/verify_tick_data.py`), or dashboard rendering (`server/osc_dash.py`).
+4. **Data Contract Preservation**: All JSON report structures and dictionary keys (`sample_issues`, `corrupt_lines`, etc.) must remain 100% intact and backward-compatible. Only human-facing CLI output labels / `--help` text in `scripts/verify_tick_data.py` may be aligned with documentation terminology.
+5. **No New Dependencies**: Stdlib and existing dependencies only.
 
 ## Quality Guardrails
-6. **Zero regressions on targeted suites:**
-   - `python -m pytest tests/test_dead_zone_lab.py -q` (new, all green)
-   - `python -m pytest tests/test_ev_sweep_lab.py -q` (lab untouched — parity guard)
-   - `python -m pytest tests/test_backtest_engine.py -q` (engine untouched — parity guard)
-7. **Anti-cheat:** no skipping/weakening tests, no suppressed warnings in the lab script,
-   no fabricated numbers — every reported figure must be reproducible by re-running
-   `python -m research.sweeps.dead_zone_lab`.
-8. **Reproducibility:** the lab script takes optional dataset paths, defaults to every
-   `run/ticks/ticks_*.jsonl`, and stamps the dataset files + row counts into both JSON
-   artifacts. Same inputs → same outputs (no sampling randomness).
-9. **Dependencies:** no new external dependencies; stdlib + existing project imports only.
-
-## Performance
-10. **Runtime ceiling:** full-dataset lab run completes in under 120s on the built
-    `ev_lab` window cache (single pass, no per-config re-parse). Cache build (~2–3 min
-    one-off) is outside the ceiling and reported separately.
+6. **Targeted Test Gate**:
+   - `python -m pytest tests/test_verify_tick_data.py -q` must pass with 0 failures.
+7. **Anti-Cheat**:
+   - No disabling, skipping, or weakening tests.
+   - No suppressing warnings or linters.
+8. **CLI Verification**:
+   - `python -m scripts.verify_tick_data --help` must run cleanly and display updated descriptions without syntax errors.
