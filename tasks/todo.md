@@ -1,8 +1,6 @@
-# TODO — Issue #213: Quoting around current price across tradeable range & replacing entry_band veto
+# TODO — Issues #222 + #223: Dead-zone unit & unpaired-leg-at-expiry measurements
 
-- [x] TASK-1 [Backend/Logic]: Verify live engine decision loop compliance in `strategy/live_trader.py` (`quote_range`, no 0.50 anchor).
-- [x] TASK-2 [Backend/Logic]: Verify backtest engine parity compliance in `backtest/engine.py`.
-- [x] TASK-3 [QA/Parity]: Run targeted parity and dashboard test suites proving behavioral parity and UI controls (`test_quote_range_parity.py`, `test_engine_parity.py`, `test_osc_dash_integration.py`).
-- [x] TASK-4 [Docs & Closure]: Generate verification evidence artifact and prepare issue closure linking PR #241.
-
-
+- [x] TASK-1 [Research/Core]: Pure measurement logic in `research/sweeps/dead_zone_lab.py` (fill timelines, dead-zone boundaries, buckets, settlement proxy, close-vs-hold arithmetic).
+- [x] TASK-2 [QA/Tests]: `tests/test_dead_zone_lab.py` on synthetic windows — written first (TDD).
+- [x] TASK-3 [Research/Measurement]: Run the lab → `research/sweeps/dead_zone_222.json` + `research/sweeps/naked_leg_223.json` (≤120s on the built cache).
+- [x] TASK-4 [Docs]: `docs/dead-zone-naked-leg-measurements.md` + measured verdicts into `docs/engine-decision-rules.md` §8/§14.

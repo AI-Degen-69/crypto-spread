@@ -366,11 +366,16 @@ tuning knob.
 **Switchable unit.** The knob carries a mode — percent of window, or absolute seconds — and a
 value. Percent at 0.10 is the default.
 
-**Which unit is actually right is an open question, deliberately.** The argument for seconds is
+**Which unit is actually right was an open question, deliberately.** The argument for seconds is
 that "enough time for two legs to fill and merge" is a fixed quantity, and a 15-minute window
 does not make filling three times slower. The argument for percent is that the dead tail
-scales with the window. This has never been measured. The switch exists so it can be measured
-rather than argued; the default stands until data replaces it.
+scales with the window. The switch existed so it could be measured rather than argued.
+
+**Measured (2026-09-18, issue #222) — inconclusive, the percent default stands.** Median
+time-to-pair runs 33.77s on 5m against 84.05s on 15m — a 2.49× ratio, inside the ambiguous
+1.5×–2.5× band, so neither unit is established by the data. Re-test as more days accumulate;
+the full numbers, method and re-test guidance live in
+`docs/dead-zone-naked-leg-measurements.md`.
 ## 9. `entry_timeout` — **deleted**  *(agreed 2026-09-16)*
 
 **The rule is removed from both engines.** A quote that has not filled is cancelled only by the
@@ -545,7 +550,12 @@ holding does not.
 
 **The default is `close`, deliberately.** The edge for holding is about a cent; the cost is
 turning every unpaired leg into a coin flip for its full size. A cent of expected value does
-not pay for that variance. The measurement that could overturn this is filed separately —
-until it lands, neither reading is treated as established.
+not pay for that variance.
+
+**Measured (2026-09-18, issue #223).** Over 937 naked legs, none of the 87 valued legs
+(proxy settlement inferred from the window's final two-sided mid — not observed
+redemption) ever won, and closing beat holding in every bucket even after the dead-zone
+bid haircut and the taker fee. The `close` default is confirmed on data; the numbers and
+the expensive-leg caveat live in `docs/dead-zone-naked-leg-measurements.md`.
 
 Operator decision, 2026-09-16.

@@ -1,29 +1,81 @@
-# SPEC — Issue #213: Quoting around current price across tradeable range & replacing entry_band veto
+# SPEC — Issues #222 + #223: Dead-zone unit & unpaired-leg-at-expiry measurements
 
 ## Goal
-Verify and codify that the trading engine quotes around the current market price (`mid`) across the tradeable range rather than enforcing a hard 0.50-anchored veto, and that out-of-range market states hold placement per-tick without permanently latching the window out.
 
-## Background & Rationale
-Historically, `strategy/live_trader.py` evaluated an `entry_band` gate computed as `abs(mid - 0.50) > entry_band`. If triggered, it set `entry_cancelled_timeout = True` and `band_skip = True`, latching the window shut for its entire duration. This forced quoting to exist only near 0.50 (e.g. 0.46–0.54), preventing valid market making in markets trading away from 0.50 (e.g. at 0.70).
+Two measurement questions, one shared per-window base table, two reports — no engine
+changes:
 
-Following the pricing fix in Issue #206 (quotes follow current mid rather than hardcoded 0.50), Issue #228 replaced `entry_band` and `adverse_open` with `quote_range = (0.10, 0.90)` (per `docs/engine-decision-rules.md` §6 and ADR-0003).
+1. **#222 — dead-zone unit.** Should `dead_zone_unit` be `"pct"` (default 10% of window
+   remaining) or `"sec"` (absolute seconds)? Answer from data:
+   - Distribution of time-to-first-fill and time-to-pair, measured from quote placement,
+     split by window length (5m vs 15m).
+   - Mid volatility per remaining-time bucket, split by window length.
+   - Outcome of windows entered inside each candidate dead zone (paired vs naked leg).
+   - Verdict rule: if time-to-pair is roughly constant across window lengths → `sec`
+     wins; if the dead tail scales with the window → `pct` stands.
 
-## Requirements & Acceptance Criteria
-1. **Mid-Anchored Quoting:**
-   - Both live and backtest engines price resting quotes based on the current two-sided mid (`mstate.mid - offset` and `(1 - mstate.mid) - offset`), not 0.50.
-2. **De-latched Range Gate (`quote_range`):**
-   - The 0.50-anchored `entry_band` veto is replaced with `quote_range` (default `(0.10, 0.90)`).
-   - Evaluated on every tick against the two-sided mid.
-   - When the mid is outside `quote_range`, quote placement holds for that tick only; no window-cancelling latch is set.
-   - If the mid re-enters `quote_range` with sufficient time remaining, quoting resumes automatically.
-3. **Engine Parity:**
-   - `backtest/engine.py` and `strategy/live_trader.py` execute identical decision logic regarding `quote_range`.
-   - Behavioral parity is validated via `tests/test_quote_range_parity.py` and `tests/test_engine_parity.py`.
-4. **UI & API Synchronization:**
-   - Backtest and Cockpit tabs in `server/osc_dash.py` expose `quote_lo` and `quote_hi` controls.
-   - Legacy `entry_band` field is removed from active configuration payloads.
+2. **#223 — unpaired leg at expiry.** Should `naked_leg_at_expiry` stay `"close"`
+   (default) or become `"hold"`? Answer from data, over legs that reached the dead zone
+   unpaired:
+   - Bucket by the leg's mid on entering the dead zone (0.05-wide buckets). Realised
+     settlement rate per bucket vs the bucket's own price (measures favourite-longshot
+     bias directly).
+   - Best bid actually available in the dead zone vs the mid (real cost of closing).
+   - Realised value of `hold` vs `close` including taker fees, per bucket, with the
+     distribution of outcomes (mean, median, std, quartiles, n) — not only the mean.
 
-## Out of Scope
-- Re-architecting quote range or changing the default `(0.10, 0.90)` (governed by ADR-0003 and #228).
-- Re-entry drift-skip logic (addressed under #212).
-- Modifying order execution transport.
+## Acceptance criteria
+
+1. A single research script (`research/sweeps/dead_zone_lab.py`) builds the per-window
+   base table in one pass over the `ev_lab` window cache, reusing:
+   - `book_math.resting_bid_filled` — the one fill rule (issue #226, ADR-0002) — never a
+     reimplemented variant;
+   - the sell-print pre-filter (issue #182) as `sim2` applies it;
+   - the sim2 anchoring rule (first valid mid inside `quote_range`, quotes at
+     `mid - offset`, `newly_placed` semantics on the placement tick).
+2. `research/sweeps/dead_zone_222.json` — fill/pair time distributions by duration,
+   volatility profile by remaining time, candidate dead-zone outcome table, and the
+   machine-readable verdict with its rationale.
+3. `research/sweeps/naked_leg_223.json` — per-bucket settlement rate, bid-vs-mid gap,
+   close-vs-hold realised values with fees, and full distribution stats per bucket.
+4. `docs/dead-zone-naked-leg-measurements.md` — the report: method, tables, verdicts,
+   caveats (dataset span, proxy settlement, sample sizes).
+5. `docs/engine-decision-rules.md` §8 and §14 gain the measured verdict in their "open
+   question" / "deliberately" passages — cross-referencing the report. **No engine
+   default changes unless the data is unambiguous; any default flip is a separate,
+   operator-approved change.**
+6. A targeted test file (`tests/test_dead_zone_lab.py`) covers the pure logic:
+   fill-timeline detection, dead-zone boundary (pct and sec units), bucketing,
+   settlement proxy, and close-vs-hold arithmetic — on synthetic windows.
+7. Targeted suites stay green: `tests/test_dead_zone_lab.py`,
+   `tests/test_ev_sweep_lab.py`, `tests/test_backtest_engine.py` (engine untouched —
+   regression guard).
+
+## Edge cases
+
+- `None` mids/books inside a window: skip ticks exactly as `sim2` does. The #223
+  valuation point is the held leg's book at the **first dead-zone tick**; if that book
+  has no bid (`None`), the leg cannot be valued as `close` — record and exclude from
+  the close-vs-hold arithmetic with a counter (`n_close_impossible`), while the
+  settlement proxy still resolves from the window's final mid.
+- Settlement proxy: captured data ends at window end; the winner is inferred from the
+  **final** two-sided mid of the window (the same convention `audit_settlement.py`
+  uses), resolved **after** the walk completes — never from the dead-zone entry tick.
+  Exact rule: `won = (held_side == up) == (final_mid > 0.5)`; mids with
+  `|final_mid − 0.5| < 0.02` (band exclusive of its edges: `0.48 ≤ m ≤ 0.52`, e.g.
+  0.505) are **ambiguous** — counted, never guessed; a missing final mid is ambiguous
+  too.
+- Late-start windows: the dead-zone boundary is measured on remaining time from the
+  window's nominal `start_ts`/`duration` (rule 8 semantics), not from first tick.
+- Buckets with tiny n: report n per bucket; verdict logic weights only buckets with
+  n ≥ 30; smaller buckets are listed but never cited alone.
+- Tape-empty days: fills come from the book detector too (ask-through), not only tape;
+  windows with no prints at all still contribute via ask-through fills.
+
+## Explicit out-of-scope
+
+- Any change to `backtest/engine.py`, `strategy/live_trader.py`, or engine defaults
+  (beyond the §8/§14 doc verdicts).
+- Editing `sim2`/`ev_lab` shared code — the lab script consumes them read-only.
+- Live-side behaviour, streaming, dashboard changes.
+- Re-running stale-sweep numbers (`fill_model`-era reports) — out of scope.
