@@ -1,0 +1,129 @@
+{
+  "timestamp": 1789749312.619686,
+  "tick_file": "ticks_2026-09-13.jsonl",
+  "file_size_mb": 467.07,
+  "backtest_duration_sec": 34.07,
+  "backtest_n_snaps": 164260,
+  "backtest_n_windows": 550,
+  "idle_baseline": {
+    "count": 95,
+    "min_ms": 1004.18,
+    "p50_ms": 1012.23,
+    "p95_ms": 1027.66,
+    "p99_ms": 1029.06,
+    "max_ms": 1029.06,
+    "mean_ms": 1013.21,
+    "per_market": {
+      "btc-up-or-down-5m": {
+        "count": 19,
+        "min_ms": 1004.18,
+        "p50_ms": 1012.25,
+        "p95_ms": 1027.26,
+        "p99_ms": 1028.7,
+        "max_ms": 1029.06,
+        "mean_ms": 1013.21
+      },
+      "eth-up-or-down-5m": {
+        "count": 19,
+        "min_ms": 1004.21,
+        "p50_ms": 1012.24,
+        "p95_ms": 1027.24,
+        "p99_ms": 1028.69,
+        "max_ms": 1029.06,
+        "mean_ms": 1013.21
+      },
+      "bnb-up-or-down-5m": {
+        "count": 19,
+        "min_ms": 1004.23,
+        "p50_ms": 1012.23,
+        "p95_ms": 1027.2,
+        "p99_ms": 1028.69,
+        "max_ms": 1029.06,
+        "mean_ms": 1013.21
+      },
+      "sol-up-or-down-5m": {
+        "count": 19,
+        "min_ms": 1004.24,
+        "p50_ms": 1012.22,
+        "p95_ms": 1027.18,
+        "p99_ms": 1028.68,
+        "max_ms": 1029.06,
+        "mean_ms": 1013.21
+      },
+      "xrp-up-or-down-5m": {
+        "count": 19,
+        "min_ms": 1004.25,
+        "p50_ms": 1012.23,
+        "p95_ms": 1027.16,
+        "p99_ms": 1028.68,
+        "max_ms": 1029.05,
+        "mean_ms": 1013.21
+      }
+    }
+  },
+  "under_backtest": {
+    "count": 145,
+    "min_ms": 1002.35,
+    "p50_ms": 1017.98,
+    "p95_ms": 1611.6,
+    "p99_ms": 3286.86,
+    "max_ms": 3286.87,
+    "mean_ms": 1139.93,
+    "per_market": {
+      "btc-up-or-down-5m": {
+        "count": 29,
+        "min_ms": 1002.49,
+        "p50_ms": 1017.99,
+        "p95_ms": 1488.46,
+        "p99_ms": 2817.79,
+        "max_ms": 3286.86,
+        "mean_ms": 1139.93
+      },
+      "eth-up-or-down-5m": {
+        "count": 29,
+        "min_ms": 1002.42,
+        "p50_ms": 1017.99,
+        "p95_ms": 1488.46,
+        "p99_ms": 2817.78,
+        "max_ms": 3286.85,
+        "mean_ms": 1139.93
+      },
+      "bnb-up-or-down-5m": {
+        "count": 29,
+        "min_ms": 1002.4,
+        "p50_ms": 1017.98,
+        "p95_ms": 1488.47,
+        "p99_ms": 2817.78,
+        "max_ms": 3286.85,
+        "mean_ms": 1139.93
+      },
+      "sol-up-or-down-5m": {
+        "count": 29,
+        "min_ms": 1002.37,
+        "p50_ms": 1017.98,
+        "p95_ms": 1488.48,
+        "p99_ms": 2817.79,
+        "max_ms": 3286.86,
+        "mean_ms": 1139.93
+      },
+      "xrp-up-or-down-5m": {
+        "count": 29,
+        "min_ms": 1002.35,
+        "p50_ms": 1017.98,
+        "p95_ms": 1488.48,
+        "p99_ms": 2817.79,
+        "max_ms": 3286.87,
+        "mean_ms": 1139.93
+      }
+    }
+  },
+  "deltas_ms": {
+    "p50_ms": 5.75,
+    "p95_ms": 583.94,
+    "max_ms": 2257.81
+  },
+  "verdict": {
+    "is_negligible": false,
+    "conclusion": "NOTABLE \u2014 Backtest sweep introduced measurable GIL latency on live ticks."
+  }
+}
