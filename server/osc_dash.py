@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from concurrent.futures import ProcessPoolExecutor
 import gzip
 import json
 import math
@@ -698,176 +699,73 @@ def _compute_pnl_histogram(per_window: list, size: int) -> dict:
     }
 
 
-@app.get("/api/backtest")
-def api_backtest(
-    file: str = "",
-    offset: float = 0.02,
-    queue: float = 0.0,
-    pair_cost: float = 0.99,
-    exit_default_5m: float = 0.05,
-    exit_default_15m: float = 0.05,
-    exit_btc_5m: float = 0.05,
-    exit_sol_5m: float = 0.05,
-    exit_reversal: float = 0.02,
-    size: int = 5,
-    gas: float = 0.0,
-    max_start_delay: float = 0.0,
-    filter_partial: bool = False,
-    quote_lo: float = 0.10,
-    quote_hi: float = 0.90,
-    entry_delay_sec: float = 0.0,
-    dead_zone_val: float = 0.10,
-    dead_zone_unit: str = "pct",
-    naked_leg_at_expiry: str = "close",
-    taker_fee_rate: float = 0.07,
-    tick_size: float = 0.001,
-    min_quote_shares: int = 5,
-    enable_leg_chase: bool = False,
-    limit_windows: int = 0,
-):
-    """Run backtest simulation on selected tick file or all files in run/ticks/."""
-    from backtest import BacktestParams, iter_ticks
+_BACKTEST_POOL: Optional[ProcessPoolExecutor] = None
+_BACKTEST_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_SEMAPHORE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def get_backtest_pool() -> ProcessPoolExecutor:
+    """Lazy-initialized singleton ProcessPoolExecutor for CPU-heavy backtest sweeps."""
+    global _BACKTEST_POOL
+    if _BACKTEST_POOL is None:
+        _BACKTEST_POOL = ProcessPoolExecutor(max_workers=1)
+    return _BACKTEST_POOL
+
+
+def get_backtest_semaphore() -> asyncio.Semaphore:
+    """Lazy-initialized asyncio semaphore capping concurrent backtests to 1."""
+    global _BACKTEST_SEMAPHORE, _SEMAPHORE_LOOP
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _BACKTEST_SEMAPHORE is None or (_SEMAPHORE_LOOP is not None and _SEMAPHORE_LOOP is not current_loop):
+        _BACKTEST_SEMAPHORE = asyncio.Semaphore(1)
+        _SEMAPHORE_LOOP = current_loop
+    return _BACKTEST_SEMAPHORE
+
+
+def shutdown_backtest_pool() -> None:
+    """Cleanly shut down the persistent backtest process pool."""
+    global _BACKTEST_POOL
+    if _BACKTEST_POOL is not None:
+        _BACKTEST_POOL.shutdown(wait=False)
+        _BACKTEST_POOL = None
+
+
+def _run_backtest_simulation_worker(
+    ticks_dir_str: str,
+    source_file_str: Optional[str],
+    params: Any,
+    size: int,
+    max_start_delay: float,
+    limit_windows: int,
+    raw_params: dict,
+    empty_params: dict,
+) -> dict:
+    """Top-level worker function executing backtest simulation in an isolated process.
+
+    Runs in a dedicated OS process with an independent GIL. Passes only picklable
+    parameters across the process boundary.
+    """
+    from backtest import iter_ticks
     from backtest.engine import _simulate_window, group_by_cid
     from strategy.series import SERIES
 
     series_label_map = {s[0]: s[2] for s in SERIES}
 
-    exit_thresh = {
-        "default_5m": exit_default_5m,
-        "default_15m": exit_default_15m,
-        "btc-up-or-down-5m": exit_btc_5m,
-        "sol-up-or-down-5m": exit_sol_5m,
-        "btc-up-or-down-15m": exit_btc_5m,
-        "sol-up-or-down-15m": exit_sol_5m,
-    }
-
-    size = max(5, int(size))
-
-    if filter_partial and max_start_delay <= 0:
-        max_start_delay = 5.0
-
-    # Quotable range (issue #228), clamped like the live engine's
-    # update_config: each end to the price domain. An inverted or degenerate
-    # pair has no clamp order that preserves "lo < hi" without inventing a
-    # range the operator never asked for, so it falls back to the default —
-    # the same "fall back, never pass through" rule as the non-finite
-    # fallbacks below. Non-finite input (nan/inf) falls back the same way.
-    try:
-        f_lo, f_hi = float(quote_lo), float(quote_hi)
-        if not (math.isfinite(f_lo) and math.isfinite(f_hi)):
-            _lo, _hi = 0.10, 0.90
-        else:
-            _lo = max(0.0, min(1.0, f_lo))
-            _hi = max(0.0, min(1.0, f_hi))
-    except (TypeError, ValueError):
-        _lo, _hi = 0.10, 0.90
-    if not (_lo < _hi):
-        _lo, _hi = 0.10, 0.90
-    quote_lo, quote_hi = _lo, _hi
-
-    # Patient maker knob (issue #145), clamped like LiveConfigPayload:
-    # delay 0..3600 (a delay past the window simply never quotes).
-    # Non-finite input (nan/inf) falls back to off — min/max comparisons
-    # against NaN silently yield the boundary otherwise.
-    if not math.isfinite(entry_delay_sec):
-        entry_delay_sec = 0.0
+    if source_file_str:
+        snaps = list(iter_ticks(Path(source_file_str)))
     else:
-        entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
-
-    # Issue #164: every numeric knob is clamped to the bounds the registry
-    # advertises, so the API refuses exactly what the engine refuses and what
-    # the UI's min/max already showed. Previously each endpoint clamped with
-    # its own inline min/max calls, which is how a bound tightened in the
-    # engine could stay loose here.
-    dz_unit = dead_zone_unit if dead_zone_unit in ("pct", "sec") else "pct"
-    # The registry bound (0.0, 3600.0) is the union across units; under "pct"
-    # the engine itself refuses anything above 1.0, so the clamp must be
-    # unit-aware or a pct request of 9999 would 500 at construction.
-    dz_high = 1.0 if dz_unit == "pct" else 3600.0
-    if not math.isfinite(dead_zone_val):
-        dz_val = 0.10
-    else:
-        dz_val = min(max(dead_zone_val, 0.0), dz_high)
-    naked_expiry = naked_leg_at_expiry if naked_leg_at_expiry in ("close", "hold") else "close"
-    params = BacktestParams(
-        offset=_clamp_to_spec("offset", offset),
-        queue_gate=_clamp_to_spec("queue_gate", queue),
-        max_pair_cost=_clamp_to_spec("max_pair_cost", pair_cost),
-        exit_thresh_by_slug=exit_thresh,
-        exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
-        quote_shares=_clamp_to_spec("quote_shares", size),
-        merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
-        quote_range=(quote_lo, quote_hi),
-        entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
-        dead_zone_val=dz_val,
-        dead_zone_unit=dz_unit,
-        naked_leg_at_expiry=naked_expiry,
-        enable_leg_chase=bool(enable_leg_chase),
-        taker_fee_rate=_clamp_to_spec("taker_fee_rate", taker_fee_rate),
-        tick_size=_clamp_to_spec("tick_size", tick_size),
-        min_quote_shares=_clamp_to_spec("min_quote_shares", min_quote_shares),
-    )
-
-    if not TICKS_DIR.exists():
-        return {
-            "error": "no ticks dir",
-            "params_hash": params.params_hash(),
-            "overall": {},
-            "per_series": {},
-            "equity_curve": [],
-            "trades_sample": [],
-            "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-            "n_snaps": 0,
-            "n_windows": 0,
-        }
-
-    if file:
-        if "/" in file or "\\" in file or ".." in file:
-            return {
-                "error": "invalid file param",
-                "params_hash": params.params_hash(),
-                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-            }
-        source = (TICKS_DIR / file).resolve()
-        try:
-            source.relative_to(TICKS_DIR.resolve())
-        except ValueError:
-            return {
-                "error": "invalid file path",
-                "params_hash": params.params_hash(),
-                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-            }
-        if not source.exists() or not source.is_file():
-            return {
-                "error": f"file not found: {file}",
-                "params_hash": params.params_hash(),
-                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-            }
-        snaps = list(iter_ticks(source))
-    else:
-        snaps = list(iter_ticks(TICKS_DIR))
+        snaps = list(iter_ticks(Path(ticks_dir_str)))
 
     grouped = group_by_cid(snaps)
     if not grouped:
         gp = params.grouped_params()
         return {
             "params_hash": params.params_hash(),
-            "params": {
-                "offset": params.offset,
-                "queue": params.queue_gate,
-                "pair_cost": params.max_pair_cost,
-                "exit_default_5m": exit_default_5m,
-                "exit_default_15m": exit_default_15m,
-                "exit_btc_5m": exit_btc_5m,
-                "exit_sol_5m": exit_sol_5m,
-                "exit_reversal": params.exit_reversal,
-                "size": size,
-                "gas": params.merge_gas_usd,
-                "max_start_delay": max_start_delay,
-                "quote_lo": quote_lo,
-                "quote_hi": quote_hi,
-                "entry_delay_sec": params.entry_delay_sec,
-            },
+            "params": empty_params,
             "params_groups": gp,
             "overall": {
                 "windows": 0,
@@ -1057,21 +955,7 @@ def api_backtest(
     gp = params.grouped_params()
     return {
         "params_hash": params.params_hash(),
-        "params": {
-            "offset": offset,
-            "queue": queue,
-            "pair_cost": pair_cost,
-            "exit_default_5m": exit_default_5m,
-            "exit_default_15m": exit_default_15m,
-            "exit_btc_5m": exit_btc_5m,
-            "exit_sol_5m": exit_sol_5m,
-            "size": size,
-            "gas": gas,
-            "max_start_delay_sec": max_start_delay,
-            "quote_lo": quote_lo,
-            "quote_hi": quote_hi,
-            "entry_delay_sec": entry_delay_sec,
-        },
+        "params": raw_params,
         "params_groups": gp,
         "n_snaps": n_snaps,
         "n_windows": total_windows,
@@ -1081,6 +965,212 @@ def api_backtest(
         "trades_sample": trades_sample,
         "pnl_histogram": _compute_pnl_histogram(per_window, size),
     }
+
+
+@app.get("/api/backtest")
+async def api_backtest(
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    size: int = 5,
+    gas: float = 0.0,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    dead_zone_val: float = 0.10,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    taker_fee_rate: float = 0.07,
+    tick_size: float = 0.001,
+    min_quote_shares: int = 5,
+    enable_leg_chase: bool = False,
+    limit_windows: int = 0,
+):
+    """Run backtest simulation on selected tick file or all files in run/ticks/."""
+    from backtest import BacktestParams
+
+    exit_thresh = {
+        "default_5m": exit_default_5m,
+        "default_15m": exit_default_15m,
+        "btc-up-or-down-5m": exit_btc_5m,
+        "sol-up-or-down-5m": exit_sol_5m,
+        "btc-up-or-down-15m": exit_btc_5m,
+        "sol-up-or-down-15m": exit_sol_5m,
+    }
+
+    size = max(5, int(size))
+
+    if filter_partial and max_start_delay <= 0:
+        max_start_delay = 5.0
+
+    # Quotable range (issue #228), clamped like the live engine's
+    # update_config: each end to the price domain. An inverted or degenerate
+    # pair has no clamp order that preserves "lo < hi" without inventing a
+    # range the operator never asked for, so it falls back to the default —
+    # the same "fall back, never pass through" rule as the non-finite
+    # fallbacks below. Non-finite input (nan/inf) falls back the same way.
+    try:
+        f_lo, f_hi = float(quote_lo), float(quote_hi)
+        if not (math.isfinite(f_lo) and math.isfinite(f_hi)):
+            _lo, _hi = 0.10, 0.90
+        else:
+            _lo = max(0.0, min(1.0, f_lo))
+            _hi = max(0.0, min(1.0, f_hi))
+    except (TypeError, ValueError):
+        _lo, _hi = 0.10, 0.90
+    if not (_lo < _hi):
+        _lo, _hi = 0.10, 0.90
+    quote_lo, quote_hi = _lo, _hi
+
+    # Patient maker knob (issue #145), clamped like LiveConfigPayload:
+    # delay 0..3600 (a delay past the window simply never quotes).
+    # Non-finite input (nan/inf) falls back to off — min/max comparisons
+    # against NaN silently yield the boundary otherwise.
+    if not math.isfinite(entry_delay_sec):
+        entry_delay_sec = 0.0
+    else:
+        entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
+
+    # Issue #164: every numeric knob is clamped to the bounds the registry
+    # advertises, so the API refuses exactly what the engine refuses and what
+    # the UI's min/max already showed. Previously each endpoint clamped with
+    # its own inline min/max calls, which is how a bound tightened in the
+    # engine could stay loose here.
+    dz_unit = dead_zone_unit if dead_zone_unit in ("pct", "sec") else "pct"
+    # The registry bound (0.0, 3600.0) is the union across units; under "pct"
+    # the engine itself refuses anything above 1.0, so the clamp must be
+    # unit-aware or a pct request of 9999 would 500 at construction.
+    dz_high = 1.0 if dz_unit == "pct" else 3600.0
+    if not math.isfinite(dead_zone_val):
+        dz_val = 0.10
+    else:
+        dz_val = min(max(dead_zone_val, 0.0), dz_high)
+    naked_expiry = naked_leg_at_expiry if naked_leg_at_expiry in ("close", "hold") else "close"
+    params = BacktestParams(
+        offset=_clamp_to_spec("offset", offset),
+        queue_gate=_clamp_to_spec("queue_gate", queue),
+        max_pair_cost=_clamp_to_spec("max_pair_cost", pair_cost),
+        exit_thresh_by_slug=exit_thresh,
+        exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
+        quote_shares=_clamp_to_spec("quote_shares", size),
+        merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
+        quote_range=(quote_lo, quote_hi),
+        entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
+        dead_zone_val=dz_val,
+        dead_zone_unit=dz_unit,
+        naked_leg_at_expiry=naked_expiry,
+        enable_leg_chase=bool(enable_leg_chase),
+        taker_fee_rate=_clamp_to_spec("taker_fee_rate", taker_fee_rate),
+        tick_size=_clamp_to_spec("tick_size", tick_size),
+        min_quote_shares=_clamp_to_spec("min_quote_shares", min_quote_shares),
+    )
+
+    if not TICKS_DIR.exists():
+        return {
+            "error": "no ticks dir",
+            "params_hash": params.params_hash(),
+            "overall": {},
+            "per_series": {},
+            "equity_curve": [],
+            "trades_sample": [],
+            "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            "n_snaps": 0,
+            "n_windows": 0,
+        }
+
+    source_path_str: Optional[str] = None
+    if file:
+        if "/" in file or "\\" in file or ".." in file:
+            return {
+                "error": "invalid file param",
+                "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            }
+        source = (TICKS_DIR / file).resolve()
+        try:
+            source.relative_to(TICKS_DIR.resolve())
+        except ValueError:
+            return {
+                "error": "invalid file path",
+                "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            }
+        if not source.exists() or not source.is_file():
+            return {
+                "error": f"file not found: {file}",
+                "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            }
+        source_path_str = str(source)
+
+    empty_params = {
+        "offset": params.offset,
+        "queue": params.queue_gate,
+        "pair_cost": params.max_pair_cost,
+        "exit_default_5m": exit_default_5m,
+        "exit_default_15m": exit_default_15m,
+        "exit_btc_5m": exit_btc_5m,
+        "exit_sol_5m": exit_sol_5m,
+        "exit_reversal": params.exit_reversal,
+        "size": size,
+        "gas": params.merge_gas_usd,
+        "max_start_delay": max_start_delay,
+        "quote_lo": quote_lo,
+        "quote_hi": quote_hi,
+        "entry_delay_sec": params.entry_delay_sec,
+    }
+
+    raw_params = {
+        "offset": offset,
+        "queue": queue,
+        "pair_cost": pair_cost,
+        "exit_default_5m": exit_default_5m,
+        "exit_default_15m": exit_default_15m,
+        "exit_btc_5m": exit_btc_5m,
+        "exit_sol_5m": exit_sol_5m,
+        "size": size,
+        "gas": gas,
+        "max_start_delay_sec": max_start_delay,
+        "quote_lo": quote_lo,
+        "quote_hi": quote_hi,
+        "entry_delay_sec": entry_delay_sec,
+    }
+
+    semaphore = get_backtest_semaphore()
+    if semaphore.locked():
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "Backtest simulation already in progress. Please retry shortly.",
+                "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            },
+        )
+
+    async with semaphore:
+        loop = asyncio.get_running_loop()
+        pool = get_backtest_pool()
+        result = await loop.run_in_executor(
+            pool,
+            _run_backtest_simulation_worker,
+            str(TICKS_DIR),
+            source_path_str,
+            params,
+            size,
+            max_start_delay,
+            limit_windows,
+            raw_params,
+            empty_params,
+        )
+        return result
 
 
 @app.get("/api/analysis")
@@ -1890,6 +1980,12 @@ def _prewarm_verify_cache() -> None:
 def _startup_prewarm() -> None:
     """Load verify sidecars into memory at startup for instant first reports."""
     _prewarm_verify_cache()
+
+
+@app.on_event("shutdown")
+def _shutdown_event() -> None:
+    """Cleanly shut down worker process pool on application exit."""
+    shutdown_backtest_pool()
 
 
 def _ensure_bg_verify_scan(filename: str, target: Path) -> None:

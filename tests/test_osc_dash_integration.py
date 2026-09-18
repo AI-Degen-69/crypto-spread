@@ -663,6 +663,35 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert "fill_model" not in res_legacy.json()["params"]
 
 
+def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
+    """Verify /api/backtest rejects concurrent simulation runs with HTTP 429 when already in flight (Issue #259)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_round.jsonl"
+    fake_file.write_text('{"cid": "0x1", "slug": "btc-updown-5m", "ts": 1000.0, "start_ts": 1000.0, "mid": 0.50, "bids": [], "asks": []}\n', encoding="utf-8")
+
+    sem = osc_dash.get_backtest_semaphore()
+    assert not sem.locked()
+
+    # When the semaphore is held by an in-flight backtest
+    sem._value = 0
+    try:
+        response = client.get(f"/api/backtest?file={fake_file.name}")
+        assert response.status_code == 429
+        data = response.json()
+        assert "error" in data
+        assert "already in progress" in data["error"].lower()
+    finally:
+        sem._value = 1
+
+
+def test_shutdown_backtest_pool():
+    """Verify shutdown_backtest_pool cleanly terminates pool and resets singleton (Issue #259)."""
+    pool = osc_dash.get_backtest_pool()
+    assert pool is not None
+    osc_dash.shutdown_backtest_pool()
+    assert osc_dash._BACKTEST_POOL is None
+
+
 def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monkeypatch):
     """Verify /api/backtest returns trade execution prices, unconstrained trades_sample, and disaggregated metrics."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)

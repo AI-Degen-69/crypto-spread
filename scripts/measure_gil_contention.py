@@ -77,6 +77,7 @@ def _make_synthetic_poll(slug: str, now: float) -> Dict[str, Any]:
 
 async def run_benchmark(
     idle_ticks: int = 30,
+    duration: Optional[int] = None,
     tick_file: Optional[str] = None,
     output_path: Optional[str] = None,
     verbose: bool = True,
@@ -98,6 +99,8 @@ async def run_benchmark(
         print("=" * 80)
         print(f"Target replay file: {tick_file} ({file_size_mb} MB)")
         print(f"Idle calibration:   {idle_ticks} ticks (target interval: 1000.00 ms)")
+        if duration is not None:
+            print(f"Stress duration:    {duration} ticks limit")
         print("-" * 80)
 
     engine = LiveTraderEngine(load_persisted=False)
@@ -144,8 +147,11 @@ async def run_benchmark(
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def run_sync_backtest():
-        """Run synchronous offline replay backtest in threadpool executor."""
-        return api_backtest(file=tick_file, offset=0.02, queue=0.0)
+        """Run backtest simulation in dedicated process via api_backtest."""
+        res = api_backtest(file=tick_file, offset=0.02, queue=0.0)
+        if asyncio.iscoroutine(res):
+            return asyncio.run(res)
+        return res
 
     t_bt_start = time.perf_counter()
     backtest_future = executor.submit(run_sync_backtest)
@@ -154,13 +160,15 @@ async def run_benchmark(
     while not backtest_future.done():
         await engine._tick_all_markets()
         stress_ticks += 1
+        if duration is not None and stress_ticks >= duration:
+            break
         await asyncio.sleep(1.0)
         if verbose and stress_ticks % 5 == 0:
             print(f"  Under backtest: {stress_ticks} live ticks elapsed...")
 
     bt_duration = time.perf_counter() - t_bt_start
-    bt_result = backtest_future.result()
-    executor.shutdown(wait=True)
+    bt_result = backtest_future.result() if backtest_future.done() else {}
+    executor.shutdown(wait=backtest_future.done())
 
     n_snaps = bt_result.get("n_snaps", 0) if isinstance(bt_result, dict) else 0
     n_windows = bt_result.get("n_windows", 0) if isinstance(bt_result, dict) else 0
@@ -243,6 +251,7 @@ def main():
     """CLI entry point for empirical GIL contention benchmark."""
     parser = argparse.ArgumentParser(description="Empirical GIL Contention Benchmark (Issue #221)")
     parser.add_argument("--idle-ticks", type=int, default=30, help="Number of ticks for idle calibration (default: 30)")
+    parser.add_argument("--duration", type=int, default=None, help="Max duration (stress ticks) to collect during backtest")
     parser.add_argument("--tick-file", type=str, default=None, help="Name of tick file in run/ticks/ to replay")
     parser.add_argument("--output", type=str, default=None, help="Path to write JSON benchmark report")
     parser.add_argument("--json", action="store_true", help="Print only JSON output")
@@ -251,6 +260,7 @@ def main():
     report = asyncio.run(
         run_benchmark(
             idle_ticks=args.idle_ticks,
+            duration=args.duration,
             tick_file=args.tick_file,
             output_path=args.output,
             verbose=not args.json,

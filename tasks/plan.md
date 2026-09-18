@@ -1,63 +1,59 @@
-# Task Plan — Issue #221: Measure whether a running backtest delays the live tick (GIL contention)
+# Task Plan — Issue #259: Isolate backtest execution into ProcessPoolExecutor to eliminate GIL contention
 
-**Size tier:** Small — lightweight monotonic timing instrumentation in `strategy/live_trader.py`, a dedicated benchmark runner script `scripts/measure_gil_contention.py`, and targeted tests. Zero architecture or decision logic change.
-**Task type:** Performance / Research (empirical measurement of GIL contention on asyncio live loop).
+**Size tier:** Standard — refactoring `/api/backtest` execution into a dedicated process pool with semaphore concurrency control in `server/osc_dash.py`, integration tests with concurrency gates in `tests/test_osc_dash_integration.py`, and benchmark script alignment in `scripts/measure_gil_contention.py`.
+**Task type:** Performance / Code (multiprocessing execution isolation & concurrency capping).
 
-## Context & Background
-
-- The live trading engine runs an asyncio loop `_run_loop()` at 1s resolution (`strategy/live_trader.py:3790`), calling `_tick_all_markets()` which dispatches polls via `loop.run_in_executor` and updates markets via `_update_market_strategy(slug, res, now)`.
-- Backtests run via `/api/backtest` in `server/osc_dash.py:701`, executed by FastAPI in an `anyio` threadpool worker (`run_in_threadpool`).
-- Because Python's Global Interpreter Lock (GIL) is contested between CPU-heavy pure-Python worker threads (backtest loops iterating over hundreds of thousands of snaps) and the asyncio thread, we must measure whether backtests introduce measurable jitter/delay to the 1s live tick.
-- This issue is strictly an empirical measurement: "This is a measurement, not a redesign. Nothing should be changed until there is a number."
+## Context & Problem
+- Issue #221 confirmed that running CPU-intensive backtest sweeps via `/api/backtest` inside FastAPI's shared threadpool locks the Python GIL, delaying the live trading engine's 1s ticks up to 3.28s (p99 blowup).
+- Issue #259 resolves this by executing the simulation inside an isolated `ProcessPoolExecutor(max_workers=1)`. Because it runs in an independent OS process with its own GIL, the main process event loop and live trader experience 0ms GIL delay.
+- An `asyncio.Semaphore(1)` ensures only one backtest runs at a time, rejecting concurrent sweeps with HTTP 429 to avoid CPU thrashing.
 
 ## Tasks
 
-- [x] **TASK-1 [Performance/Instrumentation]**: Instrument per-market live tick intervals in `LiveTraderEngine`
-  - Target: `strategy/live_trader.py`
+- [x] **TASK-1 [Performance/Architecture]**: Extract picklable worker function and implement persistent ProcessPoolExecutor
+  - Target: `server/osc_dash.py`
   - What is built:
-    - Add `_last_strategy_tick_perf: Optional[float] = None` and `_tick_intervals: collections.deque[float] = field(default_factory=lambda: collections.deque(maxlen=1000))` to `MarketLiveState`.
-    - In `_update_market_strategy`: measure elapsed monotonic time via `time.perf_counter()` since last call for that market slug, recording interval in `mstate._tick_intervals`.
-    - Add `get_tick_timing_stats(self, slug: Optional[str] = None) -> Dict[str, Any]` to `LiveTraderEngine` computing sample count, min, p50, p95, p99, max, and mean. If `slug` is None, return both aggregated and per-market breakdowns.
-    - Zero strategy or order-flow side effects.
+    - Define top-level module function `_run_backtest_in_process(...)` taking picklable parameters (paths, knob values) and returning the full backtest results dictionary.
+    - Implement persistent lazy-initialized `ProcessPoolExecutor(max_workers=1)` with clean FastAPI shutdown hook.
+    - Maintain Windows spawn-compatibility (all arguments/returns strictly pickleable).
   - Helper skill: `performance-optimization`
-  - Verify: Targeted test checking interval accumulation and percentiles.
+  - Verify: Pure function unit invocation test and clean process pool execution.
 
-- [x] **TASK-2 [QA/TDD]**: Add unit tests for timing instrumentation
-  - Target: `tests/test_gil_contention_instrumentation.py`
+- [x] **TASK-2 [Backend/Logic]**: Update `/api/backtest` to async endpoint with semaphore concurrency capping
+  - Target: `server/osc_dash.py`
   - What is built:
-    - Test interval tracking across consecutive simulated ticks.
-    - Test percentile calculations (`p50`, `p95`, `p99`, `max`) with known distributions and empty states.
-    - Test that reset or restart clears or preserves stats cleanly.
-    - Test parity gate: verify zero mutation of quoting or state transitions.
-  - Helper skill: `test-driven-development`
-  - Verify: `python -m pytest tests/test_gil_contention_instrumentation.py -q`.
+    - Convert `api_backtest` to `async def api_backtest(...)`.
+    - Introduce `_BACKTEST_SEMAPHORE = asyncio.Semaphore(1)`.
+    - If semaphore is locked, immediately return HTTP 429 `{"error": "Backtest simulation already in progress. Please retry shortly."}`.
+    - Run simulation via `await loop.run_in_executor(_get_backtest_pool(), _run_backtest_in_process, ...)`.
+  - Helper skill: `performance-optimization`
+  - Verify: Existing endpoint response schemas match 100%.
 
-- [x] **TASK-3 [Research/Benchmark]**: Create measurement runner `scripts/measure_gil_contention.py`
+- [x] **TASK-3 [QA/TDD]**: Add integration tests for process isolation, response parity, and 429 concurrency capping
+  - Target: `tests/test_osc_dash_integration.py`
+  - What is built:
+    - Ensure all existing `test_api_backtest_*` tests pass without regression.
+    - Add test verifying concurrent requests return 429 when a backtest is already running.
+    - Verify pickling and process execution on temporary fixture datasets.
+  - Helper skill: `test-driven-development`
+  - Verify: `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q`.
+
+- [x] **TASK-4 [Research/Benchmark]**: Update and verify empirical benchmark runner
   - Target: `scripts/measure_gil_contention.py`
   - What is built:
-    - Dedicated CLI benchmark runner supporting `--idle-ticks`, `--tick-file`, `--json`, and `--synthetic-poll`.
-    - Phase 1: Run live trader loop idle to establish baseline tick interval distribution (p50/p95/max).
-    - Phase 2: Concurrently launch real backtest sweep in a background worker thread via `api_backtest` / `_simulate_window` while live loop runs.
-    - Phase 3: Collect tick intervals under active backtest load.
-    - Phase 4: Output comparison table (idle vs backtest) and compute GIL contention jitter delta.
-    - Phase 5: Conclude with analysis of observed interval jitter and its potential effect on 5m window entry timing.
+    - Add `--duration` CLI option to cap benchmark stress phase.
+    - Ensure script successfully runs both idle baseline and under-load stress test with isolated backtest execution.
   - Helper skill: `performance-optimization`
-  - Verify: `python -m scripts.measure_gil_contention --idle-ticks 5` smoke run.
-
-- [x] **TASK-4 [Execution & Report]**: Run benchmark on real tick data and record empirical findings
-  - Target: Run on `run/ticks/ticks_2026-09-18.jsonl` (or largest available).
-  - What is done: Execute the full benchmark, record the exact p50 / p95 / max numbers, and provide the definitive answer to Issue #221.
-  - Helper skill: `performance-optimization`
-  - Verify: All numbers logged and confirmed reproducible.
+  - Verify: `python -m scripts.measure_gil_contention --idle-ticks 5 --duration 5 --json`.
 
 ## Verification Matrix
 | Task | Method |
 |---|---|
-| TASK-1 | Unit tests & code inspection in `strategy/live_trader.py` |
-| TASK-2 | `python -m pytest tests/test_gil_contention_instrumentation.py -q` |
-| TASK-3 | `python -m scripts.measure_gil_contention --help` & smoke run |
-| TASK-4 | Full execution with output metrics & p50/p95/max comparison |
+| TASK-1 | Process worker serialization test |
+| TASK-2 | `client.get("/api/backtest")` endpoint test in `test_osc_dash_integration.py` |
+| TASK-3 | `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q` |
+| TASK-4 | `python -m scripts.measure_gil_contention --idle-ticks 5 --duration 5 --json` |
 
 ## Post-build gates (Station IV)
-- `python -m pytest tests/test_gil_contention_instrumentation.py tests/test_engine_parity.py -q` passes with 0 failures (<2s).
-- Measurement produces clear empirical data answering the GIL contention question.
+- `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q` passes with 0 failures (<2s).
+- Benchmark script confirms negligible GIL contention under backtest load.
