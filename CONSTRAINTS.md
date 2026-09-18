@@ -1,18 +1,17 @@
-# CONSTRAINTS — Issue #259: Isolate backtest execution into ProcessPoolExecutor
+# CONSTRAINTS — Issue #148: Unify execution entrypoints
 
 ## Scope Lock
-1. **Target Isolation**: Heavy CPU loops in `/api/backtest` (tick iteration, window simulation, metrics calculation) must execute in a dedicated `ProcessPoolExecutor(max_workers=1)`.
-2. **Concurrency Cap**: Concurrency must be capped using `asyncio.Semaphore(1)`. If another backtest is in flight, return a clean HTTP 429 (`{"error": "..."}`) rather than queuing unbounded work.
-3. **Picklable Contracts**: All inputs passed across process boundaries must be primitives/dicts; results must be standard serializable JSON dicts.
-4. **No Core Engine Changes**: No modifications to `backtest/engine.py` logic or live trader trading rules.
-5. **No New Dependencies**: Use Python stdlib `concurrent.futures.ProcessPoolExecutor` and `asyncio.Semaphore` only.
+1. **Zero Ambiguity in Entrypoints**: Every execution script in the repository (`strategy/live_trader.py`, `scripts/shadow_ev_pilot.py`, `server/osc_dash.py`, `bot/paper_bot.py`, `ten-bankrolls/*`) must have a designated status (Canonical vs Deprecated/Research) and documented role in `AGENTS.md`.
+2. **Deprecation Safeguards**: `bot/paper_bot.py` must be explicitly marked deprecated. Its `--live` flag (which contains an unmaintained `pass` stub) must be blocked or disarmed to prevent operator confusion.
+3. **Preserve Valid Code & History**: Do not break imports or delete historical research directories unless completely dead; marking deprecated with clean pointers to canonical modules is preferred to maintain reproducibility.
+4. **No Quoting or Risk Logic Changes**: Quoting math, risk parameters, and order routing in `strategy/live_trader.py` remain untouched.
+5. **No New Dependencies**: Stdlib only (`warnings`, `sys`, `argparse`).
 
 ## Quality Guardrails
 6. **Targeted Test Gate**:
-   - `python -m pytest tests/test_osc_dash_integration.py -k test_api_backtest -q` must pass with 0 failures (<2s).
-   - Additional concurrency tests verifying HTTP 429 under concurrent backtest execution.
-7. **Empirical Measurement Verification**:
-   - `python -m scripts.measure_gil_contention --idle-ticks 5 --duration 5 --json` must execute cleanly and demonstrate negligible GIL contention.
-8. **Anti-Cheat**:
+   - `python -m pytest tests/test_entrypoints.py -q` must pass (<1s).
+   - `python -m pytest tests/test_docstrings.py -q` must pass with 100% coverage across all non-excluded modules.
+   - `python -m pytest tests/test_live_trader.py -q` must pass with 0 regressions.
+7. **Anti-Cheat**:
    - No disabling, skipping, or weakening tests.
-   - Zero regression to existing `/api/backtest` query parameters, clamping rules, or response payloads.
+   - Every modified Python file must maintain full PEP 257 docstring compliance.
