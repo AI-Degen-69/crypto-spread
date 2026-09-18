@@ -2988,7 +2988,8 @@ def test_backtest_param_preview_grid_in_html():
     assert "function updateBacktestParamPreview()" in html
     assert "function setupBacktestInputListeners()" in html
     assert "updateBacktestParamPreview();" in html
-    assert "updateBacktestParamPreview();" in html
+    assert "setupBacktestInputListeners();" in html
+
 
 
 
