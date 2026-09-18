@@ -9,7 +9,7 @@
 - In `scripts/verify_tick_data.py`, `sample_issues` caps at 20 (`max_sample_issues`) per file (`scripts/verify_tick_data.py:284`), capturing:
   1. `json_decode_error` (line 344)
   2. `schema_or_book_issue` (line 361) from `verify_tick_record` (line 131)
-  3. `collector_errors` (`err` field present, counted separately in report)
+  (Note: `collector_errors` is tracked as a separate counter on `err` presence and is not appended to `sample_issues`).
 - The dashboard slices the first 10 items (`server/osc_dash.py:4994`).
 - In `backtest/engine.py:74`, `_json_or_skip` returns `None` for empty/malformed/non-dict lines, and `iter_ticks` silently drops `None` items. Replay proceeds without crashing, and without logging skipped rows.
 - Replay results can therefore run over "dirty" data without warning unless the operator verifies the dataset or inspects the Tick Files tab.
@@ -20,7 +20,7 @@
 - [x] **TASK-1 [Docs]**: Add `## Sample Discrepancies & Replay Integrity` section to `docs/operations.md`
   - Target file: `docs/operations.md`
   - What is built:
-    - Definition of "Sample Discrepancy" and the 3 issue families (JSON decode, schema/book validation, collector errors).
+    - Definition of "Sample Discrepancy" and the distinction between sampled issues (`json_decode_error`, `schema_or_book_issue`) and separate counters like `collector_errors`.
     - Explanation of the 20-sample cap in `sample_issues` and 10-item display on the dashboard vs the full file-level counters (`corrupt_lines`, `schema_errors`, `crossed_books`, `book_anomalies`, `collector_errors`).
     - The backtester's silent skip contract: `_json_or_skip` and `iter_ticks` drop invalid rows silently, making pre-replay verification a required data-quality habit.
     - Explicit "When to Care" guidelines: distinguishing acceptable noise (isolated late starts/minor gaps) from replay-invalidating defects (crossed books, high corrupt line ratios, missing legs).
