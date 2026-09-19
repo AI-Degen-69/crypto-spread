@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import collections
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace as _dc_replace
 import gzip
 import json
 import math
@@ -889,6 +889,8 @@ def _run_backtest_simulation_worker(
             "exit_reason": exit_info,
             "start_delay_sec": w.start_delay_sec,
             "is_partial": w.is_partial,
+            "pairs_count": w.pairs_count,
+            "stops_count": w.stops_count,
         })
 
     total_windows = len(per_window)
@@ -963,6 +965,115 @@ def _run_backtest_simulation_worker(
         "equity_curve": equity_curve,
         "trades_sample": trades_sample,
         "pnl_histogram": _compute_pnl_histogram(per_window, size),
+    }
+
+
+# --- Sweep visual (one axis, X-Y) -------------------------------------------
+# Values mirror scripts/sweep_backtest.py sensitivity axes so the chart shows
+# the same points the CLI sweeps. The worker loads ticks once and replays each
+# point in-process: N runs share one load instead of paying it N times.
+SWEEP_AXES: Dict[str, List[float]] = {
+    "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
+    "offset": [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
+    "exit_5m": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
+}
+
+
+def _run_sweep_worker(
+    ticks_dir_str: str,
+    source_file_str: Optional[str],
+    base_params_dict: dict,
+    axis: str,
+    size: int,
+    max_start_delay: float,
+    limit_windows: int,
+) -> dict:
+    """Load ticks once, replay one param point per axis value.
+
+    Returns {"axis", "points": [{label, value, overall, per_series}],
+    "n_windows", "n_snaps"} where overall/per_series carry only the totals the
+    chart needs (windows, pairs, exits, total/avg PnL in cents).
+    """
+    from backtest import BacktestParams, iter_ticks
+    from backtest.engine import _simulate_window, group_by_cid
+    from strategy.series import SERIES, token_for_slug
+
+    base = BacktestParams(**base_params_dict)
+    values = list(SWEEP_AXES.get(axis, []))
+
+    if source_file_str:
+        snaps = list(iter_ticks(Path(source_file_str)))
+    else:
+        snaps = list(iter_ticks(Path(ticks_dir_str)))
+    grouped = group_by_cid(snaps)
+    if max_start_delay and max_start_delay > 0:
+        kept = []
+        for _cid, g in grouped:
+            if not g:
+                continue
+            first_ts = float(g[0].get("ts", 0.0) or 0.0)
+            start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
+            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+            if delay <= max_start_delay:
+                kept.append((_cid, g))
+        grouped = kept
+    if limit_windows and limit_windows > 0:
+        grouped = grouped[:limit_windows]
+
+    points = []
+    for v in values:
+        if axis == "queue":
+            params = _dc_replace(base, queue_gate=float(v))
+            label = f"queue={v:.0f}"
+        elif axis == "offset":
+            params = _dc_replace(base, offset=float(v))
+            label = f"offset={v:.3f}"
+        elif axis == "exit_5m":
+            ex = dict(base.exit_thresh_by_slug)
+            ex["default_5m"] = float(v)
+            ex["btc-up-or-down-5m"] = max(0.05, float(v) - 0.03)
+            ex["sol-up-or-down-5m"] = max(0.06, float(v) - 0.01)
+            params = _dc_replace(base, exit_thresh_by_slug=ex)
+            label = f"exit_5m={v:.2f}"
+        else:  # exit_rev
+            params = _dc_replace(base, exit_reversal=float(v))
+            label = f"exit_rev={v:.3f}"
+
+        per_window = [_simulate_window(g, params) for _cid, g in grouped]
+        overall_pnl = sum(w.pnl_cents * size for w in per_window)
+        pairs = sum(1 for w in per_window if w.pair_captured)
+        exits = sum(1 for w in per_window if w.exit_taken)
+        n = len(per_window)
+        per_series: Dict[str, float] = {}
+        for w in per_window:
+            per_series[w.series] = per_series.get(w.series, 0.0) + w.pnl_cents * size
+        points.append({
+            "label": label,
+            "value": float(v),
+            "overall": {
+                "windows": n,
+                "pairs": pairs,
+                "exits": exits,
+                "total_pnl_cents": round(overall_pnl, 2),
+                "avg_pnl_cents": round(overall_pnl / n, 2) if n else 0.0,
+            },
+            "per_series": {k: round(x, 2) for k, x in per_series.items()},
+        })
+
+    # Ensure JSON keys for the axis values survive the process boundary.
+    series_order = [s[0] for s in SERIES]
+    series_labels = {
+        slug: f"{duration // 60:02d}m {token_for_slug(slug)}"
+        for slug, duration, _label in SERIES
+    }
+    return {
+        "axis": axis,
+        "points": points,
+        "series_order": series_order,
+        "series_labels": series_labels,
+        "n_snaps": sum(len(g) for _cid, g in grouped),
+        "n_windows": len(grouped),
     }
 
 
@@ -1182,6 +1293,107 @@ async def api_backtest(
                 limit_windows,
                 raw_params,
                 empty_params,
+            )
+        finally:
+            semaphore.release()
+            with _BACKTEST_LOCK:
+                global _BACKTEST_RUNNING
+                _BACKTEST_RUNNING = False
+
+    worker_task = asyncio.create_task(_run_shielded())
+    return await asyncio.shield(worker_task)
+
+
+@app.get(
+    "/api/backtest/sweep",
+    responses={
+        200: {"description": "One-axis sweep: X-Y points for the Sweep Visual chart"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest_sweep(
+    axis: str = "queue",
+    file: str = "",
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    limit_windows: int = 0,
+    offset: float = 0.02,
+    queue: float = 0.0,
+    exit_default_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+):
+    """Replay one sensitivity axis and return X-Y points.
+
+    X = axis value, Y = total PnL (cents). One aggregate series plus one per
+    market series, so the UI draws 1 big chart + 10 small ones. The base point
+    is the caller's current backtest settings; only the axis moves.
+    """
+    from backtest import BacktestParams
+
+    if axis not in SWEEP_AXES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
+        )
+    size = max(5, int(size))
+
+    source_path_str: Optional[str] = None
+    if file:
+        if "/" in file or "\\" in file or ".." in file:
+            return JSONResponse(status_code=400, content={"error": "invalid file param"})
+        source = (TICKS_DIR / file).resolve()
+        try:
+            source.relative_to(TICKS_DIR.resolve())
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "invalid file path"})
+        if not source.exists() or not source.is_file():
+            return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
+        source_path_str = str(source)
+
+    exit_thresh = {
+        "default_5m": exit_default_5m,
+        "default_15m": 0.05,
+        "btc-up-or-down-5m": 0.05,
+        "sol-up-or-down-5m": 0.05,
+        "btc-up-or-down-15m": 0.05,
+        "sol-up-or-down-15m": 0.05,
+    }
+    base = BacktestParams(
+        offset=_clamp_to_spec("offset", offset),
+        queue_gate=_clamp_to_spec("queue_gate", queue),
+        exit_thresh_by_slug=exit_thresh,
+        exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
+        quote_shares=_clamp_to_spec("quote_shares", size),
+    )
+
+    global _BACKTEST_RUNNING
+    semaphore = get_backtest_semaphore()
+    with _BACKTEST_LOCK:
+        if _BACKTEST_RUNNING or semaphore.locked():
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Backtest simulation already in progress. Please retry shortly."},
+            )
+        _BACKTEST_RUNNING = True
+
+    await semaphore.acquire()
+
+    async def _run_shielded():
+        """Execute the sweep in the worker pool and always release its guards."""
+        try:
+            loop = asyncio.get_running_loop()
+            pool = get_backtest_pool()
+            base_dict = asdict(base)
+            return await loop.run_in_executor(
+                pool,
+                _run_sweep_worker,
+                str(TICKS_DIR),
+                source_path_str,
+                base_dict,
+                axis,
+                size,
+                max_start_delay,
+                limit_windows,
             )
         finally:
             semaphore.release()
@@ -2746,6 +2958,28 @@ textarea:focus-visible,
       </div>
     </div>
 
+    <div class="card" id="btSweepCard">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+        <h3 style="margin:0">🔬 Sweep Visual — one axis, X-Y</h3>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="btSweepAxis" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
+            <option value="queue" selected>queue (X = shares ahead)</option>
+            <option value="offset">offset (X = entry distance)</option>
+            <option value="exit_5m">exit_5m (X = stop distance)</option>
+            <option value="exit_rev">exit_rev (X = reversal buffer)</option>
+          </select>
+          <button class="btn btn-primary" id="btnRunSweepVisual" onclick="runSweepVisual()">▶ Run Sweep Visual</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:10px">X = param value, Y = total P&amp;L. Base point = your current settings above; only the axis moves. Uses the same tick file selected above.</div>
+      <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim);margin-bottom:6px"></div>
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
+        <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
+        <canvas id="chartSweepAgg" height="140"></canvas>
+      </div>
+      <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px"></div>
+    </div>
+
     <div class="card">
       <h3>📊 Per-Series Performance</h3>
       <div id="btSeriesTableWrap"></div>
@@ -4007,8 +4241,9 @@ function switchTab(name){
   if(cont) cont.classList.add('active');
   if(name==='cockpit') fetchCockpitState();
   if(name==='backtest'){
+    // Opening the tab is read-only. Backtests start only after the operator
+    // clicks Run Sweep (or explicitly presses Enter in a parameter field).
     updateBacktestParamPreview();
-    if(!equityChartInstance) runBacktest();
   }
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
@@ -4282,6 +4517,7 @@ async function tick(){
 let equityChartInstance = null;
 let pnlHistChartInstance = null;
 window.selectedBacktestFile = "";
+window._btRunning = false;
 
 function setBacktestLoadingState(isLoading){
   const btn = $('btnRunSweep');
@@ -4350,6 +4586,7 @@ async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
   window._btAbort = ctl;
+  window._btRunning = true;
   setBacktestLoadingState(true);
   try {
     const getVal = (id, def) => {
@@ -4605,7 +4842,11 @@ async function runBacktest(fileOverride){
     if (err && err.name === 'AbortError') return;
     console.error('Error running backtest:', err);
   } finally {
-    if (window._btAbort === ctl) { window._btAbort = null; setBacktestLoadingState(false); }
+    if (window._btAbort === ctl) {
+      window._btAbort = null;
+      window._btRunning = false;
+      setBacktestLoadingState(false);
+    }
   }
 }
 
@@ -4688,7 +4929,9 @@ function renderBacktestTradesPage() {
   } else {
     for (const t of pageTrades) {
       const pnlUsd = fmtUsd(t.pnl_cents, true);
-      const resPill = t.both_filled
+      const resPill = (t.both_filled && t.exit_triggered)
+        ? pill('pill-mono', `PAIR + EXIT ${pnlUsd}`)
+        : t.both_filled
         ? pill('pill-osc', `PAIR CAPTURED ${pnlUsd}`)
         : t.exit_triggered
         ? pill('pill-mono', 'EXIT TRIGGERED')
@@ -4741,6 +4984,105 @@ function resetBtParams(){
   window.selectedBacktestFile = "";
   updateBacktestParamPreview();
   runBacktest();
+}
+
+// Sweep Visual — one axis X-Y: 1 aggregate chart + 10 per-series charts
+async function runSweepVisual(){
+  const btn = $('btnRunSweepVisual');
+  const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
+  const fileVal = ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
+  const size = $('btSize') ? $('btSize').value : 5;
+  const offset = $('btOffset') ? $('btOffset').value : 0.02;
+  const queue = $('btQueue') ? $('btQueue').value : 0;
+  const exit5m = $('btExit5m') ? $('btExit5m').value : 0.05;
+  const exitRev = $('btExitReversal') ? $('btExitReversal').value : 0.02;
+  const meta = $('btSweepMeta');
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Sweeping…'; }
+  if(meta){ meta.textContent = `sweeping ${axis}…`; }
+  try{
+    // Both endpoints share the one-worker guard. If an explicit regular
+    // backtest is already running, wait for that local run instead of showing
+    // a misleading 429 when the operator starts the visual sweep.
+    const waitUntil = Date.now() + 300000;
+    while (window._btRunning && Date.now() < waitUntil) {
+      if(meta){ meta.textContent = 'waiting for the selected-file backtest to finish…'; }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if (window._btRunning) {
+      if(meta){ meta.textContent = 'backtest is still running; try the sweep again when it finishes.'; }
+      return;
+    }
+    let url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&size=${encodeURIComponent(size)}&offset=${encodeURIComponent(offset)}&queue=${encodeURIComponent(queue)}&exit_default_5m=${encodeURIComponent(exit5m)}&exit_reversal=${encodeURIComponent(exitRev)}`;
+    if(fileVal){ url += `&file=${encodeURIComponent(fileVal)}`; }
+    const res = await fetch(url);
+    if(res.status === 429){
+      if(meta){ meta.textContent = 'busy — a backtest is already running, retry shortly.'; }
+      return;
+    }
+    const data = await res.json();
+    if(data.error){ if(meta){ meta.textContent = data.error; } return; }
+    renderSweepVisual(data);
+  }catch(err){
+    if(meta){ meta.textContent = 'sweep failed: ' + err; }
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
+  }
+}
+
+function renderSweepVisual(data){
+  const theme = getThemeTokens();
+  const points = data.points || [];
+  const labels = points.map(p => p.label);
+  const xVals = points.map(p => Number(p.value));
+  const aggY = points.map(p => (p.overall.total_pnl_cents || 0) / 100);
+  const xy = y => points.map((p, i) => ({ x: xVals[i], y: y[i] }));
+  const meta = $('btSweepMeta');
+  if(meta){
+    const best = points.reduce((a,b) => ((b.overall.total_pnl_cents||0) > (a.overall.total_pnl_cents||0) ? b : a), points[0] || {label:'—', overall:{}});
+    meta.textContent = `${data.axis} · ${data.n_windows} windows · best: ${best ? best.label : '—'} (${(((best||{}).overall||{}).total_pnl_cents||0)/100 >= 0 ? '+' : ''}$${((((best||{}).overall||{}).total_pnl_cents||0)/100).toFixed(2)})`;
+  }
+  const mkOpts = (title) => ({
+    responsive: true,
+    plugins: { legend: { display: false }, title: { display: !!title, text: title || '', color: theme.dim }, tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } } },
+    scales: {
+      x: { type: 'linear', title: { display: true, text: data.axis, color: theme.dim }, ticks: { color: theme.dim, maxTicksLimit: 7, callback: function(v){ return Number(v).toString(); } }, grid: { color: theme.line } },
+      y: { title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
+    }
+  });
+  destroyChartInstance('chartSweepAgg');
+  const aggCtx = $('chartSweepAgg');
+  if(aggCtx){
+    new Chart(aggCtx.getContext('2d'), {
+      type: 'line',
+      data: { datasets: [{ label: 'Total P&L ($)', data: xy(aggY), borderColor: theme.up, backgroundColor: hexToRgba(theme.up, 0.1), fill: true, tension: 0.1, pointRadius: 3 }] },
+      options: mkOpts('')
+    });
+  }
+  const grid = $('btSweepGrid');
+  if(!grid) return;
+  grid.innerHTML = '';
+  const order = data.series_order || [];
+  order.forEach((seriesKey, idx) => {
+    const card = document.createElement('div');
+    card.style.cssText = 'background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px';
+    const title = document.createElement('div');
+    title.style.cssText = 'font:700 11px var(--disp);color:var(--faint);margin-bottom:4px';
+    title.textContent = (data.series_labels || {})[seriesKey] || seriesKey;
+    const cv = document.createElement('canvas');
+    const cvId = 'chartSweep_' + idx;
+    cv.id = cvId;
+    cv.height = 110;
+    card.appendChild(title);
+    card.appendChild(cv);
+    grid.appendChild(card);
+    const y = points.map(p => ((p.per_series || {})[seriesKey] || 0) / 100);
+    destroyChartInstance(cvId);
+    new Chart(cv.getContext('2d'), {
+      type: 'line',
+      data: { datasets: [{ data: xy(y), borderColor: theme.proj, backgroundColor: hexToRgba(theme.proj, 0.1), fill: true, tension: 0.1, pointRadius: 2 }] },
+      options: mkOpts('')
+    });
+  });
 }
 
 // Statistical Summary Charts
@@ -7444,8 +7786,10 @@ function setupBacktestInputListeners(){
 
     el.addEventListener('change', () => {
       updateBacktestParamPreview();
-      if (el.tagName === 'SELECT' && (id === 'btFileSelect' || id === 'btMaxStartDelay')) {
-        runBacktest();
+      // Parameter and dataset changes are deliberately staged. The operator
+      // may change several knobs before explicitly starting the run.
+      if (id === 'btFileSelect') {
+        window.selectedBacktestFile = el.value;
       }
     });
   });

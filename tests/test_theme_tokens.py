@@ -102,6 +102,27 @@ def test_no_hardcoded_hexes_in_chartjs_configs():
     assert "theme.dim" in summary_body
 
 
+def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
+    """Verify Sweep Visual renders numeric X/Y points and canonical label metadata."""
+    assert 'id="btSweepCard"' in FULL_APP_HTML
+    assert 'id="btSweepAxis"' in FULL_APP_HTML
+    assert 'id="btnRunSweepVisual"' in FULL_APP_HTML
+    assert 'id="chartSweepAgg"' in FULL_APP_HTML
+    assert 'id="btSweepGrid"' in FULL_APP_HTML
+    assert "type: 'linear'" in FULL_APP_HTML
+    assert "data: xy(aggY)" in FULL_APP_HTML
+    assert "data: xy(y)" in FULL_APP_HTML
+    assert "series_labels" in FULL_APP_HTML
+    assert "title.textContent = (data.series_labels || {})[seriesKey] || seriesKey" in FULL_APP_HTML
+    assert "callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } }" in FULL_APP_HTML
+    assert "window._btRunning = false" in FULL_APP_HTML
+    assert "waiting for the selected-file backtest to finish" in FULL_APP_HTML
+    assert "window.selectedBacktestFile = el.value" in FULL_APP_HTML
+    assert "if (el.tagName === 'SELECT' && (id === 'btFileSelect' || id === 'btMaxStartDelay'))" not in FULL_APP_HTML
+    assert "if(!equityChartInstance) runBacktest();" not in FULL_APP_HTML
+    assert "Opening the tab is read-only" in FULL_APP_HTML
+
+
 def test_component_styles_use_css_variables():
     """Verify specific CSS components use proper semantic CSS variables."""
     # .tbl td uses --line-dark
