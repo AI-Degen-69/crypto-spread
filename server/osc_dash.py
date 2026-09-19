@@ -2387,15 +2387,26 @@ textarea:focus-visible,
 .param-structural{border-left:2px solid var(--down) !important;padding-left:8px;border-radius:2px}
 .bt-section-dot-amber{background:var(--gold)}
 .bt-section-dot-blue{background:var(--proj)}
-/* ── Backtest Parameter 2D Preview Grid (Issue #198) ────────────────────────── */
-#btParamPreviewWrap{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:14px;transition:border-color .15s ease}
+/* ── Backtest Strategy Geometry Preview (Issue #263) ───────────────────────── */
+#btParamPreviewWrap{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:14px;transition:border-color .15s ease}
 #btParamPreviewWrap:hover{border-color:var(--line-hi)}
-.bt-preview-pill{font:600 10.5px var(--mono);padding:2px 8px;border-radius:99px;border:1px solid var(--line);background:var(--panel);display:inline-flex;align-items:center;gap:4px}
-.bt-preview-pill b{color:var(--tx)}
+.bt-preview-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:10px}
+.bt-preview-title{display:flex;align-items:baseline;gap:9px;min-width:0}
+.bt-preview-title h4{margin:0;font:700 12px var(--disp);color:var(--tx);letter-spacing:.06em;text-transform:uppercase}
+.bt-preview-title span{font:500 10px var(--mono);color:var(--dim)}
+.bt-preview-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
+.bt-preview-pill{font:600 10px var(--mono);line-height:1.35;padding:4px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.bt-preview-pill b{color:var(--tx);font-weight:700}
 .bt-preview-pill-up{color:var(--up);border-color:rgba(51,201,181,0.3);background:rgba(51,201,181,0.08)}
 .bt-preview-pill-down{color:var(--down);border-color:rgba(240,104,77,0.3);background:rgba(240,104,77,0.08)}
 .bt-preview-pill-gold{color:var(--gold);border-color:rgba(235,178,58,0.3);background:rgba(235,178,58,0.08)}
 .bt-preview-pill-cyan{color:var(--cyan);border-color:rgba(56,189,248,0.3);background:rgba(56,189,248,0.08)}
+.bt-preview-chart-shell{width:100%;background:rgba(10,13,18,0.55);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.bt-preview-chart-shell svg{display:block;width:100%;height:clamp(180px, calc((100vw - 300px) / 3), 540px);aspect-ratio:auto}
+.bt-preview-legend{display:flex;gap:8px 16px;flex-wrap:wrap;align-items:center;margin-top:11px;font:500 10px var(--mono);color:var(--dim)}
+.bt-preview-legend-item{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.bt-preview-swatch{display:inline-block;flex:0 0 auto;width:13px;height:3px;border-radius:2px}
+.bt-preview-swatch-zone{width:11px;height:11px;border:1px solid;border-radius:3px}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -2678,28 +2689,26 @@ textarea:focus-visible,
 
       <!-- ── 3. STRATEGY GEOMETRY PREVIEW (2D Price-Time Grid, Issue #198) ── -->
       <div id="btParamPreviewWrap">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-          <div style="display:flex;align-items:center;gap:8px">
-            <h4 style="margin:0;font:700 11.5px var(--disp);color:var(--tx);letter-spacing:.04em;text-transform:uppercase">📐 Strategy Geometry Preview</h4>
-            <span style="font-size:10.5px;color:var(--dim);font-family:var(--mono)">(2D Price × Time Coordinate Grid)</span>
+        <div class="bt-preview-header">
+          <div class="bt-preview-title">
+            <h4>📐 Strategy Geometry Preview</h4>
+            <span>2D price × time</span>
           </div>
-          <div id="btPreviewMetricsPills" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <div id="btPreviewMetricsPills" class="bt-preview-pills" aria-label="Preview metrics">
             <!-- Dynamic metric summary pills rendered by updateBacktestParamPreview() -->
           </div>
         </div>
-        <div style="position:relative;width:100%;background:rgba(10,13,18,0.55);border:1px solid var(--line);border-radius:8px;overflow:hidden">
-          <svg id="btParamPreviewSvg" viewBox="0 0 760 260" preserveAspectRatio="none" style="width:100%;height:260px;display:block">
+        <div class="bt-preview-chart-shell">
+          <svg id="btParamPreviewSvg" viewBox="0 0 900 300" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Strategy price levels across the active window">
             <!-- Rendered by updateBacktestParamPreview() -->
           </svg>
         </div>
-        <div id="btParamPreviewLegend" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:11px;color:var(--dim);font-family:var(--mono)">
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(56,189,248,0.2);border:1px solid var(--cyan);border-radius:2px"></span> Quotable Corridor</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--cyan);display:inline-block"></span> Long Bid (0.50 - offset)</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--up);display:inline-block"></span> Short Complement (0.50 + offset)</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:12px;height:2px;background:var(--down);display:inline-block"></span> Stop Loss (0.50 - offset - stop)</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(235,178,58,0.2);border:1px dashed var(--gold);border-radius:2px"></span> Reversal Buffer</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(235,178,58,0.15);border:1px solid rgba(235,178,58,0.4);border-radius:2px"></span> Entry Delay</span>
-          <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;background:rgba(240,104,77,0.15);border:1px solid rgba(240,104,77,0.4);border-radius:2px"></span> Dead Zone (No Entry)</span>
+        <div id="btParamPreviewLegend" class="bt-preview-legend" aria-label="Preview legend">
+          <span class="bt-preview-legend-item"><span class="bt-preview-swatch bt-preview-swatch-zone" style="background:rgba(56,189,248,0.12);border-color:var(--cyan)"></span>Quotable corridor</span>
+          <span class="bt-preview-legend-item"><span class="bt-preview-swatch" style="background:var(--cyan)"></span>Quote levels</span>
+          <span class="bt-preview-legend-item"><span class="bt-preview-swatch" style="background:var(--down)"></span>Stop / exit levels</span>
+          <span class="bt-preview-legend-item"><span class="bt-preview-swatch bt-preview-swatch-zone" style="background:rgba(235,178,58,0.14);border-color:var(--gold)"></span>Entry delay</span>
+          <span class="bt-preview-legend-item"><span class="bt-preview-swatch bt-preview-swatch-zone" style="background:rgba(240,104,77,0.14);border-color:var(--down)"></span>Dead zone</span>
         </div>
       </div>
 
@@ -7176,7 +7185,33 @@ function onCockpitChartMouseLeave() {
   if (tooltip) tooltip.style.display = 'none';
 }
 
-// ── Backtest Parameter 2D Preview Grid (Issue #198) ──────────────────────────
+// ── Backtest Strategy Geometry Preview (Issue #263) ───────────────────────────
+function layoutBacktestPreviewLabels(items, plotRight, labelX, labelRight, plotTop, plotBottom) {
+  const labelHeight = 18;
+  const minGap = 25;
+  const minCenter = plotTop + labelHeight / 2;
+  const maxCenter = plotBottom - labelHeight / 2;
+  const labels = items
+    .filter(item => item && Number.isFinite(item.y))
+    .sort((a, b) => a.y - b.y)
+    .map(item => ({ ...item, center: Math.max(minCenter, Math.min(maxCenter, item.y)) }));
+
+  for (let i = 1; i < labels.length; i += 1) {
+    labels[i].center = Math.max(labels[i].center, labels[i - 1].center + minGap);
+  }
+  const overflow = labels.length ? labels[labels.length - 1].center - maxCenter : 0;
+  if (overflow > 0) {
+    labels.forEach(label => { label.center -= overflow; });
+  }
+
+  return labels.map(label => `
+    <line x1="${plotRight.toFixed(1)}" y1="${label.y.toFixed(1)}" x2="${(labelX - 7).toFixed(1)}" y2="${label.center.toFixed(1)}" stroke="${label.color}" stroke-opacity="0.65" stroke-width="1"/>
+    <circle cx="${plotRight.toFixed(1)}" cy="${label.y.toFixed(1)}" r="2" fill="${label.color}"/>
+    <rect class="bt-preview-level-label" data-label-center="${label.center.toFixed(1)}" x="${labelX.toFixed(1)}" y="${(label.center - labelHeight / 2).toFixed(1)}" width="${(labelRight - labelX).toFixed(1)}" height="${labelHeight}" rx="4" fill="var(--panel2)" fill-opacity="0.94" stroke="var(--line)"/>
+    <text x="${(labelX + 7).toFixed(1)}" y="${(label.center + 3.5).toFixed(1)}" fill="${label.color}" font-size="10" font-family="var(--mono)">${label.text}</text>
+  `).join('');
+}
+
 function updateBacktestParamPreview(){
   const svg = $('btParamPreviewSvg');
   if(!svg) return;
@@ -7225,13 +7260,14 @@ function updateBacktestParamPreview(){
     `;
   }
 
-  // Dimensions
-  const w = 760;
-  const h = 260;
+  // Dimensions: reserve a stable right gutter for labels instead of stretching
+  // the plot to the edge of the SVG at wide viewport sizes.
+  const w = 900;
+  const h = 300;
   const padL = 58;
-  const padR = 155;
-  const padT = 18;
-  const padB = 28;
+  const padR = 245;
+  const padT = 24;
+  const padB = 36;
   const plotW = w - padL - padR;
   const plotH = h - padT - padB;
 
@@ -7265,8 +7301,7 @@ function updateBacktestParamPreview(){
   const qHiY = getY(Math.max(quoteLo, quoteHi));
   const qHeight = Math.max(0, qLoY - qHiY);
   let quotableSvg = `
-    <rect x="${padL}" y="${qHiY.toFixed(1)}" width="${plotW}" height="${qHeight.toFixed(1)}" fill="rgba(56,189,248,0.04)" stroke="rgba(56,189,248,0.22)" stroke-width="1" stroke-dasharray="4,2"/>
-    <text x="${padL + plotW + 6}" y="${((qHiY + qLoY)/2 + 3.5).toFixed(1)}" fill="var(--cyan)" font-size="10" font-family="var(--mono)" opacity="0.8">Quotable [$${quoteLo.toFixed(2)}..$${quoteHi.toFixed(2)}]</text>
+    <rect x="${padL}" y="${qHiY.toFixed(1)}" width="${plotW}" height="${qHeight.toFixed(1)}" fill="rgba(56,189,248,0.05)" stroke="rgba(56,189,248,0.28)" stroke-width="1" stroke-dasharray="4,2"/>
   `;
 
   // Time Zones Shading
@@ -7294,6 +7329,8 @@ function updateBacktestParamPreview(){
   const activeStartX = getX(delaySec);
   const activeEndX = getX(windowDur - deadSec);
   const activeWidth = Math.max(0, activeEndX - activeStartX);
+  const yLong = getY(longBid);
+  const yShort = getY(shortComp);
 
   let activeContentSvg = '';
   if (activeWidth <= 0) {
@@ -7313,20 +7350,16 @@ function updateBacktestParamPreview(){
         stopSvg += `
           <rect x="${activeStartX.toFixed(1)}" y="${yRev.toFixed(1)}" width="${activeWidth.toFixed(1)}" height="${revH.toFixed(1)}" fill="rgba(235,178,58,0.16)" stroke="rgba(235,178,58,0.4)" stroke-width="1" stroke-dasharray="2,2"/>
           <line x1="${activeStartX.toFixed(1)}" y1="${yRev.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yRev.toFixed(1)}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="2,2"/>
-          <text x="${padL + plotW + 6}" y="${(yRev + 3).toFixed(1)}" fill="var(--gold)" font-size="9.5" font-family="var(--mono)">Reversal: $${revPrice.toFixed(3)} (+${(exitReversal*100).toFixed(1)}¢)</text>
         `;
       }
 
       // Stop Loss Line
       stopSvg += `
         <line x1="${activeStartX.toFixed(1)}" y1="${yStop.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yStop.toFixed(1)}" stroke="var(--down)" stroke-width="2" stroke-dasharray="4,2"/>
-        <text x="${padL + plotW + 6}" y="${(yStop + 3.5).toFixed(1)}" fill="var(--down)" font-size="10" font-family="var(--mono)" font-weight="700">Stop Loss: $${stopPrice.toFixed(3)} (-${(exitStop*100).toFixed(1)}¢)</text>
       `;
     }
 
     // Resting Bids
-    const yLong = getY(longBid);
-    const yShort = getY(shortComp);
     const midX = activeStartX + activeWidth * 0.5;
 
     const bidsSvg = `
@@ -7339,22 +7372,34 @@ function updateBacktestParamPreview(){
       <line x1="${activeStartX.toFixed(1)}" y1="${yLong.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="var(--cyan)" stroke-width="2"/>
       <circle cx="${activeStartX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="var(--cyan)"/>
       <circle cx="${activeEndX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="var(--cyan)"/>
-      <text x="${padL + plotW + 6}" y="${(yLong + 3.5).toFixed(1)}" fill="var(--cyan)" font-size="10.5" font-family="var(--mono)" font-weight="700">Long Bid: $${longBid.toFixed(3)}</text>
 
       <!-- Short Complement Line -->
       <line x1="${activeStartX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yShort.toFixed(1)}" stroke="var(--up)" stroke-width="2"/>
       <circle cx="${activeStartX.toFixed(1)}" cy="${yShort.toFixed(1)}" r="3.5" fill="var(--up)"/>
       <circle cx="${activeEndX.toFixed(1)}" cy="${yShort.toFixed(1)}" r="3.5" fill="var(--up)"/>
-      <text x="${padL + plotW + 6}" y="${(yShort + 3.5).toFixed(1)}" fill="var(--up)" font-size="10.5" font-family="var(--mono)" font-weight="700">Short Comp: $${shortComp.toFixed(3)}</text>
     `;
 
     activeContentSvg = stopSvg + bidsSvg;
   }
 
-  // Mid 0.50 label on the right
-  const midLabelSvg = `
-    <text x="${padL + plotW + 6}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--gold)" font-size="10" font-family="var(--mono)" font-weight="700">Mid: $0.500</text>
-  `;
+  const labelX = padL + plotW + 18;
+  const labelItems = [
+    { y: (qHiY + qLoY) / 2, color: 'var(--cyan)', text: `Quotable: $${quoteLo.toFixed(2)}–$${quoteHi.toFixed(2)}` },
+    { y: getY(mid), color: 'var(--gold)', text: 'Mid: $0.500' },
+  ];
+  if (activeWidth > 0) {
+    labelItems.push(
+      { y: yLong, color: 'var(--cyan)', text: `Long Bid: $${longBid.toFixed(3)}` },
+      { y: yShort, color: 'var(--up)', text: `Short Comp: $${shortComp.toFixed(3)}` },
+    );
+    if (exitStop > 0) {
+      labelItems.push({ y: getY(stopPrice), color: 'var(--down)', text: `Stop Loss: $${stopPrice.toFixed(3)} (-${(exitStop * 100).toFixed(1)}¢)` });
+    }
+    if (exitStop > 0 && exitReversal > 0 && getY(stopPrice) > getY(revPrice)) {
+      labelItems.push({ y: getY(revPrice), color: 'var(--gold)', text: `Reversal: $${revPrice.toFixed(3)} (+${(exitReversal * 100).toFixed(1)}¢)` });
+    }
+  }
+  const labelsSvg = layoutBacktestPreviewLabels(labelItems, padL + plotW, labelX, w - 18, padT, padT + plotH);
 
   // Spines
   const spinesSvg = `
@@ -7367,7 +7412,7 @@ function updateBacktestParamPreview(){
     ${quotableSvg}
     ${timeZonesSvg}
     ${activeContentSvg}
-    ${midLabelSvg}
+    ${labelsSvg}
     ${spinesSvg}
   `;
 }

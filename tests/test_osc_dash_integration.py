@@ -3046,21 +3046,24 @@ def test_backtest_param_preview_grid_in_html():
     assert 'id="btParamPreviewLegend"' in html
     assert "Strategy Geometry Preview" in html
 
-    # Legend elements
-    assert "Quotable Corridor" in html
-    assert "Long Bid (0.50 - offset)" in html
-    assert "Short Complement (0.50 + offset)" in html
-    assert "Stop Loss (0.50 - offset - stop)" in html
-    assert "Reversal Buffer" in html
-    assert "Entry Delay" in html
-    assert "Dead Zone (No Entry)" in html
+    # Compact five-item legend and visual tokens
+    assert "Quotable corridor" in html
+    assert "Quote levels" in html
+    assert "Stop / exit levels" in html
+    assert "Entry delay" in html
+    assert "Dead zone" in html
+    assert html.count('class="bt-preview-legend-item"') == 5
 
-    # CSS styles
+    # CSS styles and responsive SVG contract
     assert "#btParamPreviewWrap" in html
     assert ".bt-preview-pill" in html
     assert ".bt-preview-pill-cyan" in html
     assert ".bt-preview-pill-up" in html
     assert ".bt-preview-pill-down" in html
+    assert 'viewBox="0 0 900 300"' in html
+    assert 'preserveAspectRatio="xMidYMid meet"' in html
+    assert "function layoutBacktestPreviewLabels" in html
+    assert "minGap = 25" in html
 
     # JavaScript rendering & reactive bindings
     assert "function updateBacktestParamPreview()" in html
@@ -3152,6 +3155,24 @@ def test_backtest_param_preview_zero_handling_node():
     const svgHtml = $('btParamPreviewSvg').innerHTML;
     if (!svgHtml.includes('Long Bid: $0.500') || !svgHtml.includes('Short Comp: $0.500')) {
       throw new Error(`expected Long Bid & Short Comp at $0.500 for zero offset, got: ${svgHtml}`);
+    }
+
+    // Cluster every visible level at the same price and verify the layout pass
+    // enforces its 25-unit minimum gap after sorting and clamping.
+    $('btQuoteLo').value = '0.5';
+    $('btQuoteHi').value = '0.5';
+    updateBacktestParamPreview();
+    const clusteredCenters = Array.from(
+      $('btParamPreviewSvg').innerHTML.matchAll(/data-label-center="([0-9.]+)"/g),
+      match => Number(match[1]),
+    ).sort((a, b) => a - b);
+    if (clusteredCenters.length < 4) {
+      throw new Error(`expected four clustered preview labels, got: ${clusteredCenters.length}`);
+    }
+    for (let i = 1; i < clusteredCenters.length; i += 1) {
+      if (clusteredCenters[i] - clusteredCenters[i - 1] < 25) {
+        throw new Error(`preview labels overlap: ${clusteredCenters.join(', ')}`);
+      }
     }
 
     console.log('BT_PARAM_PREVIEW_ZERO_TESTS_PASSED');
