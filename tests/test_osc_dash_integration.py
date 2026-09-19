@@ -663,6 +663,89 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert "fill_model" not in res_legacy.json()["params"]
 
 
+def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
+    """Verify the one-axis sweep response, canonical labels, and file validation."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_sweep.jsonl"
+    cid = "0xSWEEP_01"
+    ticks = [
+        _make_fake_tick(1000.0, cid, "btc-updown-5m-1000", "btc-up-or-down-5m", 0.50),
+        _make_fake_tick(1001.0, cid, "btc-updown-5m-1000", "btc-up-or-down-5m", 0.48),
+        _make_fake_tick(1002.0, cid, "btc-updown-5m-1000", "btc-up-or-down-5m", 0.52),
+        _make_fake_tick(1003.0, cid, "btc-updown-5m-1000", "btc-up-or-down-5m", 0.50),
+    ]
+    fake_file.write_text("".join(json.dumps(t) + "\\n" for t in ticks), encoding="utf-8")
+
+    response = client.get("/api/backtest/sweep?axis=queue&file=fake_sweep.jsonl")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["axis"] == "queue"
+    assert data["series_order"][:2] == ["btc-up-or-down-5m", "eth-up-or-down-5m"]
+    assert len(data["series_order"]) == 10
+    assert data["series_labels"]["btc-up-or-down-5m"] == "05m BTC"
+    assert data["series_labels"]["btc-up-or-down-15m"] == "15m BTC"
+    assert isinstance(data["n_windows"], int)
+    assert isinstance(data["n_snaps"], int)
+    assert len(data["points"]) == len(osc_dash.SWEEP_AXES["queue"])
+    assert all(isinstance(point["value"], (int, float)) for point in data["points"])
+    assert all({"label", "value", "overall", "per_series"} <= point.keys() for point in data["points"])
+
+    unknown = client.get("/api/backtest/sweep?axis=not-an-axis")
+    assert unknown.status_code == 400
+    assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
+
+    unsafe = client.get("/api/backtest/sweep?file=../secrets.jsonl")
+    assert unsafe.status_code == 400
+    missing = client.get("/api/backtest/sweep?file=missing.jsonl")
+    assert missing.status_code == 404
+
+
+def test_api_backtest_sweep_concurrency_releases_guard(tmp_path, monkeypatch):
+    """Verify sweep returns 429 while busy and accepts a later request."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = tmp_path / "fake_sweep_busy.jsonl"
+    fake_file.write_text('{"cid": "0x1", "series": "btc-up-or-down-5m", "ts": 1000.0, "start_ts": 1000.0, "mid": 0.50, "bids": [], "asks": []}\\n', encoding="utf-8")
+
+    import concurrent.futures
+    import threading
+
+    mock_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: mock_pool)
+    started_event = threading.Event()
+    release_event = threading.Event()
+
+    def blocking_worker(*args, **kwargs):
+        started_event.set()
+        release_event.wait(timeout=5.0)
+        return {
+            "axis": "queue",
+            "points": [],
+            "series_order": [],
+            "series_labels": {},
+            "n_snaps": 0,
+            "n_windows": 0,
+        }
+
+    monkeypatch.setattr(osc_dash, "_run_sweep_worker", blocking_worker)
+    responses = {}
+
+    def run_first():
+        responses["first"] = client.get("/api/backtest/sweep?file=fake_sweep_busy.jsonl")
+
+    thread = threading.Thread(target=run_first)
+    thread.start()
+    assert started_event.wait(timeout=3.0), "First sweep did not start in time"
+
+    second = client.get("/api/backtest/sweep?file=fake_sweep_busy.jsonl")
+    assert second.status_code == 429
+
+    release_event.set()
+    thread.join(timeout=5.0)
+    mock_pool.shutdown(wait=True)
+    assert responses["first"].status_code == 200
+    assert not osc_dash._BACKTEST_RUNNING
+
+
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
     """Verify /api/backtest rejects concurrent simulation runs with HTTP 429 when already in flight (Issue #259)."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
