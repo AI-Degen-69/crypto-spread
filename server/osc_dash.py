@@ -7207,7 +7207,7 @@ function layoutBacktestPreviewLabels(items, plotRight, labelX, labelRight, plotT
   return labels.map(label => `
     <line x1="${plotRight.toFixed(1)}" y1="${label.y.toFixed(1)}" x2="${(labelX - 7).toFixed(1)}" y2="${label.center.toFixed(1)}" stroke="${label.color}" stroke-opacity="0.65" stroke-width="1"/>
     <circle cx="${plotRight.toFixed(1)}" cy="${label.y.toFixed(1)}" r="2" fill="${label.color}"/>
-    <rect x="${labelX.toFixed(1)}" y="${(label.center - labelHeight / 2).toFixed(1)}" width="${(labelRight - labelX).toFixed(1)}" height="${labelHeight}" rx="4" fill="var(--panel2)" fill-opacity="0.94" stroke="var(--line)"/>
+    <rect class="bt-preview-level-label" data-label-center="${label.center.toFixed(1)}" x="${labelX.toFixed(1)}" y="${(label.center - labelHeight / 2).toFixed(1)}" width="${(labelRight - labelX).toFixed(1)}" height="${labelHeight}" rx="4" fill="var(--panel2)" fill-opacity="0.94" stroke="var(--line)"/>
     <text x="${(labelX + 7).toFixed(1)}" y="${(label.center + 3.5).toFixed(1)}" fill="${label.color}" font-size="10" font-family="var(--mono)">${label.text}</text>
   `).join('');
 }

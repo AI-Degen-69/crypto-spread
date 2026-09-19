@@ -3157,6 +3157,24 @@ def test_backtest_param_preview_zero_handling_node():
       throw new Error(`expected Long Bid & Short Comp at $0.500 for zero offset, got: ${svgHtml}`);
     }
 
+    // Cluster every visible level at the same price and verify the layout pass
+    // enforces its 25-unit minimum gap after sorting and clamping.
+    $('btQuoteLo').value = '0.5';
+    $('btQuoteHi').value = '0.5';
+    updateBacktestParamPreview();
+    const clusteredCenters = Array.from(
+      $('btParamPreviewSvg').innerHTML.matchAll(/data-label-center="([0-9.]+)"/g),
+      match => Number(match[1]),
+    ).sort((a, b) => a - b);
+    if (clusteredCenters.length < 4) {
+      throw new Error(`expected four clustered preview labels, got: ${clusteredCenters.length}`);
+    }
+    for (let i = 1; i < clusteredCenters.length; i += 1) {
+      if (clusteredCenters[i] - clusteredCenters[i - 1] < 25) {
+        throw new Error(`preview labels overlap: ${clusteredCenters.join(', ')}`);
+      }
+    }
+
     console.log('BT_PARAM_PREVIEW_ZERO_TESTS_PASSED');
     process.exit(0);
     """
