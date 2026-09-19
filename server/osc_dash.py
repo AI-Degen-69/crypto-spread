@@ -1379,6 +1379,7 @@ async def api_backtest_sweep(
     await semaphore.acquire()
 
     async def _run_shielded():
+        """Execute the sweep in the worker pool and always release its guards."""
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
