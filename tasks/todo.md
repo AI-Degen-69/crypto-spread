@@ -1,9 +1,8 @@
-# Todo — Issue #283
+# Todo — Issue #285
 
-- [x] TASK-1: Host pick with evidence (Render recommended, Fly fallback — SPEC.md)
-- [x] TASK-2: Watchdog POSIX path + COLLECT_OUT/COLLECT_EXTRA_ARGS; Windows unchanged
-- [ ] TASK-3 (OPERATOR, needs host): deploy recipe; `--once` passes on the host
-- [ ] TASK-4 (OPERATOR, needs host): 1+ hour proof (manifest + watchdog log into #283)
-- [ ] TASK-5 (OPERATOR, needs host): pull day files, `--gzip` check, `sha256` recorded
-- [x] TASK-6: Deploy runbook in docs/ (`docs/collector-hosting-runbook.md`)
-- [x] TASK-7: Targeted pytest green (55 passed); full suite left to CI
+- [x] TASK-1: `scripts/ship_to_drive.py` + unit tests (9 passed)
+- [x] TASK-2: Watchdog shipper pass behind `DRIVE_REMOTE` (default off)
+- [x] TASK-3: `nixpacks.toml` (python + rclone, start command, volume)
+- [x] TASK-4: Runbook Railway+Drive path (incl. operator auth steps)
+- [x] TASK-5: Targeted pytest green (76 passed, 1 platform skip); full suite left to CI
+- [ ] TASK-6 (OPERATOR, needs trial + Drive token): deploy + first Drive delivery
