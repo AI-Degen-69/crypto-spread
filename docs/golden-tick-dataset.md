@@ -173,7 +173,6 @@ The golden dataset is **re-certified** (full sequence above, manifest rewritten)
 A golden dataset whose manifest cites a policy version older than the installed one is **not**
 the golden dataset — it is a stale copy, and the dashboard's readiness badges will show it.
 
-
 ## 4. Replay-speed budget
 
 **Budget: a backtest or sweep over the golden dataset runs at ≤ ~1s per window wall-time on a
