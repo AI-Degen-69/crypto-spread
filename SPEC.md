@@ -1,108 +1,48 @@
-# SPEC — Issue #264: Backtest Sweep Visual
+# SPEC — Issue #266: Sweep Visual sensitivity clarity
 
 ## Goal
-Give the operator a visual one-axis sensitivity view in the Backtest tab: one aggregate X-Y chart plus one chart for each of the ten canonical markets, using the existing Chart.js integration and the same replay behavior as the CLI sensitivity sweep.
+Make the Backtest Sweep Visual communicate that every X value is a separate replay experiment. Use discrete bar charts, identify the strongest overall result and strongest market, and replace technical axis labels with operator-friendly names. The stop-distance sweep must vary the shared 5m and 15m defaults together rather than implying that `exit_5m` is the whole strategy.
 
 ## Current state
-The issue reports that `/api/backtest/sweep` and `btSweepCard` work has started locally. The endpoint currently returns numeric `value` fields, but the UI uses categorical `labels` for Chart.js X axes, the per-market titles use raw slugs, and the focused endpoint/rendering contracts are not yet locked by tests.
+Issue #264 delivered `/api/backtest/sweep` with numeric point values, a linear Chart.js line chart, four technical axis names, and ten per-market cards. The UI currently exposes `exit_5m` even though the backtest has separate 5m and 15m stop defaults. Each point is an independent replay; the visualization must not suggest interpolation between untested values.
 
 ## Interface contract
-- `GET /api/backtest/sweep` accepts `axis` (`queue`, `offset`, `exit_5m`, `exit_rev`), optional safe basename `file`, and the existing base simulation parameters.
-- Valid responses contain `axis`, ordered `points[]`, `series_order`, `n_snaps`, and `n_windows`. Each point contains numeric `value`, readable `label`, `overall`, and `per_series`.
-- Invalid axes return HTTP 400 with the valid-axis list. Unsafe paths return HTTP 400. Missing files return HTTP 404. A concurrent run returns HTTP 429, and the guard is released after completion.
-- Served HTML retains the existing Sweep Visual IDs and renders one aggregate chart plus ten per-market charts. Chart.js uses a linear X scale with `{x, y}` points sourced from numeric `point.value`; formatted readable labels may be supplied as tick callbacks/tooltips.
-- The Sweep Visual display format is fixed-width `05m BTC`, `15m BTC`, `05m ETH`, etc. The numeric `05m` prefix keeps the duration column aligned; machine slugs and existing non-Sweep labels remain unchanged.
+- `GET /api/backtest/sweep` remains one-axis only.
+- Valid axes become `queue`, `offset`, `exit_stop`, and `exit_rev`. `exit_5m` is retired from the Sweep Visual API and UI.
+- The endpoint accepts the current base values for both stop defaults: `exit_default_5m` and `exit_default_15m`.
+- `exit_stop` applies the swept value to both `default_5m` and `default_15m` in the sweep copy of the parameters. It does not change production defaults or strategy math. Existing market-specific overrides remain explicit and documented in the response/metadata if they are retained.
+- Responses preserve `axis`, ordered `points[]`, numeric `value`, readable `label`, `overall`, `per_series`, `series_order`, `series_labels`, `n_snaps`, and `n_windows`.
+- Each point remains an independent run; no response field may imply that intermediate values were simulated.
+- Additive metadata identifies:
+  - `best_overall`: tested point with the highest aggregate P&L, including its value, label, and P&L.
+  - `best_market`: canonical market with the highest per-market P&L across the tested points, including market slug, friendly label, tested point, and P&L.
 
-## Edge cases
-- Empty or sparse replay data still returns a valid response and renders the known series cards without throwing.
-- A series absent from a dataset renders zero-valued per-series points while preserving canonical ordering.
-- The best-point metadata handles an empty points array without indexing failure.
-- Busy state must be cleared on success and worker failure so later sweeps are not permanently rejected.
-
-## Explicit out of scope
-Multi-axis/joint-grid/random sweeps, structural-limit sweeps in the UI, per-window scatter plots, strategy calculations, parameter defaults, tick data, other dashboard tabs, new dependencies, and Issue #174 socket-authoritative book changes.
-
----
-
-
-## Goal
-Make the socket the primary source of order books everywhere, with REST demoted
-to periodic reconciliation, so quotes are priced from the freshest book the venue
-has published rather than from a snapshot up to a full round old. Measure first,
-then switch — no provenance change without published disagreement numbers.
-
-Endpoint of the chain #170 → #171 → #172 → #173. All four are CLOSED/landed,
-so this issue is unblocked.
-
-## Current state (what the chain already delivered)
-- #170: `strategy/book_math.py` — one shared mid / queue_ahead / two_sided_mid
-  used by every consumer; degenerate one-sided books handled identically.
-- #171: `strategy/live_trader.py:3860-3871` — live/paper already skips the REST
-  book fetch when `is_ws_book_fresh()` holds for both legs (`ws_book_authority`).
-- #172: live engine runs the hardened direct WS transport (`run_direct`).
-- #173: socket trade prints feed fill detection; collector skips REST tape per
-  leg when `ws_leg_authoritative()` holds (`scripts/collect_ticks.py:403-418`).
-- `CLOBStreamCollectorBridge.get_book_for_token()` (`strategy/streaming.py:1033`)
-  already exposes the socket-maintained book; nothing reads it for quoting yet.
-
-## What is still missing (this issue)
-1. **Phase 1 measurement.** No shadow comparison exists anywhere: nobody records
-   WS book vs REST book disagreement, so the "rare and bounded" gate for the
-   switch cannot be evaluated.
-2. **Formal reconciliation.** No periodic REST re-fetch cadence, no
-   drift-triggered forced resync, no stated disagreement bound.
-3. **Reconnect safety proof.** After a gap the local book is stale until a fresh
-   `book` snapshot arrives; no test proves a stale book can never be served.
-4. **Collector switch.** `scripts/collect_ticks.py` still fetches both REST books
-   every round (~184ms of ~269ms per-series cost). This closes the deferred
-   proposal once recorded as collector SPEC §7.
-
-## Plan (from the issue; Phase 2 gated on Phase 1 evidence)
-- **Phase 1 — shadow comparison, zero behaviour change.** Collector reads the
-  socket book alongside the REST book every round and records disagreement:
-  per token `abs(ws_best_bid - rest_best_bid)`, `abs(ws_best_ask - rest_best_ask)`,
-  level-set difference count, and a diverge boolean. Aggregates (diverge rate,
-  p50/p95/max) go to `manifest.json` socket telemetry; per-tick deltas go into
-  the tick JSONL itself so the evidence is replayable (adopted improvement, see
-  `tasks/plan.md`). REST remains the recorded/quoted source.
-- **Phase 2 — switch, gated on the Phase 1 numbers.** Only if disagreement is
-  rare and bounded. WS book becomes the quoting source through the shared
-  `book_math` interface; REST stays as a periodic reconciliation fetch (much less
-  often than every round) that detects drift and forces a resync.
-- **Phase 3 — collector.** Same switch in `scripts/collect_ticks.py`: skip the
-  per-round REST book fetch when the socket leg is authoritative, removing the
-  largest remaining per-series cost.
+## UI contract
+- The axis selector uses humanized labels:
+  - `Queue depth — shares ahead`
+  - `Quote offset — distance from anchor`
+  - `Stop distance — 5m + 15m markets`
+  - `Reversal buffer — distance from anchor`
+- The aggregate chart and all ten market charts use bar datasets with a visible zero baseline. They do not use a category or interpolating line scale.
+- The aggregate chart marks `best_overall` with a distinct color, point/annotation treatment, or equivalent visible bar emphasis and a text legend.
+- The ten-market grid marks `best_market` visibly and shows its friendly label and tested parameter value.
+- Best metadata remains safe for an empty `points[]` response: no indexing failure and no false best result.
+- Existing DOM IDs remain stable: `btSweepCard`, `btSweepAxis`, `btnRunSweepVisual`, `btSweepMeta`, `chartSweepAgg`, and `btSweepGrid`.
 
 ## Acceptance criteria
-1. Phase 1 produces a real measured disagreement rate, published where an
-   operator reads it (dashboard/API + manifest), with per-tick evidence in the
-   tick files.
-2. No switch without those numbers: Phase 2 tasks are blocked on a recorded
-   measurement run, not on an assumption.
-3. After the switch a reconnect cannot serve a stale book — resync is proved by
-   test (book marked stale on reconnect, served again only after a fresh `book`
-   snapshot).
-4. Book freshness for quoting is bounded by venue publication, not by the poll loop.
-5. Backtest and live consume books through the same interface (#170 `book_math`),
-   so a recorded tick and a live tick are read by the same code.
-6. Tick JSONL stays backward compatible: disagreement fields are additive and
-   optional; old replay code ignores them.
+1. Aggregate and per-market charts render discrete bars from independent tested points, with a zero baseline and no line interpolation.
+2. The selected axis menu contains only the four humanized labels and uses `exit_stop` for the shared 5m/15m stop sweep.
+3. `exit_stop` changes both 5m and 15m default stop values in every run; tests prove neither duration is left at a fixed unrelated default.
+4. The response identifies the best aggregate point and best market, and the UI visibly marks both.
+5. Existing response shape, validation, safe basename handling, 404 missing-file behavior, 429 busy behavior, canonical order, and zero-fill behavior remain intact.
+6. Focused tests cover bar configuration, humanized labels, shared stop semantics, best-point/best-market metadata, empty/sparse data, and ten-card rendering.
+7. Browser verification against `run/ticks/ticks_2026-09-18.jsonl` records the rendered chart count and confirms the best markers and shared stop label.
 
 ## Edge cases
-- Dropped/misapplied `price_change` delta → silent wrong book: caught by the
-  reconciliation fetch + drift bound, which forces a resync.
-- `tick_size_change` mid-window → price grid changes: snapshot refresh on grid
-  change, never incremental patching across it.
-- Reconnect gap → stale-until-snapshot window: serve REST (or nothing quotable)
-  until resync; never the pre-gap book.
-- Crossed/degenerate WS book (`best_bid >= best_ask`, one-sided) → fall back to
-  REST for that leg; one-sided books priced only via `book_math` rules.
-- Socket disconnected at tick time → Phase 1 records "no WS data" (not zero
-  disagreement); Phase 2/3 treat as not-authoritative and use REST.
+- Empty points produce empty bar charts and neutral metadata.
+- A market missing from the dataset remains in canonical order with zero-valued bars and cannot become best solely because its value is missing.
+- Ties use deterministic first-in-canonical-order selection, documented in tests.
+- Negative P&L bars remain visible below the zero baseline.
 
 ## Explicit out of scope
-- Changing `book_math` pricing rules (#170 owns them).
-- Changing tape/fill logic (#173 owns it).
-- New venue transports or SDK changes (#172 owns transport).
-- Dashboard redesign — one read-only disagreement surface only.
-- New external dependencies.
+Multi-axis, joint-grid, random, structural-limit, scatter, strategy-calculation, tick-data, parameter-default, other-tab, and dependency changes. The existing Chart.js integration remains in place.

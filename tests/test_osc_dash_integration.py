@@ -689,15 +689,40 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
     assert len(data["points"]) == len(osc_dash.SWEEP_AXES["queue"])
     assert all(isinstance(point["value"], (int, float)) for point in data["points"])
     assert all({"label", "value", "overall", "per_series"} <= point.keys() for point in data["points"])
+    assert set(data["points"][0]["per_series"]) == set(data["series_order"])
+    assert data["best_overall"] is None or {"value", "label", "total_pnl_cents"} <= data["best_overall"].keys()
+    assert data["best_market"] is None or {"series", "label", "value", "point_label", "total_pnl_cents"} <= data["best_market"].keys()
+
+    shared_base = BacktestParams(exit_thresh_by_slug={
+        "default_5m": 0.05, "default_15m": 0.07,
+        "btc-up-or-down-5m": 0.05, "btc-up-or-down-15m": 0.07,
+        "sol-up-or-down-5m": 0.05, "sol-up-or-down-15m": 0.07,
+    })
+    shared, label = osc_dash._sweep_params_for_value(shared_base, "exit_stop", 0.12)
+    assert label == "stop=0.12"
+    assert set(shared.exit_thresh_by_slug.values()) == {0.12}
 
     unknown = client.get("/api/backtest/sweep?axis=not-an-axis")
     assert unknown.status_code == 400
     assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
+    assert unknown.json()["valid"] == ["exit_rev", "exit_stop", "offset", "queue"]
 
     unsafe = client.get("/api/backtest/sweep?file=../secrets.jsonl")
     assert unsafe.status_code == 400
     missing = client.get("/api/backtest/sweep?file=missing.jsonl")
     assert missing.status_code == 404
+
+
+def test_sweep_empty_result_has_neutral_best_metadata(tmp_path, monkeypatch):
+    """Verify an empty sweep response does not invent a best result."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    response = client.get("/api/backtest/sweep?axis=exit_stop")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["points"]) == len(osc_dash.SWEEP_AXES["exit_stop"])
+    assert all(point["overall"]["windows"] == 0 for point in data["points"])
+    assert data["best_overall"] is None
+    assert data["best_market"] is None
 
 
 def test_api_backtest_sweep_concurrency_releases_guard(tmp_path, monkeypatch):
