@@ -67,6 +67,9 @@ loud, use **the trading engine** and **real money**.
 | **a tick file** | `run/ticks/ticks_YYYY-MM-DD.jsonl` — one snapshot per line |
 | **a snapshot** (= a tick) | One line: both books, the tape delta, the window metadata at one instant |
 | **a window** | One market from `start_ts` to `end_ts`. Always the market, never a panel in the UI |
+| **the golden dataset** | The single canonical backtest dataset: verified golden days + the golden manifest in `run/ticks/golden/`, per [`golden-tick-dataset.md`](golden-tick-dataset.md) |
+| **a golden day** | One UTC day file inside the golden dataset that passed its per-day verify gate (`PASS` + `COMPLETE CAPTURE`) |
+| **the golden manifest** | `run/ticks/golden/golden_manifest.json` — which days are in the set, each day's verify verdict, and the policy version the certification ran under |
 
 The collector misses seconds. That gap is why the fill rule reads the tape *and* the book
 ([ADR-0002](adr/0002-single-hard-coded-fill-rule.md)), and it is why a backtest predicts
