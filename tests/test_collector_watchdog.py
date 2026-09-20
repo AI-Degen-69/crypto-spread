@@ -9,6 +9,8 @@ regressions, which `build_cache` then refuses to load.
 Every branch of that decision is exercised here, because the failure mode is
 silent corruption of data that cannot be recollected.
 """
+import os
+import time
 from unittest import mock
 
 import pytest
@@ -260,6 +262,8 @@ def test_shipper_pass_runs_when_remote_set(monkeypatch, tmp_path):
     monkeypatch.setattr(wd, "MANIFEST", tmp_path / "manifest.json")
     day = tmp_path / "ticks_2026-09-19.jsonl.gz"
     day.write_bytes(b"v1")
+    old = time.time() - 3600
+    os.utime(day, (old, old))  # closed AND write-stable
     with mock.patch.object(wd, "collector_pids", return_value=[1234]), \
             mock.patch.object(wd, "manifest_age", return_value=1.0), \
             mock.patch.object(wd, "start_collector"), \
