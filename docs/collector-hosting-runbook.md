@@ -93,3 +93,36 @@ fly logs   # same healthy signs as §2
 - [ ] TASK-3: `--once` passes ON the host.
 - [ ] TASK-4: 1+ hour proof (manifest excerpt + watchdog log pasted into #283).
 - [ ] TASK-5: day file pulled, `verify_tick_data` clean, `sha256` recorded.
+
+## 7. Railway trial + Drive path (issue #285 — operator's override)
+
+Trial math: ~$1.50 compute for 6 days sits inside the $5 credit; the 500MB
+volume holds 2–3 gz days as buffer while the shipper mails finished days up.
+
+1. **Service:** New Python service from this repo/branch. `nixpacks.toml` at
+   the root installs `rclone` and starts the watchdog. Add a **500MB volume**
+   mounted at `/data`.
+2. **Variables** (dashboard, never in code):
+   `COLLECT_OUT=/data`, `COLLECT_EXTRA_ARGS=--gzip`,
+   `DRIVE_REMOTE=gdrive:crypto-ticks`, plus `RCLONE_CONFIG_GDRIVE_TYPE=drive`
+   and `RCLONE_CONFIG_GDRIVE_TOKEN` from step 3.
+3. **One-time Drive auth (on your PC, once):** install rclone, run
+   `rclone config` → new remote named `gdrive` → Drive → follow the browser
+   login, then print the token with `rclone config show gdrive` and paste the
+   `token = {...}` JSON into `RCLONE_CONFIG_GDRIVE_TOKEN` (mark the variable
+   **sensitive** in Railway so it never appears in logs; keep a copy in your
+   password manager). Service accounts cannot see personal-Drive storage —
+   this personal token is the way in. After the capture, revoke it at
+   https://myaccount.google.com/permissions and delete the variable.
+4. **Logs:** same healthy signs as §2, plus `ship: {'shipped': [...], ...}`
+   lines once a day closes. A failed upload is logged and retried each pass —
+   capture never stops for shipping. Shipped days vanish from the volume
+   (pruned after upload) — that is normal and is what keeps 500MB enough.
+5. **Pull a day** into `run/ticks/` (direction matters — remote first,
+   local second; the verify command below reads that folder):
+   `rclone copyto gdrive:crypto-ticks/ticks_<day>.jsonl.gz run/ticks/` plus
+   the matching `.sha256` sidecar into the same folder, then locally:
+   `sha256sum -c` on the sidecar and
+   `python -m scripts.verify_tick_data run/ticks/ticks_<day>.jsonl.gz`.
+   Manual shipper run on the host (same env as the service):
+   `python -m scripts.ship_to_drive --out /data`.

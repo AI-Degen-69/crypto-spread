@@ -25,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -249,6 +250,42 @@ def manifest_age() -> float | None:
         return None
 
 
+_ship_thread: threading.Thread | None = None
+
+
+def _ship_pass(remote: str) -> None:
+    """Run one Drive-shipper pass to completion (worker thread body)."""
+    try:
+        from scripts.collect_ticks import now_day_key
+        from scripts.ship_to_drive import ship_all
+        out_dir = collect_out_dir()
+        summary = ship_all(out_dir, remote, now_day_key(), out_dir / "manifest.json")
+        if summary["shipped"] or summary["failed"]:
+            log(f"ship: {summary}")
+    except Exception as e:
+        log(f"ship pass failed ({type(e).__name__}: {e}); capture continues")
+
+
+def maybe_ship() -> None:
+    """Kick off a Drive-shipper pass, only when the host asked for it (#285).
+
+    Gated on `DRIVE_REMOTE`: unset means local/Windows runs behave exactly
+    as before. The pass runs on a daemon worker thread, never inline: one
+    backlogged file can cost three 600s rclone timeouts, and the liveness
+    loop must keep watching the collector during that window. A second pass
+    never overlaps the first — it simply waits for the next loop.
+    """
+    global _ship_thread
+    remote = os.environ.get("DRIVE_REMOTE", "").strip()
+    if not remote:
+        return
+    if _ship_thread is not None and _ship_thread.is_alive():
+        return
+    _ship_thread = threading.Thread(target=_ship_pass, args=(remote,),
+                                    daemon=True, name="drive-ship")
+    _ship_thread.start()
+
+
 def main(argv: list[str]) -> int:
     """Check liveness forever, restarting a dead or wedged collector."""
     ap = argparse.ArgumentParser()
@@ -296,6 +333,7 @@ def main(argv: list[str]) -> int:
         except Exception as e:
             # A watchdog that dies on a transient error is worse than none.
             log(f"watchdog error: {type(e).__name__}: {e}")
+        maybe_ship()
         if a.once:
             return 0
         time.sleep(a.check_seconds)

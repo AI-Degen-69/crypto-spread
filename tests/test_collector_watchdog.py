@@ -9,6 +9,9 @@ regressions, which `build_cache` then refuses to load.
 Every branch of that decision is exercised here, because the failure mode is
 silent corruption of data that cannot be recollected.
 """
+import os
+import threading
+import time
 from unittest import mock
 
 import pytest
@@ -238,6 +241,72 @@ def test_manifest_follows_collect_out(monkeypatch, tmp_path):
 
 def test_manifest_defaults_locally(monkeypatch, tmp_path):
     assert wd.manifest_path() == tmp_path / "manifest.json"
+
+
+def test_shipper_off_by_default(monkeypatch):
+    """No DRIVE_REMOTE: the loop is exactly the legacy watchdog."""
+    monkeypatch.delenv("DRIVE_REMOTE", raising=False)
+    with mock.patch.object(wd, "collector_pids", return_value=[1234]), \
+            mock.patch.object(wd, "manifest_age", return_value=1.0), \
+            mock.patch.object(wd, "start_collector"), \
+            mock.patch.object(wd, "kill"), \
+            mock.patch("scripts.ship_to_drive.ship_all") as ship_all, \
+            mock.patch.object(wd.time, "sleep", lambda *_a: None):
+        wd.main(["--once", "--stale-seconds", "180"])
+    ship_all.assert_not_called()
+
+
+def test_shipper_pass_runs_when_remote_set(monkeypatch, tmp_path):
+    """DRIVE_REMOTE set: one shipper pass per loop, failures contained."""
+    from scripts import ship_to_drive as sh
+    monkeypatch.setenv("DRIVE_REMOTE", "gdrive:ticks")
+    monkeypatch.setattr(wd, "MANIFEST", tmp_path / "manifest.json")
+    day = tmp_path / "ticks_2026-09-19.jsonl.gz"
+    day.write_bytes(b"v1")
+    old = time.time() - 3600
+    os.utime(day, (old, old))  # closed AND write-stable
+    with mock.patch.object(wd, "collector_pids", return_value=[1234]), \
+            mock.patch.object(wd, "manifest_age", return_value=1.0), \
+            mock.patch.object(wd, "start_collector"), \
+            mock.patch.object(wd, "kill"), \
+            mock.patch.object(sh.subprocess, "run",
+                              mock.Mock(return_value=mock.Mock(
+                                  returncode=0, stderr=""))), \
+            mock.patch.object(wd.time, "sleep", lambda *_a: None), \
+            mock.patch("scripts.collect_ticks.now_day_key",
+                       return_value="2026-09-20"):
+            with mock.patch.dict(wd.os.environ, {"COLLECT_OUT": str(tmp_path)}):
+                wd.main(["--once", "--stale-seconds", "180"])
+                if wd._ship_thread is not None:
+                    # join under the mocks: the pass runs off-loop
+                    wd._ship_thread.join(timeout=30)
+    assert (tmp_path / "shipped.json").is_file()
+
+
+def test_shipper_pass_never_overlaps_itself(monkeypatch):
+    """A slow pass blocks the next kick: shipping never piles up threads."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(remote):
+        started.set()
+        release.wait(timeout=30)
+
+    monkeypatch.setenv("DRIVE_REMOTE", "gdrive:ticks")
+    monkeypatch.setattr(wd, "_ship_pass", slow)
+    wd._ship_thread = None
+    try:
+        wd.maybe_ship()
+        assert started.wait(timeout=10)
+        first = wd._ship_thread
+        assert first is not None and first.is_alive()
+        wd.maybe_ship()  # must not spawn a second worker
+        assert wd._ship_thread is first
+    finally:
+        release.set()
+        if wd._ship_thread is not None:
+            wd._ship_thread.join(timeout=10)
+        wd._ship_thread = None
 
 
 def test_whitespace_collect_out_stays_on_defaults(monkeypatch, tmp_path):

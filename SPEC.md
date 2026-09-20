@@ -1,48 +1,43 @@
-# SPEC — Issue #283: Host the tick collector on a managed platform for the 5-day golden capture
+# SPEC — Issue #285: Railway trial + Google Drive as the file store
 
 ## Goal
-Move ONLY the tick collector off the home PC onto an always-on managed host with
-persistent disk, so the 5-day golden capture (#281) runs with no sleep/reboot/
-internet-drop risk. Everything else (dashboard, trading engine) stays local.
+Run the golden-capture collector on the operator's Railway trial ($5 credit,
+30 days) with the operator's Google Drive (4TB free) as the file store, because
+trial volumes cap at 500MB while 5 days need ~8GB raw.
 
-## Deliverable 1 — Host decision (documented, 2026-09-20)
-- Vercel is ruled out (serverless sleep + ephemeral disk). Hardening the home
-  PC was rejected. Charter volume baseline: 5 days ≈ 8–9GB raw, ~800k
-  snapshots (`docs/golden-tick-dataset.md` §2.2) → need >= 10GB persistent disk.
+## Deliverable 1 — Railway service definition
+- `nixpacks.toml`: Python + `rclone` via apt (no new pip dependency —
+  `requirements.txt` stays at 5), start command runs the watchdog with
+  `COLLECT_OUT` at the 500MB volume mount and `COLLECT_EXTRA_ARGS=--gzip`
+  (raw days are ~1.5–1.7GB; gz days are the only thing that fits the buffer).
+- Trial math (recorded): ~$1.50 compute for 6 days sits inside the $5 credit;
+  2 vCPU / 0.5GB RAM per service is plenty for the collector loop.
 
-| Host | Fit for this workload | Cost for 1 month always-on + 10GB disk | Verdict |
-|---|---|---|---|
-| **Render** (background worker + persistent disk) | Native Python worker, no Dockerfile; disk mount is a form field; single instance (required for disk); platform restarts crashed services; disk persists across restarts (`render.com/docs/disks`, `/background-workers`) | Starter worker $7 + 10GB × $0.25 = **~$9.50/mo** (`render.com/pricing`) | ✅ **Recommended** — least moving parts |
-| Fly.io (Machine + volume) | `restart: always` policy explicit (`fly.io/docs/.../machine-restart-policy`); volumes $0.15/GB (`fly.io/docs/about/pricing`) | shared-cpu-1x ~$1.94 + 10GB × $0.15 = **~$3.50–5/mo** | ✅ Cheaper fallback — needs a Dockerfile |
-| Railway | Volumes + always-on work, but Hobby caps volumes at **5GB** (`docs.railway.com/volumes`, `/pricing/plans`) → forces Pro $20/mo for 10GB | **$20/mo flat** (usage ~$7.50 sits inside Pro credit) | ❌ Ruled out — 4× the cost for this shape |
+## Deliverable 2 — Drive shipper
+- New `scripts/ship_to_drive.py`: uploads only CLOSED days (a day file is
+  closed when `now_day_key()` has moved past it — the live day is still being
+  appended by `write_snap`, `scripts/collect_ticks.py:303-315`, and must never
+  be shipped mid-write), invoked from the watchdog loop behind a
+  `DRIVE_REMOTE`-set flag (default off — Windows behavior unchanged).
+- Transport is `rclone` (Debian package from the platform image) as a
+  subprocess with env config (`RCLONE_CONFIG_GDRIVE_*`, token pasted by the
+  operator — service accounts cannot see personal-Drive storage, so OAuth
+  refresh token in env, never in code). `google-api-python-client` is
+  explicitly NOT used (new dep + same OAuth problem, zero gain).
+- Per shipped day: the `.jsonl.gz`, a matching `.sha256` sidecar (charter §3.1
+  needs one checksum per golden day), plus a ship-manifest snapshot for
+  provenance; an atomic local `shipped.json` state file so restarts never
+  re-upload; failures retried each watchdog pass, logged not raised (a stuck
+  shipper must never kill capture). Shipped days are pruned locally so the
+  500MB buffer never fills; only closed, write-stable days ship (mtime guard).
 
-- Decision: **Render** (operator confirms at deploy time; Fly.io documented as
-  fallback in the runbook).
-
-## Deliverable 2 — Packaging for the host
-- Start command, disk mount (collector output dir), restart policy, install from
-  existing `requirements.txt` (fastapi, uvicorn, requests, sse-starlette, anyio).
-- Watchdog portability: `scripts/collector_watchdog.py` used Windows-only
-  primitives (`Get-CimInstance` probe, `taskkill`, `DETACHED` flags). Done on
-  this branch: POSIX `pgrep -f scripts.collect_ticks` probe, `SIGKILL` kill
-  path, `COLLECT_OUT`/`COLLECT_EXTRA_ARGS` host overrides, `manifest_path()`
-  follows the redirect — with **identical Windows behavior** (unknown-state ⇒
-  no action, never double-start). Capture logic itself (poll interval,
-  budgets, rotation, manifest schema) did NOT change.
-
-## Deliverable 3 — 1+ hour proof capture on the host
-- Watchdog + collector running, manifest `sampling_interval_s` sane (~1.4s warm,
-  per `docs/operations.md`), no wedged events in `run/watchdog.log`.
-- Day files downloadable; `--gzip` verified working if disk is tight
-  (`.jsonl.gz` is first-class in verify and index).
-
-## Deliverable 4 — Deploy runbook in docs
-- Short runbook: deploy, check logs, restart, pull day files — with copy-paste
-  commands. Day-file pull records `sha256` per file (the golden manifest needs
-  one checksum per day — charter §3.1).
+## Deliverable 3 — Runbook extension
+- `docs/collector-hosting-runbook.md` gains the Railway+Drive path: service
+  setup, one-time Drive auth (operator, on their PC), logs, pull-from-Drive +
+  checksum check. Render/Fly sections stay as-is.
 
 ## Out of scope (explicit)
-- Hosting the dashboard or live trader.
-- Any change to collector capture logic or verify thresholds.
-- The 5-day golden capture and certification itself (issue #281).
-- #279 UI behavior; #174 socket books (frozen until golden capture completes).
+- Collector capture logic or verify thresholds (frozen mindset; #281 owns capture).
+- `verify_tick_data` changes — pulled files verify locally, unchanged.
+- Re-deciding #283's Render pick — Railway-trial is the operator's override for
+  this run, documented as such.

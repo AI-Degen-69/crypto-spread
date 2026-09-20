@@ -1,18 +1,17 @@
-# Plan — Issue #283: Host the tick collector on a managed platform
+# Plan — Issue #285: Railway trial + Google Drive file store
 
-Stack: Python · test runner: pytest · Size: **Standard** (infra decision +
-packaging + runbook docs, one hosting decision) · Type: Research + Docs (+ small Code)
+Stack: Python · test runner: pytest · Size: **Standard** (shipper module +
+watchdog hook + platform config + runbook, one deployment decision) · Type: Code + Docs
 
 | ID | Tag | Target files | What is built | Helper skill | Verification |
 |---|---|---|---|---|---|
-| TASK-1 | [Research] | `SPEC.md` §decision | Host pick (Railway/Render/Fly): disk ≥10GB, always-on, restart policy, cost — decision table with evidence | idea-refine | Decision row cites host docs for disk + restart |
-| TASK-2 | [Backend/Logic] | `scripts/collector_watchdog.py` (`collector_pids`, `kill`, `start_collector`) | POSIX path for probe/kill/spawn; Windows path byte-identical behavior (unknown ⇒ no action) | test-driven-development | Targeted pytest of touched code passes on Windows |
-| TASK-3 | [Backend/Logic] | host config (start cmd, mount, restart policy) + `requirements.txt` | Deploy recipe: install, mount output dir, start watchdog, restart policy | incremental-implementation | `python -m scripts.collect_ticks --once` passes ON the host |
-| TASK-4 | [Research] | host logs + `run/ticks/manifest.json` | 1+ hour proof capture: sane `sampling_interval_s`, no wedged events | — | Manifest excerpt + watchdog log excerpt in runbook |
-| TASK-5 | [Backend/Logic] | downloaded day file(s) | Pull day files, verify `--gzip` if used, record `sha256` per file | test-driven-development | `verify_tick_data <downloaded-file>` clean |
-| TASK-6 | [Docs] | `docs/` runbook (new file) | Deploy / logs / restart / pull-commands, copy-pasteable | documentation-and-adrs | Commands reviewed by running them once |
-| TASK-7 | [Debug] | — | Regression gate | — | `pytest tests/test_collect_ticks_smoke.py -q` green; full suite left to CI |
+| TASK-1 | [Backend/Logic] | `scripts/ship_to_drive.py` (new) | Closed-day detection (`now_day_key` past file day), sha256 + manifest snapshot, `shipped.json` state, rclone subprocess with env config, retry-with-backoff, never-raises contract | test-driven-development | New pytest: closed-vs-live, sidecar contents, state skips re-upload, failure returns False |
+| TASK-2 | [Backend/Logic] | `scripts/collector_watchdog.py` (shipper pass) | Behind `DRIVE_REMOTE`: one shipper pass per loop iteration; default off, probe/kill/spawn untouched | test-driven-development | Watchdog tests green; off-by-default proven by test |
+| TASK-3 | [Backend/Logic] | `nixpacks.toml` (new) | Python + rclone apt; start command with `COLLECT_OUT` + `COLLECT_EXTRA_ARGS=--gzip`; 500MB volume mount documented | incremental-implementation | Config reviewed against nixpacks schema; `--once` smoke locally |
+| TASK-4 | [Docs] | `docs/collector-hosting-runbook.md` | Railway+Drive path: service setup, one-time Drive auth (operator PC), logs, pull-from-Drive + checksum | documentation-and-adrs | Commands reviewed; auth steps executable by operator |
+| TASK-5 | [Debug] | — | Regression gate | — | `pytest tests/test_collector_watchdog.py tests/test_collect_ticks_smoke.py tests/test_ship_to_drive.py -q` green; full suite left to CI |
+| TASK-6 | [Research] | operator, on host | Deploy + first Drive delivery (needs trial account + Drive token — operator hands) | — | Day file in Drive with `.sha256`; pulled file verifies clean |
 
-Improvement (adopted by default): day-file pull records `sha256` — charter §3.1
-requires one checksum per golden day, so capturing it at download time saves a
-re-hash round-trip later.
+Improvement (adopted by default): each shipped day carries a manifest snapshot
+alongside the `.sha256` — #281's provenance audit then needs Drive only, no
+server access.
