@@ -1,31 +1,34 @@
-# Constraints — Issue #273: Tick Dataset Readiness
+# Constraints — Issue #272: Tick Files clarity and readiness progress
+
+## Scope
+- Change Tick Files metric semantics, customer-facing status labels, readiness target presentation, tooltip copy, and focused tests only.
+- Preserve collector behavior, replay mathematics, window grouping, raw API compatibility, verification cache behavior, rescans, and Backtest actions.
+- No new dependencies.
 
 ## Correctness
-- Preserve `backtest.engine.replay()` behavior and all existing tick field semantics.
-- Never count raw JSONL row count as a substitute for independent market windows or tape entries.
-- A window is identified by `(series, cid)`; repeated snapshots within one window are not independent observations.
-- Keep 5m and 15m coverage separate in every readiness calculation.
-- Missing, malformed, duplicate, stale, or estimated records must be visible and cannot silently satisfy a stronger readiness level.
-- Preserve existing integrity `PASS/WARN/FAIL`; readiness is a separate claim-relative classification.
+- Raw integrity values remain `PASS`, `WARN`, and `FAIL` in machine-readable responses.
+- Customer-facing labels describe capture state: `COMPLETE CAPTURE`, `PARTIAL CAPTURE`, and `CORRUPTED DATA`.
+- Every status includes a reason and safe action; never display bare `WARN`.
+- Use the versioned readiness policy from Issue #273 as the source of truth for targets.
+- Every metric exposes both `EXPLORATORY` and `RESEARCH_READY` targets, including quality metrics.
+- A readiness level remains gated by all required checks; progress bars cannot promote a file by averaging unrelated metrics.
+- Lower-is-better metrics use inverted or explicitly zero-target progress semantics.
+- Small, empty, old-cache, and zero-window reports must render deterministically without division errors.
 
-## Statistical honesty
-- Do not present 30, 100, or 200–500 as universal guarantees. The report must label them as project policy thresholds with written rationale and uncertainty limitations.
-- Readiness must account for independent windows, tape entries, market/duration coverage, time/regime coverage, observed fill/trade variance, number of parameter trials, and out-of-sample separation.
-- A dataset cannot be `RESEARCH_READY` when it has no eligible temporal holdout for a claim that requires out-of-sample validation.
-- Any threshold change must update the policy documentation and tests together.
+## UX and accessibility
+- Main Tick Files content remains concise; the policy/profitability explanation appears only in an accessible floating tooltip.
+- Tooltip must be reachable by keyboard, have an accessible name, and close on Escape or outside interaction.
+- Progress rows expose text values in addition to visual bars; color is never the only status signal.
+- Keep supported responsive widths and avoid horizontal overflow.
+- Preserve canonical market labels: `05m BTC`, `15m BTC`, etc.
 
 ## Performance
-- Verification remains streaming and bounded-memory for large JSONL files; do not load a full file into a list.
-- A cached report for an unchanged fingerprint must remain fast and deterministic.
-- New readiness calculations must not make normal dashboard load rescan every large file synchronously.
-
-## API/UI
-- New readiness fields must be machine-readable, versionable, and backwards-compatible with existing manifest/verify fields.
-- The UI must show measured values, the selected claim/readiness level, and failed reasons in plain language.
-- Do not remove existing integrity details, market breakdown, rescan controls, or explicit Backtest actions.
+- Do not rescan large files merely to render the new labels or bars.
+- Keep verification streaming and cache-first.
+- Do not materially increase the manifest response payload with duplicated raw data.
 
 ## Testing and anti-cheat
-- Add tests for schema compatibility, mixed durations, sparse/empty tape, duplicate windows, malformed rows, gaps, collector errors, missing markets, temporal coverage, thresholds, and classification.
-- Run targeted tests for every modified module; do not skip or weaken existing assertions.
-- No new dependency without explicit approval.
-- No production/live trading behavior changes.
+- Add/adjust tests for status mapping and reasons, tooltip-only copy, both target sets, next-milestone calculations, zero values, lower-is-better direction, old-cache handling, and existing endpoint regressions.
+- Run only targeted suites during development; CI remains the full-suite gate.
+- Do not skip, weaken, delete, or suppress tests.
+- Do not change thresholds silently; update policy and tests together if needed.

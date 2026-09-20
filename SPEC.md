@@ -1,46 +1,62 @@
-# SPEC — Issue #273: Tick Dataset Readiness
+# SPEC — Issue #272: Clarify Tick Files metrics and readiness progress
 
 ## Goal
-Determine whether each collected tick file is compatible with the canonical replay engine and whether it has enough independent, correctly captured data to support a stated level of backtest claim.
+Make the Tick Files page explain the capture state and show, for every file, how much data exists versus the two readiness milestones defined by Issue #273.
 
-## Required outcomes
-1. A schema audit maps every replay-required field to its source and failure behavior.
-2. A readiness policy distinguishes exploratory debugging from research-grade parameter comparison.
-3. A deterministic readiness report evaluates each file using measured coverage, quality, and independence metrics.
-4. The Tick Files page exposes the readiness result and the reasons behind it in plain language.
+## User-facing integrity states
+The API keeps raw `PASS`, `WARN`, and `FAIL` values for compatibility. The UI maps them to:
 
-## Definitions
-- **Tick snapshot:** one valid JSONL record written by the collector, representing a timestamped observation of one market window, including books and optional `tape_delta`.
-- **Market window:** one unique `(series, cid)` interval. It is not a file and not merely a currency name.
-- **Tape entry:** one item inside a snapshot's `tape_delta`; it is not the same as a tick snapshot.
-- **Independent observation:** a distinct market window or explicitly separated temporal block; raw rows from the same window must not be counted as independent trades/windows.
-- **Research claim:** the declared use of a file, such as mechanics exploration, parameter comparison, or out-of-sample validation. Readiness is claim-relative.
+- `COMPLETE CAPTURE` — no detected structural or continuity problems.
+- `PARTIAL CAPTURE` — readable data with gaps, collector errors, late starts, early cutoffs, or time reversals.
+- `CORRUPTED DATA` — malformed/unreadable rows, missing required fields, invalid books/timestamps, or a read failure.
 
-## Compatibility contract
-The audit must verify, at minimum:
-- `ts`, `start_ts`, `end_ts`, `duration`, `cid`, `series`, and stable window identity;
-- both book legs with usable price levels and the recorded one-sided `mid` semantics;
-- `tape_delta` shape and counts;
-- fields required by fills, stops, dead-zone timing, settlement, and window grouping;
-- no unsafe mixing of 5m and 15m durations without duration-aware handling.
+Every state includes a short reason and an action. `WARN` must never appear alone.
 
-Missing, malformed, stale, duplicated, non-monotonic, or estimated data must be visible in the report and must not silently count toward a stronger readiness level.
+## Readiness targets
+The UI and API expose measured values and both targets for every metric:
 
-## Readiness levels
-The implementation must define at least:
-- **EXPLORATORY:** suitable for reproducing mechanics, debugging, and generating hypotheses; explicitly not sufficient to claim a stable trading edge.
-- **RESEARCH_READY:** meets the documented coverage, quality, independence, uncertainty, and trial-count requirements for parameter comparison on the declared sample.
+| Metric | EXPLORATORY | RESEARCH_READY |
+|---|---:|---:|
+| Valid tick snapshots | 1,000 | 10,000 |
+| Independent market windows | 30 | 100 |
+| Tape entries | 30 | 100 |
+| Market-duration pairs | 1 represented pair | all 10 supported pairs |
+| Windows per represented market-duration pair | 1 | 10 |
+| Separate time blocks/days | 1 | 3 |
+| Corrupt JSON rows | 0 | 0 |
+| Schema error rate | ≤5% | ≤5% under the current policy |
+| Sampling gaps | explicit numeric target and measured rate | ≤10% under the documented gap rule |
+| Collector errors | explicit numeric target and measured count/rate | 0 unless a documented policy says otherwise |
 
-A stronger **OOS_READY** level may be added only if the implementation includes a genuine temporal holdout or walk-forward split.
+Targets are project working milestones. They do not claim universal statistical validity or profitability.
 
-The exact thresholds must be justified in the plan/report using confidence interval width or statistical power, observed variance/fill rate, number of tested configurations, and coverage across markets, durations, and time blocks. The system must state that no universal count of ticks or trades guarantees a valid edge.
+## Progress contract
+For each file and each metric, return/render:
 
-## Acceptance criteria
-- The report contains measured values and pass/fail reasons for snapshots, windows, tape entries, all supported markets/durations, time span/regimes, gaps, errors, malformed rows, independence, and OOS separation.
-- The September 18 file is classified explicitly with reasons, not just a raw count.
-- Existing PASS/WARN/FAIL integrity output remains available and is not overwritten by readiness classification.
-- Readiness is deterministic for the same file fingerprint and configuration.
-- The API/CLI response is machine-readable and the UI explanation is human-readable.
+- measured value;
+- exploratory target and progress;
+- research target and progress;
+- reached/not reached state;
+- next milestone and remaining amount when below the next target.
+
+For lower-is-better metrics, progress is inverted or explicitly labeled `0 is the target`. Exceeding one metric never compensates for failing another readiness gate.
+
+## Tooltip contract
+The long explanation about targets and untouched later periods is hidden from the normal layout. An information icon beside Research Readiness opens a floating tooltip containing:
+
+> The targets tell us whether this file contains enough varied data for the selected analysis. They do not prove that the strategy is profitable. Choose settings on one period and check them on a later period that was not used for choosing them.
+
+## Compatibility
+- Preserve raw integrity values, existing verification endpoints, cache/fingerprint behavior, rescans, and Backtest actions.
+- Preserve the readiness level semantics and policy version from Issue #273 unless a threshold change is explicitly documented and tested.
+- Keep market labels duration-first with two-digit minutes (`05m BTC`, `15m BTC`).
+
+## Edge cases
+- Empty or tiny files show zero-valued progress and the next exploratory milestone.
+- Zero-window files show `0` for tape entries per window without division errors.
+- Lower-is-better metrics never render larger error counts as healthier progress.
+- Missing readiness data from an old cache is treated as stale and does not produce partial UI claims.
+- A file with enough snapshots but insufficient markets, days, or quality checks remains below the appropriate readiness level.
 
 ## Out of scope
-Collector protocol changes, replay/fill/exit math changes, acquiring additional historical data, and claims about live profitability.
+Collector protocol changes, replay/fill/exit math, market-window grouping changes, live trading behavior, and claims that any threshold proves live profitability.

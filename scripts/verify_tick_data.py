@@ -29,7 +29,7 @@ from strategy.series import SERIES
 
 ROOT = Path(__file__).resolve().parent.parent
 
-READINESS_POLICY_VERSION = "2026-09-20.v1"
+READINESS_POLICY_VERSION = "2026-09-20.v2"
 EXPECTED_MARKETS = frozenset((slug, duration) for slug, duration, _label in SERIES)
 READINESS_POLICIES = {
     "EXPLORATORY": {
@@ -37,18 +37,38 @@ READINESS_POLICIES = {
         "min_windows": 30,
         "min_tape_entries": 30,
         "min_time_blocks": 1,
+        "min_market_duration_pairs": 1,
+        "min_windows_per_market": 1,
+        "max_corrupt_rate": 0.0,
+        "max_schema_error_rate": 0.05,
+        "max_gap_rate": 0.50,
+        "max_collector_error_rate": 0.01,
     },
     "RESEARCH_READY": {
         "min_valid_ticks": 10_000,
         "min_windows": 100,
         "min_tape_entries": 100,
         "min_time_blocks": 3,
+        "min_market_duration_pairs": len(EXPECTED_MARKETS),
         "min_windows_per_market": 10,
-        "required_markets": len(EXPECTED_MARKETS),
         "max_corrupt_rate": 0.0,
         "max_schema_error_rate": 0.05,
         "max_gap_rate": 0.10,
+        "max_collector_error_rate": 0.0,
     },
+}
+
+READINESS_METRIC_LABELS = {
+    "valid_ticks": "Tick snapshots",
+    "independent_windows": "Market windows",
+    "tape_entries": "Tape entries",
+    "market_duration_coverage": "Market-duration pairs",
+    "minimum_windows_per_market": "Windows per market-duration pair",
+    "time_blocks": "Time blocks / days",
+    "corrupt_rate": "Corrupt JSON rows",
+    "schema_error_rate": "Schema error rate",
+    "sampling_gap_rate": "Sampling gap rate",
+    "collector_error_rate": "Collector error rate",
 }
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -218,6 +238,39 @@ def verify_tick_record(tick: Any) -> list[str]:
     return issues
 
 
+def _check(name: str, measured: float, required: float, *, direction: str = "min") -> dict[str, Any]:
+    """Create one serializable readiness check with progress direction."""
+    ok = measured >= required if direction == "min" else measured <= required
+    return {
+        "name": name,
+        "label": READINESS_METRIC_LABELS.get(name, name),
+        "measured": measured,
+        "required": required,
+        "direction": direction,
+        "ok": ok,
+    }
+
+
+def capture_state(status: str, report: dict[str, Any]) -> dict[str, str]:
+    """Describe the capture state and safe action while preserving raw status."""
+    if status == "PASS":
+        return {"label": "COMPLETE CAPTURE", "description": "The file was captured without detected integrity or continuity problems.", "action": "Replay is allowed; check readiness before research."}
+    if status == "WARN":
+        reasons = []
+        for key, label in (("schema_errors", "schema issues"), ("sampling_gaps_count", "timestamp gaps"), ("collector_errors", "collector errors"), ("late_starts_count", "late starts"), ("early_cutoffs_count", "early cutoffs"), ("time_reversals", "time reversals")):
+            if report.get(key, 0):
+                reasons.append(f"{report[key]:,} {label}")
+        return {"label": "PARTIAL CAPTURE", "description": "; ".join(reasons) or "The file is readable but the capture is incomplete.", "action": "Use for limited exploration; do not treat it as a complete capture."}
+    reasons = []
+    if report.get("error"):
+        reasons.append(str(report["error"]))
+    if report.get("corrupt_lines", 0):
+        reasons.append(f"{report['corrupt_lines']:,} corrupt rows")
+    if report.get("schema_errors", 0):
+        reasons.append(f"{report['schema_errors']:,} schema issues")
+    return {"label": "CORRUPTED DATA", "description": "; ".join(reasons) or "The file could not be read or contains invalid data.", "action": "Do not use for a serious Backtest; recapture or repair the file."}
+
+
 def assess_readiness(
     *,
     valid_ticks: int,
@@ -229,61 +282,54 @@ def assess_readiness(
     corrupt_lines: int,
     schema_errors: int,
     sampling_gaps: int,
+    collector_errors: int = 0,
 ) -> dict[str, Any]:
-    """Classify a file for exploration or research without claiming an edge.
-
-    The policy uses independent market windows and tape entries rather than
-    raw row count alone. Thresholds are project policy, not universal
-    statistical guarantees; callers must still use out-of-sample validation.
-    """
+    """Classify readiness and expose both policy milestones for every metric."""
     market_keys = {(m.get("series"), m.get("duration")) for m in market_breakdown}
     windows_per_market = {
         f"{series}:{duration}": int(m.get("windows", 0))
         for m in market_breakdown
         for series, duration in [(m.get("series"), m.get("duration"))]
     }
+    min_windows_per_market = min(windows_per_market.values(), default=0)
     gap_rate = sampling_gaps / max(windows_count, 1)
     corrupt_rate = corrupt_lines / max(raw_lines, 1)
     schema_error_rate = schema_errors / max(valid_ticks, 1)
+    collector_error_rate = collector_errors / max(valid_ticks, 1)
 
     def checks_for(level: str) -> list[dict[str, Any]]:
         """Build measured readiness checks for one policy level."""
         p = READINESS_POLICIES[level]
-        checks = [
-            {"name": "valid_ticks", "measured": valid_ticks, "required": p["min_valid_ticks"], "ok": valid_ticks >= p["min_valid_ticks"]},
-            {"name": "independent_windows", "measured": windows_count, "required": p["min_windows"], "ok": windows_count >= p["min_windows"]},
-            {"name": "tape_entries", "measured": tape_entries, "required": p["min_tape_entries"], "ok": tape_entries >= p["min_tape_entries"]},
-            {"name": "time_blocks", "measured": len(time_blocks), "required": p["min_time_blocks"], "ok": len(time_blocks) >= p["min_time_blocks"]},
+        return [
+            _check("valid_ticks", valid_ticks, p["min_valid_ticks"]),
+            _check("independent_windows", windows_count, p["min_windows"]),
+            _check("tape_entries", tape_entries, p["min_tape_entries"]),
+            _check("market_duration_coverage", len(market_keys), p["min_market_duration_pairs"]),
+            _check("minimum_windows_per_market", min_windows_per_market, p["min_windows_per_market"]),
+            _check("time_blocks", len(time_blocks), p["min_time_blocks"]),
+            _check("corrupt_rate", round(corrupt_rate, 6), p["max_corrupt_rate"], direction="max"),
+            _check("schema_error_rate", round(schema_error_rate, 6), p["max_schema_error_rate"], direction="max"),
+            _check("sampling_gap_rate", round(gap_rate, 6), p["max_gap_rate"], direction="max"),
+            _check("collector_error_rate", round(collector_error_rate, 6), p["max_collector_error_rate"], direction="max"),
         ]
-        if level == "RESEARCH_READY":
-            checks.extend([
-                {"name": "market_duration_coverage", "measured": len(market_keys), "required": p["required_markets"], "ok": market_keys == EXPECTED_MARKETS},
-                {"name": "minimum_windows_per_market", "measured": min(windows_per_market.values(), default=0), "required": p["min_windows_per_market"], "ok": all(v >= p["min_windows_per_market"] for v in windows_per_market.values()) and len(market_keys) == len(EXPECTED_MARKETS)},
-                {"name": "corrupt_rate", "measured": round(corrupt_rate, 6), "required": p["max_corrupt_rate"], "ok": corrupt_rate <= p["max_corrupt_rate"]},
-                {"name": "schema_error_rate", "measured": round(schema_error_rate, 6), "required": p["max_schema_error_rate"], "ok": schema_error_rate <= p["max_schema_error_rate"]},
-                {"name": "sampling_gap_rate", "measured": round(gap_rate, 6), "required": p["max_gap_rate"], "ok": gap_rate <= p["max_gap_rate"]},
-            ])
-        return checks
 
     exploratory = checks_for("EXPLORATORY")
     research = checks_for("RESEARCH_READY")
-    if all(c["ok"] for c in research):
+    if all(c["ok"] for c in research) and market_keys == EXPECTED_MARKETS:
         level = "RESEARCH_READY"
-    elif all(c["ok"] for c in exploratory):
+    elif all(c["ok"] for c in exploratory) and market_keys:
         level = "EXPLORATORY"
     else:
         level = "INSUFFICIENT"
-    active = research if level == "RESEARCH_READY" else exploratory
     return {
         "level": level,
         "policy_version": READINESS_POLICY_VERSION,
-        "claim_note": "Thresholds are project policy, not a guarantee of a trading edge; use out-of-sample validation.",
-        "checks": active,
+        "checks": research if level == "RESEARCH_READY" else exploratory,
         "research_checks": research,
         "exploratory_checks": exploratory,
         "missing_markets": sorted(f"{s}:{d}" for s, d in EXPECTED_MARKETS - market_keys),
         "market_duration_count": len(market_keys),
-        "time_blocks": sorted(time_blocks),
+        "targets": {"exploratory": READINESS_POLICIES["EXPLORATORY"], "research_ready": READINESS_POLICIES["RESEARCH_READY"]},
     }
 
 
@@ -396,6 +442,7 @@ def verify_tick_file(
             "raw_lines": 0,
             "corrupt_lines": 0,
             "valid_ticks": 0,
+            "capture_state": capture_state("FAIL", {"error": f"file not found: {path}"}),
         }
 
     raw_lines = 0
@@ -517,6 +564,7 @@ def verify_tick_file(
             "raw_lines": raw_lines,
             "corrupt_lines": corrupt_lines,
             "valid_ticks": valid_ticks,
+            "capture_state": capture_state("FAIL", {"error": f"read error: {e}"}),
         }
 
     # Finalize window metrics
@@ -571,6 +619,7 @@ def verify_tick_file(
         corrupt_lines=corrupt_lines,
         schema_errors=schema_errors,
         sampling_gaps=total_gaps,
+        collector_errors=collector_errors,
     )
 
     # Determine status
@@ -580,6 +629,7 @@ def verify_tick_file(
         crossed_books > 0
         or total_gaps > 0
         or total_late_starts > 0
+        or total_early_cutoffs > 0
         or collector_errors > 0
         or total_reversals > 0
     ):
@@ -592,6 +642,15 @@ def verify_tick_file(
         "path": str(path),
         "size_bytes": path.stat().st_size if path.exists() else 0,
         "status": status,
+        "capture_state": capture_state(status, {
+            "corrupt_lines": corrupt_lines,
+            "schema_errors": schema_errors,
+            "sampling_gaps_count": total_gaps,
+            "collector_errors": collector_errors,
+            "late_starts_count": total_late_starts,
+            "early_cutoffs_count": total_early_cutoffs,
+            "time_reversals": total_reversals,
+        }),
         "raw_lines": raw_lines,
         "empty_lines": empty_lines,
         "corrupt_lines": corrupt_lines,
@@ -702,6 +761,7 @@ def verify_ticks_dir(
         corrupt_lines=tot_corrupt_lines,
         schema_errors=tot_schema_errors,
         sampling_gaps=tot_gaps,
+        collector_errors=tot_collector_errors,
     )
 
     # Aggregated verdict
@@ -716,6 +776,15 @@ def verify_ticks_dir(
 
     return {
         "status": verdict,
+        "capture_state": capture_state(verdict, {
+            "corrupt_lines": tot_corrupt_lines,
+            "schema_errors": tot_schema_errors,
+            "sampling_gaps_count": tot_gaps,
+            "collector_errors": tot_collector_errors,
+            "late_starts_count": tot_late_starts,
+            "early_cutoffs_count": tot_early_cutoffs,
+            "time_reversals": tot_reversals,
+        }),
         "files_checked": len(file_reports),
         "total_raw_lines": tot_raw_lines,
         "total_corrupt_lines": tot_corrupt_lines,
