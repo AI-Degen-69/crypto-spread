@@ -77,4 +77,55 @@ Within every captured window (`verify_window_continuity`, `scripts/verify_tick_d
 - Sampling gaps (`> max_gap_sec = 6s`) count against `sampling_gap_rate` in §1.2.
 
 These are the existing verify thresholds, not new ones. The golden bar adds no stricter gate of
+
+## 2. Collection plan
+
+### 2.1 The run
+
+One uninterrupted, watchdog-guarded capture of **5 consecutive full UTC days**:
+
+```powershell
+python -m scripts.collector_watchdog   # detached; restarts a dead or wedged collector
+python -m scripts.collect_ticks        # the collector the watchdog keeps alive
+```
+
+- `scripts/collector_watchdog.py` restarts the collector when the process dies and kills +
+  restarts it when the manifest goes stale (wedged, ~10s cadence per `run/ticks/manifest.json`).
+  Every event is logged to `run/watchdog.log`.
+- Day-boundary rotation is the collector's own: `write_snap` appends to
+  `run/ticks/ticks_<day_key>.jsonl` and `now_day_key` flips at UTC midnight — no operator action
+  and no file stitching at boundaries.
+
+### 2.2 Expected volume (measured, not assumed)
+
+- A full UTC day costs **~1.5–1.7GB raw, ~160k snapshots** (measured on this machine:
+  `ticks_2026-09-14` 1.55GB, `ticks_2026-09-15` 1.70GB; the GIL baseline counted 164,260 snaps
+  in 467MB of `ticks_2026-09-13` — `docs/measurements/issue-221-gil-contention.json`).
+- Cadence is round + `POLL_INTERVAL`, real gap ~1.4s — read `sampling_interval_s` from the
+  manifest, not the 1s the old docs claimed (#167, `docs/operations.md`).
+- 5 days ≈ **8–9GB raw** and ~800k snapshots. Disk space must be checked before starting;
+  `--gzip` halves-plus the footprint if needed (`.jsonl.gz` is first-class in verify and index).
+
+### 2.3 Per-day acceptance gate
+
+After each day closes (UTC midnight), verify it before the next one is trusted:
+
+```powershell
+python -m scripts.verify_tick_data run/ticks/ticks_<day>.jsonl
+```
+
+- Every gate of §1.1 must pass. A failing day is quarantined: recorded in the golden manifest
+  with the reason and the verify verdict, and excluded from the set.
+- A quarantined day does not abort the capture — the collector keeps running; the shortfall is
+  covered by the headroom days (§1.2). If more than one day fails, extend the capture rather
+  than lower a bar.
+
+### 2.4 The freeze rule
+
+**No collector-code changes while a golden capture is running.** The golden days must be
+producible end-to-end by one collector build; a mid-capture collector change makes the
+provenance in the manifest ambiguous (which days came from which code?). This is why issue
+#174 (socket-authoritative books, which touches `scripts/collect_ticks.py`) waits until the
+golden capture is complete and the set is certified.
+
 its own — it requires the existing gates to pass with the headroom stated in §1.2.
