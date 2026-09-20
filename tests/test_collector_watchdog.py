@@ -240,6 +240,41 @@ def test_manifest_defaults_locally(monkeypatch, tmp_path):
     assert wd.manifest_path() == tmp_path / "manifest.json"
 
 
+def test_shipper_off_by_default(monkeypatch):
+    """No DRIVE_REMOTE: the loop is exactly the legacy watchdog."""
+    monkeypatch.delenv("DRIVE_REMOTE", raising=False)
+    with mock.patch.object(wd, "collector_pids", return_value=[1234]), \
+            mock.patch.object(wd, "manifest_age", return_value=1.0), \
+            mock.patch.object(wd, "start_collector"), \
+            mock.patch.object(wd, "kill"), \
+            mock.patch("scripts.ship_to_drive.ship_all") as ship_all, \
+            mock.patch.object(wd.time, "sleep", lambda *_a: None):
+        wd.main(["--once", "--stale-seconds", "180"])
+    ship_all.assert_not_called()
+
+
+def test_shipper_pass_runs_when_remote_set(monkeypatch, tmp_path):
+    """DRIVE_REMOTE set: one shipper pass per loop, failures contained."""
+    from scripts import ship_to_drive as sh
+    monkeypatch.setenv("DRIVE_REMOTE", "gdrive:ticks")
+    monkeypatch.setattr(wd, "MANIFEST", tmp_path / "manifest.json")
+    day = tmp_path / "ticks_2026-09-19.jsonl.gz"
+    day.write_bytes(b"v1")
+    with mock.patch.object(wd, "collector_pids", return_value=[1234]), \
+            mock.patch.object(wd, "manifest_age", return_value=1.0), \
+            mock.patch.object(wd, "start_collector"), \
+            mock.patch.object(wd, "kill"), \
+            mock.patch.object(sh.subprocess, "run",
+                              mock.Mock(return_value=mock.Mock(
+                                  returncode=0, stderr=""))), \
+            mock.patch.object(wd.time, "sleep", lambda *_a: None), \
+            mock.patch("scripts.collect_ticks.now_day_key",
+                       return_value="2026-09-20"):
+        with mock.patch.dict(wd.os.environ, {"COLLECT_OUT": str(tmp_path)}):
+            wd.main(["--once", "--stale-seconds", "180"])
+    assert (tmp_path / "shipped.json").is_file()
+
+
 def test_whitespace_collect_out_stays_on_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("COLLECT_OUT", "   ")
     assert wd.collect_out_dir() == wd.ROOT / "run" / "ticks"

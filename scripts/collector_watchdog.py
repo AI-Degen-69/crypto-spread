@@ -249,6 +249,28 @@ def manifest_age() -> float | None:
         return None
 
 
+def maybe_ship() -> None:
+    """One Drive-shipper pass, only when the host asked for it (issue #285).
+
+    Gated on `DRIVE_REMOTE`: unset means local/Windows runs behave exactly
+    as before. Failures are already contained in `ship_all` (returns them,
+    never raises); this wrapper guards the import edge too, so shipping can
+    never take the watchdog down.
+    """
+    remote = os.environ.get("DRIVE_REMOTE", "").strip()
+    if not remote:
+        return
+    try:
+        from scripts.collect_ticks import now_day_key
+        from scripts.ship_to_drive import ship_all
+        out_dir = collect_out_dir()
+        summary = ship_all(out_dir, remote, now_day_key(), out_dir / "manifest.json")
+        if summary["shipped"] or summary["failed"]:
+            log(f"ship: {summary}")
+    except Exception as e:
+        log(f"ship pass failed ({type(e).__name__}: {e}); capture continues")
+
+
 def main(argv: list[str]) -> int:
     """Check liveness forever, restarting a dead or wedged collector."""
     ap = argparse.ArgumentParser()
@@ -296,6 +318,7 @@ def main(argv: list[str]) -> int:
         except Exception as e:
             # A watchdog that dies on a transient error is worse than none.
             log(f"watchdog error: {type(e).__name__}: {e}")
+        maybe_ship()
         if a.once:
             return 0
         time.sleep(a.check_seconds)
