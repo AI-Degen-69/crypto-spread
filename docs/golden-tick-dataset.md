@@ -173,3 +173,29 @@ The golden dataset is **re-certified** (full sequence above, manifest rewritten)
 A golden dataset whose manifest cites a policy version older than the installed one is **not**
 the golden dataset — it is a stale copy, and the dashboard's readiness badges will show it.
 
+
+## 4. Replay-speed budget
+
+**Budget: a backtest or sweep over the golden dataset runs at ≤ ~1s per window wall-time on a
+warm sidecar index.**
+
+Grounding, both measured on this machine:
+
+| Path | Cost | Evidence |
+|---|---|---|
+| Full scan, no index | ~1.5s **per day** of data; 467MB → **34.07s** | `backtest/index.py:1-9`; `docs/measurements/issue-221-gil-contention.json` |
+| Indexed cid jump (`.idx` sidecar) | **~50ms** per call | `backtest/index.py:1-9` |
+
+Implications, binding for certification:
+
+- **A no-index scan of the golden set is out of budget by construction** — 5 days at ~1.5s/day
+  is ~7.5s per replay before any computation. The golden certification therefore requires a
+  fresh `.idx` sidecar for every golden day (`backtest.index.is_fresh` — index mtime strictly
+  newer than the source file), built by `backtest.index.build_index` (certification step 3).
+- The sidecar cuts per-window backtest reads from ~1.5s/day to ~50ms, which is what makes the
+  ≤1s/window budget achievable at the golden set's size (~5× the measured 467MB single-day
+  baseline, in bytes, spread over the index).
+- If a golden-day `.idx` is missing or stale, first replay rebuilds it automatically
+  (`load_index`), but certification never relies on that lazy path — the sidecars are built and
+  checked as part of the gate so the first research query is already fast.
+
