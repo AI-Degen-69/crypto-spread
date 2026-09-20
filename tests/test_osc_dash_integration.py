@@ -257,6 +257,11 @@ def test_tick_files_render_readiness_vocabulary():
     assert "toggleReadinessTooltip" in html
     assert "The targets tell us whether this file contains enough varied data" in html
     assert "claim_note" not in html
+    assert "valid JSONL rows, not trades" in html
+    assert "unique (series, cid) intervals" in html
+    assert "snapshots with empty tape_delta; lower is better" in html
+    assert "tape entries divided by market windows" in html
+    assert "padStart(2, '0')" in html
 
 
 def test_api_ticks_manifest_aggregate_empty_dir(tmp_path, monkeypatch):
@@ -319,6 +324,26 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert files[0]["market_breakdown"][0]["windows"] == 1
     assert files[0]["market_breakdown"][0]["trades"] == 1
     assert files[0]["market_breakdown"][0]["trades_per_window"] == 1.0
+    assert "readiness" in files[0]
+
+
+def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
+    """Manifest entries must not expose readiness from an old policy sidecar."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    f1 = tmp_path / "ticks_2026-09-08.jsonl"
+    f1.write_text('{"a": 1}\n', encoding="utf-8")
+    cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
+    cache_dir.mkdir()
+    (cache_dir / f"{f1.name}.json").write_text(json.dumps({
+        "file": f1.name,
+        "status": "PASS",
+        "readiness": {"level": "RESEARCH_READY", "policy_version": "old-policy"},
+        "fingerprint": osc_dash._file_fingerprint(f1),
+    }), encoding="utf-8")
+
+    entry = client.get("/api/ticks/manifest").json()["files"][0]
+    assert entry["readiness"] is None
+    assert entry["readiness_targets"] is None
 
 
 def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):

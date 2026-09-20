@@ -629,6 +629,7 @@ def verify_tick_file(
         crossed_books > 0
         or total_gaps > 0
         or total_late_starts > 0
+        or total_early_cutoffs > 0
         or collector_errors > 0
         or total_reversals > 0
     ):

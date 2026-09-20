@@ -570,8 +570,10 @@ def api_ticks_manifest():
                 expected_fingerprint=_file_fingerprint(TICKS_DIR / entry["name"]),
             )
             entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
-            entry["readiness"] = (cached or {}).get("readiness")
-            entry["readiness_targets"] = (cached or {}).get("readiness", {}).get("targets")
+            cache_current = _readiness_cache_is_current(cached)
+            entry["readiness"] = (cached or {}).get("readiness") if cache_current else None
+            entry["readiness_targets"] = ((cached or {}).get("readiness", {}).get("targets")
+                                           if cache_current else None)
             entry["integrity_status"] = (cached or {}).get("status")
             entry["capture_state"] = (cached or {}).get("capture_state")
             if cached:
@@ -5443,6 +5445,14 @@ async function loadManifest(){
           + tile('Tape Empty · lower is better', tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--gold)' : 'var(--dim)'))
           + tile('Research Readiness', readiness.level || 'PENDING', readinessColor);
         aggWrap.appendChild(tiles);
+        const legend = document.createElement('div');
+        legend.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;margin:0 0 12px;padding:9px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--dim);font-size:11px;line-height:1.35';
+        legend.innerHTML = '<div><strong style="color:var(--tx)">Tick Snapshots</strong> · valid JSONL rows, not trades.</div>'
+          + '<div><strong style="color:var(--tx)">Market Windows</strong> · unique (series, cid) intervals.</div>'
+          + '<div><strong style="color:var(--tx)">Tape Entries</strong> · entries recorded in tape_delta.</div>'
+          + '<div><strong style="color:var(--tx)">Tape Empty</strong> · snapshots with empty tape_delta; lower is better.</div>'
+          + '<div><strong style="color:var(--tx)">Avg / Window</strong> · tape entries divided by market windows; zero when no windows exist.</div>';
+        aggWrap.appendChild(legend);
       }
     }
 
@@ -5712,7 +5722,7 @@ function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: s
     const assetLabel = {btc:'BTC', eth:'ETH', bnb:'BNB', sol:'SOL', xrp:'XRP'};
     const marketName = (s) => {
       const m = /^([a-z]{3})-up-or-down-(\d+m)$/.exec(String(s||''));
-      return m ? `${assetLabel[m[1]]||m[1].toUpperCase()} ${m[2]}` : String(s||'');
+      return m ? `${m[2].slice(0, -1).padStart(2, '0')}m ${assetLabel[m[1]]||m[1].toUpperCase()}` : String(s||'');
     };
     html += '<div style="font:700 12px var(--disp);color:var(--tx);letter-spacing:.05em;text-transform:uppercase;margin:12px 0 6px">Per-Market Breakdown</div>'
       + '<table style="width:100%;border-collapse:collapse;font-size:12px">'
