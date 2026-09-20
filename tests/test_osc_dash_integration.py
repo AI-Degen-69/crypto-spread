@@ -262,6 +262,22 @@ def test_tick_files_render_readiness_vocabulary():
     assert "snapshots with empty tape_delta; lower is better" in html
     assert "tape entries divided by market windows" in html
     assert "padStart(2, '0')" in html
+    assert "data-scale-max" in html
+    assert "tick-progress-marker exploratory" in html
+    assert "tick-progress-marker research" in html
+    assert 'class="tick-progress-targets"' not in html
+    assert "tick-progress-targets-row" in html
+    assert "tick-progress-grid" in html
+    assert "tick-progress-measured-readout" in html
+    assert "tick-progress-measured-row" in html
+    assert "MEASURED · ${measuredText}" in html
+    assert "height:18px" in html
+    assert "Next milestone: ${milestoneText" in html
+    assert "tick-progress-value" not in html
+    assert html.count('class=\"tick-progress-track\"') == 1
+    assert "aria-label=\"${esc(label)} measured" in html
+    assert "EXPLORATORY · ${exploratoryText}" in html
+    assert "RESEARCH READY · ${researchText}" in html
 
 
 def test_api_ticks_manifest_aggregate_empty_dir(tmp_path, monkeypatch):
