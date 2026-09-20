@@ -25,6 +25,32 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from strategy.series import SERIES
+
+ROOT = Path(__file__).resolve().parent.parent
+
+READINESS_POLICY_VERSION = "2026-09-20.v1"
+EXPECTED_MARKETS = frozenset((slug, duration) for slug, duration, _label in SERIES)
+READINESS_POLICIES = {
+    "EXPLORATORY": {
+        "min_valid_ticks": 1_000,
+        "min_windows": 30,
+        "min_tape_entries": 30,
+        "min_time_blocks": 1,
+    },
+    "RESEARCH_READY": {
+        "min_valid_ticks": 10_000,
+        "min_windows": 100,
+        "min_tape_entries": 100,
+        "min_time_blocks": 3,
+        "min_windows_per_market": 10,
+        "required_markets": len(EXPECTED_MARKETS),
+        "max_corrupt_rate": 0.0,
+        "max_schema_error_rate": 0.05,
+        "max_gap_rate": 0.10,
+    },
+}
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TICKS_DIR = ROOT / "run" / "ticks"
 
@@ -192,6 +218,75 @@ def verify_tick_record(tick: Any) -> list[str]:
     return issues
 
 
+def assess_readiness(
+    *,
+    valid_ticks: int,
+    windows_count: int,
+    tape_entries: int,
+    market_breakdown: list[dict[str, Any]],
+    time_blocks: list[str],
+    raw_lines: int,
+    corrupt_lines: int,
+    schema_errors: int,
+    sampling_gaps: int,
+) -> dict[str, Any]:
+    """Classify a file for exploration or research without claiming an edge.
+
+    The policy uses independent market windows and tape entries rather than
+    raw row count alone. Thresholds are project policy, not universal
+    statistical guarantees; callers must still use out-of-sample validation.
+    """
+    market_keys = {(m.get("series"), m.get("duration")) for m in market_breakdown}
+    windows_per_market = {
+        f"{series}:{duration}": int(m.get("windows", 0))
+        for m in market_breakdown
+        for series, duration in [(m.get("series"), m.get("duration"))]
+    }
+    gap_rate = sampling_gaps / max(windows_count, 1)
+    corrupt_rate = corrupt_lines / max(raw_lines, 1)
+    schema_error_rate = schema_errors / max(valid_ticks, 1)
+
+    def checks_for(level: str) -> list[dict[str, Any]]:
+        """Build measured readiness checks for one policy level."""
+        p = READINESS_POLICIES[level]
+        checks = [
+            {"name": "valid_ticks", "measured": valid_ticks, "required": p["min_valid_ticks"], "ok": valid_ticks >= p["min_valid_ticks"]},
+            {"name": "independent_windows", "measured": windows_count, "required": p["min_windows"], "ok": windows_count >= p["min_windows"]},
+            {"name": "tape_entries", "measured": tape_entries, "required": p["min_tape_entries"], "ok": tape_entries >= p["min_tape_entries"]},
+            {"name": "time_blocks", "measured": len(time_blocks), "required": p["min_time_blocks"], "ok": len(time_blocks) >= p["min_time_blocks"]},
+        ]
+        if level == "RESEARCH_READY":
+            checks.extend([
+                {"name": "market_duration_coverage", "measured": len(market_keys), "required": p["required_markets"], "ok": market_keys == EXPECTED_MARKETS},
+                {"name": "minimum_windows_per_market", "measured": min(windows_per_market.values(), default=0), "required": p["min_windows_per_market"], "ok": all(v >= p["min_windows_per_market"] for v in windows_per_market.values()) and len(market_keys) == len(EXPECTED_MARKETS)},
+                {"name": "corrupt_rate", "measured": round(corrupt_rate, 6), "required": p["max_corrupt_rate"], "ok": corrupt_rate <= p["max_corrupt_rate"]},
+                {"name": "schema_error_rate", "measured": round(schema_error_rate, 6), "required": p["max_schema_error_rate"], "ok": schema_error_rate <= p["max_schema_error_rate"]},
+                {"name": "sampling_gap_rate", "measured": round(gap_rate, 6), "required": p["max_gap_rate"], "ok": gap_rate <= p["max_gap_rate"]},
+            ])
+        return checks
+
+    exploratory = checks_for("EXPLORATORY")
+    research = checks_for("RESEARCH_READY")
+    if all(c["ok"] for c in research):
+        level = "RESEARCH_READY"
+    elif all(c["ok"] for c in exploratory):
+        level = "EXPLORATORY"
+    else:
+        level = "INSUFFICIENT"
+    active = research if level == "RESEARCH_READY" else exploratory
+    return {
+        "level": level,
+        "policy_version": READINESS_POLICY_VERSION,
+        "claim_note": "Thresholds are project policy, not a guarantee of a trading edge; use out-of-sample validation.",
+        "checks": active,
+        "research_checks": research,
+        "exploratory_checks": exploratory,
+        "missing_markets": sorted(f"{s}:{d}" for s, d in EXPECTED_MARKETS - market_keys),
+        "market_duration_count": len(market_keys),
+        "time_blocks": sorted(time_blocks),
+    }
+
+
 def verify_window_continuity(
     ticks: list[dict[str, Any]],
     max_gap_sec: float = 6.0,
@@ -313,8 +408,9 @@ def verify_tick_file(
     collector_errors = 0
 
     # Lightweight streaming window tracker: cid -> dict
-    windows_tracker: dict[str, dict[str, Any]] = {}
+    windows_tracker: dict[tuple[str, str], dict[str, Any]] = {}
     series_counts: dict[str, int] = defaultdict(int)
+    missing_fields: dict[str, int] = defaultdict(int)
     # Issue #109: per-market (series x duration) breakdown — windows + tape
     market_windows: dict[tuple[str, int], set[str]] = defaultdict(set)
     market_trades: dict[tuple[str, int], int] = defaultdict(int)
@@ -347,6 +443,9 @@ def verify_tick_file(
                     continue
 
                 valid_ticks += 1
+                for required in REQUIRED_FIELDS:
+                    if required not in record or record[required] is None:
+                        missing_fields[required] += 1
                 issues = verify_tick_record(record)
                 if issues:
                     schema_errors += len(issues)
@@ -378,8 +477,9 @@ def verify_tick_file(
                         market_trades[(series, duration)] += len(tape)
 
                 if cid and isinstance(ts, (int, float)):
-                    if cid not in windows_tracker:
-                        windows_tracker[cid] = {
+                    window_key = (str(series or ""), str(cid))
+                    if window_key not in windows_tracker:
+                        windows_tracker[window_key] = {
                             "cid": cid,
                             "series": series or "",
                             "slug": record.get("slug", ""),
@@ -395,7 +495,7 @@ def verify_tick_file(
                             "time_reversals": 0,
                         }
                     else:
-                        w = windows_tracker[cid]
+                        w = windows_tracker[window_key]
                         w["tick_count"] += 1
                         prev_ts = w["prev_ts"]
                         delta = ts - prev_ts
@@ -442,6 +542,37 @@ def verify_tick_file(
         total_gaps += w["gaps_count"]
         total_reversals += w["time_reversals"]
 
+    time_blocks = sorted({
+        time.strftime("%Y-%m-%d", time.gmtime(w["first_ts"]))
+        for w in windows_tracker.values()
+        if isinstance(w.get("first_ts"), (int, float)) and w.get("first_ts", 0) > 0
+    })
+    market_breakdown = [
+        {
+            "series": s,
+            "duration": du,
+            "windows": len(market_windows[(s, du)]),
+            "trades": market_trades[(s, du)],
+            "trades_per_window": (
+                round(market_trades[(s, du)] / len(market_windows[(s, du)]), 1)
+                if market_windows[(s, du)] else 0.0
+            ),
+        }
+        for (s, du) in sorted(market_windows)
+    ]
+    tape_entries = sum(m["trades"] for m in market_breakdown)
+    readiness = assess_readiness(
+        valid_ticks=valid_ticks,
+        windows_count=len(windows_tracker),
+        tape_entries=tape_entries,
+        market_breakdown=market_breakdown,
+        time_blocks=time_blocks,
+        raw_lines=raw_lines,
+        corrupt_lines=corrupt_lines,
+        schema_errors=schema_errors,
+        sampling_gaps=total_gaps,
+    )
+
     # Determine status
     if corrupt_lines > 0 or schema_errors > (valid_ticks * 0.05 if valid_ticks > 0 else 1):
         status = "FAIL"
@@ -467,20 +598,11 @@ def verify_tick_file(
         "valid_ticks": valid_ticks,
         "windows_count": len(windows_tracker),
         "series_counts": dict(series_counts),
-        "market_breakdown": [
-            {
-                "series": s,
-                "duration": du,
-                "windows": len(market_windows[(s, du)]),
-                "trades": market_trades[(s, du)],
-                "trades_per_window": (
-                    round(market_trades[(s, du)] / len(market_windows[(s, du)]), 1)
-                    if market_windows[(s, du)]
-                    else 0.0
-                ),
-            }
-            for (s, du) in sorted(market_windows)
-        ],
+        "market_breakdown": market_breakdown,
+        "tape_entries": tape_entries,
+        "missing_fields": dict(missing_fields),
+        "time_blocks": time_blocks,
+        "readiness": readiness,
         "schema_errors": schema_errors,
         "crossed_books": crossed_books,
         "book_anomalies": book_anomalies,
@@ -530,6 +652,10 @@ def verify_ticks_dir(
     tot_late_starts = 0
     tot_early_cutoffs = 0
     tot_reversals = 0
+    tot_tape_entries = 0
+    tot_missing_fields: dict[str, int] = defaultdict(int)
+    aggregated_market: dict[tuple[str, int], dict[str, Any]] = {}
+    aggregated_time_blocks: set[str] = set()
     aggregated_series: dict[str, int] = defaultdict(int)
 
     for f in candidates:
@@ -550,8 +676,33 @@ def verify_ticks_dir(
         tot_late_starts += rep.get("late_starts_count", 0)
         tot_early_cutoffs += rep.get("early_cutoffs_count", 0)
         tot_reversals += rep.get("time_reversals", 0)
+        tot_tape_entries += rep.get("tape_entries", 0)
+        aggregated_time_blocks.update(rep.get("time_blocks", []))
+        for field, count in rep.get("missing_fields", {}).items():
+            tot_missing_fields[field] += count
+        for market in rep.get("market_breakdown", []):
+            key = (market.get("series", ""), int(market.get("duration", 0)))
+            item = aggregated_market.setdefault(key, {"series": key[0], "duration": key[1], "windows": 0, "trades": 0})
+            item["windows"] += int(market.get("windows", 0))
+            item["trades"] += int(market.get("trades", 0))
         for s, count in rep.get("series_counts", {}).items():
             aggregated_series[s] += count
+
+    aggregate_market = []
+    for market in sorted(aggregated_market.values(), key=lambda m: (m["series"], m["duration"])):
+        market["trades_per_window"] = round(market["trades"] / market["windows"], 1) if market["windows"] else 0.0
+        aggregate_market.append(market)
+    aggregate_readiness = assess_readiness(
+        valid_ticks=tot_valid_ticks,
+        windows_count=tot_windows,
+        tape_entries=tot_tape_entries,
+        market_breakdown=aggregate_market,
+        time_blocks=sorted(aggregated_time_blocks),
+        raw_lines=tot_raw_lines,
+        corrupt_lines=tot_corrupt_lines,
+        schema_errors=tot_schema_errors,
+        sampling_gaps=tot_gaps,
+    )
 
     # Aggregated verdict
     if any(r.get("status") == "FAIL" for r in file_reports):
@@ -578,6 +729,11 @@ def verify_ticks_dir(
         "total_early_cutoffs": tot_early_cutoffs,
         "total_time_reversals": tot_reversals,
         "series_counts": dict(aggregated_series),
+        "market_breakdown": aggregate_market,
+        "total_tape_entries": tot_tape_entries,
+        "missing_fields": dict(tot_missing_fields),
+        "time_blocks": sorted(aggregated_time_blocks),
+        "readiness": aggregate_readiness,
         "files": file_reports,
     }
 
@@ -601,6 +757,8 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"Early Cutoffs (>5s) : {report['total_early_cutoffs']:,}")
         lines.append(f"Collector Errors    : {report['total_collector_errors']:,}")
         lines.append(f"Time Reversals      : {report['total_time_reversals']:,}")
+        if report.get("readiness"):
+            lines.append(f"Research Readiness  : {report['readiness'].get('level', 'PENDING')}")
 
         lines.append("\nPer-File Summary:")
         for fr in report.get("files", []):
@@ -608,7 +766,8 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
             lines.append(
                 f"  [{st}] {fr.get('file')} : {fr.get('valid_ticks', 0):,} ticks, "
                 f"{fr.get('windows_count', 0)} windows, {fr.get('corrupt_lines', 0)} corrupt, "
-                f"{fr.get('sampling_gaps_count', 0)} gaps, {fr.get('collector_errors', 0)} errs"
+                f"{fr.get('sampling_gaps_count', 0)} gaps, {fr.get('collector_errors', 0)} errs, "
+                f"readiness={fr.get('readiness', {}).get('level', 'PENDING')}"
             )
             if verbose and fr.get("sample_issues"):
                 for issue in fr["sample_issues"][:5]:
@@ -623,6 +782,8 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"Late Starts (>5s)   : {report.get('late_starts_count', 0):,}")
         lines.append(f"Early Cutoffs (>5s) : {report.get('early_cutoffs_count', 0):,}")
         lines.append(f"Collector Errors    : {report.get('collector_errors', 0):,}")
+        if report.get("readiness"):
+            lines.append(f"Research Readiness  : {report['readiness'].get('level', 'PENDING')}")
 
         if verbose and report.get("sample_issues"):
             lines.append("\nSample Discrepancies (sample_issues, max 20 — see docs/operations.md):")

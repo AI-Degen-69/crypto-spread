@@ -15,6 +15,7 @@ from scripts.verify_tick_data import (
     verify_tick_file,
     verify_ticks_dir,
     format_report_text,
+    assess_readiness,
 )
 
 
@@ -64,6 +65,29 @@ def make_sample_tick(
         "queue_down": 100.0,
         "err": None,
     }
+
+
+def test_assess_readiness_has_explicit_exploratory_and_research_levels():
+    # Use the canonical 5m/15m series universe rather than synthetic names.
+    markets = [
+        {"series": f"{asset}-up-or-down-{duration // 60}m", "duration": duration,
+         "windows": 10, "trades": 10, "trades_per_window": 1.0}
+        for asset, duration in [("btc", 300), ("eth", 300), ("bnb", 300), ("sol", 300), ("xrp", 300),
+                                ("btc", 900), ("eth", 900), ("bnb", 900), ("sol", 900), ("xrp", 900)]
+    ]
+    result = assess_readiness(
+        valid_ticks=10000, windows_count=100, tape_entries=100,
+        market_breakdown=markets, time_blocks=["2026-09-01", "2026-09-02", "2026-09-03"],
+        raw_lines=10000, corrupt_lines=0, schema_errors=0, sampling_gaps=0,
+    )
+    assert result["level"] == "RESEARCH_READY"
+    assert result["missing_markets"] == []
+    exploratory = assess_readiness(
+        valid_ticks=1000, windows_count=30, tape_entries=30,
+        market_breakdown=markets[:1], time_blocks=["2026-09-01"],
+        raw_lines=1000, corrupt_lines=0, schema_errors=0, sampling_gaps=0,
+    )
+    assert exploratory["level"] == "EXPLORATORY"
 
 
 def test_verify_book_clean():

@@ -444,7 +444,11 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
 
     series_counts: dict[str, int] = {}
     total_windows = 0
+    total_tape_entries = 0
+    market_totals: dict[tuple[str, int], dict[str, Any]] = {}
+    time_blocks: set[str] = set()
     windows_known = True
+    readiness_known = True
     source = "none"
     cache_dir = files[0].parent / _VERIFY_CACHE_DIRNAME if files else None
     for f, _lines in entries:
@@ -458,11 +462,44 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
         )
         if cached is None:
             windows_known = False
+            readiness_known = False
             continue
         source = "verify_cache"
         for s, c in cached.get("series_counts", {}).items():
             series_counts[s] = series_counts.get(s, 0) + int(c)
         total_windows += int(cached.get("windows_count", 0))
+        total_tape_entries += int(cached.get("tape_entries", 0))
+        time_blocks.update(cached.get("time_blocks", []))
+        for market in cached.get("market_breakdown", []):
+            key = (market.get("series", ""), int(market.get("duration", 0)))
+            item = market_totals.setdefault(key, {"series": key[0], "duration": key[1], "windows": 0, "trades": 0})
+            item["windows"] += int(market.get("windows", 0))
+            item["trades"] += int(market.get("trades", 0))
+        if not cached.get("readiness"):
+            readiness_known = False
+
+    aggregate_market = []
+    for market in sorted(market_totals.values(), key=lambda m: (m["series"], m["duration"])):
+        market["trades_per_window"] = round(market["trades"] / market["windows"], 1) if market["windows"] else 0.0
+        aggregate_market.append(market)
+    aggregate_readiness = None
+    if readiness_known and entries:
+        from scripts.verify_tick_data import assess_readiness
+        aggregate_readiness = assess_readiness(
+            valid_ticks=sum(int(cached.get("valid_ticks", 0)) for f, _ in entries
+                            for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+            windows_count=total_windows,
+            tape_entries=total_tape_entries,
+            market_breakdown=aggregate_market,
+            time_blocks=sorted(time_blocks),
+            raw_lines=total_lines,
+            corrupt_lines=sum(int(cached.get("corrupt_lines", 0)) for f, _ in entries
+                              for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+            schema_errors=sum(int(cached.get("schema_errors", 0)) for f, _ in entries
+                             for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+            sampling_gaps=sum(int(cached.get("sampling_gaps_count", 0)) for f, _ in entries
+                             for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+        )
 
     if not series_counts and entries:
         # No fresh verify sidecars: fall back to a TTL-capped one-time scan.
@@ -480,9 +517,12 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
         "total_lines_estimated": any_estimated,
         "total_windows": total_windows,
         "windows_source": "cache" if (windows_known and entries) else ("partial" if entries else "none"),
-        "tape_entries_total": int((manifest or {}).get("tape_entries_total", 0)),
+        "tape_entries_total": total_tape_entries or int((manifest or {}).get("tape_entries_total", 0)),
         "series_counts": series_counts,
         "series_counts_source": source if series_counts else "none",
+        "market_breakdown": aggregate_market,
+        "time_blocks": sorted(time_blocks),
+        "readiness": aggregate_readiness,
     }
 
 
@@ -527,6 +567,8 @@ def api_ticks_manifest():
                 expected_fingerprint=_file_fingerprint(TICKS_DIR / entry["name"]),
             )
             entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
+            entry["readiness"] = (cached or {}).get("readiness")
+            entry["integrity_status"] = (cached or {}).get("status")
             if cached:
                 entry["windows_count"] = int(cached.get("windows_count", 0))
     except Exception:
@@ -2262,7 +2304,7 @@ def _prewarm_verify_cache() -> None:
                 )
             except OSError:
                 continue
-            if side and "status" in side:
+            if side and "status" in side and side.get("readiness"):
                 rep = {k: v for k, v in side.items() if k != "ts"}
                 _VERIFY_REPORT_CACHE[f.name] = {
                     "fingerprint": side["fingerprint"],
@@ -2379,7 +2421,7 @@ async def api_ticks_verify(
     entry = _VERIFY_REPORT_CACHE.get(file)
 
     # Fresh in-memory report for the exact current file: serve instantly.
-    if not refresh and entry and entry.get("fingerprint") == fp:
+    if not refresh and entry and entry.get("fingerprint") == fp and entry.get("report", {}).get("readiness"):
         out = dict(entry["report"])
         out["cached"] = True
         return out
@@ -2389,11 +2431,12 @@ async def api_ticks_verify(
     stale_rep: dict[str, Any] | None = None
     if not refresh and entry and (
         time.time() - float(entry.get("scanned_at") or 0) <= _VERIFY_RESCAN_COOLDOWN_SEC
+        and entry.get("report", {}).get("readiness")
     ):
         stale_rep = dict(entry["report"])
     else:
         side = _read_verify_cache(_verify_sidecar_path(file), expected_fingerprint=fp)
-        if side and not refresh and "status" in side:
+        if side and not refresh and "status" in side and side.get("readiness"):
             if side.get("fingerprint") == fp:
                 # Cold start (server restart): exact sidecar for this file.
                 rep = {k: v for k, v in side.items() if k != "ts"}
@@ -5361,13 +5404,15 @@ async function loadManifest(){
           </div>`;
         const tiles = document.createElement('div');
         tiles.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px';
+        const readiness = a.readiness || {};
+        const readinessColor = readiness.level === 'RESEARCH_READY' ? 'var(--up)' : readiness.level === 'EXPLORATORY' ? 'var(--gold)' : readiness.level === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
         tiles.innerHTML =
           tile('Files', a.total_files||0)
-          + tile('Total Size', mb)
-          + tile('Samples', linesVal, 'var(--up)')
-          + tile('Windows', winVal, 'var(--gold)')
+          + tile('Tick Snapshots', linesVal, 'var(--up)')
+          + tile('Market Windows', winVal, 'var(--gold)')
           + tile('Tape Entries', (a.tape_entries_total||0).toLocaleString())
-          + tile('Tape Empty' + (m.day ? ' · ' + esc(m.day) : ''), tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--up)' : 'var(--dim)'));
+          + tile('Tape Empty · lower is better', tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--gold)' : 'var(--dim)'))
+          + tile('Research Readiness', readiness.level || 'PENDING', readinessColor);
         aggWrap.appendChild(tiles);
       }
     }
@@ -5375,7 +5420,7 @@ async function loadManifest(){
     const tbl = document.createElement('table');
     tbl.className = 'tbl';
     const thead = document.createElement('tr');
-    thead.innerHTML = '<th>File Name</th><th>Size</th><th>Lines / Samples</th><th>Last Modified</th><th>Actions</th>';
+    thead.innerHTML = '<th>File Name</th><th>Size</th><th>Tick Snapshots</th><th>Last Modified</th><th>Integrity</th><th>Research Readiness</th><th>Actions</th>';
     tbl.appendChild(thead);
 
     if(!d.files || d.files.length === 0){
@@ -5421,6 +5466,15 @@ async function loadManifest(){
         tdMtime.className = 'mono';
         tdMtime.textContent = new Date(f.mtime*1000).toLocaleString('en-US');
 
+        const tdIntegrity = document.createElement('td');
+        tdIntegrity.className = 'mono';
+        tdIntegrity.textContent = '…';
+        const tdReadiness = document.createElement('td');
+        tdReadiness.className = 'mono';
+        const readinessLevel = f.readiness && f.readiness.level;
+        tdReadiness.textContent = readinessLevel || '…';
+        tdReadiness.style.color = readinessLevel === 'RESEARCH_READY' ? 'var(--up)' : readinessLevel === 'EXPLORATORY' ? 'var(--gold)' : readinessLevel === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
+
         const tdActions = document.createElement('td');
         tdActions.style.display = 'flex';
         tdActions.style.gap = '6px';
@@ -5443,7 +5497,7 @@ async function loadManifest(){
         btnDel.textContent = '🗑️ Delete';
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
 
-        tdActions.appendChild(verifyBadge);
+        tdIntegrity.appendChild(verifyBadge);
         tdActions.appendChild(btnRun);
         tdActions.appendChild(btnDel);
 
@@ -5451,6 +5505,8 @@ async function loadManifest(){
         tr.appendChild(tdSize);
         tr.appendChild(tdLines);
         tr.appendChild(tdMtime);
+        tr.appendChild(tdIntegrity);
+        tr.appendChild(tdReadiness);
         tr.appendChild(tdActions);
         tbl.appendChild(tr);
 
@@ -5460,7 +5516,7 @@ async function loadManifest(){
         vRow.id = 'verify_row_' + f.name;
         vRow.style.display = 'none';
         const vTd = document.createElement('td');
-        vTd.colSpan = 5;
+        vTd.colSpan = 7;
         vTd.id = 'verify_cell_' + f.name;
         vTd.style.cssText = 'background:var(--panel2);padding:12px 16px;border-top:1px solid var(--line)';
         vTd.innerHTML = '<div style="text-align:center;color:var(--faint);font-size:11px">Integrity report will load here…</div>';
@@ -5506,10 +5562,13 @@ function fileVerifyStatusBits(st){
 
 // Inline per-file integrity report — rendered under the file's row in the
 // files table (accordion body). No modal.
-function renderFileVerifyHtml(filename, d){
-  const {color: statusColor, label: statusLabel} = fileVerifyStatusBits(d.status);
+function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: statusLabel} = fileVerifyStatusBits(d.status);
+  const readiness = d.readiness || {};
+  const readinessColor = readiness.level === 'RESEARCH_READY' ? 'var(--up)' : readiness.level === 'EXPLORATORY' ? 'var(--gold)' : readiness.level === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
+  const failedChecks = (readiness.checks || []).filter(c => !c.ok).map(c => `${c.name}: ${c.measured} (required ${c.required})`);
 
   let html = `
+
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div>
         <div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em">Overall Integrity Status</div>
@@ -5517,10 +5576,14 @@ function renderFileVerifyHtml(filename, d){
       </div>
       <div class="mono" style="font-size:12px;color:var(--dim)">🔍 Integrity Report · ${esc(filename)}</div>
     </div>
+    <div style="display:flex;gap:14px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px">
+      <div style="min-width:155px"><div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase">Research Readiness</div><div style="font:700 17px var(--disp);color:${readinessColor};margin-top:2px">${esc(readiness.level || 'PENDING')}</div></div>
+      <div style="font-size:12px;color:var(--dim);line-height:1.45">${esc(readiness.claim_note || 'Readiness requires a completed verification report.')} ${failedChecks.length ? `<br><span style="color:var(--gold)">Needs: ${esc(failedChecks.join('; '))}</span>` : ''}</div>
+    </div>
 
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-        <div style="font:500 11px var(--body);color:var(--dim)">Valid Samples</div>
+        <div style="font:500 11px var(--body);color:var(--dim)">Valid Tick Snapshots</div>
         <div class="mono" style="font-size:15px;font-weight:700;color:var(--up);margin-top:2px">${(d.valid_ticks||0).toLocaleString()}</div>
       </div>
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
@@ -5528,7 +5591,7 @@ function renderFileVerifyHtml(filename, d){
         <div class="mono" style="font-size:15px;font-weight:700;color:${(d.corrupt_lines||0)>0?'var(--down)':'var(--tx)'};margin-top:2px">${(d.corrupt_lines||0).toLocaleString()}</div>
       </div>
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
-        <div style="font:500 11px var(--body);color:var(--dim)">Identified Windows</div>
+        <div style="font:500 11px var(--body);color:var(--dim)">Identified Market Windows</div>
         <div class="mono" style="font-size:15px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums">${(d.windows_count||0).toLocaleString()}</div>
       </div>
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
@@ -5558,8 +5621,8 @@ function renderFileVerifyHtml(filename, d){
       + '<thead><tr>'
       + '<th scope="col" style="text-align:left;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Market</th>'
       + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Windows</th>'
-      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Trades</th>'
-      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Avg / Window</th>'
+      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Tape Entries</th>'
+      + '<th scope="col" style="text-align:right;font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:4px 8px">Tape Entries / Window</th>'
       + '</tr></thead><tbody>';
     for(const mb of d.market_breakdown){
       const alt = (d.market_breakdown.indexOf(mb) % 2) ? ' background:var(--panel);' : '';
@@ -5617,6 +5680,12 @@ async function verifyTickData(filename, refresh){
     }
     if(cell){
       cell.dataset.loaded = '1';
+      const row = document.getElementById('verify_row_' + filename);
+      const readinessCell = row && row.previousElementSibling ? row.previousElementSibling.querySelector('td:nth-child(6)') : null;
+      if(readinessCell && d.readiness){
+        readinessCell.textContent = d.readiness.level || 'PENDING';
+        readinessCell.style.color = d.readiness.level === 'RESEARCH_READY' ? 'var(--up)' : d.readiness.level === 'EXPLORATORY' ? 'var(--gold)' : d.readiness.level === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
+      }
       cell.innerHTML = renderFileVerifyHtml(filename, d) + (d.stale
         ? '<div style="text-align:center;color:var(--faint);font-size:10px;margin-top:6px">Snapshot of a file still being written — rescanning in background.</div>'
         : '')
