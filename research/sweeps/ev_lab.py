@@ -297,7 +297,7 @@ ENGINE_ONLY_KNOBS = ("enable_leg_chase",
 #: The first three are implemented by `sim2` as its own call arguments, so
 #: setting them on the params is silent rather than unimplemented --
 #: `max_pair_cost` is `sim2`'s `chase_cap` argument (issue #227).
-UNSUPPORTED_KNOBS = ("entry_delay_sec", "quote_range",
+UNSUPPORTED_KNOBS = ("entry_delay_sec", "entry_delay_pct", "quote_range",
                      "max_pair_cost") + ENGINE_ONLY_KNOBS
 
 
