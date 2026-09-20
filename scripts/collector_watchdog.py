@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -32,9 +33,43 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "run" / "watchdog.log"
 MANIFEST = ROOT / "run" / "ticks" / "manifest.json"
 
+
+def collect_out_dir() -> Path:
+    """Tick output dir the guarded collector writes to (issue #283).
+
+    Follows `COLLECT_OUT` when set (managed host with a mounted disk);
+    otherwise the local default. Stripped, so a whitespace-only value
+    cannot become `--out " "`. A relative value resolves against ROOT so
+    the watchdog and the collector (spawned with `cwd=ROOT`) read the
+    same directory.
+    """
+    out = os.environ.get("COLLECT_OUT", "").strip()
+    if not out:
+        return ROOT / "run" / "ticks"
+    p = Path(out)
+    return p if p.is_absolute() else ROOT / p
+
+
+def manifest_path() -> Path:
+    """Manifest the watchdog must watch: the one inside the output dir.
+
+    The collector writes `manifest.json` into its own `out_dir`
+    (`collect_ticks.update_manifest`), so watching the fixed default while
+    the collector was redirected elsewhere would read a stale file forever
+    and declare the live process wedged.
+    """
+    if os.environ.get("COLLECT_OUT", "").strip():
+        return collect_out_dir() / "manifest.json"
+    return MANIFEST
+
 # Windows process-creation flags: no console, own process group, so the
 # collector survives the shell that started the watchdog.
 DETACHED = 0x00000008 | 0x00000200
+
+# Kill signal for the POSIX path. SIGKILL exists on every managed Linux host;
+# the getattr fallback is for the Windows dev machine, where this branch only
+# ever runs under tests.
+_KILL_SIG = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def log(msg: str) -> None:
@@ -62,6 +97,13 @@ def collector_pids() -> list[int] | None:
 
     An unknown state is not a dead state. The caller does nothing on None.
     """
+    if os.name == "nt":
+        return _collector_pids_windows()
+    return _collector_pids_posix()
+
+
+def _collector_pids_windows() -> list[int] | None:
+    """Windows probe via the process command lines (unchanged legacy path)."""
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -78,6 +120,84 @@ def collector_pids() -> list[int] | None:
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+# Full module path, not the bare stem: `pgrep -f collect_ticks` also matches
+# editors, test runners, and one-shot `--once` proof runs whose command line
+# merely contains the substring. The residual `--once` overlap is handled by
+# refusing `--once` in COLLECT_EXTRA_ARGS (see collector_cmd) and by the
+# runbook rule: never run a manual `--once` on the host while the worker
+# is up — it can read as a duplicate and get killed.
+_PGREP_PATTERN = "scripts.collect_ticks"
+
+
+def _collector_pids_posix() -> list[int] | None:
+    """POSIX probe via `pgrep -f` (managed Linux host path, issue #283).
+
+    Same contract as the Windows probe: a list of PIDs, `[]` only when the
+    probe ran clean and matched nothing, None when the state is unknowable.
+    `pgrep` exits 1 on "no match", which is the healthy empty case — any
+    other failure (or a missing `pgrep` binary) is unknown, never empty.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", _PGREP_PATTERN],
+            capture_output=True, text=True, timeout=30)
+    except Exception as e:  # includes FileNotFoundError: no pgrep installed
+        log(f"pid probe failed ({e}); state unknown, taking no action")
+        return None
+    if out.returncode == 1 and not out.stdout.strip():
+        return []
+    if out.returncode != 0:
+        log(f"pid probe rc={out.returncode}; state unknown, taking no action")
+        return None
+    toks = out.stdout.split()
+    pids = [int(x) for x in toks if x.strip().isdigit()]
+    if len(pids) != len(toks):
+        log(f"pid probe rc=0 but unparsable output {out.stdout!r}; treating as unknown")
+        return None
+    return pids
+
+
+def collector_cmd() -> list[str]:
+    """Build the collector command, with managed-host overrides (issue #283).
+
+    `COLLECT_OUT` redirects the tick output dir (e.g. at a mounted disk);
+    `COLLECT_EXTRA_ARGS` appends flags such as `--gzip`. Unset means the
+    local defaults, so Windows behavior is unchanged.
+
+    `--once` is refused: under the watchdog it would exit instantly and be
+    restarted in a tight loop, and on the host its command line trips the
+    duplicate-collector path. `--out` is refused too: argparse takes the
+    last `--out`, so a smuggled one would run the collector elsewhere while
+    `manifest_path()` watches the redirect — a permanent false `WEDGED`
+    loop. Use `COLLECT_OUT` for the output dir. Simple whitespace split —
+    quoted values with spaces are not supported; keep host flags to tokens.
+    """
+    cmd = [sys.executable, "-m", "scripts.collect_ticks"]
+    out = os.environ.get("COLLECT_OUT", "").strip()
+    if out:
+        cmd += ["--out", out]
+    extra = os.environ.get("COLLECT_EXTRA_ARGS", "").split()
+    cleaned: list[str] = []
+    skip_next = False
+    refused = False
+    for a in extra:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--once" or a == "--out":
+            refused = True
+            if a == "--out":
+                skip_next = True  # drop its value token as well
+            continue
+        if a.startswith("--out="):
+            refused = True
+            continue
+        cleaned.append(a)
+    if refused:
+        log("COLLECT_EXTRA_ARGS contained --once/--out; refused (use COLLECT_OUT for the output dir)")
+    return cmd + cleaned
+
+
 def start_collector() -> int | None:
     """Spawn a detached collector; returns its PID, or None if it failed.
 
@@ -88,12 +208,16 @@ def start_collector() -> int | None:
     out = ROOT / "run" / "collector.out.log"
     err = ROOT / "run" / "collector.log"
     try:
+        # DETACHED is a Windows-only flag; on POSIX the child simply
+        # inherits the watchdog's session, which is what a managed host
+        # (Render/Fly) expects of its start command.
+        popen_kw: dict[str, object] = {"close_fds": True}
+        if os.name == "nt":
+            popen_kw["creationflags"] = DETACHED
         with open(out, "ab") as fo, open(err, "ab") as fe:
             p = subprocess.Popen(
-                [sys.executable, "-m", "scripts.collect_ticks"],
-                cwd=str(ROOT), stdout=fo, stderr=fe,
-                creationflags=DETACHED if os.name == "nt" else 0,
-                close_fds=True)
+                collector_cmd(),
+                cwd=str(ROOT), stdout=fo, stderr=fe, **popen_kw)
         log(f"STARTED collector pid={p.pid}")
         return p.pid
     except Exception as e:
@@ -103,14 +227,24 @@ def start_collector() -> int | None:
 
 def kill(pid: int) -> None:
     """Force-terminate a collector so a restart cannot double-append ticks."""
-    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                   capture_output=True, text=True)
+    if os.name == "nt":
+        r = subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"taskkill pid={pid} rc={r.returncode}; leaving it alone")
+        return
+    try:
+        os.kill(pid, _KILL_SIG)
+    except ProcessLookupError:
+        pass  # already gone — the desired end state
+    except PermissionError as e:
+        log(f"kill pid={pid} not permitted ({e}); leaving it alone")
 
 
 def manifest_age() -> float | None:
     """Seconds since the collector last wrote its manifest, None if absent."""
     try:
-        return time.time() - MANIFEST.stat().st_mtime
+        return time.time() - manifest_path().stat().st_mtime
     except OSError:
         return None
 

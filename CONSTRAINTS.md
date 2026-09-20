@@ -1,35 +1,29 @@
-# CONSTRAINTS — Issue #280: Charter the golden tick dataset for backtesting
+# CONSTRAINTS — Issue #283: Host the tick collector on a managed platform
 
 ## Scope guard
-- Docs + name-registry change only. **No code behavior changes**: no edits to
-  `scripts/collect_ticks.py`, `scripts/verify_tick_data.py`, `scripts/collector_watchdog.py`,
-  `backtest/*`, `server/osc_dash.py`, or `strategy/*`.
-- No new dependencies. No new Python modules.
-- The charter defines targets; it must NOT change `READINESS_POLICIES` thresholds
-  (`scripts/verify_tick_data.py:34-59`) — the quality bar is expressed *in terms of* the
-  existing metrics and their existing thresholds, with headroom stated beside them.
+- Collector hosting only. No dashboard / trading-engine hosting.
+- **No capture-logic changes**: `POLL_INTERVAL`, `TICK_BUDGET_MS`, day rotation
+  (`write_snap`/`now_day_key`), manifest schema, verify thresholds stay as-is.
+- Watchdog edits limited to cross-platform process management
+  (`collector_pids` / `kill` / spawn flags) with identical Windows behavior:
+  unknown probe state ⇒ take no action, never start a second collector.
+- No new Python dependencies without explicit approval (host installs the
+  existing `requirements.txt`).
 
 ## Measurable boundaries
-- Every numeric **verification quality-gate target** in `docs/golden-tick-dataset.md`
-  (§1.1–§1.3) must map 1:1 to a named metric that `verify_tick_data.py` already emits
-  (`status`, `capture_state().label`, `readiness.level`, `sampling_gap_rate`,
-  `late_starts_count`, `early_cutoffs_count`, `windows_count`, `market_breakdown`,
-  `time_blocks`). No invented metrics.
-- **Throughput and replay-speed targets** (§2.2, §4) are *not* verify-emitted metrics; they are
-  governed by measured baselines instead (collector day-volume from real files;
-  `docs/measurements/issue-221-gil-contention.json`; the `backtest/index.py` sidecar
-  estimates) and must cite their measurement source.
-- The replay-speed budget must be grounded in measured baselines
-  (`docs/measurements/issue-221-gil-contention.json`: 467MB → 34.07s full-scan; `backtest/index.py`
-  sidecar: ~50ms per cid jump vs ~1.5s/day full scan) — not in wishful numbers.
-- Achievability: coverage/duration targets must be consistent with measured collector throughput
-  (full UTC day ≈ 1.5–1.7GB raw, ~160k snaps; `run/ticks/manifest.json` `sampling_interval_s` ≈ 1.4s).
+- Disk on host: >= 10GB free before the proof run.
+- Proof run: >= 1 hour continuous; manifest `sampling_interval_s` sane
+  (~1.4s warm); zero `WEDGED`/`DUPLICATES` events unexplained in watchdog log.
+- `python -m scripts.collect_ticks --once` passes ON the host.
+- `python -m scripts.verify_tick_data <downloaded-day-file>` reports no
+  structural errors.
+- Downloaded day files carry recorded `sha256` checksums.
 
 ## Anti-cheat
 - No skipping/disabling tests, no deleting assertions, no suppressing linters.
-- No editing of existing tests to make the doc "pass".
+- No editing existing tests to make the work "pass".
 
 ## Zero regressions
-- Targeted gate (per issue acceptance criteria):
-  `python -m pytest tests/test_verify_tick_data.py tests/test_collect_ticks_smoke.py -q`
+- Targeted gate: `python -m pytest tests/test_collect_ticks_smoke.py -q`
+  plus any watchdog tests covering touched code.
 - Full-suite runs stay with CI on push (per AGENTS.md testing policy).
