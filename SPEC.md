@@ -3,7 +3,7 @@
 ## Goal
 Move ONLY the tick collector off the home PC onto an always-on managed host with
 persistent disk, so the 5-day golden capture (#281) runs with no sleep/reboot/
-internet-drop risk. Everything else (dashboard, live trader) stays local.
+internet-drop risk. Everything else (dashboard, trading engine) stays local.
 
 ## Deliverable 1 — Host decision (documented, 2026-09-20)
 - Vercel is ruled out (serverless sleep + ephemeral disk). Hardening the home
@@ -22,12 +22,13 @@ internet-drop risk. Everything else (dashboard, live trader) stays local.
 ## Deliverable 2 — Packaging for the host
 - Start command, disk mount (collector output dir), restart policy, install from
   existing `requirements.txt` (fastapi, uvicorn, requests, sse-starlette, anyio).
-- Watchdog portability: `scripts/collector_watchdog.py` currently uses
-  Windows-only primitives (`Get-CimInstance` probe at :66-72, `taskkill` at
-  :106, `DETACHED` flags at :37/:95). A Linux host needs a POSIX path for
-  `collector_pids()` / `kill()` / spawn with **identical Windows behavior**
-  (unknown-state ⇒ no action, never double-start). Capture logic itself
-  (poll interval, budgets, rotation, manifest schema) does NOT change.
+- Watchdog portability: `scripts/collector_watchdog.py` used Windows-only
+  primitives (`Get-CimInstance` probe, `taskkill`, `DETACHED` flags). Done on
+  this branch: POSIX `pgrep -f scripts.collect_ticks` probe, `SIGKILL` kill
+  path, `COLLECT_OUT`/`COLLECT_EXTRA_ARGS` host overrides, `manifest_path()`
+  follows the redirect — with **identical Windows behavior** (unknown-state ⇒
+  no action, never double-start). Capture logic itself (poll interval,
+  budgets, rotation, manifest schema) did NOT change.
 
 ## Deliverable 3 — 1+ hour proof capture on the host
 - Watchdog + collector running, manifest `sampling_interval_s` sane (~1.4s warm,

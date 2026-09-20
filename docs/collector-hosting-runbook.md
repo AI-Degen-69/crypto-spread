@@ -1,8 +1,8 @@
 # Collector Hosting Runbook (Issue #283)
 
-> Only the tick collector moves off-machine. Dashboard and live trader stay local.
+> Only the tick collector moves off-machine. Dashboard and trading engine stay local.
 > Host decision: **Render** (background worker + disk). **Fly.io** is the cheaper
-> fallback. Full comparison: `SPEC.md` Deliverable 1.
+> fallback. Full comparison: `../SPEC.md` Deliverable 1.
 
 ## 1. Deploy (Render, primary)
 
@@ -12,7 +12,10 @@
    `python -m scripts.collector_watchdog` (it spawns and guards `collect_ticks`).
 3. Add a **persistent disk**: size **10GB**, mount path `/opt/render/project/src/run/ticks`.
    Only files under the mount survive restarts — the collector defaults to
-   `run/ticks/`, which lands on the disk when mounted at that path.
+   `run/ticks/`, which lands on the disk when mounted at that path. Prefer this
+   over `COLLECT_OUT`: the watchdog and collector logs (`run/watchdog.log`,
+   `run/collector.log`) live under `run/` *outside* the mount and are
+   ephemeral — after a restart, read them fresh from the Logs tab, not the disk.
 4. Environment (optional, wired in `collector_cmd`):
    - `COLLECT_OUT=/data` — only if the disk is mounted somewhere else.
    - `COLLECT_EXTRA_ARGS=--gzip` — only if disk is tight (`.jsonl.gz` verifies clean).
@@ -20,6 +23,11 @@
    before the proof run.
 
 ## 2. Check logs
+
+> Never run a manual `python -m scripts.collect_ticks --once` on the host while
+> the worker is up: its command line trips the watchdog's duplicate-collector
+> path and one of the two processes gets killed. Stop the worker first, or
+> proof from the downloaded files (§4) instead.
 
 - Render dashboard → service → Logs. Healthy signs:
   - `watchdog up (check=60s stale=180s)` once at boot.
@@ -44,7 +52,8 @@ From the service Shell tab (or `scp`/`render disks` equivalent), per closed UTC 
 sha256sum run/ticks/ticks_<YYYY-MM-DD>.jsonl* > ticks_<YYYY-MM-DD>.sha256
 ```
 
-Download both the day file and its `.sha256`, then locally:
+Download both the day file and its `.sha256`, then locally (charter cite:
+`docs/golden-tick-dataset.md` §3.1 needs one checksum per golden day):
 
 ```powershell
 python -m scripts.verify_tick_data run/ticks/ticks_<YYYY-MM-DD>.jsonl
@@ -69,7 +78,7 @@ app = 'python -m scripts.collector_watchdog'
 policy = "always"
 [[mounts]]
 source = "tickdata"
-destination = "/data"   # + --out /data
+destination = "/data"   # + COLLECT_OUT=/data (same redirect convention as Render §1)
 ```
 
 ```bash

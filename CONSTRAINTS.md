@@ -1,7 +1,7 @@
 # CONSTRAINTS — Issue #283: Host the tick collector on a managed platform
 
 ## Scope guard
-- Collector hosting only. No dashboard / live-trader hosting.
+- Collector hosting only. No dashboard / trading-engine hosting.
 - **No capture-logic changes**: `POLL_INTERVAL`, `TICK_BUDGET_MS`, day rotation
   (`write_snap`/`now_day_key`), manifest schema, verify thresholds stay as-is.
 - Watchdog edits limited to cross-platform process management

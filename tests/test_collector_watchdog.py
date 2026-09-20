@@ -18,9 +18,17 @@ from scripts import collector_watchdog as wd
 
 @pytest.fixture(autouse=True)
 def _quiet(monkeypatch, tmp_path):
-    """Keep test runs out of the real `run/watchdog.log`."""
+    """Keep test runs out of the real `run/watchdog.log`.
+
+    Pins the Windows probe path (CI runs Linux — without the pin, the
+    legacy probe tests below would take the POSIX branch) and clears the
+    host env overrides so one export cannot leak across tests.
+    """
     monkeypatch.setattr(wd, "LOG", tmp_path / "watchdog.log")
     monkeypatch.setattr(wd, "MANIFEST", tmp_path / "manifest.json")
+    monkeypatch.setattr(wd.os, "name", "nt")
+    monkeypatch.delenv("COLLECT_OUT", raising=False)
+    monkeypatch.delenv("COLLECT_EXTRA_ARGS", raising=False)
 
 
 def _run_once(pids, *, manifest_age=1.0):
@@ -180,9 +188,53 @@ def test_collector_cmd_honours_host_overrides(monkeypatch):
 
 def test_windows_kill_still_uses_taskkill(monkeypatch):
     """The legacy Windows path is byte-identical: taskkill /F."""
-    monkeypatch.setattr(wd.os, "name", "nt")
     run = mock.Mock(return_value=mock.Mock(returncode=0))
     monkeypatch.setattr(wd.subprocess, "run", run)
     wd.kill(1234)
     run.assert_called_once_with(["taskkill", "/PID", "1234", "/F"],
                                 capture_output=True, text=True)
+
+
+def test_kill_signal_is_sigkill_where_it_exists():
+    """The POSIX branch must really send SIGKILL, whatever its number."""
+    if not hasattr(wd.signal, "SIGKILL"):
+        pytest.skip("no SIGKILL on this platform")
+    assert wd._KILL_SIG == wd.signal.SIGKILL
+
+
+def test_posix_kill_without_permission_is_logged_not_raised(monkeypatch, tmp_path):
+    """A kill we may not perform must not take the watchdog down."""
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.os, "kill",
+                        mock.Mock(side_effect=PermissionError("denied")))
+    wd.kill(1234)  # must not raise
+    assert "not permitted" in (tmp_path / "watchdog.log").read_text()
+
+
+def test_posix_probe_garbage_output_is_unknown(monkeypatch):
+    """rc=0 with unparsable text is not an empty healthy result."""
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.subprocess, "run",
+                        mock.Mock(return_value=mock.Mock(returncode=0, stdout="???")))
+    assert wd.collector_pids() is None
+
+
+def test_collector_cmd_refuses_once(monkeypatch, tmp_path):
+    """`--once` under the watchdog means an instant exit + restart churn."""
+    monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--gzip --once")
+    assert wd.collector_cmd() == [
+        wd.sys.executable, "-m", "scripts.collect_ticks", "--gzip"]
+    assert "--once" in (tmp_path / "watchdog.log").read_text()
+
+
+def test_manifest_follows_collect_out(monkeypatch, tmp_path):
+    """With COLLECT_OUT set, the watchdog watches the redirected manifest —
+    otherwise it would read a stale default file and declare a live
+    collector wedged."""
+    monkeypatch.setenv("COLLECT_OUT", str(tmp_path / "data"))
+    assert wd.manifest_path() == tmp_path / "data" / "manifest.json"
+    assert wd.collect_out_dir() == tmp_path / "data"
+
+
+def test_manifest_defaults_locally(monkeypatch, tmp_path):
+    assert wd.manifest_path() == tmp_path / "manifest.json"

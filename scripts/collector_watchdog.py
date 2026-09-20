@@ -33,6 +33,30 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "run" / "watchdog.log"
 MANIFEST = ROOT / "run" / "ticks" / "manifest.json"
 
+
+def collect_out_dir() -> Path:
+    """Tick output dir the guarded collector writes to (issue #283).
+
+    Follows `COLLECT_OUT` when set (managed host with a mounted disk);
+    otherwise the local default. Stripped, so a whitespace-only value
+    cannot become `--out " "`.
+    """
+    out = os.environ.get("COLLECT_OUT", "").strip()
+    return Path(out) if out else ROOT / "run" / "ticks"
+
+
+def manifest_path() -> Path:
+    """Manifest the watchdog must watch: the one inside the output dir.
+
+    The collector writes `manifest.json` into its own `out_dir`
+    (`collect_ticks.update_manifest`), so watching the fixed default while
+    the collector was redirected elsewhere would read a stale file forever
+    and declare the live process wedged.
+    """
+    if os.environ.get("COLLECT_OUT", "").strip():
+        return collect_out_dir() / "manifest.json"
+    return MANIFEST
+
 # Windows process-creation flags: no console, own process group, so the
 # collector survives the shell that started the watchdog.
 DETACHED = 0x00000008 | 0x00000200
@@ -91,6 +115,15 @@ def _collector_pids_windows() -> list[int] | None:
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+# Full module path, not the bare stem: `pgrep -f collect_ticks` also matches
+# editors, test runners, and one-shot `--once` proof runs whose command line
+# merely contains the substring. The residual `--once` overlap is handled by
+# refusing `--once` in COLLECT_EXTRA_ARGS (see collector_cmd) and by the
+# runbook rule: never run a manual `--once` on the host while the worker
+# is up — it can read as a duplicate and get killed.
+_PGREP_PATTERN = "scripts.collect_ticks"
+
+
 def _collector_pids_posix() -> list[int] | None:
     """POSIX probe via `pgrep -f` (managed Linux host path, issue #283).
 
@@ -101,7 +134,7 @@ def _collector_pids_posix() -> list[int] | None:
     """
     try:
         out = subprocess.run(
-            ["pgrep", "-f", "collect_ticks"],
+            ["pgrep", "-f", _PGREP_PATTERN],
             capture_output=True, text=True, timeout=30)
     except Exception as e:  # includes FileNotFoundError: no pgrep installed
         log(f"pid probe failed ({e}); state unknown, taking no action")
@@ -111,7 +144,11 @@ def _collector_pids_posix() -> list[int] | None:
     if out.returncode != 0:
         log(f"pid probe rc={out.returncode}; state unknown, taking no action")
         return None
-    return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+    pids = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+    if out.stdout.strip() and not pids:
+        log(f"pid probe rc=0 but unparsable output {out.stdout!r}; treating as unknown")
+        return None
+    return pids
 
 
 def collector_cmd() -> list[str]:
@@ -120,12 +157,21 @@ def collector_cmd() -> list[str]:
     `COLLECT_OUT` redirects the tick output dir (e.g. at a mounted disk);
     `COLLECT_EXTRA_ARGS` appends flags such as `--gzip`. Unset means the
     local defaults, so Windows behavior is unchanged.
+
+    `--once` is refused: under the watchdog it would exit instantly and be
+    restarted in a tight loop, and on the host its command line trips the
+    duplicate-collector path. Simple whitespace split — quoted values with
+    spaces are not supported; keep host flags to bare tokens.
     """
     cmd = [sys.executable, "-m", "scripts.collect_ticks"]
-    if os.environ.get("COLLECT_OUT"):
-        cmd += ["--out", os.environ["COLLECT_OUT"]]
-    cmd += os.environ.get("COLLECT_EXTRA_ARGS", "").split()
-    return cmd
+    out = os.environ.get("COLLECT_OUT", "").strip()
+    if out:
+        cmd += ["--out", out]
+    extra = os.environ.get("COLLECT_EXTRA_ARGS", "").split()
+    if "--once" in extra:
+        log("COLLECT_EXTRA_ARGS contains --once; refusing (watchdog needs a long-lived collector)")
+        extra = [a for a in extra if a != "--once"]
+    return cmd + extra
 
 
 def start_collector() -> int | None:
@@ -141,7 +187,7 @@ def start_collector() -> int | None:
         # DETACHED is a Windows-only flag; on POSIX the child simply
         # inherits the watchdog's session, which is what a managed host
         # (Render/Fly) expects of its start command.
-        popen_kw: dict = {"close_fds": True}
+        popen_kw: dict[str, object] = {"close_fds": True}
         if os.name == "nt":
             popen_kw["creationflags"] = DETACHED
         with open(out, "ab") as fo, open(err, "ab") as fe:
@@ -158,8 +204,10 @@ def start_collector() -> int | None:
 def kill(pid: int) -> None:
     """Force-terminate a collector so a restart cannot double-append ticks."""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, text=True)
+        r = subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"taskkill pid={pid} rc={r.returncode}; leaving it alone")
         return
     try:
         os.kill(pid, _KILL_SIG)
@@ -172,7 +220,7 @@ def kill(pid: int) -> None:
 def manifest_age() -> float | None:
     """Seconds since the collector last wrote its manifest, None if absent."""
     try:
-        return time.time() - MANIFEST.stat().st_mtime
+        return time.time() - manifest_path().stat().st_mtime
     except OSError:
         return None
 
