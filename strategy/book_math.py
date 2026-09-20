@@ -246,6 +246,17 @@ def two_sided_mid_with_default(up_book: Optional[Dict[str, Any]],
     return round((_leg(up_book) + (1.0 - _leg(down_book))) / 2.0, 4)
 
 
+# --- duration-aware window percentages --------------------------------------
+
+def window_percentage_seconds(window_length: float, percentage: float) -> float:
+    """Convert a 0..1 window fraction to seconds using the actual window length."""
+    if not math.isfinite(window_length) or window_length <= 0.0:
+        return 0.0
+    if not math.isfinite(percentage):
+        return 0.0
+    return round(max(0.0, min(1.0, float(percentage))) * float(window_length), 6)
+
+
 # --- dead zone (issue #229 / ADR-0003) ---------------------------------------
 
 def dead_zone_cutoff_seconds(window_length: float,

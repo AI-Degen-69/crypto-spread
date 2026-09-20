@@ -1,48 +1,29 @@
-# SPEC — Issue #266: Sweep Visual sensitivity clarity
+# SPEC — Issue #269: Duration-aware backtest timing percentages
 
 ## Goal
-Make the Backtest Sweep Visual communicate that every X value is a separate replay experiment. Use discrete bar charts, identify the strongest overall result and strongest market, and replace technical axis labels with operator-friendly names. The stop-distance sweep must vary the shared 5m and 15m defaults together rather than implying that `exit_5m` is the whole strategy.
-
-## Current state
-Issue #264 delivered `/api/backtest/sweep` with numeric point values, a linear Chart.js line chart, four technical axis names, and ten per-market cards. The UI currently exposes `exit_5m` even though the backtest has separate 5m and 15m stop defaults. Each point is an independent replay; the visualization must not suggest interpolation between untested values.
+Represent Backtest timing controls as percentages of each market window and render Strategy Geometry on a normalized 0–100% time axis, so identical settings mean the same relative position for 5m and 15m markets.
 
 ## Interface contract
-- `GET /api/backtest/sweep` remains one-axis only.
-- Valid axes become `queue`, `offset`, `exit_stop`, and `exit_rev`. `exit_5m` is retired from the Sweep Visual API and UI.
-- The endpoint accepts the current base values for both stop defaults: `exit_default_5m` and `exit_default_15m`.
-- `exit_stop` applies the swept value to both `default_5m` and `default_15m` in the sweep copy of the parameters. It does not change production defaults or strategy math. Existing market-specific overrides remain explicit and documented in the response/metadata if they are retained.
-- Responses preserve `axis`, ordered `points[]`, numeric `value`, readable `label`, `overall`, `per_series`, `series_order`, `series_labels`, `n_snaps`, and `n_windows`.
-- Each point remains an independent run; no response field may imply that intermediate values were simulated.
-- Additive metadata identifies:
-  - `best_overall`: tested point with the highest aggregate P&L, including its value, label, and P&L.
-  - `best_market`: canonical market with the highest per-market P&L across the tested points, including market slug, friendly label, tested point, and P&L.
-
-## UI contract
-- The axis selector uses humanized labels:
-  - `Queue depth — shares ahead`
-  - `Quote offset — distance from anchor`
-  - `Stop distance — 5m + 15m markets`
-  - `Reversal buffer — distance from anchor`
-- The aggregate chart and all ten market charts use bar datasets with a visible zero baseline. They do not use a category or interpolating line scale.
-- The aggregate chart marks `best_overall` with a distinct color, point/annotation treatment, or equivalent visible bar emphasis and a text legend.
-- The ten-market grid marks `best_market` visibly and shows its friendly label and tested parameter value.
-- Best metadata remains safe for an empty `points[]` response: no indexing failure and no false best result.
-- Existing DOM IDs remain stable: `btSweepCard`, `btSweepAxis`, `btnRunSweepVisual`, `btSweepMeta`, `chartSweepAgg`, and `btSweepGrid`.
+- Backtest UI controls for late entry and dead zone accept `0..100%` values.
+- `10%` means 30 seconds for a 300-second window and 90 seconds for a 900-second window.
+- Existing timestamp-based simulation remains authoritative; conversion to seconds must use each window's actual `end_ts - start_ts`.
+- The API may preserve internal `entry_delay_sec`/`dead_zone_val` fields for compatibility only if the Backtest UI/API boundary clearly converts percentages per duration and never applies one fixed 5m delay to 15m windows.
+- The Backtest tab no longer exposes a seconds-unit selector for these controls.
+- Strategy Geometry's horizontal axis is normalized elapsed percentage: 0%, 10%, …, 100%; labels and shaded regions use the same percentage model.
 
 ## Acceptance criteria
-1. Aggregate and per-market charts render discrete bars from independent tested points, with a zero baseline and no line interpolation.
-2. The selected axis menu contains only the four humanized labels and uses `exit_stop` for the shared 5m/15m stop sweep.
-3. `exit_stop` changes both 5m and 15m default stop values in every run; tests prove neither duration is left at a fixed unrelated default.
-4. The response identifies the best aggregate point and best market, and the UI visibly marks both.
-5. Existing response shape, validation, safe basename handling, 404 missing-file behavior, 429 busy behavior, canonical order, and zero-fill behavior remain intact.
-6. Focused tests cover bar configuration, humanized labels, shared stop semantics, best-point/best-market metadata, empty/sparse data, and ten-card rendering.
-7. Browser verification against `run/ticks/ticks_2026-09-18.jsonl` records the rendered chart count and confirms the best markers and shared stop label.
+- Geometry has no hardcoded 300-second primary axis.
+- Entry Delay and Dead Zone are percentage controls with clear labels, bounds, defaults, and validation.
+- Mixed 5m/15m replay applies the same percentage independently to each window.
+- 0% disables the corresponding delay/dead-zone behavior; 100% produces the documented fully delayed/blocked boundary behavior.
+- Existing backtest results, safe file handling, explicit-run behavior, and concurrency guard remain intact.
+- Targeted engine, parity, API, and served-HTML tests pass.
 
 ## Edge cases
-- Empty points produce empty bar charts and neutral metadata.
-- A market missing from the dataset remains in canonical order with zero-valued bars and cannot become best solely because its value is missing.
-- Ties use deterministic first-in-canonical-order selection, documented in tests.
-- Negative P&L bars remain visible below the zero baseline.
+- Missing/invalid/non-finite percentages use the documented safe fallback or return validation errors; no NaN reaches the worker.
+- Window lengths are derived from timestamps, not snapshot count or series label.
+- Partial windows and windows with invalid clocks retain existing handling.
+- Both 5m and 15m geometry renderings remain readable and use the same percentage labels.
 
-## Explicit out of scope
-Multi-axis, joint-grid, random, structural-limit, scatter, strategy-calculation, tick-data, parameter-default, other-tab, and dependency changes. The existing Chart.js integration remains in place.
+## Out of scope
+Live cockpit parameter semantics, strategy entry/exit math beyond time-unit conversion, tick data, sweep axes, chart expansion, and unrelated dashboard tabs.

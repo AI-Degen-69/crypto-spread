@@ -1157,7 +1157,9 @@ async def api_backtest(
     quote_lo: float = 0.10,
     quote_hi: float = 0.90,
     entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
     dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
     dead_zone_unit: str = "pct",
     naked_leg_at_expiry: str = "close",
     taker_fee_rate: float = 0.07,
@@ -1202,11 +1204,12 @@ async def api_backtest(
         _lo, _hi = 0.10, 0.90
     quote_lo, quote_hi = _lo, _hi
 
-    # Patient maker knob (issue #145), clamped like LiveConfigPayload:
-    # delay 0..3600 (a delay past the window simply never quotes).
-    # Non-finite input (nan/inf) falls back to off — min/max comparisons
-    # against NaN silently yield the boundary otherwise.
-    if not math.isfinite(entry_delay_sec):
+    # Backtest timing controls use operator-facing percentages. Keep the old
+    # seconds argument as an internal compatibility path for older callers.
+    if entry_delay_pct is not None:
+        entry_delay_pct = max(0.0, min(100.0, float(entry_delay_pct))) if math.isfinite(float(entry_delay_pct)) else 0.0
+        entry_delay_sec = 0.0
+    elif not math.isfinite(entry_delay_sec):
         entry_delay_sec = 0.0
     else:
         entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
@@ -1216,6 +1219,9 @@ async def api_backtest(
     # the UI's min/max already showed. Previously each endpoint clamped with
     # its own inline min/max calls, which is how a bound tightened in the
     # engine could stay loose here.
+    if dead_zone_pct is not None:
+        dead_zone_val = max(0.0, min(100.0, float(dead_zone_pct))) / 100.0 if math.isfinite(float(dead_zone_pct)) else 0.10
+        dead_zone_unit = "pct"
     dz_unit = dead_zone_unit if dead_zone_unit in ("pct", "sec") else "pct"
     # The registry bound (0.0, 3600.0) is the union across units; under "pct"
     # the engine itself refuses anything above 1.0, so the clamp must be
@@ -1236,6 +1242,7 @@ async def api_backtest(
         merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
         quote_range=(quote_lo, quote_hi),
         entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
+        entry_delay_pct=(entry_delay_pct / 100.0) if entry_delay_pct is not None else None,
         dead_zone_val=dz_val,
         dead_zone_unit=dz_unit,
         naked_leg_at_expiry=naked_expiry,
@@ -1298,6 +1305,8 @@ async def api_backtest(
         "quote_lo": quote_lo,
         "quote_hi": quote_hi,
         "entry_delay_sec": params.entry_delay_sec,
+        "entry_delay_pct": params.entry_delay_pct,
+        "dead_zone_pct": params.dead_zone_val * 100.0 if params.dead_zone_unit == "pct" else None,
     }
 
     raw_params = {
@@ -1314,6 +1323,8 @@ async def api_backtest(
         "quote_lo": quote_lo,
         "quote_hi": quote_hi,
         "entry_delay_sec": entry_delay_sec,
+        "entry_delay_pct": entry_delay_pct,
+        "dead_zone_pct": dead_zone_pct,
     }
 
     global _BACKTEST_RUNNING
@@ -2824,8 +2835,8 @@ textarea:focus-visible,
               <input type="number" step="5" id="btQueue" data-param="queue_gate" value="0">
             </div>
             <div class="form-group">
-              <label data-param-label="entry_delay_sec"></label>
-              <input type="number" min="0" max="3600" step="1" id="btEntryDelay" data-param="entry_delay_sec" value="0">
+              <label data-param-label="entry_delay_pct"></label>
+              <input type="number" min="0" max="100" step="1" id="btEntryDelay" data-param="entry_delay_pct" value="0">
             </div>
             <div id="btStopLossFields">
               <div class="form-group">
@@ -2899,15 +2910,8 @@ textarea:focus-visible,
               <input type="number" min="0.5" max="1" step="0.005" id="btPairCost" data-param="max_pair_cost" value="0.99">
             </div>
             <div class="form-group">
-              <label data-param-label="dead_zone_val"></label>
-              <input type="number" min="0" max="3600" step="0.01" id="btDeadZoneVal" data-param="dead_zone_val" value="0.10">
-            </div>
-            <div class="form-group">
-              <label data-param-label="dead_zone_unit"></label>
-              <select id="btDeadZoneUnit" data-param="dead_zone_unit">
-                <option value="pct" selected>% of window</option>
-                <option value="sec">Seconds</option>
-              </select>
+              <label>Dead Zone (% of window)</label>
+              <input type="number" min="0" max="100" step="1" id="btDeadZoneVal" data-param="dead_zone_pct" value="10">
             </div>
             <div class="form-group">
               <label data-param-label="naked_leg_at_expiry"></label>
@@ -4667,11 +4671,10 @@ async function runBacktest(fileOverride){
     const maxStartDelay = getVal('btMaxStartDelay', 0.0);
     const quoteLo = getVal('btQuoteLo', 0.10);
     const quoteHi = getVal('btQuoteHi', 0.90);
-    const entryDelay = getVal('btEntryDelay', 0.0);
+    const entryDelayPct = Math.max(0, Math.min(100, getVal('btEntryDelay', 0.0)));
     // Issue #164: knobs the live engine has always had, now simulated too.
     const exitReversal = getVal('btExitReversal', 0.02);
-    const deadZoneVal = getVal('btDeadZoneVal', 0.10);
-    const deadZoneUnit = $('btDeadZoneUnit') ? $('btDeadZoneUnit').value : 'pct';
+    const deadZonePct = Math.max(0, Math.min(100, getVal('btDeadZoneVal', 10.0)));
     const nakedLegAtExpiry = $('btNakedLegAtExpiry') ? $('btNakedLegAtExpiry').value : 'close';
     const legChase = $('btLegChase') ? $('btLegChase').value : '0';
     // Rendered from the registry, so they must actually reach the engine.
@@ -4684,7 +4687,7 @@ async function runBacktest(fileOverride){
       $('btFileSelect').value = fileOverride;
     }
 
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_sec=${entryDelay}&exit_reversal=${exitReversal}&dead_zone_val=${deadZoneVal}&dead_zone_unit=${deadZoneUnit}&naked_leg_at_expiry=${nakedLegAtExpiry}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
+    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_pct=${entryDelayPct}&exit_reversal=${exitReversal}&dead_zone_pct=${deadZonePct}&naked_leg_at_expiry=${nakedLegAtExpiry}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
@@ -5035,8 +5038,7 @@ function resetBtParams(){
   if ($('btQuoteHi')) $('btQuoteHi').value = "0.90";
   if ($('btEntryDelay')) $('btEntryDelay').value = "0";
   if ($('btExitReversal')) $('btExitReversal').value = "0.02";
-  if ($('btDeadZoneVal')) $('btDeadZoneVal').value = "0.10";
-  if ($('btDeadZoneUnit')) $('btDeadZoneUnit').value = "pct";
+  if ($('btDeadZoneVal')) $('btDeadZoneVal').value = "10";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
   updateBacktestParamPreview();
@@ -7652,18 +7654,16 @@ function updateBacktestParamPreview(){
   const pairCostMax = Math.max(0, readFinite('btPairCost', 0.99));
   const exitStop = Math.max(0, readFinite('btExit5m', 0.05));
   const exitReversal = Math.max(0, readFinite('btExitReversal', 0.02));
-  const entryDelay = Math.max(0, readFinite('btEntryDelay', 0));
+  const entryDelayPct = Math.max(0, Math.min(100, readFinite('btEntryDelay', 0)));
   const quoteLo = Math.max(0, Math.min(1.0, readFinite('btQuoteLo', 0.10)));
   const quoteHi = Math.max(0, Math.min(1.0, readFinite('btQuoteHi', 0.90)));
-  const deadZoneVal = Math.max(0, readFinite('btDeadZoneVal', 0.10));
-  const deadZoneUnit = $('btDeadZoneUnit')?.value || 'pct';
+  const deadZonePct = Math.max(0, Math.min(100, readFinite('btDeadZoneVal', 10)));
 
-  // Time calculations (5m reference window = 300s)
-  const windowDur = 300;
-  let deadSec = deadZoneUnit === 'sec' ? deadZoneVal : windowDur * deadZoneVal;
-  deadSec = Math.max(0, Math.min(windowDur, deadSec));
-  const delaySec = Math.max(0, Math.min(windowDur, entryDelay));
-  const activeSec = Math.max(0, windowDur - delaySec - deadSec);
+  // Geometry is normalized: the same controls apply to 5m and 15m windows.
+  const windowPct = 100;
+  const delayPct = entryDelayPct;
+  const deadPct = deadZonePct;
+  const activePct = Math.max(0, windowPct - delayPct - deadPct);
 
   // Price calculations
   const mid = 0.50;
@@ -7680,7 +7680,7 @@ function updateBacktestParamPreview(){
       <span class="bt-preview-pill bt-preview-pill-cyan" title="Quoted spread width (2 × offset)">Spread: <b>${(offset * 200).toFixed(1)}¢</b></span>
       <span class="bt-preview-pill ${pairCost <= pairCostMax ? 'bt-preview-pill-up' : 'bt-preview-pill-down'}" title="Calculated pair cost vs max limit">Pair Cost: <b>$${pairCost.toFixed(3)}</b> <span style="font-size:9.5px;opacity:.7">/ max $${pairCostMax.toFixed(2)}</span></span>
       <span class="bt-preview-pill bt-preview-pill-down" title="Adverse distance to trigger stop exit">Stop: <b>-${(exitStop * 100).toFixed(1)}¢</b></span>
-      <span class="bt-preview-pill bt-preview-pill-gold" title="Active quoting window duration">Active: <b>${Math.round(activeSec)}s</b> <span style="font-size:9.5px;opacity:.7">(${((activeSec / windowDur) * 100).toFixed(0)}%)</span></span>
+      <span class="bt-preview-pill bt-preview-pill-gold" title="Active quoting window as a percentage">Active: <b>${activePct.toFixed(0)}%</b></span>
     `;
   }
 
@@ -7695,7 +7695,7 @@ function updateBacktestParamPreview(){
   const plotW = w - padL - padR;
   const plotH = h - padT - padB;
 
-  const getX = (sec) => padL + (Math.max(0, Math.min(windowDur, sec)) / windowDur) * plotW;
+  const getX = (pct) => padL + (Math.max(0, Math.min(windowPct, pct)) / windowPct) * plotW;
   const getY = (p) => padT + (1.0 - Math.max(0.0, Math.min(1.0, p))) * plotH;
 
   // Background Gridlines
@@ -7710,13 +7710,12 @@ function updateBacktestParamPreview(){
     `;
   }
 
-  // Vertical Time Lines (60s steps)
-  for(let sec = 0; sec <= windowDur; sec += 60){
-    const xPos = getX(sec);
-    const minStr = Math.floor(sec / 60) + 'm';
+  // Normalized timeline: no 5m assumption, so 15m windows align correctly.
+  for(let pct = 0; pct <= windowPct; pct += 25){
+    const xPos = getX(pct);
     gridSvg += `
       <line x1="${xPos.toFixed(1)}" y1="${padT}" x2="${xPos.toFixed(1)}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.05)" stroke-width="1" stroke-dasharray="2,3"/>
-      <text x="${xPos.toFixed(1)}" y="${h - 10}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="middle">${sec}s (${minStr})</text>
+      <text x="${xPos.toFixed(1)}" y="${h - 10}" fill="var(--faint)" font-size="10" font-family="var(--mono)" text-anchor="middle">${pct}%</text>
     `;
   }
 
@@ -7731,27 +7730,27 @@ function updateBacktestParamPreview(){
   // Time Zones Shading
   let timeZonesSvg = '';
   // Entry Delay Zone
-  if (delaySec > 0) {
-    const delayW = getX(delaySec) - padL;
+  if (delayPct > 0) {
+    const delayW = getX(delayPct) - padL;
     timeZonesSvg += `
       <rect x="${padL}" y="${padT}" width="${delayW.toFixed(1)}" height="${plotH}" fill="rgba(235,178,58,0.12)" stroke="rgba(235,178,58,0.4)" stroke-width="1" stroke-dasharray="3,2"/>
-      <text x="${(padL + delayW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--gold)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">DELAY (${delaySec}s)</text>
+      <text x="${(padL + delayW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--gold)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">DELAY (${delayPct.toFixed(0)}%)</text>
     `;
   }
 
   // Dead Zone Tail
-  if (deadSec > 0) {
-    const deadX = getX(windowDur - deadSec);
+  if (deadPct > 0) {
+    const deadX = getX(windowPct - deadPct);
     const deadW = padL + plotW - deadX;
     timeZonesSvg += `
       <rect x="${deadX.toFixed(1)}" y="${padT}" width="${deadW.toFixed(1)}" height="${plotH}" fill="rgba(240,104,77,0.12)" stroke="rgba(240,104,77,0.4)" stroke-width="1" stroke-dasharray="3,2"/>
-      <text x="${(deadX + deadW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--down)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">DEAD ZONE (${Math.round(deadSec)}s)</text>
+      <text x="${(deadX + deadW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--down)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">DEAD ZONE (${deadPct.toFixed(0)}%)</text>
     `;
   }
 
   // Active Trading Span Coordinates
-  const activeStartX = getX(delaySec);
-  const activeEndX = getX(windowDur - deadSec);
+  const activeStartX = getX(delayPct);
+  const activeEndX = getX(windowPct - deadPct);
   const activeWidth = Math.max(0, activeEndX - activeStartX);
   const yLong = getY(longBid);
   const yShort = getY(shortComp);
@@ -7847,7 +7846,7 @@ function setupBacktestInputListeners(){
     'btExit15m', 'btExitBtc', 'btExitSol',
     'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
     'btQuoteLo', 'btQuoteHi', 'btEntryDelay',
-    'btExitReversal', 'btDeadZoneVal', 'btDeadZoneUnit'
+    'btExitReversal', 'btDeadZoneVal'
   ];
 
   inputIds.forEach(id => {

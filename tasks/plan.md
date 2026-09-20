@@ -1,65 +1,47 @@
-# Task Plan — Issue #266: Sweep Visual sensitivity clarity
+# Task Plan — Issue #269: Duration-aware backtest timing percentages
 
-**Size tier:** Standard — one dashboard endpoint and one served Chart.js component need a response-contract extension, visualization change, and focused regression coverage.
+**Size tier:** Large — changes cross the Backtest UI, FastAPI parameter boundary, frozen BacktestParams contract, timestamp replay behavior, geometry rendering, and parity tests.
 **Task type:** Code + Design/UI + API/Backend + QA/Regression.
-**Related issue:** #264 delivered the initial Sweep Visual.
+**Issue:** #269
 
-## Issue-driven decisions
-- Use discrete bar charts because every tested X value is an independent replay; no line interpolation is implied.
-- Replace `exit_5m` with `exit_stop`, a shared stop-distance sweep that sets the 5m and 15m default stop values together.
-- Define the best market as the canonical market with the highest per-market P&L across all tested sweep points; ties resolve by canonical order. Show its friendly label, tested value, and P&L.
-- Humanize the axis selector while preserving machine axis names in the API.
+## Decisions locked by the issue
+- Operator-facing Backtest timing values are percentages from 0 to 100.
+- One percentage applies relative to each window's actual timestamp duration.
+- 10% means 30s on 5m/300s and 90s on 15m/900s.
+- Geometry's primary time axis is normalized 0%–100%; seconds may appear only as secondary explanatory text.
+- Live cockpit behavior is out of scope; preserve internal timestamp-based replay and parity.
 
 ## Tasks
 
-- [x] **TASK-1 [API/Backend]**: Align the sweep axis contract and shared stop semantics.
-  - Target: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`.
-  - Build: replace `exit_5m` with `exit_stop`; accept both 5m and 15m base stop values; apply every `exit_stop` value to both default duration stop entries in the copied sweep parameters; preserve validation and safe file handling.
-  - Verify: endpoint tests prove both duration values move together and invalid-axis responses list the new four axes.
+- [x] **TASK-1 [Backend/Logic]**: Define one duration-aware percentage conversion contract.
+  - Target: `backtest/engine.py`, `strategy/book_math.py`, focused engine tests.
+  - Build: tested conversion from `window_length` and percentage to seconds; exact boundaries and invalid-window behavior; percentage input carried without breaking existing callers.
+  - Verify: unit tests prove 10%→30s/90s and boundaries.
 
-- [x] **TASK-2 [API/Backend]**: Add deterministic best-result metadata.
-  - Target: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`.
-  - Build: return additive `best_overall` and `best_market` metadata; handle empty points, absent markets, negative values, and deterministic ties without changing replay math.
-  - Verify: response tests cover populated, empty, sparse, negative, and tied results.
+- [x] **TASK-2 [Backend/Logic]**: Apply percentage timing independently to every replay window.
+  - Target: `backtest/engine.py`, parity tests.
+  - Build: entry delay uses each window's actual timestamp duration; dead-zone percentage remains duration-aware; existing timestamp and parity behavior retained.
+  - Verify: focused engine, dead-zone, and parity tests.
 
-- [x] **TASK-3 [Design/UI]**: Humanize the parameter selector and explain independent runs.
-  - Target: `server/osc_dash.py`, `tests/test_theme_tokens.py`.
-  - Build: replace technical option text with operator-facing descriptions for queue depth, quote offset, shared 5m+15m stop distance, and reversal buffer; update helper text to say each bar is an independent replay.
-  - Verify: served-HTML tests assert the four humanized labels, absence of `exit_5m` in the Sweep Visual menu, and stable DOM IDs.
+- [x] **TASK-3 [API/Backend]**: Update the Backtest request and response contract.
+  - Target: `server/osc_dash.py`, integration tests.
+  - Build: accept validated 0–100% `entry_delay_pct` and `dead_zone_pct`, explicitly translate them at the simulation boundary, and preserve compatibility for internal seconds callers.
+  - Verify: API validation, safe file, guard, and response tests.
 
-- [x] **TASK-4 [Design/UI]**: Convert all Sweep Visual charts from lines to discrete bars.
-  - Target: `server/osc_dash.py`, `tests/test_theme_tokens.py`.
-  - Build: render the aggregate and ten market charts as bar datasets with a zero baseline, signed values, readable tooltips, and no interpolating line configuration.
-  - Verify: rendering-contract tests assert bar chart configuration, zero-baseline behavior, numeric values, one aggregate canvas, and ten market cards.
+- [x] **TASK-4 [Design/UI]**: Convert Backtest timing controls to percentages.
+  - Target: `server/osc_dash.py` served HTML/JavaScript, theme/integration tests.
+  - Build: Entry Delay and Dead Zone controls use 0–100% bounds, clear labels, percentage query parameters, and no seconds-unit selector on the Backtest surface.
+  - Verify: served-HTML tests and no-auto-run behavior.
 
-- [x] **TASK-5 [Design/UI]**: Mark the best aggregate point and best market.
-  - Target: `server/osc_dash.py`, `tests/test_theme_tokens.py`.
-  - Build: visibly emphasize the best aggregate bar; highlight the best market card/bar and display its friendly label, tested parameter value, and P&L; render neutral metadata for empty responses.
-  - Verify: HTML/JS contract assertions cover both markers and the empty state; browser check confirms the markers are visible.
+- [x] **TASK-5 [Design/UI]**: Normalize Strategy Geometry Preview to 0%–100%.
+  - Target: `server/osc_dash.py`, tests.
+  - Build: replace the hardcoded 300s timeline with a normalized percentage axis and place delay/dead-zone shading using percentages.
+  - Verify: focused UI tests and source inspection of normalized labels/zones.
 
-- [x] **TASK-6 [QA/Regression]**: Verify the real dataset and update handoff evidence.
-  - Target: `tasks/plan.md`, `tasks/todo.md`; no generated data.
-  - Build: run the browser against `run/ticks/ticks_2026-09-18.jsonl`, record chart count, shared-stop axis text, best markers, and any zero-fill caveat.
-  - Verify: targeted pytest gate plus browser snapshot and console/network inspection. Completed with 152 focused tests, a queue sweep against `ticks_2026-09-18.jsonl` (30 windows), one aggregate bar chart, ten market bars, and visible best-result metadata; browser console had no errors.
-
-## Verification matrix
-| Task | Verification |
-|---|---|
-| TASK-1 | API contract and shared 5m/15m stop tests |
-| TASK-2 | Best metadata edge-case tests |
-| TASK-3 | Served HTML label contract tests |
-| TASK-4 | Chart configuration and DOM contract tests |
-| TASK-5 | Marker metadata tests + browser visibility |
-| TASK-6 | `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q` + browser run |
-
-## Risks and mitigations
-| Risk | Mitigation |
-|---|---|
-| Bars hide trend shape | Keep tested values ordered and show exact parameter labels/tooltips; do not interpolate. |
-| 5m/15m semantics remain ambiguous | Use one `exit_stop` machine axis and one humanized “5m + 15m markets” label; test both defaults per point. |
-| Missing markets appear artificially best | Zero-fill missing markets and exclude missing-data defaults from best selection. |
-| Negative P&L is hard to read | Enforce a visible zero baseline and signed bar colors. |
-| Old clients send `exit_5m` | Return the documented invalid-axis response; no silent alias that hides the contract change. |
+- [x] **TASK-6 [QA/Regression]**: Run the focused gate and real-data browser verification.
+  - Target: focused timing, parity, API, and UI suites.
+  - Build: verify the changed semantics against the available test fixtures and preserve the real-data browser gate for Station IV.
+  - Verify: `python -m pytest tests/test_book_math.py tests/test_backtest_engine.py tests/test_dead_zone_parity.py tests/test_engine_parity.py tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q` — 348 passed.
 
 ## Out of scope
-Strategy/backtest calculations, production parameter defaults, tick data, other tabs, structural-limit sweeps, joint/random sweeps, new dependencies, and Issue #174 work.
+Live cockpit timing controls, market-data collection, sweep axes, P&L/strategy rules, chart expansion, and unrelated dashboard tabs.
