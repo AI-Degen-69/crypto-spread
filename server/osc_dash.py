@@ -975,9 +975,71 @@ def _run_backtest_simulation_worker(
 SWEEP_AXES: Dict[str, List[float]] = {
     "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
     "offset": [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
-    "exit_5m": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    "exit_stop": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
 }
+
+
+def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, str]:
+    """Return an independent parameter copy and readable label for one sweep bar."""
+    if axis == "queue":
+        return _dc_replace(base, queue_gate=float(value)), f"queue={value:.0f}"
+    if axis == "offset":
+        return _dc_replace(base, offset=float(value)), f"offset={value:.3f}"
+    if axis == "exit_stop":
+        thresholds = dict(base.exit_thresh_by_slug)
+        # This axis is deliberately global across both durations and the
+        # duration-specific BTC/SOL overrides, so 5m and 15m are one experiment.
+        for key in (
+            "default_5m", "default_15m",
+            "btc-up-or-down-5m", "btc-up-or-down-15m",
+            "sol-up-or-down-5m", "sol-up-or-down-15m",
+        ):
+            thresholds[key] = float(value)
+        return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop={value:.2f}"
+    return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
+
+
+def _select_sweep_bests(
+    points: list[dict],
+    series_order: list[str],
+    series_labels: dict[str, str],
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Select aggregate and canonical-order market winners from sweep points."""
+    best_overall = None
+    best_market = None
+    best_market_order = len(series_order)
+    for point in points:
+        if point["overall"]["windows"] <= 0:
+            continue
+        overall_pnl = point["overall"]["total_pnl_cents"]
+        if best_overall is None or overall_pnl > best_overall["total_pnl_cents"]:
+            best_overall = {
+                "value": point["value"],
+                "label": point["label"],
+                "total_pnl_cents": overall_pnl,
+            }
+        for market_order, slug in enumerate(series_order):
+            if slug not in point["series_present"]:
+                continue
+            market_pnl = point["per_series"][slug]
+            if (
+                best_market is None
+                or market_pnl > best_market["total_pnl_cents"]
+                or (
+                    market_pnl == best_market["total_pnl_cents"]
+                    and market_order < best_market_order
+                )
+            ):
+                best_market = {
+                    "series": slug,
+                    "label": series_labels[slug],
+                    "value": point["value"],
+                    "point_label": point["label"],
+                    "total_pnl_cents": market_pnl,
+                }
+                best_market_order = market_order
+    return best_overall, best_market
 
 
 def _run_sweep_worker(
@@ -1021,24 +1083,14 @@ def _run_sweep_worker(
     if limit_windows and limit_windows > 0:
         grouped = grouped[:limit_windows]
 
+    series_order = [s[0] for s in SERIES]
+    series_labels = {
+        slug: f"{duration // 60:02d}m {token_for_slug(slug)}"
+        for slug, duration, _label in SERIES
+    }
     points = []
     for v in values:
-        if axis == "queue":
-            params = _dc_replace(base, queue_gate=float(v))
-            label = f"queue={v:.0f}"
-        elif axis == "offset":
-            params = _dc_replace(base, offset=float(v))
-            label = f"offset={v:.3f}"
-        elif axis == "exit_5m":
-            ex = dict(base.exit_thresh_by_slug)
-            ex["default_5m"] = float(v)
-            ex["btc-up-or-down-5m"] = max(0.05, float(v) - 0.03)
-            ex["sol-up-or-down-5m"] = max(0.06, float(v) - 0.01)
-            params = _dc_replace(base, exit_thresh_by_slug=ex)
-            label = f"exit_5m={v:.2f}"
-        else:  # exit_rev
-            params = _dc_replace(base, exit_reversal=float(v))
-            label = f"exit_rev={v:.3f}"
+        params, label = _sweep_params_for_value(base, axis, float(v))
 
         per_window = [_simulate_window(g, params) for _cid, g in grouped]
         overall_pnl = sum(w.pnl_cents * size for w in per_window)
@@ -1048,6 +1100,10 @@ def _run_sweep_worker(
         per_series: Dict[str, float] = {}
         for w in per_window:
             per_series[w.series] = per_series.get(w.series, 0.0) + w.pnl_cents * size
+        per_series_values = {
+            slug: round(per_series.get(slug, 0.0), 2)
+            for slug in series_order
+        }
         points.append({
             "label": label,
             "value": float(v),
@@ -1058,20 +1114,20 @@ def _run_sweep_worker(
                 "total_pnl_cents": round(overall_pnl, 2),
                 "avg_pnl_cents": round(overall_pnl / n, 2) if n else 0.0,
             },
-            "per_series": {k: round(x, 2) for k, x in per_series.items()},
+            "per_series": per_series_values,
+            "series_present": sorted(per_series),
         })
 
-    # Ensure JSON keys for the axis values survive the process boundary.
-    series_order = [s[0] for s in SERIES]
-    series_labels = {
-        slug: f"{duration // 60:02d}m {token_for_slug(slug)}"
-        for slug, duration, _label in SERIES
-    }
+    best_overall, best_market = _select_sweep_bests(
+        points, series_order, series_labels
+    )
     return {
         "axis": axis,
         "points": points,
         "series_order": series_order,
         "series_labels": series_labels,
+        "best_overall": best_overall,
+        "best_market": best_market,
         "n_snaps": sum(len(g) for _cid, g in grouped),
         "n_windows": len(grouped),
     }
@@ -1320,6 +1376,7 @@ async def api_backtest_sweep(
     offset: float = 0.02,
     queue: float = 0.0,
     exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
     exit_reversal: float = 0.02,
 ):
     """Replay one sensitivity axis and return X-Y points.
@@ -1352,11 +1409,11 @@ async def api_backtest_sweep(
 
     exit_thresh = {
         "default_5m": exit_default_5m,
-        "default_15m": 0.05,
-        "btc-up-or-down-5m": 0.05,
-        "sol-up-or-down-5m": 0.05,
-        "btc-up-or-down-15m": 0.05,
-        "sol-up-or-down-15m": 0.05,
+        "default_15m": exit_default_15m,
+        "btc-up-or-down-5m": exit_default_5m,
+        "sol-up-or-down-5m": exit_default_5m,
+        "btc-up-or-down-15m": exit_default_15m,
+        "sol-up-or-down-15m": exit_default_15m,
     }
     base = BacktestParams(
         offset=_clamp_to_spec("offset", offset),
@@ -2963,15 +3020,15 @@ textarea:focus-visible,
         <h3 style="margin:0">🔬 Sweep Visual — one axis, X-Y</h3>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select id="btSweepAxis" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
-            <option value="queue" selected>queue (X = shares ahead)</option>
-            <option value="offset">offset (X = entry distance)</option>
-            <option value="exit_5m">exit_5m (X = stop distance)</option>
-            <option value="exit_rev">exit_rev (X = reversal buffer)</option>
+            <option value="queue" selected>Queue depth — shares ahead</option>
+            <option value="offset">Quote offset — distance from anchor</option>
+            <option value="exit_stop">Stop distance — 5m + 15m markets</option>
+            <option value="exit_rev">Reversal buffer — distance from anchor</option>
           </select>
           <button class="btn btn-primary" id="btnRunSweepVisual" onclick="runSweepVisual()">▶ Run Sweep Visual</button>
         </div>
       </div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:10px">X = param value, Y = total P&amp;L. Base point = your current settings above; only the axis moves. Uses the same tick file selected above.</div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:10px">Each bar is a separate replay of the selected file. Only the chosen axis moves; the other settings stay fixed. Stop distance sweeps 5m and 15m markets together.</div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim);margin-bottom:6px"></div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
         <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
@@ -4994,7 +5051,8 @@ async function runSweepVisual(){
   const size = $('btSize') ? $('btSize').value : 5;
   const offset = $('btOffset') ? $('btOffset').value : 0.02;
   const queue = $('btQueue') ? $('btQueue').value : 0;
-  const exit5m = $('btExit5m') ? $('btExit5m').value : 0.05;
+  const exitStop5m = $('btExit5m') ? $('btExit5m').value : 0.05;
+  const exitStop15m = $('btExit15m') ? $('btExit15m').value : 0.05;
   const exitRev = $('btExitReversal') ? $('btExitReversal').value : 0.02;
   const meta = $('btSweepMeta');
   if(btn){ btn.disabled = true; btn.textContent = '⏳ Sweeping…'; }
@@ -5012,7 +5070,7 @@ async function runSweepVisual(){
       if(meta){ meta.textContent = 'backtest is still running; try the sweep again when it finishes.'; }
       return;
     }
-    let url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&size=${encodeURIComponent(size)}&offset=${encodeURIComponent(offset)}&queue=${encodeURIComponent(queue)}&exit_default_5m=${encodeURIComponent(exit5m)}&exit_reversal=${encodeURIComponent(exitRev)}`;
+    let url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&size=${encodeURIComponent(size)}&offset=${encodeURIComponent(offset)}&queue=${encodeURIComponent(queue)}&exit_default_5m=${encodeURIComponent(exitStop5m)}&exit_default_15m=${encodeURIComponent(exitStop15m)}&exit_reversal=${encodeURIComponent(exitRev)}`;
     if(fileVal){ url += `&file=${encodeURIComponent(fileVal)}`; }
     const res = await fetch(url);
     if(res.status === 429){
@@ -5034,28 +5092,50 @@ function renderSweepVisual(data){
   const points = data.points || [];
   const labels = points.map(p => p.label);
   const xVals = points.map(p => Number(p.value));
-  const aggY = points.map(p => (p.overall.total_pnl_cents || 0) / 100);
+  const axisLabels = {
+    queue: 'Queue depth — shares ahead',
+    offset: 'Quote offset — distance from anchor',
+    exit_stop: 'Stop distance — 5m + 15m markets',
+    exit_rev: 'Reversal buffer — distance from anchor'
+  };
+  const axisLabel = axisLabels[data.axis] || data.axis;
+  const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
   const xy = y => points.map((p, i) => ({ x: xVals[i], y: y[i] }));
+  const money = cents => `${cents >= 0 ? '+' : '-'}$${Math.abs(cents / 100).toFixed(2)}`;
+  const bestOverall = data.best_overall || null;
+  const bestMarket = data.best_market || null;
   const meta = $('btSweepMeta');
   if(meta){
-    const best = points.reduce((a,b) => ((b.overall.total_pnl_cents||0) > (a.overall.total_pnl_cents||0) ? b : a), points[0] || {label:'—', overall:{}});
-    meta.textContent = `${data.axis} · ${data.n_windows} windows · best: ${best ? best.label : '—'} (${(((best||{}).overall||{}).total_pnl_cents||0)/100 >= 0 ? '+' : ''}$${((((best||{}).overall||{}).total_pnl_cents||0)/100).toFixed(2)})`;
+    const overallText = bestOverall ? `best overall: ${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : 'best overall: —';
+    const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
+    meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}`;
   }
-  const mkOpts = (title) => ({
+  const mkOpts = () => ({
     responsive: true,
-    plugins: { legend: { display: false }, title: { display: !!title, text: title || '', color: theme.dim }, tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } } },
+    parsing: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } }
+    },
     scales: {
-      x: { type: 'linear', title: { display: true, text: data.axis, color: theme.dim }, ticks: { color: theme.dim, maxTicksLimit: 7, callback: function(v){ return Number(v).toString(); } }, grid: { color: theme.line } },
-      y: { title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
+      x: { type: 'linear', offset: false, afterBuildTicks: function(scale){ scale.ticks = xVals.map((value, index) => ({ value: value, label: labels[index] })); }, title: { display: true, text: axisLabel, color: theme.dim }, ticks: { autoSkip: false, color: theme.dim, maxTicksLimit: 7, callback: function(v){ return xTickLabels.get(Number(v)) || Number(v).toString(); } }, grid: { color: theme.line } },
+      y: { beginAtZero: true, title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
     }
   });
+  const barColors = (seriesKey) => points.map(point => {
+    const isBest = seriesKey
+      ? bestMarket && bestMarket.series === seriesKey && bestMarket.value === point.value
+      : bestOverall && bestOverall.value === point.value;
+    return isBest ? theme.gold : theme.proj;
+  });
+  const barBorders = colors => colors.map(color => color);
   destroyChartInstance('chartSweepAgg');
   const aggCtx = $('chartSweepAgg');
   if(aggCtx){
     new Chart(aggCtx.getContext('2d'), {
-      type: 'line',
-      data: { datasets: [{ label: 'Total P&L ($)', data: xy(aggY), borderColor: theme.up, backgroundColor: hexToRgba(theme.up, 0.1), fill: true, tension: 0.1, pointRadius: 3 }] },
-      options: mkOpts('')
+      type: 'bar',
+      data: { datasets: [{ label: 'Total P&L ($)', data: xy(points.map(p => (p.overall.total_pnl_cents || 0) / 100)), backgroundColor: barColors(), borderColor: barBorders(barColors()), borderWidth: 1 }] },
+      options: mkOpts()
     });
   }
   const grid = $('btSweepGrid');
@@ -5063,11 +5143,12 @@ function renderSweepVisual(data){
   grid.innerHTML = '';
   const order = data.series_order || [];
   order.forEach((seriesKey, idx) => {
+    const isBestMarket = bestMarket && bestMarket.series === seriesKey;
     const card = document.createElement('div');
-    card.style.cssText = 'background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px';
+    card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:10px`;
     const title = document.createElement('div');
     title.style.cssText = 'font:700 11px var(--disp);color:var(--faint);margin-bottom:4px';
-    title.textContent = (data.series_labels || {})[seriesKey] || seriesKey;
+    title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
     const cv = document.createElement('canvas');
     const cvId = 'chartSweep_' + idx;
     cv.id = cvId;
@@ -5076,11 +5157,12 @@ function renderSweepVisual(data){
     card.appendChild(cv);
     grid.appendChild(card);
     const y = points.map(p => ((p.per_series || {})[seriesKey] || 0) / 100);
+    const colors = barColors(seriesKey);
     destroyChartInstance(cvId);
     new Chart(cv.getContext('2d'), {
-      type: 'line',
-      data: { datasets: [{ data: xy(y), borderColor: theme.proj, backgroundColor: hexToRgba(theme.proj, 0.1), fill: true, tension: 0.1, pointRadius: 2 }] },
-      options: mkOpts('')
+      type: 'bar',
+      data: { datasets: [{ data: xy(y), backgroundColor: colors, borderColor: barBorders(colors), borderWidth: 1 }] },
+      options: mkOpts()
     });
   });
 }

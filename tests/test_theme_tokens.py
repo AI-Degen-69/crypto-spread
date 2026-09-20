@@ -109,14 +109,23 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert 'id="btnRunSweepVisual"' in FULL_APP_HTML
     assert 'id="chartSweepAgg"' in FULL_APP_HTML
     assert 'id="btSweepGrid"' in FULL_APP_HTML
-    assert "type: 'linear'" in FULL_APP_HTML
-    assert "data: xy(aggY)" in FULL_APP_HTML
-    assert "data: xy(y)" in FULL_APP_HTML
+    assert "type: 'bar'" in FULL_APP_HTML
+    assert "parsing: false" in FULL_APP_HTML
+    assert "beginAtZero: true" in FULL_APP_HTML
+    assert "afterBuildTicks" in FULL_APP_HTML
+    assert "xTickLabels" in FULL_APP_HTML
+    assert "best_overall" in FULL_APP_HTML
+    assert "best_market" in FULL_APP_HTML
     assert "series_labels" in FULL_APP_HTML
-    assert "title.textContent = (data.series_labels || {})[seriesKey] || seriesKey" in FULL_APP_HTML
-    assert "callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } }" in FULL_APP_HTML
+    assert "★ BEST MARKET" in FULL_APP_HTML
+    assert "Queue depth — shares ahead" in FULL_APP_HTML
+    assert "Stop distance — 5m + 15m markets" in FULL_APP_HTML
+    assert "exit_5m (X = stop distance)" not in FULL_APP_HTML
+    assert "Each bar is a separate replay" in FULL_APP_HTML
+    assert "title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`" in FULL_APP_HTML
     assert "window._btRunning = false" in FULL_APP_HTML
     assert "waiting for the selected-file backtest to finish" in FULL_APP_HTML
+    assert "exit_default_15m" in FULL_APP_HTML
     assert "window.selectedBacktestFile = el.value" in FULL_APP_HTML
     assert "if (el.tagName === 'SELECT' && (id === 'btFileSelect' || id === 'btMaxStartDelay'))" not in FULL_APP_HTML
     assert "if(!equityChartInstance) runBacktest();" not in FULL_APP_HTML
