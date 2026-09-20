@@ -241,6 +241,15 @@ def test_api_ticks_manifest_aggregate(tmp_path, monkeypatch):
     assert agg["series_counts_source"] in ("none", "verify_cache", "scan_cache")
 
 
+def test_tick_files_render_readiness_vocabulary():
+    html = client.get("/").text
+    assert "Tick Snapshots" in html
+    assert "Market Windows" in html
+    assert "Research Readiness" in html
+    assert "Valid Tick Snapshots" in html
+    assert "Tape Entries / Window" in html
+
+
 def test_api_ticks_manifest_aggregate_empty_dir(tmp_path, monkeypatch):
     """Issue #109: missing run/ticks/ yields a zeroed aggregate, not an error."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
@@ -284,6 +293,7 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
 
     res = client.get("/api/ticks/verify", params={"file": f1.name, "wait": 1})
     assert res.status_code == 200
+    assert res.json()["readiness"]["level"] == "INSUFFICIENT"
 
     agg = client.get("/api/ticks/manifest").json()["aggregate"]
     assert agg["series_counts_source"] == "verify_cache"
@@ -311,9 +321,10 @@ def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
     cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
     cache_dir.mkdir()
     (cache_dir / "ticks_2026-09-08.jsonl.json").write_text(json.dumps({
-        "file": f1.name, "status": "PASS", "valid_ticks": 1,
-        "series_counts": {"btc-up-or-down-5m": 1},
-        "fingerprint": fp, "ts": 12345.0,
+        "file": f1.name, "status": "PASS", "valid_ticks": 1,        "series_counts": {"btc-up-or-down-5m": 1},
+            "readiness": {"level": "EXPLORATORY", "policy_version": "test"},
+            "fingerprint": fp, "ts": 12345.0,
+
     }), encoding="utf-8")
 
     osc_dash._prewarm_verify_cache()
