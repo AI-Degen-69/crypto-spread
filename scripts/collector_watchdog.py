@@ -114,6 +114,20 @@ def _collector_pids_posix() -> list[int] | None:
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+def collector_cmd() -> list[str]:
+    """Build the collector command, with managed-host overrides (issue #283).
+
+    `COLLECT_OUT` redirects the tick output dir (e.g. at a mounted disk);
+    `COLLECT_EXTRA_ARGS` appends flags such as `--gzip`. Unset means the
+    local defaults, so Windows behavior is unchanged.
+    """
+    cmd = [sys.executable, "-m", "scripts.collect_ticks"]
+    if os.environ.get("COLLECT_OUT"):
+        cmd += ["--out", os.environ["COLLECT_OUT"]]
+    cmd += os.environ.get("COLLECT_EXTRA_ARGS", "").split()
+    return cmd
+
+
 def start_collector() -> int | None:
     """Spawn a detached collector; returns its PID, or None if it failed.
 
@@ -132,7 +146,7 @@ def start_collector() -> int | None:
             popen_kw["creationflags"] = DETACHED
         with open(out, "ab") as fo, open(err, "ab") as fe:
             p = subprocess.Popen(
-                [sys.executable, "-m", "scripts.collect_ticks"],
+                collector_cmd(),
                 cwd=str(ROOT), stdout=fo, stderr=fe, **popen_kw)
         log(f"STARTED collector pid={p.pid}")
         return p.pid

@@ -165,6 +165,19 @@ def test_posix_kill_of_a_gone_pid_is_silent(monkeypatch):
     wd.kill(1234)  # must not raise
 
 
+def test_collector_cmd_defaults_to_bare_module(monkeypatch):
+    monkeypatch.delenv("COLLECT_OUT", raising=False)
+    monkeypatch.delenv("COLLECT_EXTRA_ARGS", raising=False)
+    assert wd.collector_cmd() == [wd.sys.executable, "-m", "scripts.collect_ticks"]
+
+
+def test_collector_cmd_honours_host_overrides(monkeypatch):
+    monkeypatch.setenv("COLLECT_OUT", "/data")
+    monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--gzip")
+    assert wd.collector_cmd() == [
+        wd.sys.executable, "-m", "scripts.collect_ticks", "--out", "/data", "--gzip"]
+
+
 def test_windows_kill_still_uses_taskkill(monkeypatch):
     """The legacy Windows path is byte-identical: taskkill /F."""
     monkeypatch.setattr(wd.os, "name", "nt")

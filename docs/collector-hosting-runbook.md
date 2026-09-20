@@ -1,0 +1,85 @@
+# Collector Hosting Runbook (Issue #283)
+
+> Only the tick collector moves off-machine. Dashboard and live trader stay local.
+> Host decision: **Render** (background worker + disk). **Fly.io** is the cheaper
+> fallback. Full comparison: `SPEC.md` Deliverable 1.
+
+## 1. Deploy (Render, primary)
+
+1. Dashboard → New → **Background Worker**, repo `crypto-spread`, branch with this
+   change (watchdog POSIX path, #283).
+2. Build: `pip install -r requirements.txt`. Start command:
+   `python -m scripts.collector_watchdog` (it spawns and guards `collect_ticks`).
+3. Add a **persistent disk**: size **10GB**, mount path `/opt/render/project/src/run/ticks`.
+   Only files under the mount survive restarts — the collector defaults to
+   `run/ticks/`, which lands on the disk when mounted at that path.
+4. Environment (optional, wired in `collector_cmd`):
+   - `COLLECT_OUT=/data` — only if the disk is mounted somewhere else.
+   - `COLLECT_EXTRA_ARGS=--gzip` — only if disk is tight (`.jsonl.gz` verifies clean).
+   No secrets needed (public market data). Confirm disk shows ≥ 10GB free
+   before the proof run.
+
+## 2. Check logs
+
+- Render dashboard → service → Logs. Healthy signs:
+  - `watchdog up (check=60s stale=180s)` once at boot.
+  - `STARTED collector pid=...` once; **no** `WEDGED` / `DUPLICATES` lines.
+- Proof gate (≥ 1 hour): fetch `run/ticks/manifest.json` from the disk and check
+  `sampling_interval_s` ≈ 1.4s warm. Command (Shell tab on the service):
+  `python -c "import json;print(json.load(open('run/ticks/manifest.json'))['sampling_interval_s'])"`
+
+## 3. Restart
+
+- Render restarts the worker automatically on crash. Manual restart: dashboard →
+  Manual Deploy → Deploy latest commit (disk contents survive).
+- Wedged collector (manifest stale > 3 min): the watchdog kills + restarts it by
+  itself and logs `WEDGED: ... killing [...]`. No operator action needed; if
+  `WEDGED` repeats, redeploy and inspect `run/collector.log`.
+
+## 4. Pull day files (with checksums)
+
+From the service Shell tab (or `scp`/`render disks` equivalent), per closed UTC day:
+
+```bash
+sha256sum run/ticks/ticks_<YYYY-MM-DD>.jsonl* > ticks_<YYYY-MM-DD>.sha256
+```
+
+Download both the day file and its `.sha256`, then locally:
+
+```powershell
+python -m scripts.verify_tick_data run/ticks/ticks_<YYYY-MM-DD>.jsonl
+```
+
+Gate: no structural errors. The recorded `sha256` goes straight into the golden
+manifest later (charter §3.1 needs one checksum per golden day).
+
+`--gzip` check (if disk is tight): set `COLLECT_EXTRA_ARGS=--gzip` on the
+service, confirm a `.jsonl.gz` day file verifies clean.
+
+## 5. Fly.io fallback (cheaper, ~$4–5/mo)
+
+Needs a `Dockerfile` (python:3.12-slim, `pip install -r requirements.txt`,
+`CMD ["python", "-m", "scripts.collector_watchdog"]`) — not yet in repo:
+
+```toml
+# fly.toml sketch
+[processes]
+app = 'python -m scripts.collector_watchdog'
+[[restart]]
+policy = "always"
+[[mounts]]
+source = "tickdata"
+destination = "/data"   # + --out /data
+```
+
+```bash
+fly volumes create tickdata --size 10 --region iad
+fly deploy
+fly logs   # same healthy signs as §2
+```
+
+## 6. Operator-blocked checklist (needs the real host)
+
+- [ ] TASK-3: `--once` passes ON the host.
+- [ ] TASK-4: 1+ hour proof (manifest excerpt + watchdog log pasted into #283).
+- [ ] TASK-5: day file pulled, `verify_tick_data` clean, `sha256` recorded.
