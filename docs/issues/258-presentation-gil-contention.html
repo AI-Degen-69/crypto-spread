@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Does testing slow down the live bot? Now we know</title>
+  <style>
+    :root {
+      --ink: #eaf1f6; --muted: #9aabb8; --bg: #0b1117;
+      --panel: #121c25; --panel-2: #172530; --line: #29404d;
+      --cyan: #55d6c2; --amber: #f4b860; --red: #f17c78;
+      --green: #79d99b; --shadow: 0 20px 55px rgba(0,0,0,.28);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif; }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .panel { background: var(--panel); border: 1px solid var(--line);
+      box-shadow: var(--shadow); border-radius: 18px; padding: 26px; margin-top: 24px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.8rem); margin: 10px 0 12px; line-height: 1.25; }
+    h2 { font-size: 1.4rem; margin: 0 0 14px; }
+    p { color: var(--muted); margin: 0 0 12px; }
+    .status-merged { display: inline-flex; align-items: center; gap: 8px;
+      border: 1px solid rgba(121,217,155,.45); border-radius: 999px;
+      padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(121,217,155,.1); margin-top: 10px; }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .big-num { font-size: clamp(2.4rem, 5vw, 3.4rem); font-weight: 800; line-height: 1.1; }
+    .num-card { padding: 22px; background: var(--panel-2); border: 1px solid var(--line);
+      border-radius: 14px; text-align: center; }
+    .num-card small { color: var(--muted); display: block; margin-top: 8px; font-size: .9rem; }
+    .ok { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
+    .verdict { border-left: 4px solid var(--amber); background: rgba(244,184,96,.07); }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--cyan); }
+    .after { border-top: 4px solid var(--amber); }
+    .compare ul { margin: 0; padding-left: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+    .code-row { position: relative; margin: 12px 0; }
+    .code { direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace; }
+    button.copy-btn { position: absolute; right: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600; }
+    button.copy-btn:hover { background: #223c46; }
+    .links { color: var(--muted); font-size: .95rem; }
+    .links a { color: var(--cyan); text-decoration: none; font-weight: 600; }
+    svg { max-width: 100%; height: auto; display: block; margin: 6px auto; }
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <span class="status-merged">Update live</span>
+      <h1>Does testing ideas slow down the live bot? Now we have a number.</h1>
+      <p>Problem: the live bot trades real money while you test ideas on old data at the same time. Nobody knew if the testing steals power from the live bot. Fix: we put a stopwatch on the bot's heartbeat and measured quiet vs. busy. Result: usually fine, sometimes a 3-second freeze.</p>
+    </section>
+
+    <section class="panel">
+      <h2>The three numbers that matter</h2>
+      <p>Heartbeat = the bot checking the market, about once a second. Measured while idle, then while a full test of 164,260 past moments ran beside it.</p>
+      <svg viewBox="0 0 600 150" role="img" aria-label="Bar chart: typical delay tiny, worst moments large">
+        <text x="12" y="20" fill="#9aabb8" font-size="13">Extra delay added by testing</text>
+        <rect x="12" y="40" width="18" height="26" rx="5" fill="#79d99b"/>
+        <text x="12" y="84" fill="#eaf1f6" font-size="13">Typical: +6 ms</text>
+        <rect x="12" y="96" width="220" height="26" rx="5" fill="#f4b860"/>
+        <text x="12" y="140" fill="#eaf1f6" font-size="13">Bad moments: +584 ms</text>
+        <rect x="250" y="40" width="330" height="26" rx="5" fill="#f17c78"/>
+        <text x="250" y="84" fill="#eaf1f6" font-size="13">Longest freeze: +2,258 ms</text>
+      </svg>
+      <div class="grid-3">
+        <div class="num-card">
+          <div class="big-num ok">+6 ms</div>
+          <small>Typical heartbeat delay. Heartbeat stays ~1 second. You would never feel this.</small>
+        </div>
+        <div class="num-card">
+          <div class="big-num warn">+584 ms</div>
+          <small>Bad moments run ~57% late (1.0s becomes 1.6s). Happens in bursts.</small>
+        </div>
+        <div class="num-card">
+          <div class="big-num bad">3.3 s</div>
+          <small>Longest single freeze measured under load. Idle never passed 1.03 seconds.</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel verdict">
+      <h2>Verdict: worth fixing, but no rush to rebuild</h2>
+      <p>Think of it like one kitchen shared by two cooks. The live cook works every second. The testing cook suddenly chops 164,260 vegetables non-stop. The live cook usually still gets the stove, but sometimes waits 3 seconds. For 5-minute trades, a 3-second wait at the wrong moment can change the price you get.</p>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>Quiet kitchen</h3>
+          <ul>
+            <li>Heartbeat steady at ~1 second</li>
+            <li>Longest gap ever: 1.03 seconds</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>Testing cook working beside</h3>
+          <ul>
+            <li>Typical beat still ~1 second (+6 ms)</li>
+            <li>Bursts up to 1.6 seconds, worst 3.3 seconds</li>
+          </ul>
+        </article>
+      </div>
+      <p>Next options on the table: give testing its own kitchen (separate process), teach it to pause for breath every 1,000 items, or allow only one test at a time. Decision comes after this number — nothing was rebuilt yet.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Try it yourself</h2>
+      <p>1. Open the dashboard at <b>http://127.0.0.1:8802</b> → <b>Backtest</b> tab → run a sweep on any tick file and watch it finish. That sweep is the "testing cook" from the story — the load half of this measurement, live on screen.</p>
+      <div class="code-row">
+        <pre class="code">http://127.0.0.1:8802  →  Backtest tab  →  Run sweep</pre>
+        <button class="copy-btn" data-copy="http://127.0.0.1:8802">Copy</button>
+      </div>
+      <p>2. Fallback — the heartbeat numbers themselves are not shown in the dashboard, so to reproduce the three delays run the stopwatch script (terminal only because there is no screen for it):</p>
+      <div class="code-row">
+        <pre class="code">python scripts/measure_gil_contention.py --report docs/measurements/my-run.json</pre>
+        <button class="copy-btn" data-copy="python scripts/measure_gil_contention.py --report docs/measurements/my-run.json">Copy</button>
+      </div>
+      <p><b>What you will see:</b> first the quiet heartbeat (~1012 ms), then the same while a full old-data test runs beside it, then the three delays printed with the verdict.</p>
+    </section>
+
+    <section class="panel links">
+      Problem: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/221">#221 — does testing delay the live heartbeat?</a>
+      &nbsp;·&nbsp; Update: <a href="https://github.com/AI-Degen-69/crypto-spread/pull/258">#258 live</a> 🟢
+    </section>
+
+    <footer>
+      Built for crypto-spread · PR #258 · measurement only, nothing rebuilt
+    </footer>
+  </main>
+  <script>
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        const original = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>

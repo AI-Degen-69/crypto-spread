@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue #231 | PR #245 Showcase - סולם הסלמת Leg Chase לפי זמן</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #55d6c2;
+      --amber: #f4b860;
+      --red: #f17c78;
+      --green: #79d99b;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #183441 0, transparent 38%),
+                  radial-gradient(circle at 90% 15%, #2a2534 0, transparent 32%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.8rem); margin: 10px 0 16px; line-height: 1.25; }
+    h2 { font-size: 1.45rem; margin: 0 0 14px; }
+    h3 { font-size: 1.1rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(121,217,155,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(121,217,155,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(85,214,194,.07); }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(241,124,120,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(121,217,155,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+
+    .flow-card { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .flow-num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+
+    /* Interactive Simulator */
+    .sim-box { background: #0c151c; border: 1px solid #284454; border-radius: 14px; padding: 20px; margin-top: 16px; }
+    .sim-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+    .sim-control label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
+    .sim-control input[type="range"] { width: 100%; accent-color: var(--cyan); }
+    .sim-display { display: flex; justify-content: space-between; font-weight: bold; color: var(--ink); font-size: 0.95rem; }
+    .sim-meter { height: 16px; background: #182834; border-radius: 8px; overflow: hidden; position: relative; margin: 12px 0; }
+    .sim-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--amber)); transition: width 0.15s ease; }
+    .sim-badges { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+    .sim-badge { background: #162430; border: 1px solid #2a4150; border-radius: 8px; padding: 8px 14px; flex: 1; min-width: 140px; text-align: center; }
+    .sim-badge span { display: block; font-size: 0.75rem; color: var(--muted); }
+    .sim-badge strong { font-size: 1.15rem; color: var(--ink); }
+
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+      transition: all 0.2s;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected-box {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(121,217,155,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected-box b { color: var(--green); }
+
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid-2, .grid-3, .sim-controls { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+
+    <!-- § HERO -->
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <span class="status-merged">מוזג לענף הראשי (master)</span>
+
+      <h1>סולם הסלמת Leg Chase לפי זמן (Issue #231)</h1>
+      <p>הסרת ההקפצה המיידית של ציטוט הרגל החסרה: הבוט כבר אינו רץ לשלם מחיר Ask יקר מייד בטיק הראשון שאחרי מילוי רגל בודדת, אלא מעלה את תקרת הרדיפה בהדרגה לאורך ציר הזמן עד לתחילת ה-Dead Zone.</p>
+
+      <div class="facts">
+        <div class="fact">
+          <b>Issue מקושר</b>
+          <a href="https://github.com/AI-Degen-69/crypto-spread/issues/231" target="_blank">#231 · סגור ומוזג ↗</a>
+        </div>
+        <div class="fact">
+          <b>Pull Request</b>
+          <a href="https://github.com/AI-Degen-69/crypto-spread/pull/245" target="_blank">#245 · feat(engine): escalate leg chase (#231) 🟢</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- § ELI5 -->
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: מה השתנה ולמה זה קריטי?</h2>
+      <p>
+        <strong>המטאפורה:</strong> תחשבו על קונה שרוצה לקנות זוג נעליים ומחפש מציאות. ברגע שהוא קונה את נעל שמאל ב-47¢, האם הוא ירוץ בשנייה הראשונה לקנות את נעל ימין ב-51¢ ולשלם מחיר שיא של 98¢, כשהשוק בכלל לא זז? ממש לא. קודם כל מחכים בסבלנות — אולי מישהו ימכור לו גם את ימין במחיר המקורי (47¢) ויאפשר רווח מקסימלי?
+      </p>
+      <p>
+        <strong>במערכת שלנו:</strong> עד היום, ברגע שרגל אחת התמלאה (Naked Leg), המנוע הקפיץ בטיק הבא את ההצעה על הרגל השנייה ישר ל-Ask של השוק כדי לסגור זוג. מעכשיו, הבוט מחזיק בהצעה המקורית כל עוד הזמן בתחילתו, ורק ככל שחלון ה-5 דקות אוזל והסכנה לחשיפה גוברת לקראת ה-Dead Zone, הוא מעלה בהדרגה את תקרת המחיר שהוא מוכן לשלם.
+      </p>
+    </section>
+
+    <!-- § INTERACTIVE SIMULATOR -->
+    <section class="panel">
+      <h2>🎛️ סימולטור אינטראקטיבי: התנהגות סולם הזמן בזמן אמת</h2>
+      <p>גררו את הסליידר של ציר הזמן וצפו כיצד ההתקדמות (Progress) והתקרה (Ceiling) משתנות ללא כל קפיצה פתאומית:</p>
+
+      <div class="sim-box">
+        <div class="sim-controls">
+          <div class="sim-control">
+            <label id="lbl-time">התקדמות הזמן לעבר Dead Zone (באחוזים): 0%</label>
+            <input type="range" id="sim-slider" min="0" max="100" value="0">
+          </div>
+          <div class="sim-control">
+            <label>מחיר Ask נוכחי של הרגל השנייה (דולר):</label>
+            <div class="sim-display" style="padding-top: 6px;">0.51$ (מחיר השוק)</div>
+          </div>
+        </div>
+
+        <div class="sim-meter">
+          <div class="sim-fill" id="sim-meter-bar" style="width: 0%;"></div>
+        </div>
+
+        <div class="sim-badges">
+          <div class="sim-badge">
+            <span>מחיר מקורי (Original)</span>
+            <strong>0.47$</strong>
+          </div>
+          <div class="sim-badge">
+            <span>התקדמות (Progress)</span>
+            <strong id="sim-val-prog" style="color: var(--cyan);">0.00</strong>
+          </div>
+          <div class="sim-badge">
+            <span>תקרת רדיפה (Ceiling)</span>
+            <strong id="sim-val-ceil" style="color: var(--amber);">0.47$</strong>
+          </div>
+          <div class="sim-badge">
+            <span>הצעת מחיר בפועל (Bid)</span>
+            <strong id="sim-val-bid" style="color: var(--green);">0.47$</strong>
+          </div>
+          <div class="sim-badge">
+            <span>עלות זוג מקסימלית (Pair Cost)</span>
+            <strong id="sim-val-pair">0.94$ (רווח מלא!)</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- § BEFORE / AFTER -->
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>🔴 לפני השינוי:</h3>
+          <ul>
+            <li><strong>פאניקה בטיק הראשון:</strong> רדיפה מיידית שהקפיצה את הציטוט ל-Ask בטיק העוקב מיד לאחר מילוי חד-צדדי.</li>
+            <li><strong>שחיקת רווחיות מיותרת:</strong> תשלום של עד 0.98$ על זוג ששווה 1.00$ כאשר מחיר השוק (Mid) בכלל לא זז (נשאר 0.50$).</li>
+            <li><strong>אפס סבלנות:</strong> המנוע לא איפשר לשוק למלא את ההצעה הפסיבית המקורית.</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי השינוי:</h3>
+          <ul>
+            <li><strong>סולם זמן הדרגתי:</strong> ב-<code>progress = 0.0</code> ההצעה נשארת הציטוט המקורי (למשל 0.47$).</li>
+            <li><strong>תקרה מדורגת (Ceiling):</strong> התקרה נעה לינארית בין הציטוט המקורי לבין <code>max_affordable</code> לקראת תחילת ה-Dead Zone.</li>
+            <li><strong>רווחיות מקסימלית:</strong> נותן הזדמנות מלאה למילוי פסיבי זול לפני שמשלמים פרמיה.</li>
+            <li><strong>זהות מתמטית מלאה (Parity):</strong> מנוע ה-Live ומנוע ה-Backtest משתמשים בדיוק באותן פונקציות ליבה מ-<code>book_math.py</code>.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- § FLOW CARDS -->
+    <section class="panel">
+      <h2>⚡ זרימת התהליך הלוגי במנוע</h2>
+      <div class="grid-3">
+        <div class="flow-card">
+          <div class="flow-num">01 · זיהוי חשיפה (Naked Leg)</div>
+          <h3>רישום זמן כניסה</h3>
+          <p>בעת מילוי רגל אחת, נרשם חותם הזמן <code>went_naked_at</code> ומחושב <code>dead_zone_start</code> של החלון.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">02 · חישוב התקדמות ותקרה</div>
+          <h3>חישוב לינארי טהור</h3>
+          <p>פונקציית <code>chase_progress</code> מחשבת את היחס מ-0 ל-1, ו-<code>chase_ceiling</code> קובעת את המחיר המקסימלי המותר.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">03 · קביעת מחיר וציטוט</div>
+          <h3>ציטוט מוגן תמיד</h3>
+          <p>הציטוט הוא <code>min(other_ask, ceiling)</code>, לעולם אינו יורד (Ratchet) ולעולם אינו חורג מ-<code>max_pair_cost</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- § TOUCH & SEE VERIFICATION -->
+    <section class="panel">
+      <h2>🕹️ מדריך אימות ובדיקה ידנית (Touch & See)</h2>
+      <p>כדי לצפות במערכת פועלת ולראות את מנוע הניתוח והדשבורד המחובר:</p>
+
+      <h3>1. הפעלת הדשבורד הראשי</h3>
+      <p>הריצו את פקודת השרת לבדיקת הדשבורד וה-APIs של ה-Live Trader והמנוע:</p>
+      <div class="code-row">
+        <pre class="code">python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</pre>
+        <button class="copy-btn" data-copy="python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> השרת עולה בהצלחה ומאזין על <code>http://127.0.0.1:8802</code>.
+      </div>
+
+      <h3 style="margin-top: 20px;">2. פתיחת טאב ה-Cockpit והמצב</h3>
+      <p>גלישה לכתובת הדשבורד בדפדפן כדי לראות את מצב ה-Live Trader ופרמטרי הריצה:</p>
+      <div class="code-row">
+        <pre class="code">http://127.0.0.1:8802</pre>
+        <button class="copy-btn" data-copy="http://127.0.0.1:8802">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> טעינת ממשק הדשבורד עם תצוגת חלונות התנודה (Oscillation), מסך ה-Cockpit וסטטוס המנוע.
+      </div>
+    </section>
+
+    <!-- § IMPACTED FILES TABLE -->
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>קובץ</th>
+            <th>תפקיד והשפעה</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>strategy/book_math.py</code></td>
+            <td>מימוש הפונקציות הטהורות: <code>chase_progress</code> ו-<code>chase_ceiling</code> עם עיגול לסנטים.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>strategy/live_trader.py</code></td>
+            <td>אינטגרציית סולם הרדיפה במנוע ה-Live, שילוב עם <code>dead_zone_cutoff_secs</code> ומניעת הקפצה בטיק 0.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>backtest/engine.py</code></td>
+            <td>אינטגרציית סולם הרדיפה במנוע ה-Backtest והבטחת התאמה מתמטית של 100% מול ה-Live.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tests/test_leg_chase_parity.py</code></td>
+            <td>סוויטת בדיקות שוויון (Parity) ייעודית המוודאת התנהגות זהה טיק-אחר-טיק בין המנועים.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issue #231 · Pull Request #245 מוזג בהצלחה ל-master
+    </footer>
+  </main>
+
+  <script>
+    // Copy buttons logic
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+
+    // Interactive simulator logic
+    const slider = document.getElementById("sim-slider");
+    const lblTime = document.getElementById("lbl-time");
+    const meterBar = document.getElementById("sim-meter-bar");
+    const valProg = document.getElementById("sim-val-prog");
+    const valCeil = document.getElementById("sim-val-ceil");
+    const valBid = document.getElementById("sim-val-bid");
+    const valPair = document.getElementById("sim-val-pair");
+
+    const originalResting = 0.47;
+    const maxAffordable = 0.52; // assuming max_pair_cost = 0.99, entry = 0.47 -> 0.52
+    const otherAsk = 0.51;
+
+    slider.addEventListener("input", (e) => {
+      const pct = parseInt(e.target.value, 10);
+      const progress = pct / 100.0;
+      lblTime.textContent = `התקדמות הזמן לעבר Dead Zone (באחוזים): ${pct}%`;
+      meterBar.style.width = `${pct}%`;
+      valProg.textContent = progress.toFixed(2);
+
+      // ceiling = original + progress * (max_affordable - original)
+      const rawCeiling = originalResting + progress * (maxAffordable - originalResting);
+      const ceiling = Math.floor(rawCeiling * 100) / 100;
+      valCeil.textContent = `${ceiling.toFixed(2)}$`;
+
+      // target = min(other_ask, ceiling)
+      const bid = Math.min(otherAsk, ceiling);
+      valBid.textContent = `${bid.toFixed(2)}$`;
+
+      const pairCost = (originalResting + bid).toFixed(2);
+      if (pct === 0) {
+        valPair.textContent = `${pairCost}$ (רווח מלא! 6¢)`;
+        valPair.style.color = "var(--green)";
+      } else if (bid < otherAsk) {
+        valPair.textContent = `${pairCost}$ (רווח משופר)`;
+        valPair.style.color = "var(--cyan)";
+      } else {
+        valPair.textContent = `${pairCost}$ (סגירת זוג רווחית)`;
+        valPair.style.color = "var(--amber)";
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR #249 | אימות פער המילויים של Issue #205</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #55d6c2;
+      --amber: #f4b860;
+      --red: #f17c78;
+      --green: #79d99b;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #183441 0, transparent 38%),
+                  radial-gradient(circle at 90% 15%, #2a2534 0, transparent 32%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(2rem, 4.5vw, 3.2rem); margin: 10px 0 16px; line-height: 1.2; }
+    h2 { font-size: 1.5rem; margin: 0 0 14px; }
+    h3 { font-size: 1.05rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(121,217,155,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(121,217,155,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .status-open {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(244,184,96,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--amber); background: rgba(244,184,96,.1); margin-top: 10px; margin-inline-start: 10px;
+    }
+    .status-open::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(85,214,194,.07); }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(241,124,120,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(121,217,155,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+
+    .flow-card { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .flow-num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected-box {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(121,217,155,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected-box b { color: var(--green); }
+
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+
+    /* ── measurement table styling ── */
+    .measure th, .measure td { text-align: center; }
+    .measure td:first-child { text-align: right; font-weight: 600; }
+    .hot  { color: var(--red); font-weight: 700; }
+    .cold { color: var(--amber); font-weight: 700; }
+    .good { color: var(--green); font-weight: 700; }
+
+    .verdict {
+      border-right: 4px solid var(--amber); background: rgba(244,184,96,.08);
+      padding: 14px 18px; border-radius: 0 10px 10px 0; margin-top: 18px;
+    }
+    .verdict b { color: var(--amber); }
+
+    .bar-wrap { direction: ltr; text-align: left; margin: 8px 0 2px; }
+    .bar-label { display: flex; justify-content: space-between; font-size: .85rem; color: var(--muted); margin-bottom: 3px; }
+    .bar-track { height: 14px; background: #0c141b; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 7px 0 0 7px; }
+
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+
+    <!-- ═══ HERO ═══ -->
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <h1>Issue #205: פער המילויים — tape 3.6% מול cross 57%</h1>
+      <p>החידה של #205 נפתרה במדידה חוזרת: הכלל המאוחד מתמלא ב-99.1% מהחלונות — הבעיה התהפכה מ"כמעט אף פעם לא מתמלא" ל"כמעט תמיד מתמלא דרך הספר". ה-Issue נשאר פתוח להחלטת המפעיל.</p>
+      <span class="status-merged">PR #249 מוזג לענף הראשי (master)</span>
+      <span class="status-open">Issue #205 נשאר פתוח — המסקנה "צריך הכרעה"</span>
+      <div class="facts">
+        <div class="fact"><b>Issue</b><a href="https://github.com/AI-Degen-69/crypto-spread/issues/205">#205 · פער המילויים (פתוח)</a></div>
+        <div class="fact"><b>Pull Request</b><a href="https://github.com/AI-Degen-69/crypto-spread/pull/249">#249 · מוזג (Squash) 🟢</a></div>
+      </div>
+    </section>
+
+    <!-- ═══ ELI5 ═══ -->
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: מה התגלה?</h2>
+      <p>דמיינו שאתם מוכרים כרטיסים ותוהים למה לקונים כמעט לא מגיעים (3.6%) בעוד שסימולציה אופטימית מראה 57%. המדידה החוזרת גילתה משהו אחר לגמרי: הכלל המאוחד (שהחליף את המודל הישן) פשוט נותן כרטיס לכל מי שנוגע בדלת — <b>99.1%</b> מהחלונות מתמלאים. כלומר, הבוט בבק-טסט נראה כאילו הוא מרוויח כל הזמן, בגלל שהסימולציה מניחה שכל זעזוע קטן בספר של 1¢ ממלא את ההזמנה — מה שלא יקרה עם תור אמיתי. הכלי שבנינו מפריד את שני "גלאי המילוי" (הדפסת מסחר מול חדירת ה-ask) ומודד כל אחד בנפרד, בלי לגעת בקוד המנוע.</p>
+    </section>
+
+    <!-- ═══ MEASUREMENT TABLE (free form) ═══ -->
+    <section class="panel">
+      <h2>📏 המספרים שנמדדו (550 חלונות, ‎ticks_2026-09-13‎, offset 0.02)</h2>
+      <table class="measure">
+        <thead>
+          <tr><th>תצורה</th><th>מילוי רגל כלשהי</th><th>שיעור</th><th>זוגות שהושלמו</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>המודל הישן tape בלבד (המספר של #205)</td><td>20 / 550</td><td class="cold">3.6%</td><td>2</td></tr>
+          <tr><td>המודל הישן cross בלבד (המספר של #205)</td><td>314 / 550</td><td class="cold">57.1%</td><td>245</td></tr>
+          <tr><td>‎tape-only‎ על הסימולטור של היום</td><td>68 / 550</td><td class="cold">12.4%</td><td>1</td></tr>
+          <tr><td>‎ask-through-only‎ (חדירת ה-ask בלבד)</td><td>545 / 550</td><td class="hot">99.1%</td><td>71</td></tr>
+          <tr><td>הכלל המאוחד (שני הגלאים, כמו בלייב)</td><td>545 / 550</td><td class="hot">99.1%</td><td>71</td></tr>
+        </tbody>
+      </table>
+
+      <h3 style="margin-top:22px">השוואה חזותית — שיעור מילוי חלונות</h3>
+      <div class="bar-wrap"><div class="bar-label"><span>tape ישן (#205)</span><span>3.6%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:3.6%;background:var(--amber)"></div></div></div>
+      <div class="bar-wrap"><div class="bar-label"><span>cross ישן (#205)</span><span>57.1%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:57.1%;background:var(--amber)"></div></div></div>
+      <div class="bar-wrap"><div class="bar-label"><span>tape-only היום</span><span>12.4%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:12.4%;background:var(--cyan)"></div></div></div>
+      <div class="bar-wrap"><div class="bar-label"><span>ask-only היום</span><span>99.1%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:99.1%;background:var(--red)"></div></div></div>
+      <div class="bar-wrap"><div class="bar-label"><span>הכלל המאוחד</span><span>99.1%</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:99.1%;background:var(--red)"></div></div></div>
+
+      <div class="verdict">
+        <b>השורה התחתונה:</b> הפער של פי 16 נסגר — אבל לכיוון ההפוך ממה שחששו. בדגימה של שנייה אחת עם ספר ברוחב 1¢, הגלאי הספרי מתלהק כמעט לכל חלון, ולכן הבק-טסט אופטימי מדי ולא שמרן מדי. ADR-0002 סגר את השאלה המבנית; השאלה "האם מודל המילוי כן?" — עדיין דורשת הכרעה.
+      </div>
+    </section>
+
+    <!-- ═══ BEFORE / AFTER ═══ -->
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>🔴 לפני:</h3>
+          <ul>
+            <li>פער של פי 16 בין tape ל-cross — מסתורין פתוח מאז ה-Issue</li>
+            <li>ADR-0002 הסביר את הפער מבחינה מבנית אבל <b>מעולם לא הריץ את המספרים מחדש</b></li>
+            <li>לא ניתן היה לבודד את שני גלאי המילוי על אותו מנוע בלי לשנות קוד</li>
+            <li>מספרי #205 התבססו על מנוע ישן — לא ניתנים להשוואה להיום</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי:</h3>
+          <ul>
+            <li>כלי אימות קבוע: <span class="ltr">research/sweeps/verify_205_fill_rate.py</span> — מפריד גלאים בעטיפה קריאה-בלבד</li>
+            <li>הרצה דרך צינור המחקר הרשמי (‎ev_lab + sim2‎) — עומד במדיניות ה-yad-iut המוגנות של המעבדה</li>
+            <li>מדידה דטרמיניסטית על 4 ימי נתונים, עם פירוק מלא לשלוש תצורות</li>
+            <li>מסמך ממצאים: <span class="ltr">docs/issue-205-verification-results.md</span> — עם טווח צפי מוקדם והשוואה כנה</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- ═══ FLOW CARDS ═══ -->
+    <section class="panel">
+      <h2>⚡ איך האימות עובד</h2>
+      <div class="grid-3">
+        <div class="flow-card">
+          <div class="flow-num">01 · בניית מטמון החלונות</div>
+          <h3>‎ev_lab.build_cache‎</h3>
+          <p>כל קובץ ticks נדחס פעם אחת לחלונות ממוזערים (ספרים, טייפ, צדדי מסחר) — אותו מטמון שמעבדת המחקר משתמשת בו, כך שהכלי לא ממציא נתיב משלו.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">02 · פירוק הגלאים</div>
+          <h3>עטיפת ‎resting_bid_filled‎</h3>
+          <p>הכלל המשותף נעטף קריאה-בלבד בשני אתרי הקריאה: מצב tape מאלחש את הספר, מצב ask מאלחש את הטייפ ומקפיא ‎newly_placed=False‎, ומצב both הוא הכלל המלא — בלי שינוי קוד במנוע.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">03 · ספירה כמו ב-Issue</div>
+          <h3>‎sim2‎ על 550 חלונות</h3>
+          <p>כל חלון רץ בתצורה gates-off, והספירה (רגל-כלשהי / למעלה / למטה / שניים / זוגות) זהה לטבלה שפתחה את #205 — כך שההשוואה הישירה תקפה.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ VERIFICATION ═══ -->
+    <section class="panel">
+      <h2>🕹️ מדריך בדיקה ידנית (Touch &amp; See)</h2>
+      <p>הכלי הוא CLI — הנה ההרצה שמייצרת את טבלת המדידה בעיניים:</p>
+
+      <h3>1. הרצת המדידה בתצורת הכלל המאוחד</h3>
+      <div class="code-row">
+        <pre class="code">python -m research.sweeps.verify_205_fill_rate run/ticks/ticks_2026-09-13.jsonl</pre>
+        <button class="copy-btn" data-copy="python -m research.sweeps.verify_205_fill_rate run/ticks/ticks_2026-09-13.jsonl">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> שורת סיכום עם 550 חלונות, ‎any_leg = 545‎ ו-‎99.1%‎ — ההוכחה בעיניים שהכלל המאוחד כמעט תמיד מתמלא.
+      </div>
+
+      <h3 style="margin-top:22px">2. בידוד גלאי הטייפ בלבד</h3>
+      <div class="code-row">
+        <pre class="code">python -m research.sweeps.verify_205_fill_rate --detector tape run/ticks/ticks_2026-09-13.jsonl</pre>
+        <button class="copy-btn" data-copy="python -m research.sweeps.verify_205_fill_rate --detector tape run/ticks/ticks_2026-09-13.jsonl">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> ‎any_leg = 68‎ ו-‎12.4%‎ — אותו מנוע, אותם נתונים, רק גלאי ההדפסות. הפער בין שתי ההרצות הוא כל הסיפור.
+      </div>
+
+      <h3 style="margin-top:22px">3. בידוד גלאי הספר בלבד</h3>
+      <div class="code-row">
+        <pre class="code">python -m research.sweeps.verify_205_fill_rate --detector ask run/ticks/ticks_2026-09-13.jsonl</pre>
+        <button class="copy-btn" data-copy="python -m research.sweeps.verify_205_fill_rate --detector ask run/ticks/ticks_2026-09-13.jsonl">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> שוב ‎545 / 99.1%‎ — זהה למצב המאוחד, ההוכחה שהגלאי הספרי שולט לגמרי בתוצאה.
+      </div>
+    </section>
+
+    <!-- ═══ FILES TABLE ═══ -->
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead><tr><th>קובץ</th><th>תפקיד והשפעה</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>research/sweeps/verify_205_fill_rate.py</code></td>
+            <td>כלי האימות החדש: מפריד את גלאי המילוי בעטיפה קריאה-בלבד ומריץ מדידה דטרמיניסטית על כל ימי הנתונים</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>docs/issue-205-verification-results.md</code></td>
+            <td>מסמך הממצאים: המספרים המלאים, טווח הצפי שנרשם מראש, והמסקנה הכנה שהתוצאה מחוץ לטווח</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tasks/plan.md</code> · <code>tasks/todo.md</code></td>
+            <td>תוכנית העבודה של ה-Issue — מעודכנת עם סימון המשימות שהושלמו ומה שנחסם להכרעת מפעיל</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>CONSTRAINTS.md</code> · <code>SPEC.md</code></td>
+            <td>גבולות האיכות והמפרט: איסור מוחלט על שינוי קוד מנוע, ואיסור על מספרים שלא מריצה אמיתית</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issue #205 · Pull Request #249 מוזג בהצלחה · ה-Issue נותר פתוח להכרעת המפעיל
+    </footer>
+  </main>
+
+  <script>
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(btn.dataset.copy);
+        } catch (e) {
+          const ta = document.createElement("textarea");
+          ta.value = btn.dataset.copy;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          ta.remove();
+        }
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>

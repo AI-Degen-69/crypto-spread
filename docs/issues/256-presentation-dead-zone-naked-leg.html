@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR #256 | Dead zone (#222) ורגל לא ממוסגרת (#223) — מדידה על נתונים אמיתיים</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #55d6c2;
+      --amber: #f4b860;
+      --red: #f17c78;
+      --green: #79d99b;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #183441 0, transparent 38%),
+                  radial-gradient(circle at 90% 15%, #2a2534 0, transparent 32%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(2rem, 4.5vw, 3.2rem); margin: 10px 0 16px; line-height: 1.2; }
+    h2 { font-size: 1.5rem; margin: 0 0 14px; }
+    h3 { font-size: 1.05rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(121,217,155,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(121,217,155,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .status-closed {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(85,214,194,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--cyan); background: rgba(85,214,194,.1); margin-top: 10px; margin-inline-start: 10px;
+    }
+    .status-closed::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(85,214,194,.07); }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(241,124,120,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(121,217,155,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+
+    .flow-card { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .flow-num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected-box {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(121,217,155,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected-box b { color: var(--green); }
+
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+
+    /* ── measurement table styling ── */
+    .measure th, .measure td { text-align: center; }
+    .measure td:first-child { text-align: right; font-weight: 600; }
+    .hot  { color: var(--red); font-weight: 700; }
+    .cold { color: var(--amber); font-weight: 700; }
+    .good { color: var(--green); font-weight: 700; }
+
+    .verdict {
+      border-right: 4px solid var(--amber); background: rgba(244,184,96,.08);
+      padding: 14px 18px; border-radius: 0 10px 10px 0; margin-top: 18px;
+    }
+    .verdict b { color: var(--amber); }
+    .verdict.green {
+      border-right-color: var(--green); background: rgba(121,217,155,.08);
+    }
+    .verdict.green b { color: var(--green); }
+
+    .bar-wrap { direction: ltr; text-align: left; margin: 8px 0 2px; }
+    .bar-label { display: flex; justify-content: space-between; font-size: .85rem; color: var(--muted); margin-bottom: 3px; }
+    .bar-track { height: 14px; background: #0c141b; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 7px 0 0 7px; }
+
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <main>
+
+    <!-- ═══ HERO ═══ -->
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <h1>Issues #222 + #223: Dead zone ורגל לא ממוסגרת — הכרעה בנתונים במקום בוויכוח</h1>
+      <p>שתי ברירות מחדל של המנוע שמעולם לא נמדדו נבדקו על ‎1.23M‎ שורות tick אמיתיות (‎3,985‎ חלונות, 5 ימים): <b>#222</b> — אחוז מול שניות קבועות ל-dead zone; <b>#223</b> — סגירת רגל חשופה בספר מול החזקה עד סטייטמנט. פסיקה אחת לא הכריעה, ואחת אושרה בוודאות.</p>
+      <span class="status-merged">PR #256 מוזג לענף הראשי (master)</span>
+      <span class="status-closed">Issues #222 + #223 נסגרו אוטומטית עם המיזוג</span>
+      <div class="facts">
+        <div class="fact"><b>Issues</b><a href="https://github.com/AI-Degen-69/crypto-spread/issues/222">#222 · dead zone</a> + <a href="https://github.com/AI-Degen-69/crypto-spread/issues/223">#223 · naked leg</a></div>
+        <div class="fact"><b>Pull Request</b><a href="https://github.com/AI-Degen-69/crypto-spread/pull/256">#256 · מוזג (Squash, ‎5d1fd18‎) 🟢</a></div>
+      </div>
+    </section>
+
+    <!-- ═══ ELI5 ═══ -->
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: מה נמדד?</h2>
+      <p><b>#222 — כמה זמן "לשתוק" בסוף החלון?</b> המנוע לא מציב הזמנות חדשות בסוף החלון (אזור המת), כי אין זמן שההזמנה תתמלא ותספיק להתזווג. השאלה הייתה: האם הזמן הזה צריך להיות <b>אחוז ממשך החלון</b> (10% מ-15 דקות = 90 שניות) או <b>מספר שניות קבוע</b> (30 שניות לכל חלון)? הכל תלוי בשאלה אחת: האם הזמן שלוקח להזמנה להתמלא ולהתזווג מתארך כשהחלון ארוך יותר, או שהוא קבוע?</p>
+      <p><b>#223 — מה עושים עם רגל נטושה?</b> אם הצד אחד של הזוג התמלא אבל הזיווג נכשל, בכניסה לאזור המת נשארת רגל בודדת וחשופה. הברירה היא: למכור אותה מיד לספר (לאבד את הפער בין מחיר הקנייה ל-bid האמיתי), או להחזיק אותה עד סטייטמנט (היא תשתלם שקל אם הצד "זוכה", או אפס אם לא). המדידה בדקה ישירות: כמה באמת זוכות רגליים כאלה, ובאיזה מחיר.</p>
+    </section>
+
+    <!-- ═══ MEASUREMENT TABLE ═══ -->
+    <section class="panel">
+      <h2>📏 המספרים שנמדדו (‎3,985‎ חלונות · ‎1.23M‎ שורות · 5 ימי ‎run/ticks‎)</h2>
+      <table class="measure">
+        <thead>
+          <tr><th>שאלה</th><th>המדידה</th><th>תוצאה</th><th>פסיקה</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>#222 · יחס זמן מילוי-עד-זיווג ‎15m/5m‎</td>
+            <td class="ltr">2.49×</td>
+            <td>בתוך רצועה הדו-משמעית (‎1.5–2.5‎)</td>
+            <td class="cold">לא הוכרע — ברירת המחדל (אחוז) עומדת</td>
+          </tr>
+          <tr>
+            <td>#222 · תדריות מכניות לכל שיטה</td>
+            <td class="ltr">pct vs sec</td>
+            <td>הפער בין השיטות קטן יחסית לרעש הדגימה</td>
+            <td class="cold">מומלץ ריצה חוזרת על דאטהסט רחב יותר</td>
+          </tr>
+          <tr>
+            <td>#223 · רגליים חשופות בכניסה ל-dead zone</td>
+            <td class="ltr">937 legs</td>
+            <td>מתוכן ‎87‎ בדליים ברות-הערכה (‎n ≥ 30‎)</td>
+            <td class="hot">שיעור זכייה בפועל: 0%</td>
+          </tr>
+          <tr>
+            <td>#223 · דליים ‎1–7¢‎ — סגירה מול החזקה</td>
+            <td class="ltr">close vs hold</td>
+            <td>דלי דומיננטי: ‎−46.6¢‎ מול ‎−47.5¢‎</td>
+            <td class="good">close מנצחת בכל דלי</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 style="margin-top:22px">השוואה חזותית — עלות ממוצעת לרגל חשופה בדלי הדומיננטי</h3>
+      <div class="bar-wrap"><div class="bar-label"><span>close (סגירה בספר)</span><span>−46.6¢</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:93.2%;background:var(--green)"></div></div></div>
+      <div class="bar-wrap"><div class="bar-label"><span>hold (החזקה עד סטייטמנט)</span><span>−47.5¢</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:95%;background:var(--red)"></div></div></div>
+      <p style="font-size:.85rem;margin-top:8px">ההפרש נראה קטן, אבל ההתפלגות היא כל הסיפור: החזקה היא הימור בינארי (אפס או שקל) בשיעור זכייה מדוד של אפס, בעוד הסגירה דטרמיניסטית. עם אפס זכיות ב-‎87‎ תצפיות, אין תרחיש שבו ההחזקה משתלמת.</p>
+
+      <div class="verdict">
+        <b>#222 — השורה התחתונה:</b> יחס ‎2.49×‎ נופל בקצה העליון של הרצועה הדו-משמעית (‎1.5×‎ עד ‎2.5×‎) — קרוב לנטייה ל"אחוז", אבל לא מספיק חד כדי לשנות ברירת מחדל של מנוע. הברירה הקיימת (אחוז מהחלון) עומדת, וההמלצה היא למדוד שוב על דאטהסט רחב יותר לפני הכרעה.
+      </div>
+      <div class="verdict green">
+        <b>#223 — השורה התחתונה:</b> <b>close מאושרת בוודאות.</b> שיעור הזכייה בפועל של רגל חשופה במחיר ‎1–7¢‎ היה אפס בכל הדליים שניתנו להערכה, והסגירה ניצחה את ההחזקה בכל דלי בנפרד. ההטיה נגד-longshots שנחשדה ב-Issue מאומתת מדידתית. אף ברירת מחדל לא שונתה ב-PR — הפסיקות נרשמו בסעיפים 8 ו-14 של ‎docs/engine-decision-rules.md‎.
+      </div>
+    </section>
+
+    <!-- ═══ BEFORE / AFTER ═══ -->
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>🔴 לפני:</h3>
+          <ul>
+            <li>שתי ברירות מחדל של המנוע (dead zone באחוזים; רגל חשופה נסגרת) מעולם לא נבדקו מול הנתונים שלנו</li>
+            <li>הדיון על ההטיה נגד-longshots היה תיאורטי — בלי שיעור זכייה מדוד ובלי התפלגות</li>
+            <li>אין כלי מדידה שמשתמש בחוק המילוי המשותף — כל ניסיון היה ממציא חוק משלו</li>
+            <li>המספרים היו נשענים על הממוצע בלבד, שמסתיר את ההימור הבינארי בהחזקה</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי:</h3>
+          <ul>
+            <li>לאב מדידה קבוע: <span class="ltr">research/sweeps/dead_zone_lab.py</span> — קריאה-בלבד, בלי לגעת במנוע</li>
+            <li>חוק המילוי הוא ‎book_math.resting_bid_filled‎ המשותף (#226/ADR-0002), סינון sell-prints (#182), עיגון ‎sim2‎ (#225) — אפס כפילות חוקים</li>
+            <li>פסיקה עם ספי החלטה מפורשים: רצועה דו-משמעית ל-#222, ‎HOLD_EDGE_CENTS‎ ל-#223, דליים דלים (‎n&lt;30‎) שאף פעם לא מצוטטים</li>
+            <li>ארטיפקטים משוחזרים בריצה אחת: ‎dead_zone_222.json‎ + ‎naked_leg_223.json‎, ודוח מלא ב-‎docs/dead-zone-naked-leg-measurements.md‎</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- ═══ FLOW CARDS ═══ -->
+    <section class="panel">
+      <h2>⚡ איך הלאב עובד</h2>
+      <div class="grid-3">
+        <div class="flow-card">
+          <div class="flow-num">01 · מטמון החלונות</div>
+          <h3>‎ev_lab.build_cache‎</h3>
+          <p>כל קובץ ticks נדחס פעם אחת לחלונות ממוזערים (ספרים מלאים + טייפ מסונן). הלאב מסנן את המטמון לימים שנבחרו — תיקון שנכנס בסקירה — כך שתיקיות דאטהסט מפורשות באמת מגבילות את המדידה.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">02 · צירי זמן וגבולות</div>
+          <h3>מילוי → זיווג → dead zone</h3>
+          <p>לכל חלון נמדד הזמן מהצבת הציטוט עד מילוי הרגל הראשונה ועד הזיווג, וגבול ה-dead zone מחושב בשתי היחידות (אחוז ושניות) מתוך ‎book_math‎ עצמו — בלי לשכפל את הגבולות.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">03 · close vs hold</div>
+          <h3>אריתמטיקה + פרוקסי סטייטמנט</h3>
+          <p>לכל רגל חשופה: עלות סגירה ב-bid האמיתי מול החזקה עם עמלת taker. הסטייטמנט נפסק מה-mid <b>הסופי</b> של החלון (תיקון Major של הסקירה), עם רצועת עמימות ‎0.48–0.52‎ שנספרת ולא מנוחשת.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ CODE RABBIT ═══ -->
+    <section class="panel">
+      <h2>🐰 סבב סקירת CodeRabbit — 10 הערות, 10 קבלות, אפס דחיות</h2>
+      <table>
+        <thead><tr><th>חומרה</th><th>הממצא</th><th>מה תוקן</th></tr></thead>
+        <tbody>
+          <tr><td class="hot">Major</td><td>פסיקת הסטייטמנט נלקחה מה-mid בכניסה ל-dead zone ולא מה-mid הסופי</td><td>הפסיקה נדדה לאחר הלופ; הארטיפקטים חושבו מחדש (‎87‎ רגליים ברות-הערכה במקום ‎60‎); הפסיקות עמדו</td></tr>
+          <tr><td class="hot">Major</td><td>דלי שמטה ל-hold בחצי סנט היה מייצר פסיקת threshold כוזבת</td><td>צדדי הדליים מנורמלים דרך ‎HOLD_EDGE_CENTS‎ לפני בחירת הפסיקה</td></tr>
+          <tr><td class="hot">Major</td><td>‎build_cache‎ התעלם מרשימת הדאטהסטים שנבחרה ו-glob-ע את כל התיקייה</td><td>המטמון נטען פעם אחת ומסונן לימים שנבחרו</td></tr>
+          <tr><td class="cold">Minor ×5</td><td>ספירות מיושנות בדוח, ניסוח "מעולם לא נמדד" שנשאר, תיוג proxy, ‎naked_valued‎ שנשאר 0, נתיבים אבסולוטיים בארטיפקטים</td><td>כולם תוקנו — דוח וארטיפקטים מותאמים למספרים הסופיים</td></tr>
+          <tr><td class="cold">Minor</td><td>כלל פרוקסי הסטייטמנט לא היה נעול ב-SPEC/plan</td><td>הכלל המדויק ננעל בשני הקבצים: ‎won = (held_side == up) == (final_mid &gt; 0.5)‎</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ═══ VERIFICATION ═══ -->
+    <section class="panel">
+      <h2>🕹️ מדריך בדיקה ידנית (Touch &amp; See)</h2>
+      <p>הלאב הוא CLI משחזר — ההרצה הזו מייצרת את שני הארטיפקטים ואת כל המספרים בדוח:</p>
+
+      <h3>1. ריצת המדידה המלאה</h3>
+      <div class="code-row">
+        <pre class="code">python -m research.sweeps.dead_zone_lab</pre>
+        <button class="copy-btn" data-copy="python -m research.sweeps.dead_zone_lab">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> ~‎17‎ שניות על המטמון הקיים (בניית המטמון חד-פעמית: ~‎169‎ שניות), וכתיבת ‎research/sweeps/dead_zone_222.json‎ + ‎naked_leg_223.json‎ עם ‎3,985‎ חלונות ו-‎937‎ רגליים חשופות — אותם מספרים בדיוק כמו בדוח.
+      </div>
+
+      <h3 style="margin-top:22px">2. הטסטים הממוקדים</h3>
+      <div class="code-row">
+        <pre class="code">python -m pytest tests/test_dead_zone_lab.py -q</pre>
+        <button class="copy-btn" data-copy="python -m pytest tests/test_dead_zone_lab.py -q">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> ‎22‎ טסטים ירוקים בפחות משתי שניות — זהות הגבולות pct/sec, חוק המילוי המשותף, פרוקסי הסטייטמנט כולל רצועת העמימות, וכלל ‎HOLD_EDGE_CENTS‎. הסוויטות המגנות (‎test_ev_sweep_lab‎ + ‎test_backtest_engine‎) מאשרות שהמנוע עצמו לא נגע.
+      </div>
+    </section>
+
+    <!-- ═══ FILES TABLE ═══ -->
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead><tr><th>קובץ</th><th>תפקיד והשפעה</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>research/sweeps/dead_zone_lab.py</code></td>
+            <td>לאב המדידה הקריאה-בלבד: צירי זמן מילוי/זיווג, גבולות dead zone בשתי היחידות, דליים, פרוקסי סטייטמנט, ופסיקות עם ספי החלטה מפורשים</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tests/test_dead_zone_lab.py</code></td>
+            <td>‎22‎ טסטים על חלונות סינתטיים — נכתבו לפני המימוש (TDD) ומכשילים אם ההגנות שהם בודקים מוסרות</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>research/sweeps/dead_zone_222.json</code> · <code>naked_leg_223.json</code></td>
+            <td>ארטיפקטי המדידה המשוחזרים — כל מספר בדוח נובע מהם, עם נתיבים יחסיים לשורש הריפו</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>docs/dead-zone-naked-leg-measurements.md</code></td>
+            <td>הדוח המלא: ההתפלגויות, הדליים, ושתי הפסיקות עם הנימוק המדוד</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>docs/engine-decision-rules.md</code></td>
+            <td>סעיפים 8 ו-14 בלבד: הפסיקה המדודה נוספה מתחת לשאלה הפתוחה — ברירות המחדל לא שונו</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>SPEC.md</code> · <code>CONSTRAINTS.md</code> · <code>tasks/plan.md</code></td>
+            <td>המפרט וגבולות האיכות: איסור מוחלט על שינוי קוד מנוע, כלל פרוקסי הסטייטמנט נעול, וכל מספר ניתן לשחזור בריצה אחת</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issues #222 + #223 · Pull Request #256 מוזג בהצלחה (Squash, ‎5d1fd18‎) · שני ה-Issues נסגרו עם המיזוג
+    </footer>
+  </main>
+
+  <script>
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(btn.dataset.copy);
+        } catch (e) {
+          const ta = document.createElement("textarea");
+          ta.value = btn.dataset.copy;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          ta.remove();
+        }
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>

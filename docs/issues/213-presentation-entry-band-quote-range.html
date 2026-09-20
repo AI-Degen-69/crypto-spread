@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR #253 | איחוד והסרת Entry Band לטובת Quote Range [0.10, 0.90]</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #38bdf8;
+      --gold: #f3ba2f;
+      --red: #f87171;
+      --green: #4ade80;
+      --purple: #c084fc;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #132a36 0, transparent 40%),
+                  radial-gradient(circle at 90% 15%, #241d30 0, transparent 35%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.8rem); margin: 10px 0 16px; line-height: 1.25; }
+    h2 { font-size: 1.45rem; margin: 0 0 14px; }
+    h3 { font-size: 1.05rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(74,222,128,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(74,222,128,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(56,189,248,.07); }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(248,113,113,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(74,222,128,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+    .flow-card { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .flow-num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+
+    /* Interactive Simulator */
+    .sim-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+      background: rgba(10,18,25,0.7);
+      padding: 18px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+    }
+    .sim-control-group { display: flex; flex-direction: column; gap: 6px; }
+    .sim-control-group label { font-size: 0.85rem; font-weight: 600; color: var(--ink); display: flex; justify-content: space-between; }
+    .sim-control-group span.val { color: var(--cyan); font-family: var(--font-mono); font-weight: 700; }
+    .sim-control-group input[type=range] { accent-color: var(--cyan); cursor: pointer; }
+    
+    .status-banner {
+      padding: 14px 18px;
+      border-radius: 10px;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid var(--line);
+      background: #09131a;
+    }
+    .status-banner.active { border-color: rgba(74,222,128,0.5); background: rgba(74,222,128,0.08); color: var(--green); }
+    .status-banner.hold { border-color: rgba(243,186,47,0.5); background: rgba(243,186,47,0.08); color: var(--gold); }
+    .status-banner.latched { border-color: rgba(248,113,113,0.5); background: rgba(248,113,113,0.08); color: var(--red); }
+    
+    .vis-track {
+      position: relative;
+      height: 48px;
+      background: #080f15;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      margin: 25px 0 15px;
+      overflow: visible;
+    }
+    .vis-range {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(56,189,248,0.18);
+      border-left: 2px dashed var(--cyan);
+      border-right: 2px dashed var(--cyan);
+    }
+    .vis-old-band {
+      position: absolute;
+      top: 10px;
+      bottom: 10px;
+      background: rgba(248,113,113,0.25);
+      border-left: 2px dotted var(--red);
+      border-right: 2px dotted var(--red);
+      border-radius: 4px;
+    }
+    .vis-mid-pin {
+      position: absolute;
+      top: -8px;
+      bottom: -8px;
+      width: 4px;
+      background: var(--gold);
+      transform: translateX(-50%);
+      box-shadow: 0 0 10px var(--gold);
+      border-radius: 2px;
+      z-index: 10;
+      transition: left 0.1s ease-out;
+    }
+    .vis-mid-label {
+      position: absolute;
+      top: -26px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--gold);
+      color: #0b1117;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      white-space: nowrap;
+    }
+    .vis-ticks {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      margin-top: 6px;
+    }
+
+    .sim-pills-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 18px 0 0;
+    }
+    .sim-pill {
+      font-size: 12px;
+      font-family: var(--font-mono);
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #091219;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sim-pill b { color: var(--ink); }
+    .sim-pill-cyan { border-color: rgba(56,189,248,0.4); color: #7dd3fc; }
+    .sim-pill-green { border-color: rgba(74,222,128,0.4); color: #86efac; }
+    .sim-pill-gold { border-color: rgba(243,186,47,0.4); color: #fde047; }
+    .sim-pill-red { border-color: rgba(248,113,113,0.4); color: #fca5a5; }
+
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected-box {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(74,222,128,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected-box b { color: var(--green); }
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <span class="status-merged">מוזג לענף הראשי (master)</span>
+      <h1>PR #253: איחוד והסרת Entry Band לטובת Quote Range [0.10, 0.90]</h1>
+      <p>מעבר מלא מעגינה קשיחה ומנוונת סביב $0.50 ונעילה לצמיתות (latching), למסדרון ציטוט דינמי עוקב-מיד [0.10, 0.90] בכלל 6 ו-ADR-0003, עם שוויון התנהגותי (1:1 Parity) מוחלט בין מנוע הלייב למנוע הבקטסט.</p>
+      <div class="facts">
+        <div class="fact"><b>Issue מקושר</b><a href="https://github.com/AI-Degen-69/crypto-spread/issues/213" target="_blank">#213 · סגור ומוזג</a></div>
+        <div class="fact"><b>Pull Request</b><a href="https://github.com/AI-Degen-69/crypto-spread/pull/253" target="_blank">#253 · מוזג (Squash) 🟢</a></div>
+      </div>
+    </section>
+
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: מה הבעיה ואיך פתרנו אותה?</h2>
+      <p>בעבר, למערכת היה "שומר סף" קשוח וקצר-ראייה: הוא הסכים לצטט רק אם המחיר של השוק היה צמוד בדיוק ל-50 אגורות (0.45 עד 0.55). ברגע שהשוק חווה תנודה קטנה והמחיר זז ל-56 אגורות, שומר הסף נכנס לפאניקה, נעל את הדלת (<code>band_skip = True</code>), זרק את המפתח, והשבית את הבוט מציטוט <b>לכל אורך 300 השניות של החלון</b> – גם אם שתי שניות לאחר מכן המחיר חזר בדיוק למרכז!</p>
+      <p>במודל החדש (כלל 6 ו-ADR-0003):</p>
+      <ul>
+        <li><b>שחרור הנעילה לצמיתות:</b> אין יותר השבתה גורפת! אם המחיר יוצא מהטווח, הבוט ממתין לאותו טיק בודד בלבד (Tick hold), וברגע שהמחיר שוב בפנים – ממשיכים לצטט מיד.</li>
+        <li><b>טווח מסחרי רחב:</b> במקום 0.45–0.55 הצר, הבוט רשאי לצטט בכל מקום בין <b>0.10 ל-0.90</b> (80% מטווח החוזה).</li>
+        <li><b>ציטוט עוקב-מיד:</b> ההזמנות אינן עגונות ל-0.50 אלא למיד האמיתי של השוק ברגע זה: <code>mid - offset</code>.</li>
+      </ul>
+    </section>
+
+    <!-- LIVE INTERACTIVE SIMULATOR IN THE SHOWCASE -->
+    <section class="panel">
+      <h2>🎮 סימולטור אינטראקטיבי: התנהגות הציטוט והשוואת מודלים</h2>
+      <p>הזיזו את הסליידר של מחיר האמצע (Market Mid) כדי לראות כיצד המודל החדש מתנהג לעומת מנגנון ה-Entry Band הישן שנמחק:</p>
+
+      <div class="sim-controls">
+        <div class="sim-control-group">
+          <label>מחיר אמצע נוכחי (Market Mid): <span class="val" id="ctrlMidVal">0.500</span></label>
+          <input type="range" id="ctrlMid" min="0.01" max="0.99" step="0.005" value="0.50">
+        </div>
+        <div class="sim-control-group">
+          <label>Quote Range Lo: <span class="val" id="ctrlLoVal">0.10</span></label>
+          <input type="range" id="ctrlLo" min="0.01" max="0.40" step="0.01" value="0.10">
+        </div>
+        <div class="sim-control-group">
+          <label>Quote Range Hi: <span class="val" id="ctrlHiVal">0.90</span></label>
+          <input type="range" id="ctrlHi" min="0.60" max="0.99" step="0.01" value="0.90">
+        </div>
+        <div class="sim-control-group">
+          <label>Offset (היסט מרווח): <span class="val" id="ctrlOffsetVal">0.02</span></label>
+          <input type="range" id="ctrlOffset" min="0.005" max="0.08" step="0.005" value="0.02">
+        </div>
+      </div>
+
+      <div class="status-banner" id="simStatusBanner">
+        <div>
+          <b id="simStatusTitle">סטטוס ציטוט: פעיל ומצטט</b>
+          <div style="font-size: 0.85rem; margin-top: 3px;" id="simStatusDesc">המיד בתוך הטווח [0.10, 0.90]. נשלחות פקודות דו-צדדיות עוקבות-מיד.</div>
+        </div>
+        <div id="simStatusTag" class="sim-pill sim-pill-green">ACTIVE QUOTING</div>
+      </div>
+
+      <!-- VISUAL TRACK -->
+      <div class="vis-track">
+        <div class="vis-range" id="visQuoteRange" style="left: 10%; width: 80%;"></div>
+        <div class="vis-old-band" title="הטווח הישן של entry_band (0.45-0.55)" style="left: 45%; width: 10%;"></div>
+        <div class="vis-mid-pin" id="visMidPin" style="left: 50%;">
+          <div class="vis-mid-label" id="visMidLabel">Mid: 0.500</div>
+        </div>
+      </div>
+      <div class="vis-ticks">
+        <span>0.00$</span>
+        <span>0.10$ (Lo)</span>
+        <span style="color: var(--red);">[0.45-0.55 ישן]</span>
+        <span>0.50$</span>
+        <span>0.90$ (Hi)</span>
+        <span>1.00$</span>
+      </div>
+
+      <div class="sim-pills-row">
+        <div class="sim-pill sim-pill-cyan">YES Bid: <b id="pillYesBid">0.480$</b></div>
+        <div class="sim-pill sim-pill-cyan">NO Bid (Comp): <b id="pillNoBid">0.480$</b></div>
+        <div class="sim-pill sim-pill-gold">Pair Cost: <b id="pillPairCost">0.960$</b></div>
+        <div class="sim-pill" id="pillOldStatus">במודל הישן: <b>ציטט</b></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>🔴 לפני השינוי (Legacy Entry Band):</h3>
+          <ul>
+            <li><b>עגינה קשיחה ל-0.50:</b> טווח כניסה צר של 0.45 עד 0.55 בלבד.</li>
+            <li><b>נעילה הרסנית (Latching):</b> חריגה בטיק בודד הפעילה <code>band_skip = True</code> שנשאר נעול לצמיתות עד תום 300 השניות של החלון.</li>
+            <li><b>הזמנות סטטיות:</b> ציטוט במחיר קבוע מול 0.50 במקום לעקוב אחרי מרכז השוק האמיתי.</li>
+            <li><b>היעדר שוויון:</b> חוסר עקביות במימוש ובשמות הפרמטרים בין הלייב טריידר לבקטסט.</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי השינוי (Rule 6 / ADR-0003):</h3>
+          <ul>
+            <li><b>טווח מסחרי רחב [0.10, 0.90]:</b> פעילות מלאה על פני 80% ממנעד ההסתברויות של הפולימרקט.</li>
+            <li><b>בדיקה לטיק בודד ללא נעילה:</b> אם המיד חורג, הבוט ממתין באותו טיק בלבד. ברגע שהמיד חוזר – חוזרים לצטט מיד!</li>
+            <li><b>ציטוט עוקב-מיד (Dynamic Mid-Anchored):</b> פקודות מחושבות כ-<code>mid - offset</code> ומשלימתן <code>(1 - mid) - offset</code>.</li>
+            <li><b>שוויון התנהגותי מוחלט 1:1:</b> קוד לוגיקה תואם לחלוטין בין מנוע הבקטסט ללייב טריידר, מגובה בחבילת טסטים מלאה.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>⚡ זרימת התהליך והארכיטקטורה</h2>
+      <div class="grid-3">
+        <div class="flow-card">
+          <div class="flow-num">01 · קריאת מיד מספרי האורדרבוק</div>
+          <h3>קריאת Mid מדויקת</h3>
+          <p>המנוע מוודא קיום ספר דו-צדדי (Best Bid ו-Best Ask תקפים) ומחשב את המיד הרציף: <code>mid = (best_bid + best_ask) / 2</code>.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">02 · הערכת Quote Range פר-טיק</div>
+          <h3>אימות טווח ללא נעילה</h3>
+          <p>הערכת תנאי <code>quote_lo <= mid <= quote_hi</code> פר-טיק. אם מחוץ לטווח, מדלגים על טיק זה בלבד ללא שינוי דגלים וללא נעילת המנוע.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">03 · פריסת פקודות עוקבות-מיד</div>
+          <h3>ציטוט דינמי סימטרי</h3>
+          <p>חישוב מחיר ביד YES כ-<code>mid - offset</code> ומחיר ביד NO (משלים) כ-<code>(1 - mid) - offset</code>, עם וידוא עלות זוג נמוכה מ-1.00$.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🕹️ מדריך בדיקה ידנית (Touch &amp; See)</h2>
+      <p>בדיקה פשוטה להוכחת השינוי בעיניים בדשבורד האמיתי וב-CLI ללא הרצת טסטים:</p>
+      
+      <h3>1. בדיקת פרמטרי ה-Quote Range בממשק הדשבורד</h3>
+      <div class="code-row">
+        <pre class="code">python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</pre>
+        <button class="copy-btn" data-copy="python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> פתחו דפדפן ב-<code>http://127.0.0.1:8802</code>, היכנסו לכרטיסיית <b>Backtest</b>. ודאו כי קיימים השדות <b>Quote Range Lo</b> (ברירת מחדל 0.10) ו-<b>Quote Range Hi</b> (ברירת מחדל 0.90). אין יותר שום אזכור לשדה הישן <code>entry_band</code>.
+      </div>
+
+      <h3>2. בדיקת נקודת הקצה ב-REST API</h3>
+      <p>קריאה ל-API כדי לוודא תמיכה מלאה בפרמטרים החדשים:</p>
+      <div class="code-row">
+        <pre class="code">curl "http://127.0.0.1:8802/api/backtest?quote_lo=0.10&quote_hi=0.90&offset=0.02"</pre>
+        <button class="copy-btn" data-copy="curl &quot;http://127.0.0.1:8802/api/backtest?quote_lo=0.10&quote_hi=0.90&offset=0.02&quot;">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> תגובת JSON תקינה שבה מוחזרת תוצאת הבקטסט תוך כיבוד הגבולות 0.10 עד 0.90.
+      </div>
+
+      <h3>3. בדיקת הרצה ישירה ב-CLI</h3>
+      <p>הרצת מנוע הבקטסט באמצעות ה-CLI עם הדגלים הרשמיים:</p>
+      <div class="code-row">
+        <pre class="code">python -m scripts.backtest run/ticks --quote-lo 0.10 --quote-hi 0.90 --offset 0.02</pre>
+        <button class="copy-btn" data-copy="python -m scripts.backtest run/ticks --quote-lo 0.10 --quote-hi 0.90 --offset 0.02">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> פלט טבלאי של חלונות מסחר שבוצעו, שבו עסקאות מבוצעות בכל רחבי הטווח 0.10–0.90 ולא נחסמות כאשר המיד סוטה מ-0.50.
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead><tr><th>קובץ</th><th>תפקיד והשפעה</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>strategy/live_trader.py</code></td>
+            <td>מימוש כלל 6: בחינת <code>quote_range</code> פר-טיק ללא latching, וחישוב מחירי ציטוט עוקבי-מיד (<code>mid - offset</code>).</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>backtest/engine.py</code></td>
+            <td>מימוש תואם 1:1 בלוגיקת הבקטסט: פרמטרים <code>quote_lo</code> ו-<code>quote_hi</code>, השמטת נעילות <code>band_skip</code>.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>server/osc_dash.py</code></td>
+            <td>חשיפת שדות <code>quote_lo</code> ו-<code>quote_hi</code> ב-API וב-UI, והסרת כל שריד של <code>entry_band</code>.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tests/test_quote_range_parity.py</code></td>
+            <td>בדיקות שוויון מקיפות (Parity) המוכיחות זהות התנהגות מוחלטת בהחלטות מסחר בין שני המנועים.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>docs/issues/213-verification-entry-band-quote-range.md</code></td>
+            <td>דוח אימות מקיף המוכיח את פתרון Issue #213 וביטול ה-drift.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issue #213 · Pull Request #253 מוזג בהצלחה
+    </footer>
+  </main>
+
+  <script>
+    // One-click copy buttons
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+
+    // Interactive Simulator Logic
+    (function () {
+      const cMid = document.getElementById('ctrlMid');
+      const cLo = document.getElementById('ctrlLo');
+      const cHi = document.getElementById('ctrlHi');
+      const cOffset = document.getElementById('ctrlOffset');
+
+      const vMid = document.getElementById('ctrlMidVal');
+      const vLo = document.getElementById('ctrlLoVal');
+      const vHi = document.getElementById('ctrlHiVal');
+      const vOffset = document.getElementById('ctrlOffsetVal');
+
+      const statusBanner = document.getElementById('simStatusBanner');
+      const statusTitle = document.getElementById('simStatusTitle');
+      const statusDesc = document.getElementById('simStatusDesc');
+      const statusTag = document.getElementById('simStatusTag');
+
+      const visRange = document.getElementById('visQuoteRange');
+      const visMidPin = document.getElementById('visMidPin');
+      const visMidLabel = document.getElementById('visMidLabel');
+
+      const pillYesBid = document.getElementById('pillYesBid');
+      const pillNoBid = document.getElementById('pillNoBid');
+      const pillPairCost = document.getElementById('pillPairCost');
+      const pillOldStatus = document.getElementById('pillOldStatus');
+
+      function update() {
+        const mid = parseFloat(cMid.value);
+        const lo = parseFloat(cLo.value);
+        const hi = parseFloat(cHi.value);
+        const offset = parseFloat(cOffset.value);
+
+        vMid.textContent = mid.toFixed(3);
+        vLo.textContent = lo.toFixed(2);
+        vHi.textContent = hi.toFixed(2);
+        vOffset.textContent = offset.toFixed(3);
+
+        // Update Visual Range & Pin
+        const loPct = lo * 100;
+        const hiPct = hi * 100;
+        const midPct = mid * 100;
+        visRange.style.left = loPct + '%';
+        visRange.style.width = (hiPct - loPct) + '%';
+        visMidPin.style.left = midPct + '%';
+        visMidLabel.textContent = 'Mid: ' + mid.toFixed(3) + '$';
+
+        // Evaluate Rule 6 Quote Range
+        const inRange = (mid >= lo && mid <= hi);
+        const inOldBand = (mid >= 0.45 && mid <= 0.55);
+
+        if (inRange) {
+          const yesBid = Math.max(0.01, Math.min(0.99, mid - offset));
+          const noBid = Math.max(0.01, Math.min(0.99, (1.0 - mid) - offset));
+          const pairCost = yesBid + noBid;
+
+          statusBanner.className = 'status-banner active';
+          statusTitle.textContent = 'סטטוס ציטוט: פעיל ומצטט (Active Quoting)';
+          statusDesc.textContent = `המיד (${mid.toFixed(3)}$) נמצא בתוך טווח הציטוט [${lo.toFixed(2)}, ${hi.toFixed(2)}]. ההזמנות מחושבות סביב המיד הנוכחי.`;
+          statusTag.className = 'sim-pill sim-pill-green';
+          statusTag.textContent = 'ACTIVE QUOTING';
+
+          pillYesBid.textContent = yesBid.toFixed(3) + '$';
+          pillNoBid.textContent = noBid.toFixed(3) + '$';
+          pillPairCost.textContent = pairCost.toFixed(3) + '$';
+        } else {
+          statusBanner.className = 'status-banner hold';
+          statusTitle.textContent = 'סטטוס ציטוט: המתנה לטיק זה בלבד (Tick Hold)';
+          statusDesc.textContent = `המיד (${mid.toFixed(3)}$) חרג מחוץ לטווח [${lo.toFixed(2)}, ${hi.toFixed(2)}]. הבוט אינו נועל את עצמו לצמיתות! ברגע שהמיד יחזור לטווח – יצוטט מיד.`;
+          statusTag.className = 'sim-pill sim-pill-gold';
+          statusTag.textContent = 'TICK HOLD (RESUMABLE)';
+
+          pillYesBid.textContent = '---';
+          pillNoBid.textContent = '---';
+          pillPairCost.textContent = '---';
+        }
+
+        // Compare with old behavior
+        if (!inOldBand) {
+          pillOldStatus.innerHTML = 'במודל הישן: <b style="color:var(--red);">נעול לצמיתות (LATCHED) ❌</b>';
+        } else {
+          pillOldStatus.innerHTML = 'במודל הישן: <b style="color:var(--green);">ציטט ✅</b>';
+        }
+      }
+
+      [cMid, cLo, cHi, cOffset].forEach(input => input.addEventListener('input', update));
+      update();
+    })();
+  </script>
+</body>
+</html>

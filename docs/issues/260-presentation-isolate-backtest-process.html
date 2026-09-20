@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Testing ideas no longer freezes live prices</title>
+  <style>
+    :root {
+      --ink: #eaf1f6; --muted: #9aabb8; --bg: #0b1117;
+      --panel: #121c25; --panel-2: #172530; --line: #29404d;
+      --cyan: #55d6c2; --amber: #f4b860; --red: #f17c78;
+      --green: #79d99b; --shadow: 0 20px 55px rgba(0,0,0,.28);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif; }
+    main { max-width: 900px; margin: auto; padding: 40px 20px 70px; }
+    .panel { background: var(--panel); border: 1px solid var(--line);
+      box-shadow: var(--shadow); border-radius: 18px; padding: 26px; margin-top: 24px; }
+    h1 { font-size: clamp(1.7rem, 4vw, 2.5rem); margin: 10px 0 12px; line-height: 1.25; }
+    p { color: var(--muted); margin: 0 0 12px; }
+    .badge { display: inline-block; border: 1px solid rgba(85,214,194,.45); border-radius: 999px;
+      padding: 4px 14px; font-size: .85rem; font-weight: 700; color: var(--cyan);
+      background: rgba(85,214,194,.1); }
+    .lane { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px;
+      padding: 16px 18px; margin-top: 14px; }
+    .lane h3 { margin: 0 0 4px; font-size: 1.05rem; }
+    .lane small { color: var(--muted); }
+    .dots { display: flex; gap: 8px; margin-top: 12px; min-height: 26px; flex-wrap: wrap; }
+    .dot { width: 18px; height: 18px; border-radius: 50%; background: var(--green);
+      animation: pop .3s ease; }
+    .dot.late { background: var(--red); }
+    .dot.wait { background: var(--amber); }
+    @keyframes pop { from { transform: scale(.4); opacity: .3; } to { transform: scale(1); opacity: 1; } }
+    .bar-wrap { background: #091016; border: 1px solid var(--line); border-radius: 10px;
+      height: 26px; margin-top: 12px; overflow: hidden; }
+    .bar { height: 100%; width: 0%; background: var(--amber); border-radius: 10px; }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    button { cursor: pointer; border-radius: 10px; padding: 10px 18px; font-size: 1rem;
+      font-weight: 700; border: 1px solid var(--line); }
+    .btn-go { background: var(--cyan); color: #06231f; border-color: transparent; }
+    .btn-toggle { background: transparent; color: var(--ink); }
+    .btn-toggle[aria-pressed="true"] { border-color: var(--cyan); color: var(--cyan); }
+    .verdict { margin-top: 16px; padding: 14px 16px; border-radius: 12px; font-weight: 600;
+      background: rgba(121,217,155,.08); border: 1px solid rgba(121,217,155,.4); color: var(--ink); }
+    .grid-2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 16px; }
+    .compare { padding: 20px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel-2); }
+    .before { border-top: 4px solid var(--red); }
+    .after { border-top: 4px solid var(--green); }
+    .compare h3 { margin: 0 0 8px; }
+    .compare p { margin: 0; }
+    .links { color: var(--muted); font-size: .95rem; }
+    .links a { color: var(--cyan); text-decoration: none; font-weight: 600; }
+    @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <span class="badge">Change put live</span>
+      <h1>Testing ideas no longer freezes live prices.</h1>
+      <p>Before: pressing "test on old data" made the live price checker stall for seconds.
+        Now: the test runs in a separate room, so live prices keep ticking every second.</p>
+    </section>
+
+    <section class="panel" aria-label="Live demo">
+      <h2 style="margin:0 0 6px">Feel it: press the button, watch the live dots</h2>
+      <p>Green dots = live price checks, one per second. Orange bar = a test running on old data.
+        Switch between the old way and the new way, then press the button.</p>
+      <div class="controls" role="group" aria-label="Choose old or new way">
+        <button class="btn-toggle" id="btnBefore" aria-pressed="false">Old way: one shared room</button>
+        <button class="btn-toggle" id="btnAfter" aria-pressed="true">New way: separate room</button>
+        <button class="btn-go" id="btnRun">Run a test now</button>
+      </div>
+
+      <div class="lane">
+        <h3>Live price checks <small>— should tick every second</small></h3>
+        <div class="dots" id="dots" aria-live="polite"></div>
+        <p id="tickMsg" style="margin-top:10px">Press "Run a test now" to see what happens.</p>
+      </div>
+
+      <div class="lane">
+        <h3>Test on old data <small>— heavy work, takes about 5 seconds</small></h3>
+        <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+        <p id="jobMsg" style="margin-top:10px">Idle. No test running.</p>
+      </div>
+
+      <div class="verdict" id="verdict">New way: live dots keep coming while the test runs elsewhere.</div>
+    </section>
+
+    <section class="panel">
+      <div class="grid-2">
+        <div class="compare before">
+          <h3>Before</h3>
+          <p>Test and live checker shared one brain. The test hogged it, so live prices froze up to 3 seconds — risky when real money is on.</p>
+        </div>
+        <div class="compare after">
+          <h3>After</h3>
+          <p>Test moved to its own room with its own brain. Live checker never waits. Bonus rule: only one test at a time — a second test gets a polite "busy, try again" note.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 style="margin:0 0 8px">Try it yourself in the dashboard</h2>
+      <p>1. Open the live dashboard at <a href="http://127.0.0.1:8802" target="_blank" style="color:var(--cyan)">http://127.0.0.1:8802</a>, switch to the Backtest tab, and start a simulation while live market prices stream on Tab 1.<br>
+        2. What you will see: live market prices continue ticking every second without skipping a beat, while the backtest completes smoothly in the background.</p>
+      <p class="links">Problem: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/259">request #259 — live prices froze during tests</a><br>
+        Change: <a href="https://github.com/AI-Degen-69/crypto-spread/pull/260">update #260 — test runs in a separate room</a> 🟢 MERGED</p>
+    </section>
+  </main>
+  <script>
+    var mode = "after";
+    var btnBefore = document.getElementById("btnBefore");
+    var btnAfter = document.getElementById("btnAfter");
+    var btnRun = document.getElementById("btnRun");
+    var dots = document.getElementById("dots");
+    var bar = document.getElementById("bar");
+    var tickMsg = document.getElementById("tickMsg");
+    var jobMsg = document.getElementById("jobMsg");
+    var verdict = document.getElementById("verdict");
+    var running = false;
+
+    function setMode(m) {
+      mode = m;
+      btnBefore.setAttribute("aria-pressed", m === "before" ? "true" : "false");
+      btnAfter.setAttribute("aria-pressed", m === "after" ? "true" : "false");
+      verdict.textContent = m === "after"
+        ? "New way: live dots keep coming while the test runs elsewhere."
+        : "Old way: watch the green dots stop while the orange bar moves.";
+    }
+    btnBefore.addEventListener("click", function () { setMode("before"); });
+    btnAfter.addEventListener("click", function () { setMode("after"); });
+
+    function addDot(cls) {
+      var d = document.createElement("span");
+      d.className = "dot" + (cls ? " " + cls : "");
+      dots.appendChild(d);
+      while (dots.children.length > 24) dots.removeChild(dots.firstChild);
+    }
+
+    btnRun.addEventListener("click", function () {
+      if (running) return;
+      running = true;
+      dots.innerHTML = "";
+      var steps = 10, i = 0;
+      jobMsg.textContent = "Test running…";
+      if (mode === "after") {
+        tickMsg.textContent = "Live checks: ticking every second, test does not touch them.";
+      } else {
+        tickMsg.textContent = "Live checks: frozen! The test is hogging the shared room…";
+      }
+      var timer = setInterval(function () {
+        i++;
+        bar.style.width = (i * 10) + "%";
+        if (mode === "after") {
+          addDot("");
+        } else if (i <= 2 || i >= 9) {
+          addDot("");
+        } else {
+          addDot("late");
+        }
+        if (i >= steps) {
+          clearInterval(timer);
+          bar.style.width = "0%";
+          running = false;
+          if (mode === "after") {
+            jobMsg.textContent = "Test finished. Live checks never missed a beat.";
+            verdict.textContent = "Result: 10 live ticks arrived during the test. Zero freezes.";
+          } else {
+            jobMsg.textContent = "Test finished — but live checks froze halfway.";
+            verdict.textContent = "Result: live ticks stalled for seconds. That is the freeze this change removes.";
+          }
+        }
+      }, 500);
+    });
+    setMode("after");
+  </script>
+</body>
+</html>

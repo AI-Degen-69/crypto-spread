@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR #252 | תצוגה מקדימה גרפית אינטראקטיבית לפרמטרי בקטסט</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #38bdf8;
+      --gold: #f3ba2f;
+      --red: #f87171;
+      --green: #4ade80;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #132a36 0, transparent 40%),
+                  radial-gradient(circle at 90% 15%, #241d30 0, transparent 35%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(2rem, 4.5vw, 3.2rem); margin: 10px 0 16px; line-height: 1.2; }
+    h2 { font-size: 1.5rem; margin: 0 0 14px; }
+    h3 { font-size: 1.05rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(74,222,128,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(74,222,128,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(56,189,248,.07); }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(248,113,113,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(74,222,128,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+    .flow-card { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .flow-num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+    
+    /* Interactive Simulator */
+    .sim-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+      background: rgba(10,18,25,0.7);
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+    }
+    .sim-control-group { display: flex; flex-direction: column; gap: 6px; }
+    .sim-control-group label { font-size: 0.82rem; font-weight: 600; color: var(--ink); display: flex; justify-content: space-between; }
+    .sim-control-group span.val { color: var(--cyan); font-family: var(--font-mono); }
+    .sim-control-group input[type=range] {
+      accent-color: var(--cyan);
+      cursor: pointer;
+    }
+    .sim-pills-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .sim-pill {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #091219;
+      color: var(--muted);
+    }
+    .sim-pill b { color: var(--ink); }
+    .sim-pill-cyan { border-color: rgba(56,189,248,0.4); color: #7dd3fc; }
+    .sim-pill-green { border-color: rgba(74,222,128,0.4); color: #86efac; }
+    .sim-pill-red { border-color: rgba(248,113,113,0.4); color: #fca5a5; }
+    .sim-pill-gold { border-color: rgba(243,186,47,0.4); color: #fde047; }
+    .sim-svg-wrap {
+      background: #080e14;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
+    }
+    .sim-svg-wrap svg { width: 100%; height: auto; display: block; }
+
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected-box {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(74,222,128,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected-box b { color: var(--green); }
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <span class="status-merged">מוזג לענף הראשי (master)</span>
+      <h1>PR #252: גריד הדמיה 2D אינטראקטיבי לפרמטרי בקטסט</h1>
+      <p>רכיב וקטורי מודרני מבוסס SVG המציג בזמן אמת ובאופן ריאקטיבי (<16ms) את הגאומטריה המלאה של האסטרטגיה: מחירי ציטוט, מסדרון קורלציה, סטופ-לוס, ריוורסל, ושערי זמן החלון — ללא שום קריאת רשת או תלות חיצונית.</p>
+      <div class="facts">
+        <div class="fact"><b>Issue מקושר</b><a href="https://github.com/AI-Degen-69/crypto-spread/issues/198" target="_blank">#198 · סגור ומוזג</a></div>
+        <div class="fact"><b>Pull Request</b><a href="https://github.com/AI-Degen-69/crypto-spread/pull/252" target="_blank">#252 · מוזג (Squash) 🟢</a></div>
+      </div>
+    </section>
+
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: מה השתנה?</h2>
+      <p>עד היום, כיוונון אסטרטגיית הבקטסט היה כמו ניווט מטוס בעלטה מוחלטת: ראינו רשימה של שדות מספרים יבשים (Offset, Stop, Delay), והיינו צריכים לנחש בראש איפה יעמדו הפקודות או להמתין לבקטסט ארוך כדי לגלות שסכומי העיכוב וה-Dead Zone חסמו את כל חלון הציטוט. עכשיו, נוסף מכ״ם ויזואלי 2D חי שמשרטט במדויק את המפה הגאומטרית כולה תוך כדי הקלדה או גרירת הסליידרים — בדיוק איפה המיד ($0.50), איפה רגלי הלונג והשורט, מתי הסטופ ייפדה, וכמה שניות פעילות נשארו בתוך החלון.</p>
+    </section>
+
+    <!-- LIVE INTERACTIVE SIMULATOR IN THE SHOWCASE -->
+    <section class="panel">
+      <h2>🎮 נסו כאן — סימולטור הגריד האינטראקטיבי החי</h2>
+      <p>הזיזו את הסליידרים להלן כדי לראות את אלגוריתם ה-SVG של הדשבורד מחשב ומשרטט את הגאומטריה בזמן אמת:</p>
+
+      <div class="sim-controls">
+        <div class="sim-control-group">
+          <label>Offset (היסט מרווח): <span class="val" id="ctrlOffsetVal">0.02</span></label>
+          <input type="range" id="ctrlOffset" min="0.00" max="0.10" step="0.005" value="0.02">
+        </div>
+        <div class="sim-control-group">
+          <label>Stop Loss (מרחק סטופ): <span class="val" id="ctrlStopVal">0.05</span></label>
+          <input type="range" id="ctrlStop" min="0.00" max="0.15" step="0.005" value="0.05">
+        </div>
+        <div class="sim-control-group">
+          <label>Reversal Buffer: <span class="val" id="ctrlRevVal">0.02</span></label>
+          <input type="range" id="ctrlRev" min="0.00" max="0.06" step="0.005" value="0.02">
+        </div>
+        <div class="sim-control-group">
+          <label>Entry Delay (עיכוב כניסה): <span class="val" id="ctrlDelayVal">15s</span></label>
+          <input type="range" id="ctrlDelay" min="0" max="180" step="5" value="15">
+        </div>
+        <div class="sim-control-group">
+          <label>Dead Zone (אזור חסום): <span class="val" id="ctrlDeadVal">30s</span></label>
+          <input type="range" id="ctrlDead" min="0" max="180" step="5" value="30">
+        </div>
+      </div>
+
+      <div class="sim-pills-row" id="simPills">
+        <!-- populated dynamically -->
+      </div>
+
+      <div class="sim-svg-wrap">
+        <svg id="simSvg" viewBox="0 0 760 260"></svg>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>🔴 לפני השינוי:</h3>
+          <ul>
+            <li>שדות קלט מספריים מבודדים ומנותקים ללא פידבק ויזואלי הדדי.</li>
+            <li>חסימות שחלון הציטוט סובל מהן (כגון Delay + Dead Zone ≥ 300s) התגלו רק כבקטסט ריק עם 0 טריידים.</li>
+            <li>חוסר יכולת להעריך מיידית את יחס המחירים: מרווח (Spread Width), עלות הזוג (Pair Cost), ומרחק הסטופ באגורות.</li>
+            <li>ערכי 0 בשדות פרמטרים היו עלולים להידרס בשל המרות falsy לא מוגנות.</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי השינוי:</h3>
+          <ul>
+            <li>גריד וקטורי 2D מלא (SVG רספונסיבי ב-ViewBox 760×260) המוטמע ישירות ב-DOM של כרטיסיית הבקטסט.</li>
+            <li>עדכון ריאקטיבי מיידי (<16ms) בכל שינוי קלט (`input`/`change`) או איפוס פרמטרים.</li>
+            <li>תגיות סיכום (Pill Badges) צבעוניות: רוחב מרווח ב-¢, עלות זוג מול תקרה, מרחק סטופ באגורות, ושניות פעילות באחוזים.</li>
+            <li>מנגנון חילוץ מוגן <code>readFinite</code> המשמר במדויק ערכי 0 תקינים ללא דריסת ברירת מחדל.</li>
+            <li>אפס תלויות npm, אפס קריאות רשת, ותאימות מלאה ל-Dark Mode ולתקני נגישות.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>⚡ זרימת התהליך והארכיטקטורה</h2>
+      <div class="grid-3">
+        <div class="flow-card">
+          <div class="flow-num">01 · קלט ואירועים ריאקטיביים</div>
+          <h3>מאזיני אירועים ב-SPA</h3>
+          <p>פונקציית <span class="ltr">setupBacktestInputListeners()</span> מאזינה לאירועי <code>input</code> ו-<code>change</code> בכל בקרי הטופס (offset, stop, delay, dead zone, pair cost), ומפעילה את הרינדור מיד בכל הקלדה, גרירה או איפוס.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">02 · חילוץ מוגן וחישוב גאומטרי</div>
+          <h3>readFinite ומיפוי קואורדינטות</h3>
+          <p>פונקציית העזר מחלצת ערכים מספריים מדויקים ושומרת אפסים תקינים. מחושבים קואורדינטות הזמן (0s–300s) וגובה המחיר ($0.00–$1.00), יחד עם בדיקת חסימת חלון (Delay + Dead ≥ 300s).</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">03 · שרטוט וקטורי וסנכרון תגיות</div>
+          <h3>רינדור SVG ו-Pill Badges</h3>
+          <p>הקוד מייצר אלמנטי SVG טהורים (שנתות רשת, אזורי הצללה של Delay ו-Dead Zone, קווי הזמנות לונג ושורט, קו סטופ וריוורסל) ומעדכן תגיות סיכום צבעוניות בלחיצה אחת וללא פניות רשת.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🕹️ מדריך בדיקה ידנית (Touch &amp; See)</h2>
+      <p>בדיקה פשוטה להוכחת השינוי בעיניים בדשבורד האמיתי ללא הרצת טסטים:</p>
+      
+      <h3>1. הפעלת שרת הדשבורד המקומי</h3>
+      <div class="code-row">
+        <pre class="code">python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</pre>
+        <button class="copy-btn" data-copy="python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802">העתק</button>
+      </div>
+      
+      <h3>2. ניווט לטאב הבקטסט</h3>
+      <div class="code-row">
+        <pre class="code">http://127.0.0.1:8802  →  לחיצה על כרטיסיית Backtest בראש העמוד</pre>
+        <button class="copy-btn" data-copy="http://127.0.0.1:8802">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> בתוך כרטיסיית "Backtest Parameters" מופיע גריד SVG מהודר בגווני שחור-ציאן עם תגיות סיכום עליונות, ציר מחיר ($0.00-$1.00), ציר זמן (0s-300s), קו Mid זהב ב-$0.50, קווי פקודות ורצועת ציטוט.
+      </div>
+
+      <h3>3. בדיקת ריאקטיביות מיידית</h3>
+      <p>שנו את ערך <b>Spread Offset</b> מ-<code>0.02</code> ל-<code>0.05</code>.</p>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> תוך כדי הקלדה, ללא רענון עמוד וללא שום קריאת רשת, קווי ה-Long Bid וה-Short Complement מתרחקים זה מזה, תגית המרווח מתעדכנת מיד ל-<b>10.0¢</b>, ועלות הזוג מחושבת מחדש.
+      </div>
+
+      <h3>4. בדיקת התרעת חסימת חלון</h3>
+      <p>הזינו ב-<b>Entry Delay</b> ערך של <code>200</code> וב-<b>Dead Zone</b> ערך של <code>150</code> (סך הכל 350s > 300s).</p>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> מרכז הגריד נצבע באדום ומופיעה התרעה ויזואלית ברורה: <code>⚠️ Quoting Window Blocked (Delay + Dead Zone ≥ Window Duration)</code>.
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead><tr><th>קובץ</th><th>תפקיד והשפעה</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>server/osc_dash.py</code></td>
+            <td>הטמעת אלמנט <code>#btParamPreviewWrap</code> ו-<code>#btParamPreviewSvg</code>, סגנונות CSS, פונקציית <code>updateBacktestParamPreview()</code>, רישום מאזיני אירועים, ופונקציית <code>readFinite</code> לשימור אפסים.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tests/test_osc_dash_integration.py</code></td>
+            <td>בדיקות אינטגרציה מלאות: אימות קיום אלמנטים וסגנונות ב-SPA, בדיקת הרצת Node.js מול חישובי הגאומטריה של ה-SVG, ואימות היעדר קריאות רשת.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issue #198 · Pull Request #252 מוזג בהצלחה
+    </footer>
+  </main>
+
+  <script>
+    // One-click copy buttons
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+
+    // Interactive Simulator Logic (exact replication of osc_dash.py renderer)
+    (function () {
+      const cOffset = document.getElementById('ctrlOffset');
+      const cStop = document.getElementById('ctrlStop');
+      const cRev = document.getElementById('ctrlRev');
+      const cDelay = document.getElementById('ctrlDelay');
+      const cDead = document.getElementById('ctrlDead');
+
+      const vOffset = document.getElementById('ctrlOffsetVal');
+      const vStop = document.getElementById('ctrlStopVal');
+      const vRev = document.getElementById('ctrlRevVal');
+      const vDelay = document.getElementById('ctrlDelayVal');
+      const vDead = document.getElementById('ctrlDeadVal');
+
+      const pillsEl = document.getElementById('simPills');
+      const svg = document.getElementById('simSvg');
+
+      function update() {
+        const offset = parseFloat(cOffset.value) || 0;
+        const exitStop = parseFloat(cStop.value) || 0;
+        const exitReversal = parseFloat(cRev.value) || 0;
+        const entryDelay = parseFloat(cDelay.value) || 0;
+        const deadSec = parseFloat(cDead.value) || 0;
+        const pairCostMax = 0.99;
+        const quoteLo = 0.10;
+        const quoteHi = 0.90;
+
+        vOffset.textContent = offset.toFixed(3);
+        vStop.textContent = exitStop.toFixed(3);
+        vRev.textContent = exitReversal.toFixed(3);
+        vDelay.textContent = Math.round(entryDelay) + 's';
+        vDead.textContent = Math.round(deadSec) + 's';
+
+        const windowDur = 300;
+        const delaySec = Math.max(0, Math.min(windowDur, entryDelay));
+        const clampedDead = Math.max(0, Math.min(windowDur, deadSec));
+        const activeSec = Math.max(0, windowDur - delaySec - clampedDead);
+
+        const mid = 0.50;
+        const longBid = Math.max(0, mid - offset);
+        const shortComp = Math.min(1.0, mid + offset);
+        const pairCost = Math.max(0, (mid - offset) * 2);
+        const stopPrice = Math.max(0, longBid - exitStop);
+        const revPrice = Math.min(1.0, stopPrice + exitReversal);
+
+        // Update pills
+        pillsEl.innerHTML = `
+          <span class="sim-pill sim-pill-cyan">Spread: <b>${(offset * 200).toFixed(1)}¢</b></span>
+          <span class="sim-pill ${pairCost <= pairCostMax ? 'sim-pill-green' : 'sim-pill-red'}">Pair Cost: <b>$${pairCost.toFixed(3)}</b> <span style="opacity:.7">/ max $${pairCostMax.toFixed(2)}</span></span>
+          <span class="sim-pill sim-pill-red">Stop: <b>-${(exitStop * 100).toFixed(1)}¢</b></span>
+          <span class="sim-pill sim-pill-gold">Active: <b>${Math.round(activeSec)}s</b> <span style="opacity:.7">(${((activeSec / windowDur) * 100).toFixed(0)}%)</span></span>
+        `;
+
+        // SVG rendering
+        const w = 760, h = 260, padL = 58, padR = 155, padT = 18, padB = 28;
+        const plotW = w - padL - padR, plotH = h - padT - padB;
+
+        const getX = (sec) => padL + (Math.max(0, Math.min(windowDur, sec)) / windowDur) * plotW;
+        const getY = (p) => padT + (1.0 - Math.max(0.0, Math.min(1.0, p))) * plotH;
+
+        let gridSvg = '';
+        for (let p = 0.0; p <= 1.001; p += 0.10) {
+          const yPos = getY(p);
+          const isMid = Math.abs(p - 0.50) < 0.001;
+          gridSvg += `
+            <line x1="${padL}" y1="${yPos.toFixed(1)}" x2="${padL + plotW}" y2="${yPos.toFixed(1)}" stroke="${isMid ? 'rgba(243,186,47,0.45)' : 'rgba(255,255,255,0.06)'}" stroke-width="${isMid ? 1.5 : 1}" stroke-dasharray="${isMid ? '4,3' : '2,3'}"/>
+            <text x="${padL - 6}" y="${(yPos + 3.5).toFixed(1)}" fill="${isMid ? 'var(--gold)' : 'var(--muted)'}" font-size="10" font-family="var(--font-mono)" font-weight="${isMid ? '700' : '400'}" text-anchor="end">$${p.toFixed(2)}</text>
+          `;
+        }
+
+        for (let sec = 0; sec <= windowDur; sec += 60) {
+          const xPos = getX(sec);
+          const minStr = Math.floor(sec / 60) + 'm';
+          gridSvg += `
+            <line x1="${xPos.toFixed(1)}" y1="${padT}" x2="${xPos.toFixed(1)}" y2="${padT + plotH}" stroke="rgba(255,255,255,0.05)" stroke-width="1" stroke-dasharray="2,3"/>
+            <text x="${xPos.toFixed(1)}" y="${h - 10}" fill="var(--muted)" font-size="10" font-family="var(--font-mono)" text-anchor="middle">${sec}s (${minStr})</text>
+          `;
+        }
+
+        const qLoY = getY(quoteLo), qHiY = getY(quoteHi);
+        const quotableSvg = `
+          <rect x="${padL}" y="${qHiY.toFixed(1)}" width="${plotW}" height="${(qLoY - qHiY).toFixed(1)}" fill="rgba(56,189,248,0.04)" stroke="rgba(56,189,248,0.22)" stroke-width="1" stroke-dasharray="4,2"/>
+          <text x="${padL + plotW + 6}" y="${((qHiY + qLoY)/2 + 3.5).toFixed(1)}" fill="#38bdf8" font-size="10" font-family="var(--font-mono)" opacity="0.8">Quotable [$0.10..$0.90]</text>
+        `;
+
+        let timeZonesSvg = '';
+        if (delaySec > 0) {
+          const delayW = getX(delaySec) - padL;
+          timeZonesSvg += `
+            <rect x="${padL}" y="${padT}" width="${delayW.toFixed(1)}" height="${plotH}" fill="rgba(243,186,47,0.12)" stroke="rgba(243,186,47,0.4)" stroke-width="1" stroke-dasharray="3,2"/>
+            <text x="${(padL + delayW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--gold)" font-size="9" font-family="var(--font-mono)" text-anchor="middle" font-weight="700">DELAY (${delaySec}s)</text>
+          `;
+        }
+        if (clampedDead > 0) {
+          const deadX = getX(windowDur - clampedDead);
+          const deadW = padL + plotW - deadX;
+          timeZonesSvg += `
+            <rect x="${deadX.toFixed(1)}" y="${padT}" width="${deadW.toFixed(1)}" height="${plotH}" fill="rgba(248,113,113,0.12)" stroke="rgba(248,113,113,0.4)" stroke-width="1" stroke-dasharray="3,2"/>
+            <text x="${(deadX + deadW / 2).toFixed(1)}" y="${padT + 14}" fill="var(--red)" font-size="9" font-family="var(--font-mono)" text-anchor="middle" font-weight="700">DEAD ZONE (${Math.round(clampedDead)}s)</text>
+          `;
+        }
+
+        const activeStartX = getX(delaySec);
+        const activeEndX = getX(windowDur - clampedDead);
+        const activeWidth = Math.max(0, activeEndX - activeStartX);
+
+        let activeContentSvg = '';
+        if (activeWidth <= 0) {
+          activeContentSvg = `
+            <text x="${(padL + plotW / 2).toFixed(1)}" y="${(padT + plotH / 2).toFixed(1)}" fill="var(--red)" font-size="12" font-family="Segoe UI, sans-serif" font-weight="700" text-anchor="middle">⚠️ Quoting Window Blocked (Delay + Dead Zone ≥ Window Duration)</text>
+          `;
+        } else {
+          let stopSvg = '';
+          if (exitStop > 0) {
+            const yStop = getY(stopPrice);
+            const yRev = getY(revPrice);
+            const revH = Math.max(0, yStop - yRev);
+
+            if (exitReversal > 0 && revH > 0) {
+              stopSvg += `
+                <rect x="${activeStartX.toFixed(1)}" y="${yRev.toFixed(1)}" width="${activeWidth.toFixed(1)}" height="${revH.toFixed(1)}" fill="rgba(243,186,47,0.16)" stroke="rgba(243,186,47,0.4)" stroke-width="1" stroke-dasharray="2,2"/>
+                <line x1="${activeStartX.toFixed(1)}" y1="${yRev.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yRev.toFixed(1)}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="2,2"/>
+                <text x="${padL + plotW + 6}" y="${(yRev + 3).toFixed(1)}" fill="var(--gold)" font-size="9.5" font-family="var(--font-mono)">Reversal: $${revPrice.toFixed(3)} (+${(exitReversal*100).toFixed(1)}¢)</text>
+              `;
+            }
+
+            stopSvg += `
+              <line x1="${activeStartX.toFixed(1)}" y1="${yStop.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yStop.toFixed(1)}" stroke="var(--red)" stroke-width="2" stroke-dasharray="4,2"/>
+              <text x="${padL + plotW + 6}" y="${(yStop + 3.5).toFixed(1)}" fill="var(--red)" font-size="10" font-family="var(--font-mono)" font-weight="700">Stop Loss: $${stopPrice.toFixed(3)} (-${(exitStop*100).toFixed(1)}¢)</text>
+            `;
+          }
+
+          const yLong = getY(longBid);
+          const yShort = getY(shortComp);
+          const midX = activeStartX + activeWidth * 0.5;
+
+          const bidsSvg = `
+            <line x1="${midX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${midX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="rgba(255,255,255,0.2)" stroke-width="1.2" stroke-dasharray="2,2"/>
+            <rect x="${(midX - 35).toFixed(1)}" y="${(getY(mid) - 7).toFixed(1)}" width="70" height="14" rx="3" fill="#121c25" stroke="rgba(255,255,255,0.15)"/>
+            <text x="${midX.toFixed(1)}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--ink)" font-size="9" font-family="var(--font-mono)" text-anchor="middle" font-weight="700">2×off: ${(offset*200).toFixed(1)}¢</text>
+
+            <line x1="${activeStartX.toFixed(1)}" y1="${yLong.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="#38bdf8" stroke-width="2"/>
+            <circle cx="${activeStartX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="#38bdf8"/>
+            <circle cx="${activeEndX.toFixed(1)}" cy="${yLong.toFixed(1)}" r="3.5" fill="#38bdf8"/>
+            <text x="${padL + plotW + 6}" y="${(yLong + 3.5).toFixed(1)}" fill="#38bdf8" font-size="10.5" font-family="var(--font-mono)" font-weight="700">Long Bid: $${longBid.toFixed(3)}</text>
+
+            <line x1="${activeStartX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yShort.toFixed(1)}" stroke="var(--green)" stroke-width="2"/>
+            <circle cx="${activeStartX.toFixed(1)}" cy="${yShort.toFixed(1)}" r="3.5" fill="var(--green)"/>
+            <circle cx="${activeEndX.toFixed(1)}" cy="${yShort.toFixed(1)}" r="3.5" fill="var(--green)"/>
+            <text x="${padL + plotW + 6}" y="${(yShort + 3.5).toFixed(1)}" fill="var(--green)" font-size="10.5" font-family="var(--font-mono)" font-weight="700">Short Comp: $${shortComp.toFixed(3)}</text>
+          `;
+
+          activeContentSvg = stopSvg + bidsSvg;
+        }
+
+        const midLabelSvg = `
+          <text x="${padL + plotW + 6}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--gold)" font-size="10" font-family="var(--font-mono)" font-weight="700">Mid: $0.500</text>
+        `;
+
+        const spinesSvg = `
+          <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1.2"/>
+          <line x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}" stroke="var(--line)" stroke-width="1.2"/>
+        `;
+
+        svg.innerHTML = `
+          ${gridSvg}
+          ${quotableSvg}
+          ${timeZonesSvg}
+          ${activeContentSvg}
+          ${midLabelSvg}
+          ${spinesSvg}
+        `;
+      }
+
+      [cOffset, cStop, cRev, cDelay, cDead].forEach(input => {
+        input.addEventListener('input', update);
+      });
+
+      update();
+    })();
+  </script>
+</body>
+</html>

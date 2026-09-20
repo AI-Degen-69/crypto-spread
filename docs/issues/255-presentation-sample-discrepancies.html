@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR #257 | תיעוד פערי דגימות (Sample Discrepancies) ועמידות הבקטסטר — Issue #255</title>
+  <style>
+    :root {
+      --ink: #eaf1f6;
+      --muted: #9aabb8;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #172530;
+      --line: #29404d;
+      --cyan: #55d6c2;
+      --amber: #f4b860;
+      --red: #f17c78;
+      --green: #79d99b;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 12% 0%, #183441 0, transparent 38%),
+                  radial-gradient(circle at 90% 15%, #2a2534 0, transparent 32%), var(--bg);
+      font: 16px/1.65 "Segoe UI", Tahoma, sans-serif;
+    }
+    main { max-width: 1100px; margin: auto; padding: 40px 20px 70px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .08em; font-size: .82rem; font-weight: 700; text-transform: uppercase; }
+    h1 { font-size: clamp(2rem, 4.2vw, 3rem); margin: 10px 0 16px; line-height: 1.25; }
+    h2 { font-size: 1.5rem; margin: 0 0 14px; }
+    h3 { font-size: 1.05rem; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0 0 14px; }
+    .status-merged {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(121,217,155,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--green); background: rgba(121,217,155,.1); margin-top: 10px;
+    }
+    .status-merged::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .status-closed {
+      display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(85,214,194,.45);
+      border-radius: 999px; padding: 4px 14px; font-size: .85rem; font-weight: 700;
+      color: var(--cyan); background: rgba(85,214,194,.1); margin-top: 10px; margin-inline-start: 10px;
+    }
+    .status-closed::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); }
+    .facts, .panel {
+      background: linear-gradient(145deg, rgba(23,37,48,.94), rgba(14,23,31,.94));
+      border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 18px;
+    }
+    .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; overflow: hidden; margin: 24px 0; }
+    .fact { padding: 18px 22px; background: rgba(18,28,37,.72); }
+    .fact b { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+    .fact a { color: var(--cyan); text-decoration: none; font-weight: 600; font-size: 1.05rem; }
+    .panel { padding: 26px; margin-top: 24px; }
+    .eli { border-right: 4px solid var(--cyan); background: rgba(85,214,194,.07); }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .compare { padding: 22px; border-radius: 14px; border: 1px solid var(--line); }
+    .before { border-top: 4px solid var(--red); background: rgba(241,124,120,.04); }
+    .after { border-top: 4px solid var(--green); background: rgba(121,217,155,.04); }
+    .compare ul { margin: 0; padding-right: 20px; color: var(--muted); }
+    .compare li { margin: 8px 0; }
+
+    .flow-card { padding: 20px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; }
+    .flow-num { color: var(--cyan); font-weight: 800; font-size: .85rem; margin-bottom: 8px; }
+
+    .code-row { position: relative; margin: 12px 0; }
+    .code {
+      direction: ltr; text-align: left; color: #d9f7ef; background: #091016;
+      border: 1px solid #29434b; border-radius: 10px; padding: 14px 16px;
+      overflow: auto; white-space: pre-wrap; font: .88rem/1.5 Consolas, monospace;
+    }
+    button.copy-btn {
+      position: absolute; left: 10px; top: 10px; cursor: pointer;
+      border: 1px solid #3d5b63; color: var(--ink); background: #172a31;
+      border-radius: 7px; padding: 5px 12px; font-size: 0.8rem; font-weight: 600;
+    }
+    button.copy-btn:hover { background: #223c46; }
+    .expected-box {
+      border-right: 4px solid var(--green); padding: 12px 16px;
+      background: rgba(121,217,155,.08); margin-top: 10px; border-radius: 0 8px 8px 0;
+    }
+    .expected-box b { color: var(--green); }
+
+    table { width: 100%; border-collapse: collapse; color: var(--muted); margin-top: 14px; }
+    th, td { text-align: right; border-bottom: 1px solid var(--line); padding: 12px 10px; }
+    th { color: var(--ink); }
+    .ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+
+    .hot  { color: var(--red); font-weight: 700; }
+    .cold { color: var(--amber); font-weight: 700; }
+    .good { color: var(--green); font-weight: 700; }
+
+    .taxonomy-card {
+      border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: rgba(18,28,37,.6); margin-top: 12px;
+    }
+    .taxonomy-card h4 { margin: 0 0 6px; color: var(--cyan); }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; margin-inline-start: 8px;
+    }
+    .badge-drop { background: rgba(241,124,120,.2); color: var(--red); border: 1px solid rgba(241,124,120,.4); }
+    .badge-audit { background: rgba(244,184,96,.2); color: var(--amber); border: 1px solid rgba(244,184,96,.4); }
+    .badge-ok { background: rgba(121,217,155,.2); color: var(--green); border: 1px solid rgba(121,217,155,.4); }
+
+    footer { color: var(--muted); text-align: center; padding-top: 36px; font-size: .9rem; }
+    @media (max-width: 768px) {
+      main { padding: 24px 14px 50px; }
+      .facts, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <main>
+
+    <!-- ═══ HERO ═══ -->
+    <section class="hero">
+      <div class="eyebrow">דוח סיום מחזור · Station VII Showcase</div>
+      <h1>Issue #255: תיעוד פערי דגימות (Sample Discrepancies) ועמידות הבקטסטר</h1>
+      <p>איסוף טיקים חיים של Polymarket CLOB כרוך באי-רציפויות רשת בלתי נמנעות. שדרוג זה מייצר טקסונומיה רשמית לפערי דגימות ב-<code>docs/operations.md</code>, מבטיח שהבקטסטר מדלג עליהם באופן דטרמיניסטי ללא שגיאות או זיוף מידע, ומצייד את כלי האימות <code>scripts/verify_tick_data.py</code> בסף גמיש ובמונים מבודדים.</p>
+      <span class="status-merged">PR #257 מוזג לענף הראשי (master)</span>
+      <span class="status-closed">Issue #255 נסגר אוטומטית עם המיזוג</span>
+      <div class="facts">
+        <div class="fact"><b>Issue</b><a href="https://github.com/AI-Degen-69/crypto-spread/issues/255">#255 · sample discrepancies & backtester integrity</a></div>
+        <div class="fact"><b>Pull Request</b><a href="https://github.com/AI-Degen-69/crypto-spread/pull/257">#257 · מוזג (Squash, b5f4a36) 🟢</a></div>
+      </div>
+    </section>
+
+    <!-- ═══ ELI5 ═══ -->
+    <section class="panel eli">
+      <h2>💡 במילים פשוטות: למה יש "חורים" בדאטה ואיך שומרים על בקטסט אמין?</h2>
+      <p><b>איסוף טיקים ב-1Hz ברשת האינטרנט דומה לציור נוף מחלון רכבת דוהרת:</b> רוב הזמן התמונות ברורות, אך לפעמים חולף ענן אבק (איטיות תקשורת), הדף נקרע מעט (שורה פגומה), או שהשעון קופץ קדימה בכמה שניות. בעולם המסחר, השאלה אינה "איך להעלים תקלות" אלא <b>איך לזהות אותן במדויק ולא לשקר לעצמנו בסימולציה</b>.</p>
+      <p><b>הפתרון שהוטמע:</b> במקום לנחש או להפסיק ריצת בקטסט של 5 ימים בגלל פסיק חסר, המערכת מזהה כל סוג של פער (JSON פגום, ספר צולב, שגיאת שרת או קפיצת זמן), מדווחת עליו באופן מבודד, ובבקטסטר מדלגת עליו בצורה דטרמיניסטית מבלי להמציא עסקאות דמיוניות. כך הריפליי נשאר טהור (Pure), עקבי ואמין.</p>
+    </section>
+
+    <!-- ═══ TAXONOMY ═══ -->
+    <section class="panel">
+      <h2>📊 טקסונומיית פערי הדגימות (Discrepancy Taxonomy)</h2>
+      <p>שש קטגוריות החריגות שהוגדרו רשמית במערכת וכיצד כל שכבה מטפלת בהן:</p>
+      
+      <div class="taxonomy-card">
+        <h4>1. Corrupted Lines (שורות פגומות) <span class="badge badge-drop">דילוג בבקטסטר</span></h4>
+        <p>שורות בלתי קריאות (Invalid JSON) כתוצאה מקטיעת קובץ פתאומית. המאמת סופר כ-<code>corrupt_lines</code> והבקטסטר מדלג עליהן מידית דרך <code>_json_or_skip</code> ללא השפעה על מצב הספר.</p>
+      </div>
+
+      <div class="taxonomy-card">
+        <h4>2. Schema Mismatch (חוסר התאמת סכמה) <span class="badge badge-drop">דילוג בבקטסטר</span></h4>
+        <p>טיק שבו חסרים שדות חובה כגון <code>series</code>, <code>bids</code> או <code>asks</code>. נספר כ-<code>schema_errors</code> ומבודד מבעיות מחיר פנימיות.</p>
+      </div>
+
+      <div class="taxonomy-card">
+        <h4>3. Crossed Books (ספרים צולבים) <span class="badge badge-audit">אנומליה נרשמת</span></h4>
+        <p>מצב שבו <code>best_bid &gt;= best_ask</code> (מתרחש לעיתים נדירות עקב שיהוק סנכרון ב-CLOB). נספר כ-<code>crossed_books</code> לצורך בקרת איכות נתונים.</p>
+      </div>
+
+      <div class="taxonomy-card">
+        <h4>4. Book Anomalies (אנומליות במחירי אמצע) <span class="badge badge-audit">אנומליה נרשמת</span></h4>
+        <p>ערכי <code>mid &lt;= 0</code> או <code>mid &gt;= 1</code> החורגים מטווח ההסתברות הבינארי [0, 1]. נספרים כ-<code>book_anomalies</code>.</p>
+      </div>
+
+      <div class="taxonomy-card">
+        <h4>5. Timestamp Gaps (קפיצות זמן) <span class="badge badge-ok">סף גמיש --max-gap</span></h4>
+        <p>פער זמנים בין טיקים עוקבים העולה על הסף המוגדר (ברירת מחדל: 6.0 שניות). מעיד על השהיית רשת זמנית או עומס ב-Event Loop של הפולר.</p>
+      </div>
+
+      <div class="taxonomy-card">
+        <h4>6. Collector Errors (שגיאות תקשורת באיסוף) <span class="badge badge-audit">מונה מבודד</span></h4>
+        <p>שגיאות רשת ברמת ה-HTTP/REST של הפולר מול Polymarket. מונה זה מבודד לחלוטין מ-<code>sample_issues</code> (שאינו נקטם ברף 20 הדגימות לקובץ) לשקיפות מלאה.</p>
+      </div>
+    </section>
+
+    <!-- ═══ BEFORE / AFTER ═══ -->
+    <section class="panel">
+      <h2>🔄 לפני מול אחרי</h2>
+      <div class="grid-2">
+        <article class="compare before">
+          <h3>🔴 לפני (PR #257):</h3>
+          <ul>
+            <li>התנהגות הריפליי בעת היתקלות בשורות פגומות לא הייתה מתועדת רשמית.</li>
+            <li>מוני <code>collector_errors</code> נטו להתערבב עם שגיאות תוכן בתוך הדגימות עצמן.</li>
+            <li>סף קפיצת הזמן (Gap Threshold) היה מקודד קשיח בקוד (6 שניות) ללא אפשרות התאמה.</li>
+            <li>חוסר בהירות האם הבקטסטר עלול לחשב עסקאות שגויות או לזייף מצב שוק בשורה חסרה.</li>
+          </ul>
+        </article>
+        <article class="compare after">
+          <h3>🟢 אחרי (PR #257):</h3>
+          <ul>
+            <li>פרק ייעודי מקיף ב-<code>docs/operations.md</code> עם טקסונומיה והבטחות שלמות.</li>
+            <li>הפרדה ארכיטקטונית נקייה: מונה <code>collector_errors</code> מבודד ואינו נחתך ב-20 הדגימות.</li>
+            <li>פרמטר CLI חדש: <code>--max-gap</code> עם ברירת מחדל 6.0 שניות לשליטה מדויקת ברגישות.</li>
+            <li>עמידות דטרמיניסטית מוכחת: הבקטסטר מדלג בחן על שגיאות, בלי קריסות ובלי זיוף נתונים.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- ═══ FLOW CARDS ═══ -->
+    <section class="panel">
+      <h2>⚡ זרימת הטיפול בפערים (Architecture Flow)</h2>
+      <div class="grid-3">
+        <div class="flow-card">
+          <div class="flow-num">01 · איסוף נתונים</div>
+          <h3>Collect & Log</h3>
+          <p>הפולר <code>collect_ticks</code> שומר טיקים חיים ב-JSONL. שגיאות רשת נרשמות עם חותמת זמן מפורשת ומבודדות מתוכן הספרים.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">02 · אימות ובקרה</div>
+          <h3>Verify & Tally</h3>
+          <p>הכלי <code>verify_tick_data</code> סורק את הקבצים, מזהה חריגות לפי הסף (<code>--max-gap</code>), ומציג טבלת מונים נקייה עם דגימות מייצגות.</p>
+        </div>
+        <div class="flow-card">
+          <div class="flow-num">03 · ריפליי עמיד</div>
+          <h3>Graceful Backtest</h3>
+          <p>מנוע ה-<code>backtest/engine.py</code> מדלג על שורות לא תקינות באופן שקט ודטרמיניסטי. הסימולציה מסתיימת בהצלחה ללא נתונים מוטים.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ CODE RABBIT ═══ -->
+    <section class="panel">
+      <h2>🐰 סבב סקירת CodeRabbit — 2 הערות, 2 קבלות, אפס דחיות</h2>
+      <table>
+        <thead><tr><th>חומרה</th><th>הממצא</th><th>מה תוקן</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="hot">Major / Design</td>
+            <td>מונה <code>collector_errors</code> ב-<code>verify_tick_data.py</code> עלול היה להיבלע ברשימת הדגימות שנקטמת ל-20 שורות.</td>
+            <td>המונה הופרד והובהר בטבלת הסיכום כאינדיקטור עצמאי מחוץ למגבלת 20 שגיאות התוכן.</td>
+          </tr>
+          <tr>
+            <td class="cold">Refinement</td>
+            <td>סף זיהוי קפיצות הזמן (6 שניות) היה קשיח, ללא גמישות לרשתות איטיות או פולרים בקצבים מותאמים.</td>
+            <td>נוסף דגל CLI ייעודי <code>--max-gap</code> עם ברירת מחדל מתועדת של 6.0 שניות.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ═══ VERIFICATION ═══ -->
+    <section class="panel">
+      <h2>🕹️ מדריך בדיקה ידנית (Touch &amp; See)</h2>
+      <p>הפקודות הבאות מאפשרות בדיקה ואימות מיידיים של השינויים בקונסולה:</p>
+
+      <h3>1. בדיקת שלמות נתוני הטיקים עם סף גמיש</h3>
+      <div class="code-row">
+        <pre class="code">python -m scripts.verify_tick_data run/ticks --max-gap 6.0</pre>
+        <button class="copy-btn" data-copy="python -m scripts.verify_tick_data run/ticks --max-gap 6.0">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> סריקה של כל קובצי ה-JSONL תחת <code>run/ticks</code>, טבלת סיכום נקייה עם מוני <code>corrupt_lines</code>, <code>schema_errors</code>, <code>crossed_books</code>, <code>book_anomalies</code> ו-<code>collector_errors</code> מבודד, ורשימת עד 20 דגימות מייצגות לכל קובץ.
+      </div>
+
+      <h3 style="margin-top:22px">2. בדיקת דגל העזרה והפרמטרים החדשים</h3>
+      <div class="code-row">
+        <pre class="code">python -m scripts.verify_tick_data --help</pre>
+        <button class="copy-btn" data-copy="python -m scripts.verify_tick_data --help">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> הופעת הפרמטר <code>--max-gap MAX_GAP</code> בתיעוד הפקודה עם הסבר על סף השניות לקפיצת זמן (ברירת מחדל 6.0).
+      </div>
+
+      <h3 style="margin-top:22px">3. עיון בפרק התיעוד החדש ב-operations.md</h3>
+      <div class="code-row">
+        <pre class="code">Get-Content docs/operations.md | Select-String -Pattern "Sample Discrepancies" -Context 0,20</pre>
+        <button class="copy-btn" data-copy="Get-Content docs/operations.md | Select-String -Pattern &quot;Sample Discrepancies&quot; -Context 0,20">העתק</button>
+      </div>
+      <div class="expected-box">
+        <b>מה אמורים לראות:</b> הצגת פרק התיעוד המלא הכולל את שש קטגוריות הפערים, בידוד המונים, ואופן הטיפול העמיד של מנוע הבקטסט.
+      </div>
+    </section>
+
+    <!-- ═══ FILES TABLE ═══ -->
+    <section class="panel">
+      <h2>📁 קבצים שהשתתפו בשינוי</h2>
+      <table>
+        <thead><tr><th>קובץ</th><th>תפקיד והשפעה</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="ltr"><code>docs/operations.md</code></td>
+            <td>תיעוד רשמי ומפורט של טקסונומיית פערי הדגימות, מדיניות דילוג בבקטסטר, ועקרונות בידוד שגיאות.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>scripts/verify_tick_data.py</code></td>
+            <td>הוספת דגל CLI גמיש <code>--max-gap</code>, הפרדת מונה <code>collector_errors</code>, וחידוד מנגנון הצגת הדגימות.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tests/test_verify_tick_data.py</code></td>
+            <td>כיסוי בדיקות ייעודי עבור בידוד המונים, התנהגות <code>--max-gap</code>, והתמודדות עם שורות פגומות.</td>
+          </tr>
+          <tr>
+            <td class="ltr"><code>tasks/plan.md</code> · <code>tasks/todo.md</code></td>
+            <td>תיעוד המשימות, אישורי השערים, ומעקב התקדמות של תחנות המחזור.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      נוצר עבור Issue #255 · Pull Request #257 מוזג בהצלחה (Squash, b5f4a36) · נסגר אוטומטית עם המיזוג
+    </footer>
+  </main>
+
+  <script>
+    document.querySelectorAll("button[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(btn.dataset.copy);
+        } catch (e) {
+          const ta = document.createElement("textarea");
+          ta.value = btn.dataset.copy;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          ta.remove();
+        }
+        const original = btn.textContent;
+        btn.textContent = "הועתק! ✔️";
+        setTimeout(() => { btn.textContent = original; }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>

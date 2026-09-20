@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>תצוגת האסטרטגיה — מה השתפר</title>
+  <style>
+    :root {
+      --bg: #0b1016;
+      --panel: #121a23;
+      --panel-2: #17212c;
+      --line: #2a3948;
+      --text: #edf3f7;
+      --muted: #9aabba;
+      --coral: #ff806d;
+      --cyan: #58c7e8;
+      --gold: #f1c75b;
+      --green: #52d0b1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .page { width: min(1120px, calc(100% - 36px)); margin: 0 auto; padding: 42px 0 54px; }
+    .eyebrow { color: var(--coral); font-size: 12px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { max-width: 760px; margin: 12px 0 14px; font-size: clamp(32px, 6vw, 64px); line-height: .98; letter-spacing: -.055em; }
+    .lead { max-width: 690px; margin: 0; color: var(--muted); font-size: clamp(16px, 2vw, 20px); line-height: 1.65; }
+    .demo { margin-top: 34px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; }
+    .demo-head { display: flex; justify-content: space-between; align-items: end; gap: 18px; flex-wrap: wrap; margin-bottom: 12px; }
+    .demo h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .demo-note { color: var(--muted); font-size: 13px; }
+    .chart-wrap { background: #0d141c; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    svg { display: block; width: 100%; height: auto; aspect-ratio: 2.3 / 1; }
+    .controls { display: flex; align-items: center; gap: 14px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+    input[type=range] { accent-color: var(--coral); flex: 1; min-width: 120px; }
+    .value { color: var(--text); font-weight: 800; min-width: 62px; text-align: left; direction: ltr; }
+    .support { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .card { padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+    .card h3 { margin: 0 0 9px; font-size: 15px; }
+    .card p { margin: 0; color: var(--muted); line-height: 1.65; font-size: 14px; }
+    .pill { display: inline-flex; margin-top: 13px; padding: 6px 9px; border-radius: 8px; color: var(--green); border: 1px solid #2e776b; background: #102b2c; font-size: 12px; font-weight: 700; }
+    footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 700px) {
+      .page { width: min(100% - 22px, 1120px); padding-top: 27px; }
+      .support { grid-template-columns: 1fr; }
+      .controls { flex-wrap: wrap; }
+      .controls input { order: 3; flex-basis: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="eyebrow">Backtest · תצוגת האסטרטגיה</div>
+    <h1>עכשיו רואים מה הפרמטרים באמת עושים.</h1>
+    <p class="lead">במקום גוש של תוויות שנדבקות זו לזו, הגרף מסדר את רמות המחיר בצד ומחבר כל אחת למקום שלה. כך אפשר להבין את הצעת המחיר במבט אחד.</p>
+
+    <section class="demo" aria-labelledby="demo-title">
+      <div class="demo-head">
+        <div>
+          <h2 id="demo-title">הזז את הרמות — התוויות נשארות קריאות</h2>
+          <div class="demo-note">כשהמחירים מתקרבים, התוויות יורדות לשורות נפרדות וקווי החיבור מראים לאן הן שייכות.</div>
+        </div>
+        <div class="value" id="spreadValue">קרוב מאוד</div>
+      </div>
+      <div class="chart-wrap">
+        <svg id="demoSvg" viewBox="0 0 900 390" role="img" aria-label="הדגמה של רמות מחיר ותוויות מופרדות">
+          <rect width="900" height="390" fill="#0d141c"/>
+          <g id="grid"></g>
+          <rect x="72" y="58" width="560" height="250" fill="#58c7e8" fill-opacity=".05" stroke="#58c7e8" stroke-opacity=".32" stroke-dasharray="6 4"/>
+          <g id="levels"></g>
+          <g id="labels"></g>
+          <text x="72" y="344" fill="#9aabba" font-size="13" font-family="ui-monospace,monospace">זמן החלון  ←</text>
+          <text x="48" y="66" fill="#9aabba" font-size="12" text-anchor="end" font-family="ui-monospace,monospace">$1.00</text>
+          <text x="48" y="190" fill="#9aabba" font-size="12" text-anchor="end" font-family="ui-monospace,monospace">$0.50</text>
+          <text x="48" y="312" fill="#9aabba" font-size="12" text-anchor="end" font-family="ui-monospace,monospace">$0.00</text>
+        </svg>
+      </div>
+      <div class="controls">
+        <span>רמות רחוקות</span>
+        <input id="crowd" type="range" min="0" max="100" value="82" aria-label="צפיפות רמות המחיר">
+        <span>רמות צמודות</span>
+        <span class="value" id="crowdValue">82%</span>
+      </div>
+    </section>
+
+    <section class="support" aria-label="מה מקבלים עכשיו">
+      <article class="card">
+        <h3>הגרף מספר את הסיפור</h3>
+        <p>רשת המחיר, אזור המחירים שאפשר לצטט, אזור ההשהיה ואזור הסיום נראים בנפרד. אין צורך לנחש איזה קו שייך לאיזה מחיר.</p>
+        <span class="pill">5 סימני הסבר במקום 7 צפופים</span>
+      </article>
+      <article class="card">
+        <h3>איפה רואים את זה?</h3>
+        <p>פתחו את Backtest Sweeper בדשבורד, שנו את הפרמטרים, והסתכלו על Strategy Geometry Preview שמתעדכן מיד.</p>
+        <span class="pill">אותם חישובים · תצוגה ברורה יותר</span>
+      </article>
+    </section>
+    <footer>העדכון שומר על המספרים והכללים של האסטרטגיה. הוא רק עושה אותם קלים יותר לקריאה.</footer>
+  </main>
+  <script>
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const grid = document.getElementById('grid');
+    const levels = document.getElementById('levels');
+    const labels = document.getElementById('labels');
+    const crowd = document.getElementById('crowd');
+    const crowdValue = document.getElementById('crowdValue');
+    const spreadValue = document.getElementById('spreadValue');
+    const esc = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    const make = (tag, attrs, text) => {
+      const el = document.createElementNS(svgNS, tag);
+      Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+      if (text != null) el.textContent = text;
+      return el;
+    };
+    for (let price = 0; price <= 1.001; price += .1) {
+      const y = 308 - price * 250;
+      grid.append(make('line', {x1:72, y1:y, x2:632, y2:y, stroke:price === .5 ? '#f1c75b' : '#263643', 'stroke-dasharray':price === .5 ? '5 4' : '2 5'}));
+    }
+    function render() {
+      const density = Number(crowd.value) / 100;
+      const center = 0.5;
+      const offsets = [.025, .024, .021, .018, .015];
+      const colors = ['#58c7e8', '#52d0b1', '#ff806d', '#f1c75b', '#9d8cff'];
+      const names = ['Long Bid', 'Short Comp', 'Stop Loss', 'Reversal', 'Mid'];
+      const prices = [center - offsets[0] * (1 - density), center + offsets[1] * (1 - density), center - .05 * (1 - density), center - .035 * (1 - density), center];
+      levels.replaceChildren(); labels.replaceChildren();
+      const desired = prices.map(price => 308 - price * 250).sort((a, b) => a - b);
+      const placed = [];
+      desired.forEach((y, i) => placed.push(Math.max(y, i ? placed[i - 1] + 29 : 72)));
+      const overflow = placed[placed.length - 1] - 300;
+      if (overflow > 0) placed.forEach((_, i) => placed[i] -= overflow);
+      prices.forEach((price, i) => {
+        const y = 308 - price * 250;
+        levels.append(make('line', {x1:72, y1:y, x2:632, y2:y, stroke:colors[i], 'stroke-width':i < 2 ? 3 : 2, 'stroke-dasharray':i > 1 ? '6 3' : ''}));
+        const labelY = placed[desired.indexOf(y)];
+        labels.append(make('line', {x1:632, y1:y, x2:684, y2:labelY, stroke:colors[i], 'stroke-opacity':'.75'}));
+        labels.append(make('circle', {cx:632, cy:y, r:3, fill:colors[i]}));
+        labels.append(make('rect', {x:690, y:labelY - 12, width:190, height:24, rx:5, fill:'#17212c', stroke:'#2a3948'}));
+        labels.append(make('text', {x:700, y:labelY + 4, fill:colors[i], 'font-size':12, 'font-family':'ui-monospace,monospace'}, `${names[i]}  $${price.toFixed(3)}`));
+      });
+      crowdValue.textContent = `${crowd.value}%`;
+      spreadValue.textContent = density > .7 ? 'קרוב מאוד' : density > .35 ? 'מתקרב' : 'מרווח';
+    }
+    crowd.addEventListener('input', render);
+    render();
+  </script>
+</body>
+</html>
