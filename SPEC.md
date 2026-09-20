@@ -19,15 +19,17 @@ trial volumes cap at 500MB while 5 days need ~8GB raw.
   appended by `write_snap`, `scripts/collect_ticks.py:303-315`, and must never
   be shipped mid-write), invoked from the watchdog loop behind a
   `DRIVE_REMOTE`-set flag (default off — Windows behavior unchanged).
-- Transport is `rclone` as a subprocess with env config
-  (`RCLONE_CONFIG_GDRIVE_*`, token pasted by the operator — service accounts
-  cannot see personal-Drive storage, so OAuth refresh token in env, never in
-  code). `google-api-python-client` is explicitly NOT used (new dep + same
-  OAuth problem, zero gain).
+- Transport is `rclone` (Debian package from the platform image) as a
+  subprocess with env config (`RCLONE_CONFIG_GDRIVE_*`, token pasted by the
+  operator — service accounts cannot see personal-Drive storage, so OAuth
+  refresh token in env, never in code). `google-api-python-client` is
+  explicitly NOT used (new dep + same OAuth problem, zero gain).
 - Per shipped day: the `.jsonl.gz`, a matching `.sha256` sidecar (charter §3.1
-  needs one checksum per golden day), plus a manifest snapshot for provenance;
-  a local `shipped.json` state file so restarts never re-upload; retry with
-  backoff, failures logged not raised (a stuck shipper must never kill capture).
+  needs one checksum per golden day), plus a ship-manifest snapshot for
+  provenance; an atomic local `shipped.json` state file so restarts never
+  re-upload; failures retried each watchdog pass, logged not raised (a stuck
+  shipper must never kill capture). Shipped days are pruned locally so the
+  500MB buffer never fills; only closed, write-stable days ship (mtime guard).
 
 ## Deliverable 3 — Runbook extension
 - `docs/collector-hosting-runbook.md` gains the Railway+Drive path: service

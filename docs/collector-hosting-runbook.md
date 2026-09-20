@@ -107,13 +107,21 @@ volume holds 2–3 gz days as buffer while the shipper mails finished days up.
    `DRIVE_REMOTE=gdrive:crypto-ticks`, plus `RCLONE_CONFIG_GDRIVE_TYPE=drive`
    and `RCLONE_CONFIG_GDRIVE_TOKEN` from step 3.
 3. **One-time Drive auth (on your PC, once):** install rclone, run
-   `rclone authorize "drive"` (or `rclone config` → new remote → Drive →
-   paste the browser token), then copy the resulting token JSON into
-   `RCLONE_CONFIG_GDRIVE_TOKEN`. Service accounts cannot see personal-Drive
-   storage — this personal token is the way in.
+   `rclone config` → new remote named `gdrive` → Drive → follow the browser
+   login, then print the token with `rclone config show gdrive` and paste the
+   `token = {...}` JSON into `RCLONE_CONFIG_GDRIVE_TOKEN` (mark the variable
+   **sensitive** in Railway so it never appears in logs; keep a copy in your
+   password manager). Service accounts cannot see personal-Drive storage —
+   this personal token is the way in. After the capture, revoke it at
+   https://myaccount.google.com/permissions and delete the variable.
 4. **Logs:** same healthy signs as §2, plus `ship: {'shipped': [...], ...}`
-   lines once a day closes. A failed upload is logged and retried — capture
-   never stops for shipping.
-5. **Pull a day:** from Drive (web or `rclone copyto`), then locally:
+   lines once a day closes. A failed upload is logged and retried each pass —
+   capture never stops for shipping. Shipped days vanish from the volume
+   (pruned after upload) — that is normal and is what keeps 500MB enough.
+5. **Pull a day** (direction matters — remote first, local second):
+   `rclone copyto gdrive:crypto-ticks/ticks_<day>.jsonl.gz .` plus the
+   matching `.sha256` sidecar, then locally, in one folder:
    `sha256sum -c ticks_<day>.jsonl.gz.sha256` and
    `python -m scripts.verify_tick_data run/ticks/ticks_<day>.jsonl.gz`.
+   Manual shipper run on the host (same env as the service):
+   `python -m scripts.ship_to_drive --out /data`.

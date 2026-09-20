@@ -1,6 +1,6 @@
 # Railway trial host for the golden capture (issue #285).
 #
-# Python service + rclone (static binary from apt — requirements.txt stays
+# Python service + rclone (Debian package from apt — requirements.txt stays
 # at 5 pip deps). The watchdog is the start command; it spawns and guards
 # the collector and ships closed days to Drive.
 #
