@@ -248,6 +248,15 @@ def test_tick_files_render_readiness_vocabulary():
     assert "Research Readiness" in html
     assert "Valid Tick Snapshots" in html
     assert "Tape Entries / Window" in html
+    assert "COMPLETE CAPTURE" in html
+    assert "PARTIAL CAPTURE" in html
+    assert "CORRUPTED DATA" in html
+    assert "tick-progress" in html
+    assert "EXPLORATORY " in html
+    assert "RESEARCH READY " in html
+    assert "toggleReadinessTooltip" in html
+    assert "The targets tell us whether this file contains enough varied data" in html
+    assert "claim_note" not in html
 
 
 def test_api_ticks_manifest_aggregate_empty_dir(tmp_path, monkeypatch):
@@ -294,6 +303,8 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     res = client.get("/api/ticks/verify", params={"file": f1.name, "wait": 1})
     assert res.status_code == 200
     assert res.json()["readiness"]["level"] == "INSUFFICIENT"
+    assert res.json()["readiness"]["targets"]["exploratory"]["min_valid_ticks"] == 1_000
+    assert res.json()["capture_state"]["label"] == "CORRUPTED DATA"
 
     agg = client.get("/api/ticks/manifest").json()["aggregate"]
     assert agg["series_counts_source"] == "verify_cache"

@@ -499,6 +499,8 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
                              for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
             sampling_gaps=sum(int(cached.get("sampling_gaps_count", 0)) for f, _ in entries
                              for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+            collector_errors=sum(int(cached.get("collector_errors", 0)) for f, _ in entries
+                                for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
         )
 
     if not series_counts and entries:
@@ -523,6 +525,7 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
         "market_breakdown": aggregate_market,
         "time_blocks": sorted(time_blocks),
         "readiness": aggregate_readiness,
+        "readiness_targets": (aggregate_readiness or {}).get("targets"),
     }
 
 
@@ -568,7 +571,9 @@ def api_ticks_manifest():
             )
             entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
             entry["readiness"] = (cached or {}).get("readiness")
+            entry["readiness_targets"] = (cached or {}).get("readiness", {}).get("targets")
             entry["integrity_status"] = (cached or {}).get("status")
+            entry["capture_state"] = (cached or {}).get("capture_state")
             if cached:
                 entry["windows_count"] = int(cached.get("windows_count", 0))
     except Exception:
@@ -2572,6 +2577,22 @@ textarea:focus-visible,
 .bar{height:6px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;overflow:hidden;margin-top:6px}
 .fill{height:100%;border-radius:99px}
 .fill.up{background:var(--up)} .fill.warn{background:var(--proj)} .fill.gold{background:var(--gold)} .fill.down{background:var(--down)}
+.tick-progress{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px}
+.tick-progress-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;font-size:11px}
+.tick-progress-label{font-weight:700;color:var(--tx)}
+.tick-progress-value{font-family:var(--mono);color:var(--dim);white-space:nowrap}
+.tick-progress-target-label{font:700 9px var(--disp);letter-spacing:.05em;color:var(--faint);margin-top:6px}
+.tick-progress-track{height:7px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;overflow:hidden;margin-top:3px}
+.tick-progress-fill{height:100%;border-radius:99px;transition:width .2s ease}
+.tick-progress-fill.min{background:var(--up)} .tick-progress-fill.max{background:var(--gold)}
+.tick-progress-targets{display:flex;justify-content:space-between;gap:8px;color:var(--faint);font:10px var(--mono);margin-top:4px}
+.tick-progress-next{color:var(--gold);font-size:10px;margin-top:3px}
+.tick-info{display:inline-grid;place-items:center;width:18px;height:18px;padding:0;margin-left:5px;border:1px solid var(--line-hi);border-radius:50%;background:var(--panel2);color:var(--cyan);font:700 11px var(--mono);cursor:pointer;vertical-align:middle}
+.tick-info:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+.tick-tooltip{position:relative;display:inline-block}
+.tick-tooltip-pop{position:absolute;right:0;top:25px;z-index:30;width:300px;padding:10px 12px;background:var(--panel2);border:1px solid var(--line-hi);border-radius:8px;box-shadow:0 8px 22px rgba(0,0,0,.45);font:12px/1.45 var(--body);color:var(--tx);text-transform:none;letter-spacing:normal;text-align:left}
+.tick-tooltip-pop[hidden]{display:none}
+@media(max-width:700px){.tick-tooltip-pop{position:fixed;right:12px;left:12px;top:auto;bottom:12px;width:auto}}
 .tbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
 .tbl th{font:700 11px var(--disp);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:10px 8px;border-bottom:1px solid var(--line-dark);font-size:13px;vertical-align:middle}
@@ -5553,33 +5574,103 @@ function runVerifyQueue(){
   })();
 }
 
-function fileVerifyStatusBits(st){
+function fileVerifyStatusBits(st, capture){
   const s = st || 'UNKNOWN';
-  const color = s === 'PASS' ? 'var(--up)' : s === 'WARN' ? 'var(--gold)' : 'var(--down)';
-  const label = s === 'PASS' ? '✅ PASS' : s === 'WARN' ? '⚠️ WARN' : '❌ FAIL';
+  const state = capture || {};
+  const color = s === 'PASS' ? 'var(--up)' : s === 'WARN' ? 'var(--gold)' : s === 'FAIL' ? 'var(--down)' : 'var(--dim)';
+  const label = state.label || (s === 'PASS' ? 'COMPLETE CAPTURE' : s === 'WARN' ? 'PARTIAL CAPTURE' : s === 'FAIL' ? 'CORRUPTED DATA' : 'PENDING');
   return {color, label};
+}
+
+function formatReadinessValue(name, value){
+  if(name && name.endsWith('_rate')) return `${(Number(value || 0) * 100).toFixed(2)}%`;
+  return Number(value || 0).toLocaleString();
+}
+
+function readinessProgressRow(exploratory, research){
+  const e = exploratory || {}, r = research || {};
+  const name = e.name || r.name || '';
+  const measured = Number(e.measured ?? r.measured ?? 0);
+  const direction = e.direction || r.direction || 'min';
+  const eTarget = Number(e.required ?? 0), rTarget = Number(r.required ?? 0);
+  const pct = (target) => direction === 'max'
+    ? (target === 0 ? (measured === 0 ? 100 : 0) : Math.min(100, (target / Math.max(measured, target)) * 100))
+    : (target === 0 ? 100 : Math.min(100, (measured / target) * 100));
+  const remaining = (target) => direction === 'max'
+    ? (measured <= target ? 'target reached' : `${formatReadinessValue(name, measured - target)} above limit`)
+    : (measured >= target ? 'target reached' : `${formatReadinessValue(name, target - measured)} more needed`);
+  const eOk = Boolean(e.ok), rOk = Boolean(r.ok);
+  const next = eOk ? (rOk ? 'both targets reached' : `Next: RESEARCH READY · ${remaining(rTarget)}`) : `Next: EXPLORATORY · ${remaining(eTarget)}`;
+  const label = e.label || r.label || name;
+  const fillClass = direction === 'max' ? 'max' : 'min';
+  return `<div class="tick-progress" data-metric="${esc(name)}">
+    <div class="tick-progress-head"><span class="tick-progress-label">${esc(label)}</span><span class="tick-progress-value">${formatReadinessValue(name, measured)} measured</span></div>
+    <div class="tick-progress-target-label">EXPLORATORY ${eOk ? '✓' : ''}</div><div class="tick-progress-track" role="progressbar" aria-label="${esc(label)} exploratory progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct(eTarget))}"><div class="tick-progress-fill ${fillClass}" style="width:${pct(eTarget).toFixed(1)}%"></div></div>
+    <div class="tick-progress-target-label">RESEARCH READY ${rOk ? '✓' : ''}</div><div class="tick-progress-track" role="progressbar" aria-label="${esc(label)} research progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct(rTarget))}"><div class="tick-progress-fill ${fillClass}" style="width:${pct(rTarget).toFixed(1)}%"></div></div>
+    <div class="tick-progress-targets"><span>Exploratory target: ${formatReadinessValue(name, eTarget)}</span><span>Research target: ${formatReadinessValue(name, rTarget)}</span></div>
+    <div class="tick-progress-next">${esc(next)}</div>
+  </div>`;
+}
+
+function renderReadinessProgress(readiness){
+  const exploratory = readiness && readiness.exploratory_checks || [];
+  const research = readiness && readiness.research_checks || [];
+  const byName = new Map(research.map(c => [c.name, c]));
+  return exploratory.map(e => readinessProgressRow(e, byName.get(e.name))).join('');
+}
+
+window.toggleReadinessTooltip = function(button){
+  const tip = document.getElementById(button.getAttribute('aria-controls'));
+  if(!tip) return;
+  const open = !tip.hidden;
+  tip.hidden = open;
+  button.setAttribute('aria-expanded', String(!open));
+};
+if(!window._readinessTooltipBound){
+  window._readinessTooltipBound = true;
+  if(document.addEventListener){
+    document.addEventListener('keydown', event => {
+      if(event.key === 'Escape') document.querySelectorAll('.tick-tooltip-pop:not([hidden])').forEach(tip => {
+        tip.hidden = true;
+        const button = document.querySelector(`[aria-controls="${tip.id}"]`);
+        if(button) button.setAttribute('aria-expanded', 'false');
+      });
+    });
+    document.addEventListener('click', event => {
+      document.querySelectorAll('.tick-tooltip-pop:not([hidden])').forEach(tip => {
+        if(!tip.parentElement.contains(event.target)){
+          tip.hidden = true;
+          const button = document.querySelector(`[aria-controls="${tip.id}"]`);
+          if(button) button.setAttribute('aria-expanded', 'false');
+        }
+      });
+    });
+  }
 }
 
 // Inline per-file integrity report — rendered under the file's row in the
 // files table (accordion body). No modal.
-function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: statusLabel} = fileVerifyStatusBits(d.status);
+function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: statusLabel} = fileVerifyStatusBits(d.status, d.capture_state);
   const readiness = d.readiness || {};
   const readinessColor = readiness.level === 'RESEARCH_READY' ? 'var(--up)' : readiness.level === 'EXPLORATORY' ? 'var(--gold)' : readiness.level === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
-  const failedChecks = (readiness.checks || []).filter(c => !c.ok).map(c => `${c.name}: ${c.measured} (required ${c.required})`);
+  const progressHtml = renderReadinessProgress(readiness);
 
   let html = `
 
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div>
-        <div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em">Overall Integrity Status</div>
-        <div style="font:700 17px var(--disp);color:${statusColor};margin-top:2px">${statusLabel}</div>
+        <div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase;letter-spacing:.05em">Capture State</div>
+        <div style="font:700 17px var(--disp);color:${statusColor};margin-top:2px">${esc(statusLabel)}</div>
+        <div style="font-size:11px;color:var(--dim);margin-top:3px">${esc((d.capture_state || {}).description || '')}</div>
+        <div style="font-size:11px;color:var(--gold);margin-top:3px">${esc((d.capture_state || {}).action || '')}</div>
       </div>
       <div class="mono" style="font-size:12px;color:var(--dim)">🔍 Integrity Report · ${esc(filename)}</div>
     </div>
     <div style="display:flex;gap:14px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px">
-      <div style="min-width:155px"><div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase">Research Readiness</div><div style="font:700 17px var(--disp);color:${readinessColor};margin-top:2px">${esc(readiness.level || 'PENDING')}</div></div>
-      <div style="font-size:12px;color:var(--dim);line-height:1.45">${esc(readiness.claim_note || 'Readiness requires a completed verification report.')} ${failedChecks.length ? `<br><span style="color:var(--gold)">Needs: ${esc(failedChecks.join('; '))}</span>` : ''}</div>
+      <div style="min-width:210px"><div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase">Research Readiness <span class="tick-tooltip"><button type="button" class="tick-info" aria-expanded="false" aria-controls="readiness_tip_${esc(filename)}" aria-label="Explain Research Readiness" onclick="toggleReadinessTooltip(this)">i</button><span id="readiness_tip_${esc(filename)}" class="tick-tooltip-pop" role="tooltip" hidden>The targets tell us whether this file contains enough varied data for the selected analysis. They do not prove that the strategy is profitable. Choose settings on one period and check them on a later period that was not used for choosing them.</span></span></div><div style="font:700 17px var(--disp);color:${readinessColor};margin-top:2px">${esc(readiness.level || 'PENDING')}</div></div>
+      <div style="font-size:11px;color:var(--dim);line-height:1.45">Each metric below is checked independently. One large number cannot compensate for a missing market, day, or quality check.</div>
     </div>
+    <div style="margin-bottom:10px">${progressHtml}</div>
 
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
@@ -5694,7 +5785,7 @@ async function verifyTickData(filename, refresh){
     // Refresh the status badge on the file row.
     const badge = document.getElementById('verify_badge_' + filename);
     if(badge){
-      const {color, label} = fileVerifyStatusBits(d.status);
+      const {color, label} = fileVerifyStatusBits(d.status, d.capture_state);
       badge.textContent = label;
       badge.style.color = color;
     }

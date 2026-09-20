@@ -16,6 +16,9 @@ from scripts.verify_tick_data import (
     verify_ticks_dir,
     format_report_text,
     assess_readiness,
+    capture_state,
+    READINESS_POLICIES,
+    READINESS_POLICY_VERSION,
 )
 
 
@@ -88,6 +91,36 @@ def test_assess_readiness_has_explicit_exploratory_and_research_levels():
         raw_lines=1000, corrupt_lines=0, schema_errors=0, sampling_gaps=0,
     )
     assert exploratory["level"] == "EXPLORATORY"
+
+
+def test_readiness_exposes_shared_targets_and_progress_direction():
+    result = assess_readiness(
+        valid_ticks=12,
+        windows_count=1,
+        tape_entries=0,
+        market_breakdown=[{"series": "btc-up-or-down-5m", "duration": 300, "windows": 1, "trades": 0}],
+        time_blocks=[], raw_lines=12, corrupt_lines=0, schema_errors=0,
+        sampling_gaps=0, collector_errors=0,
+    )
+    assert result["policy_version"] == READINESS_POLICY_VERSION
+    assert result["targets"]["exploratory"] == READINESS_POLICIES["EXPLORATORY"]
+    assert result["targets"]["research_ready"] == READINESS_POLICIES["RESEARCH_READY"]
+    checks = {c["name"]: c for c in result["exploratory_checks"]}
+    assert checks["valid_ticks"]["required"] == 1_000
+    assert checks["valid_ticks"]["direction"] == "min"
+    assert checks["sampling_gap_rate"]["direction"] == "max"
+    assert result["level"] == "INSUFFICIENT"
+
+
+def test_capture_state_describes_file_and_action():
+    assert capture_state("PASS", {})["label"] == "COMPLETE CAPTURE"
+    partial = capture_state("WARN", {"sampling_gaps_count": 4, "collector_errors": 2})
+    assert partial["label"] == "PARTIAL CAPTURE"
+    assert "timestamp gaps" in partial["description"]
+    assert "exploration" in partial["action"]
+    broken = capture_state("FAIL", {"corrupt_lines": 3, "schema_errors": 4})
+    assert broken["label"] == "CORRUPTED DATA"
+    assert "corrupt rows" in broken["description"]
 
 
 def test_verify_book_clean():
@@ -200,6 +233,8 @@ def test_verify_tick_file_clean_and_corrupt(tmp_path: Path):
     assert rep["status"] == "PASS"
     assert rep["valid_ticks"] == 10
     assert rep["corrupt_lines"] == 0
+    assert rep["capture_state"]["label"] == "COMPLETE CAPTURE"
+    assert "targets" in rep["readiness"]
 
     # Add corrupt lines
     corrupt_file = tmp_path / "ticks_corrupt.jsonl"
