@@ -2774,9 +2774,7 @@ textarea:focus-visible,
 #btParamPreviewWrap{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:14px;transition:border-color .15s ease}
 #btParamPreviewWrap:hover{border-color:var(--line-hi)}
 .bt-preview-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:10px}
-.bt-preview-title{display:flex;align-items:baseline;gap:9px;min-width:0}
-.bt-preview-title h4{margin:0;font:700 12px var(--disp);color:var(--tx);letter-spacing:.06em;text-transform:uppercase}
-.bt-preview-title span{font:500 10px var(--mono);color:var(--dim)}
+.bt-preview-sub{font:500 10px var(--mono);color:var(--dim)}
 .bt-preview-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
 .bt-preview-pill{font:600 10px var(--mono);line-height:1.35;padding:4px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .bt-preview-pill b{color:var(--tx);font-weight:700}
@@ -2786,10 +2784,6 @@ textarea:focus-visible,
 .bt-preview-pill-cyan{color:var(--cyan);border-color:rgba(56,189,248,0.3);background:rgba(56,189,248,0.08)}
 .bt-preview-chart-shell{width:100%;background:rgba(10,13,18,0.55);border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .bt-preview-chart-shell svg{display:block;width:100%;height:clamp(180px, calc((100vw - 300px) / 3), 540px);aspect-ratio:auto}
-.bt-preview-legend{display:flex;gap:8px 16px;flex-wrap:wrap;align-items:center;margin-top:11px;font:500 10px var(--mono);color:var(--dim)}
-.bt-preview-legend-item{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
-.bt-preview-swatch{display:inline-block;flex:0 0 auto;width:13px;height:3px;border-radius:2px}
-.bt-preview-swatch-zone{width:11px;height:11px;border:1px solid;border-radius:3px}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -3082,10 +3076,7 @@ textarea:focus-visible,
         <div class="bt-section-body" id="btSecGeometryBody">
       <div id="btParamPreviewWrap">
         <div class="bt-preview-header">
-          <div class="bt-preview-title">
-            <h4>📐 Strategy Geometry Preview</h4>
-            <span>2D price × time</span>
-          </div>
+          <span class="bt-preview-sub">2D price × time</span>
           <div id="btPreviewMetricsPills" class="bt-preview-pills" aria-label="Preview metrics">
             <!-- Dynamic metric summary pills rendered by updateBacktestParamPreview() -->
           </div>
@@ -3094,13 +3085,6 @@ textarea:focus-visible,
           <svg id="btParamPreviewSvg" viewBox="0 0 900 300" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Strategy price levels across the active window">
             <!-- Rendered by updateBacktestParamPreview() -->
           </svg>
-        </div>
-        <div id="btParamPreviewLegend" class="bt-preview-legend" aria-label="Preview legend">
-          <span class="bt-preview-legend-item"><span class="bt-preview-swatch bt-preview-swatch-zone" style="background:rgba(56,189,248,0.12);border-color:var(--cyan)"></span>Quotable corridor</span>
-          <span class="bt-preview-legend-item"><span class="bt-preview-swatch" style="background:var(--cyan)"></span>Quote levels</span>
-          <span class="bt-preview-legend-item"><span class="bt-preview-swatch" style="background:var(--down)"></span>Stop / exit levels</span>
-          <span class="bt-preview-legend-item"><span class="bt-preview-swatch bt-preview-swatch-zone" style="background:rgba(235,178,58,0.14);border-color:var(--gold)"></span>Entry delay</span>
-          <span class="bt-preview-legend-item"><span class="bt-preview-swatch bt-preview-swatch-zone" style="background:rgba(240,104,77,0.14);border-color:var(--down)"></span>Dead zone</span>
         </div>
       </div>
 
@@ -3156,8 +3140,7 @@ textarea:focus-visible,
       </button>
       <div class="bt-section-body" id="btSecSweepBody">
       <div class="card" id="btSweepCard">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-        <h3 style="margin:0">🔬 Sweep Visual — one axis, X-Y</h3>
+      <div style="display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select id="btSweepAxis" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
             <option value="queue" selected>Queue depth — shares ahead</option>
@@ -3168,8 +3151,8 @@ textarea:focus-visible,
           <button class="btn btn-primary" id="btnRunSweepVisual" onclick="runSweepVisual()">▶ Run Sweep Visual</button>
         </div>
       </div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:10px">Each bar is a separate replay of the selected file. Only the chosen axis moves; the other settings stay fixed. Stop distance sweeps 5m and 15m markets together.</div>
-      <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim);margin-bottom:6px"></div>
+      <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
+      <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:10px}</style>
       <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
         <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
         <canvas id="chartSweepAgg" height="140"></canvas>
@@ -3200,8 +3183,7 @@ textarea:focus-visible,
       </button>
       <div class="bt-section-body" id="btSecLogBody">
       <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-        <h3 style="margin:0">📝 Executed Windows Log</h3>
+      <div style="display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
         <div id="btLogControls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="text" id="btLogSearch" placeholder="Search slug/cid..." oninput="onBtLogFilterChange()" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg);width:140px">
           <select id="btLogSeriesFilter" onchange="onBtLogFilterChange()" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
