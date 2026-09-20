@@ -93,3 +93,27 @@ fly logs   # same healthy signs as §2
 - [ ] TASK-3: `--once` passes ON the host.
 - [ ] TASK-4: 1+ hour proof (manifest excerpt + watchdog log pasted into #283).
 - [ ] TASK-5: day file pulled, `verify_tick_data` clean, `sha256` recorded.
+
+## 7. Railway trial + Drive path (issue #285 — operator's override)
+
+Trial math: ~$1.50 compute for 6 days sits inside the $5 credit; the 500MB
+volume holds 2–3 gz days as buffer while the shipper mails finished days up.
+
+1. **Service:** New Python service from this repo/branch. `nixpacks.toml` at
+   the root installs `rclone` and starts the watchdog. Add a **500MB volume**
+   mounted at `/data`.
+2. **Variables** (dashboard, never in code):
+   `COLLECT_OUT=/data`, `COLLECT_EXTRA_ARGS=--gzip`,
+   `DRIVE_REMOTE=gdrive:crypto-ticks`, plus `RCLONE_CONFIG_GDRIVE_TYPE=drive`
+   and `RCLONE_CONFIG_GDRIVE_TOKEN` from step 3.
+3. **One-time Drive auth (on your PC, once):** install rclone, run
+   `rclone authorize "drive"` (or `rclone config` → new remote → Drive →
+   paste the browser token), then copy the resulting token JSON into
+   `RCLONE_CONFIG_GDRIVE_TOKEN`. Service accounts cannot see personal-Drive
+   storage — this personal token is the way in.
+4. **Logs:** same healthy signs as §2, plus `ship: {'shipped': [...], ...}`
+   lines once a day closes. A failed upload is logged and retried — capture
+   never stops for shipping.
+5. **Pull a day:** from Drive (web or `rclone copyto`), then locally:
+   `sha256sum -c ticks_<day>.jsonl.gz.sha256` and
+   `python -m scripts.verify_tick_data run/ticks/ticks_<day>.jsonl.gz`.

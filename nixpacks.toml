@@ -1,0 +1,18 @@
+# Railway trial host for the golden capture (issue #285).
+#
+# Python service + rclone (static binary from apt — requirements.txt stays
+# at 5 pip deps). The watchdog is the start command; it spawns and guards
+# the collector and ships closed days to Drive.
+#
+# Env (Railway dashboard → Variables; the Drive token NEVER lives in repo):
+#   COLLECT_OUT=/data                  # 500MB volume mount path
+#   COLLECT_EXTRA_ARGS=--gzip          # raw days (~1.5GB) don't fit the buffer
+#   DRIVE_REMOTE=gdrive:crypto-ticks   # rclone destination
+#   RCLONE_CONFIG_GDRIVE_TYPE=drive
+#   RCLONE_CONFIG_GDRIVE_TOKEN=<paste from one-time `rclone authorize` on PC>
+
+[phases.setup]
+aptPkgs = ["rclone"]
+
+[start]
+cmd = "python -m scripts.collector_watchdog"
