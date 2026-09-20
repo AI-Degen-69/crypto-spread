@@ -2752,6 +2752,24 @@ textarea:focus-visible,
 .param-structural{border-left:2px solid var(--down) !important;padding-left:8px;border-radius:2px}
 .bt-section-dot-amber{background:var(--gold)}
 .bt-section-dot-blue{background:var(--proj)}
+.bt-peer-layout{display:flex;flex-direction:column;gap:14px}
+.bt-peer-section{margin:0!important;padding:12px 14px!important;background:var(--panel)!important;border-top:2px solid var(--up)!important}
+.bt-peer-section .bt-section-body{padding-top:10px}
+.bt-peer-section .bt-section-head{font-size:12px;padding:0}
+.bt-peer-section .bt-section-head .bt-section-dot{flex:0 0 auto}
+.bt-chart-card{position:relative;min-width:0;cursor:zoom-in;transition:border-color .15s ease,box-shadow .15s ease}
+.bt-chart-card:hover{border-color:var(--line-hi)!important}
+.bt-chart-card:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+.bt-chart-card::after{content:'Open chart';position:absolute;right:8px;top:7px;font:600 9px var(--disp);color:var(--faint);opacity:0;transition:opacity .15s ease}
+.bt-chart-card:hover::after,.bt-chart-card:focus-visible::after{opacity:1}
+.bt-chart-dialog[hidden]{display:none}
+.bt-chart-dialog{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(5,8,12,.78)}
+.bt-chart-dialog-panel{width:min(1100px,calc(100vw - 32px));max-height:calc(100vh - 40px);overflow:auto;background:var(--panel);border:1px solid var(--line-hi);border-radius:12px;padding:16px;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+.bt-chart-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.bt-chart-dialog-title{margin:0;font:700 13px var(--disp);letter-spacing:.05em;text-transform:uppercase;color:var(--tx)}
+.bt-chart-dialog-close:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.bt-chart-dialog-canvas{display:block;width:100%;height:min(62vh,560px)!important}
+@media(max-width:600px){.bt-chart-dialog{padding:10px}.bt-chart-dialog-panel{width:calc(100vw - 20px);padding:12px}.bt-chart-dialog-canvas{height:58vh!important}}
 /* ── Backtest Strategy Geometry Preview (Issue #263) ───────────────────────── */
 #btParamPreviewWrap{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:14px;transition:border-color .15s ease}
 #btParamPreviewWrap:hover{border-color:var(--line-hi)}
@@ -2887,8 +2905,15 @@ textarea:focus-visible,
 
   <!-- TAB 2: BACKTEST ENGINE & SWEEPER -->
   <div id="tab-backtest" class="tab-content">
-    <div class="card" style="border-top:2px solid var(--up)">
-      <h3>⚡ Backtest Parameters <span class="mono" id="btHash" style="font-size:11px;color:var(--dim)"></span></h3>
+    <div class="bt-peer-layout">
+    <div class="bt-section bt-peer-section" id="btSecParameters">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecParametersBody" onclick="toggleBtSection(this,'btSecParametersBody')">
+        <span class="bt-section-dot bt-section-dot-green"></span>
+        <span>⚡ Backtest Parameters</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecParametersBody">
+      <div class="mono" id="btHash" style="font-size:11px;color:var(--dim);margin-bottom:8px"></div>
       <div class="bt-accordion" style="margin-top:12px">
         <!-- ── 1. OPERATOR CONTROLS (live-replicable) ─────────────────────── -->
         <div class="bt-section" id="btSecOperator">
@@ -3044,8 +3069,17 @@ textarea:focus-visible,
         </div>
 
       </div>
+      </div>
+      </div>
 
       <!-- ── 3. STRATEGY GEOMETRY PREVIEW (2D Price-Time Grid, Issue #198) ── -->
+      <div class="bt-section bt-peer-section" id="btSecGeometry">
+        <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecGeometryBody" onclick="toggleBtSection(this,'btSecGeometryBody')">
+          <span class="bt-section-dot bt-section-dot-blue"></span>
+          <span>📐 Strategy Geometry Preview</span>
+          <span class="bt-section-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div class="bt-section-body" id="btSecGeometryBody">
       <div id="btParamPreviewWrap">
         <div class="bt-preview-header">
           <div class="bt-preview-title">
@@ -3074,10 +3108,18 @@ textarea:focus-visible,
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
       </div>
-    </div>
+        </div>
+      </div>
 
-    <div class="card" id="btOverallCard">
-      <h3>📈 Overall Execution Results</h3>
+    <div class="bt-section bt-peer-section" id="btSecOverall">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOverallBody" onclick="toggleBtSection(this,'btSecOverallBody')">
+        <span class="bt-section-dot bt-section-dot-green"></span>
+        <span>📈 Overall Execution Results</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecOverallBody">
+      <div class="card" id="btOverallCard">
+
       <div class="kpi" id="btKpiRow">
         <div class="box" title="Net cumulative P&L across all executed windows"><div class="lbl">Total P&L</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 / window</div></div>
         <div class="box" title="Proportion of windows where both legs filled and merged for profit"><div class="lbl">Pair Capture Rate ℹ️</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 / 0 pairs</div></div>
@@ -3102,9 +3144,18 @@ textarea:focus-visible,
         </div>
         <canvas id="chartPnlHist" height="140"></canvas>
       </div>
+      </div>
+      </div>
     </div>
 
-    <div class="card" id="btSweepCard">
+    <div class="bt-section bt-peer-section" id="btSecSweep">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecSweepBody" onclick="toggleBtSection(this,'btSecSweepBody')">
+        <span class="bt-section-dot bt-section-dot-amber"></span>
+        <span>🔬 Sweep Visual</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecSweepBody">
+      <div class="card" id="btSweepCard">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
         <h3 style="margin:0">🔬 Sweep Visual — one axis, X-Y</h3>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -3119,19 +3170,36 @@ textarea:focus-visible,
       </div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:10px">Each bar is a separate replay of the selected file. Only the chosen axis moves; the other settings stay fixed. Stop distance sweeps 5m and 15m markets together.</div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim);margin-bottom:6px"></div>
-      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
+      <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
         <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
         <canvas id="chartSweepAgg" height="140"></canvas>
       </div>
       <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px"></div>
+      </div>
+      </div>
     </div>
 
-    <div class="card">
-      <h3>📊 Per-Series Performance</h3>
+    <div class="bt-section bt-peer-section" id="btSecSeries">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecSeriesBody" onclick="toggleBtSection(this,'btSecSeriesBody')">
+        <span class="bt-section-dot bt-section-dot-blue"></span>
+        <span>📊 Per-Series Performance</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecSeriesBody">
+      <div class="card">
       <div id="btSeriesTableWrap"></div>
+      </div>
+      </div>
     </div>
 
-    <div class="card">
+    <div class="bt-section bt-peer-section" id="btSecLog">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecLogBody" onclick="toggleBtSection(this,'btSecLogBody')">
+        <span class="bt-section-dot bt-section-dot-blue"></span>
+        <span>📝 Executed Windows Log</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecLogBody">
+      <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
         <h3 style="margin:0">📝 Executed Windows Log</h3>
         <div id="btLogControls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -3161,7 +3229,20 @@ textarea:focus-visible,
           <button class="btn" id="btLogBtnNext" onclick="onBtLogPageNext()" style="padding:3px 10px;font-size:11.5px" disabled>Next ▶</button>
         </div>
       </div>
+      </div>
     </div>
+    </div>
+  </div>
+
+  <div id="btChartDialog" class="bt-chart-dialog" role="dialog" aria-modal="true" aria-labelledby="btChartDialogTitle" hidden>
+    <div class="bt-chart-dialog-panel">
+      <div class="bt-chart-dialog-head">
+        <h2 id="btChartDialogTitle" class="bt-chart-dialog-title">Sweep chart detail</h2>
+        <button type="button" class="btn bt-chart-dialog-close" id="btChartDialogClose" aria-label="Close expanded chart">✕ Close</button>
+      </div>
+      <canvas id="btChartDialogCanvas" class="bt-chart-dialog-canvas"></canvas>
+    </div>
+  </div>
   </div>
 
   <!-- TAB 3: STATISTICAL ANALYSIS & DISTRIBUTIONS -->
@@ -4404,6 +4485,14 @@ function marketName(series){
   return m ? `${ASSET_LABELS[m[1]]||m[1].toUpperCase()} ${m[2]}` : String(series||'');
 }
 
+// Backtest-facing market label. Slugs remain stable filter values; only the
+// customer-facing text is canonicalized to duration-first format.
+function canonicalMarketName(series){
+  const m = /^([a-z]{3})-up-or-down-(\d+)m$/.exec(String(series||''));
+  if(!m) return String(series||'');
+  return `${String(m[2]).padStart(2, '0')}m ${ASSET_LABELS[m[1]]||m[1].toUpperCase()}`;
+}
+
 // ── Parameter registry (issue #164) ──────────────────────────────────────
 // Backtest and Cockpit render from one definition. Every label, min, max and
 // title below comes from /api/params/spec; nothing here hard-codes a shared
@@ -4662,7 +4751,10 @@ async function tick(){
 // Backtest execution
 let equityChartInstance = null;
 let pnlHistChartInstance = null;
+let btChartDialogInstance = null;
 window.selectedBacktestFile = "";
+window._btSweepVisualData = null;
+window._btChartDialogTrigger = null;
 window._btRunning = false;
 
 function setBacktestLoadingState(isLoading){
@@ -4717,7 +4809,18 @@ function toggleBtSection(btn, bodyId){
   if(typeof document === 'undefined' || !document.getElementById || !document.querySelector) return;
   let state = {};
   try { state = JSON.parse(localStorage.getItem('btSectionsOpen') || '{}'); } catch(e) {}
-  const defaults = { btSecOperatorBody: true, btSecExecutionBody: false, btSecPolicyBody: false };
+  const defaults = {
+    btSecParametersBody: true,
+    btSecGeometryBody: true,
+    btSecOverallBody: true,
+    btSecSweepBody: true,
+    btSecSeriesBody: true,
+    btSecLogBody: true,
+    btSecOperatorBody: true,
+    btSecStructuralBody: true,
+    btSecExecutionBody: false,
+    btSecPolicyBody: false
+  };
   Object.keys(defaults).forEach(function(id){
     const body = document.getElementById(id);
     const btn = body ? document.querySelector('.bt-section-head[aria-controls="' + id + '"]') : null;
@@ -4961,7 +5064,8 @@ async function runBacktest(fileOverride){
       + '<th>Monotonic</th>'
       + '</tr></thead><tbody>';
     for(const [k,v] of Object.entries(data.per_series||{})){
-      stbl+=`<tr><td style="font-weight:700">${esc(v.label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
+      const label = canonicalMarketName(k || v.label);
+      stbl+=`<tr><td style="font-weight:700">${esc(label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
     }
     stbl+='</tbody></table>';
     $('btSeriesTableWrap').innerHTML=stbl;
@@ -4973,7 +5077,7 @@ async function runBacktest(fileOverride){
       const currentVal = $('btLogSeriesFilter').value;
       const seriesLabels = new Map();
       for (const t of window.allBacktestTrades) {
-        if (t.series && t.label) seriesLabels.set(t.series, t.label);
+        if (t.series) seriesLabels.set(t.series, canonicalMarketName(t.series || t.label));
       }
       let opts = '<option value="">All Series</option>';
       for (const [slug, label] of seriesLabels.entries()) {
@@ -5093,7 +5197,7 @@ function renderBacktestTradesPage() {
 
       ttbl += `<tr>`
         + `<td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${esc(t.slug.slice(-14))}</td>`
-        + `<td style="font-weight:600">${esc(t.label || t.series)}</td>`
+        + `<td style="font-weight:600">${esc(canonicalMarketName(t.series || t.label || ''))}</td>`
         + `<td>${resPill}</td>`
         + `<td class="mono" style="font-size:12px">${entryUpStr}</td>`
         + `<td class="mono" style="font-size:12px">${entryDnStr}</td>`
@@ -5174,19 +5278,138 @@ async function runSweepVisual(){
   }
 }
 
-function renderSweepVisual(data){
-  const theme = getThemeTokens();
-  const points = data.points || [];
-  const labels = points.map(p => p.label);
-  const xVals = points.map(p => Number(p.value));
-  const axisLabels = {
+function sweepAxisLabel(axis){
+  return ({
     queue: 'Queue depth — shares ahead',
     offset: 'Quote offset — distance from anchor',
     exit_stop: 'Stop distance — 5m + 15m markets',
     exit_rev: 'Reversal buffer — distance from anchor'
-  };
-  const axisLabel = axisLabels[data.axis] || data.axis;
+  })[axis] || axis;
+}
+
+function sweepChartOptions(data, detail){
+  const theme = getThemeTokens();
+  const points = data.points || [];
+  const labels = points.map(p => p.label);
+  const xVals = points.map(p => Number(p.value));
+  const axisLabel = sweepAxisLabel(data.axis);
   const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
+  const maxTicks = detail ? Math.min(14, xVals.length) : Math.min(4, xVals.length);
+  // Small cards name the axis once in the btSweepMeta line, so the per-card
+  // axis title is redundant and only collides with rotated ticks. Cards also
+  // show compact value-only ticks; the full "axis=value" label lives in the
+  // tooltip and in the expanded dialog.
+  const integerAxis = xVals.every(n => Number.isInteger(n));
+  const compactTick = num => integerAxis ? String(num) : num.toFixed(3);
+  return {
+    responsive: true,
+    parsing: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } }
+    },
+    scales: {
+      x: {
+        type: 'linear', offset: false,
+        afterBuildTicks: function(scale){
+          const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));
+          scale.ticks = xVals.filter((value, index) => index % step === 0 || index === xVals.length - 1)
+            .map((value, index) => ({ value: value, label: xTickLabels.get(value) }));
+        },
+        title: { display: !!detail, text: axisLabel, color: theme.dim },
+        ticks: { autoSkip: false, color: theme.dim, maxTicksLimit: maxTicks, maxRotation: detail ? 35 : 55, minRotation: detail ? 0 : 35, callback: function(v){ const num = Number(v); return detail ? (xTickLabels.get(num) || String(num)) : compactTick(num); } },
+        grid: { color: theme.line }
+      },
+      y: { beginAtZero: true, title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
+    }
+  };
+}
+
+function sweepChartColors(data, seriesKey, theme){
+  return (data.points || []).map(point => {
+    const best = seriesKey
+      ? data.best_market && data.best_market.series === seriesKey && data.best_market.value === point.value
+      : data.best_overall && data.best_overall.value === point.value;
+    return best ? theme.gold : theme.proj;
+  });
+}
+
+function closeBtChartDetail(){
+  const dialog = $('btChartDialog');
+  if(!dialog) return;
+  dialog.hidden = true;
+  if(btChartDialogInstance){ btChartDialogInstance.destroy(); btChartDialogInstance = null; }
+  const trigger = window._btChartDialogTrigger;
+  window._btChartDialogTrigger = null;
+  if(trigger && typeof trigger.focus === 'function') trigger.focus();
+}
+
+function openBtChartDetail(seriesKey, title, trigger){
+  const data = window._btSweepVisualData;
+  const dialog = $('btChartDialog');
+  const canvas = $('btChartDialogCanvas');
+  const heading = $('btChartDialogTitle');
+  if(!data || !dialog || !canvas) return;
+  window._btChartDialogTrigger = trigger || document.activeElement;
+  if(heading) heading.textContent = title || 'Sweep chart detail';
+  dialog.hidden = false;
+  if(btChartDialogInstance) btChartDialogInstance.destroy();
+  const theme = getThemeTokens();
+  const points = data.points || [];
+  const values = points.map(point => seriesKey ? ((point.per_series || {})[seriesKey] || 0) / 100 : ((point.overall || {}).total_pnl_cents || 0) / 100);
+  const colors = sweepChartColors(data, seriesKey, theme);
+  btChartDialogInstance = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: { datasets: [{ label: 'Total P&L ($)', data: points.map((p, i) => ({x:Number(p.value), y:values[i]})), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
+    options: sweepChartOptions(data, true)
+  });
+  const close = $('btChartDialogClose');
+  if(close) close.focus();
+}
+
+function setupBtChartDialog(){
+  if(window._btChartDialogReady) return;
+  const dialog = $('btChartDialog');
+  const close = $('btChartDialogClose');
+  const aggregate = $('btSweepAggCard');
+  if(!dialog || !close || !aggregate) return;
+  window._btChartDialogReady = true;
+  close.addEventListener('click', closeBtChartDetail);
+  dialog.addEventListener('click', event => { if(event.target === dialog) closeBtChartDetail(); });
+  document.addEventListener('keydown', event => {
+    if(dialog.hidden) return;
+    if(event.key === 'Escape'){ closeBtChartDetail(); return; }
+    if(event.key === 'Tab'){
+      const focusable = Array.from(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+        .filter(el => !el.disabled && el.offsetParent !== null);
+      if(!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if(event.shiftKey && document.activeElement === first){
+        event.preventDefault();
+        last.focus();
+      } else if(!event.shiftKey && document.activeElement === last){
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  });
+  const activate = event => {
+    if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+    if(event.type === 'keydown') event.preventDefault();
+    openBtChartDetail(null, 'All markets — Sweep Visual', aggregate);
+  };
+  aggregate.addEventListener('click', activate);
+  aggregate.addEventListener('keydown', activate);
+}
+
+function renderSweepVisual(data){
+  window._btSweepVisualData = data;
+  setupBtChartDialog();
+  const theme = getThemeTokens();
+  const points = data.points || [];
+  const xVals = points.map(p => Number(p.value));
+  const axisLabel = sweepAxisLabel(data.axis);
   const xy = y => points.map((p, i) => ({ x: xVals[i], y: y[i] }));
   const money = cents => `${cents >= 0 ? '+' : '-'}$${Math.abs(cents / 100).toFixed(2)}`;
   const bestOverall = data.best_overall || null;
@@ -5197,34 +5420,20 @@ function renderSweepVisual(data){
     const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
     meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}`;
   }
-  const mkOpts = () => ({
-    responsive: true,
-    parsing: false,
-    plugins: {
-      legend: { display: false },
-      tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } }
-    },
-    scales: {
-      x: { type: 'linear', offset: false, afterBuildTicks: function(scale){ scale.ticks = xVals.map((value, index) => ({ value: value, label: labels[index] })); }, title: { display: true, text: axisLabel, color: theme.dim }, ticks: { autoSkip: false, color: theme.dim, maxTicksLimit: 7, callback: function(v){ return xTickLabels.get(Number(v)) || Number(v).toString(); } }, grid: { color: theme.line } },
-      y: { beginAtZero: true, title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
-    }
-  });
-  const barColors = (seriesKey) => points.map(point => {
-    const isBest = seriesKey
-      ? bestMarket && bestMarket.series === seriesKey && bestMarket.value === point.value
-      : bestOverall && bestOverall.value === point.value;
-    return isBest ? theme.gold : theme.proj;
-  });
-  const barBorders = colors => colors.map(color => color);
+  const mkOpts = () => sweepChartOptions(data, false);
+  const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
   destroyChartInstance('chartSweepAgg');
   const aggCtx = $('chartSweepAgg');
   if(aggCtx){
+    const aggregateColors = chartColors(null);
     new Chart(aggCtx.getContext('2d'), {
       type: 'bar',
-      data: { datasets: [{ label: 'Total P&L ($)', data: xy(points.map(p => (p.overall.total_pnl_cents || 0) / 100)), backgroundColor: barColors(), borderColor: barBorders(barColors()), borderWidth: 1 }] },
+      data: { datasets: [{ label: 'Total P&L ($)', data: xy(points.map(p => (p.overall.total_pnl_cents || 0) / 100)), backgroundColor: aggregateColors, borderColor: aggregateColors, borderWidth: 1 }] },
       options: mkOpts()
     });
   }
+  const aggregate = $('btSweepAggCard');
+  if(aggregate) aggregate.setAttribute('aria-label', `Open aggregate Sweep Visual chart detail for ${points.length} tested values`);
   const grid = $('btSweepGrid');
   if(!grid) return;
   grid.innerHTML = '';
@@ -5232,7 +5441,18 @@ function renderSweepVisual(data){
   order.forEach((seriesKey, idx) => {
     const isBestMarket = bestMarket && bestMarket.series === seriesKey;
     const card = document.createElement('div');
+    card.className = 'bt-chart-card';
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', `Open ${(data.series_labels || {})[seriesKey] || seriesKey} Sweep Visual chart detail for ${points.length} tested values`);
     card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:10px`;
+    const activate = event => {
+      if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+      if(event.type === 'keydown') event.preventDefault();
+      openBtChartDetail(seriesKey, (data.series_labels || {})[seriesKey] || seriesKey, card);
+    };
+    card.addEventListener('click', activate);
+    card.addEventListener('keydown', activate);
     const title = document.createElement('div');
     title.style.cssText = 'font:700 11px var(--disp);color:var(--faint);margin-bottom:4px';
     title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
@@ -5244,15 +5464,16 @@ function renderSweepVisual(data){
     card.appendChild(cv);
     grid.appendChild(card);
     const y = points.map(p => ((p.per_series || {})[seriesKey] || 0) / 100);
-    const colors = barColors(seriesKey);
+    const colors = chartColors(seriesKey);
     destroyChartInstance(cvId);
     new Chart(cv.getContext('2d'), {
       type: 'bar',
-      data: { datasets: [{ data: xy(y), backgroundColor: colors, borderColor: barBorders(colors), borderWidth: 1 }] },
+      data: { datasets: [{ data: xy(y), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
       options: mkOpts()
     });
   });
 }
+
 
 // Statistical Summary Charts
 function destroyChartInstance(canvasId){
@@ -5747,11 +5968,9 @@ function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: s
   `;
 
   if(d.market_breakdown && d.market_breakdown.length > 0){
-    const durLabel = {300:'5m', 900:'15m'};
-    const assetLabel = {btc:'BTC', eth:'ETH', bnb:'BNB', sol:'SOL', xrp:'XRP'};
     const marketName = (s) => {
-      const m = /^([a-z]{3})-up-or-down-(\d+m)$/.exec(String(s||''));
-      return m ? `${m[2].slice(0, -1).padStart(2, '0')}m ${assetLabel[m[1]]||m[1].toUpperCase()}` : String(s||'');
+      const m = /^([a-z]{3})-up-or-down-(\d+)m$/.exec(String(s||''));
+      return m ? `${String(m[2]).padStart(2, '0')}m ${({btc:'BTC', eth:'ETH', bnb:'BNB', sol:'SOL', xrp:'XRP'})[m[1]]||m[1].toUpperCase()}` : String(s||'');
     };
     html += '<div style="font:700 12px var(--disp);color:var(--tx);letter-spacing:.05em;text-transform:uppercase;margin:12px 0 6px">Per-Market Breakdown</div>'
       + '<table style="width:100%;border-collapse:collapse;font-size:12px">'

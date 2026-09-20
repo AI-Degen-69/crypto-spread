@@ -1,34 +1,38 @@
-# Constraints — Issue #272: Tick Files clarity and readiness progress
+# Constraints — Issue #270: Flatten and standardize collapsible Backtest sections
 
 ## Scope
-- Change Tick Files metric semantics, customer-facing status labels, readiness target presentation, tooltip copy, and focused tests only.
-- Preserve collector behavior, replay mathematics, window grouping, raw API compatibility, verification cache behavior, rescans, and Backtest actions.
-- No new dependencies.
+- Change Backtest presentation, collapse interaction, Sweep Visual chart presentation/expansion, canonical labels, and focused tests only.
+- Preserve backtest calculations, API responses, timing semantics, sweep axes/data, stable DOM IDs, explicit-run behavior, selected-file state, live cockpit layout, and unrelated tabs.
+- Use the existing Python/FastAPI dashboard, vanilla JavaScript, CSS tokens, Chart.js, and pytest setup.
+- No new external dependencies.
 
-## Correctness
-- Raw integrity values remain `PASS`, `WARN`, and `FAIL` in machine-readable responses.
-- Customer-facing labels describe capture state: `COMPLETE CAPTURE`, `PARTIAL CAPTURE`, and `CORRUPTED DATA`.
-- Every status includes a reason and safe action; never display bare `WARN`.
-- Use the versioned readiness policy from Issue #273 as the source of truth for targets.
-- Every metric exposes both `EXPLORATORY` and `RESEARCH_READY` targets, including quality metrics.
-- A readiness level remains gated by all required checks; progress bars cannot promote a file by averaging unrelated metrics.
-- Lower-is-better metrics use inverted or explicitly zero-target progress semantics.
-- Small, empty, old-cache, and zero-window reports must render deterministically without division errors.
+## Correctness and compatibility
+- All six major Backtest areas are peer sections with a clear heading and collapsible body.
+- Every section heading is a `<button>` with matching `aria-expanded` and `aria-controls`; body visibility always matches the state.
+- Reopening sections preserves controls, rendered chart instances/data, table contents, selected file, filters, and pagination.
+- Aggregate and ten per-series Sweep Visual charts retain all tested values and existing best-result highlighting.
+- Chart expansion is view-only: it must not call `/api/backtest` or `/api/backtest/sweep`, mutate parameter controls, or alter selected-file state.
+- Per-Series Performance and Executed Windows Log rows/filter options render only duration-first canonical labels (`05m BTC` / `15m BTC`); old suffix labels are absent from those Backtest areas.
+- Existing stable IDs, slug filter values, ordering, sorting, pagination, and API contracts remain unchanged.
 
-## UX and accessibility
-- Main Tick Files content remains concise; the policy/profitability explanation appears only in an accessible floating tooltip.
-- Tooltip must be reachable by keyboard, have an accessible name, and close on Escape or outside interaction.
-- Progress rows expose text values in addition to visual bars; color is never the only status signal.
-- Keep supported responsive widths and avoid horizontal overflow.
-- Preserve canonical market labels: `05m BTC`, `15m BTC`, etc.
+## Accessibility and responsive UX
+- Chart cards are keyboard focusable, have an accessible name, and activate with click, Enter, and Space.
+- Expanded chart uses `role="dialog"` and an accessible label, contains a clear close button, supports Escape, has visible focus styling, moves focus into the dialog, and returns focus to the triggering card.
+- Focus is not trapped outside the dialog; repeated open/close cycles do not leave stale focus handlers.
+- No visible tick-label overlap or bar obstruction in small cards at 320px, 768px, 1024px, and 1440px supported widths.
+- No horizontal overflow introduced by the flattened layout or modal.
+- Color is not the only signal for best-result highlighting; text/labels remain available.
 
-## Performance
-- Do not rescan large files merely to render the new labels or bars.
-- Keep verification streaming and cache-first.
-- Do not materially increase the manifest response payload with duplicated raw data.
+## Performance and runtime behavior
+- No extra backtest/sweep network request on tab open, section toggle, chart click, modal open, or modal close.
+- Detail rendering reuses the already-received sweep payload and avoids duplicate chart instances/listeners.
+- Existing chart rendering remains responsive; modal open/close should complete without a visible blocking delay under normal local dashboard conditions.
+- Browser verification must report zero console errors and no failed requests caused by the feature.
 
 ## Testing and anti-cheat
-- Add/adjust tests for status mapping and reasons, tooltip-only copy, both target sets, next-milestone calculations, zero values, lower-is-better direction, old-cache handling, and existing endpoint regressions.
-- Run only targeted suites during development; CI remains the full-suite gate.
-- Do not skip, weaken, delete, or suppress tests.
-- Do not change thresholds silently; update policy and tests together if needed.
+- Add focused HTML/JavaScript contract tests for section count/headings/ARIA wiring, stable IDs, no automatic simulation, canonical labels, chart-card expansion semantics, and modal accessibility hooks.
+- Run `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q` after implementation; development may use narrower `-k` selections.
+- Browser verification is required for desktop and narrow layouts, chart overlap, expansion/close/Escape/focus return, canonical labels, and console/network cleanliness.
+- Do not skip, weaken, delete, or suppress tests; do not remove assertions to make the suite pass.
+- Do not add `@ts-ignore`, `eslint-disable`, `# noqa`, or equivalent suppression comments.
+- Do not change API/data behavior to satisfy a presentation test.
