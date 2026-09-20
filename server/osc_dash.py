@@ -3243,6 +3243,7 @@ textarea:focus-visible,
       <canvas id="btChartDialogCanvas" class="bt-chart-dialog-canvas"></canvas>
     </div>
   </div>
+  </div>
 
   <!-- TAB 3: STATISTICAL ANALYSIS & DISTRIBUTIONS -->
   <div id="tab-summary" class="tab-content">
@@ -5376,7 +5377,22 @@ function setupBtChartDialog(){
   close.addEventListener('click', closeBtChartDetail);
   dialog.addEventListener('click', event => { if(event.target === dialog) closeBtChartDetail(); });
   document.addEventListener('keydown', event => {
-    if(event.key === 'Escape' && !dialog.hidden) closeBtChartDetail();
+    if(dialog.hidden) return;
+    if(event.key === 'Escape'){ closeBtChartDetail(); return; }
+    if(event.key === 'Tab'){
+      const focusable = Array.from(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+        .filter(el => !el.disabled && el.offsetParent !== null);
+      if(!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if(event.shiftKey && document.activeElement === first){
+        event.preventDefault();
+        last.focus();
+      } else if(!event.shiftKey && document.activeElement === last){
+        event.preventDefault();
+        first.focus();
+      }
+    }
   });
   const activate = event => {
     if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
