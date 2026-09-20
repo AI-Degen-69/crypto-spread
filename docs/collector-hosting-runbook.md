@@ -118,10 +118,11 @@ volume holds 2–3 gz days as buffer while the shipper mails finished days up.
    lines once a day closes. A failed upload is logged and retried each pass —
    capture never stops for shipping. Shipped days vanish from the volume
    (pruned after upload) — that is normal and is what keeps 500MB enough.
-5. **Pull a day** (direction matters — remote first, local second):
-   `rclone copyto gdrive:crypto-ticks/ticks_<day>.jsonl.gz .` plus the
-   matching `.sha256` sidecar, then locally, in one folder:
-   `sha256sum -c ticks_<day>.jsonl.gz.sha256` and
+5. **Pull a day** into `run/ticks/` (direction matters — remote first,
+   local second; the verify command below reads that folder):
+   `rclone copyto gdrive:crypto-ticks/ticks_<day>.jsonl.gz run/ticks/` plus
+   the matching `.sha256` sidecar into the same folder, then locally:
+   `sha256sum -c` on the sidecar and
    `python -m scripts.verify_tick_data run/ticks/ticks_<day>.jsonl.gz`.
    Manual shipper run on the host (same env as the service):
    `python -m scripts.ship_to_drive --out /data`.

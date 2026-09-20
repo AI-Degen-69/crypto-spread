@@ -120,7 +120,8 @@ def test_second_pass_skips_shipped(tmp_path, monkeypatch):
 
 def test_ship_all_skips_unchanged_days_without_rclone(tmp_path, monkeypatch):
     day = _day(tmp_path, "ticks_2026-09-19.jsonl.gz")
-    sh.save_state(tmp_path, {day.name: {"sha256": sh.sha256_of(day)}})
+    sh.save_state(tmp_path, {day.name: {"sha256": sh.sha256_of(day),
+                                        "remote": "gdrive:ticks/" + day.name}})
     run = mock.Mock()
     monkeypatch.setattr(sh.subprocess, "run", run)
     summary = sh.ship_all(tmp_path, "gdrive:ticks", "2026-09-20")
@@ -209,7 +210,8 @@ def test_leading_dash_remote_is_refused(tmp_path):
         sh.ship_all(tmp_path, "--remote=x", "2026-09-20")
 
 
-def test_stderr_tokens_are_redacted(tmp_path, monkeypatch, capsys):
+def test_failure_logs_carry_no_stderr(tmp_path, monkeypatch, capsys):
+    """Failure logs carry rc + name only — stderr can echo auth config."""
     _day(tmp_path, "ticks_2026-09-19.jsonl.gz")
     monkeypatch.setattr(sh.subprocess, "run", mock.Mock(return_value=mock.Mock(
         returncode=1,
@@ -217,4 +219,40 @@ def test_stderr_tokens_are_redacted(tmp_path, monkeypatch, capsys):
     sh.ship_all(tmp_path, "gdrive:ticks", "2026-09-20", prune=False)
     out = capsys.readouterr().out
     assert "SECRET123" not in out
-    assert "***" in out
+    assert "rc=1" in out
+
+
+def test_future_day_is_not_closed(tmp_path):
+    """A clock stepping back across midnight must not ship a future day."""
+    _day(tmp_path, "ticks_2026-09-21.jsonl.gz")
+    assert sh.closed_day_files(tmp_path, "2026-09-20") == []
+
+
+def test_changed_remote_reships(tmp_path, monkeypatch):
+    """Same bytes, new destination: the skip needs digest AND remote."""
+    day = _day(tmp_path, "ticks_2026-09-19.jsonl.gz")
+    sh.save_state(tmp_path, {day.name: {"sha256": sh.sha256_of(day),
+                                        "remote": "gdrive:old/ticks_2026-09-19.jsonl.gz"}})
+    calls = []
+    _ok(monkeypatch, calls)
+    summary = sh.ship_all(tmp_path, "gdrive:new", "2026-09-20", prune=False)
+    assert summary["shipped"] == [day.name]
+    assert calls[0][3] == "gdrive:new/ticks_2026-09-19.jsonl.gz"
+    assert sh.load_state(tmp_path)[day.name]["remote"] == \
+        "gdrive:new/ticks_2026-09-19.jsonl.gz"
+
+
+def test_skip_branch_retries_prune(tmp_path, monkeypatch):
+    """State says shipped but files linger (crash between save and prune):
+    the skip pass finishes the cleanup so the small disk never fills."""
+    day = _day(tmp_path, "ticks_2026-09-19.jsonl.gz")
+    sidecar = _day(tmp_path, day.name + ".sha256")
+    sh.save_state(tmp_path, {day.name: {"sha256": sh.sha256_of(day),
+                                        "remote": "gdrive:ticks/" + day.name}})
+    run = mock.Mock()
+    monkeypatch.setattr(sh.subprocess, "run", run)
+    summary = sh.ship_all(tmp_path, "gdrive:ticks", "2026-09-20")
+    assert summary["skipped"] == [day.name]
+    run.assert_not_called()  # no upload, just the missed cleanup
+    assert not day.exists()
+    assert not sidecar.exists()

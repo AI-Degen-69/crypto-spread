@@ -37,15 +37,19 @@ MIN_STABLE_AGE_S = 300.0
 
 
 def closed_day_files(out_dir: Path, today: str) -> list[Path]:
-    """Day files whose day is fully past, oldest first.
+    """Day files strictly older than `today`, oldest first.
 
     `today` is a `YYYY-MM-DD` day key (normally `now_day_key()`); the live
     day file is excluded because the collector is still appending to it.
+    The comparison is strict (`<`, not `!=`): if the host clock ever steps
+    back across midnight, a future-named file must not ship — uploading and
+    pruning it would split one capture day across two files. ISO day keys
+    compare chronologically as plain strings.
     """
     found: list[Path] = []
     for p in out_dir.glob("ticks_*.jsonl*"):
         m = DAY_RE.match(p.name)
-        if m and m.group(1) != today and p.is_file():
+        if m and m.group(1) < today and p.is_file():
             found.append(p)
     return sorted(found)
 
@@ -96,14 +100,11 @@ def dest(remote: str, name: str) -> str:
     return remote.rstrip("/") + "/" + name
 
 
-_TOKEN_RE = re.compile(r'"(access_token|refresh_token)"\s*:\s*"[^"]*"')
-
-
 def rclone_copyto(local: Path, remote_dest: str, timeout: float = 600.0) -> bool:
     """Upload one file via `rclone copyto`; False (never raise) on failure.
 
-    rclone diagnostics can echo auth config, so stderr is redacted before it
-    reaches the logs.
+    Failure logs carry only the return code and the file name — never
+    stderr, which can echo auth config (CWE-532).
     """
     try:
         r = subprocess.run(
@@ -113,8 +114,7 @@ def rclone_copyto(local: Path, remote_dest: str, timeout: float = 600.0) -> bool
         print(f"ship: rclone failed for {local.name} ({type(e).__name__})", flush=True)
         return False
     if r.returncode != 0:
-        err = _TOKEN_RE.sub(r'"\1":"***"', r.stderr.strip()[:200])
-        print(f"ship: rclone rc={r.returncode} for {local.name}: {err}", flush=True)
+        print(f"ship: rclone rc={r.returncode} for {local.name}", flush=True)
         return False
     return True
 
@@ -165,6 +165,8 @@ def ship_all(out_dir: Path, remote: str, today: str,
     One digest per file per pass (day files are gigabytes — never re-read).
     Freshly-rolled files wait for `min_age_s` of silence. Successfully
     shipped days are pruned locally so the small trial disk never fills.
+    A skip also prunes: if the process died between state-save and prune,
+    the next pass must finish the cleanup or files accumulate forever.
     """
     dest(remote, "probe")  # fail fast on config, before touching files
     state = load_state(out_dir)
@@ -175,7 +177,10 @@ def ship_all(out_dir: Path, remote: str, today: str,
                 continue  # rolled moments ago; next pass will take it
             digest = sha256_of(path)
             entry = state.get(path.name)
-            if isinstance(entry, dict) and entry.get("sha256") == digest:
+            if (isinstance(entry, dict) and entry.get("sha256") == digest
+                    and entry.get("remote") == dest(remote, path.name)):
+                if prune:
+                    prune_local(path)  # retry the cleanup a crash skipped
                 summary["skipped"].append(path.name)
                 continue
             if ship_file(path, remote, digest, manifest_src):
@@ -197,6 +202,7 @@ def ship_all(out_dir: Path, remote: str, today: str,
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run one Drive shipping pass from the command line."""
     ap = argparse.ArgumentParser(description="Ship closed tick days to Drive.")
     ap.add_argument("--out", type=Path, default=None,
                     help="tick dir; default follows COLLECT_OUT like the watchdog")

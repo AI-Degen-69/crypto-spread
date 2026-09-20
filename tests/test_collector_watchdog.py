@@ -10,6 +10,7 @@ Every branch of that decision is exercised here, because the failure mode is
 silent corruption of data that cannot be recollected.
 """
 import os
+import threading
 import time
 from unittest import mock
 
@@ -274,9 +275,38 @@ def test_shipper_pass_runs_when_remote_set(monkeypatch, tmp_path):
             mock.patch.object(wd.time, "sleep", lambda *_a: None), \
             mock.patch("scripts.collect_ticks.now_day_key",
                        return_value="2026-09-20"):
-        with mock.patch.dict(wd.os.environ, {"COLLECT_OUT": str(tmp_path)}):
-            wd.main(["--once", "--stale-seconds", "180"])
+            with mock.patch.dict(wd.os.environ, {"COLLECT_OUT": str(tmp_path)}):
+                wd.main(["--once", "--stale-seconds", "180"])
+                if wd._ship_thread is not None:
+                    # join under the mocks: the pass runs off-loop
+                    wd._ship_thread.join(timeout=30)
     assert (tmp_path / "shipped.json").is_file()
+
+
+def test_shipper_pass_never_overlaps_itself(monkeypatch):
+    """A slow pass blocks the next kick: shipping never piles up threads."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(remote):
+        started.set()
+        release.wait(timeout=30)
+
+    monkeypatch.setenv("DRIVE_REMOTE", "gdrive:ticks")
+    monkeypatch.setattr(wd, "_ship_pass", slow)
+    wd._ship_thread = None
+    try:
+        wd.maybe_ship()
+        assert started.wait(timeout=10)
+        first = wd._ship_thread
+        assert first is not None and first.is_alive()
+        wd.maybe_ship()  # must not spawn a second worker
+        assert wd._ship_thread is first
+    finally:
+        release.set()
+        if wd._ship_thread is not None:
+            wd._ship_thread.join(timeout=10)
+        wd._ship_thread = None
 
 
 def test_whitespace_collect_out_stays_on_defaults(monkeypatch, tmp_path):
