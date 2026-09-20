@@ -39,10 +39,15 @@ def collect_out_dir() -> Path:
 
     Follows `COLLECT_OUT` when set (managed host with a mounted disk);
     otherwise the local default. Stripped, so a whitespace-only value
-    cannot become `--out " "`.
+    cannot become `--out " "`. A relative value resolves against ROOT so
+    the watchdog and the collector (spawned with `cwd=ROOT`) read the
+    same directory.
     """
     out = os.environ.get("COLLECT_OUT", "").strip()
-    return Path(out) if out else ROOT / "run" / "ticks"
+    if not out:
+        return ROOT / "run" / "ticks"
+    p = Path(out)
+    return p if p.is_absolute() else ROOT / p
 
 
 def manifest_path() -> Path:
@@ -144,8 +149,9 @@ def _collector_pids_posix() -> list[int] | None:
     if out.returncode != 0:
         log(f"pid probe rc={out.returncode}; state unknown, taking no action")
         return None
-    pids = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
-    if out.stdout.strip() and not pids:
+    toks = out.stdout.split()
+    pids = [int(x) for x in toks if x.strip().isdigit()]
+    if len(pids) != len(toks):
         log(f"pid probe rc=0 but unparsable output {out.stdout!r}; treating as unknown")
         return None
     return pids
@@ -160,18 +166,36 @@ def collector_cmd() -> list[str]:
 
     `--once` is refused: under the watchdog it would exit instantly and be
     restarted in a tight loop, and on the host its command line trips the
-    duplicate-collector path. Simple whitespace split — quoted values with
-    spaces are not supported; keep host flags to bare tokens.
+    duplicate-collector path. `--out` is refused too: argparse takes the
+    last `--out`, so a smuggled one would run the collector elsewhere while
+    `manifest_path()` watches the redirect — a permanent false `WEDGED`
+    loop. Use `COLLECT_OUT` for the output dir. Simple whitespace split —
+    quoted values with spaces are not supported; keep host flags to tokens.
     """
     cmd = [sys.executable, "-m", "scripts.collect_ticks"]
     out = os.environ.get("COLLECT_OUT", "").strip()
     if out:
         cmd += ["--out", out]
     extra = os.environ.get("COLLECT_EXTRA_ARGS", "").split()
-    if "--once" in extra:
-        log("COLLECT_EXTRA_ARGS contains --once; refusing (watchdog needs a long-lived collector)")
-        extra = [a for a in extra if a != "--once"]
-    return cmd + extra
+    cleaned: list[str] = []
+    skip_next = False
+    refused = False
+    for a in extra:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--once" or a == "--out":
+            refused = True
+            if a == "--out":
+                skip_next = True  # drop its value token as well
+            continue
+        if a.startswith("--out="):
+            refused = True
+            continue
+        cleaned.append(a)
+    if refused:
+        log("COLLECT_EXTRA_ARGS contained --once/--out; refused (use COLLECT_OUT for the output dir)")
+    return cmd + cleaned
 
 
 def start_collector() -> int | None:

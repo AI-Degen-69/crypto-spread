@@ -238,3 +238,37 @@ def test_manifest_follows_collect_out(monkeypatch, tmp_path):
 
 def test_manifest_defaults_locally(monkeypatch, tmp_path):
     assert wd.manifest_path() == tmp_path / "manifest.json"
+
+
+def test_whitespace_collect_out_stays_on_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLECT_OUT", "   ")
+    assert wd.collect_out_dir() == wd.ROOT / "run" / "ticks"
+    assert wd.manifest_path() == tmp_path / "manifest.json"
+
+
+def test_relative_collect_out_resolves_against_root(monkeypatch):
+    monkeypatch.setenv("COLLECT_OUT", "data")
+    assert wd.collect_out_dir() == wd.ROOT / "data"
+
+
+def test_extra_out_is_refused_with_its_value(monkeypatch):
+    monkeypatch.setenv("COLLECT_OUT", "/data")
+    monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--gzip --out /evil --days 1")
+    assert wd.collector_cmd() == [
+        wd.sys.executable, "-m", "scripts.collect_ticks",
+        "--out", "/data", "--gzip", "--days", "1"]
+
+
+def test_extra_out_equals_form_is_refused(monkeypatch):
+    monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--out=/evil --gzip")
+    assert wd.collector_cmd() == [
+        wd.sys.executable, "-m", "scripts.collect_ticks", "--gzip"]
+
+
+def test_partial_garbage_probe_is_unknown(monkeypatch):
+    """One bad token poisons the whole probe — a partial pid list is not
+    a state to act on."""
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.subprocess, "run",
+                        mock.Mock(return_value=mock.Mock(returncode=0, stdout="123 ???")))
+    assert wd.collector_pids() is None

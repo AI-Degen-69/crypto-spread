@@ -32,9 +32,10 @@
 - Render dashboard → service → Logs. Healthy signs:
   - `watchdog up (check=60s stale=180s)` once at boot.
   - `STARTED collector pid=...` once; **no** `WEDGED` / `DUPLICATES` lines.
-- Proof gate (≥ 1 hour): fetch `run/ticks/manifest.json` from the disk and check
-  `sampling_interval_s` ≈ 1.4s warm. Command (Shell tab on the service):
-  `python -c "import json;print(json.load(open('run/ticks/manifest.json'))['sampling_interval_s'])"`
+- Proof gate (≥ 1 hour): fetch the manifest from the disk and check
+  `sampling_interval_s` ≈ 1.4s warm. Command (Shell tab on the service —
+  honours `COLLECT_OUT` when the disk is mounted elsewhere):
+  `python -c "import json,os;print(json.load(open(os.path.join(os.environ.get('COLLECT_OUT','run/ticks'),'manifest.json')))['sampling_interval_s'])"`
 
 ## 3. Restart
 
