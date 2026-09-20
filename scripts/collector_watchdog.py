@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -35,6 +36,11 @@ MANIFEST = ROOT / "run" / "ticks" / "manifest.json"
 # Windows process-creation flags: no console, own process group, so the
 # collector survives the shell that started the watchdog.
 DETACHED = 0x00000008 | 0x00000200
+
+# Kill signal for the POSIX path. SIGKILL exists on every managed Linux host;
+# the getattr fallback is for the Windows dev machine, where this branch only
+# ever runs under tests.
+_KILL_SIG = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def log(msg: str) -> None:
@@ -62,6 +68,13 @@ def collector_pids() -> list[int] | None:
 
     An unknown state is not a dead state. The caller does nothing on None.
     """
+    if os.name == "nt":
+        return _collector_pids_windows()
+    return _collector_pids_posix()
+
+
+def _collector_pids_windows() -> list[int] | None:
+    """Windows probe via the process command lines (unchanged legacy path)."""
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -78,6 +91,29 @@ def collector_pids() -> list[int] | None:
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+def _collector_pids_posix() -> list[int] | None:
+    """POSIX probe via `pgrep -f` (managed Linux host path, issue #283).
+
+    Same contract as the Windows probe: a list of PIDs, `[]` only when the
+    probe ran clean and matched nothing, None when the state is unknowable.
+    `pgrep` exits 1 on "no match", which is the healthy empty case — any
+    other failure (or a missing `pgrep` binary) is unknown, never empty.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "collect_ticks"],
+            capture_output=True, text=True, timeout=30)
+    except Exception as e:  # includes FileNotFoundError: no pgrep installed
+        log(f"pid probe failed ({e}); state unknown, taking no action")
+        return None
+    if out.returncode == 1 and not out.stdout.strip():
+        return []
+    if out.returncode != 0:
+        log(f"pid probe rc={out.returncode}; state unknown, taking no action")
+        return None
+    return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+
+
 def start_collector() -> int | None:
     """Spawn a detached collector; returns its PID, or None if it failed.
 
@@ -88,12 +124,16 @@ def start_collector() -> int | None:
     out = ROOT / "run" / "collector.out.log"
     err = ROOT / "run" / "collector.log"
     try:
+        # DETACHED is a Windows-only flag; on POSIX the child simply
+        # inherits the watchdog's session, which is what a managed host
+        # (Render/Fly) expects of its start command.
+        popen_kw: dict = {"close_fds": True}
+        if os.name == "nt":
+            popen_kw["creationflags"] = DETACHED
         with open(out, "ab") as fo, open(err, "ab") as fe:
             p = subprocess.Popen(
                 [sys.executable, "-m", "scripts.collect_ticks"],
-                cwd=str(ROOT), stdout=fo, stderr=fe,
-                creationflags=DETACHED if os.name == "nt" else 0,
-                close_fds=True)
+                cwd=str(ROOT), stdout=fo, stderr=fe, **popen_kw)
         log(f"STARTED collector pid={p.pid}")
         return p.pid
     except Exception as e:
@@ -103,8 +143,16 @@ def start_collector() -> int | None:
 
 def kill(pid: int) -> None:
     """Force-terminate a collector so a restart cannot double-append ticks."""
-    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                   capture_output=True, text=True)
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                       capture_output=True, text=True)
+        return
+    try:
+        os.kill(pid, _KILL_SIG)
+    except ProcessLookupError:
+        pass  # already gone — the desired end state
+    except PermissionError as e:
+        log(f"kill pid={pid} not permitted ({e}); leaving it alone")
 
 
 def manifest_age() -> float | None:

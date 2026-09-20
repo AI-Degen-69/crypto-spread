@@ -110,3 +110,66 @@ def test_an_empty_successful_probe_really_means_no_collector(monkeypatch):
     monkeypatch.setattr(wd.subprocess, "run",
                         mock.Mock(return_value=mock.Mock(returncode=0, stdout="")))
     assert wd.collector_pids() == []
+
+
+def _as_posix(monkeypatch):
+    """Run the following probe/kill through the managed-host (Linux) path."""
+    monkeypatch.setattr(wd.os, "name", "posix")
+
+
+def test_posix_probe_parses_pids(monkeypatch):
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.subprocess, "run",
+                        mock.Mock(return_value=mock.Mock(
+                            returncode=0, stdout="111\n222\n")))
+    assert wd.collector_pids() == [111, 222]
+
+
+def test_posix_probe_no_match_is_empty_not_unknown(monkeypatch):
+    """`pgrep` exits 1 when nothing matches — that is the healthy empty case."""
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.subprocess, "run",
+                        mock.Mock(return_value=mock.Mock(returncode=1, stdout="")))
+    assert wd.collector_pids() == []
+
+
+def test_posix_probe_other_failure_is_unknown(monkeypatch):
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.subprocess, "run",
+                        mock.Mock(return_value=mock.Mock(returncode=2, stdout="")))
+    assert wd.collector_pids() is None
+
+
+def test_posix_probe_missing_pgrep_is_unknown(monkeypatch):
+    """No `pgrep` binary at all must read as unknown, never as "no collector"."""
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.subprocess, "run",
+                        mock.Mock(side_effect=FileNotFoundError("pgrep")))
+    assert wd.collector_pids() is None
+
+
+def test_posix_kill_sends_sigkill(monkeypatch):
+    _as_posix(monkeypatch)
+    sent = []
+    monkeypatch.setattr(wd.os, "kill",
+                        lambda pid, sig: sent.append((pid, sig)))
+    wd.kill(1234)
+    assert sent == [(1234, wd._KILL_SIG)]
+
+
+def test_posix_kill_of_a_gone_pid_is_silent(monkeypatch):
+    """A pid that already exited is the desired end state, not an error."""
+    _as_posix(monkeypatch)
+    monkeypatch.setattr(wd.os, "kill",
+                        mock.Mock(side_effect=ProcessLookupError))
+    wd.kill(1234)  # must not raise
+
+
+def test_windows_kill_still_uses_taskkill(monkeypatch):
+    """The legacy Windows path is byte-identical: taskkill /F."""
+    monkeypatch.setattr(wd.os, "name", "nt")
+    run = mock.Mock(return_value=mock.Mock(returncode=0))
+    monkeypatch.setattr(wd.subprocess, "run", run)
+    wd.kill(1234)
+    run.assert_called_once_with(["taskkill", "/PID", "1234", "/F"],
+                                capture_output=True, text=True)
