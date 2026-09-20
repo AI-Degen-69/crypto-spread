@@ -2587,16 +2587,27 @@ textarea:focus-visible,
 .bar{height:6px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;overflow:hidden;margin-top:6px}
 .fill{height:100%;border-radius:99px}
 .fill.up{background:var(--up)} .fill.warn{background:var(--proj)} .fill.gold{background:var(--gold)} .fill.down{background:var(--down)}
-.tick-progress{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px}
-.tick-progress-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;font-size:11px}
-.tick-progress-label{font-weight:700;color:var(--tx)}
-.tick-progress-value{font-family:var(--mono);color:var(--dim);white-space:nowrap}
-.tick-progress-target-label{font:700 9px var(--disp);letter-spacing:.05em;color:var(--faint);margin-top:6px}
-.tick-progress-track{height:7px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;overflow:hidden;margin-top:3px}
-.tick-progress-fill{height:100%;border-radius:99px;transition:width .2s ease}
+.tick-progress-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.tick-progress{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 9px;margin-top:0;min-width:0}
+.tick-progress-head{display:flex;gap:10px;align-items:baseline;font-size:11px}
+.tick-progress-label{font-weight:700;color:var(--tx);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tick-progress-direction{color:var(--faint);font:9px var(--mono);margin-top:1px}
+.tick-progress-scale{position:relative;height:10px;margin-top:4px;overflow:visible;color:var(--faint);font:9px var(--mono)}
+.tick-progress-scale-zero{position:absolute;left:0;bottom:0;color:var(--dim)}
+.tick-progress-measured-row{display:flex;justify-content:center;align-items:center;height:20px;margin:3px 0 4px}
+.tick-progress-track{position:relative;height:18px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;overflow:visible;margin-top:0}
+.tick-progress-fill{position:absolute;left:0;top:0;bottom:0;border-radius:5px;transition:width .2s ease}
 .tick-progress-fill.min{background:var(--up)} .tick-progress-fill.max{background:var(--gold)}
-.tick-progress-targets{display:flex;justify-content:space-between;gap:8px;color:var(--faint);font:10px var(--mono);margin-top:4px}
-.tick-progress-next{color:var(--gold);font-size:10px;margin-top:3px}
+.tick-progress-measured-readout{position:static!important;display:grid!important;place-items:center!important;width:auto!important;min-width:118px!important;height:20px!important;box-sizing:border-box!important;padding:3px 9px!important;border:1px solid var(--tx)!important;border-radius:5px!important;background:var(--bg)!important;color:var(--tx)!important;font:800 10px/1 var(--mono)!important;letter-spacing:.01em!important;white-space:nowrap!important;z-index:10!important;pointer-events:none!important;box-shadow:0 1px 4px rgba(0,0,0,.8)!important;text-shadow:none!important}
+.tick-progress-marker{position:absolute;top:-3px;bottom:-3px;width:2px;transform:translateX(-1px);border-radius:2px;z-index:2;pointer-events:none}
+.tick-progress-marker.exploratory{background:var(--gold);box-shadow:0 0 0 1px rgba(232,184,75,.22)}
+.tick-progress-marker.research{background:var(--cyan);box-shadow:0 0 0 1px rgba(56,189,248,.22)}
+.tick-progress-targets-row{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:7px;font:700 10px/1.25 var(--disp);letter-spacing:.02em;position:relative;z-index:4}
+.tick-progress-target{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tick-progress-target.exploratory{color:var(--gold)}
+.tick-progress-target.research{color:var(--cyan);text-align:right}
+.tick-progress-next{color:var(--gold);font-size:9px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:760px){.tick-progress-grid{grid-template-columns:1fr}}
 .tick-info{display:inline-grid;place-items:center;width:18px;height:18px;padding:0;margin-left:5px;border:1px solid var(--line-hi);border-radius:50%;background:var(--panel2);color:var(--cyan);font:700 11px var(--mono);cursor:pointer;vertical-align:middle}
 .tick-info:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
 .tick-tooltip{position:relative;display:inline-block}
@@ -5610,21 +5621,39 @@ function readinessProgressRow(exploratory, research){
   const measured = Number(e.measured ?? r.measured ?? 0);
   const direction = e.direction || r.direction || 'min';
   const eTarget = Number(e.required ?? 0), rTarget = Number(r.required ?? 0);
-  const pct = (target) => direction === 'max'
-    ? (target === 0 ? (measured === 0 ? 100 : 0) : Math.min(100, (target / Math.max(measured, target)) * 100))
-    : (target === 0 ? 100 : Math.min(100, (measured / target) * 100));
-  const remaining = (target) => direction === 'max'
-    ? (measured <= target ? 'target reached' : `${formatReadinessValue(name, measured - target)} above limit`)
-    : (measured >= target ? 'target reached' : `${formatReadinessValue(name, target - measured)} more needed`);
+  // Both milestones share one scale. Extend it to the measured value so an
+  // over-target file can visibly pass the research marker instead of clipping.
+  const scaleMax = Math.max(1, eTarget, rTarget, measured);
+  const position = (value) => Math.min(100, Math.max(0, (Number(value || 0) / scaleMax) * 100));
+  const measuredPct = position(measured);
+  const ePos = position(eTarget), rPos = position(rTarget);
+  const milestoneText = (level, target) => {
+    const targetText = formatReadinessValue(name, target);
+    const measuredText = formatReadinessValue(name, measured);
+    if(direction === 'max'){
+      return measured <= target
+        ? `${level} limit ≤ ${targetText} · measured ${measuredText} · within limit`
+        : `${level} limit ≤ ${targetText} · measured ${measuredText} · ${formatReadinessValue(name, measured - target)} above limit`;
+    }
+    return measured >= target
+      ? `${level} target ≥ ${targetText} · measured ${measuredText} · target reached`
+      : `${level} target ≥ ${targetText} · measured ${measuredText} · ${formatReadinessValue(name, target - measured)} more needed`;
+  };
   const eOk = Boolean(e.ok), rOk = Boolean(r.ok);
-  const next = eOk ? (rOk ? 'both targets reached' : `Next: RESEARCH READY · ${remaining(rTarget)}`) : `Next: EXPLORATORY · ${remaining(eTarget)}`;
+  const next = eOk ? (rOk ? 'both targets reached' : `Next milestone: ${milestoneText('RESEARCH READY', rTarget)}`) : `Next milestone: ${milestoneText('EXPLORATORY', eTarget)}`;
   const label = e.label || r.label || name;
   const fillClass = direction === 'max' ? 'max' : 'min';
-  return `<div class="tick-progress" data-metric="${esc(name)}">
-    <div class="tick-progress-head"><span class="tick-progress-label">${esc(label)}</span><span class="tick-progress-value">${formatReadinessValue(name, measured)} measured</span></div>
-    <div class="tick-progress-target-label">EXPLORATORY ${eOk ? '✓' : ''}</div><div class="tick-progress-track" role="progressbar" aria-label="${esc(label)} exploratory progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct(eTarget))}"><div class="tick-progress-fill ${fillClass}" style="width:${pct(eTarget).toFixed(1)}%"></div></div>
-    <div class="tick-progress-target-label">RESEARCH READY ${rOk ? '✓' : ''}</div><div class="tick-progress-track" role="progressbar" aria-label="${esc(label)} research progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct(rTarget))}"><div class="tick-progress-fill ${fillClass}" style="width:${pct(rTarget).toFixed(1)}%"></div></div>
-    <div class="tick-progress-targets"><span>Exploratory target: ${formatReadinessValue(name, eTarget)}</span><span>Research target: ${formatReadinessValue(name, rTarget)}</span></div>
+  const directionNote = direction === 'max' ? '0 is the target · lower is better' : 'higher is better';
+  const measuredText = formatReadinessValue(name, measured);
+  const exploratoryText = formatReadinessValue(name, eTarget);
+  const researchText = formatReadinessValue(name, rTarget);
+  return `<div class="tick-progress" data-metric="${esc(name)}" data-direction="${direction}" data-scale-max="${scaleMax}">
+    <div class="tick-progress-head"><span class="tick-progress-label">${esc(label)}</span></div>
+    <div class="tick-progress-direction">${directionNote}</div>
+    <div class="tick-progress-scale" aria-hidden="true"><span class="tick-progress-scale-zero">0</span></div>
+    <div class="tick-progress-measured-row"><div class="tick-progress-measured-readout">MEASURED · ${measuredText}</div></div>
+    <div class="tick-progress-track" style="height:18px" role="progressbar" aria-label="${esc(label)} measured ${measuredText}; exploratory target ${exploratoryText}; research ready target ${researchText}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(measuredPct)}"><div class="tick-progress-fill ${fillClass}" style="width:${measuredPct.toFixed(1)}%"></div><span class="tick-progress-marker exploratory" style="left:${ePos.toFixed(2)}%"></span><span class="tick-progress-marker research" style="left:${rPos.toFixed(2)}%"></span></div>
+    <div class="tick-progress-targets-row"><span class="tick-progress-target exploratory">EXPLORATORY · ${exploratoryText}${eOk ? ' ✓' : ''}</span><span class="tick-progress-target research">RESEARCH READY · ${researchText}${rOk ? ' ✓' : ''}</span></div>
     <div class="tick-progress-next">${esc(next)}</div>
   </div>`;
 }
@@ -5687,7 +5716,7 @@ function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: s
       <div style="min-width:210px"><div style="font:600 11px var(--disp);color:var(--dim);text-transform:uppercase">Research Readiness <span class="tick-tooltip"><button type="button" class="tick-info" aria-expanded="false" aria-controls="readiness_tip_${esc(filename)}" aria-label="Explain Research Readiness" onclick="toggleReadinessTooltip(this)">i</button><span id="readiness_tip_${esc(filename)}" class="tick-tooltip-pop" role="tooltip" hidden>The targets tell us whether this file contains enough varied data for the selected analysis. They do not prove that the strategy is profitable. Choose settings on one period and check them on a later period that was not used for choosing them.</span></span></div><div style="font:700 17px var(--disp);color:${readinessColor};margin-top:2px">${esc(readiness.level || 'PENDING')}</div></div>
       <div style="font-size:11px;color:var(--dim);line-height:1.45">Each metric below is checked independently. One large number cannot compensate for a missing market, day, or quality check.</div>
     </div>
-    <div style="margin-bottom:10px">${progressHtml}</div>
+    <div class="tick-progress-grid" style="margin-bottom:10px">${progressHtml}</div>
 
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
       <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;text-align:center">
