@@ -333,7 +333,7 @@ def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
     cache_dir.mkdir()
     (cache_dir / "ticks_2026-09-08.jsonl.json").write_text(json.dumps({
         "file": f1.name, "status": "PASS", "valid_ticks": 1,        "series_counts": {"btc-up-or-down-5m": 1},
-            "readiness": {"level": "EXPLORATORY", "policy_version": "test"},
+            "readiness": {"level": "EXPLORATORY", "policy_version": "2026-09-20.v2"},
             "fingerprint": fp, "ts": 12345.0,
 
     }), encoding="utf-8")
@@ -348,6 +348,16 @@ def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
     d = res.json()
     assert d["status"] == "PASS"
     assert d.get("cached") is True
+
+    # A sidecar from an older readiness policy must not be pre-warmed.
+    (cache_dir / "ticks_2026-09-08.jsonl.json").write_text(json.dumps({
+        "file": f1.name, "status": "PASS", "valid_ticks": 1,
+        "readiness": {"level": "EXPLORATORY", "policy_version": "old-policy"},
+        "fingerprint": fp, "ts": 12345.0,
+    }), encoding="utf-8")
+    osc_dash._VERIFY_REPORT_CACHE.clear()
+    osc_dash._prewarm_verify_cache()
+    assert f1.name not in osc_dash._VERIFY_REPORT_CACHE
 
     # Stale sidecar (fingerprint mismatch) is not pre-warmed.
     (cache_dir / "ticks_2026-09-08.jsonl.json").write_text(json.dumps({

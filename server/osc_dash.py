@@ -2261,6 +2261,14 @@ _VERIFY_RESCAN_COOLDOWN_SEC = 120.0
 _VERIFY_SCAN_PROGRESS: dict[str, dict[str, Any]] = {}
 
 
+def _readiness_cache_is_current(side: dict[str, Any] | None) -> bool:
+    """Accept only sidecars written by the currently active readiness policy."""
+    if not side or not isinstance(side.get("readiness"), dict):
+        return False
+    from scripts.verify_tick_data import READINESS_POLICY_VERSION
+    return side["readiness"].get("policy_version") == READINESS_POLICY_VERSION
+
+
 def _file_fingerprint(path: Path) -> str:
     """Cheap identity for a tick file: size + mtime_ns."""
     st = path.stat()
@@ -2309,7 +2317,7 @@ def _prewarm_verify_cache() -> None:
                 )
             except OSError:
                 continue
-            if side and "status" in side and side.get("readiness"):
+            if side and "status" in side and _readiness_cache_is_current(side):
                 rep = {k: v for k, v in side.items() if k != "ts"}
                 _VERIFY_REPORT_CACHE[f.name] = {
                     "fingerprint": side["fingerprint"],
@@ -2441,7 +2449,7 @@ async def api_ticks_verify(
         stale_rep = dict(entry["report"])
     else:
         side = _read_verify_cache(_verify_sidecar_path(file), expected_fingerprint=fp)
-        if side and not refresh and "status" in side and side.get("readiness"):
+        if side and not refresh and "status" in side and _readiness_cache_is_current(side):
             if side.get("fingerprint") == fp:
                 # Cold start (server restart): exact sidecar for this file.
                 rep = {k: v for k, v in side.items() if k != "ts"}
@@ -5489,7 +5497,6 @@ async function loadManifest(){
 
         const tdIntegrity = document.createElement('td');
         tdIntegrity.className = 'mono';
-        tdIntegrity.textContent = '…';
         const tdReadiness = document.createElement('td');
         tdReadiness.className = 'mono';
         const readinessLevel = f.readiness && f.readiness.level;
