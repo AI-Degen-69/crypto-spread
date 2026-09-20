@@ -247,6 +247,7 @@ def assess_readiness(
     schema_error_rate = schema_errors / max(valid_ticks, 1)
 
     def checks_for(level: str) -> list[dict[str, Any]]:
+        """Build measured readiness checks for one policy level."""
         p = READINESS_POLICIES[level]
         checks = [
             {"name": "valid_ticks", "measured": valid_ticks, "required": p["min_valid_ticks"], "ok": valid_ticks >= p["min_valid_ticks"]},
