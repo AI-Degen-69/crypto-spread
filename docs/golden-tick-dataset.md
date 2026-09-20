@@ -27,7 +27,10 @@ as-is and the manifest declares which days are in the set. This is deliberate:
 - `backtest/index.py:group_by_cid_indexed` (`backtest/index.py:117-124`) already accepts a
   directory and merges per-file `.idx` sidecars in ts order — replay over the set needs no
   concat step and no new tooling.
-- A failing day is quarantined by removing it from the manifest, not by rewriting gigabytes.
+- A failing day is quarantined by moving its file **out of** `run/ticks/golden/` (to
+  `run/ticks/quarantine/`) and recording the exclusion in the manifest — not by rewriting
+  gigabytes. (The file itself must leave the directory: the set-level verify scans every
+  `ticks_*.jsonl[.gz]` it finds there and does not read the manifest — see §2.3.)
 - Per-day verify verdicts stay per-day; a concat would bury a bad day inside a good file.
 - Issue #281 explicitly leaves this either/or to the charter: "either concatenates verified
   days into one canonical file or records the canonical file list in a manifest".
@@ -115,8 +118,11 @@ After each day closes (UTC midnight), verify it before the next one is trusted:
 python -m scripts.verify_tick_data run/ticks/ticks_<day>.jsonl
 ```
 
-- Every gate of §1.1 must pass. A failing day is quarantined: recorded in the golden manifest
-  with the reason and the verify verdict, and excluded from the set.
+- Every gate of §1.1 must pass. A failing day is quarantined: its file is **moved out of**
+  `run/ticks/golden/` (to `run/ticks/quarantine/`) and the day + reason are recorded in the
+  golden manifest. Removing a day from the manifest alone is not enough — `verify_tick_data`
+  on a directory scans every `ticks_*.jsonl[.gz]` file present regardless of the manifest, so
+  a file left behind would be silently included in certification step 2.
 - A quarantined day does not abort the capture — the collector keeps running; the shortfall is
   covered by the headroom days (§1.2). If more than one day fails, extend the capture rather
   than lower a bar.
@@ -136,15 +142,18 @@ re-certification sequence — every promotion of a new or replaced day re-runs i
 
 ```powershell
 # 1. Every golden day passes its per-day gate (§1.1)
-python -m scripts.verify_tick_data run/ticks/golden/ticks_<day>.jsonl
+#    <day-file> is the actual day filename — golden days may be .jsonl or .jsonl.gz (§1)
+python -m scripts.verify_tick_data run/ticks/golden/ticks_<day>.jsonl[.gz]
 
 # 2. The set as a whole meets the §1.2 bar
+#    (only golden days are in the directory — quarantined files live in run/ticks/quarantine/)
 python -m scripts.verify_tick_data run/ticks/golden
 
 # 3. Fresh replay index for every golden day (index newer than its source file)
-python -c "from pathlib import Path; from backtest.index import build_index, is_fresh; p=Path('run/ticks/golden/ticks_<day>.jsonl'); build_index(p); assert is_fresh(p, p.with_suffix(p.suffix+'.idx'))"
+python -c "from pathlib import Path; from backtest.index import build_index, is_fresh; p=Path('run/ticks/golden/<day-file>'); build_index(p); assert is_fresh(p, p.with_suffix(p.suffix+'.idx'))"
 
-# 4. Replay-speed budget holds (§4)
+# 4. Replay-speed budget holds (§4): read the printed total replay time T and the window
+#    count W from the output; certification FAILS if T / W > 1.0 seconds per window.
 python -m scripts.backtest run/ticks/golden --offset 0.02 --queue 50
 ```
 
@@ -178,22 +187,27 @@ the golden dataset — it is a stale copy, and the dashboard's readiness badges 
 **Budget: a backtest or sweep over the golden dataset runs at ≤ ~1s per window wall-time on a
 warm sidecar index.**
 
-Grounding, both measured on this machine:
+Grounding — three distinct operations, each labeled with what it actually measures:
 
-| Path | Cost | Evidence |
+| Operation | Cost | Evidence |
 |---|---|---|
-| Full scan, no index | ~1.5s **per day** of data; 467MB → **34.07s** | `backtest/index.py:1-9`; `docs/measurements/issue-221-gil-contention.json` |
-| Indexed cid jump (`.idx` sidecar) | **~50ms** per call | `backtest/index.py:1-9` |
+| **Measured**: full no-index **replay** of one day (467.07MB, 164,260 snaps, 550 windows) | 34.07s total ≈ ~62ms/window amortized | `docs/measurements/issue-221-gil-contention.json` |
+| **Estimated**: per-call **scan** cost without index (what the slider pays per API call) | ~1.5s **per day** of data | `backtest/index.py:1-9` (docstring estimate) |
+| **Measured**: indexed cid jump on a warm `.idx` sidecar | **~50ms** per call | `backtest/index.py:1-9` |
 
 Implications, binding for certification:
 
-- **A no-index scan of the golden set is out of budget by construction** — 5 days at ~1.5s/day
-  is ~7.5s per replay before any computation. The golden certification therefore requires a
-  fresh `.idx` sidecar for every golden day (`backtest.index.is_fresh` — index mtime strictly
-  newer than the source file), built by `backtest.index.build_index` (certification step 3).
-- The sidecar cuts per-window backtest reads from ~1.5s/day to ~50ms, which is what makes the
-  ≤1s/window budget achievable at the golden set's size (~5× the measured 467MB single-day
-  baseline, in bytes, spread over the index).
+- The ≤~1s/window budget governs **per-window reads** (the slider/API path, one call per
+  window). Without a sidecar that call pays the scan estimate — ~1.5s/day × 5 days ≈ 7.5s,
+  out of budget by construction. With a warm sidecar it is ~50ms, in budget with ~20× headroom.
+- The 34.07s figure is a **batch** replay of one whole day, not a scan and not a per-window
+  cost; it is the evidence that a full-day replay is affordable, and scaled linearly to five
+  days ≈ 170s across ~2,750 windows ≈ ~62ms/window amortized. Certification step 4 measures
+  exactly this operation on the golden set and enforces T/W ≤ 1.0s.
+- A no-index scan of the golden set is out of budget **per call** by construction; the golden
+  certification therefore requires a fresh `.idx` sidecar for every golden day
+  (`backtest.index.is_fresh` — index mtime strictly newer than the source file), built by
+  `backtest.index.build_index` (certification step 3).
 - If a golden-day `.idx` is missing or stale, first replay rebuilds it automatically
   (`load_index`), but certification never relies on that lazy path — the sidecars are built and
   checked as part of the gate so the first research query is already fast.

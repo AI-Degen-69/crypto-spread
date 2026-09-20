@@ -10,10 +10,15 @@
   existing metrics and their existing thresholds, with headroom stated beside them.
 
 ## Measurable boundaries
-- Every numeric target in `docs/golden-tick-dataset.md` must map 1:1 to a named metric that
-  `verify_tick_data.py` already emits (`status`, `capture_state().label`, `readiness.level`,
-  `sampling_gap_rate`, `late_starts_count`, `early_cutoffs_count`, `windows_count`,
-  `market_breakdown`, `time_blocks`). No invented metrics.
+- Every numeric **verification quality-gate target** in `docs/golden-tick-dataset.md`
+  (§1.1–§1.3) must map 1:1 to a named metric that `verify_tick_data.py` already emits
+  (`status`, `capture_state().label`, `readiness.level`, `sampling_gap_rate`,
+  `late_starts_count`, `early_cutoffs_count`, `windows_count`, `market_breakdown`,
+  `time_blocks`). No invented metrics.
+- **Throughput and replay-speed targets** (§2.2, §4) are *not* verify-emitted metrics; they are
+  governed by measured baselines instead (collector day-volume from real files;
+  `docs/measurements/issue-221-gil-contention.json`; the `backtest/index.py` sidecar
+  estimates) and must cite their measurement source.
 - The replay-speed budget must be grounded in measured baselines
   (`docs/measurements/issue-221-gil-contention.json`: 467MB → 34.07s full-scan; `backtest/index.py`
   sidecar: ~50ms per cid jump vs ~1.5s/day full scan) — not in wishful numbers.
