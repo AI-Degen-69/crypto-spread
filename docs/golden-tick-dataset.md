@@ -77,6 +77,7 @@ Within every captured window (`verify_window_continuity`, `scripts/verify_tick_d
 - Sampling gaps (`> max_gap_sec = 6s`) count against `sampling_gap_rate` in §1.2.
 
 These are the existing verify thresholds, not new ones. The golden bar adds no stricter gate of
+its own — it requires the existing gates to pass with the headroom stated in §1.2.
 
 ## 2. Collection plan
 
@@ -128,4 +129,47 @@ provenance in the manifest ambiguous (which days came from which code?). This is
 #174 (socket-authoritative books, which touches `scripts/collect_ticks.py`) waits until the
 golden capture is complete and the set is certified.
 
-its own — it requires the existing gates to pass with the headroom stated in §1.2.
+## 3. Certification plan
+
+The golden dataset is certified when this exact sequence passes. It is also the
+re-certification sequence — every promotion of a new or replaced day re-runs it in full.
+
+```powershell
+# 1. Every golden day passes its per-day gate (§1.1)
+python -m scripts.verify_tick_data run/ticks/golden/ticks_<day>.jsonl
+
+# 2. The set as a whole meets the §1.2 bar
+python -m scripts.verify_tick_data run/ticks/golden
+
+# 3. Fresh replay index for every golden day (index newer than its source file)
+python -c "from pathlib import Path; from backtest.index import build_index, is_fresh; p=Path('run/ticks/golden/ticks_<day>.jsonl'); build_index(p); assert is_fresh(p, p.with_suffix(p.suffix+'.idx'))"
+
+# 4. Replay-speed budget holds (§4)
+python -m scripts.backtest run/ticks/golden --offset 0.02 --queue 50
+```
+
+### 3.1 The golden manifest
+
+`run/ticks/golden/golden_manifest.json` records, per entry:
+
+- `day` — the UTC day key of the source file.
+- `verify_verdict` — the day's `status`, `capture_state().label`, and `readiness.level` at
+  certification time.
+- `sha256` — checksum of the day file, so a later tamper or partial rewrite is detectable.
+
+Plus set-level totals (`windows_count`, `time_blocks`, `sampling_gap_rate`, ...), the
+certification date, and the `READINESS_POLICY_VERSION` the certification ran under.
+
+### 3.2 Promotion / re-certification policy
+
+The golden dataset is **re-certified** (full sequence above, manifest rewritten) whenever:
+
+1. A day is added or replaced — including a quarantined day's replacement.
+2. `READINESS_POLICY_VERSION` changes — the old certification is void the moment the policy
+   moves (`scripts/verify_tick_data.py:32`).
+3. A verify or index tool change could alter a verdict or a sidecar — re-certify before the
+   next backtest claim is made against the set.
+
+A golden dataset whose manifest cites a policy version older than the installed one is **not**
+the golden dataset — it is a stale copy, and the dashboard's readiness badges will show it.
+
