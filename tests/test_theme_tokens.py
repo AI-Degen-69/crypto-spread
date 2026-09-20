@@ -121,7 +121,7 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert "Queue depth — shares ahead" in FULL_APP_HTML
     assert "Stop distance — 5m + 15m markets" in FULL_APP_HTML
     assert "exit_5m (X = stop distance)" not in FULL_APP_HTML
-    assert "Each bar is a separate replay" in FULL_APP_HTML
+    assert "Each bar is a separate replay" not in FULL_APP_HTML
     assert "title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`" in FULL_APP_HTML
     assert "window._btRunning = false" in FULL_APP_HTML
     assert "waiting for the selected-file backtest to finish" in FULL_APP_HTML

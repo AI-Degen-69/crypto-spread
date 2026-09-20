@@ -2643,6 +2643,8 @@ def test_issue_270_backtest_peer_sections_and_accessible_chart_dialog():
     for body_id, heading in sections.items():
         assert f'aria-controls="{body_id}"' in html
         assert heading in html
+    assert html.count("<span>📝 Executed Windows Log</span>") == 1
+    assert html.count("<span>🔬 Sweep Visual</span>") == 1
     assert html.count('class="bt-section-head"') >= 9  # six peers + parameter groups
     assert 'id="btChartDialog"' in html
     assert 'role="dialog"' in html
@@ -3280,16 +3282,13 @@ def test_backtest_param_preview_grid_in_html():
     assert 'id="btParamPreviewWrap"' in html
     assert 'id="btParamPreviewSvg"' in html
     assert 'id="btPreviewMetricsPills"' in html
-    assert 'id="btParamPreviewLegend"' in html
     assert "Strategy Geometry Preview" in html
-
-    # Compact five-item legend and visual tokens
-    assert "Quotable corridor" in html
-    assert "Quote levels" in html
-    assert "Stop / exit levels" in html
-    assert "Entry delay" in html
-    assert "Dead zone" in html
-    assert html.count('class="bt-preview-legend-item"') == 5
+    # Single visible instance: the collapsible section header is the only
+    # heading; the inner duplicate title and the legend were removed.
+    assert html.count("<span>📐 Strategy Geometry Preview</span>") == 1
+    assert 'id="btParamPreviewLegend"' not in html
+    assert "Quotable corridor" not in html
+    assert "bt-preview-legend-item" not in html
 
     # CSS styles and responsive SVG contract
     assert "#btParamPreviewWrap" in html
