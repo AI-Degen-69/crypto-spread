@@ -1000,6 +1000,48 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
+def _select_sweep_bests(
+    points: list[dict],
+    series_order: list[str],
+    series_labels: dict[str, str],
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Select aggregate and canonical-order market winners from sweep points."""
+    best_overall = None
+    best_market = None
+    best_market_order = len(series_order)
+    for point in points:
+        if point["overall"]["windows"] <= 0:
+            continue
+        overall_pnl = point["overall"]["total_pnl_cents"]
+        if best_overall is None or overall_pnl > best_overall["total_pnl_cents"]:
+            best_overall = {
+                "value": point["value"],
+                "label": point["label"],
+                "total_pnl_cents": overall_pnl,
+            }
+        for market_order, slug in enumerate(series_order):
+            if slug not in point["series_present"]:
+                continue
+            market_pnl = point["per_series"][slug]
+            if (
+                best_market is None
+                or market_pnl > best_market["total_pnl_cents"]
+                or (
+                    market_pnl == best_market["total_pnl_cents"]
+                    and market_order < best_market_order
+                )
+            ):
+                best_market = {
+                    "series": slug,
+                    "label": series_labels[slug],
+                    "value": point["value"],
+                    "point_label": point["label"],
+                    "total_pnl_cents": market_pnl,
+                }
+                best_market_order = market_order
+    return best_overall, best_market
+
+
 def _run_sweep_worker(
     ticks_dir_str: str,
     source_file_str: Optional[str],
@@ -1076,30 +1118,9 @@ def _run_sweep_worker(
             "series_present": sorted(per_series),
         })
 
-    best_overall = None
-    best_market = None
-    for point in points:
-        if point["overall"]["windows"] <= 0:
-            continue
-        overall_pnl = point["overall"]["total_pnl_cents"]
-        if best_overall is None or overall_pnl > best_overall["total_pnl_cents"]:
-            best_overall = {
-                "value": point["value"],
-                "label": point["label"],
-                "total_pnl_cents": overall_pnl,
-            }
-        for slug in series_order:
-            if slug not in point["series_present"]:
-                continue
-            market_pnl = point["per_series"][slug]
-            if best_market is None or market_pnl > best_market["total_pnl_cents"]:
-                best_market = {
-                    "series": slug,
-                    "label": series_labels[slug],
-                    "value": point["value"],
-                    "point_label": point["label"],
-                    "total_pnl_cents": market_pnl,
-                }
+    best_overall, best_market = _select_sweep_bests(
+        points, series_order, series_labels
+    )
     return {
         "axis": axis,
         "points": points,
@@ -5078,6 +5099,7 @@ function renderSweepVisual(data){
     exit_rev: 'Reversal buffer — distance from anchor'
   };
   const axisLabel = axisLabels[data.axis] || data.axis;
+  const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
   const xy = y => points.map((p, i) => ({ x: xVals[i], y: y[i] }));
   const money = cents => `${cents >= 0 ? '+' : '-'}$${Math.abs(cents / 100).toFixed(2)}`;
   const bestOverall = data.best_overall || null;
@@ -5096,7 +5118,7 @@ function renderSweepVisual(data){
       tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } }
     },
     scales: {
-      x: { type: 'linear', offset: false, title: { display: true, text: axisLabel, color: theme.dim }, ticks: { color: theme.dim, maxTicksLimit: 7, callback: function(v){ return Number(v).toString(); } }, grid: { color: theme.line } },
+      x: { type: 'linear', offset: false, afterBuildTicks: function(scale){ scale.ticks = xVals.map((value, index) => ({ value: value, label: labels[index] })); }, title: { display: true, text: axisLabel, color: theme.dim }, ticks: { autoSkip: false, color: theme.dim, maxTicksLimit: 7, callback: function(v){ return xTickLabels.get(Number(v)) || Number(v).toString(); } }, grid: { color: theme.line } },
       y: { beginAtZero: true, title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
     }
   });

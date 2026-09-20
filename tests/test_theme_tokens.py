@@ -112,6 +112,8 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert "type: 'bar'" in FULL_APP_HTML
     assert "parsing: false" in FULL_APP_HTML
     assert "beginAtZero: true" in FULL_APP_HTML
+    assert "afterBuildTicks" in FULL_APP_HTML
+    assert "xTickLabels" in FULL_APP_HTML
     assert "best_overall" in FULL_APP_HTML
     assert "best_market" in FULL_APP_HTML
     assert "series_labels" in FULL_APP_HTML

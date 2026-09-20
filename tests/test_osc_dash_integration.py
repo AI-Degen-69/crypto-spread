@@ -693,6 +693,22 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
     assert data["best_overall"] is None or {"value", "label", "total_pnl_cents"} <= data["best_overall"].keys()
     assert data["best_market"] is None or {"series", "label", "value", "point_label", "total_pnl_cents"} <= data["best_market"].keys()
 
+    tied_points = [
+        {
+            "value": 1.0,
+            "label": "one",
+            "overall": {"windows": 1, "total_pnl_cents": 0.0},
+            "per_series": {"later": 1.0, "earlier": 1.0},
+            "series_present": ["later", "earlier"],
+        },
+    ]
+    _, tied_market = osc_dash._select_sweep_bests(
+        tied_points,
+        ["earlier", "later"],
+        {"earlier": "Earlier", "later": "Later"},
+    )
+    assert tied_market["series"] == "earlier"
+
     shared_base = BacktestParams(exit_thresh_by_slug={
         "default_5m": 0.05, "default_15m": 0.07,
         "btc-up-or-down-5m": 0.05, "btc-up-or-down-15m": 0.07,
