@@ -2629,6 +2629,46 @@ def test_backtest_tuning_section_is_relabelled_as_tuning_knobs():
     assert "Tuning Knobs" in html
 
 
+def test_issue_270_backtest_peer_sections_and_accessible_chart_dialog():
+    """Issue #270: six peer sections and a view-only accessible chart dialog exist."""
+    html = client.get("/").text
+    sections = {
+        "btSecParametersBody": "Backtest Parameters",
+        "btSecGeometryBody": "Strategy Geometry Preview",
+        "btSecOverallBody": "Overall Execution Results",
+        "btSecSweepBody": "Sweep Visual",
+        "btSecSeriesBody": "Per-Series Performance",
+        "btSecLogBody": "Executed Windows Log",
+    }
+    for body_id, heading in sections.items():
+        assert f'aria-controls="{body_id}"' in html
+        assert heading in html
+    assert html.count('class="bt-section-head"') >= 9  # six peers + parameter groups
+    assert 'id="btChartDialog"' in html
+    assert 'role="dialog"' in html
+    assert 'aria-labelledby="btChartDialogTitle"' in html
+    assert 'id="btChartDialogClose"' in html
+    assert "function openBtChartDetail" in html
+    assert "function closeBtChartDetail" in html
+    assert "event.key === 'Escape'" in html
+    assert "window._btRunning = false" in html
+    assert "window._btSweepVisualData" in html
+
+
+def test_issue_270_backtest_labels_are_duration_first_and_filter_values_stay_slugs():
+    """Issue #270: result rendering canonicalizes labels without changing slug values."""
+    html = client.get("/").text
+    for label in (
+        "05m BTC", "05m ETH", "05m BNB", "05m SOL", "05m XRP",
+        "15m BTC", "15m ETH", "15m BNB", "15m SOL", "15m XRP",
+    ):
+        assert label in html or "canonicalMarketName" in html
+    assert "function canonicalMarketName" in html
+    assert "seriesLabels.set(t.series" in html
+    assert "const currentVal = $('btLogSeriesFilter').value;" in html
+    assert "opts += `<option value=\"${esc(slug)}\"" in html
+
+
 def test_cockpit_renders_a_structural_limits_grouping_with_badges():
     """The Cockpit demarcates structural limits with a badged sub-group."""
     html = client.get("/").text

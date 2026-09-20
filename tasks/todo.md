@@ -1,13 +1,23 @@
-# Issue #272 Planning Checklist
+# Issue #270 Planning Checklist
 
-- [x] Confirm issue scope, capture-state vocabulary, and policy targets
-- [x] Define one machine-readable target contract for verifier/API/UI
-- [x] Add capture-state labels, reasons, and safe actions
-- [x] Render two-target progress rows for every readiness metric
-- [x] Add accessible floating tooltip for the readiness explanation
-- [x] Verify tiny, exploratory, and near-research files in the real Tick Files tab
-- [x] Run targeted tests and browser checks
-- [x] Keep raw PASS/WARN/FAIL API compatibility and existing actions intact
+- [x] Add the six flat peer Backtest sections while preserving stable IDs and controls
+- [x] Generalize accessible collapse semantics and persisted state to every section
+- [x] Standardize Per-Series Performance and Executed Windows Log labels to `05m BTC` / `15m BTC`
+- [x] Make aggregate and ten per-series Sweep Visual cards legible at supported widths
+- [x] Add reusable view-only expanded chart dialog with focus management and Escape close
+- [x] Verify selected-file state, explicit Run behavior, filters, pagination, and collapse/reopen after results
+- [x] Run focused tests and browser verification with zero console/network errors
+- [x] Confirm no API, calculations, sweep data, timing, or unrelated tab changes
 
-Targeted verification command:
-`python -m pytest tests/test_osc_dash_integration.py tests/test_verify_tick_data.py tests/test_theme_tokens.py -q`
+## Targeted verification
+
+`python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`
+
+## Browser verification
+
+- Backtest tab at 320px, 768px, 1024px, and 1440px: flat alignment, no horizontal overflow, no small-chart text overlap.
+- Toggle each section with mouse and keyboard; verify `aria-expanded`/visibility and preserved controls/results.
+- Run one explicit backtest and one Sweep Visual; verify opening the tab or chart does not create a new request.
+- Open aggregate and market charts; verify larger axes/tooltips/full tested values, best highlighting, close button, Escape, focus return, and repeated open/close.
+- Verify ten canonical labels in the series table, log rows, and filter options; confirm old suffix labels are absent.
+- Inspect console and network logs for zero feature-caused errors.

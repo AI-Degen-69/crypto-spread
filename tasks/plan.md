@@ -1,59 +1,103 @@
-# Task Plan — Issue #272: Clarify Tick Files metrics and readiness progress
+# Task Plan — Issue #270: Flatten and standardize collapsible Backtest sections
 
-**Size tier:** Large — changes the Tick Files UI, integrity presentation, readiness target contract, tooltip interaction, and focused regression coverage.
-**Task type:** Code + API/Backend + Design/UI + QA.
-**Issue:** #272
+**Issue:** #270 — Flatten and standardize collapsible Backtest sections
+**Size tier:** Large — one server-served UI contains several independently testable layout, accessibility, chart, and label contracts, with focused integration and browser verification.
+**Task type:** Code + Design/UI + API/Interface compatibility + QA.
+**Stack:** Python/FastAPI/uvicorn serving a vanilla JavaScript dashboard with existing Chart.js; pytest is the focused test runner. No package manifest or frontend build step is present.
 
-## Locked decisions
-- Keep raw integrity values `PASS/WARN/FAIL` for API compatibility.
-- Show capture-state labels `COMPLETE CAPTURE`, `PARTIAL CAPTURE`, and `CORRUPTED DATA` in the UI.
-- Show a short reason and safe action for every integrity state.
-- Hide the long readiness/profitability explanation from the main layout; expose it through an accessible floating tooltip.
-- Use Issue #273's versioned readiness policy as the target source of truth.
-- Every readiness metric has explicit exploratory and research targets, measured value, two progress states, and a next milestone.
-- Lower-is-better metrics are visibly inverted or labeled `0 is the target`.
-- Preserve API compatibility, cache/rescan behavior, Backtest actions, and duration-first market labels.
+## Issue-derived interface contract
 
-## Tasks
+- **Rendered DOM:** preserve existing stable IDs and add unique body IDs for the six peer sections. Each heading is a button whose `aria-controls` names its body and whose `aria-expanded` matches `hidden`.
+- **Chart interaction:** existing sweep payload (`points`, `series_order`, `series_labels`, `best_overall`, `best_market`) remains the source. Expansion is client-only and takes a chart/card descriptor; it does not fetch or rerun anything.
+- **Labels:** `marketName(series)` remains the single helper, but its output contract becomes duration-first (`05m BTC`). Slug values and filter comparisons stay unchanged.
+- **Accessibility:** the chart detail surface is a dialog with accessible label, close button, focus-in/focus-out behavior, and Escape handling.
+- **API:** no endpoint, query parameter, response field, calculation, or timing contract changes.
 
-- [x] **TASK-1 [Backend/API]**: Normalize the readiness target contract.
-  - Target: `scripts/verify_tick_data.py`, `server/osc_dash.py`, focused verifier tests.
-  - Build: expose versioned target metadata for both levels, including explicit exploratory targets for market pairs, windows per pair, gaps, and collector errors; provide deterministic measured values and next-milestone inputs without changing the readiness gate unexpectedly.
-  - Verify: unit tests cover all metrics, both levels, zero values, lower-is-better limits, and policy-version consistency.
-  - Helper: `test-driven-development` + `api-and-interface-design`.
+## Dependency order and tasks
 
-- [x] **TASK-2 [Backend/API]**: Add capture-state display metadata without breaking raw integrity values.
-  - Target: `scripts/verify_tick_data.py`, `server/osc_dash.py`, integration tests.
-  - Build: map `PASS/WARN/FAIL` to customer-facing capture-state metadata with reason categories and safe-action text while retaining raw status fields in verify and manifest responses.
-  - Verify: tests assert all mappings, representative reason text, failure precedence, and backwards-compatible raw values.
-  - Helper: `api-and-interface-design` + `test-driven-development`.
+### Phase 1 — contracts and flat section shell
 
-- [x] **TASK-3 [Design/UI]**: Replace ambiguous Tick Files labels and status rendering.
-  - Target: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`, `tests/test_theme_tokens.py`.
-  - Build: render `COMPLETE CAPTURE`, `PARTIAL CAPTURE`, or `CORRUPTED DATA`, show a short reason/action, keep metric definitions visible, and preserve Backtest/rescan controls and `05m BTC`/`15m BTC` labels.
-  - Verify: served-HTML assertions and browser inspection of aggregate and expanded per-file views at desktop and narrow widths.
-  - Helper: `frontend-ui-engineering`.
+- [x] **TASK-1 [Design/UI] Section inventory and flat peer layout**
+  - **Files:** `server/osc_dash.py`, `tests/test_osc_dash_integration.py`.
+  - **Build:** wrap Backtest Parameters, Strategy Geometry Preview, Overall Execution Results, Sweep Visual, Per-Series Performance, and Executed Windows Log in consistent peer section markup; retain all current controls and stable IDs.
+  - **Acceptance:** six clear headings exist at one vertical hierarchy; no result card remains visually/nestingly unrelated; responsive layout has no new horizontal overflow.
+  - **Helper:** `frontend-ui-engineering` + `incremental-implementation`.
+  - **Verify:** focused served-HTML assertions for section count, headings, stable IDs; browser inspection at 320/768/1024/1440px.
+  - **Dependencies:** None.
 
-- [x] **TASK-4 [Design/UI]**: Build per-file two-target progress rows.
-  - Target: `server/osc_dash.py`, UI/integration tests.
-  - Build: add independent progress meters for snapshots, windows, tape entries, market-duration coverage, windows per pair, time blocks, corrupt rows, schema errors, gaps, and collector errors. Each row shows measured value, exploratory target/progress, research target/progress, reached state, and next milestone. Use reversed semantics for lower-is-better metrics and retain text accessible to screen readers.
-  - Verify: browser checks for empty/tiny, exploratory, and near-research reports; tests cover target text, progress clamping, next milestone, and zero-target metrics.
-  - Helper: `frontend-ui-engineering` + `test-driven-development`.
+- [x] **TASK-2 [Design/UI/Accessibility] Generalize collapse semantics and state**
+  - **Files:** `server/osc_dash.py`, `tests/test_osc_dash_integration.py`, `tests/test_theme_tokens.py`.
+  - **Build:** extend the existing `toggleBtSection`/initialization pattern to all six peer sections, with deterministic defaults, `aria-expanded`, `aria-controls`, hidden-body synchronization, focus-visible styling, and safe local persistence.
+  - **Acceptance:** every section is keyboard operable; collapse/reopen preserves child DOM and rendered state; opening the Backtest tab remains read-only.
+  - **Helper:** `frontend-ui-engineering` + `test-driven-development`.
+  - **Verify:** HTML/Node contract tests plus browser keyboard toggle and reopen checks with zero console errors and no backtest requests.
+  - **Dependencies:** TASK-1.
 
-- [x] **TASK-5 [Design/UI]**: Move the readiness explanation into an accessible floating tooltip.
-  - Target: `server/osc_dash.py`, UI tests.
-  - Build: add an `ⓘ` trigger beside Research Readiness, keyboard/focus support, Escape/outside close behavior, and concise copy explaining that targets measure data coverage rather than profitability and require later untouched-period checking.
-  - Verify: browser interaction and DOM assertions confirm the copy is not in the normal visible layout, the tooltip is reachable, and no console errors occur.
-  - Helper: `frontend-ui-engineering`.
+### Checkpoint A
 
-- [x] **TASK-6 [QA/Regression]**: Validate real files and simplify the final implementation.
-  - Target: changed verifier/dashboard/tests/docs.
-  - Build: inspect current files including the September 18 example, confirm measured-vs-target displays, remove duplicate helpers or dead styling, and preserve cache-first loading.
-  - Verify: targeted pytest suite, compile/diff checks, API response inspection, and browser verification in the real Tick Files tab.
-  - Helper: `code-simplification` + `verification-before-completion`.
+- [x] Flat six-section DOM and collapse behavior pass focused tests.
+- [x] Existing Backtest IDs, explicit Run behavior, and parameter controls remain intact.
 
-## Evidence-based improvement proposal
-Use one shared serializable target definition for the verifier, API, and UI instead of duplicating thresholds in JavaScript. This follows the existing versioned `READINESS_POLICIES` contract in `scripts/verify_tick_data.py` and prevents the displayed progress bars from drifting away from the actual readiness gate.
+### Phase 2 — labels and chart readability
+
+- [x] **TASK-3 [Design/UI/Compatibility] Canonical market labels everywhere in Backtest results**
+  - **Files:** `server/osc_dash.py`, `tests/test_osc_dash_integration.py`, `tests/test_theme_tokens.py`.
+  - **Build:** update the shared market-label helper/order and all Per-Series Performance, Executed Windows Log row, and filter-option rendering to `05m BTC` / `15m BTC` without changing slug values, ordering, filtering, sorting, or API data.
+  - **Acceptance:** all ten canonical labels are represented; `BTC 5m`/`BTC 15m` suffix forms do not appear in the targeted Backtest areas.
+  - **Helper:** `api-and-interface-design` + `test-driven-development`.
+  - **Verify:** focused HTML/API assertions and browser checks for table rows and filter options.
+  - **Dependencies:** TASK-1.
+
+- [x] **TASK-4 [Design/UI] Make small Sweep Visual cards legible**
+  - **Files:** `server/osc_dash.py`, `tests/test_theme_tokens.py`, `tests/test_osc_dash_integration.py`.
+  - **Build:** adjust the existing shared Chart.js options for compact cards: readable duration/asset tick formatting, bounded tick density/rotation, responsive chart sizing, and preserved full-value tooltips/best highlighting.
+  - **Acceptance:** no visible label overlap or bar obstruction at supported widths; aggregate and all ten market charts retain numeric X/Y values, tooltips, and best highlighting.
+  - **Helper:** `frontend-ui-engineering` + `test-driven-development`.
+  - **Verify:** served-HTML chart-option assertions and browser screenshots/inspection at narrow and desktop widths.
+  - **Dependencies:** TASK-1.
+
+### Checkpoint B
+
+- [x] Canonical labels and compact chart rendering pass focused tests.
+- [x] Browser confirms cards remain legible without changing sweep data or triggering requests.
+
+### Phase 3 — expanded chart view
+
+- [x] **TASK-5 [Design/UI/Accessibility] Add view-only expanded chart dialog**
+  - **Files:** `server/osc_dash.py`, `tests/test_osc_dash_integration.py`, `tests/test_theme_tokens.py`.
+  - **Build:** add one reusable detail surface for aggregate and per-series cards. Make each card focusable/activatable by click/Enter/Space; render a larger chart from the existing sweep payload with full tested-value set, readable axes/tooltips, and the same best-result highlighting.
+  - **Acceptance:** dialog has `role="dialog"`, accessible name, close button, Escape support, focus-visible styling, focus entry and return to the triggering card; no endpoint is called and parameters/file selection are unchanged.
+  - **Helper:** `frontend-ui-engineering` + `api-and-interface-design` + `test-driven-development`.
+  - **Verify:** Node/HTML interaction contract tests and browser checks for aggregate + market card, close button, Escape, focus return, repeated open/close, and console/network cleanliness.
+  - **Dependencies:** TASK-4.
+
+- [x] **TASK-6 [QA/Regression] End-to-end Backtest acceptance review and cleanup**
+  - **Files:** `server/osc_dash.py`, `tests/test_osc_dash_integration.py`, `tests/test_theme_tokens.py`.
+  - **Build:** exercise explicit Run, selected-file flow, parameter edits, collapse/reopen after results, filter/pagination behavior, all chart expansion paths, and narrow layout; remove duplicate listeners/styles or dead code without altering unrelated tabs.
+  - **Acceptance:** all Issue #270 criteria are covered, no API/data behavior changed, and the implementation remains within the locked constraints.
+  - **Helper:** `verification-before-completion` + `code-simplification`.
+  - **Verify:** `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`, compile/syntax checks as applicable, and browser preview with zero console errors/network failures.
+  - **Dependencies:** TASK-2, TASK-3, TASK-5.
+
+### Checkpoint C — ready for Station IV
+
+- [x] Targeted test command passes; no test was skipped or weakened.
+- [x] Browser confirms flat sections, collapse semantics, chart legibility, dialog focus behavior, canonical labels, and no unintended simulation.
+- [x] `git diff` contains only Issue #270 files plus intentional focused tests.
+
+## One evidence-based improvement proposal (adopted by default)
+
+Use one shared chart-card/detail renderer and one Chart.js option factory for both the small cards and dialog: the current `renderSweepVisual()` duplicates chart construction while forcing `autoSkip: false` and only `maxTicksLimit: 7` in a small-card context (`server/osc_dash.py:5198-5210`), which is direct evidence for centralizing tick policy and preventing card/detail behavior from drifting.
+
+## Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Existing scripts/tests depend on result IDs or card DOM | High | Preserve IDs and assert them before/after markup changes. |
+| Chart.js canvas instances leak during re-render/modal use | Medium | Keep one registry/destroy path; test repeated render/open/close. |
+| Label helper change affects unrelated tabs | Medium | Scope assertions to Backtest and verify existing shared usages explicitly. |
+| Focus behavior fails only after repeated interactions | High | Browser-test click, keyboard activation, Escape, close, and return focus in cycles. |
+| Collapse hides a chart whose size is measured before render | Medium | Resize/update chart after reopening and verify visually. |
 
 ## Out of scope
-Collector protocol changes, replay/fill/exit math, window grouping changes, live trading behavior, new dependencies, and profitability claims.
+Backtest/replay math, API contracts, timing semantics, sweep axes/data, live cockpit, unrelated tabs, and new dependencies.
