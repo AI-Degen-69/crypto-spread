@@ -1,24 +1,20 @@
-# CONSTRAINTS — Issue #266: Sweep Visual sensitivity clarity
+# CONSTRAINTS — Issue #269: Duration-aware backtest timing percentages
 
 ## Scope lock
-1. Change only the Sweep Visual endpoint, its served UI, focused tests, and issue planning records.
-2. Preserve existing Chart.js and theme-token integration; add no dependencies.
-3. Keep the feature one-axis only: `queue`, `offset`, `exit_stop`, and `exit_rev`.
-4. Treat each tested value as an independent replay; do not add interpolation, trend fitting, or untested values.
-5. `exit_stop` must set the 5m and 15m default stop values together in the copied sweep parameters. Do not change production defaults or strategy/backtest math.
-6. Preserve existing DOM IDs and canonical ten-market order.
-7. Do not include Issue #174 changes, tick data, unrelated dashboard tabs, or presentation artifacts.
+1. Change only Backtest timing controls, Strategy Geometry Preview, duration conversion, and focused tests/docs for this issue.
+2. Do not change live cockpit semantics, trading rules, sweep axes, tick data, or unrelated tabs.
+3. Preserve timestamp-based simulation and existing internal parity behavior.
+4. No new dependencies.
 
 ## Quality guardrails
-8. Targeted gate: `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q` plus any new focused test module.
-9. New behavior requires assertions for bar configuration, humanized axis labels, shared 5m/15m stop semantics, best aggregate and best-market metadata, empty data, zero-fill order, and busy-guard release.
-10. Browser verification must use `run/ticks/ticks_2026-09-18.jsonl` when present and record chart count, visible markers, and selected axis text.
-11. No skipped/deleted assertions, test weakening, broad snapshot-only coverage, or lint suppression.
-12. Do not run the full local test suite; CI remains the merge gate.
+5. Targeted tests must pass: engine timing/parity, dead-zone parity, dashboard integration, and theme/UI contracts.
+6. Add assertions for 5m/15m conversion: 10% = 30s/90s, 0%, 100%, mixed-duration windows, invalid values, and partial/invalid clock handling.
+7. Browser verification must inspect the Backtest tab at 5m and 15m contexts and confirm a normalized 0–100% axis, correctly positioned delay/dead-zone regions, and no horizontal overflow or label overlap.
+8. Do not skip, weaken, delete, or suppress tests. Do not alter expected P&L outcomes except where the old fixed-seconds behavior was demonstrably wrong for 15m.
+9. Keep UI interaction responsive: percentage conversion and preview updates must remain client-side and complete without network calls.
 
 ## Interface guardrails
-- Valid-axis errors must list exactly the supported machine axes.
-- Readable labels are additive presentation metadata; machine slugs remain unchanged.
-- Best-result metadata is deterministic and safe for empty points.
-- Missing markets render zero-valued bars and cannot win through missing-data defaults.
-- Negative values render below a visible zero baseline.
+- Operator-facing timing inputs are percentages in the inclusive range 0..100.
+- Internal conversion uses each window's actual timestamp duration; never infer duration from snapshot count or a 5m default.
+- Existing API/file safety and busy-guard behavior remain intact.
+- Any compatibility translation from existing second-based fields must be explicit, documented, and tested; no silent ambiguity between seconds and percentages.

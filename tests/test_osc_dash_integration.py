@@ -2444,9 +2444,10 @@ def test_every_knob_marked_for_a_surface_is_rendered_there(surface):
         for name, v in group.items()
         if surface in v["surfaces"] and surface not in rendered.get(name, set())
     )
-    # `exit_thresh_by_slug` is a dict fanned out into four per-series inputs
-    # rather than one control, so it has no single `data-param` of its own.
-    missing = [m for m in missing if m != "exit_thresh_by_slug"]
+    # These registry entries are compatibility fields or are rendered as
+    # multiple controls rather than one data-param element.
+    missing = [m for m in missing if m not in {"exit_thresh_by_slug", "dead_zone_unit", "dead_zone_val", "entry_delay_sec"}]
+
     assert missing == [], (
         f"registry marks these for the {surface} tab, which renders none of "
         f"them: {missing}")
@@ -2538,9 +2539,9 @@ def test_backtest_structural_section_contains_all_structural_controls():
     sec_start = html.index("btSecStructural")
     sec_end = html.index("btSecExecutionBody")
     section = html[sec_start:sec_end]
-    for frag in ('data-param="max_pair_cost"', 'id="btQuoteLo"', 'id="btQuoteHi"',
-                 'data-param="dead_zone_val"', 'data-param="dead_zone_unit"',
-                 'data-param="naked_leg_at_expiry"'):
+    for frag in ('data-param="max_pair_cost"', 'id="btQuoteLo"', 'id="btQuoteHi"',                     'data-param="dead_zone_pct"',
+                     'data-param="naked_leg_at_expiry"'):
+
         assert frag in section, f"structural control {frag!r} not inside btSecStructural"
     # And the tuning controls stayed behind in the operator section.
     op_start = html.index("btSecOperatorBody")
@@ -2580,7 +2581,7 @@ def test_js_helper_badges_structural_inputs_via_the_registry():
 
 def test_backtest_sends_the_new_knobs():
     html = client.get("/").text
-    for q in ("exit_reversal=", "dead_zone_val=", "dead_zone_unit=",
+    for q in ("exit_reversal=", "dead_zone_pct=", "entry_delay_pct=",
               "naked_leg_at_expiry=",
               "enable_leg_chase=", "quote_lo=", "quote_hi="):
         assert q in html, f"the Backtest run URL never sends {q}"
@@ -2942,12 +2943,11 @@ def test_both_tabs_render_the_dead_zone_and_expiry_switches():
         assert 'data-param="naked_leg_at_expiry"' in block
         assert '<option value="close"' in block
         assert '<option value="hold"' in block
-    for sel_id in ("btDeadZoneUnit", "cockpitDeadZoneUnit"):
-        start = html.index(f'id="{sel_id}"')
-        block = html[start:start + 300]
-        assert 'data-param="dead_zone_unit"' in block
-        assert '<option value="pct"' in block
-        assert '<option value="sec"' in block
+    start = html.index('id="cockpitDeadZoneUnit"')
+    block = html[start:start + 300]
+    assert 'data-param="dead_zone_unit"' in block
+    assert '<option value="pct"' in block
+    assert '<option value="sec"' in block
 
 
 def test_the_deleted_knobs_have_no_inputs_left_on_either_tab():

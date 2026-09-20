@@ -260,6 +260,18 @@ def test_chase_cap_of_an_unparseable_entry_is_unknown():
     assert chase_cap("abc", 0.48) is None
 
 
+# --- duration-aware percentage timing (issue #269) -----------------------
+
+def test_window_percentage_seconds_uses_actual_duration():
+    from strategy.book_math import window_percentage_seconds
+
+    assert window_percentage_seconds(300.0, 0.10) == 30.0
+    assert window_percentage_seconds(900.0, 0.10) == 90.0
+    assert window_percentage_seconds(300.0, 0.0) == 0.0
+    assert window_percentage_seconds(900.0, 1.0) == 900.0
+    assert window_percentage_seconds(0.0, 0.10) == 0.0
+
+
 # --- dead zone (issue #229) ----------------------------------------------
 
 def test_dead_zone_cutoff_pct_and_sec():

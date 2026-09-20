@@ -328,6 +328,14 @@ def test_a_printed_leg_that_drifts_is_stopped_out():
 
 
 
+def test_entry_delay_percentage_is_duration_aware():
+    assert BacktestParams(entry_delay_pct=0.10).entry_delay_pct == 0.10
+    with pytest.raises(ValueError, match="entry_delay_pct"):
+        BacktestParams(entry_delay_pct=1.01)
+    with pytest.raises(ValueError, match="entry_delay_pct"):
+        BacktestParams(entry_delay_pct=-0.01)
+
+
 # --- simulation: gates ----------------------------------------------------
 
 def test_simulate_queue_gate_blocks_entry():

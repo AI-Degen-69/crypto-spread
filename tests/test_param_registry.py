@@ -86,7 +86,7 @@ def test_every_field_declares_a_valid_param_class():
 def test_param_class_assignments_match_the_spec():
     """The agreed classification (`docs/engine-decision-rules.md` §Parameter classes)."""
     tuning = {"offset", "queue_gate", "quote_shares", "entry_delay_sec",
-              "exit_thresh_by_slug", "exit_reversal",
+              "entry_delay_pct", "exit_thresh_by_slug", "exit_reversal",
               "enable_leg_chase"}
     structural = {"max_pair_cost", "quote_range", "dead_zone_val",
                   "dead_zone_unit", "naked_leg_at_expiry"}

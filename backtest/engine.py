@@ -136,6 +136,9 @@ class BacktestParams:
     # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
     # holds all quoting until that far into the window (0 = off).
     entry_delay_sec: float = 0.0
+    # Backtest-only relative timing input. When set, it takes precedence over
+    # entry_delay_sec and is converted using each window's actual duration.
+    entry_delay_pct: float | None = None
     # Issue #228: the one quotable range, replacing `entry_band` and the
     # adverse-open gate (`docs/engine-decision-rules.md` §6). A structural
     # limit, not a tuning knob (ADR-0003): inside it the window is quoted,
@@ -194,7 +197,9 @@ class BacktestParams:
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
              "shares", (5, 10000), ("backtest", "cockpit"), "tuning"),
             ("entry_delay_sec", "Entry Delay (s)", "You hold quotes until the window matures",
-             "s", (0.0, 3600.0), ("backtest", "cockpit"), "tuning"),
+             "s", (0.0, 3600.0), ("cockpit",), "tuning"),
+            ("entry_delay_pct", "Late Entry (% of window)", "Hold quotes until this fraction of each window has elapsed",
+             "%", (0.0, 1.0), ("backtest",), "tuning"),
             # Issue #228: structural limit (ADR-0003) replacing the band and
             # the adverse-open gate. Bounds are the price domain itself; the
             # dashboard renders two inputs (lo/hi), not one knob.
@@ -224,9 +229,9 @@ class BacktestParams:
             # Issue #229: Dead zone governs the end of the window (rules §8 & §14).
             # Structural limits (ADR-0003), not tuning knobs.
             ("dead_zone_val", "Dead Zone Threshold", "Tail of window that is untradeable (0.10 default; 0 disables)",
-             "% or s", (0.0, 3600.0), ("backtest", "cockpit"), "structural"),
+             "% or s", (0.0, 3600.0), ("cockpit",), "structural"),
             ("dead_zone_unit", "Dead Zone Unit", "Whether threshold is % of window or absolute seconds",
-             "str", None, ("backtest", "cockpit"), "structural"),
+             "str", None, ("cockpit",), "structural"),
         ],
     }
 
@@ -389,6 +394,12 @@ class BacktestParams:
             if not math.isfinite(self.entry_delay_sec) or not (0.0 <= self.entry_delay_sec <= 3600.0):
                 raise ValueError(
                     f"entry_delay_sec must be between 0.0 and 3600.0, got {self.entry_delay_sec}"
+                )
+        if self.entry_delay_pct is not None:
+            if (not math.isfinite(self.entry_delay_pct)
+                    or not (0.0 <= self.entry_delay_pct <= 1.0)):
+                raise ValueError(
+                    f"entry_delay_pct must be between 0.0 and 1.0, got {self.entry_delay_pct}"
                 )
         # Issue #227: a structural limit, enforced here and not only at the API
         # clamp. Every driver in `research/sweeps/` builds this dataclass
@@ -768,7 +779,11 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     # validator (`__post_init__` owns range/finiteness for constructed params).
     # Issue #228: the entry band is deleted and the range below is judged on
     # the anchor's own two-sided mid.
-    entry_delay = 0.0 if params.entry_delay_sec is None else params.entry_delay_sec
+    entry_delay = (
+        book_math.window_percentage_seconds(window_length, params.entry_delay_pct)
+        if params.entry_delay_pct is not None
+        else (0.0 if params.entry_delay_sec is None else params.entry_delay_sec)
+    )
     quote_lo, quote_hi = params.quote_range
     resting_up: float | None = None
     resting_down: float | None = None
