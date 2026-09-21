@@ -95,3 +95,12 @@ Multiple agents and the user work in the same checkout. Therefore:
   `git status --short` — the branch may have been switched under you.
 - Track exactly which hunks/files are yours; stage only those.
 - If ownership of a dirty file is ambiguous, leave it uncommitted and say so.
+
+## 7. Pipeline leftovers (issue #287)
+
+- Showcase pages (`docs/issues/<id>-presentation-*.html`) are committed by
+  the station that creates them, as part of that issue's PR — never left
+  untracked.
+- Per-issue scratch (`tasks/plan-*.md`, closed todos) is removed by
+  Station VI before merge — never left staged-deleted.
+- Before push: `git status --porcelain` shows only the issue's own work.
