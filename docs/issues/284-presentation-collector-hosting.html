@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The market recorder now lives where it never sleeps — #284</title>
+<style>
+:root{--ink:#edf3ec;--muted:#9db3a4;--bg:#0a1210;--panel:#101c17;--panel-2:#15241d;--line:#274435;--accent:#5fd0a5;--accent-ink:#06231a;--warn:#e5a84b;--bad:#f17c78;--shadow:0 20px 55px rgba(0,0,0,.30)}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:16px/1.65 "Segoe UI",Tahoma,sans-serif}
+main{max-width:1060px;margin:auto;padding:44px 20px 70px}
+.eyebrow{color:var(--accent);font-size:.75rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+h1{font-size:clamp(28px,4.6vw,50px);line-height:1.1;margin:10px 0 12px;letter-spacing:-.02em;max-width:800px}
+.lede{color:var(--muted);font-size:1.12rem;max-width:700px;margin:0}
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:28px;margin-top:26px;box-shadow:var(--shadow)}
+.hero svg{width:100%;height:auto;display:block}
+.pulse{animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.caption{font-size:.85rem;color:var(--muted);margin-top:10px}
+.tabs{margin-top:26px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px;box-shadow:var(--shadow)}
+.tabbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.tabbar button{font:inherit;font-weight:700;font-size:.9rem;color:var(--muted);background:transparent;border:1px solid var(--line);border-radius:99px;padding:.45rem 1.1rem;cursor:pointer}
+.tabbar button[aria-selected="true"]{color:var(--accent-ink);background:var(--accent);border-color:var(--accent)}
+.tabpanel{display:none;padding-top:8px}
+.tabpanel.active{display:block}
+.tabpanel h2{margin:.4rem 0 .3rem;font-size:1.3rem}
+.tabpanel p{margin:.3rem 0;color:var(--muted)}
+.tabpanel .price{display:inline-block;font-size:1.6rem;font-weight:800;color:var(--ink);margin-top:.4rem}
+.tabpanel .price small{font-size:.85rem;color:var(--muted);font-weight:400}
+.verdict{display:inline-block;font-size:.78rem;font-weight:800;padding:.2rem .8rem;border-radius:99px;margin-left:.6rem;vertical-align:middle}
+.verdict.yes{background:rgba(95,208,165,.14);color:var(--accent);border:1px solid var(--accent)}
+.verdict.no{background:rgba(241,124,120,.12);color:var(--bad);border:1px solid var(--bad)}
+.try{margin-top:26px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px;box-shadow:var(--shadow)}
+.try h2{margin:0 0 .4rem;font-size:1.3rem}
+.try ol{margin:.5rem 0 .2rem;padding-left:1.3rem}
+.try li{margin:.45rem 0;color:var(--ink)}
+.try li small{color:var(--muted)}
+.links{margin-top:14px;font-size:.9rem;color:var(--muted)}
+.links a{color:var(--accent)}
+footer{margin-top:26px;color:var(--muted);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+<div class="eyebrow">Change put live &middot; #284</div>
+<h1>The market recorder now lives where it never sleeps</h1>
+<p class="lede">Before, the recorder ran on a home computer that naps, restarts, and drops its connection — leaving gaps in the recordings. Now it has a rented home that stays awake around the clock, so the five-day recording can finally begin.</p>
+
+<div class="hero" aria-label="The move">
+<svg viewBox="0 0 680 240" role="img" aria-label="Drawing: sleepy home computer on the left, arrow, always-awake cloud recorder with a guard on the right">
+<!-- home PC -->
+<g>
+<rect x="20" y="60" width="170" height="118" rx="14" fill="none" stroke="#f17c78" stroke-width="2" stroke-dasharray="7 6"/>
+<rect x="48" y="88" width="114" height="66" rx="6" fill="none" stroke="#9db3a4" stroke-width="2"/>
+<text x="105" y="128" text-anchor="middle" fill="#9db3a4" font-size="26">💻</text>
+<text x="105" y="172" text-anchor="middle" fill="#f17c78" font-size="12">home computer · naps</text>
+<text x="150" y="52" fill="#9db3a4" font-size="20">z</text>
+<text x="164" y="38" fill="#9db3a4" font-size="24">z</text>
+<text x="182" y="20" fill="#9db3a4" font-size="28">z</text>
+<path d="M60 196 l14 0 M96 196 l14 0 M132 196 l14 0" stroke="#f17c78" stroke-width="2" stroke-dasharray="4 4"/>
+</g>
+<!-- arrow -->
+<g>
+<path d="M215 129 L315 129" stroke="#5fd0a5" stroke-width="3"/>
+<path d="M300 116 L318 129 L300 142" fill="none" stroke="#5fd0a5" stroke-width="3" stroke-linecap="round"/>
+<text x="265" y="112" text-anchor="middle" fill="#5fd0a5" font-size="12">moves to</text>
+</g>
+<!-- cloud host -->
+<g>
+<rect x="340" y="40" width="320" height="160" rx="14" fill="#15241d" stroke="#5fd0a5" stroke-width="2"/>
+<text x="500" y="72" text-anchor="middle" fill="#5fd0a5" font-size="14" font-weight="bold">rented server · always awake</text>
+<ellipse cx="440" cy="120" rx="52" ry="30" fill="none" stroke="#5fd0a5" stroke-width="2"/>
+<text x="440" y="128" text-anchor="middle" fill="#edf3ec" font-size="13">recorder</text>
+<path class="pulse" d="M500 112 h14 l6 -12 l8 24 l6 -12 h16" fill="none" stroke="#5fd0a5" stroke-width="2.5" stroke-linecap="round"/>
+<text x="575" y="128" text-anchor="middle" fill="#edf3ec" font-size="13">🛡 guard</text>
+<text x="500" y="162" text-anchor="middle" fill="#9db3a4" font-size="12">guard restarts the recorder if it stalls</text>
+<text x="500" y="182" text-anchor="middle" fill="#9db3a4" font-size="12">10 GB shelf for five days of recordings</text>
+</g>
+</svg>
+<p class="caption">Left: the old setup — a home computer that sleeps. Right: the new setup — a rented server with the recorder, its guard, and a big shelf for recordings.</p>
+</div>
+
+<div class="tabs" aria-label="Which rented home we picked">
+<div class="tabbar" role="tablist">
+<button role="tab" aria-selected="true" data-tab="t-render">Render</button>
+<button role="tab" aria-selected="false" data-tab="t-fly">Fly</button>
+<button role="tab" aria-selected="false" data-tab="t-rail">Railway</button>
+</div>
+<div class="tabpanel active" id="t-render" role="tabpanel">
+<h2>Render <span class="verdict yes">picked</span></h2>
+<p>A worker that runs day and night, with a 10&nbsp;GB shelf attached. No extra packaging needed — the simplest move.</p>
+<span class="price">≈ $9.50 <small>/ month</small></span>
+</div>
+<div class="tabpanel" id="t-fly" role="tabpanel">
+<h2>Fly <span class="verdict yes">backup plan</span></h2>
+<p>Same always-awake promise for less money, but it needs a custom box (a Dockerfile) we have not built yet.</p>
+<span class="price">≈ $4 <small>/ month</small></span>
+</div>
+<div class="tabpanel" id="t-rail" role="tabpanel">
+<h2>Railway <span class="verdict no">ruled out</span></h2>
+<p>Its affordable shelf holds only 5&nbsp;GB — half of what five days need. The bigger shelf costs four times as much.</p>
+<span class="price">$20 <small>/ month · too much for this job</small></span>
+</div>
+</div>
+
+<div class="try" aria-label="Try it yourself">
+<h2>What happens next</h2>
+<ol>
+<li><strong>The move is ready, the trip is not taken yet.</strong><br><small>Renting the server needs a human with a credit card — the handbook below lists every click.</small></li>
+<li><strong>Where to look:</strong> open <small><code>docs/collector-hosting-runbook.md</code></small> in the project and follow section 1 (rent), 2 (check the lights are on), 4 (bring the recordings home).</li>
+<li><strong>What you will see when it works:</strong> one line saying the guard is up, one line saying the recorder started — then silence, and a recordings file that keeps growing for five days.</li>
+</ol>
+<div class="links">Problem: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/283">request #283</a> · Change put live: <a href="https://github.com/AI-Degen-69/crypto-spread/pull/284">update #284</a></div>
+</div>
+
+<footer>Plain-words page for a finished change. The guard (watchdog) also learned a second language so it works on rented Linux servers, not just Windows.</footer>
+</main>
+<script>
+(function(){
+var btns=document.querySelectorAll('.tabbar button');
+btns.forEach(function(b){b.addEventListener('click',function(){
+btns.forEach(function(x){x.setAttribute('aria-selected','false');});
+b.setAttribute('aria-selected','true');
+document.querySelectorAll('.tabpanel').forEach(function(p){p.classList.remove('active');});
+document.getElementById(b.getAttribute('data-tab')).classList.add('active');
+});});
+})();
+</script>
+</body>
+</html>

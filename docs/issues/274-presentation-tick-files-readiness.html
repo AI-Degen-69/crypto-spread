@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tick Files — איך יודעים שאפשר לסמוך על הנתונים?</title>
+<style>
+:root{--bg:#0b1117;--panel:#121b27;--panel2:#172333;--line:#314258;--ink:#edf3fa;--muted:#a8b6c6;--accent:#c792ea;--accent2:#8be9fd;--good:#55d6c2;--warn:#f4b860;--bad:#f17c78;--shadow:0 22px 60px rgba(0,0,0,.3)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 "Segoe UI",Tahoma,sans-serif}main{max-width:1120px;margin:auto;padding:42px 22px 76px}.eyebrow{color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.hero{max-width:800px}.hero h1{font-size:clamp(34px,6vw,68px);line-height:1.05;margin:12px 0 18px;letter-spacing:-.04em}.hero p{font-size:20px;color:var(--muted);max-width:760px;margin:0}.rail{height:5px;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:99px;margin:34px 0 26px;opacity:.85}.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px;box-shadow:var(--shadow);margin-top:22px}.panel h2{margin:0 0 8px;font-size:22px}.sub{color:var(--muted);margin:0 0 18px}.figure{background:var(--panel2);border:1px solid var(--line);border-radius:14px;overflow:hidden}.figure-label{padding:13px 16px 0;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.canvas-wrap{padding:10px 14px 0}.canvas-wrap canvas{display:block;width:100%;height:auto}.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--line)}button{border:1px solid var(--line);background:#202d3d;color:var(--ink);border-radius:9px;padding:8px 14px;cursor:pointer;font-weight:700}button:hover,button:focus-visible{border-color:var(--accent);outline:2px solid transparent}button.primary{background:var(--accent);color:#1d1230;border-color:var(--accent)}.caption{padding:0 16px 15px;color:var(--muted);font-size:14px}.legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:13px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-left:5px;background:var(--accent)}.dot.blue{background:var(--accent2)}.dot.green{background:var(--good)}.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}.meaning{display:grid;gap:10px;margin-top:16px}.meaning div{padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.025)}.meaning strong{display:block;color:var(--ink);font-size:16px}.meaning span{display:block;color:var(--muted);font-size:14px;margin-top:3px}.status{display:inline-block;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:800;margin-right:5px}.yellow{background:rgba(244,184,96,.16);color:var(--warn)}.purple{background:rgba(199,146,234,.16);color:var(--accent)}.green{background:rgba(85,214,194,.16);color:var(--good)}.steps{counter-reset:step;display:grid;gap:12px}.step{display:grid;grid-template-columns:42px 1fr;gap:12px;align-items:start}.step:before{counter-increment:step;content:counter(step);display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:rgba(199,146,234,.18);color:var(--accent);font-weight:800}.step strong{display:block}.step span{color:var(--muted);font-size:14px}.note{border-right:3px solid var(--accent);background:rgba(199,146,234,.08);padding:13px 16px;border-radius:0 10px 10px 0;color:var(--muted);margin-top:16px}.links{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}.links a{color:var(--accent2);text-decoration:none;border-bottom:1px solid rgba(139,233,253,.4)}footer{margin-top:30px;color:var(--muted);font-size:13px}@media(max-width:760px){.two{grid-template-columns:1fr}.panel{padding:18px}.hero p{font-size:17px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<main>
+  <section class="hero" aria-labelledby="title">
+    <div class="eyebrow">Tick Files · עדכון #274</div>
+    <h1 id="title">לא כל קובץ גדול הוא קובץ טוב.</h1>
+    <p>עכשיו אפשר לראות מה באמת נמצא בקובץ, האם הנתונים תקינים, והאם יש מספיק תצפיות שונות כדי להשתמש בהם ב־Backtest בצורה אחראית.</p>
+  </section>
+  <div class="rail" aria-hidden="true"></div>
+
+  <section class="panel" aria-labelledby="flow-title">
+    <h2 id="flow-title">מה עובר בדרך אל ה־Backtest?</h2>
+    <p class="sub">הנקודות זזות כדי להראות שכל שלב מוסיף בדיקה אחרת. עצרו את התנועה או עברו על התרשים בקצב שלכם.</p>
+    <div class="figure">
+      <div class="figure-label">המסלול של הנתונים</div>
+      <div class="canvas-wrap"><canvas id="flow" width="1040" height="300" role="img" aria-label="תרשים זרימת Tick Files מהאיסוף ועד Backtest"></canvas></div>
+      <div class="controls"><button class="primary" id="pause">עצור תנועה</button><span id="flowState">הנתונים זורמים</span></div>
+      <div class="caption"><span class="dot"></span> snapshot = שורה אחת בזמן מסוים · <span class="dot blue"></span> tape entry = עסקה שנראתה · <span class="dot green"></span> window = שוק שלם שנמדד</div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="read-title">
+    <h2 id="read-title">איך לקרוא את המסך?</h2>
+    <p class="sub">יש שתי שאלות שונות. לא מערבבים ביניהן.</p>
+    <div class="two">
+      <div class="meaning">
+        <div><strong>Integrity Status</strong><span>האם השורות והספרים נראים תקינים טכנית? <b class="status green">PASS</b> הכול תקין · <b class="status yellow">WARN</b> יש פערים שצריך להבין · <b class="status" style="background:rgba(241,124,120,.16);color:var(--bad)">FAIL</b> יש בעיה קשה.</span></div>
+        <div><strong>Research Readiness</strong><span>האם יש מספיק מידע מגוון כדי להשוות פרמטרים? זה לא מבטיח רווחיות; זו רק בדיקת התאמה למחקר.</span></div>
+      </div>
+      <div class="meaning">
+        <div><strong>EXPLORATORY <b class="status yellow">בדיקה</b></strong><span>מספיק כדי להבין מכניקה, למצוא באגים ולגבש השערה. לא מספיק כדי להסיק שיש יתרון יציב.</span></div>
+        <div><strong>RESEARCH_READY <b class="status green">מחקר</b></strong><span>עומד בספי הכיסוי, האיכות והגיוון שהוגדרו לפרויקט. עדיין צריך השוואה מחוץ למדגם.</span></div>
+        <div><strong>INSUFFICIENT <b class="status" style="background:rgba(241,124,120,.16);color:var(--bad)">מעט מדי</b></strong><span>אין מספיק תצפיות בסיסיות אפילו לבדיקה שימושית.</span></div>
+      </div>
+    </div>
+    <div class="note">אין מספר קסם של ticks או trades שהופך Backtest לאמין. חשובים גם חלונות נפרדים, כמה ימים או תקופות, כיסוי 5m ו־15m, פערי איסוף ומספר הניסויים שנוסו.</div>
+  </section>
+
+  <section class="panel" aria-labelledby="terms-title">
+    <h2 id="terms-title">מה כל מספר אומר?</h2>
+    <div class="two">
+      <div class="meaning">
+        <div><strong>Tick Snapshots</strong><span>שורות הנתונים. כל שורה היא צילום מצב של ספרי ההזמנות וה־tape בזמן מסוים. זו לא עסקה אחת.</span></div>
+        <div><strong>Market Windows</strong><span>חלונות שוק נפרדים: כל צירוף של שוק ומזהה חלון, למשל BTC 5m או ETH 15m. הרבה שורות יכולות להשתייך לאותו חלון.</span></div>
+        <div><strong>Tape Entries</strong><span>פריטי עסקאות שנמצאו בתוך `tape_delta`. עסקה היא לא snapshot, ו־snapshot ריק מ־tape אינו בהכרח קובץ פסול.</span></div>
+      </div>
+      <div class="meaning">
+        <div><strong>Tape Empty</strong><span>אחוז ה־snapshots שבהם לא נמצאו עסקאות חדשות. נמוך בדרך כלל טוב יותר, אבל הצבע לבדו לא קובע אם אפשר להשתמש בקובץ.</span></div>
+        <div><strong>Tape Entries / Window</strong><span>ממוצע פריטי העסקאות בכל חלון שוק. הוא מתאר צפיפות מידע, לא מספר חלונות ולא מספר ticks.</span></div>
+        <div><strong>Sample Discrepancies</strong><span>דוגמאות ראשונות לבעיות שנמצאו. הרשימה קצרה בכוונה; המספרים הכוללים של errors ו־gaps הם שקובעים את התמונה המלאה.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="routine-title">
+    <h2 id="routine-title">איך לעבוד עם Tick Files נכון?</h2>
+    <div class="steps">
+      <div class="step"><div><strong>פותחים את Tick Files</strong><span>בוחרים קובץ לפי התאריך, ולא לפי הגודל בלבד.</span></div></div>
+      <div class="step"><div><strong>בודקים קודם Integrity</strong><span>מחפשים ספרים מוצלבים, gaps גדולים, שגיאות collector ושורות פגומות. WARN אינו אישור אוטומטי.</span></div></div>
+      <div class="step"><div><strong>בודקים אחר כך Readiness</strong><span>רואים כמה snapshots, windows, tape entries, שווקים ותקופות יש, ומה חסר מול הסף.</span></div></div>
+      <div class="step"><div><strong>מתחילים קטן</strong><span>קובץ EXPLORATORY טוב להבנת המכניקה. לא משתמשים בו לבדו כדי לבחור פרמטרים סופיים.</span></div></div>
+      <div class="step"><div><strong>רק אז מריצים Backtest</strong><span>משווים כמה פרמטרים, שומרים holdout של תקופה שלא שימשה לכיוון, ולא מפרשים תוצאה אחת כהוכחה.</span></div></div>
+    </div>
+    <div class="note">כלל פשוט: קודם איכות הנתונים, אחר כך גודל המדגם, ורק בסוף P&amp;L.</div>
+  </section>
+
+  <footer>
+    <div>העדכון זמין במסך האמיתי: <b>Tick Files</b> בדשבורד. המצגת הזו מסבירה את המסך; היא אינה תחליף לבדיקה בתוך האפליקציה.</div>
+    <div class="links"><a href="https://github.com/AI-Degen-69/crypto-spread/issues/273">הבעיה המקורית</a><a href="https://github.com/AI-Degen-69/crypto-spread/pull/274">העדכון שמוזג</a></div>
+  </footer>
+</main>
+<script>
+(function(){
+  const c=document.getElementById('flow'),ctx=c.getContext('2d');
+  const dpr=window.devicePixelRatio||1, W=c.width,H=c.height;
+  c.width=W*dpr;c.height=H*dpr;c.style.width='100%';c.style.height='auto';ctx.scale(dpr,dpr);
+  const nodes=[['Collector','אוסף'],['Tick File','שומר'],['Integrity','בודק'],['Readiness','מסווג'],['Backtest','משווה']];
+  let t=0,paused=false;
+  function draw(){
+    ctx.clearRect(0,0,W,H);ctx.font='700 14px Segoe UI';ctx.textAlign='center';
+    const xs=[105,310,515,720,925], y=130;
+    ctx.strokeStyle='rgba(199,146,234,.25)';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(150,y);ctx.lineTo(875,y);ctx.stroke();
+    nodes.forEach((n,i)=>{ctx.fillStyle='#172333';ctx.strokeStyle=i===3?'#c792ea':'#314258';ctx.lineWidth=2;ctx.beginPath();ctx.roundRect(xs[i]-70,y-42,140,84,14);ctx.fill();ctx.stroke();ctx.fillStyle='#edf3fa';ctx.fillText(n[0],xs[i],y-4);ctx.fillStyle='#a8b6c6';ctx.font='12px Segoe UI';ctx.fillText(n[1],xs[i],y+20);ctx.font='700 14px Segoe UI'});
+    for(let i=0;i<18;i++){const p=((t*0.00008+i/18)%1),x=150+p*725;ctx.fillStyle=i%3===0?'#55d6c2':i%3===1?'#8be9fd':'#c792ea';ctx.beginPath();ctx.arc(x,y,4+(i%2),0,Math.PI*2);ctx.fill()}
+    ctx.fillStyle='#a8b6c6';ctx.font='13px Segoe UI';ctx.fillText('שורות',205,230);ctx.fillText('ספרים + tape',410,230);ctx.fillText('תקינות',615,230);ctx.fillText('מספיק למחקר?',820,230);ctx.fillText('השוואת כללים',1000,230);
+    if(!paused){t+=16;requestAnimationFrame(draw)}
+  }
+  draw();
+  document.getElementById('pause').addEventListener('click',function(){paused=!paused;this.textContent=paused?'המשך תנועה':'עצור תנועה';document.getElementById('flowState').textContent=paused?'התרשים נעצר':'הנתונים זורמים';if(!paused)draw()});
+})();
+</script>
+</body>
+</html>
