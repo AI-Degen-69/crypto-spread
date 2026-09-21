@@ -95,3 +95,14 @@ Multiple agents and the user work in the same checkout. Therefore:
   `git status --short` — the branch may have been switched under you.
 - Track exactly which hunks/files are yours; stage only those.
 - If ownership of a dirty file is ambiguous, leave it uncommitted and say so.
+
+## 7. Pipeline leftovers
+
+- Issue artifacts (`docs/issues/<id>-<kind>-<slug>.html`, see
+  `docs/issue-workflow.md`) are committed by the station that creates them,
+  as part of that issue's PR — never left untracked. The post-merge sweep
+  decides what stays (`docs/issue-workflow.md` §6).
+- Per-issue scratch (`tasks/plan.md`, `tasks/todo.md` and per-issue variants)
+  is removed by the post-merge sweep (`prune-artifacts` after MERGED) —
+  never left staged-deleted.
+- Before push: `git status --porcelain` shows only the issue's own work.
