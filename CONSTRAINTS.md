@@ -8,7 +8,7 @@
 
 ## Measurable boundaries
 - The rule names: who commits showcase pages (creating station, same PR),
-  who removes per-issue scratch (Station VI, before merge), and the
+  who removes per-issue scratch (post-merge sweep), and the
   clean-tree check (`git status --porcelain` empty) as merge precondition.
 - Rule text ≤ 10 lines, same tone as surrounding sections.
 

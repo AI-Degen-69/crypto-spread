@@ -5,7 +5,7 @@ Stack: docs-only · Size: **Small** (one rule, one file) · Type: Docs
 Spec (embedded, Small): add the leftover rule to `docs/git-workflow.md` —
 showcase pages (`docs/issues/<id>-presentation-*.html`) are committed by the
 station that creates them as part of that issue's PR; per-issue scratch is
-removed by Station VI before merge; `git status --porcelain` must be empty
+removed by the post-merge sweep; `git status --porcelain` must be empty
 apart from the issue's own work before push. Master is already clean
 (chore `adc806a`), so no cleanup commit is part of this plan.
 
