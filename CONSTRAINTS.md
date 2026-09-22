@@ -1,49 +1,19 @@
-# CONSTRAINTS — Issue #298: Rebuild run/ticks/pristine after the bounds_violation gate lands
+# CONSTRAINTS.md — Issue #295: List pristine tick files in the dashboard
 
-Active working constraints for issue #298. Per-issue file; goes stale on merge.
-(Archived #297 constraints removed post-merge; #297 shipped as PR #299.)
+Branch: `i295/list-pristine-tick-files-in-the-dashboard` · Size: Small · Type: Code
 
-## Hard Gates (must hold before merge)
-
-1. **Zero code changes to the extractor or gates.** This issue is an operational rebuild +
-   findings record. `scripts/build_pristine_dataset.py`, gate thresholds, and all source
-   modules stay byte-identical to `master` (post-#297).
-2. **Source day files are read-only.** No modification or regeneration of any
-   `run/ticks/ticks_*.jsonl[.gz]`. Proof: `totals.source_files` SHA-256 map in the new
-   manifest must equal the pre-rebuild baseline map. The extractor must additionally
-   re-hash every source day file **after both read passes** and reject the build if any
-   post-pass hash differs from the pre-build snapshot map — an initial hash alone does not
-   prove the bytes read during pass 1/pass 2 were the hashed ones.
-3. **Default thresholds only.** The rebuild runs with no gate-tuning flags, so the gate set
-   matches the merged #297 behavior exactly.
-4. **Self-certification must PASS.** Exit 0 and `output verify: PASS`; new manifest carries
-   `output_verify.status == "PASS"` + the bounds-gate `policy_note` clause; independent
-   `python -m scripts.verify_tick_data run/ticks/pristine` cross-check also PASS.
-5. **Baseline preserved before overwrite.** `run/` is git-ignored; the current
-   `run/ticks/pristine/pristine_manifest.json` (6,129 windows / 5,042 passed / 1,485,319
-   ticks) is snapshotted to a scratch path **before** the rebuild starts.
-6. **Committed artifacts are docs only.** Only `docs/issues/298-pristine-manifest-delta-findings.md`
-   and `docs/measurements/issue-298-pristine-manifest-delta.json` (raw counts). No `run/`
-   content is ever committed.
-7. **Full-repo pytest sweep is CI-only** (repo policy). This issue changes no Python modules;
-   the targeted gate `python -m pytest tests/test_build_pristine_dataset.py -q` must stay
-   37/37 green — **regression evidence only**, not proof of extractor identity. The proof
-   that the extractor and gates are unchanged is Gate 1's byte-identity comparison
-   (`git diff origin/master...HEAD` shows no source-module changes).
-
-## Scope Guardrails
-
-- IN: baseline snapshot, rebuild run, acceptance verification, delta computation, committed
-  findings document, issue comment with the delta.
-- OUT: changing gates/thresholds; dashboard visibility (#295 owns); touching
-  `strategy/`, `server/`, `backtest/`; committing anything under `run/`.
-- NOTICED-BUT-NOT-TOUCHING: anything spotted during the rebuild that is out of scope becomes
-  a future issue candidate, recorded in the findings doc or plan — never a silent side change.
-
-## Anti-cheat
-
-- Delta numbers come from the two real manifests only — never from estimates or the 291
-  baseline doc (that doc is a fallback reference, not a substitute when the on-disk manifest
-  exists, and it does).
-- Every dropped window must carry `bounds_violation` in the new `failing_gates` — if any
-  drop fails this invariant, stop: the extractor changed or the matching is wrong.
+## Hard boundaries
+1. **Zero regressions:** `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`
+   must pass with the issue's own acceptance tests added. Never the full suite locally (CI gates it).
+2. **Error-shape preservation:** existing endpoints' error messages and status codes for invalid/missing
+   `file` params are preserved verbatim (existing rejection tests must pass unchanged).
+3. **No new dependencies.** stdlib + existing FastAPI only.
+4. **Anti-cheat:** no skipping/disabling tests, no deleted assertions, no suppressed linters.
+5. **Security:** the resolver is the single path-resolution point — `..`, backslash, absolute paths,
+   leading `/`, >2 segments, and non-allow-listed subdirectories are rejected. Containment under
+   `TICKS_DIR` is enforced via `relative_to`. Only `pristine` is surfaced; `golden/`, `quarantine/`,
+   `.verify_cache/` stay hidden.
+6. **Verify-cache correctness:** a pristine sidecar must never be readable as (or mistaken for) a
+   top-level day-file sidecar — keys include the relative path; mirrored dir layout on disk.
+7. **Scope lock:** no ranking-tier changes, no verify-engine/collector/extractor changes, no delete
+   routing for pristine files.

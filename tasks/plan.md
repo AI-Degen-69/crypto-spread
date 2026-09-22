@@ -1,105 +1,98 @@
-# Plan — Issue #298: Rebuild run/ticks/pristine after the bounds_violation gate lands
+# Plan — Issue #295: List pristine tick files in the dashboard as distinct datasets
 
-Branch: `i298/rebuild-pristine-after-bounds-gate` | Issue: #298
-Stack: Python 3, pytest · Size: **Standard** (operational long-running rebuild + analysis +
-2 committed docs; no production code change, but cross-artifact evidence work) ·
-Type: **Research + Docs** (quantitative delta analysis + durable findings record)
+Branch: `i295/list-pristine-tick-files-in-the-dashboard` | Issue: #295
+Stack: Python 3, FastAPI, pytest · Size: **Small** (one module `server/osc_dash.py` + its test file;
+disambiguation design already settled in the CodeRabbit plan on the issue) ·
+Task type: **Code** (Backend/Logic + light embedded-frontend touch)
 
-## Resolved inputs (planning record)
+## Resolved inputs (from issue + CodeRabbit plan, no open questions)
 
-- Issue supplies 4 acceptance criteria and the exact rebuild command — adopted as-is.
-- CodeRabbit plan (comment 5780981530, fetched this session): reviewed against the actual
-  code and adopted as the task skeleton. Its key insight — snapshot the git-ignored manifest
-  BEFORE the rebuild overwrites it — is CONSTRAINTS hard-gate #5. Its findings-doc decision
-  (commit `docs/issues/298-...md` since `run/` can't be committed) matches repo convention
-  (`221-gil-contention-findings.md` template exists).
-- This plan adds what CodeRabbit lacked: (a) the SHA-256 read-only proof via
-  `totals.source_files` old-vs-new; (b) the drop-invariant assertion (every dropped window
-  carries `bounds_violation`); (c) baseline numbers verified on disk at planning time
-  (6,129 / 5,042 / 1,485,319 — match the 291 baseline doc, so no fallback needed);
-  (d) background-process execution for the ~5.2 GB rebuild so the session doesn't block.
-- Sub-issue mapping skipped: 5 linear tasks stay tracked here + `tasks/todo.md`.
+- Display label AND request value for a pristine file = the relative path
+  `pristine/<basename>` (single string, round-trips via `encodeURIComponent`).
+- Verify-cache sidecar mirrors the subdirectory: `.verify_cache/pristine/<basename>.json`,
+  parent dirs created on write (collision-free by construction).
+- Resolver allow-list contains exactly one approved subdirectory: `pristine`.
+  Traversal (`..`, `\`, absolute, leading `/`), >2 segments, and unlisted first segments stay rejected.
+- Preferred ranking needs no code change — it keys on dict fields; `is_preferred` is exact `name` equality.
+- Delete action for pristine entries is omitted (delete endpoint stays top-level-only; out of scope).
+- Only `pristine/` is scanned; `golden/`, `quarantine/`, `.verify_cache/` stay hidden.
 
-## Evidence gathered at planning time
+## Tasks (atomic slices, dependency-ordered)
 
-- On-disk manifest inspected: keys `policy_note, gates, totals, per_pair_pristine_counts,
-  windows, output_verify`; 6,129 window rows with identity fields
-  `cid, series, slug, duration, start_ts, start_day` — sufficient for delta matching.
-- `build_pristine_dataset.py:145` discovers only top-level `ticks_*.jsonl*` → in-place
-  `--out run/ticks/pristine` cannot self-scan; `:371-374` already deletes stale output.
-- Sources: 6 day files, ~5.2 GB total; existing pristine ~4.9 GB. Rebuild is streaming;
-  expect tens of minutes → run as background process writing `run/rebuild_298.log`.
+### T1 — Shared allow-listed tick-file resolver `[Backend/Logic]` (S)
+- File: `server/osc_dash.py` (near the verify-cache helpers).
+- Add `_TICKS_SUBDIR_ALLOWLIST = {"pristine"}` and `_resolve_tick_file(file: str)` returning a
+  discriminated result: `("ok", Path)` / `("invalid", None)` / `("not_found", None)`.
+- Rejects: backslash, `..`, absolute paths, leading `/`, >2 segments, first segment not in allow-list;
+  keeps the containment check (`relative_to(TICKS_DIR.resolve())`, `ValueError` → invalid).
+- Verification: unit-level asserts in `tests/test_osc_dash_integration.py` via the endpoint tests (T5).
+- Depends on: —
+- [x] Done
 
-## Spec
+### T2 — Route the three endpoints through the resolver `[Backend/Logic]` (S)
+- File: `server/osc_dash.py`.
+- `api_backtest` (~:1360), `api_backtest_sweep` (~:1521), `api_ticks_verify` (~:2487):
+  replace duplicated inline `"/" in file` guards with `_resolve_tick_file`, mapping each result to the
+  endpoint's existing error shape/status code (messages preserved verbatim so current tests pass).
+- Verification: existing rejection tests in `tests/test_osc_dash_integration.py` still pass unchanged.
+- Depends on: T1
+- [x] Done
 
-See `SPEC.md` — verified code facts, acceptance criteria, and the full method (snapshot →
-rebuild → verify → delta → findings doc → issue comment).
+### T3 — Subpath-aware verify-cache sidecars `[Backend/Logic]` (S)
+- File: `server/osc_dash.py`.
+- `_verify_sidecar_path` accepts a relative name (`pristine/<basename>`) → `TICKS_DIR / .verify_cache / f"{rel}.json"`.
+- `_write_verify_sidecar` derives the relative name from `target.relative_to(TICKS_DIR)` and
+  `mkdir(parents=True, exist_ok=True)` on the sidecar parent.
+- Update sidecar-path constructions that use `f.name` / `entry["name"]` (`_aggregate_ticks` cache reads
+  ~:490–503, manifest read ~:623) to go through `_verify_sidecar_path` with the relative name.
+- `_VERIFY_REPORT_CACHE` stays keyed by the relative name the endpoints receive.
+- Verification: T5 sidecar-mirroring asserts.
+- Depends on: T1
+- [x] Done
 
-## Tasks
+### T4 — Manifest listing of pristine files + frontend carry-through `[Backend/Logic] + [Frontend]` (M)
+- File: `server/osc_dash.py`.
+- `api_ticks_manifest` (~:585–662): after the top-level scan, scan `TICKS_DIR / "pristine"` when present;
+  same filters (`.jsonl`/`.gz`/`.jsonl.gz`, skip `.idx`, `is_file()`); entry `name = "pristine/<basename>"`;
+  stats computed from the real path; add `is_pristine: True`; sidecar/fingerprint read through the relative
+  name so `market_breakdown`/`readiness`/`integrity_status`/`capture_state`/`windows_count` populate exactly
+  like top-level entries. No recursion into other subdirectories.
+- Confirm `pick_preferred`/`_file_rank_key` rank pristine entries unchanged (dict-field keyed);
+  `is_preferred` by exact `name` equality (pristine can win and be starred).
+- Embedded frontend `loadManifest()` (~:5660): `f.name` stays option label+value (encoder handles `/`);
+  DOM ids (`verify_arrow_*` etc.) built from a sanitized token (`/` → `_`); delete action omitted for
+  `is_pristine` entries.
+- Verification: T5 manifest/ranking tests; dashboard smoke via targeted tests (UI polish is Station IV's browser gate).
+- Depends on: T1, T3
+- [x] Done
 
-- **TASK-1** [Ops/Baseline] · Size S · scratch: `.pristine_baseline_manifest.json`
-  Copy `run/ticks/pristine/pristine_manifest.json` to the scratch path. Record top-line
-  counts (`totals.windows_total / windows_passed / ticks_written`) and per-day passed counts
-  (group windows by `start_day`, passed only). Assert counts equal the 291 baseline doc
-  (6,129 / 5,042 / 1,485,319).
-  · Depends on: — · Verify: printed counts match baseline doc; snapshot file exists.
+### T5 — Tests with pristine fixtures `[Tests]` (M)
+- File: `tests/test_osc_dash_integration.py`.
+- Extend `_write_verify_sidecar` helper (:372) to accept a relative name like `pristine/ticks_<day>.jsonl`,
+  create the file under `pristine/` and the sidecar at the mirrored path.
+- New tests:
+  1. **Manifest disambiguation:** same basename at top level and in `pristine/` → both listed with distinct
+     `name`s; pristine entry carries its own `readiness`/`integrity_status`.
+  2. **Ranking:** pristine entry wins → `preferred_file == "pristine/<basename>"`, `is_preferred is True`.
+  3. **Resolution:** `/api/backtest` and `/api/backtest/sweep` with `pristine/<basename>` replay the pristine
+     file (not the day file); `..` and backslash values still rejected.
+- Verification: `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`.
+- Depends on: T2, T4
+- [x] Done
 
-- **TASK-2** [Ops/Rebuild] · Size M · runs `scripts/build_pristine_dataset.py`
-  Launch `python -m scripts.build_pristine_dataset run/ticks --out run/ticks/pristine` as a
-  background process logging to `run/rebuild_298.log` (no gate flags). Wait for exit code 0
-  and the `output verify: PASS` success line. On `RuntimeError` or exit≠0 → stop, report.
-  · Depends on: TASK-1 (snapshot must exist first) · Verify: exit 0 + PASS line in log.
+**Checkpoints:** after T2 (resolver live, all existing tests green) and after T4 (manifest lists pristine).
 
-- **TASK-3** [Verification] · Size S · read-only manifest checks
-  On the new manifest: (a) `policy_note` contains the bounds-gate clause; (b)
-  `output_verify.status == PASS`; (c) independent `python -m scripts.verify_tick_data
-  run/ticks/pristine --json` → PASS; (d) every window with `bounds_violation` in
-  `failing_gates` has `passed: false`; (e) the 09-18 evidence window is failing and its cid
-  is absent from output files; (f) `totals.source_files` == baseline map (read-only proof).
-  · Depends on: TASK-2 · Verify: all six checks green (scripted, output recorded).
-  **Acceptance record:** five of six checks green. The source-hash check did NOT hold:
-  `ticks_2026-09-21.jsonl` was externally rewritten before the rebuild, so the new manifest's
-  hash for it differs from the baseline map (5/6 matched). Every passed window still passes
-  and all 12 drops on that day carry `bounds_violation`, but the per-constraint proof of
-  source immutability is incomplete for 09-21 — recorded as a deviation, not silently
-  passed. Restoration + re-run tracked on #298.
-  **Amended closure (certified re-run, `i298b/pristine-source-certification`):** original
-  capture bytes unrecoverable (only-copy checkout holds the identical post-rewrite
-  generation; no backups) — provenance of the pre-rewrite 09-21 generation is permanently
-  degraded, which is unfixable by any re-run. The pre-rebuild source state, however, equals
-  the current file, and a certified re-run with pre/post full-hash proof closed the
-  immutability gap end-to-end (findings §5a). TASK-3 accepted with the provenance footnote.
+## Explicitly out of scope (per issue)
+Least-bad ranking tiers for pristine, extractor/golden-charter changes, verify-engine changes,
+delete-endpoint routing, any collector change.
 
-- **TASK-4** [Research/Delta] · Size M · `docs/issues/298-pristine-manifest-delta-findings.md`,
-  `docs/measurements/issue-298-pristine-manifest-delta.json`
-  One-off read-only Python: match old/new windows on `(cid, series, slug, duration,
-  start_ts)`; dropped = passed-before ∧ ¬passed-now. Assert every dropped window carries
-  `bounds_violation` in new `failing_gates`. Group drops by `start_day`; record
-  `windows_passed`/`ticks_written` deltas + total `bounds_violation` window count. Write the
-  findings doc (221 template: Executive Summary / Methodology w/ exact CLI + matching rule /
-  Results table before-after-delta per day / git-ignored `run/` caveat / gates unchanged,
-  #295 owns dashboard) and the raw JSON measurement. Delete the scratch snapshot.
-  · Depends on: TASK-3 · Verify: doc + JSON exist; numbers tie to the two manifests.
+## Improvement proposal (adopt-by-default, evidence-based)
+The CodeRabbit plan's Task 3 says to update "every other sidecar-path construction that currently uses
+`f.name` or `entry[\"name\"]`" — evidence from the issue: "the backtest resolves datasets by bare name
+(`TICKS_DIR / file`), so listing them needs a disambiguation design". Proposal: implement T1's resolver as the
+*single* resolution point and have T4's manifest read sidecars via the same relative-name helper (rather than
+patching each `f.name` construction in place), so future subdirectories (e.g. `golden/` for #292) are a
+one-line allow-list change. This is simplification within the issue's own scope — adopted.
 
-- **TASK-5** [Closeout] · Size XS · git + issue
-  Commit the two docs files only (`git diff --stat` shows nothing else); comment the delta
-  summary on #298; tick todos; confirm `python -m pytest tests/test_build_pristine_dataset.py
-  -q` still 37/37 (extractor untouched).
-  · Depends on: TASK-4 · Verify: clean diff-stat + issue comment posted.
-
-Checkpoints: after TASK-2 (rebuild PASS), after TASK-4 (delta recorded).
-
-## Improvement proposals (recorded)
-
-- **Adopted (evidence):** SHA-256 map comparison (`totals.source_files` old-vs-new) as the
-  read-only proof — the manifest already carries per-source hashes, so the check is free and
-  stronger than "we didn't touch the files".
-- **Adopted (execution):** background rebuild with log file — 5.2 GB streaming is too slow
-  for a blocking call; log doubles as evidence for the findings doc.
-
----
-
-# Archived — Issue #297 (shipped as PR #299, merged 41a6997)
-
-TASK-1/2/3 all completed `[x]`: bounds_violation gate (helper + seed + judge + manifest +
-policy note), 10 new tests, full targeted gate 37/37, 2 clean commits (313a69a + c0fa46a).
+## Rejections recorded
+None — no proposal was rejected this session.
