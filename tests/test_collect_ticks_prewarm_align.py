@@ -187,6 +187,10 @@ def test_poll_once_boundary_uses_prewarm_not_a_gamma_burst(env, monkeypatch, tmp
     monkeypatch.setattr(env, "full_book", _book)
     stats: dict = {}
     env.poll_once(tmp_path, False, stats)           # round 1: cold resolve x3
+    # Precondition: the cold resolve really ran pre-roll. If the box stalled
+    # past roll_at before round 1, the stub would hand out the post-roll
+    # market immediately and the promotion assertions below would be vacuous.
+    assert time.time() < roll_at, "cold resolve landed after the roll; test would not exercise promotion"
     before_live = len(live_calls)
 
     # Drive poll_once across the roll; prewarm parks successors, promotion
@@ -226,9 +230,10 @@ def test_late_join_skips_in_flight_windows_and_records_from_the_open(
     """poll_once with a join cutoff drops windows that opened before it."""
     now = time.time()
     monkeypatch.setattr(env, "full_book", _book)
-    env._join_cutoff = now + 2.0                    # fresh opens 2s from now
-    # The in-flight window ends before the fresh one opens, like a real roll.
+    # The in-flight window ends at the fresh boundary, like a real roll; the
+    # cutoff IS that boundary, exactly as main() alignment arms it.
     live = _market("0xMID", now - 120.0, now + 1.0, "a-5m")
+    env._join_cutoff = live["end_ts"]
     monkeypatch.setattr(env, "fetch_live_for_series",
                         _per_slug({"a-5m": (live, None)}))
     monkeypatch.setattr(env, "fetch_next_market_for_series",
@@ -237,8 +242,11 @@ def test_late_join_skips_in_flight_windows_and_records_from_the_open(
     env.poll_once(tmp_path, False, stats)           # mid-flight window: skipped
     assert [s["cid"] for s in _snaps(tmp_path)] == []
 
-    time.sleep(1.2)                                 # past the old window's end
-    fresh = _market("0xFRESH", now + 2.0, now + 302.0, "a-5m")
+    time.sleep(1.2)                                 # past the old window's end AND the cutoff
+    # The fresh market opens exactly at the boundary (its start == the cutoff,
+    # so it is not filtered as pre-cutoff), and the poll runs while it is live.
+    fresh = _market("0xFRESH", live["end_ts"], live["end_ts"] + 300.0, "a-5m")
+    assert time.time() >= fresh["start_ts"]
     monkeypatch.setattr(env, "fetch_live_for_series",
                         _per_slug({"a-5m": (fresh, None)}))
     env.poll_once(tmp_path, False, stats)           # fresh window: recorded
@@ -246,8 +254,9 @@ def test_late_join_skips_in_flight_windows_and_records_from_the_open(
     cids = [s["cid"] for s in _snaps(tmp_path)]
     assert "0xMID" not in cids
     assert cids == ["0xFRESH"]
-    # Still armed: the fresh boundary itself has not been processed yet.
-    assert env._join_cutoff is not None
+    # The fresh-boundary round has been processed (the poll ran past the
+    # cutoff), so the armed state is cleared — later cids are normal adoptions.
+    assert env._join_cutoff is None
 
 
 def test_no_cutoff_records_immediately(env, monkeypatch, tmp_path):

@@ -158,6 +158,13 @@ PREWARM_LEAD_SEC = 30.0
 PREWARM_STAGGER_SEC = 4.0
 PREWARM_STAGGER_STEPS = 5
 
+# A series whose successor is not listed yet (or whose prewarm lookup errored)
+# must not retry every second for the rest of its lead window — that is ~32
+# wasted gamma calls per boundary, the exact load the prewarm exists to
+# remove. After a failed attempt the series cools down this long before it is
+# eligible again; a success parks the market and bypasses the gate entirely.
+PREWARM_RETRY_COOLDOWN = 10.0
+
 # Startup alignment wakes this long before the fresh boundary so the cold
 # round (measured 3.1s warm-process / 5.8s cold-process) and the first
 # prewarm land BEFORE the windows being recorded open.
@@ -368,10 +375,16 @@ def reset_gamma_cache() -> None:
 # trading, the pre-open market must never be served as if it were live.
 _prewarm: dict[str, dict[str, Any]] = {}
 
+# { series_slug: ts of the last prewarm attempt } — failed lookups (gamma
+# error, "no upcoming") back off for PREWARM_RETRY_COOLDOWN instead of
+# retrying once per poll for the rest of the lead window.
+_prewarm_attempt: dict[str, float] = {}
+
 
 def reset_prewarm() -> None:
     """Drop every prewarmed next-market resolution (process restart / tests)."""
     _prewarm.clear()
+    _prewarm_attempt.clear()
 
 
 # Startup alignment: set by main() to the next quarter-hour when the collector
@@ -687,9 +700,13 @@ def prewarm_round(now: float, fetches: list[SeriesFetch]) -> None:
     for i, fetched in enumerate(fetches):
         if fetched.series in _prewarm or fetched.info is None:
             continue
+        last_try = _prewarm_attempt.get(fetched.series)
+        if last_try is not None and (now - last_try) < PREWARM_RETRY_COOLDOWN:
+            continue
         lead = PREWARM_LEAD_SEC + (i % PREWARM_STAGGER_STEPS) * PREWARM_STAGGER_SEC
         remaining = fetched.info["end_ts"] - now
         if 0.0 < remaining <= lead:
+            _prewarm_attempt[fetched.series] = now
             jobs.append((i, fetched.series))
     if not jobs:
         return
