@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import gzip
 import json
 import math
 import re
@@ -42,6 +43,7 @@ DEFAULT_OUT_DIR = DEFAULT_TICKS_DIR / "pristine"
 MANIFEST_NAME = "pristine_manifest.json"
 
 DAY_RE = re.compile(r"^ticks_(\d{4}-\d{2}-\d{2})\.jsonl(\.gz)?$")
+CID_RE = re.compile(r'"cid"\s*:\s*"([^"]+)"')
 
 VERIFY_POLICY_NOTE = (
     "gate defaults mirror scripts/verify_tick_data.verify_window_continuity "
@@ -66,23 +68,153 @@ def min_snaps_for(duration: float, params: PristineGateParams) -> int:
 
 
 def evaluate_window_gates(ticks: list[dict[str, Any]], params: PristineGateParams) -> dict[str, Any]:
-    """Verdict one window's ticks against every gate.
+    """Verdict one window's in-memory ticks against every gate.
 
-    Gate math mirrors scripts/verify_tick_data.verify_window_continuity; the density
-    floor and the collector-error gate are the additions the issue specifies. `passed`
-    and `failing_gates` are computed together so they can never disagree.
+    Folds the ticks into the same scalar aggregates the streaming scan builds, then
+    judges through `judge_window` — one gate-decision path for both APIs, so `passed`
+    and `failing_gates` can never disagree between paths.
+    """
+    if not ticks:
+        return judge_window({"tick_count": 0, "cid": "", "series": "", "slug": "",
+                             "duration": 0, "start_ts": 0.0, "end_ts": 0.0}, params)
+    agg = _new_window_state(ticks[0], "")
+    for tick in ticks[1:]:
+        _add_tick_to_state(agg, tick, "", params.max_gap_sec)
+    return judge_window(agg, params)
+
+
+def _open_tick_text(path: Path):
+    """Open a day file for verbatim line reading (jsonl or jsonl.gz)."""
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return open(path, "r", encoding="utf-8", errors="replace")
+
+
+def _cid_of_line(raw: str) -> str | None:
+    """Extract `cid` from one raw tick line without building the full dict.
+
+    Finds `"cid": "<value>"` near the line head; a malformed line yields None and is
+    excluded from output exactly like iter_ticks would exclude it.
+    """
+    m = CID_RE.search(raw[:1024])
+    return m.group(1) if m else None
+
+
+def day_key_of(ts: float) -> str:
+    """The UTC day key of a unix timestamp (the collector's day-key convention)."""
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+def evaluate_window_state(state: dict[str, Any], params: PristineGateParams) -> dict[str, Any]:
+    """Verdict one aggregated window state (as built by scan_windows).
+
+    Callers must scan with params.max_gap_sec (build_pristine_dataset does); gap
+    counting happens at aggregation time, exactly once, under the caller's rule.
+    """
+    verdict = judge_window(state, params)
+    verdict["source_files"] = list(state["source_files"])
+    return verdict
+
+
+def source_day_files(ticks_dir: Path) -> list[Path]:
+    """Day files sorted by name (deterministic). Exactly the collector's naming."""
+    found = [p for p in ticks_dir.glob("ticks_*.jsonl*") if DAY_RE.match(p.name) and p.is_file()]
+    return sorted(found, key=lambda p: p.name)
+
+
+def _new_window_state(first_tick: dict[str, Any], source_name: str) -> dict[str, Any]:
+    """Scalar accumulators for one window. NO tick dicts are retained — pass 1 must
+    stay O(windows) in memory even over multi-GB day files."""
+    return {
+        "cid": first_tick.get("cid", ""),
+        "series": first_tick.get("series", ""),
+        "slug": first_tick.get("slug", ""),
+        "duration": first_tick.get("duration", 300) or 300,
+        "start_ts": first_tick.get("start_ts", 0.0) or 0.0,
+        "end_ts": first_tick.get("end_ts", 0.0) or 0.0,
+        "first_ts": first_tick.get("ts", 0.0) or 0.0,
+        "last_ts": first_tick.get("ts", 0.0) or 0.0,
+        "prev_ts": first_tick.get("ts", 0.0) or 0.0,
+        "gaps_count": 0,
+        "max_gap": 0.0,
+        "time_reversals": 0,
+        "error_ticks": 0,
+        "tick_count": 1,
+        "source_files": [source_name] if source_name else [],
+        "_seen": {source_name} if source_name else set(),
+    }
+
+
+def _add_tick_to_state(
+    st: dict[str, Any], tick: dict[str, Any], source_name: str, max_gap_sec: float
+) -> None:
+    """Fold one tick into the scalar state. The gap threshold comes from the caller's
+    params so every aggregation path counts gaps against the same rule."""
+    ts = tick.get("ts", 0.0) or 0.0
+    delta = ts - st["prev_ts"]
+    if delta < 0:
+        st["time_reversals"] += 1
+    elif delta > max_gap_sec:
+        st["gaps_count"] += 1
+        if delta > st["max_gap"]:
+            st["max_gap"] = delta
+    st["prev_ts"] = ts
+    st["last_ts"] = ts
+    if tick.get("err"):
+        st["error_ticks"] += 1
+    st["tick_count"] += 1
+    if source_name and source_name not in st["_seen"]:
+        st["_seen"].add(source_name)
+        st["source_files"].append(source_name)
+
+
+def scan_windows(
+    sources: Iterable[tuple[str, Iterable[dict[str, Any]]]], max_gap_sec: float = 6.0
+) -> dict[str, dict[str, Any]]:
+    """Aggregate ticks into one scalar state per cid, merged across source files.
+
+    The collector splits midnight-spanning windows across two day files; merging by cid
+    here is what keeps the derived set whole-window. States hold counters only — never
+    the ticks themselves — so a six-day, multi-GB scan stays O(windows) in memory.
+    `source_files` is first-seen order, never a set (determinism).
+    """
+    states: dict[str, dict[str, Any]] = {}
+    for source_name, ticks in sources:
+        if source_name:
+            print(f"pass1: scanning {source_name}", flush=True)
+        for tick in ticks:
+            cid = tick.get("cid")
+            if not cid:
+                continue
+            st = states.get(cid)
+            if st is None:
+                states[cid] = _new_window_state(tick, source_name)
+            else:
+                _add_tick_to_state(st, tick, source_name, max_gap_sec)
+    for st in states.values():
+        st.pop("_seen", None)
+    return states
+
+
+def judge_window(agg: dict[str, Any], params: PristineGateParams) -> dict[str, Any]:
+    """Verdict one window from its scalar aggregates — the single gate-decision path.
+
+    Both the streaming scan (evaluate_window_state) and the direct list API
+    (evaluate_window_gates) funnel through here, so `passed` and `failing_gates`
+    can never disagree between paths.
     """
     failing: list[str] = []
-    if not ticks:
+    tick_count = agg.get("tick_count", 0)
+    if tick_count == 0:
         return {
             "passed": False,
             "failing_gates": ["no_ticks"],
-            "cid": "",
-            "series": "",
-            "slug": "",
-            "duration": 0,
-            "start_ts": 0.0,
-            "end_ts": 0.0,
+            "cid": agg.get("cid", ""),
+            "series": agg.get("series", ""),
+            "slug": agg.get("slug", ""),
+            "duration": agg.get("duration", 0),
+            "start_ts": agg.get("start_ts", 0.0),
+            "end_ts": agg.get("end_ts", 0.0),
             "start_day": "",
             "tick_count": 0,
             "min_snaps": 0,
@@ -94,34 +226,17 @@ def evaluate_window_gates(ticks: list[dict[str, Any]], params: PristineGateParam
             "error_ticks": 0,
         }
 
-    first = ticks[0]
-    duration = first.get("duration", 300) or 300
-    start_ts = first.get("start_ts", 0.0) or 0.0
-    end_ts = first.get("end_ts", 0.0) or 0.0
-    first_ts = first.get("ts", 0.0) or 0.0
-    last_ts = ticks[-1].get("ts", 0.0) or 0.0
-
+    start_ts = agg["start_ts"]
+    end_ts = agg["end_ts"]
+    first_ts = agg["first_ts"]
+    last_ts = agg["last_ts"]
     start_delay = max(0.0, first_ts - start_ts) if start_ts > 0 else 0.0
     end_cutoff = max(0.0, end_ts - last_ts) if end_ts > 0 else 0.0
-
-    gaps_count = 0
-    max_gap = 0.0
-    time_reversals = 0
-    error_ticks = 0
-    prev_ts = first_ts
-    for tick in ticks:
-        if tick.get("err"):
-            error_ticks += 1
-        ts = tick.get("ts", 0.0) or 0.0
-        delta = ts - prev_ts
-        if delta < 0:
-            time_reversals += 1
-        elif delta > params.max_gap_sec:
-            gaps_count += 1
-            max_gap = max(max_gap, delta)
-        prev_ts = ts
-
-    min_snaps = min_snaps_for(duration, params)
+    gaps_count = agg["gaps_count"]
+    max_gap = agg["max_gap"]
+    time_reversals = agg["time_reversals"]
+    error_ticks = agg["error_ticks"]
+    min_snaps = min_snaps_for(agg["duration"], params)
 
     if start_delay > params.max_start_delay_sec:
         failing.append("late_start")
@@ -133,20 +248,20 @@ def evaluate_window_gates(ticks: list[dict[str, Any]], params: PristineGateParam
         failing.append("time_reversal")
     if error_ticks > 0:
         failing.append("collector_error")
-    if len(ticks) < min_snaps:
+    if tick_count < min_snaps:
         failing.append("snap_density")
 
     return {
         "passed": not failing,
         "failing_gates": failing,
-        "cid": first.get("cid", ""),
-        "series": first.get("series", ""),
-        "slug": first.get("slug", ""),
-        "duration": duration,
+        "cid": agg["cid"],
+        "series": agg["series"],
+        "slug": agg["slug"],
+        "duration": agg["duration"],
         "start_ts": start_ts,
         "end_ts": end_ts,
         "start_day": day_key_of(start_ts),
-        "tick_count": len(ticks),
+        "tick_count": tick_count,
         "min_snaps": min_snaps,
         "start_delay_sec": round(start_delay, 2),
         "end_cutoff_sec": round(end_cutoff, 2),
@@ -155,58 +270,6 @@ def evaluate_window_gates(ticks: list[dict[str, Any]], params: PristineGateParam
         "time_reversals": time_reversals,
         "error_ticks": error_ticks,
     }
-
-
-def day_key_of(ts: float) -> str:
-    """The UTC day key of a unix timestamp (the collector's day-key convention)."""
-    return time.strftime("%Y-%m-%d", time.gmtime(ts))
-
-
-def evaluate_window_state(state: dict[str, Any], params: PristineGateParams) -> dict[str, Any]:
-    """Verdict one aggregated window state (as built by scan_windows)."""
-    verdict = evaluate_window_gates(state["ticks"], params)
-    verdict["source_files"] = list(state["source_files"])
-    return verdict
-
-
-def source_day_files(ticks_dir: Path) -> list[Path]:
-    """Day files sorted by name (deterministic). Exactly the collector's naming."""
-    found = [p for p in ticks_dir.glob("ticks_*.jsonl*") if DAY_RE.match(p.name) and p.is_file()]
-    return sorted(found, key=lambda p: p.name)
-
-
-def scan_windows(sources: Iterable[tuple[str, Iterable[dict[str, Any]]]]) -> dict[str, dict[str, Any]]:
-    """Aggregate ticks into one state per cid, merged across source files.
-
-    The collector splits midnight-spanning windows across two day files; merging by cid
-    here is what keeps the derived set whole-window. `ticks` are appended in stream
-    (file, line) order so original line order is preserved; `source_files` is
-    first-seen order, never a set (determinism).
-    """
-    states: dict[str, dict[str, Any]] = {}
-    for source_name, ticks in sources:
-        for tick in ticks:
-            cid = tick.get("cid")
-            if not cid:
-                continue
-            st = states.get(cid)
-            if st is None:
-                st = {
-                    "cid": cid,
-                    "ticks": [],
-                    "tick_count": 0,
-                    "source_files": [],
-                    "_seen": set(),
-                }
-                states[cid] = st
-            st["ticks"].append(tick)
-            st["tick_count"] += 1
-            if source_name not in st["_seen"]:
-                st["_seen"].add(source_name)
-                st["source_files"].append(source_name)
-    for st in states.values():
-        st.pop("_seen", None)
-    return states
 
 
 def build_pristine_dataset(
@@ -239,7 +302,9 @@ def build_pristine_dataset(
     # ---- Pass 1: aggregate per cid across files, gate every window.
     from scripts.verify_tick_data import verify_ticks_dir  # local: heavy module import
 
-    states = scan_windows((p.name, iter_ticks([p])) for p in src_files)
+    states = scan_windows(
+        ((p.name, iter_ticks([p])) for p in src_files), params.max_gap_sec
+    )
     verdicts = [evaluate_window_state(st, params) for st in states.values()]
     verdicts.sort(key=lambda v: (v["start_ts"], v["cid"]))
     passed_cids = {v["cid"] for v in verdicts if v["passed"]}
@@ -255,7 +320,9 @@ def build_pristine_dataset(
         if v["passed"]:
             per_pair[f"{v['series']}:{v['duration']}"] += 1
 
-    # ---- Pass 2: stream again; copy whole surviving windows, keyed to START day.
+    # ---- Pass 2: stream again; copy surviving windows' ORIGINAL raw lines.
+    # Lines are copied verbatim (no re-parse-and-redump): the output stays byte-faithful
+    # to the capture and the pass stays O(1) in memory per line.
     out_dir.mkdir(parents=True, exist_ok=True)
     # A re-run must not leave day files from a previous build that this one no longer
     # produces (thresholds changed, sources removed) — the manifest would lie.
@@ -263,18 +330,30 @@ def build_pristine_dataset(
         if DAY_RE.match(stale.name):
             stale.unlink()
     out_files: dict[str, Any] = {}
+    ticks_written = 0
     try:
         for p in src_files:
-            for tick in iter_ticks([p]):
-                cid = tick.get("cid")
-                if cid not in passed_cids:
-                    continue
-                day = day_key_of(tick.get("start_ts", 0.0) or 0.0)
-                fh = out_files.get(day)
-                if fh is None:
-                    fh = open(out_dir / f"ticks_{day}.jsonl", "w", encoding="utf-8", newline="\n")
-                    out_files[day] = fh
-                fh.write(json.dumps(tick) + "\n")
+            if not quiet:
+                print(f"pass2: streaming {p.name}", flush=True)
+            with _open_tick_text(p) as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    head = _cid_of_line(raw)
+                    if head is None or head not in passed_cids:
+                        continue
+                    try:
+                        tick = json.loads(raw)
+                    except ValueError:
+                        continue  # corrupt line: pass 1 excluded it too, stay consistent
+                    day = day_key_of(tick.get("start_ts", 0.0) or 0.0)
+                    fh = out_files.get(day)
+                    if fh is None:
+                        fh = open(out_dir / f"ticks_{day}.jsonl", "w", encoding="utf-8", newline="\n")
+                        out_files[day] = fh
+                    fh.write(raw + "\n")
+                    ticks_written += 1
     finally:
         for fh in out_files.values():
             fh.close()
@@ -290,7 +369,6 @@ def build_pristine_dataset(
          "source_sha256s": {n: digests[n] for n in v["source_files"]}}
         for v in verdicts
     ]
-    ticks_written = sum(v["tick_count"] for v in verdicts if v["passed"])
     manifest = {
         "policy_note": VERIFY_POLICY_NOTE,
         "gates": dataclasses.asdict(params),
