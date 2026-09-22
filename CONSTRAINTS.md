@@ -1,38 +1,35 @@
-# CONSTRAINTS — Issue #294: Rank the least-bad tick file as preferred when no file fully qualifies
+﻿# CONSTRAINTS — Issue #297: pristine dataset — gate out windows with bounds-violation ticks
 
 ## Scope guard
-- Files touched: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`,
-  `tests/test_theme_tokens.py`, plus the three per-issue working files (`tasks/plan.md`,
-  `tasks/todo.md`, this file + `SPEC.md`). Nothing else.
-- Additive API only: `preferred_tier` is a new key. Existing `preferred_file` and
-  `is_preferred` semantics widened (may now be non-null when only tier 2 qualifies) — but
-  no field renamed, re-typed, or removed.
-- Out of scope (hard): `/api/ticks/verify`, `scripts/verify_tick_data.py` logic or thresholds,
-  backtest engine math, other dashboard tabs, `strategy/*`, forced re-verifies,
-  `requirements.txt`, pristine files (#295).
+- Files touched: `scripts/build_pristine_dataset.py`,
+  `tests/test_build_pristine_dataset.py`, plus the three per-issue working files
+  (`tasks/plan.md`, `tasks/todo.md`, this file + `SPEC.md`). Nothing else.
+- Out of scope (hard): the sane-bounds values themselves (stay mid in [-0.01, 1.01],
+  touch_pair in [0.50, 1.50] as in `verify_tick_data.py:205-213`); `verify_tick_data.py`
+  behavior; the dashboard Sample Discrepancies panel; source tick files (read-only);
+  any CLI flag for this gate (always-on, like the other six gates); a pristine re-build
+  of `run/ticks/pristine/` (operator decision, post-merge — the dir is gitignored).
+- The gate is named `bounds_violation` (singular) in `failing_gates`; the counter is
+  `bounds_violations` (plural) in state/verdict/manifest — same naming split as
+  `time_reversal` gate vs `time_reversals` counter.
 
 ## Zero regressions
-- Targeted gate: `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`
-  passes — both before the work starts (baseline) and at closeout.
-- Existing tier-1 tests (`test_manifest_preferred_file_picks_healthy_winner`,
-  `test_pick_preferred_pure_ranking`, etc.) must keep passing unchanged — tier-1
-  behavior is preserved, not replaced.
+- Targeted gate: `python -m pytest tests/test_build_pristine_dataset.py -q` passes —
+  all existing tests plus new ones (issue asks for all 67 + new bounds tests).
+- `python -m pytest tests/test_build_pristine_dataset.py -q -k bounds` passes (issue
+  verification command).
 - Full-repo sweep stays with CI on push (repo policy — never run locally).
 
 ## Anti-cheat
 - No skipping, disabling, deleting, or weakening of any test or assertion.
-- No suppression of linters or type checks; no `# noqa` introduced.
-- No new external dependency without explicit operator approval (`requirements.txt` stays at 5).
+- No new external dependency (`requirements.txt` untouched).
+- No relaxation of existing gates to make fixtures pass.
 
-## Determinism & safety of the ranking
-- `pick_preferred()` remains pure: no I/O, no globals, no wall-clock reads.
-- Tier 1 still compares exact strings (`"PASS"`, `"COMPLETE CAPTURE"`) — no fuzzy matching.
-- Tier 2 uses a defined total order (see SPEC.md) — deterministic, no ambiguity.
-- Exactly one `is_preferred: true` across all files whenever a winner exists; zero when not.
-
-## UI guardrails
-- Badge and ★ reuse existing theme tokens (`--gold`, panel/line variables) — no new CSS
-  files, no inline hex literals for themed colors.
-- Tier-1 badge says "★ Preferred"; tier-2 badge says "★ Best available" — the UI never
-  lies about the data quality behind the star.
-- Manual-selection persistence path is not weakened.
+## Determinism & data-safety invariants (from the module docstring — must survive)
+- Sources never modified (existing `test_sources_untouched_hashes_before_after` stays green).
+- Byte-identical re-run over unchanged inputs with the SAME code is preserved — the new
+  counter is pure input-derived, no wall-clock, no set-iteration-order leaks into output.
+- Pass-1 memory stays O(windows): one scalar counter only, no tick retention.
+- Bounds-check semantics EXACTLY mirror `verify_tick_data.py:205-213`:
+  None means skip; non-numeric or out-of-range means violation.
+- A failing window never reaches pass-2 output: `passed_cids` derives from `passed`.
