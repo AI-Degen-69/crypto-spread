@@ -1,15 +1,21 @@
 """Tests for scripts/build_pristine_dataset.py — pristine-window dataset extractor (issue #290)."""
 from __future__ import annotations
 
+import dataclasses
+import json
 import time
 
 import pytest
 
 from scripts.build_pristine_dataset import (
+    MANIFEST_NAME,
+    VERIFY_POLICY_NOTE,
     PristineGateParams,
+    build_pristine_dataset,
     evaluate_window_gates,
     evaluate_window_state,
     scan_windows,
+    sha256_of,
 )
 
 BASE_TS = 1725000000.0
@@ -166,3 +172,130 @@ class TestScanWindows:
         assert set(states) == {"0xaaa", "0xbbb"}
         for st in states.values():
             assert st["source_files"] == ["f.jsonl"]
+
+
+def write_ticks_dir(tmp_path, days: dict[str, list[dict]]):
+    """Materialize a ticks dir like the collector writes it (one file per UTC day)."""
+    for day_name, ticks in days.items():
+        p = tmp_path / day_name
+        with open(p, "w", encoding="utf-8") as f:
+            for t in ticks:
+                f.write(json.dumps(t) + "\n")
+    return tmp_path
+
+
+def day_of(ts):
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+@pytest.fixture()
+def two_day_dir(tmp_path):
+    """A pristine 5m window truly spanning midnight (23:55 -> 00:00) plus a wrecked one."""
+    start = (BASE_TS // 86400) * 86400 + 86100.0  # 23:55:00 UTC of BASE_TS's day
+    good = [
+        make_tick(ts=start - BASE_TS + float(i), start_ts=start, end_ts=start + 300.0)
+        for i in range(302)  # last two ticks land past midnight -> collector splits across day files
+    ]
+    bad = [
+        make_tick(ts=start + 300.0 - BASE_TS + round(i * 5.9, 3),
+                  start_ts=start + 300.0, end_ts=start + 600.0, cid="0xbad")
+        for i in range(40)
+    ]
+    d1 = day_of(start)
+    d2 = day_of(start + 301.0)  # the day the window's final ticks land on
+    write_ticks_dir(tmp_path, {
+        f"ticks_{d1}.jsonl": good[:150],
+        f"ticks_{d2}.jsonl": good[150:] + bad,
+    })  # d2 gets the window's tail (150..299) plus the next window's wrecked ticks
+    return tmp_path, good, bad
+
+
+class TestWritePristineDataset:
+    def test_whole_windows_keyed_to_start_day(self, two_day_dir):
+        ticks_dir, good, _ = two_day_dir
+        out = ticks_dir / "pristine"
+        report = build_pristine_dataset(ticks_dir, out)
+        day_file = out / f"ticks_{day_of(good[0]['start_ts'])}.jsonl"
+        assert day_file.is_file()
+        lines = [json.loads(x) for x in day_file.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert lines == good  # whole window, original order, no early cutoff
+
+    def test_failing_window_absent_from_output(self, two_day_dir):
+        ticks_dir, _, bad = two_day_dir
+        report = build_pristine_dataset(ticks_dir, ticks_dir / "pristine")
+        every_line_cid = {
+            json.loads(x)["cid"]
+            for f in (ticks_dir / "pristine").glob("ticks_*.jsonl")
+            for x in f.read_text(encoding="utf-8").splitlines() if x.strip()
+        }
+        assert "0xbad" not in every_line_cid
+        assert "0xbad" not in report["passed_cids"]
+
+    def test_manifest_records_verdicts_counts_and_hashes(self, two_day_dir):
+        ticks_dir, good, bad = two_day_dir
+        out = ticks_dir / "pristine"
+        report = build_pristine_dataset(ticks_dir, out)
+        man = json.loads((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+        assert man["policy_note"] == VERIFY_POLICY_NOTE
+        assert man["gates"] == dataclasses.asdict(PristineGateParams())
+        assert {w["cid"] for w in man["windows"]} == {"0xabc", "0xbad"}
+        good_w = next(w for w in man["windows"] if w["cid"] == "0xabc")
+        assert good_w["passed"] is True and good_w["failing_gates"] == []
+        assert good_w["source_files"] == [
+            f"ticks_{day_of(good[0]['start_ts'])}.jsonl",
+            f"ticks_{day_of(good[-1]['ts'])}.jsonl",
+        ]
+        assert good_w["source_sha256s"] and all(len(h) == 64 for h in good_w["source_sha256s"].values())
+        bad_w = next(w for w in man["windows"] if w["cid"] == "0xbad")
+        assert bad_w["passed"] is False
+        assert "snap_density" in bad_w["failing_gates"]
+        assert man["per_pair_pristine_counts"]["btc-up-or-down-5m:300"] == 1
+        assert man["totals"]["windows_total"] == 2
+        assert man["totals"]["ticks_written"] == len(good)
+        assert man["totals"]["windows_passed"] == 1
+
+    def test_sources_untouched_hashes_before_after(self, two_day_dir):
+        ticks_dir, _, _ = two_day_dir
+        src = sorted(p.name for p in ticks_dir.glob("ticks_*.jsonl"))
+        before = {n: sha256_of(ticks_dir / n) for n in src}
+        build_pristine_dataset(ticks_dir, ticks_dir / "pristine")
+        after = {n: sha256_of(ticks_dir / n) for n in src}
+        assert before == after
+
+    def test_rerun_is_byte_identical(self, two_day_dir):
+        ticks_dir, _, _ = two_day_dir
+        out = ticks_dir / "pristine"
+        build_pristine_dataset(ticks_dir, out)
+        first = {p.name: p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
+        build_pristine_dataset(ticks_dir, out)
+        second = {p.name: p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
+        assert first == second
+
+    def test_overwrite_prunes_stale_outputs(self, two_day_dir):
+        ticks_dir, _, _ = two_day_dir
+        out = ticks_dir / "pristine"
+        build_pristine_dataset(ticks_dir, out)
+        stale = out / f"ticks_{day_of(BASE_TS + 86400)}.jsonl"
+        stale.write_text("{\"cid\": \"stale\"}\n", encoding="utf-8")
+        build_pristine_dataset(ticks_dir, out)
+        assert not stale.exists()
+
+    def test_refuses_out_inside_ticks_dir(self, two_day_dir):
+        ticks_dir, _, _ = two_day_dir
+        with pytest.raises(ValueError):
+            build_pristine_dataset(ticks_dir, ticks_dir)  # exact overlap clobbers sources
+
+    def test_empty_input_dir_exits_clean(self, tmp_path):
+        with pytest.raises(ValueError):
+            build_pristine_dataset(tmp_path, tmp_path / "pristine")
+
+    def test_output_verify_embedded(self, two_day_dir):
+        ticks_dir, _, _ = two_day_dir
+        out = ticks_dir / "pristine"
+        report = build_pristine_dataset(ticks_dir, out)
+        ov = report["manifest"]["output_verify"]
+        assert ov["status"] == "PASS"
+        assert ov["files_checked"] == 1
+        for k in ("total_late_starts", "total_early_cutoffs", "total_sampling_gaps",
+                  "total_time_reversals", "total_collector_errors"):
+            assert ov[k] == 0

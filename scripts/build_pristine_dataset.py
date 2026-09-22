@@ -25,6 +25,7 @@ import argparse
 import dataclasses
 import json
 import math
+import re
 import sys
 import time
 from collections import defaultdict
@@ -33,19 +34,19 @@ from typing import Any, Iterable
 
 from scripts.rebuild_windows import iter_ticks
 from scripts.ship_to_drive import sha256_of
+from strategy.windows import write_json_atomic
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TICKS_DIR = ROOT / "run" / "ticks"
 DEFAULT_OUT_DIR = DEFAULT_TICKS_DIR / "pristine"
 MANIFEST_NAME = "pristine_manifest.json"
 
-DAY_RE_PATTERN = r"^ticks_(\d{4}-\d{2}-\d{2})\.jsonl(\.gz)?$"
+DAY_RE = re.compile(r"^ticks_(\d{4}-\d{2}-\d{2})\.jsonl(\.gz)?$")
 
 VERIFY_POLICY_NOTE = (
     "gate defaults mirror scripts/verify_tick_data.verify_window_continuity "
-    "(6.0s gaps, 5.0s start delay); density floor adds >=1 snap per 3s of duration"
+    "(6.0s gaps, 5.0s start delay); density floor sets min_snaps = ceil(duration / 3.0)"
 )
-
 
 @dataclasses.dataclass(frozen=True)
 class PristineGateParams:
@@ -168,6 +169,12 @@ def evaluate_window_state(state: dict[str, Any], params: PristineGateParams) -> 
     return verdict
 
 
+def source_day_files(ticks_dir: Path) -> list[Path]:
+    """Day files sorted by name (deterministic). Exactly the collector's naming."""
+    found = [p for p in ticks_dir.glob("ticks_*.jsonl*") if DAY_RE.match(p.name) and p.is_file()]
+    return sorted(found, key=lambda p: p.name)
+
+
 def scan_windows(sources: Iterable[tuple[str, Iterable[dict[str, Any]]]]) -> dict[str, dict[str, Any]]:
     """Aggregate ticks into one state per cid, merged across source files.
 
@@ -200,3 +207,145 @@ def scan_windows(sources: Iterable[tuple[str, Iterable[dict[str, Any]]]]) -> dic
     for st in states.values():
         st.pop("_seen", None)
     return states
+
+
+def build_pristine_dataset(
+    ticks_dir: Path,
+    out_dir: Path,
+    params: PristineGateParams = PristineGateParams(),
+    quiet: bool = False,
+) -> dict[str, Any]:
+    """One build pass: gate every window and write the pristine dataset.
+
+    Two streaming passes over the day files (memory stays O(windows), never O(ticks)):
+    pass 1 gates every merged window, pass 2 copies surviving windows' raw lines to
+    per-start-day output files. The manifest is written last so it never references a
+    missing output file. Sources are only ever opened for reading.
+    """
+    ticks_dir = Path(ticks_dir)
+    out_dir = Path(out_dir)
+    if not ticks_dir.is_dir():
+        raise ValueError(f"ticks dir not found: {ticks_dir}")
+    src_files = source_day_files(ticks_dir)
+    if not src_files:
+        raise ValueError(f"no tick day files in {ticks_dir} (expected ticks_<YYYY-MM-DD>.jsonl[.gz])")
+    if out_dir.resolve() == ticks_dir.resolve():
+        raise ValueError(
+            f"refusing --out {out_dir}: outputs share the ticks_<day>.jsonl naming and would clobber sources"
+        )
+
+    digests = {p.name: sha256_of(p) for p in src_files}
+
+    # ---- Pass 1: aggregate per cid across files, gate every window.
+    from scripts.verify_tick_data import verify_ticks_dir  # local: heavy module import
+
+    states = scan_windows((p.name, iter_ticks([p])) for p in src_files)
+    verdicts = [evaluate_window_state(st, params) for st in states.values()]
+    verdicts.sort(key=lambda v: (v["start_ts"], v["cid"]))
+    passed_cids = {v["cid"] for v in verdicts if v["passed"]}
+    if not quiet:
+        print(
+            f"pass1: {len(verdicts)} windows, {len(passed_cids)} pristine "
+            f"({len(verdicts) - len(passed_cids)} failed)",
+            flush=True,
+        )
+
+    per_pair: dict[str, int] = defaultdict(int)
+    for v in verdicts:
+        if v["passed"]:
+            per_pair[f"{v['series']}:{v['duration']}"] += 1
+
+    # ---- Pass 2: stream again; copy whole surviving windows, keyed to START day.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # A re-run must not leave day files from a previous build that this one no longer
+    # produces (thresholds changed, sources removed) — the manifest would lie.
+    for stale in out_dir.glob("ticks_*.jsonl*"):
+        if DAY_RE.match(stale.name):
+            stale.unlink()
+    out_files: dict[str, Any] = {}
+    try:
+        for p in src_files:
+            for tick in iter_ticks([p]):
+                cid = tick.get("cid")
+                if cid not in passed_cids:
+                    continue
+                day = day_key_of(tick.get("start_ts", 0.0) or 0.0)
+                fh = out_files.get(day)
+                if fh is None:
+                    fh = open(out_dir / f"ticks_{day}.jsonl", "w", encoding="utf-8", newline="\n")
+                    out_files[day] = fh
+                fh.write(json.dumps(tick) + "\n")
+    finally:
+        for fh in out_files.values():
+            fh.close()
+
+    manifest_keys = (
+        "passed", "failing_gates", "cid", "series", "slug", "duration",
+        "start_ts", "end_ts", "start_day", "tick_count", "min_snaps",
+        "start_delay_sec", "end_cutoff_sec", "gaps_count", "max_gap_sec",
+        "time_reversals", "error_ticks", "source_files",
+    )
+    windows_manifest = [
+        {**{k: v[k] for k in manifest_keys},
+         "source_sha256s": {n: digests[n] for n in v["source_files"]}}
+        for v in verdicts
+    ]
+    ticks_written = sum(v["tick_count"] for v in verdicts if v["passed"])
+    manifest = {
+        "policy_note": VERIFY_POLICY_NOTE,
+        "gates": dataclasses.asdict(params),
+        "totals": {
+            "windows_total": len(verdicts),
+            "windows_passed": len(passed_cids),
+            "ticks_written": ticks_written,
+            "output_files": sorted(out_files),
+            "source_files": {p.name: digests[p.name] for p in src_files}
+        },
+        "per_pair_pristine_counts": dict(sorted(per_pair.items())),
+        "windows": windows_manifest,
+    }
+    report = {"manifest": manifest, "passed_cids": passed_cids}
+
+    # ---- Self-certification: verify the freshly written output, embed the verdict.
+    output_verify = verify_ticks_dir(out_dir)
+    ov_keys = (
+        "status", "files_checked", "total_valid_ticks", "total_windows",
+        "total_late_starts", "total_early_cutoffs", "total_sampling_gaps",
+        "total_time_reversals", "total_collector_errors",
+    )
+    manifest["output_verify"] = {k: output_verify[k] for k in ov_keys}
+
+    write_json_atomic(out_dir / MANIFEST_NAME, manifest)
+    if not quiet:
+        print(
+            f"wrote {len(passed_cids)} pristine windows ({ticks_written} ticks) to {out_dir}; "
+            f"output verify: {manifest['output_verify']['status']}",
+            flush=True,
+        )
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: build the pristine dataset from a ticks directory."""
+    ap = argparse.ArgumentParser(description="Build the pristine-window tick dataset (issue #290).")
+    ap.add_argument("ticks_dir", nargs="?", type=Path, default=DEFAULT_TICKS_DIR)
+    ap.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument("--max-gap-sec", type=float, default=6.0)
+    ap.add_argument("--max-start-delay-sec", type=float, default=5.0)
+    ap.add_argument("--max-snap-interval-sec", type=float, default=3.0)
+    e = ap.parse_args(argv)
+    params = PristineGateParams(
+        max_gap_sec=e.max_gap_sec,
+        max_start_delay_sec=e.max_start_delay_sec,
+        max_snap_interval_sec=e.max_snap_interval_sec,
+    )
+    try:
+        build_pristine_dataset(e.ticks_dir, e.out, params=params)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
