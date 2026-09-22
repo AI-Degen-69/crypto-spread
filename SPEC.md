@@ -1,45 +1,52 @@
-# SPEC — Issue #294: Rank the least-bad tick file as preferred when no file fully qualifies
+﻿# SPEC — Issue #297: pristine dataset — gate out windows with bounds-violation ticks
 
-## Goal
-The live repository holds 6 day files, all `PARTIAL CAPTURE`. Issue #279 shipped
-`pick_preferred()` which requires `PASS` + `COMPLETE CAPTURE` to be eligible — a perfectly
-correct tier-1 rule, but it means `preferred_file` is always `null` and no file ever gets the
-star. The operator wants best-of-available: when no file meets the tier-1 bar, rank the
-least-bad available file as a tier-2 fallback so one file is always starred, badged, and
-pre-selected as the backtest default.
+## Problem (from the issue, confirmed against real data)
+`build_pristine_dataset.py` gates windows on continuity only. A window with a tick whose
+`mid` or `touch_pair` is out of sane bounds (surfaced on the dashboard as Sample
+Discrepancies) is still written into the pristine dataset — contradicting pristine.
 
-## Acceptance criteria
-1. With only PARTIAL CAPTURE files present, `/api/ticks/manifest` returns the least-bad file
-   as `preferred_file` with exactly one `is_preferred: true` row.
-2. Tier-1 rule unchanged: PASS + COMPLETE CAPTURE files still outrank any partial file.
-   Stale-policy sidecars stay ineligible (no eligibility fields ⇒ no ranking).
-3. Badge and dropdown label distinguish **"★ Best available"** (tier 2) from the tier-1
-   **"★ Preferred"** star.
-4. `preferred_tier` (1 or 2) is returned alongside `preferred_file` so the UI can pick
-   the right wording without client-side guessing.
-5. `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`
-   passes.
+**Existence proof on real data (planning-time scan):** `run/ticks/ticks_2026-09-18.jsonl`
+(smallest day, 7,180 ticks) contains 1 bounds-violating tick in 1 distinct window — the
+bug is real in the current dataset, not theoretical. A full 5.2 GB re-scan is deferred
+to build-time verification (optional), not a planning blocker.
 
-## Tier-2 total order (defined)
-Among files that fail tier-1 eligibility, rank by:
-1. `integrity_status`: PASS > WARN > everything else (FAIL, None) — PASS is better even
-   without COMPLETE CAPTURE.
-2. `capture_state.label`: COMPLETE CAPTURE > PARTIAL CAPTURE > everything else.
-3. `readiness.level`: RESEARCH_READY (2) > EXPLORATORY (1) > other/None (0).
-4. `windows_count` desc.
-5. `mtime` desc.
-Files with all eligibility fields null (no cached sidecar, or stale policy) score zero
-on every axis — they are the least-bad fallback of last resort, not actively promoted.
+## Interface contracts (frozen before logic)
+- `_tick_out_of_bounds(tick: dict) -> bool` — new module-level helper in
+  `scripts/build_pristine_dataset.py`. Reads `tick.get("mid")` / `tick.get("touch_pair")`;
+  None means no violation for that field; non-numeric or out-of-range means True.
+  Thresholds hard-coded to [-0.01, 1.01] / [0.50, 1.50] — single definition point,
+  mirroring `verify_tick_data.py:205-213`. No params, no CLI knob.
+- `_new_window_state(first_tick, source_name)` — adds `bounds_violations: int` seeded
+  from the FIRST tick (same pattern as `error_ticks` at line 148). Critical: the first
+  tick never flows through `_add_tick_to_state`, so seeding here is the only way a
+  first-tick violation is counted.
+- `_add_tick_to_state(st, tick, source_name, max_gap_sec)` — increments
+  `st["bounds_violations"]` when `_tick_out_of_bounds(tick)`.
+- `judge_window(agg, params)` — reads `agg.get("bounds_violations", 0)` (defensive .get:
+  the empty-window path at `evaluate_window_gates:95` builds a minimal dict without the
+  key and relies on the `no_ticks` early return; .get keeps the gate safe for any
+  future caller). Appends `bounds_violation` to `failing` when > 0, after
+  `collector_error`, before the snap_density check (gate order in `failing_gates` stays
+  deterministic). Adds `bounds_violations: 0` to the `no_ticks` early-return dict AND
+  `bounds_violations: <count>` to the normal verdict dict — both return shapes carry
+  identical keys.
+- `manifest_keys` tuple in `build_pristine_dataset` (line 377) — adds
+  `bounds_violations` so the counter reaches `pristine_manifest.json` per window.
+- `VERIFY_POLICY_NOTE` (line 47) — extend with one clause noting the bounds gate mirrors
+  `verify_tick_data.verify_tick` sane bounds (the note currently claims gates mirror
+  `verify_window_continuity` only, which would become a lie).
 
-## Edge cases
-- Empty `run/ticks/` → `files: []`, `preferred_file: null`, `preferred_tier: null`.
-- No verify cache for any file → all eligibility fields null; the file with highest
-  windows_count/mtime wins tier 2 (0,0,0,windows,mtime) — a valid least-bad pick.
-- All files PASS + COMPLETE → tier-1 winner as before; `preferred_tier: 1`.
-- Mix of PASS+COMPLETE and PARTIAL → tier-1 wins; `preferred_tier: 1`.
-- All files PARTIAL → tier-2 winner; `preferred_tier: 2`, badge says "Best available".
-- Single file → it always wins (tier 1 or tier 2 depending on its status).
+## Acceptance-criteria to test mapping
+| Issue criterion | Test |
+|---|---|
+| touch_pair > 1.50 fails with bounds_violation | unit: make_tick(touch_pair=1.74) mid-window |
+| mid > 1.01 or < -0.01 fails | unit: two cases via make_tick(mid=...) |
+| gate name in manifest per-window record | e2e manifest assertion |
+| window excluded from pass-2 output / passed_cids | e2e modeled on test_failing_window_absent_from_output |
+| byte-identical re-run preserved | existing test_rerun_is_byte_identical must stay green |
+| all existing tests pass | full targeted file run |
+| first-tick violation counted (code-derived, beyond issue text) | unit: violation at tick index 0 via seeding path |
 
-## Explicit out of scope
-Listing pristine files (sibling #295); changing verify logic or thresholds; backtest
-math; forced re-verifies; new dependencies.
+## Non-goals (hard)
+Changing bounds values; touching `verify_tick_data.py`; dashboard changes; source-file
+modification; CLI flag; rebuilding the on-disk pristine dataset in this branch.
