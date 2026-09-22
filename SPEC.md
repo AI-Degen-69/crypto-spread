@@ -1,52 +1,62 @@
-﻿# SPEC — Issue #297: pristine dataset — gate out windows with bounds-violation ticks
+# SPEC — Issue #298: Rebuild run/ticks/pristine after the bounds_violation gate lands
 
-## Problem (from the issue, confirmed against real data)
-`build_pristine_dataset.py` gates windows on continuity only. A window with a tick whose
-`mid` or `touch_pair` is out of sane bounds (surfaced on the dashboard as Sample
-Discrepancies) is still written into the pristine dataset — contradicting pristine.
+Per-issue specification. Source: issue #298 body + CodeRabbit coding plan
+(comment 5780981530), code-verified against `scripts/build_pristine_dataset.py`.
 
-**Existence proof on real data (planning-time scan):** `run/ticks/ticks_2026-09-18.jsonl`
-(smallest day, 7,180 ticks) contains 1 bounds-violating tick in 1 distinct window — the
-bug is real in the current dataset, not theoretical. A full 5.2 GB re-scan is deferred
-to build-time verification (optional), not a planning blocker.
+## Context
 
-## Interface contracts (frozen before logic)
-- `_tick_out_of_bounds(tick: dict) -> bool` — new module-level helper in
-  `scripts/build_pristine_dataset.py`. Reads `tick.get("mid")` / `tick.get("touch_pair")`;
-  None means no violation for that field; non-numeric or out-of-range means True.
-  Thresholds hard-coded to [-0.01, 1.01] / [0.50, 1.50] — single definition point,
-  mirroring `verify_tick_data.py:205-213`. No params, no CLI knob.
-- `_new_window_state(first_tick, source_name)` — adds `bounds_violations: int` seeded
-  from the FIRST tick (same pattern as `error_ticks` at line 148). Critical: the first
-  tick never flows through `_add_tick_to_state`, so seeding here is the only way a
-  first-tick violation is counted.
-- `_add_tick_to_state(st, tick, source_name, max_gap_sec)` — increments
-  `st["bounds_violations"]` when `_tick_out_of_bounds(tick)`.
-- `judge_window(agg, params)` — reads `agg.get("bounds_violations", 0)` (defensive .get:
-  the empty-window path at `evaluate_window_gates:95` builds a minimal dict without the
-  key and relies on the `no_ticks` early return; .get keeps the gate safe for any
-  future caller). Appends `bounds_violation` to `failing` when > 0, after
-  `collector_error`, before the snap_density check (gate order in `failing_gates` stays
-  deterministic). Adds `bounds_violations: 0` to the `no_ticks` early-return dict AND
-  `bounds_violations: <count>` to the normal verdict dict — both return shapes carry
-  identical keys.
-- `manifest_keys` tuple in `build_pristine_dataset` (line 377) — adds
-  `bounds_violations` so the counter reaches `pristine_manifest.json` per window.
-- `VERIFY_POLICY_NOTE` (line 47) — extend with one clause noting the bounds gate mirrors
-  `verify_tick_data.verify_tick` sane bounds (the note currently claims gates mirror
-  `verify_window_continuity` only, which would become a lie).
+PR #299 (issue #297) added the always-on `bounds_violation` gate to the pristine extractor,
+but the derived dataset on disk (`run/ticks/pristine/`, built by PR #291) predates the gate.
+Known evidence: `run/ticks/ticks_2026-09-18.jsonl` holds 1 bounds-violating tick in 1 window
+currently inside the pristine dataset. This issue re-runs the extractor and produces a durable
+delta record for #295 dashboard consumers.
 
-## Acceptance-criteria to test mapping
-| Issue criterion | Test |
-|---|---|
-| touch_pair > 1.50 fails with bounds_violation | unit: make_tick(touch_pair=1.74) mid-window |
-| mid > 1.01 or < -0.01 fails | unit: two cases via make_tick(mid=...) |
-| gate name in manifest per-window record | e2e manifest assertion |
-| window excluded from pass-2 output / passed_cids | e2e modeled on test_failing_window_absent_from_output |
-| byte-identical re-run preserved | existing test_rerun_is_byte_identical must stay green |
-| all existing tests pass | full targeted file run |
-| first-tick violation counted (code-derived, beyond issue text) | unit: violation at tick index 0 via seeding path |
+## Verified Code Facts (checked, not assumed)
 
-## Non-goals (hard)
-Changing bounds values; touching `verify_tick_data.py`; dashboard changes; source-file
-modification; CLI flag; rebuilding the on-disk pristine dataset in this branch.
+- File discovery (`build_pristine_dataset.py:145`) globs `ticks_dir.glob("ticks_*.jsonl*")`
+  top-level only → the `pristine/` subdir is never scanned. In-place `--out run/ticks/pristine`
+  is safe.
+- Rebuild hygiene (`:371-374`): old manifest unlinked, stale day files deleted before writing.
+  Clean-rebuild semantics already exist — no helper script needed.
+- Self-certification (`:431-445`): `verify_ticks_dir(out_dir)` runs on fresh output; a non-PASS
+  aborts with `RuntimeError` and writes no manifest.
+- Baseline manifest verified on disk: `totals = {windows_total: 6129, windows_passed: 5042,
+  ticks_written: 1485319}`, six day files with `source_files` SHA-256 map; window identity
+  fields `cid, series, slug, duration, start_ts, start_day` all present. Old window rows do
+  NOT carry `bounds_violations` (pre-gate build) — delta matching uses identity fields only.
+- Template `docs/issues/221-gil-contention-findings.md` and dir `docs/measurements/` exist.
+
+## Acceptance Criteria (from the issue)
+
+1. Rebuild completes; `pristine_manifest.json` policy note includes the bounds-gate clause.
+2. Windows containing bounds-violation ticks are gone from the output and carry
+   `bounds_violation` in `failing_gates` in the manifest (`passed: false`).
+3. `output_verify` status is PASS.
+4. Delta vs the pre-rebuild manifest (windows dropped per day) is recorded — committed
+   findings doc + issue comment.
+
+## Method
+
+1. Snapshot baseline manifest to `.pristine_baseline_manifest.json` (repo root, scratch,
+   deleted after TASK-4; never committed).
+2. Run `python -m scripts.build_pristine_dataset run/ticks --out run/ticks/pristine`
+   (no flags; long-running over ~5.2 GB → background process with log file).
+3. Verify: exit 0, `output verify: PASS`, policy clause, independent
+   `verify_tick_data run/ticks/pristine` PASS, every `bounds_violation` gate entry has
+   `passed: false`, the 09-18 evidence window is failing and absent from output, and
+   `totals.source_files` hashes equal the baseline (read-only proof).
+4. Delta: match old/new windows on `(cid, series, slug, duration, start_ts)`; dropped =
+   passed before, not passed now. Invariant to assert: every dropped window carries
+   `bounds_violation` in its new `failing_gates` (gates otherwise unchanged, same inputs).
+   Group drops by `start_day`; record `windows_passed` / `ticks_written` deltas and the
+   `bounds_violation` window count.
+5. Write `docs/issues/298-pristine-manifest-delta-findings.md` (Executive Summary /
+   Methodology with exact CLI + matching rule / Results table before-after-delta per day /
+   note that `run/` is git-ignored so this doc is the durable record / gates unchanged,
+   dashboard owned by #295) and `docs/measurements/issue-298-pristine-manifest-delta.json`.
+6. Comment the delta summary on issue #298.
+
+## Out of Scope
+
+Gate/threshold changes; dashboard work (#295); any `strategy/`, `server/`, `backtest/` edits;
+committing `run/` artifacts.
