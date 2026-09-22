@@ -132,6 +132,13 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert "Opening the tab is read-only" in FULL_APP_HTML
 
 
+def test_preferred_badge_uses_theme_tokens():
+    """Issue #279: the ★ Preferred badge exists and colors via the --gold token."""
+    assert "if (f.is_preferred)" in FULL_APP_HTML
+    assert "★ Preferred" in FULL_APP_HTML
+    assert "color:var(--gold);font-weight:700;font-size:11px;white-space:nowrap;margin-left:6px" in FULL_APP_HTML
+
+
 def test_component_styles_use_css_variables():
     """Verify specific CSS components use proper semantic CSS variables."""
     # .tbl td uses --line-dark

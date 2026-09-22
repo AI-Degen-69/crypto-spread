@@ -5741,6 +5741,14 @@ async function loadManifest(){
           toggleFileVerify(f.name);
         });
         tdName.appendChild(btnName);
+        if (f.is_preferred) {
+          // Issue #279: exactly one row carries the ★ Preferred badge.
+          const pref = document.createElement('span');
+          pref.textContent = '★ Preferred';
+          pref.style.cssText = 'color:var(--gold);font-weight:700;font-size:11px;white-space:nowrap;margin-left:6px';
+          pref.title = `Healthiest dataset: integrity PASS, complete capture, ${(f.readiness && f.readiness.level) || 'unknown'} readiness, ${(f.windows_count || 0).toLocaleString()} windows`;
+          tdName.appendChild(pref);
+        }
 
         const tdSize = document.createElement('td');
         tdSize.className = 'mono';
