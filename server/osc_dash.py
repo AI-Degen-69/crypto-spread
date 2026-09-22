@@ -529,10 +529,39 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
     }
 
 
+_READINESS_LEVEL_RANK = {"RESEARCH_READY": 2, "EXPLORATORY": 1}
+
+
+def pick_preferred(files: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the healthiest tick file from already-cached verify data (Issue #279).
+
+    Pure ranking — no I/O, no globals: eligible = integrity PASS + COMPLETE
+    CAPTURE capture state; rank by readiness level (RESEARCH_READY >
+    EXPLORATORY > the rest), then windows_count desc, then mtime desc.
+    `files` arrives name-sorted, so fully equal keys resolve stably by name.
+    Returns the winning entry itself, or None when nothing qualifies.
+    """
+    eligible = [
+        f for f in files
+        if f.get("integrity_status") == "PASS"
+        and (f.get("capture_state") or {}).get("label") == "COMPLETE CAPTURE"
+    ]
+    if not eligible:
+        return None
+    return max(
+        eligible,
+        key=lambda f: (
+            _READINESS_LEVEL_RANK.get((f.get("readiness") or {}).get("level"), 0),
+            int(f.get("windows_count") or 0),
+            float(f.get("mtime") or 0.0),
+        ),
+    )
+
+
 @app.get("/api/ticks/manifest")
 def api_ticks_manifest():
     """List available tick files + manifest stats for the slider UI."""
-    out: dict[str, Any] = {"files": [], "manifest": None}
+    out: dict[str, Any] = {"files": [], "manifest": None, "preferred_file": None}
     if not TICKS_DIR.exists():
         return out
     mf = TICKS_DIR / "manifest.json"
@@ -578,6 +607,12 @@ def api_ticks_manifest():
             entry["capture_state"] = (cached or {}).get("capture_state")
             if cached:
                 entry["windows_count"] = int(cached.get("windows_count", 0))
+        # Issue #279: surface the healthiest file so the UI can badge and
+        # pre-select it — derived only from the cached fields already read.
+        winner = pick_preferred(out["files"])
+        out["preferred_file"] = (winner or {}).get("name")
+        for entry in out["files"]:
+            entry["is_preferred"] = entry["name"] == out["preferred_file"]
     except Exception:
         out["aggregate"] = {
             "total_files": 0,

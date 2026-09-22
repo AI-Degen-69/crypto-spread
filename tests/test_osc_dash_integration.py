@@ -1,5 +1,6 @@
 """Integration tests for the 4-tab dashboard SPA and FastAPI API endpoints."""
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -334,6 +335,9 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert agg["total_windows"] == 2
     assert agg["windows_source"] == "cache"
 
+    # Issue #279: this CORRUPTED-data file is ineligible — no preferred winner.
+    assert client.get("/api/ticks/manifest").json()["preferred_file"] is None
+
     # Per-file market breakdown surfaces from the cache too.
     files = client.get("/api/ticks/manifest").json()["files"]
     assert files[0]["market_breakdown"][0]["series"] == "btc-up-or-down-5m"
@@ -360,6 +364,119 @@ def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
     entry = client.get("/api/ticks/manifest").json()["files"][0]
     assert entry["readiness"] is None
     assert entry["readiness_targets"] is None
+
+
+def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPLETE CAPTURE",
+                          level="RESEARCH_READY", windows=50):
+    """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper)."""
+    from scripts.verify_tick_data import READINESS_POLICY_VERSION
+
+    target = tmp_path / name
+    target.write_text('{"a": 1}\n', encoding="utf-8")
+    cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / f"{name}.json").write_text(json.dumps({
+        "file": name,
+        "status": status,
+        "capture_state": {"label": capture_label},
+        "readiness": {"level": level, "policy_version": READINESS_POLICY_VERSION},
+        "windows_count": windows,
+        "fingerprint": osc_dash._file_fingerprint(target),
+        "series_counts": {},
+    }), encoding="utf-8")
+
+
+def test_manifest_preferred_file_picks_healthy_winner(tmp_path, monkeypatch):
+    """Issue #279: eligible = PASS + COMPLETE CAPTURE; the most-ready file wins."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-07.jsonl", status="WARN",
+                          capture_label="PARTIAL CAPTURE", level="RESEARCH_READY", windows=999)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", level="EXPLORATORY", windows=900)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-09.jsonl", level="RESEARCH_READY", windows=50)
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] == "ticks_2026-09-09.jsonl"
+    flagged = [f["name"] for f in data["files"] if f["is_preferred"]]
+    assert flagged == ["ticks_2026-09-09.jsonl"]
+
+
+def test_manifest_preferred_file_windows_tie_break(tmp_path, monkeypatch):
+    """Issue #279: equal readiness ranks by windows_count desc, then mtime desc."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    a = tmp_path / "ticks_2026-09-07.jsonl"
+    a.write_text('{"a": 1}\n', encoding="utf-8")
+    b = tmp_path / "ticks_2026-09-08.jsonl"
+    b.write_text('{"a": 1}\n', encoding="utf-8")
+    c = tmp_path / "ticks_2026-09-09.jsonl"
+    c.write_text('{"a": 1}\n', encoding="utf-8")
+    _write_verify_sidecar(tmp_path, a.name, level="EXPLORATORY", windows=100)
+    _write_verify_sidecar(tmp_path, b.name, level="EXPLORATORY", windows=300)
+    _write_verify_sidecar(tmp_path, c.name, level="EXPLORATORY", windows=100)
+    older = time.time() - 500
+    os.utime(a, (older, older))
+    os.utime(c, (older + 100, older + 100))  # c newer than a, same windows
+
+    data = client.get("/api/ticks/manifest").json()
+    # b wins on windows outright; among the 100-window ties the newer mtime wins.
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+
+
+def test_pick_preferred_pure_ranking():
+    """Issue #279: pure ranking — level → windows_count → mtime, no I/O, no globals."""
+    def mk(name, **kw):
+        return {"name": name, "mtime": 0, "windows_count": 0, **kw}
+
+    files = [
+        mk("warn.jsonl", integrity_status="WARN", capture_state={"label": "PARTIAL CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=999, mtime=3),
+        mk("research.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=40, mtime=2),
+        mk("explor.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=500, mtime=3),
+    ]
+    # WARN is never eligible despite the best level/windows/mtime.
+    assert osc_dash.pick_preferred(files)["name"] == "research.jsonl"
+    assert osc_dash.pick_preferred([]) is None
+    assert osc_dash.pick_preferred([files[0]]) is None
+
+    # windows_count beats mtime at equal level.
+    tie = [
+        mk("older.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=100, mtime=1),
+        mk("newer.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=99, mtime=99),
+    ]
+    assert osc_dash.pick_preferred(tie)["name"] == "older.jsonl"
+
+    # Fully equal keys resolve stably by the caller's (name-sorted) order.
+    same = [
+        mk("a.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}),
+        mk("b.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}),
+    ]
+    assert osc_dash.pick_preferred(same)["name"] == "a.jsonl"
+
+
+def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeypatch):
+    """Issue #279: empty dir / uncached / all WARN-FAIL → preferred_file is None."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert data["files"] == []
+
+    # Uncached file: never eligible, never triggers a re-verify.
+    (tmp_path / "ticks_2026-09-08.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert all(f["is_preferred"] is False for f in data["files"])
+
+    # All files WARN/FAIL: fall back to the All-Files default behavior unchanged.
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", status="WARN",
+                          capture_label="PARTIAL CAPTURE")
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert all(f["is_preferred"] is False for f in data["files"])
 
 
 def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
