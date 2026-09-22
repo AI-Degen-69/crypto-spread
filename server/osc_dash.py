@@ -530,38 +530,63 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
 
 
 _READINESS_LEVEL_RANK = {"RESEARCH_READY": 2, "EXPLORATORY": 1}
+_INTEGRITY_RANK = {"PASS": 2, "WARN": 1}
+_CAPTURE_RANK = {"COMPLETE CAPTURE": 2, "PARTIAL CAPTURE": 1}
 
 
-def pick_preferred(files: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Pick the healthiest tick file from already-cached verify data (Issue #279).
+def _file_rank_key(f: dict[str, Any]) -> tuple:
+    """Total-order key for ranking tick files (highest = best)."""
+    return (
+        _READINESS_LEVEL_RANK.get((f.get("readiness") or {}).get("level"), 0),
+        int(f.get("windows_count") or 0),
+        float(f.get("mtime") or 0.0),
+    )
 
-    Pure ranking — no I/O, no globals: eligible = integrity PASS + COMPLETE
-    CAPTURE capture state; rank by readiness level (RESEARCH_READY >
-    EXPLORATORY > the rest), then windows_count desc, then mtime desc.
+
+def pick_preferred(
+    files: list[dict[str, Any]],
+) -> tuple[dict[str, Any], int] | tuple[None, None]:
+    """Pick the healthiest tick file from already-cached verify data.
+
+    Pure ranking — no I/O, no globals.  Two tiers (Issue #294):
+
+    * **Tier 1** (Issue #279): eligible = integrity PASS + COMPLETE CAPTURE.
+      Rank by readiness level → windows_count desc → mtime desc.
+    * **Tier 2** (Issue #294): when tier 1 is empty, rank *all* files by
+      integrity (PASS>WARN>rest) → capture (COMPLETE>PARTIAL>rest) →
+      readiness → windows_count → mtime.  The least-bad file wins.
+
     `files` arrives name-sorted, so fully equal keys resolve stably by name.
-    Returns the winning entry itself, or None when nothing qualifies.
+    Returns ``(winner, tier)`` or ``(None, None)`` when the list is empty.
     """
-    eligible = [
+    if not files:
+        return None, None
+
+    # --- Tier 1: strict PASS + COMPLETE CAPTURE ---
+    tier1 = [
         f for f in files
         if f.get("integrity_status") == "PASS"
         and (f.get("capture_state") or {}).get("label") == "COMPLETE CAPTURE"
     ]
-    if not eligible:
-        return None
+    if tier1:
+        return max(tier1, key=_file_rank_key), 1
+
+    # --- Tier 2: least-bad fallback over all files ---
     return max(
-        eligible,
+        files,
         key=lambda f: (
-            _READINESS_LEVEL_RANK.get((f.get("readiness") or {}).get("level"), 0),
-            int(f.get("windows_count") or 0),
-            float(f.get("mtime") or 0.0),
+            _INTEGRITY_RANK.get(f.get("integrity_status"), 0),
+            _CAPTURE_RANK.get((f.get("capture_state") or {}).get("label"), 0),
+            *_file_rank_key(f),
         ),
-    )
+    ), 2
 
 
 @app.get("/api/ticks/manifest")
 def api_ticks_manifest():
     """List available tick files + manifest stats for the slider UI."""
-    out: dict[str, Any] = {"files": [], "manifest": None, "preferred_file": None}
+    out: dict[str, Any] = {"files": [], "manifest": None,
+                           "preferred_file": None, "preferred_tier": None}
     if not TICKS_DIR.exists():
         return out
     mf = TICKS_DIR / "manifest.json"
@@ -605,12 +630,15 @@ def api_ticks_manifest():
                                            if cache_current else None)
             entry["integrity_status"] = (cached or {}).get("status") if cache_current else None
             entry["capture_state"] = (cached or {}).get("capture_state") if cache_current else None
-            if cached:
+            # Stale-policy sidecars contribute nothing to ranking (Issue #294
+            # review): their old windows_count must not leak into tier 2.
+            if cache_current:
                 entry["windows_count"] = int(cached.get("windows_count", 0))
-        # Issue #279: surface the healthiest file so the UI can badge and
-        # pre-select it — derived only from the cached fields already read.
-        winner = pick_preferred(out["files"])
+        # Issue #279 / #294: surface the healthiest file so the UI can badge
+        # and pre-select it — derived only from the cached fields already read.
+        winner, tier = pick_preferred(out["files"])
         out["preferred_file"] = (winner or {}).get("name")
+        out["preferred_tier"] = tier
         for entry in out["files"]:
             entry["is_preferred"] = entry["name"] == out["preferred_file"]
     except Exception:
@@ -5752,11 +5780,14 @@ async function loadManifest(){
         });
         tdName.appendChild(btnName);
         if (f.is_preferred) {
-          // Issue #279: exactly one row carries the ★ Preferred badge.
+          // Issue #279/#294: exactly one row carries the ★ badge.
           const pref = document.createElement('span');
-          pref.textContent = '★ Preferred';
+          const isTier1 = d.preferred_tier === 1;
+          pref.textContent = isTier1 ? '★ Preferred' : '★ Best available';
           pref.style.cssText = 'color:var(--gold);font-weight:700;font-size:11px;white-space:nowrap;margin-left:6px';
-          pref.title = `Healthiest dataset: integrity PASS, complete capture, ${(f.readiness && f.readiness.level) || 'unknown'} readiness, ${(f.windows_count || 0).toLocaleString()} windows`;
+          pref.title = isTier1
+            ? `Healthiest dataset: integrity PASS, complete capture, ${(f.readiness && f.readiness.level) || 'unknown'} readiness, ${(f.windows_count || 0).toLocaleString()} windows`
+            : `Best available (no file fully qualifies): ${f.integrity_status || 'unchecked'} integrity, ${(f.capture_state && f.capture_state.label) || 'unknown'} capture, ${(f.readiness && f.readiness.level) || 'unknown'} readiness, ${(f.windows_count || 0).toLocaleString()} windows`;
           tdName.appendChild(pref);
         }
 

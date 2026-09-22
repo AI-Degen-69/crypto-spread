@@ -1,6 +1,6 @@
-# Todo — Issue #279
+# TODO — Issue #294
 
-- [x] TASK-1: `pick_preferred()` + `preferred_file`/`is_preferred` in `/api/ticks/manifest` + endpoint tests
-- [x] TASK-2: ★ Preferred badge on the winning Tick Files row (tooltip, theme tokens)
-- [x] TASK-3: ★ in dropdown label + first-load pre-select of `preferred_file` (manual picks still persist)
-- [x] TASK-4: Closeout — targeted suites green (`test_osc_dash_integration.py` + `test_theme_tokens.py`), todos ticked
+- [x] TASK-1: Extend `pick_preferred()` with tier-2 fallback + wire `preferred_tier` in `/api/ticks/manifest`
+- [x] TASK-2: Add tier-2 tests + update existing pure-ranking tests for tuple return
+- [x] TASK-3: UI badge wording — "★ Preferred" (T1) vs "★ Best available" (T2) + theme test
+- [x] TASK-4: Closeout — targeted pytest gate green, `git diff --stat`
