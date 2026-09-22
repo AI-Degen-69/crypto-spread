@@ -38,8 +38,37 @@ DEFAULT_PRISTINE_DIR = ROOT / "run" / "ticks" / "pristine"
 DEFAULT_GOLDEN_DIR = ROOT / "run" / "ticks" / "golden"
 MANIFEST_NAME = "golden_manifest.json"
 CHARTER = "docs/golden-tick-dataset.md"
+VERIFY_CACHE_DIRNAME = ".verify_cache"
 
 DAY_SUFFIXES = (".jsonl", ".jsonl.gz")
+
+
+def _file_fingerprint(path: Path) -> str:
+    """Same cheap identity the dashboard uses: size + mtime_ns."""
+    st = path.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _write_verify_sidecar(golden_dir: Path, target: Path, report: dict[str, Any]) -> None:
+    """Persist the day's verify report where the dashboard's cache reads it.
+
+    Mirrors server/osc_dash.py's sidecar layout: .verify_cache/golden/<name>.json
+    keyed by the copied file's fingerprint, so the golden card (issue #292) and
+    the file table serve cached verdicts without re-streaming day files.
+    """
+    try:
+        sidecar_dir = golden_dir.parent / VERIFY_CACHE_DIRNAME / golden_dir.name
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+        import time
+
+        payload = dict(report)
+        payload["fingerprint"] = _file_fingerprint(target)
+        payload["ts"] = time.time()
+        (sidecar_dir / f"{target.name}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+    except Exception:
+        pass  # sidecar is a cache; the manifest carries the authoritative verdict
 
 
 def day_gate_verdict(report: dict[str, Any]) -> tuple[bool, str | None]:
@@ -106,6 +135,9 @@ def build_golden_dataset(
         target = golden_dir / src.name
         if not target.exists() or sha256_of(target) != sha256_of(src):
             shutil.copyfile(src, target)
+        # Fresh copy ⇒ new mtime ⇒ new fingerprint: write the sidecar keyed to
+        # the copy so the dashboard's fingerprint check matches.
+        _write_verify_sidecar(golden_dir, target, report)
 
         copied_sha = sha256_of(target)
         idx_path = None
