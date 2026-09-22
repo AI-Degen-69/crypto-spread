@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>תעודת התמימות של סט הזהב — #301</title>
+<style>
+:root { --ink:#eaf1f6; --muted:#9aabb8; --bg:#0b1117; --panel:#121c25; --panel-2:#172530;
+--line:#29404d; --accent:#c792ea; --accent-ink:#1d0f2e; --bad:#e06c75; --good:#55d6c2; --shadow:0 20px 55px rgba(0,0,0,.28); }
+* { box-sizing:border-box } body { margin:0; color:var(--ink); background:var(--bg); font:16px/1.65 "Segoe UI",Tahoma,sans-serif }
+main { max-width:1100px; margin:auto; padding:40px 20px 70px }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px; margin-top:24px; box-shadow:var(--shadow) }
+.figure { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel-2) }
+.figure-controls { display:flex; gap:.5rem; align-items:center; padding:.6rem 1rem; border-top:1px solid var(--line); flex-wrap:wrap }
+.ctrl-btn { font-size:.75rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer }
+.ctrl-btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:700 }
+.figure-caption { font-size:.78rem; color:var(--muted); padding:.6rem 1rem .8rem; border-top:1px solid var(--line) }
+.callout { border-right:3px solid var(--accent); background:rgba(255,255,255,.04); padding:1rem 1.2rem; border-radius:8px 0 0 8px; margin:1.2rem 0 }
+h1 { font-size:1.7rem; margin:.2rem 0 } h2 { margin-top:0 } .sub { color:var(--muted); margin:0 0 .5rem }
+.big { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:14px }
+.big .num { background:var(--panel-2); border:1px solid var(--line); border-radius:14px; padding:18px 14px; text-align:center }
+.big .num b { display:block; font-size:2rem; color:var(--accent) }
+.big .num span { font-size:.8rem; color:var(--muted) }
+@media(max-width:700px){ .big{grid-template-columns:1fr} }
+.stage { min-height:230px; padding:18px }
+.tube { display:inline-block; margin:0 4px; padding:.45rem .8rem; border-radius:10px; border:2px dashed var(--line); font-size:.8rem; color:var(--muted) }
+.tube.seal { border-style:solid; border-color:var(--accent); color:var(--accent); font-weight:700 }
+.tube.ok { border-color:var(--good); color:var(--good) }
+.arrow { color:var(--muted); margin:0 2px }
+.mystery { display:none; margin-top:14px }
+.mystery.show { display:block }
+.opt { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:8px 0; background:var(--panel) }
+.opt .tag { font-weight:700 } .opt .tag.no { color:var(--bad) } .opt .tag.yes { color:var(--good) }
+</style>
+</head>
+<body>
+<main>
+<h1>אמת במים: סט הזהב עבר בדיקת תמימות מקצה לקצה</h1>
+<p class="sub">בעיה → פתרון → תוצאה: ערב אחד, יום הקלטה אחד שוכתב בלי להשאיר עקבות — וזה ערער את האמון בסט הנתונים הנקי שנבנה ממנו. עכשיו יש תעודה שמוכיחה, צעד אחרי צעד, שהסט שישב על הדיסק נבנה בדיוק מהבייטים שרשומים בתעודה שלו.</p>
+
+<div class="panel">
+  <div class="big">
+    <div class="num"><b>6 מ־6</b><span>קובצי מקור — אטומים לאורך כל הבנייה</span></div>
+    <div class="num"><b>0</b><span>בייטים שהשתנו בין תחילת הבנייה לסופה</span></div>
+    <div class="num"><b>זהות ×2</b><span>הפלט זהה בייט-בייט לפעמיים רצופות שנבנה</span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>שרשרת האמון — לחצו צעד אחר צעד וראו איך כל שלב נועל את הבא אחריו</h2>
+  <div class="figure">
+    <div class="figure-controls">
+      <button class="ctrl-btn primary" id="s-step">צעד הבא</button>
+      <button class="ctrl-btn" id="s-reset">אפס</button>
+      <span id="s-info" style="color:var(--muted);font-size:.8rem">שלב 0 מתוך 4</span>
+    </div>
+    <div class="stage" id="s-stage">
+      <div id="s-chain" style="font-size:1.05rem;line-height:2.2">
+        <span class="tube" id="t0">📁 קובצי המקור</span><span class="arrow">←</span><span class="tube" id="t1">⚙️ הבנייה</span><span class="arrow">←</span><span class="tube" id="t2">📁 הפלט הנקי</span><span class="arrow">←</span><span class="tube" id="t3">🔍 ההשוואה</span>
+      </div>
+      <div id="s-text" style="margin-top:10px;color:var(--muted)">לחצו "צעד הבא" כדי להתחיל.</div>
+    </div>
+    <div class="figure-caption" id="s-cap">כל שלב "חותם" על מה שקרה לפניו — ואם משהו היה זז בדרך, החותמת שלאחריו הייתה מתפוצצת.</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>התעלומה של יום 6 — לחצו וגלו מה באמת קרה</h2>
+  <p style="margin:.3rem 0 0">קובץ אחד מתוך שישה לא התאים לטביעת האצבע הישנה שלו. שתי הסברים אפשריים — ורק אחד נכון:</p>
+  <div class="figure-controls" style="padding:.8rem 1rem">
+    <button class="ctrl-btn" id="m-b">לחצו לחשיפה</button>
+  </div>
+  <div class="mystery" id="m-box">
+    <div class="opt"><span class="tag no">✗ האשמה הקלה:</span> אולי הבנייה עצמה שינתה את קובצי המקור?<br><span style="color:var(--muted)">נפסל — הבנייה רק קוראת. וגם: הרצה שנייה מלאה הניבה פלט זהה בייט-בייט. מכונה שמשנה את חומר הגלם שלה לא תייצר פעמיים את אותה תוצאה.</span></div>
+    <div class="opt"><span class="tag yes">✓ מה שקרה באמת:</span> מי שאסף את הנתונים שכתב את יום 6 בעצמו — בצהריים, שעות <b>לפני</b> שהבנייה רצה בכלל.<br><span style="color:var(--muted)">הטביעה הישנה הייתה של הגרסה הקודמת. סוד קטן נוסף: בגלל סדר האירועים הזה, התעודה של היום מכסה בדיוק את הבייטים שמהם נבנה סט הזהב — הפער היה רק בין שתי תעודות, לא בתוך הסט עצמו.</span></div>
+    <div class="callout" style="margin-bottom:0">המחיר: הגרסה הראשונה של יום 6 נעלמה לנצח — 338 רגעים כושלים מדליקה ישנה שאי אפשר להחזיר. זה רשום בגוף התעודה, לא מוסתר. הרווח: מעכשיו כל שכתוב כזה מפיל את החותמת במקום לעבור בשקט.</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var step=0, max=4;
+  var txt=[
+    'לפני שדבר זז: שוקלים את כל קובצי המקור ורושמים את טביעת האצבע של כל אחד. חותמת פתיחה.',
+    'הבנייה רצה: קוראת את הקבצים פעמיים מקצה לקצה וכותבת את הפלט הנקי. החותמת עדיין בפנים.',
+    'אחרי שהבנייה נגמרה: שוקלים שוב את אותם קבצים, בדיוק באותה שיטה. חותמת סיום.',
+    'ההשוואה: פתיחה מול סיום — זהות מושלמת. וגם: הרצה נוספת הניבה פלט זהה בייט-בייט לראשונה. השרשרת סגורה.'
+  ];
+  var caps=[
+    'שימו לב: הטביעות נלקחות לפני שהבנייה נוגעת במשהו — זו נקודת ההתחלה המוכחת.',
+    'הבנייה לא מקבלת הרשאה לשנות כלום במקורות. השלב הבא יבדוק אם זה נשמר.',
+    'אותה שיטת שקילה, אותם קבצים, אחרי שהכל נגמר.',
+    'אם אפילו בייט אחד היה זז — כאן היינו רואים את זה. במקום זה: 6 מתוך 6 זהים.'
+  ];
+  var g=function(id){return document.getElementById(id)};
+  function render(){
+    g('s-info').textContent='שלב '+step+' מתוך '+max;
+    if(step===0){ g('s-text').textContent='לחצו "צעד הבא" כדי להתחיל.'; }
+    else { g('s-text').textContent=txt[step-1]; }
+    g('s-cap').textContent= step===0 ? caps[0] : caps[step-1];
+    for(var i=0;i<4;i++){ var t=g('t'+i);
+      t.className='tube'+(i<step?' ok':'');
+    }
+    if(step>=max){ g('s-step').disabled=true; g('s-step').style.opacity=.5; }
+    else { g('s-step').disabled=false; g('s-step').style.opacity=1; }
+  }
+  g('s-step').addEventListener('click',function(){ if(step<max) step++; render(); });
+  g('s-reset').addEventListener('click',function(){ step=0; render(); });
+  render();
+  g('m-b').addEventListener('click',function(){
+    g('m-box').classList.add('show'); g('m-b').style.display='none';
+  });
+})();
+</script>
+</main>
+</body>
+</html>
