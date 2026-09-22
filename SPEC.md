@@ -13,7 +13,7 @@ as the Backtest dataset on first load.
    `is_preferred`, derived **only** from cached verify data, with the deterministic tie-break
    `readiness.level → windows_count desc → mtime desc`.
 2. Eligibility = `integrity_status == "PASS"` AND `capture_state.label == "COMPLETE CAPTURE"`.
-   WARN/FAIL and uncached files are never eligible.
+   WARN/FAIL, uncached, and stale-policy files are never eligible.
 3. Tick Files table shows exactly one ★ Preferred badge when a winner exists, none otherwise.
 4. Backtest dropdown marks the preferred option with `★` and pre-selects it on fresh load
    (also setting `window.selectedBacktestFile`); a manual selection — including All Files —
@@ -29,9 +29,9 @@ as the Backtest dataset on first load.
 - All files WARN/FAIL → `preferred_file: null`.
 - Multiple PASS+COMPLETE files → total order by (level, windows_count, mtime); the files
   list is name-sorted upstream, so equal keys resolve stably by name.
-- Stale cache: entries are only eligible on the fields the endpoint actually exposes;
-  `cache_current` gating (`_readiness_cache_is_current`) already nulls stale readiness —
-  ineligible is the safe default.
+- Stale cache: `integrity_status`, `capture_state`, and `readiness` are all gated on
+  `cache_current` (`_readiness_cache_is_current`); a stale sidecar leaves every
+  eligibility field null — ineligible is the safe default.
 
 ## Explicit out of scope
 Forcing re-verify of uncached files; changing verify logic or thresholds; backtest execution

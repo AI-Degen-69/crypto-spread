@@ -367,7 +367,7 @@ def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
 
 
 def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPLETE CAPTURE",
-                          level="RESEARCH_READY", windows=50):
+                          level="RESEARCH_READY", windows=50, policy=None):
     """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper)."""
     from scripts.verify_tick_data import READINESS_POLICY_VERSION
 
@@ -379,7 +379,8 @@ def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPL
         "file": name,
         "status": status,
         "capture_state": {"label": capture_label},
-        "readiness": {"level": level, "policy_version": READINESS_POLICY_VERSION},
+        "readiness": {"level": level,
+                      "policy_version": READINESS_POLICY_VERSION if policy is None else policy},
         "windows_count": windows,
         "fingerprint": osc_dash._file_fingerprint(target),
         "series_counts": {},
@@ -477,6 +478,22 @@ def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeyp
     data = client.get("/api/ticks/manifest").json()
     assert data["preferred_file"] is None
     assert all(f["is_preferred"] is False for f in data["files"])
+
+
+def test_manifest_preferred_file_rejects_stale_policy_cache(tmp_path, monkeypatch):
+    """Issue #279: a PASS+COMPLETE sidecar under an old readiness policy is stale —
+    every eligibility field stays null, so nothing is preferred."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", policy="stale-policy-0")
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert len(data["files"]) == 1
+    entry = data["files"][0]
+    assert entry["integrity_status"] is None
+    assert entry["capture_state"] is None
+    assert entry["readiness"] is None
+    assert entry["is_preferred"] is False
 
 
 def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):

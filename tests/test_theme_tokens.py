@@ -138,6 +138,8 @@ def test_dropdown_preferred_preselect_wiring():
     assert "!window._btFileChosen && d.preferred_file" in FULL_APP_HTML
     assert "window._btFileChosen = false; // Issue #279: flips on any manual dataset pick" in FULL_APP_HTML
     assert "window._btFileChosen = true;" in FULL_APP_HTML
+    # Reset to Defaults picks All Files explicitly — also a choice loadManifest keeps.
+    assert 'window.selectedBacktestFile = "";\n  window._btFileChosen = true;' in FULL_APP_HTML
 
 
 def test_preferred_badge_uses_theme_tokens():

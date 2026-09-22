@@ -3,7 +3,9 @@
 ## Scope guard
 - Files touched: `server/osc_dash.py`, `tests/test_osc_dash_integration.py`,
   `tests/test_theme_tokens.py`, plus the three per-issue working files (`tasks/plan.md`,
-  `tasks/todo.md`, this file + `SPEC.md`). Nothing else.
+  `tasks/todo.md`, this file + `SPEC.md`) — plus the already-committed
+  `docs/issues/288-presentation-hygiene-rule.html` (#288 artifact filed by the
+  post-merge sweep, disclosed in the PR). Nothing else.
 - Additive API only: no existing `/api/ticks/manifest` field renamed, re-typed, or removed;
   `preferred_file`/`is_preferred` are new keys.
 - Out of scope (hard): `/api/ticks/verify`, `scripts/verify_tick_data.py` logic or thresholds,

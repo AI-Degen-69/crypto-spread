@@ -603,8 +603,8 @@ def api_ticks_manifest():
             entry["readiness"] = (cached or {}).get("readiness") if cache_current else None
             entry["readiness_targets"] = ((cached or {}).get("readiness", {}).get("targets")
                                            if cache_current else None)
-            entry["integrity_status"] = (cached or {}).get("status")
-            entry["capture_state"] = (cached or {}).get("capture_state")
+            entry["integrity_status"] = (cached or {}).get("status") if cache_current else None
+            entry["capture_state"] = (cached or {}).get("capture_state") if cache_current else None
             if cached:
                 entry["windows_count"] = int(cached.get("windows_count", 0))
         # Issue #279: surface the healthiest file so the UI can badge and
@@ -5248,6 +5248,7 @@ function resetBtParams(){
   if ($('btDeadZoneVal')) $('btDeadZoneVal').value = "10";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
+  window._btFileChosen = true; // Issue #279: Reset picks All Files — a manual-equivalent choice loadManifest must not override
   updateBacktestParamPreview();
   runBacktest();
 }
