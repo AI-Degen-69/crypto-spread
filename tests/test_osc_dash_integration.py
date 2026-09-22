@@ -556,7 +556,7 @@ def test_endpoints_reject_traversal_and_unlisted_subdirs(tmp_path, monkeypatch):
     bad_values = (
         "..%2Fsecrets.jsonl",
         "pristine%2F..%2Fsecrets.jsonl",
-        "golden%2Fticks_2026-09-13.jsonl",
+        "quarantine%2Fticks_2026-09-13.jsonl",  # subdir exists but not allow-listed
         "pristine%5Cticks_2026-09-13.jsonl",  # backslash, not a slash
     )
     for bad in bad_values:
