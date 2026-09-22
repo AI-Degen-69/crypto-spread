@@ -310,6 +310,35 @@ def test_api_ticks_manifest_aggregate_tape_from_manifest(tmp_path, monkeypatch):
     assert agg["tape_entries_total"] == 235
 
 
+def test_manifest_aggregate_counts_duplicated_tiers_once(tmp_path, monkeypatch):
+    """Issue #281 (CodeRabbit round 1): golden/pristine hold copies of the same
+    source day — both tiers stay listed as files, but the All Files aggregate
+    counts each source day once (no doubled windows/totals)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    body = (
+        json.dumps({"series": "btc-up-or-down-5m", "duration": 300, "cid": "w1",
+                    "ts": 1.0, "tape_delta": []}) + "\n"
+        + json.dumps({"series": "eth-up-or-down-5m", "duration": 300, "cid": "w2",
+                      "ts": 2.0, "tape_delta": []}) + "\n"
+    )
+    for name in ("ticks_2026-09-13.jsonl",):
+        (tmp_path / name).write_text(body, encoding="utf-8")
+        (tmp_path / "pristine").mkdir(exist_ok=True)
+        (tmp_path / "pristine" / name).write_text(body, encoding="utf-8")
+        (tmp_path / "golden").mkdir(exist_ok=True)
+        (tmp_path / "golden" / name).write_text(body, encoding="utf-8")
+
+    data = client.get("/api/ticks/manifest").json()
+    names = [f["name"] for f in data["files"]]
+    assert "ticks_2026-09-13.jsonl" in names
+    assert "pristine/ticks_2026-09-13.jsonl" in names
+    assert "golden/ticks_2026-09-13.jsonl" in names
+    # 3 rows listed, but only ONE counted per tier-copy in the aggregate.
+    assert data["aggregate"]["total_files"] == 3  # all rows remain files
+    agg_lines = data["aggregate"]["total_lines"]
+    assert agg_lines == 2  # 2 rows in one day, not 6 across copies
+
+
 def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     """Issue #109: /api/ticks/verify persists a counts sidecar that the
     manifest aggregate consumes (series_counts_source == verify_cache)."""

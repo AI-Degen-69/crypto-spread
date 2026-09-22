@@ -80,10 +80,12 @@ def test_build_golden_excludes_failing_day_and_records_reason(tmp_path: Path):
 
     manifest = build_golden_dataset(pristine, golden, build_indexes=False)
     names = {d["day"] for d in manifest["days"]}
-    assert names == {"ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"}
+    # Charter §3.1: `day` is the UTC day key, not the filename.
+    assert names == {"2026-09-13", "2026-09-14"}
     assert len(manifest["excluded"]) == 1
     exc = manifest["excluded"][0]
-    assert exc["day"] == "ticks_2026-09-15.jsonl"
+    assert exc["day"] == "2026-09-15"
+    assert exc["file"] == "ticks_2026-09-15.jsonl"
     assert exc["reason"] and ("COMPLETE CAPTURE" in exc["reason"] or "PASS" in exc["reason"])
     # The failing day must not land in golden/.
     assert not (golden / "ticks_2026-09-15.jsonl").exists()
@@ -103,11 +105,23 @@ def test_manifest_schema_and_provenance(tmp_path: Path):
     assert len(day["sha256"]) == 64 and len(day["source_sha256"]) == 64
     assert day["verify_verdict"]["status"] == "PASS"
     assert day["verify_verdict"]["capture_label"] == "COMPLETE CAPTURE"
-    assert manifest["totals"]["windows_total"] == sum(d["windows_count"] for d in manifest["days"])
+    # Charter §3.1 set-level vocabulary (audit without re-streaming the files).
+    totals = manifest["totals"]
+    assert totals["windows_count"] == sum(d["windows_count"] for d in manifest["days"])
+    assert totals["valid_ticks"] == sum(d["valid_ticks"] for d in manifest["days"])
+    assert isinstance(totals["time_blocks"], list)
+    assert isinstance(totals["sampling_gap_rate"], float)
+    assert {g["name"] for g in manifest["set_gates"]} >= {
+        "windows_count", "windows_per_market_pair", "time_blocks",
+        "valid_ticks", "sampling_gap_rate", "all_10_series_present"}
     # Copied file is byte-identical to its pristine source.
-    assert (golden / day["day"]).read_bytes() == (pristine / day["day"]).read_bytes()
+    assert (golden / day["file"]).read_bytes() == (pristine / day["file"]).read_bytes()
     # Pristine sources untouched.
-    assert (pristine / day["day"]).exists()
+    assert (pristine / day["file"]).exists()
+    # A 2-day set passes §1.1 per day but cannot meet §1.2 targets (≥5 time
+    # blocks, ≥50 windows per pair): published explicitly uncertified.
+    assert manifest["status"] == "incomplete"
+    assert manifest["certified_utc"] is None
 
 
 def test_build_golden_creates_fresh_idx_sidecars(tmp_path: Path):
@@ -162,6 +176,65 @@ def test_assembled_days_pass_day_gates_on_real_pristine(tmp_path: Path):
     assert manifest["days"], "expected at least one passing day"
     assert manifest["excluded"] == []
     for d in manifest["days"]:
-        rep = verify_tick_file(golden / d["day"])
+        rep = verify_tick_file(golden / d["file"])
         passed, reason = day_gate_verdict(rep)
         assert passed, (d["day"], reason)
+
+
+def test_stale_golden_day_is_removed_on_rebuild(tmp_path: Path):
+    """A golden day whose source no longer passes (or vanished) is removed."""
+    pristine = tmp_path / "pristine"
+    golden = tmp_path / "golden"
+    _write_day(pristine, "ticks_2026-09-13.jsonl")
+    _write_day(pristine, "ticks_2026-09-14.jsonl")
+    build_golden_dataset(pristine, golden, build_indexes=False)
+    assert (golden / "ticks_2026-09-14.jsonl").exists()
+
+    # The source of 09-14 degrades: truncate it below the gate.
+    _truncate_day(pristine, "ticks_2026-09-14.jsonl")
+    manifest = build_golden_dataset(pristine, golden, build_indexes=False)
+    # Removed from the published set, recorded in removed_stale and excluded.
+    assert not (golden / "ticks_2026-09-14.jsonl").exists()
+    assert not (golden / "ticks_2026-09-14.jsonl.idx").exists()
+    assert any(r["day"] == "ticks_2026-09-14.jsonl" for r in manifest["removed_stale"])
+    assert any(e["file"] == "ticks_2026-09-14.jsonl" for e in manifest["excluded"])
+
+
+def test_certified_utc_stable_for_unchanged_inputs(tmp_path, monkeypatch):
+    """A rebuild on a later date keeps the original certification date when
+    the input identity (content hashes) is unchanged, and recertifies when
+    it changes. The §1.2 gate is stubbed OK here — the reuse path is the
+    behavior under test."""
+    import scripts.build_golden_dataset as bgd
+
+    monkeypatch.setattr(
+        bgd, "charter_set_gates",
+        lambda days: [{"name": "stub", "measured": 1, "required": 1, "ok": True}])
+    pristine = tmp_path / "pristine"
+    golden = tmp_path / "golden"
+    _write_day(pristine, "ticks_2026-09-13.jsonl")
+    _write_day(pristine, "ticks_2026-09-14.jsonl")
+    first = build_golden_dataset(pristine, golden, build_indexes=False)
+    assert first["status"] == "certified" and first["certified_utc"]
+    # Simulate a rebuild on the next UTC day with a stale recorded date.
+    first["certified_utc"] = "2000-01-01"
+    (golden / MANIFEST_NAME).write_text(json.dumps(first), encoding="utf-8")
+    second = build_golden_dataset(pristine, golden, build_indexes=False)
+    assert second["certified_utc"] == "2000-01-01"  # identity unchanged → reused
+    # Now change the inputs: the certification date must move off the old one.
+    _write_day(pristine, "ticks_2026-09-15.jsonl")
+    third = build_golden_dataset(pristine, golden, build_indexes=False)
+    assert third["certified_utc"] != "2000-01-01"
+
+
+def test_incomplete_set_is_published_uncertified(tmp_path: Path):
+    """A set that fails §1.2 is written with status='incomplete' and a null
+    certification date — never certified by accident."""
+    pristine = tmp_path / "pristine"
+    golden = tmp_path / "golden"
+    _write_day(pristine, "ticks_2026-09-13.jsonl", n_windows=1)
+    manifest = build_golden_dataset(pristine, golden, build_indexes=False)
+    assert manifest["days"], "day passed §1.1 but the set is tiny"
+    assert manifest["status"] == "incomplete"
+    assert manifest["certified_utc"] is None
+    assert any(not g["ok"] for g in manifest["set_gates"])

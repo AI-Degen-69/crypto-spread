@@ -21,7 +21,9 @@ Behavior:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -67,8 +69,10 @@ def _write_verify_sidecar(golden_dir: Path, target: Path, report: dict[str, Any]
         (sidecar_dir / f"{target.name}.json").write_text(
             json.dumps(payload), encoding="utf-8"
         )
-    except Exception:
-        pass  # sidecar is a cache; the manifest carries the authoritative verdict
+    except OSError:
+        # Best-effort cache write; a failure here is logged, never swallowed —
+        # the manifest carries the authoritative verdict either way.
+        print(f"warn: verify sidecar write failed for {target.name}", file=sys.stderr)
 
 
 def day_gate_verdict(report: dict[str, Any]) -> tuple[bool, str | None]:
@@ -92,6 +96,103 @@ def day_gate_verdict(report: dict[str, Any]) -> tuple[bool, str | None]:
     return True, None
 
 
+def day_key_from_name(name: str) -> str:
+    """Charter §3.1: `day` is the UTC day key ('2026-09-13'), not a filename."""
+    stem = name
+    for suffix in DAY_SUFFIXES:
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    import re
+
+    for token in reversed(re.findall(r"\d{4}-\d{2}-\d{2}", stem)):
+        try:
+            datetime.strptime(token, "%Y-%m-%d")
+            return token
+        except ValueError:
+            continue
+    return stem
+
+
+def charter_set_totals(days: list[dict[str, Any]]) -> dict[str, Any]:
+    """Set-level totals in the charter §3.1 vocabulary."""
+    windows_total = sum(int(d["windows_count"]) for d in days)
+    gaps = sum(int(d.get("sampling_gaps_count") or 0) for d in days)
+    blocks: set[str] = set()
+    for d in days:
+        blocks.update(d.get("time_blocks") or [])
+    return {
+        "windows_count": windows_total,
+        "valid_ticks": sum(int(d["valid_ticks"]) for d in days),
+        "time_blocks": sorted(blocks),
+        "sampling_gap_rate": round(gaps / windows_total, 6) if windows_total else 0.0,
+    }
+
+
+def charter_set_gates(days: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Charter §1.2 — the set-level targets, evaluated over the assembled days.
+
+    Mirrors the dashboard card's targets (both derive from the charter); kept
+    local so the builder never imports the FastAPI app.
+    """
+    from strategy.series import SERIES
+
+    totals = charter_set_totals(days)
+    pair_windows: dict[str, int] = {}
+    for d in days:
+        for m in d.get("market_breakdown") or []:
+            series = m.get("series", "")
+            pair_windows[series] = pair_windows.get(series, 0) + int(m.get("windows") or 0)
+    for series, _dur, _label in SERIES:
+        pair_windows.setdefault(series, 0)
+    weakest = min(pair_windows.values(), default=0)
+    present = sum(1 for s, _d, _l in SERIES if pair_windows.get(s, 0) > 0)
+    windows_total = totals["windows_count"]
+    return [
+        {"name": "windows_count", "measured": windows_total, "required": 500,
+         "ok": windows_total >= 500},
+        {"name": "windows_per_market_pair", "measured": weakest, "required": 50,
+         "ok": weakest >= 50},
+        {"name": "time_blocks", "measured": len(totals["time_blocks"]), "required": 5,
+         "ok": len(totals["time_blocks"]) >= 5},
+        {"name": "valid_ticks", "measured": totals["valid_ticks"], "required": 50_000,
+         "ok": totals["valid_ticks"] >= 50_000},
+        {"name": "sampling_gap_rate", "measured": totals["sampling_gap_rate"],
+         "required": 0.05, "ok": totals["sampling_gap_rate"] <= 0.05},
+        {"name": "all_10_series_present", "measured": present, "required": len(SERIES),
+         "ok": present == len(SERIES)},
+    ]
+
+
+def inputs_identity(
+    policy_version: str,
+    days: list[dict[str, Any]],
+    excluded: list[dict[str, Any]],
+) -> str:
+    """Content hash of everything the certification claims about the inputs."""
+    payload = json.dumps(
+        {
+            "policy_version": policy_version,
+            "days": [
+                {k: d[k] for k in ("day", "file", "source", "source_sha256", "sha256")}
+                for d in days
+            ],
+            "excluded": sorted(f"{e['day']}|{e['reason']}" for e in excluded),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _certification_date(prev_manifest: dict[str, Any], identity: str) -> str:
+    """Byte-identical manifest across re-runs: reuse the recorded certification
+    date while the input identity is unchanged; recertify (new date) otherwise."""
+    if prev_manifest.get("inputs_sha256") == identity and prev_manifest.get("certified_utc"):
+        return str(prev_manifest["certified_utc"])
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def source_day_files(pristine_dir: Path) -> list[Path]:
     """Deterministically ordered pristine day files (manifest itself excluded)."""
     return sorted(
@@ -113,9 +214,19 @@ def build_golden_dataset(
         raise SystemExit(f"pristine dir not found: {pristine_dir}")
 
     golden_dir.mkdir(parents=True, exist_ok=True)
+
+    # Previous certification, if any — used to keep certified_utc stable for
+    # unchanged inputs (byte-identical manifest across re-runs on any date).
+    prev_manifest: dict[str, Any] = {}
+    try:
+        loaded_prev = json.loads((golden_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        if isinstance(loaded_prev, dict):
+            prev_manifest = loaded_prev
+    except Exception:
+        prev_manifest = {}
+
     days: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
-    totals = {"windows_total": 0, "valid_ticks": 0, "ticks_written": 0}
 
     for src in source_day_files(pristine_dir):
         report = verify_tick_file(
@@ -124,7 +235,8 @@ def build_golden_dataset(
         passed, reason = day_gate_verdict(report)
         if not passed:
             excluded.append({
-                "day": src.name,
+                "day": day_key_from_name(src.name),
+                "file": src.name,
                 "source": f"pristine/{src.name}",
                 "reason": reason,
                 "verify_status": report.get("status"),
@@ -134,7 +246,17 @@ def build_golden_dataset(
 
         target = golden_dir / src.name
         if not target.exists() or sha256_of(target) != sha256_of(src):
-            shutil.copyfile(src, target)
+            # Atomic promotion: copy to a temp file in the same directory and
+            # replace the target only after the copy succeeds — a failed build
+            # never leaves a truncated golden day, and a previously certified
+            # day survives the failure intact.
+            tmp_target = target.with_name(f".{target.name}.tmp")
+            try:
+                shutil.copyfile(src, tmp_target)
+                os.replace(tmp_target, target)
+            except BaseException:
+                tmp_target.unlink(missing_ok=True)
+                raise
         # Fresh copy ⇒ new mtime ⇒ new fingerprint: write the sidecar keyed to
         # the copy so the dashboard's fingerprint check matches.
         _write_verify_sidecar(golden_dir, target, report)
@@ -151,43 +273,64 @@ def build_golden_dataset(
             "readiness_level": ((report.get("readiness") or {}).get("level")),
         }
         days.append({
-            "day": target.name,
+            "day": day_key_from_name(src.name),
+            "file": target.name,
             "source": f"pristine/{src.name}",
             "sha256": copied_sha,
             "source_sha256": sha256_of(src),
             "verify_verdict": verdict,
             "windows_count": int(report.get("windows_count") or 0),
             "valid_ticks": int(report.get("valid_ticks") or 0),
+            "sampling_gaps_count": int(report.get("sampling_gaps_count") or 0),
+            "time_blocks": list(report.get("time_blocks") or []),
+            "market_breakdown": list(report.get("market_breakdown") or []),
             "idx_sidecar": idx_path.name if idx_path else None,
             "idx_fresh": idx_fresh,
         })
-        totals["windows_total"] += int(report.get("windows_count") or 0)
-        totals["valid_ticks"] += int(report.get("valid_ticks") or 0)
-        totals["ticks_written"] += _count_lines(target)
 
+    # Reconcile (§3.1): the golden directory is the published set — a day that
+    # no longer passes §1.1 or vanished from the source is removed here, never
+    # silently kept over from an earlier build.
+    passing_files = {d["file"] for d in days}
+    removed: list[dict[str, Any]] = []
+    for stale in sorted(golden_dir.iterdir()):
+        if not (stale.is_file() and stale.name.endswith(DAY_SUFFIXES)):
+            continue
+        if stale.name in passing_files:
+            continue
+        stale.unlink()
+        removed.append({"day": stale.name, "reason": "no longer passes §1.1 / absent from source"})
+        for extra in (
+            golden_dir.parent / VERIFY_CACHE_DIRNAME / golden_dir.name / f"{stale.name}.json",
+            stale.with_name(stale.name + ".idx"),
+        ):
+            try:
+                extra.unlink()
+            except OSError:
+                pass
+
+    totals = charter_set_totals(days)
+    gates = charter_set_gates(days)
+    certified = bool(days) and all(g["ok"] for g in gates)
+
+    identity = inputs_identity(READINESS_POLICY_VERSION, days, excluded)
     manifest: dict[str, Any] = {
         "policy_version": READINESS_POLICY_VERSION,
-        "certified_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        # Only a complete §1.2-passing set is certified; an incomplete assembly
+        # is published explicitly uncertified (certified_utc stays null).
+        "status": "certified" if certified else "incomplete",
+        "certified_utc": _certification_date(prev_manifest, identity) if certified else None,
+        "inputs_sha256": identity,
         "charter": CHARTER,
         "route": "pristine-derived (issue #290 pipeline promoted through §1.1 gates)",
         "totals": totals,
+        "set_gates": gates,
         "days": days,
         "excluded": excluded,
+        "removed_stale": removed,
     }
     write_json_atomic(golden_dir / MANIFEST_NAME, manifest)
     return manifest
-
-
-def _count_lines(path: Path) -> int:
-    opener = _open_tick_text(path)
-    with opener as fh:
-        return sum(1 for _ in fh)
-
-
-def _open_tick_text(path: Path):
-    import gzip
-    return gzip.open(path, "rt", encoding="utf-8") if path.name.endswith(".gz") \
-        else path.open("r", encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -211,17 +354,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"golden dataset assembled at {args.out}")
     print(f"  policy_version : {manifest['policy_version']}")
+    print(f"  status         : {manifest['status']}")
     print(f"  certified_utc  : {manifest['certified_utc']}")
     print(f"  days           : {len(manifest['days'])}"
-          f" ({manifest['totals']['windows_total']} windows,"
+          f" ({manifest['totals']['windows_count']} windows,"
           f" {manifest['totals']['valid_ticks']} valid ticks)")
     for d in manifest["days"]:
         print(f"    + {d['day']}  <- {d['source']}  windows={d['windows_count']}"
               f"  idx_fresh={d['idx_fresh']}")
     for e in manifest["excluded"]:
         print(f"    - {e['day']}  EXCLUDED: {e['reason']}")
-    if manifest["excluded"] and not manifest["days"]:
-        print("ERROR: no day passed the §1.1 gate — golden set not assembled", file=sys.stderr)
+    for r in manifest["removed_stale"]:
+        print(f"    ~ {r['day']}  REMOVED STALE: {r['reason']}")
+    for g in manifest["set_gates"]:
+        mark = "ok  " if g["ok"] else "MISS"
+        print(f"    [{mark}] {g['name']}: {g['measured']} (need {g['required']})")
+    if manifest["status"] != "certified":
+        print("ERROR: assembled set does not meet charter §1.2 — published as "
+              "'incomplete', not certified", file=sys.stderr)
         return 1
     return 0
 

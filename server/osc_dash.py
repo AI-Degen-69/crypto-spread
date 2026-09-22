@@ -718,8 +718,13 @@ def _scan_series_counts(path: Path) -> dict[str, int]:
     return counts
 
 
-def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict[str, Any]:
-    """Sum cheap totals across tick files; per-series counts from cache sources only."""
+def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
+                     *, file_count: int | None = None) -> dict[str, Any]:
+    """Sum cheap totals across tick files; per-series counts from cache sources only.
+
+    file_count: report this as total_files when given (issue #281 — tier copies
+    of one source day are summed once, but every listed row is still a file).
+    """
     total_bytes = 0
     total_lines = 0
     any_estimated = False
@@ -806,7 +811,7 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
                     series_counts[s] = series_counts.get(s, 0) + int(c)
 
     return {
-        "total_files": len(entries),
+        "total_files": len(entries) if file_count is None else file_count,
         "total_bytes": total_bytes,
         "total_lines": total_lines,
         "total_lines_estimated": any_estimated,
@@ -929,9 +934,17 @@ def api_ticks_manifest():
         if subdir_dir.is_dir():
             _list_tick_files(subdir_dir, subdir=subdir, flag_field=flag)
     try:
+        # Issue #281 (CodeRabbit round 1): golden/pristine hold copies of the
+        # same source day — each tier stays listed as an individual file, but
+        # every source day is counted once in the All Files aggregate (dedup
+        # by basename; out["files"] is ordered root → pristine → golden, and
+        # setdefault keeps the first/canonical copy).
+        agg_files: dict[str, Path] = {}
+        for f in out["files"]:
+            agg_files.setdefault(Path(f["name"]).name, TICKS_DIR / f["name"])
         out["aggregate"] = _aggregate_ticks(
-            [TICKS_DIR / f["name"] for f in out["files"]], out["manifest"]
-        )
+            list(agg_files.values()), out["manifest"],
+            file_count=len(out["files"]))
         # Per-file market breakdown, when a cached verify report exists.
         for entry in out["files"]:
             cached = _read_verify_cache(
