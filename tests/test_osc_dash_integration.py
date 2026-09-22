@@ -586,7 +586,8 @@ def _write_golden_manifest(tmp_path, *, policy="old-policy", days=None):
 
 
 def test_golden_endpoint_absent_state(tmp_path, monkeypatch):
-    """Issue #292: no golden dir → explicit absent state, 200 OK, no checks."""
+    """Issue #292: no golden dir → explicit absent state, 200 OK, checklist
+    rendered unchecked (the binding contract from the issue)."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     res = client.get("/api/ticks/golden")
     assert res.status_code == 200
@@ -595,7 +596,11 @@ def test_golden_endpoint_absent_state(tmp_path, monkeypatch):
     assert data["reason"] == "no golden dataset yet"
     assert data["charter"] == "docs/golden-tick-dataset.md"
     assert data["days"] == []
-    assert data["checks"] == []
+    names = {c["name"] for c in data["checks"]}
+    assert {"windows_total", "windows_per_market_pair", "time_blocks",
+            "valid_ticks", "sampling_gap_rate", "all_10_series_present",
+            "every_golden_day_passes", "policy_version_current"} <= names
+    assert all(c["ok"] is False for c in data["checks"])
 
 
 def test_golden_endpoint_stale_policy_is_not_certified(tmp_path, monkeypatch):
@@ -614,13 +619,11 @@ def test_golden_endpoint_stale_policy_is_not_certified(tmp_path, monkeypatch):
     assert any(c["ok"] for c in data["checks"])
 
 
-def test_golden_endpoint_certified_state(tmp_path, monkeypatch):
-    """Issue #292: healthy days + current policy → every gate checked."""
+def _golden_certified_fixture(tmp_path, *, market_breakdown):
+    """Two golden days with strong metrics, current policy, fresh .idx files."""
     from scripts.verify_tick_data import READINESS_POLICY_VERSION
 
-    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _write_golden_manifest(tmp_path, policy=READINESS_POLICY_VERSION)
-    # Two golden days, each winning its sidecar with strong metrics.
     for day in ("ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"):
         target = tmp_path / "golden" / day
         target.parent.mkdir(exist_ok=True)
@@ -640,31 +643,50 @@ def test_golden_endpoint_certified_state(tmp_path, monkeypatch):
             "time_reversals": 0,
             "sampling_gaps_count": 0,
             "time_blocks": ["2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17"],
-            "market_breakdown": [
-                {"series": s, "duration": 300, "windows": 60, "trades": 10}
-                for s in ("btc-up-or-down-5m", "eth-up-or-down-5m")
-            ],
+            "market_breakdown": market_breakdown,
             "fingerprint": osc_dash._file_fingerprint(target),
             "series_counts": {},
         }), encoding="utf-8")
-    # Fresh .idx sidecars for the currency gate.
-    for day in ("ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"):
-        df = tmp_path / "golden" / day
-        (df.with_name(df.name + ".idx")).write_text("{}", encoding="utf-8")
+        (target.with_name(target.name + ".idx")).write_text("{}", encoding="utf-8")
 
+
+def test_golden_endpoint_certified_state(tmp_path, monkeypatch):
+    """Issue #292: full coverage + healthy days + current policy → certified."""
+    from strategy.series import SERIES
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _golden_certified_fixture(tmp_path, market_breakdown=[
+        {"series": s, "duration": dur, "windows": 60, "trades": 10}
+        for s, dur, _label in SERIES
+    ])
     data = client.get("/api/ticks/golden").json()
-    assert data["state"] in ("certified", "present")
+    assert data["state"] == "certified"
     by_name = {c["name"]: c for c in data["checks"]}
     assert by_name["windows_total"]["n"] == 600
     assert by_name["windows_total"]["ok"] is True
+    assert by_name["windows_per_market_pair"]["n"] == 120
+    assert by_name["windows_per_market_pair"]["ok"] is True
     assert by_name["time_blocks"]["ok"] is True
     assert by_name["valid_ticks"]["n"] == 80_000
     assert by_name["zero_corrupt_rows"]["ok"] is True
     assert by_name["zero_time_reversals"]["ok"] is True
     assert by_name["policy_version_current"]["ok"] is True
-    # All 10 series must be covered — the fixture only has 2, so this is the
-    # gate that legitimately stays unchecked.
+    assert by_name["all_10_series_present"]["ok"] is True
+    assert all(c["ok"] for c in data["checks"])
+
+
+def test_golden_endpoint_incomplete_series_coverage(tmp_path, monkeypatch):
+    """Issue #292: two series only → the 10-series coverage gate stays unchecked."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _golden_certified_fixture(tmp_path, market_breakdown=[
+        {"series": s, "duration": 300, "windows": 60, "trades": 10}
+        for s in ("btc-up-or-down-5m", "eth-up-or-down-5m")
+    ])
+    data = client.get("/api/ticks/golden").json()
+    assert data["state"] == "present"
+    by_name = {c["name"]: c for c in data["checks"]}
     assert by_name["all_10_series_present"]["ok"] is False
+    assert by_name["all_10_series_present"]["n"] == 2
 
 
 def test_golden_card_frontend_invariants():

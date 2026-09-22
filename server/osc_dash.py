@@ -457,14 +457,28 @@ def _golden_check(name: str, measured: Any, required: Any, ok: bool,
 
 
 def _golden_absent(reason: str) -> dict[str, Any]:
-    """The explicit 'no golden dataset yet' payload — 200 OK, never an error."""
+    """The explicit 'no golden dataset yet' payload — 200 OK, never an error.
+
+    The issue requires the checklist rendered unchecked in this state, so the
+    canonical gates ship here computed over an empty day list (every target
+    unmet, currency unverified).
+    """
     return {
         "state": "absent",
         "reason": reason,
         "charter": "docs/golden-tick-dataset.md",
         "policy_version": None,
         "days": [],
-        "checks": [],
+        # Trivially-true vacuous gates are forced unchecked here: an absent
+        # dataset has satisfied nothing, and the issue requires the checklist
+        # rendered entirely unchecked in this state.
+        "checks": [
+            {**c, "ok": False} for c in (
+                _golden_set_checks([])
+                + _golden_per_day_checks([])
+                + _golden_currency_checks({}, [])
+            )
+        ],
     }
 
 
@@ -582,7 +596,7 @@ def _golden_currency_checks(manifest: dict[str, Any],
     return [
         _golden_check(
             "policy_version_current", manifest_version, READINESS_POLICY_VERSION,
-            ok=policy_ok),
+            ok=policy_ok, direction="equal"),
         _golden_check(
             "idx_sidecars_fresh",
             sum(1 for df in day_files if df.with_name(df.name + ".idx").exists()),
@@ -5984,14 +5998,15 @@ async function loadGoldenCard(){
     } else {
       const rows = (d.checks || []).map(c => {
         const mark = c.ok ? '<span style="color:var(--up);font-weight:700">✓</span>' : '<span style="color:var(--down);font-weight:700">✗</span>';
-        const measured = c.direction === 'min' && c.n === undefined ? fmt(c.measured) : fmt(c.measured);
         let target;
         if(c.n !== undefined && c.n !== null){
           target = `${fmt(c.measured)} / ${fmt(c.required)}`;
+        } else if(c.direction === 'equal'){
+          target = `${fmt(c.measured)} = ${fmt(c.required)}`;
         } else if(c.direction === 'min'){
-          target = `≤ ${fmt(c.required)}`;
+          target = `${fmt(c.measured)} ≤ ${fmt(c.required)}`;
         } else {
-          target = `≥ ${fmt(c.required)}`;
+          target = `${fmt(c.measured)} ≥ ${fmt(c.required)}`;
         }
         const label = String(c.name).replaceAll('_', ' ');
         return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line)">`
