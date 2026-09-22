@@ -411,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-gap-sec", type=float, default=6.0)
     ap.add_argument("--max-start-delay-sec", type=float, default=5.0)
     ap.add_argument("--max-snap-interval-sec", type=float, default=3.0)
+    ap.add_argument("--quiet", action="store_true", help="Suppress progress output")
     e = ap.parse_args(argv)
     params = PristineGateParams(
         max_gap_sec=e.max_gap_sec,
@@ -418,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         max_snap_interval_sec=e.max_snap_interval_sec,
     )
     try:
-        build_pristine_dataset(e.ticks_dir, e.out, params=params)
+        build_pristine_dataset(e.ticks_dir, e.out, params=params, quiet=e.quiet)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
