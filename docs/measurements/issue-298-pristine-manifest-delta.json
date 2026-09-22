@@ -138,5 +138,23 @@
   "verify_artifacts": {
     "rebuild_log": "run/rebuild_298.log (exit 0, 'output verify: PASS')",
     "independent_verify": "run/verify_298.json (status PASS, 4910 windows, 1428888 valid ticks)"
+  },
+  "certification": {
+    "certified_rerun": {
+      "branch": "i298b/pristine-source-certification",
+      "date": "2026-09-22",
+      "motivation": "PR #300 review: constraint-2 source-hash gate did not hold for ticks_2026-09-21.jsonl",
+      "recovery_attempt": "original capture generation (8d1aacdf...) unrecoverable \u2014 working-copy checkout holds byte-identical post-rewrite generation; no backups exist. Provenance of the pre-rewrite 09-21 generation permanently degraded.",
+      "key_fact": "the rewrite happened BEFORE the #298 rebuild, so pre-rebuild source state == current file (764a5e65...); certification covers exactly the bytes the #298 build consumed",
+      "method": "full SHA-256 of all 6 sources + all 6 pristine outputs snapshotted pre-run; rebuild re-executed with default thresholds; post-run re-hash of sources and outputs; manifest map compared to both",
+      "results": {
+        "rebuild": "exit 0; wrote 4910 pristine windows (1428888 ticks); output verify: PASS",
+        "sources_unchanged_during_build": true,
+        "outputs_deterministic_vs_298_build": true,
+        "manifest_source_map_matches_pre_run_snapshot": true,
+        "manifest_source_map_matches_post_run_disk": true
+      },
+      "artifacts": "run/cert_298/ (pre_run_hashes.json, pristine_manifest_pre.json, rebuild_rerun.log, post_run_verification.json)"
+    }
   }
 }
