@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backtests now open on your healthiest data — #279</title>
+<style>
+:root{--ink:#eef6f4;--muted:#9db8b3;--bg:#0e2422;--panel:#14302d;--panel2:#0b1d1c;--line:#2b4a47;--accent:#2dd4bf;--accent-ink:#06231f;--star:#f5b942;--bad:#f08a8a;--warn:#e8c35a}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:16px/1.65 "Segoe UI",Tahoma,sans-serif}
+main{max-width:960px;margin:auto;padding:44px 20px 70px}
+.eyebrow{color:var(--accent);font-size:.75rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+h1{font-size:clamp(28px,4.6vw,48px);line-height:1.12;margin:10px 0 12px;letter-spacing:-.02em;max-width:720px}
+.lede{color:var(--muted);font-size:1.1rem;max-width:660px;margin:0}
+.demo{margin-top:28px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px;box-shadow:0 20px 55px rgba(0,0,0,.30)}
+.demo h2{margin:0 0 4px;font-size:1.25rem}
+.hint{color:var(--muted);font-size:.9rem;margin:0 0 16px}
+.files{display:flex;gap:12px;flex-wrap:wrap}
+.file{flex:1 1 200px;background:var(--panel2);border:2px solid var(--line);border-radius:14px;padding:14px 14px 12px;cursor:pointer;text-align:left;color:var(--ink);font:inherit}
+.file:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.file.winner{border-color:var(--star)}
+.fname{font-family:Consolas,"Courier New",monospace;font-size:.85rem;word-break:break-all}
+.badge{display:inline-block;font-size:.72rem;font-weight:800;border-radius:99px;padding:2px 10px;margin-top:8px}
+.ok{background:#123f38;color:var(--accent)}
+.part{background:#3d3413;color:var(--warn)}
+.fail{background:#422020;color:var(--bad)}
+.meta{color:var(--muted);font-size:.82rem;margin-top:8px}
+.star{color:var(--star);font-weight:800}
+.use{margin-top:10px;width:100%;font:inherit;font-size:.82rem;font-weight:700;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--muted);padding:6px;cursor:pointer}
+.use.locked{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.reason{margin-top:16px;min-height:3.2em;font-size:.95rem}
+.opens{margin-top:6px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 16px;font-size:.95rem}
+.reset{margin-top:14px;font:inherit;font-weight:700;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--muted);padding:8px 18px;cursor:pointer}
+.checks{margin-top:26px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px}
+.checks h2{margin:0 0 10px;font-size:1.25rem}
+.chips{display:flex;gap:10px;flex-wrap:wrap;list-style:none;margin:0;padding:0}
+.chips li{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:.9rem;flex:1 1 180px}
+.chips strong{color:var(--accent)}
+.try{margin-top:26px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px}
+.try h2{margin:0 0 10px;font-size:1.25rem}
+.try ol{margin:.4rem 0 .2rem;padding-left:1.3rem}
+.try li{margin:.55rem 0}
+.links{margin-top:14px;font-size:.9rem;color:var(--muted)}
+.links a{color:var(--accent)}
+footer{margin-top:26px;color:var(--muted);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<main>
+<div class="eyebrow">Change put live &middot; #279</div>
+<h1>Backtests now open on your healthiest data</h1>
+<p class="lede">Before, every test run opened on “everything mixed together” — good days and broken days alike. Now the screen checks each saved day, puts a star on the healthiest one, and opens on it. Your own choice still always wins.</p>
+
+<div class="demo" aria-label="Touch it yourself">
+<h2>Touch it: tap a day to change its health</h2>
+<p class="hint">Tap a card to cycle it between healthy, partial, and failed — watch the star move exactly the way the real screen moves it.</p>
+<div class="files" id="files"></div>
+<p class="reason" id="reason" aria-live="polite"></p>
+<div class="opens" id="opens"></div>
+<button class="reset" id="resetBtn" type="button">Reset to defaults</button>
+</div>
+
+<div class="checks" aria-label="What the check looks at">
+<h2>What the check looks at</h2>
+<ul class="chips">
+<li><strong>Full capture</strong><br>Was the whole day recorded, with no missing stretch?</li>
+<li><strong>Clean bill</strong><br>Did the recording pass its integrity check?</li>
+<li><strong>Readiness first</strong><br>Research-grade days beat exploring ones; ties break on more clean slices, then the newest day.</li>
+</ul>
+</div>
+
+<div class="try" aria-label="See it in the project">
+<h2>See it in the project</h2>
+<ol>
+<li><strong>Open the dashboard</strong> and go to the Backtest tab.</li>
+<li><strong>Look at the file list:</strong> one row carries a star that names why it won.</li>
+<li><strong>Look at the dataset menu:</strong> it opens on the starred day. Pick anything yourself — including “everything” — and your pick sticks.</li>
+</ol>
+<div class="links">Problem: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/279">request #279</a> · Change put live: <a href="https://github.com/AI-Degen-69/crypto-spread/pull/293">update #293</a></div>
+</div>
+
+<footer>Plain-words page for a finished change. The star, the menu, and your-pick-wins are all live in the dashboard now.</footer>
+</main>
+<script>
+(function(){
+var CONDITIONS=[
+ {key:"healthy",label:"Healthy",cls:"ok"},
+ {key:"partial",label:"Partial capture",cls:"part"},
+ {key:"failed",label:"Failed check",cls:"fail"}
+];
+var files=[
+ {name:"ticks_2026-09-18.jsonl",cond:0,grade:"research-grade",slices:812,day:"Sep 18"},
+ {name:"ticks_2026-09-19.jsonl",cond:0,grade:"exploring",slices:940,day:"Sep 19"},
+ {name:"ticks_2026-09-20.jsonl",cond:1,grade:"research-grade",slices:999,day:"Sep 20"}
+];
+var manual=null; // your pick always wins, like the real screen
+var resetLock=false; // reset means "everything" — the star must not override it
+function eligible(f){return CONDITIONS[f.cond].key==="healthy";}
+function rank(f){
+ var level=f.grade==="research-grade"?2:(f.grade==="exploring"?1:0);
+ return [level,f.slices];
+}
+function pickWinner(){
+ var best=null,bestKey=null;
+ files.forEach(function(f,i){
+  if(!eligible(f))return;
+  var k=rank(f).concat([i]); // earlier day loses ties, like name order
+  if(!best||k[0]>bestKey[0]||(k[0]===bestKey[0]&&(k[1]>bestKey[1]||(k[1]===bestKey[1]&&k[2]<bestKey[2])))){best=f;bestKey=k;}
+ });
+ return best;
+}
+var filesEl=document.getElementById("files"),
+    reasonEl=document.getElementById("reason"),
+    opensEl=document.getElementById("opens");
+function render(){
+ filesEl.innerHTML="";
+ files.forEach(function(f,i){
+  var c=CONDITIONS[f.cond],w=pickWinner();
+  var b=document.createElement("button");
+  b.className="file"+((w===f&&!manual)?" winner":"");
+  b.type="button";
+  b.setAttribute("aria-label",f.name+", "+c.label+". Activate to change health.");
+  var html='<span class="fname">'+f.name+'</span><br><span class="badge '+c.cls+'">'+c.label+'</span><div class="meta">'+f.grade+' &middot; '+f.slices+' clean slices &middot; '+f.day+'</div>';
+  if(w===f&&!manual)html+='<div class="star">★ Healthiest</div>';
+  if(manual===f)html+='<div class="star">★ Your pick</div>';
+  b.innerHTML=html;
+  b.addEventListener("click",function(){f.cond=(f.cond+1)%CONDITIONS.length;render();});
+  var u=document.createElement("button");
+  u.className="use"+(manual===f?" locked":"");
+  u.type="button";
+  u.textContent=manual===f?"Release my pick":"Use this one";
+  u.addEventListener("click",function(ev){ev.stopPropagation();manual=(manual===f)?null:f;render();});
+  b.appendChild(u);
+  filesEl.appendChild(b);
+ });
+ var w=pickWinner(),shown=manual||((!resetLock&&w)||null);
+ if(manual){
+  reasonEl.textContent="You picked "+manual.name+" yourself, so the screen keeps it — your choice beats the automatic star.";
+ }else if(resetLock){
+  reasonEl.textContent="Reset picked “everything” — and the automatic star no longer overrides it until you choose again.";
+ }else if(w){
+  var others=files.filter(function(f){return f!==w&&eligible(f);}).length;
+  reasonEl.textContent="★ "+w.name+" wins: "+w.grade+", "+w.slices+" clean slices"+(others?(" (ahead of "+others+" other healthy day"+(others>1?"s":"")+")."):".");
+ }else{
+  reasonEl.textContent="No healthy day right now, so the screen stays on “everything” — the safe fallback.";
+ }
+ opensEl.textContent="Backtest would open on: "+(shown?shown.name:"All days (default)");
+}
+document.getElementById("resetBtn").addEventListener("click",function(){
+ manual=null;resetLock=true; // reset means “everything”, and the screen must keep it
+ files.forEach(function(f){f.cond=0;});
+ files[2].cond=1;
+ render();
+});
+render();
+})();
+</script>
+</body>
+</html>
