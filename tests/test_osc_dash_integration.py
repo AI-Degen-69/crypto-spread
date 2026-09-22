@@ -589,6 +589,37 @@ def test_pick_preferred_tier2_total_order():
     assert w3["name"] == "high.jsonl"  # equal integrity/capture/readiness; windows wins
 
 
+def test_manifest_stale_sidecar_windows_not_ranked(tmp_path, monkeypatch):
+    """Issue #294 review: a stale-policy sidecar must not leak windows_count
+    into ranking — it scores zero on every axis, like an uncached file."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    stale = tmp_path / "ticks_2026-09-07.jsonl"
+    _write_verify_sidecar(tmp_path, stale.name, status="PASS",
+                          capture_label="PARTIAL CAPTURE", level="RESEARCH_READY",
+                          windows=9999, policy="old-policy")
+    uncached = tmp_path / "ticks_2026-09-08.jsonl"
+    uncached.write_text('{"a": 1}\n', encoding="utf-8")
+    old = time.time() - 500
+    os.utime(stale, (old, old))  # stale file older; uncached file newer
+
+    data = client.get("/api/ticks/manifest").json()
+    # Stale sidecar contributes nothing: the uncached file wins tier 2 on mtime.
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 2
+    stale_entry = next(f for f in data["files"] if f["name"] == stale.name)
+    assert "windows_count" not in stale_entry
+
+
+def test_manifest_missing_dir_includes_preferred_tier(tmp_path, monkeypatch):
+    """Issue #294 review: the early no-TICKS_DIR response carries preferred_tier=None."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path / "nope")
+    data = client.get("/api/ticks/manifest").json()
+    assert data["files"] == []
+    assert data["preferred_file"] is None
+    assert data["preferred_tier"] is None
+
+
+
 def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
     """Startup pre-warm loads fingerprint-matching sidecars into memory so the
     first /api/ticks/verify after a restart is instant."""

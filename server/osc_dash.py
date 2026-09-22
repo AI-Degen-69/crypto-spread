@@ -585,7 +585,8 @@ def pick_preferred(
 @app.get("/api/ticks/manifest")
 def api_ticks_manifest():
     """List available tick files + manifest stats for the slider UI."""
-    out: dict[str, Any] = {"files": [], "manifest": None, "preferred_file": None}
+    out: dict[str, Any] = {"files": [], "manifest": None,
+                           "preferred_file": None, "preferred_tier": None}
     if not TICKS_DIR.exists():
         return out
     mf = TICKS_DIR / "manifest.json"
@@ -629,7 +630,9 @@ def api_ticks_manifest():
                                            if cache_current else None)
             entry["integrity_status"] = (cached or {}).get("status") if cache_current else None
             entry["capture_state"] = (cached or {}).get("capture_state") if cache_current else None
-            if cached:
+            # Stale-policy sidecars contribute nothing to ranking (Issue #294
+            # review): their old windows_count must not leak into tier 2.
+            if cache_current:
                 entry["windows_count"] = int(cached.get("windows_count", 0))
         # Issue #279 / #294: surface the healthiest file so the UI can badge
         # and pre-select it — derived only from the cached fields already read.
