@@ -170,6 +170,74 @@ class TestEvaluateWindowGates:
         assert v["start_day"] == time.strftime("%Y-%m-%d", time.gmtime(BASE_TS))
 
 
+class TestBoundsViolationGate:
+    """Issue #297: a window with a tick out of sane bounds is not pristine."""
+
+    def test_touch_pair_above_bound_fails(self):
+        ticks = pristine_ticks()
+        ticks[150] = make_tick(ts=150.0, touch_pair=1.74)
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert v["passed"] is False
+        assert "bounds_violation" in v["failing_gates"]
+        assert v["bounds_violations"] == 1
+
+    def test_mid_above_bound_fails(self):
+        ticks = pristine_ticks()
+        ticks[150] = make_tick(ts=150.0, mid=1.02)
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "bounds_violation" in v["failing_gates"]
+        assert v["bounds_violations"] == 1
+
+    def test_mid_below_bound_fails(self):
+        ticks = pristine_ticks()
+        ticks[150] = make_tick(ts=150.0, mid=-0.02)
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "bounds_violation" in v["failing_gates"]
+        assert v["bounds_violations"] == 1
+
+    def test_violation_on_first_tick_is_counted(self):
+        # The first tick seeds state in _new_window_state and never flows through
+        # _add_tick_to_state — seeding must count it (same as error_ticks, CR #7633).
+        ticks = pristine_ticks()
+        ticks[0] = make_tick(ts=0.0, touch_pair=1.74)
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "bounds_violation" in v["failing_gates"]
+        assert v["bounds_violations"] == 1
+
+    def test_none_fields_are_skipped(self):
+        ticks = pristine_ticks()
+        ticks[150] = make_tick(ts=150.0, mid=None, touch_pair=None)
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "bounds_violation" not in v["failing_gates"]
+        assert v["bounds_violations"] == 0
+
+    def test_non_numeric_value_is_a_violation(self):
+        ticks = pristine_ticks()
+        ticks[150] = make_tick(ts=150.0, mid="0.50")
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "bounds_violation" in v["failing_gates"]
+
+    def test_clean_window_has_no_bounds_gate(self):
+        v = evaluate_window_gates(pristine_ticks(), PristineGateParams())
+        assert v["passed"] is True
+        assert "bounds_violation" not in v["failing_gates"]
+        assert v["bounds_violations"] == 0
+
+    def test_boundary_values_pass(self):
+        ticks = pristine_ticks()
+        ticks[150] = make_tick(ts=150.0, mid=-0.01)
+        ticks[151] = make_tick(ts=151.0, mid=1.01)
+        ticks[152] = make_tick(ts=152.0, touch_pair=0.50)
+        ticks[153] = make_tick(ts=153.0, touch_pair=1.50)
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "bounds_violation" not in v["failing_gates"]
+
+    def test_empty_window_verdict_carries_counter(self):
+        v = evaluate_window_gates([], PristineGateParams())
+        assert v["bounds_violations"] == 0
+        assert "bounds_violation" not in v["failing_gates"]
+
+
 class TestScanWindows:
     def test_midnight_spanning_window_merges_and_keys_to_start_day(self):
         day1 = [make_tick(ts=float(i), cid="0xmid") for i in range(180)]
@@ -249,6 +317,34 @@ class TestWritePristineDataset:
         }
         assert "0xbad" not in every_line_cid
         assert "0xbad" not in report["passed_cids"]
+
+    def test_bounds_violating_window_absent_from_output(self, tmp_path):
+        # Issue #297 e2e: one clean window + one window with an out-of-bounds tick
+        # (built directly, not via two_day_dir — the fixture writes files at
+        # fixture time, so post-hoc mutation would never reach the scan).
+        start = (BASE_TS // 86400) * 86400 + 86100.0
+        good = pristine_ticks(n=300)
+        bad = [
+            make_tick(ts=300.0 + float(i), start_ts=BASE_TS + 300.0,
+                      end_ts=BASE_TS + 600.0, cid="0xbounds")
+            for i in range(300)
+        ]
+        bad[10]["touch_pair"] = 1.74
+        write_ticks_dir(tmp_path, {f"ticks_{day_of(start)}.jsonl": good + bad})
+        report = build_pristine_dataset(tmp_path, tmp_path / "pristine")
+        every_line_cid = {
+            json.loads(x)["cid"]
+            for f in (tmp_path / "pristine").glob("ticks_*.jsonl")
+            for x in f.read_text(encoding="utf-8").splitlines() if x.strip()
+        }
+        assert "0xbounds" not in every_line_cid
+        assert "0xbounds" not in report["passed_cids"]
+        assert "0xabc" in report["passed_cids"]  # the clean window survives
+        man = json.loads((tmp_path / "pristine" / MANIFEST_NAME).read_text(encoding="utf-8"))
+        bad_w = next(w for w in man["windows"] if w["cid"] == "0xbounds")
+        assert bad_w["passed"] is False
+        assert bad_w["failing_gates"] == ["bounds_violation"]
+        assert bad_w["bounds_violations"] == 1
 
     def test_manifest_records_verdicts_counts_and_hashes(self, two_day_dir):
         ticks_dir, good, bad = two_day_dir

@@ -46,7 +46,8 @@ DAY_RE = re.compile(r"^ticks_(\d{4}-\d{2}-\d{2})\.jsonl(\.gz)?$")
 
 VERIFY_POLICY_NOTE = (
     "gate defaults mirror scripts/verify_tick_data.verify_window_continuity "
-    "(6.0s gaps, 5.0s start delay); density floor sets min_snaps = ceil(duration / 3.0)"
+    "(6.0s gaps, 5.0s start delay); density floor sets min_snaps = ceil(duration / 3.0); "
+    "bounds gate mirrors verify_tick sane bounds (mid [-0.01, 1.01], touch_pair [0.50, 1.50])"
 )
 
 @dataclasses.dataclass(frozen=True)
@@ -82,6 +83,22 @@ class PristineGateParams:
 def min_snaps_for(duration: float, params: PristineGateParams) -> int:
     """Snap-density floor: >=1 snap per `max_snap_interval_sec` of window duration."""
     return math.ceil(duration / params.max_snap_interval_sec)
+
+
+def _tick_out_of_bounds(tick: dict[str, Any]) -> bool:
+    """Sane-bounds check, mirroring scripts/verify_tick_data.verify_tick exactly
+    (mid [-0.01, 1.01], touch_pair [0.50, 1.50]): a missing (None) field is skipped;
+    a non-numeric or out-of-range value is a violation. Thresholds are hard-coded —
+    the gate is always-on, like the other six gates (issue #297)."""
+    mid = tick.get("mid")
+    if mid is not None and (not isinstance(mid, (int, float)) or mid < -0.01 or mid > 1.01):
+        return True
+    touch_pair = tick.get("touch_pair")
+    if touch_pair is not None and (
+        not isinstance(touch_pair, (int, float)) or touch_pair < 0.50 or touch_pair > 1.50
+    ):
+        return True
+    return False
 
 
 def evaluate_window_gates(ticks: list[dict[str, Any]], params: PristineGateParams) -> dict[str, Any]:
@@ -146,6 +163,7 @@ def _new_window_state(first_tick: dict[str, Any], source_name: str) -> dict[str,
         "max_gap": 0.0,
         "time_reversals": 0,
         "error_ticks": 1 if first_tick.get("err") else 0,
+        "bounds_violations": 1 if _tick_out_of_bounds(first_tick) else 0,
         "tick_count": 1,
         "source_files": [source_name] if source_name else [],
         "_seen": {source_name} if source_name else set(),
@@ -169,6 +187,8 @@ def _add_tick_to_state(
     st["last_ts"] = ts
     if tick.get("err"):
         st["error_ticks"] += 1
+    if _tick_out_of_bounds(tick):
+        st["bounds_violations"] += 1
     st["tick_count"] += 1
     if source_name and source_name not in st["_seen"]:
         st["_seen"].add(source_name)
@@ -233,6 +253,7 @@ def judge_window(agg: dict[str, Any], params: PristineGateParams) -> dict[str, A
             "max_gap_sec": 0.0,
             "time_reversals": 0,
             "error_ticks": 0,
+            "bounds_violations": 0,
         }
 
     start_ts = agg["start_ts"]
@@ -245,6 +266,9 @@ def judge_window(agg: dict[str, Any], params: PristineGateParams) -> dict[str, A
     max_gap = agg["max_gap"]
     time_reversals = agg["time_reversals"]
     error_ticks = agg["error_ticks"]
+    # .get: the empty-window caller (evaluate_window_gates) builds a minimal dict
+    # without this key; today the no_ticks early return saves it, but stay safe.
+    bounds_violations = agg.get("bounds_violations", 0)
     min_snaps = min_snaps_for(agg["duration"], params)
 
     if start_delay > params.max_start_delay_sec:
@@ -257,6 +281,8 @@ def judge_window(agg: dict[str, Any], params: PristineGateParams) -> dict[str, A
         failing.append("time_reversal")
     if error_ticks > 0:
         failing.append("collector_error")
+    if bounds_violations > 0:
+        failing.append("bounds_violation")
     if tick_count < min_snaps:
         failing.append("snap_density")
 
@@ -278,6 +304,7 @@ def judge_window(agg: dict[str, Any], params: PristineGateParams) -> dict[str, A
         "max_gap_sec": round(max_gap, 2),
         "time_reversals": time_reversals,
         "error_ticks": error_ticks,
+        "bounds_violations": bounds_violations,
     }
 
 
@@ -378,7 +405,7 @@ def build_pristine_dataset(
         "passed", "failing_gates", "cid", "series", "slug", "duration",
         "start_ts", "end_ts", "start_day", "tick_count", "min_snaps",
         "start_delay_sec", "end_cutoff_sec", "gaps_count", "max_gap_sec",
-        "time_reversals", "error_ticks", "source_files",
+        "time_reversals", "error_ticks", "bounds_violations", "source_files",
     )
     windows_manifest = [
         {**{k: v[k] for k in manifest_keys},

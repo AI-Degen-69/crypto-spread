@@ -1,6 +1,5 @@
-# TODO — Issue #294
+﻿# TODO — Issue #297
 
-- [x] TASK-1: Extend `pick_preferred()` with tier-2 fallback + wire `preferred_tier` in `/api/ticks/manifest`
-- [x] TASK-2: Add tier-2 tests + update existing pure-ranking tests for tuple return
-- [x] TASK-3: UI badge wording — "★ Preferred" (T1) vs "★ Best available" (T2) + theme test
-- [x] TASK-4: Closeout — targeted pytest gate green, `git diff --stat`
+- [x] TASK-1: bounds gate in build_pristine_dataset.py (helper + seed + judge + manifest + policy note)
+- [x] TASK-2: TestBoundsViolationGate unit + e2e tests (-k bounds green)
+- [x] TASK-3: full targeted gate + diff-stat closeout
