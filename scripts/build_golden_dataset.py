@@ -334,6 +334,7 @@ def build_golden_dataset(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry: assemble golden/ from a pristine dir and print the certification summary."""
     ap = argparse.ArgumentParser(
         description="Assemble the golden tick dataset from pristine days (issue #281)."
     )
