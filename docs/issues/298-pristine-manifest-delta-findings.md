@@ -56,6 +56,10 @@ than smoothed over.
   an invariant break → the analysis script reports `invariant_breaks_total = 0`.
 - **Read-only proof:** SHA-256 per-source map compared between the two manifests
   (`totals.source_files`). 5/6 files identical; the 09-21 divergence is itemized in §5.
+  Note: the hashes are recorded by the extractor at build start. A future rebuild should
+  also re-hash every source file **after both read passes** and reject the build on any
+  mismatch, so the bytes actually read are proven identical to the hashed snapshot
+  (codified in `CONSTRAINTS.md` gate 2 for this issue).
 - **Data sources of truth:** the two manifests only (anti-cheat rule). The 291 baseline doc
   (6,129 / 5,042 / 1,485,319) matched the on-disk baseline manifest exactly and was used as
   corroboration, never as a substitute.

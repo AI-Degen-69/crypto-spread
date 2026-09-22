@@ -57,6 +57,12 @@ rebuild → verify → delta → findings doc → issue comment).
   `failing_gates` has `passed: false`; (e) the 09-18 evidence window is failing and its cid
   is absent from output files; (f) `totals.source_files` == baseline map (read-only proof).
   · Depends on: TASK-2 · Verify: all six checks green (scripted, output recorded).
+  **Acceptance record:** five of six checks green. The source-hash check did NOT hold:
+  `ticks_2026-09-21.jsonl` was externally rewritten before the rebuild, so the new manifest's
+  hash for it differs from the baseline map (5/6 matched). Every passed window still passes
+  and all 12 drops on that day carry `bounds_violation`, but the per-constraint proof of
+  source immutability is incomplete for 09-21 — recorded as a deviation, not silently
+  passed. Restoration + re-run tracked on #298.
 
 - **TASK-4** [Research/Delta] · Size M · `docs/issues/298-pristine-manifest-delta-findings.md`,
   `docs/measurements/issue-298-pristine-manifest-delta.json`

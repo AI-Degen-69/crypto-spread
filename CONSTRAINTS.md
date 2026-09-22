@@ -10,7 +10,10 @@ Active working constraints for issue #298. Per-issue file; goes stale on merge.
    modules stay byte-identical to `master` (post-#297).
 2. **Source day files are read-only.** No modification or regeneration of any
    `run/ticks/ticks_*.jsonl[.gz]`. Proof: `totals.source_files` SHA-256 map in the new
-   manifest must equal the pre-rebuild baseline map.
+   manifest must equal the pre-rebuild baseline map. The extractor must additionally
+   re-hash every source day file **after both read passes** and reject the build if any
+   post-pass hash differs from the pre-build snapshot map — an initial hash alone does not
+   prove the bytes read during pass 1/pass 2 were the hashed ones.
 3. **Default thresholds only.** The rebuild runs with no gate-tuning flags, so the gate set
    matches the merged #297 behavior exactly.
 4. **Self-certification must PASS.** Exit 0 and `output verify: PASS`; new manifest carries
@@ -24,7 +27,9 @@ Active working constraints for issue #298. Per-issue file; goes stale on merge.
    content is ever committed.
 7. **Full-repo pytest sweep is CI-only** (repo policy). This issue changes no Python modules;
    the targeted gate `python -m pytest tests/test_build_pristine_dataset.py -q` must stay
-   37/37 green (proves the branch didn't touch the extractor).
+   37/37 green — **regression evidence only**, not proof of extractor identity. The proof
+   that the extractor and gates are unchanged is Gate 1's byte-identity comparison
+   (`git diff origin/master...HEAD` shows no source-module changes).
 
 ## Scope Guardrails
 
