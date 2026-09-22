@@ -335,8 +335,11 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert agg["total_windows"] == 2
     assert agg["windows_source"] == "cache"
 
-    # Issue #279: this CORRUPTED-data file is ineligible — no preferred winner.
-    assert client.get("/api/ticks/manifest").json()["preferred_file"] is None
+    # Issue #279/#294: CORRUPTED-data file is ineligible for tier 1 but
+    # tier 2 picks it as least-bad (it's the only file).
+    manifest = client.get("/api/ticks/manifest").json()
+    assert manifest["preferred_file"] == f1.name
+    assert manifest["preferred_tier"] == 2
 
     # Per-file market breakdown surfaces from the cache too.
     files = client.get("/api/ticks/manifest").json()["files"]
@@ -397,6 +400,7 @@ def test_manifest_preferred_file_picks_healthy_winner(tmp_path, monkeypatch):
 
     data = client.get("/api/ticks/manifest").json()
     assert data["preferred_file"] == "ticks_2026-09-09.jsonl"
+    assert data["preferred_tier"] == 1
     flagged = [f["name"] for f in data["files"] if f["is_preferred"]]
     assert flagged == ["ticks_2026-09-09.jsonl"]
 
@@ -420,10 +424,11 @@ def test_manifest_preferred_file_windows_tie_break(tmp_path, monkeypatch):
     data = client.get("/api/ticks/manifest").json()
     # b wins on windows outright; among the 100-window ties the newer mtime wins.
     assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 1
 
 
 def test_pick_preferred_pure_ranking():
-    """Issue #279: pure ranking — level → windows_count → mtime, no I/O, no globals."""
+    """Issue #279/#294: pure ranking — tier 1 level → windows → mtime; tier 2 fallback."""
     def mk(name, **kw):
         return {"name": name, "mtime": 0, "windows_count": 0, **kw}
 
@@ -435,19 +440,25 @@ def test_pick_preferred_pure_ranking():
         mk("explor.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
            readiness={"level": "EXPLORATORY"}, windows_count=500, mtime=3),
     ]
-    # WARN is never eligible despite the best level/windows/mtime.
-    assert osc_dash.pick_preferred(files)["name"] == "research.jsonl"
-    assert osc_dash.pick_preferred([]) is None
-    assert osc_dash.pick_preferred([files[0]]) is None
+    # Tier-1: WARN file is not tier-1 eligible; research wins on level despite fewer windows.
+    winner, tier = osc_dash.pick_preferred(files)
+    assert winner["name"] == "research.jsonl"
+    assert tier == 1
+    assert osc_dash.pick_preferred([]) == (None, None)
 
-    # windows_count beats mtime at equal level.
+    # Tier-2: only non-eligible files → tier 2 with the total order.
+    winner2, tier2 = osc_dash.pick_preferred([files[0]])
+    assert winner2["name"] == "warn.jsonl"
+    assert tier2 == 2
+
+    # windows_count beats mtime at equal level (tier 1).
     tie = [
         mk("older.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
            readiness={"level": "EXPLORATORY"}, windows_count=100, mtime=1),
         mk("newer.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
            readiness={"level": "EXPLORATORY"}, windows_count=99, mtime=99),
     ]
-    assert osc_dash.pick_preferred(tie)["name"] == "older.jsonl"
+    assert osc_dash.pick_preferred(tie)[0]["name"] == "older.jsonl"
 
     # Fully equal keys resolve stably by the caller's (name-sorted) order.
     same = [
@@ -456,44 +467,126 @@ def test_pick_preferred_pure_ranking():
         mk("b.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
            readiness={"level": "EXPLORATORY"}),
     ]
-    assert osc_dash.pick_preferred(same)["name"] == "a.jsonl"
+    assert osc_dash.pick_preferred(same)[0]["name"] == "a.jsonl"
 
 
 def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeypatch):
-    """Issue #279: empty dir / uncached / all WARN-FAIL → preferred_file is None."""
+    """Issue #279/#294: empty dir → preferred_file is None; otherwise tier 2 picks least-bad."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     data = client.get("/api/ticks/manifest").json()
     assert data["preferred_file"] is None
+    assert data["preferred_tier"] is None
     assert data["files"] == []
 
-    # Uncached file: never eligible, never triggers a re-verify.
+    # Uncached file: tier-2 picks it as least-bad (all rank fields zero, but it exists).
     (tmp_path / "ticks_2026-09-08.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
     data = client.get("/api/ticks/manifest").json()
-    assert data["preferred_file"] is None
-    assert all(f["is_preferred"] is False for f in data["files"])
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 2
+    assert sum(1 for f in data["files"] if f["is_preferred"]) == 1
 
-    # All files WARN/FAIL: fall back to the All-Files default behavior unchanged.
+    # WARN file: still tier-2 eligible — better than no star at all.
     _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", status="WARN",
                           capture_label="PARTIAL CAPTURE")
     data = client.get("/api/ticks/manifest").json()
-    assert data["preferred_file"] is None
-    assert all(f["is_preferred"] is False for f in data["files"])
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 2
 
 
 def test_manifest_preferred_file_rejects_stale_policy_cache(tmp_path, monkeypatch):
-    """Issue #279: a PASS+COMPLETE sidecar under an old readiness policy is stale —
-    every eligibility field stays null, so nothing is preferred."""
+    """Issue #279/#294: a PASS+COMPLETE sidecar under an old readiness policy is stale —
+    every eligibility field stays null, but tier 2 still picks it as least-bad."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", policy="stale-policy-0")
 
     data = client.get("/api/ticks/manifest").json()
-    assert data["preferred_file"] is None
+    # Tier-2 picks the only file (all rank axes = 0, but it exists).
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 2
     assert len(data["files"]) == 1
     entry = data["files"][0]
     assert entry["integrity_status"] is None
     assert entry["capture_state"] is None
     assert entry["readiness"] is None
-    assert entry["is_preferred"] is False
+    assert entry["is_preferred"] is True
+
+
+def test_manifest_tier2_all_partial(tmp_path, monkeypatch):
+    """Issue #294: only PARTIAL CAPTURE files → tier-2 least-bad winner."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-07.jsonl", status="WARN",
+                          capture_label="PARTIAL CAPTURE", level="EXPLORATORY", windows=30)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", status="PASS",
+                          capture_label="PARTIAL CAPTURE", level="RESEARCH_READY", windows=80)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-09.jsonl", status="PASS",
+                          capture_label="PARTIAL CAPTURE", level="EXPLORATORY", windows=120)
+
+    data = client.get("/api/ticks/manifest").json()
+    # Tier-2: 09-08 wins — PASS > WARN for integrity; PARTIAL vs PARTIAL tie; then
+    # RESEARCH_READY (2) > EXPLORATORY (1) beats 09-09's higher windows.
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 2
+    assert sum(1 for f in data["files"] if f["is_preferred"]) == 1
+
+
+def test_manifest_tier1_outranks_tier2(tmp_path, monkeypatch):
+    """Issue #294: a single PASS+COMPLETE file always wins tier-1 over many PARTIALs."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-07.jsonl", status="PASS",
+                          capture_label="PARTIAL CAPTURE", level="RESEARCH_READY", windows=999)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", status="PASS",
+                          capture_label="COMPLETE CAPTURE", level="EXPLORATORY", windows=10)
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+    assert data["preferred_tier"] == 1
+
+
+def test_pick_preferred_tier2_total_order():
+    """Issue #294: tier-2 total order — integrity > capture > readiness > windows > mtime."""
+    def mk(name, **kw):
+        return {"name": name, "mtime": 0, "windows_count": 0, **kw}
+
+    # integrity_status decides: PASS > WARN even with worse capture/windows.
+    files = [
+        mk("warn_complete.jsonl", integrity_status="WARN",
+           capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=999),
+        mk("pass_partial.jsonl", integrity_status="PASS",
+           capture_state={"label": "PARTIAL CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=1),
+    ]
+    # Neither is tier-1 eligible (WARN excludes first, PARTIAL excludes second).
+    winner, tier = osc_dash.pick_preferred(files)
+    assert tier == 2
+    assert winner["name"] == "pass_partial.jsonl"  # PASS (2) > WARN (1)
+
+    # capture_state decides at equal integrity.
+    files2 = [
+        mk("partial.jsonl", integrity_status="PASS",
+           capture_state={"label": "PARTIAL CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=999),
+        mk("complete.jsonl", integrity_status="PASS",
+           capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=1),
+    ]
+    # Both PASS — but complete.jsonl is tier-1 eligible, so tier 1 wins.
+    w2, t2 = osc_dash.pick_preferred(files2)
+    assert t2 == 1
+    assert w2["name"] == "complete.jsonl"
+
+    # All-PARTIAL same integrity: readiness > windows > mtime.
+    files3 = [
+        mk("low.jsonl", integrity_status="WARN",
+           capture_state={"label": "PARTIAL CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=500, mtime=99),
+        mk("high.jsonl", integrity_status="WARN",
+           capture_state={"label": "PARTIAL CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=501, mtime=1),
+    ]
+    w3, t3 = osc_dash.pick_preferred(files3)
+    assert t3 == 2
+    assert w3["name"] == "high.jsonl"  # equal integrity/capture/readiness; windows wins
 
 
 def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):

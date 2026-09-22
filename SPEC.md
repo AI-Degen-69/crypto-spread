@@ -1,38 +1,45 @@
-# SPEC — Issue #279: auto-pick healthiest tick file as the default backtest dataset
+# SPEC — Issue #294: Rank the least-bad tick file as preferred when no file fully qualifies
 
 ## Goal
-Every backtest/sweep replay silently mixes partial or corrupted captures with good ones,
-because the Backtest tab always defaults to "All Files (Default)". The health data to avoid
-that already exists in the verify cache (`integrity_status`, `capture_state`,
-`readiness.level`, `windows_count` per file). Make the dashboard act on it: compute a
-server-side "preferred" ranking in `/api/ticks/manifest`, badge the winner, and pre-select it
-as the Backtest dataset on first load.
+The live repository holds 6 day files, all `PARTIAL CAPTURE`. Issue #279 shipped
+`pick_preferred()` which requires `PASS` + `COMPLETE CAPTURE` to be eligible — a perfectly
+correct tier-1 rule, but it means `preferred_file` is always `null` and no file ever gets the
+star. The operator wants best-of-available: when no file meets the tier-1 bar, rank the
+least-bad available file as a tier-2 fallback so one file is always starred, badged, and
+pre-selected as the backtest default.
 
 ## Acceptance criteria
-1. `/api/ticks/manifest` returns `preferred_file` (name or `null`) and per-file
-   `is_preferred`, derived **only** from cached verify data, with the deterministic tie-break
-   `readiness.level → windows_count desc → mtime desc`.
-2. Eligibility = `integrity_status == "PASS"` AND `capture_state.label == "COMPLETE CAPTURE"`.
-   WARN/FAIL, uncached, and stale-policy files are never eligible.
-3. Tick Files table shows exactly one ★ Preferred badge when a winner exists, none otherwise.
-4. Backtest dropdown marks the preferred option with `★` and pre-selects it on fresh load
-   (also setting `window.selectedBacktestFile`); a manual selection — including All Files —
-   persists across `loadManifest()` refreshes; when nothing qualifies, default stays
-   "All Files (Default)".
-5. No change to `/api/ticks/verify`, the verify engine, readiness thresholds, backtest math,
-   or other tabs.
-6. `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q` passes.
+1. With only PARTIAL CAPTURE files present, `/api/ticks/manifest` returns the least-bad file
+   as `preferred_file` with exactly one `is_preferred: true` row.
+2. Tier-1 rule unchanged: PASS + COMPLETE CAPTURE files still outrank any partial file.
+   Stale-policy sidecars stay ineligible (no eligibility fields ⇒ no ranking).
+3. Badge and dropdown label distinguish **"★ Best available"** (tier 2) from the tier-1
+   **"★ Preferred"** star.
+4. `preferred_tier` (1 or 2) is returned alongside `preferred_file` so the UI can pick
+   the right wording without client-side guessing.
+5. `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`
+   passes.
+
+## Tier-2 total order (defined)
+Among files that fail tier-1 eligibility, rank by:
+1. `integrity_status`: PASS > WARN > everything else (FAIL, None) — PASS is better even
+   without COMPLETE CAPTURE.
+2. `capture_state.label`: COMPLETE CAPTURE > PARTIAL CAPTURE > everything else.
+3. `readiness.level`: RESEARCH_READY (2) > EXPLORATORY (1) > other/None (0).
+4. `windows_count` desc.
+5. `mtime` desc.
+Files with all eligibility fields null (no cached sidecar, or stale policy) score zero
+on every axis — they are the least-bad fallback of last resort, not actively promoted.
 
 ## Edge cases
-- Empty `run/ticks/` → `files: []`, `preferred_file: null`, UI unchanged.
-- No verify cache for any file → `preferred_file: null` (no re-verify is ever triggered).
-- All files WARN/FAIL → `preferred_file: null`.
-- Multiple PASS+COMPLETE files → total order by (level, windows_count, mtime); the files
-  list is name-sorted upstream, so equal keys resolve stably by name.
-- Stale cache: `integrity_status`, `capture_state`, and `readiness` are all gated on
-  `cache_current` (`_readiness_cache_is_current`); a stale sidecar leaves every
-  eligibility field null — ineligible is the safe default.
+- Empty `run/ticks/` → `files: []`, `preferred_file: null`, `preferred_tier: null`.
+- No verify cache for any file → all eligibility fields null; the file with highest
+  windows_count/mtime wins tier 2 (0,0,0,windows,mtime) — a valid least-bad pick.
+- All files PASS + COMPLETE → tier-1 winner as before; `preferred_tier: 1`.
+- Mix of PASS+COMPLETE and PARTIAL → tier-1 wins; `preferred_tier: 1`.
+- All files PARTIAL → tier-2 winner; `preferred_tier: 2`, badge says "Best available".
+- Single file → it always wins (tier 1 or tier 2 depending on its status).
 
 ## Explicit out of scope
-Forcing re-verify of uncached files; changing verify logic or thresholds; backtest execution
-math; the golden/pristine dataset views (issues #281/#292); new dependencies.
+Listing pristine files (sibling #295); changing verify logic or thresholds; backtest
+math; forced re-verifies; new dependencies.

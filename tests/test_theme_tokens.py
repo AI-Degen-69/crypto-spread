@@ -143,9 +143,11 @@ def test_dropdown_preferred_preselect_wiring():
 
 
 def test_preferred_badge_uses_theme_tokens():
-    """Issue #279: the ★ Preferred badge exists and colors via the --gold token."""
+    """Issue #279/#294: ★ Preferred (tier 1) and ★ Best available (tier 2) badges via --gold."""
     assert "if (f.is_preferred)" in FULL_APP_HTML
     assert "★ Preferred" in FULL_APP_HTML
+    assert "★ Best available" in FULL_APP_HTML
+    assert "d.preferred_tier === 1" in FULL_APP_HTML
     assert "color:var(--gold);font-weight:700;font-size:11px;white-space:nowrap;margin-left:6px" in FULL_APP_HTML
 
 
