@@ -61,6 +61,11 @@ class PristineGateParams:
     max_snap_interval_sec: float = 3.0
 
     def __post_init__(self) -> None:
+        """Reject non-finite, negative, or degenerate thresholds at construction.
+
+        A nan threshold would make every comparison false and silently disable the
+        gates; a zero snap interval would divide by zero in min_snaps_for.
+        """
         values = (
             self.max_gap_sec,
             self.max_start_delay_sec,
