@@ -572,6 +572,110 @@ def test_endpoints_reject_traversal_and_unlisted_subdirs(tmp_path, monkeypatch):
     assert missing.status_code == 404
 
 
+# --- Issue #292: golden dataset certification card ---------------------------
+
+
+def _write_golden_manifest(tmp_path, *, policy="old-policy", days=None):
+    """Write a golden_manifest.json the way certification would."""
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir(exist_ok=True)
+    (golden_dir / "golden_manifest.json").write_text(json.dumps({
+        "policy_version": policy,
+        "days": days or [],
+    }), encoding="utf-8")
+
+
+def test_golden_endpoint_absent_state(tmp_path, monkeypatch):
+    """Issue #292: no golden dir → explicit absent state, 200 OK, no checks."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    res = client.get("/api/ticks/golden")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["state"] == "absent"
+    assert data["reason"] == "no golden dataset yet"
+    assert data["charter"] == "docs/golden-tick-dataset.md"
+    assert data["days"] == []
+    assert data["checks"] == []
+
+
+def test_golden_endpoint_stale_policy_is_not_certified(tmp_path, monkeypatch):
+    """Issue #292: a manifest citing an old policy version is never certified."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_golden_manifest(tmp_path, policy="2020-01-01.old")
+    _write_verify_sidecar(tmp_path, "golden/ticks_2026-09-13.jsonl",
+                          status="PASS", capture_label="COMPLETE CAPTURE",
+                          level="RESEARCH_READY", windows=600)
+    data = client.get("/api/ticks/golden").json()
+    assert data["state"] == "present"
+    assert data["policy_version"] == "2020-01-01.old"
+    currency = {c["name"]: c for c in data["checks"]}
+    assert currency["policy_version_current"]["ok"] is False
+    # Everything else can pass, but the stale policy alone blocks certification.
+    assert any(c["ok"] for c in data["checks"])
+
+
+def test_golden_endpoint_certified_state(tmp_path, monkeypatch):
+    """Issue #292: healthy days + current policy → every gate checked."""
+    from scripts.verify_tick_data import READINESS_POLICY_VERSION
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_golden_manifest(tmp_path, policy=READINESS_POLICY_VERSION)
+    # Two golden days, each winning its sidecar with strong metrics.
+    for day in ("ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"):
+        target = tmp_path / "golden" / day
+        target.parent.mkdir(exist_ok=True)
+        target.write_text('{"a": 1}\n', encoding="utf-8")
+        sidecar = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME / "golden" / f"{day}.json"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps({
+            "file": f"golden/{day}",
+            "status": "PASS",
+            "capture_state": {"label": "COMPLETE CAPTURE"},
+            "readiness": {"level": "RESEARCH_READY",
+                          "policy_version": READINESS_POLICY_VERSION},
+            "windows_count": 300,
+            "valid_ticks": 40_000,
+            "corrupt_lines": 0,
+            "collector_errors": 0,
+            "time_reversals": 0,
+            "sampling_gaps_count": 0,
+            "time_blocks": ["2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17"],
+            "market_breakdown": [
+                {"series": s, "duration": 300, "windows": 60, "trades": 10}
+                for s in ("btc-up-or-down-5m", "eth-up-or-down-5m")
+            ],
+            "fingerprint": osc_dash._file_fingerprint(target),
+            "series_counts": {},
+        }), encoding="utf-8")
+    # Fresh .idx sidecars for the currency gate.
+    for day in ("ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"):
+        df = tmp_path / "golden" / day
+        (df.with_name(df.name + ".idx")).write_text("{}", encoding="utf-8")
+
+    data = client.get("/api/ticks/golden").json()
+    assert data["state"] in ("certified", "present")
+    by_name = {c["name"]: c for c in data["checks"]}
+    assert by_name["windows_total"]["n"] == 600
+    assert by_name["windows_total"]["ok"] is True
+    assert by_name["time_blocks"]["ok"] is True
+    assert by_name["valid_ticks"]["n"] == 80_000
+    assert by_name["zero_corrupt_rows"]["ok"] is True
+    assert by_name["zero_time_reversals"]["ok"] is True
+    assert by_name["policy_version_current"]["ok"] is True
+    # All 10 series must be covered — the fixture only has 2, so this is the
+    # gate that legitimately stays unchecked.
+    assert by_name["all_10_series_present"]["ok"] is False
+
+
+def test_golden_card_frontend_invariants():
+    """Issue #292: the SPA ships the golden card container, loader and badge."""
+    html = client.get("/").text
+    assert "goldenCardWrap" in html
+    assert "loadGoldenCard" in html
+    assert "/api/ticks/golden" in html
+    assert "Golden Dataset" in html
+
+
 def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeypatch):
     """Issue #279/#294: empty dir → preferred_file is None; otherwise tier 2 picks least-bad."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)

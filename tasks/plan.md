@@ -1,98 +1,96 @@
-# Plan — Issue #295: List pristine tick files in the dashboard as distinct datasets
+# Plan — Issue #292: Golden dataset card in Tick Files with n/N certification checklist
 
-Branch: `i295/list-pristine-tick-files-in-the-dashboard` | Issue: #295
-Stack: Python 3, FastAPI, pytest · Size: **Small** (one module `server/osc_dash.py` + its test file;
-disambiguation design already settled in the CodeRabbit plan on the issue) ·
-Task type: **Code** (Backend/Logic + light embedded-frontend touch)
+Branch: `i292/golden-dataset-card-tick-files` | Issue: #292
+Stack: Python 3, FastAPI, pytest · Size: **Standard** (new backend endpoint + new card in the
+embedded frontend + test coverage; one architectural decision already settled by the issue's
+defaults: card at the top of Tick Files, golden-shaped fallback) ·
+Task type: **Code** (Backend/Logic + Frontend)
 
-## Resolved inputs (from issue + CodeRabbit plan, no open questions)
+## Resolved inputs (from issue + charter `docs/golden-tick-dataset.md`)
 
-- Display label AND request value for a pristine file = the relative path
-  `pristine/<basename>` (single string, round-trips via `encodeURIComponent`).
-- Verify-cache sidecar mirrors the subdirectory: `.verify_cache/pristine/<basename>.json`,
-  parent dirs created on write (collision-free by construction).
-- Resolver allow-list contains exactly one approved subdirectory: `pristine`.
-  Traversal (`..`, `\`, absolute, leading `/`), >2 segments, and unlisted first segments stay rejected.
-- Preferred ranking needs no code change — it keys on dict fields; `is_preferred` is exact `name` equality.
-- Delete action for pristine entries is omitted (delete endpoint stays top-level-only; out of scope).
-- Only `pristine/` is scanned; `golden/`, `quarantine/`, `.verify_cache/` stay hidden.
+- Card location: top of the Tick Files tab (`tab-ticks`), rendered by a new endpoint
+  `GET /api/ticks/golden` reading `run/ticks/golden/` and `golden_manifest.json` (charter §3.1).
+- States: `absent` (explicit "no golden dataset yet" card, checklist unchecked, pointer to the
+  charter — not an error), `present`, `certified` (every §1.1/§1.2 gate checked).
+- Set targets (charter §1.2, n/N): windows total n/500, windows-per-market-pair n/50 (worst
+  pair), time blocks n/5, valid ticks n/50,000, sampling gap rate ≤ 0.05, all 10 series present
+  (`strategy/series.py:SERIES`).
+- Per-day gates (charter §1.1): every golden day PASS + COMPLETE CAPTURE, zero corrupt rows,
+  zero collector errors, zero time reversals.
+- Certification currency: manifest `policy_version` == installed `READINESS_POLICY_VERSION`
+  (`scripts/verify_tick_data.py:32`) — stale → unchecked; per-day `.idx` sidecars fresh
+  (charter §3 step 3, `backtest.index.is_fresh`).
+- Data sources: cached verify sidecars via `_read_verify_cache` / `_verify_sidecar_path`
+  (Issue #295's relative-name keys) — **no full re-stream of day files on dashboard load**.
+- Out of scope: creating/certifying the golden set (#281), verify/threshold changes, pristine
+  view, backtest engine, collector changes.
 
 ## Tasks (atomic slices, dependency-ordered)
 
-### T1 — Shared allow-listed tick-file resolver `[Backend/Logic]` (S)
-- File: `server/osc_dash.py` (near the verify-cache helpers).
-- Add `_TICKS_SUBDIR_ALLOWLIST = {"pristine"}` and `_resolve_tick_file(file: str)` returning a
-  discriminated result: `("ok", Path)` / `("invalid", None)` / `("not_found", None)`.
-- Rejects: backslash, `..`, absolute paths, leading `/`, >2 segments, first segment not in allow-list;
-  keeps the containment check (`relative_to(TICKS_DIR.resolve())`, `ValueError` → invalid).
-- Verification: unit-level asserts in `tests/test_osc_dash_integration.py` via the endpoint tests (T5).
+### T1 — `GET /api/ticks/golden` endpoint `[Backend/Logic]` (M)
+- File: `server/osc_dash.py`.
+- Reads `run/ticks/golden/`: absent → `{"state": "absent", ...}` with the checklist shape but
+  everything unchecked and `reason: "no golden dataset yet"` (never an error).
+- Present → reads `golden_manifest.json` (policy_version, per-day verdicts, sha256s), and each
+  golden day's verify verdict from its cached sidecar (relative-name key, e.g.
+  `golden/ticks_<day>.jsonl`); computes the §1.1 per-day gates and §1.2 set metrics
+  (windows total, worst-pair windows from `market_breakdown`, time blocks, valid ticks,
+  sampling gap rate, series coverage vs `strategy/series.py:SERIES`).
+- Certification currency: policy version match + `.idx` freshness per day.
+- Response carries `state`, `manifest`, `days[]`, `checks[]` (each: name, measured, required,
+  ok, n/N formatting fields) — the frontend only renders, never computes.
+- Verification: T4 tests (absent / stale-policy / certified).
 - Depends on: —
 - [x] Done
 
-### T2 — Route the three endpoints through the resolver `[Backend/Logic]` (S)
-- File: `server/osc_dash.py`.
-- `api_backtest` (~:1360), `api_backtest_sweep` (~:1521), `api_ticks_verify` (~:2487):
-  replace duplicated inline `"/" in file` guards with `_resolve_tick_file`, mapping each result to the
-  endpoint's existing error shape/status code (messages preserved verbatim so current tests pass).
-- Verification: existing rejection tests in `tests/test_osc_dash_integration.py` still pass unchanged.
+### T2 — Golden card UI at the top of Tick Files `[Frontend]` (M)
+- File: `server/osc_dash.py` (embedded `FULL_APP_HTML`).
+- Container `<div id="goldenCardWrap">` inserted at the top of `tab-ticks`, filled by
+  `loadGoldenCard()` (fetch `/api/ticks/golden`, called on tab open alongside `loadManifest()`).
+- Renders: state badge (absent / present / certified), policy-version currency line (stale →
+  explicit unchecked warning), and the checklist — every item with ✓/✗, measured-vs-required,
+  and n/N progress format (e.g. `2,750 / 500`), grouped: Set (§1.2) / Per-day (§1.1) /
+  Certification currency.
+- Absent state: explicit "no golden dataset yet" with the checklist shown unchecked and a
+  pointer to `docs/golden-tick-dataset.md` — no error styling.
+- Verification: T4 tests assert card HTML/JS invariants; visual check in Station IV browser gate.
 - Depends on: T1
 - [x] Done
 
-### T3 — Subpath-aware verify-cache sidecars `[Backend/Logic]` (S)
+### T3 — Wire into the Tick Files tab lifecycle + docs pointer `[Backend/Logic]` (XS)
 - File: `server/osc_dash.py`.
-- `_verify_sidecar_path` accepts a relative name (`pristine/<basename>`) → `TICKS_DIR / .verify_cache / f"{rel}.json"`.
-- `_write_verify_sidecar` derives the relative name from `target.relative_to(TICKS_DIR)` and
-  `mkdir(parents=True, exist_ok=True)` on the sidecar parent.
-- Update sidecar-path constructions that use `f.name` / `entry["name"]` (`_aggregate_ticks` cache reads
-  ~:490–503, manifest read ~:623) to go through `_verify_sidecar_path` with the relative name.
-- `_VERIFY_REPORT_CACHE` stays keyed by the relative name the endpoints receive.
-- Verification: T5 sidecar-mirroring asserts.
-- Depends on: T1
+- `loadGoldenCard()` runs when the ticks tab opens (same hook that calls `loadManifest()`),
+  and after `executeDeleteFileDirect`/verify rescans that could change golden contents —
+  simplest correct trigger: tab-open + the existing `loadManifest()` call sites.
+- Verification: targeted tests.
+- Depends on: T2
 - [x] Done
 
-### T4 — Manifest listing of pristine files + frontend carry-through `[Backend/Logic] + [Frontend]` (M)
-- File: `server/osc_dash.py`.
-- `api_ticks_manifest` (~:585–662): after the top-level scan, scan `TICKS_DIR / "pristine"` when present;
-  same filters (`.jsonl`/`.gz`/`.jsonl.gz`, skip `.idx`, `is_file()`); entry `name = "pristine/<basename>"`;
-  stats computed from the real path; add `is_pristine: True`; sidecar/fingerprint read through the relative
-  name so `market_breakdown`/`readiness`/`integrity_status`/`capture_state`/`windows_count` populate exactly
-  like top-level entries. No recursion into other subdirectories.
-- Confirm `pick_preferred`/`_file_rank_key` rank pristine entries unchanged (dict-field keyed);
-  `is_preferred` by exact `name` equality (pristine can win and be starred).
-- Embedded frontend `loadManifest()` (~:5660): `f.name` stays option label+value (encoder handles `/`);
-  DOM ids (`verify_arrow_*` etc.) built from a sanitized token (`/` → `_`); delete action omitted for
-  `is_pristine` entries.
-- Verification: T5 manifest/ranking tests; dashboard smoke via targeted tests (UI polish is Station IV's browser gate).
-- Depends on: T1, T3
-- [x] Done
-
-### T5 — Tests with pristine fixtures `[Tests]` (M)
+### T4 — Endpoint + card tests `[Tests]` (M)
 - File: `tests/test_osc_dash_integration.py`.
-- Extend `_write_verify_sidecar` helper (:372) to accept a relative name like `pristine/ticks_<day>.jsonl`,
-  create the file under `pristine/` and the sidecar at the mirrored path.
-- New tests:
-  1. **Manifest disambiguation:** same basename at top level and in `pristine/` → both listed with distinct
-     `name`s; pristine entry carries its own `readiness`/`integrity_status`.
-  2. **Ranking:** pristine entry wins → `preferred_file == "pristine/<basename>"`, `is_preferred is True`.
-  3. **Resolution:** `/api/backtest` and `/api/backtest/sweep` with `pristine/<basename>` replay the pristine
-     file (not the day file); `..` and backslash values still rejected.
+- Three states: **absent-golden** (no dir → `state: absent`, checklist unchecked, 200 OK),
+  **stale-policy** (golden manifest with old `policy_version` → currency check unchecked),
+  **certified** (fixture manifest + fingerprint-matched sidecars → all §1.1/§1.2 checks ok).
+- Assert the frontend ships the card container + `loadGoldenCard` and renders `n/N` progress
+  (HTML smoke assertions like the existing SPA tests).
 - Verification: `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`.
-- Depends on: T2, T4
+- Depends on: T1, T2
 - [x] Done
 
-**Checkpoints:** after T2 (resolver live, all existing tests green) and after T4 (manifest lists pristine).
+**Checkpoint:** after T1 (endpoint contract proven by tests-first fixtures) and after T3.
 
 ## Explicitly out of scope (per issue)
-Least-bad ranking tiers for pristine, extractor/golden-charter changes, verify-engine changes,
-delete-endpoint routing, any collector change.
+Golden capture/certification itself (#281); verify logic or threshold changes; pristine view;
+backtest engine changes; collector changes; a sixth sidebar tab.
 
 ## Improvement proposal (adopt-by-default, evidence-based)
-The CodeRabbit plan's Task 3 says to update "every other sidecar-path construction that currently uses
-`f.name` or `entry[\"name\"]`" — evidence from the issue: "the backtest resolves datasets by bare name
-(`TICKS_DIR / file`), so listing them needs a disambiguation design". Proposal: implement T1's resolver as the
-*single* resolution point and have T4's manifest read sidecars via the same relative-name helper (rather than
-patching each `f.name` construction in place), so future subdirectories (e.g. `golden/` for #292) are a
-one-line allow-list change. This is simplification within the issue's own scope — adopted.
+The issue says the endpoint "reads from verify caches (no full re-stream of day files on
+dashboard load)" and lists `_read_verify_cache` / `_aggregate_ticks` (374–503) as the pattern.
+Proposal: reuse Issue #295's relative-name sidecar keys (`_verify_sidecar_path`) for golden
+days too — golden files live under `golden/`, so their sidecars land at
+`.verify_cache/golden/<day>.json` with zero new cache machinery, and the certification check
+reuses `backtest.index.is_fresh` for sidecar currency. Simplification within the issue's own
+scope — adopted.
 
 ## Rejections recorded
 None — no proposal was rejected this session.
