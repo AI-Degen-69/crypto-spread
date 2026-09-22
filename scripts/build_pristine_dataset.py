@@ -43,7 +43,6 @@ DEFAULT_OUT_DIR = DEFAULT_TICKS_DIR / "pristine"
 MANIFEST_NAME = "pristine_manifest.json"
 
 DAY_RE = re.compile(r"^ticks_(\d{4}-\d{2}-\d{2})\.jsonl(\.gz)?$")
-CID_RE = re.compile(r'"cid"\s*:\s*"([^"]+)"')
 
 VERIFY_POLICY_NOTE = (
     "gate defaults mirror scripts/verify_tick_data.verify_window_continuity "
@@ -60,6 +59,19 @@ class PristineGateParams:
     max_gap_sec: float = 6.0
     max_start_delay_sec: float = 5.0
     max_snap_interval_sec: float = 3.0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.max_gap_sec,
+            self.max_start_delay_sec,
+            self.max_snap_interval_sec,
+        )
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("gate thresholds must be finite")
+        if self.max_gap_sec < 0 or self.max_start_delay_sec < 0:
+            raise ValueError("gap and delay thresholds must be non-negative")
+        if self.max_snap_interval_sec <= 0:
+            raise ValueError("max snap interval must be positive")
 
 
 def min_snaps_for(duration: float, params: PristineGateParams) -> int:
@@ -88,16 +100,6 @@ def _open_tick_text(path: Path):
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
     return open(path, "r", encoding="utf-8", errors="replace")
-
-
-def _cid_of_line(raw: str) -> str | None:
-    """Extract `cid` from one raw tick line without building the full dict.
-
-    Finds `"cid": "<value>"` near the line head; a malformed line yields None and is
-    excluded from output exactly like iter_ticks would exclude it.
-    """
-    m = CID_RE.search(raw[:1024])
-    return m.group(1) if m else None
 
 
 def day_key_of(ts: float) -> str:
@@ -138,7 +140,7 @@ def _new_window_state(first_tick: dict[str, Any], source_name: str) -> dict[str,
         "gaps_count": 0,
         "max_gap": 0.0,
         "time_reversals": 0,
-        "error_ticks": 0,
+        "error_ticks": 1 if first_tick.get("err") else 0,
         "tick_count": 1,
         "source_files": [source_name] if source_name else [],
         "_seen": {source_name} if source_name else set(),
@@ -169,7 +171,9 @@ def _add_tick_to_state(
 
 
 def scan_windows(
-    sources: Iterable[tuple[str, Iterable[dict[str, Any]]]], max_gap_sec: float = 6.0
+    sources: Iterable[tuple[str, Iterable[dict[str, Any]]]],
+    max_gap_sec: float = 6.0,
+    quiet: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Aggregate ticks into one scalar state per cid, merged across source files.
 
@@ -180,7 +184,7 @@ def scan_windows(
     """
     states: dict[str, dict[str, Any]] = {}
     for source_name, ticks in sources:
-        if source_name:
+        if source_name and not quiet:
             print(f"pass1: scanning {source_name}", flush=True)
         for tick in ticks:
             cid = tick.get("cid")
@@ -303,7 +307,9 @@ def build_pristine_dataset(
     from scripts.verify_tick_data import verify_ticks_dir  # local: heavy module import
 
     states = scan_windows(
-        ((p.name, iter_ticks([p])) for p in src_files), params.max_gap_sec
+        ((p.name, iter_ticks([p])) for p in src_files),
+        params.max_gap_sec,
+        quiet=quiet,
     )
     verdicts = [evaluate_window_state(st, params) for st in states.values()]
     verdicts.sort(key=lambda v: (v["start_ts"], v["cid"]))
@@ -325,7 +331,12 @@ def build_pristine_dataset(
     # to the capture and the pass stays O(1) in memory per line.
     out_dir.mkdir(parents=True, exist_ok=True)
     # A re-run must not leave day files from a previous build that this one no longer
-    # produces (thresholds changed, sources removed) — the manifest would lie.
+    # produces (thresholds changed, sources removed) — the manifest would lie. The OLD
+    # manifest is invalidated FIRST: between pruning and the fresh manifest write there
+    # must be no moment where a manifest certifies missing output files.
+    old_manifest = out_dir / MANIFEST_NAME
+    if old_manifest.exists():
+        old_manifest.unlink()
     for stale in out_dir.glob("ticks_*.jsonl*"):
         if DAY_RE.match(stale.name):
             stale.unlink()
@@ -340,13 +351,13 @@ def build_pristine_dataset(
                     raw = raw.strip()
                     if not raw:
                         continue
-                    head = _cid_of_line(raw)
-                    if head is None or head not in passed_cids:
-                        continue
                     try:
                         tick = json.loads(raw)
                     except ValueError:
                         continue  # corrupt line: pass 1 excluded it too, stay consistent
+                    cid = tick.get("cid")
+                    if not cid or cid not in passed_cids:
+                        continue
                     day = day_key_of(tick.get("start_ts", 0.0) or 0.0)
                     fh = out_files.get(day)
                     if fh is None:
@@ -392,6 +403,15 @@ def build_pristine_dataset(
         "total_time_reversals", "total_collector_errors",
     )
     manifest["output_verify"] = {k: output_verify[k] for k in ov_keys}
+
+    # The manifest is a certificate: never publish one that certifies a failing
+    # dataset (CodeRabbit #7654). A failed self-verification aborts the build —
+    # the day files stay on disk for inspection but carry no PASS manifest.
+    if output_verify.get("status") != "PASS":
+        raise RuntimeError(
+            f"output verification failed ({output_verify.get('status')}): "
+            "refusing to write a PASS-less manifest over a failing dataset"
+        )
 
     write_json_atomic(out_dir / MANIFEST_NAME, manifest)
     if not quiet:

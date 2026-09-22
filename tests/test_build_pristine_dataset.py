@@ -72,6 +72,17 @@ class TestPristineGateParams:
         with pytest.raises(Exception):
             p.max_gap_sec = 1.0
 
+    def test_rejects_non_finite_and_bad_thresholds(self):
+        # CodeRabbit #7600: nan would silently disable every comparison gate.
+        with pytest.raises(ValueError):
+            PristineGateParams(max_gap_sec=float("nan"))
+        with pytest.raises(ValueError):
+            PristineGateParams(max_start_delay_sec=float("inf"))
+        with pytest.raises(ValueError):
+            PristineGateParams(max_gap_sec=-1.0)
+        with pytest.raises(ValueError):
+            PristineGateParams(max_snap_interval_sec=0.0)
+
 
 class TestEvaluateWindowGates:
     def test_pristine_window_passes(self):
@@ -117,6 +128,14 @@ class TestEvaluateWindowGates:
     def test_collector_error_fails(self):
         ticks = pristine_ticks()
         ticks[50] = make_tick(ts=50.0, err="up_book: boom")
+        v = evaluate_window_gates(ticks, PristineGateParams())
+        assert "collector_error" in v["failing_gates"]
+        assert v["error_ticks"] == 1
+
+    def test_collector_error_on_first_tick_fails(self):
+        # CodeRabbit #7633: the scan's first tick must count too, not only folds.
+        ticks = pristine_ticks()
+        ticks[0] = make_tick(ts=0.0, err="up_book: boom")
         v = evaluate_window_gates(ticks, PristineGateParams())
         assert "collector_error" in v["failing_gates"]
         assert v["error_ticks"] == 1
@@ -284,6 +303,23 @@ class TestWritePristineDataset:
         ticks_dir, _, _ = two_day_dir
         with pytest.raises(ValueError):
             build_pristine_dataset(ticks_dir, ticks_dir)  # exact overlap clobbers sources
+
+    def test_fail_verify_leaves_no_pass_manifest(self, two_day_dir):
+        # CodeRabbit #7654: a failing self-verify must not publish a manifest.
+        ticks_dir, _, _ = two_day_dir
+        out = ticks_dir / "pristine"
+        import scripts.verify_tick_data as vtd
+        orig = vtd.verify_ticks_dir
+        vtd.verify_ticks_dir = lambda d: {"status": "WARN", "files_checked": 1,
+            "total_valid_ticks": 0, "total_windows": 0, "total_late_starts": 0,
+            "total_early_cutoffs": 0, "total_sampling_gaps": 0,
+            "total_time_reversals": 0, "total_collector_errors": 0}
+        try:
+            with pytest.raises(RuntimeError):
+                build_pristine_dataset(ticks_dir, out)
+        finally:
+            vtd.verify_ticks_dir = orig
+        assert not (out / MANIFEST_NAME).exists()
 
     def test_empty_input_dir_exits_clean(self, tmp_path):
         with pytest.raises(ValueError):

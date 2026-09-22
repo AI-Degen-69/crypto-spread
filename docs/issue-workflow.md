@@ -74,7 +74,7 @@ Raw idea in chat → researched, shaped, published GitHub issue with the
 ## 2. Discover & pick — `x-workflow-issue` (Station X)
 
 Invoked with **no arguments**, `x-workflow-issue` is the discovery step, not a
-silent pickup: it lists every open issue (`gh issue list --state open --limit
+silent pickup: it lists up to 50 open issues (`gh issue list --state open --limit
 50`), groups them, recommends an execution order, and calls out the single
 next issue — then waits for you to choose. Pass an issue number only after
 seeing the inventory. Robert's phrasing: **"work issue."**
@@ -153,7 +153,7 @@ Zero human in the loop otherwise. Robert's phrasing: **"PR babysitter."**
 
 After Station V reports MERGED, run the `vi-prune-artifacts` skill: it
 deletes per-issue artifacts whose work is CLOSED and unreferenced —
-`docs/issues/<id>-*-*.html` for closed issues, orphaned scratch drafts —
+`docs/issues/<id>-*.html` for closed issues, orphaned scratch drafts —
 while always keeping dated finding reports, knowledge docs, and anything
 referenced from surviving documentation. Robert's phrasing: **"prune."**
 
