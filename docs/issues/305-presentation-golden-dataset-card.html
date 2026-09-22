@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>מחוון האיכות הזהוב — כרטיס ה-Golden Dataset (#305)</title>
+<style>
+:root{--ink:#eaf1f6;--muted:#9aabb8;--bg:#0b1117;--panel:#121c25;--panel2:#172530;--line:#29404d;
+--gold:#f3ba2f;--gold-ink:#2a2000;--good:#55d6c2;--bad:#f0684d;--shadow:0 20px 55px rgba(0,0,0,.28)}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:16px/1.65 "Segoe UI",Tahoma,sans-serif}
+main{max-width:1000px;margin:auto;padding:40px 20px 70px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:26px;margin-top:24px;box-shadow:var(--shadow)}
+.kicker{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--gold);font-weight:700}
+h1{font-size:1.7rem;line-height:1.3;margin:.4rem 0 .6rem}
+.lede{color:var(--muted);font-size:1.02rem;margin:0}
+.badge{display:inline-block;padding:.25rem .8rem;border-radius:999px;font-size:.75rem;font-weight:700}
+.badge.gold{background:rgba(243,186,47,.16);color:var(--gold);border:1px solid var(--gold)}
+.badge.flat{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+.figure{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel2)}
+.figure-label{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:.8rem 1rem 0}
+.figure-controls{display:flex;gap:.5rem;align-items:center;padding:.6rem 1rem;border-top:1px solid var(--line);flex-wrap:wrap}
+.ctrl-btn{font-size:.75rem;padding:.4rem .9rem;border-radius:8px;border:1px solid var(--line);background:#fff;color:#111;cursor:pointer}
+.ctrl-btn.primary{background:var(--gold);border-color:var(--gold);color:var(--gold-ink);font-weight:700}
+.figure-caption{font-size:.78rem;color:var(--muted);padding:.6rem 1rem .8rem;border-top:1px solid var(--line)}
+.checklist{padding:.4rem 1rem .9rem}
+.row{display:flex;align-items:center;gap:10px;padding:.55rem 0;border-bottom:1px solid var(--line);font-size:.95rem}
+.row:last-child{border-bottom:none}
+.row .mark{width:22px;text-align:center;font-weight:800}
+.row .name{flex:1}
+.row .val{font-variant-numeric:tabular-nums;font-size:.85rem;white-space:nowrap}
+.ok{color:var(--good)} .no{color:var(--bad)}
+.callout{border-left:3px solid var(--gold);background:rgba(255,255,255,.04);padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin-top:18px;font-size:.92rem;color:var(--muted)}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+@media(max-width:720px){.steps{grid-template-columns:1fr}}
+.step{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:.9rem 1rem;font-size:.9rem}
+.step b{display:block;color:var(--gold);margin-bottom:.3rem;font-size:.8rem;letter-spacing:.04em}
+footer{color:var(--muted);font-size:.8rem;margin-top:26px;text-align:center}
+a{color:var(--gold)}
+</style>
+</head>
+<body>
+<main>
+  <span class="kicker">עדכון שהוכנס למערכת · בקשה #292</span>
+  <h1>מחוון האיכות הזהוב: עכשיו אפשר לראות בלחיצה אם סט האימון המרכזי תקין</h1>
+  <p class="lede">קודם, דרישות האיכות של סט הנתונים הזהוב חיו רק במסמך תיעוד — מי שפתח את הדשבורד לא ידע אם הסט קיים, כמה חסר לו, ואם האישור שלו עדיין בתוקף. עכשיו יש כרטיס חי בראש לשונית הקבצים שמראה את כל זה בעיניים.</p>
+
+  <div class="panel">
+    <div class="figure">
+      <div class="figure-label">הכרטיס בפועל — לוחצים על המצבים ורואים איך הוא מתנהג</div>
+      <div class="figure-controls">
+        <button class="ctrl-btn primary" id="b-absent">אין סט זהוב</button>
+        <button class="ctrl-btn" id="b-partial">יש סט — חסר לו</button>
+        <button class="ctrl-btn" id="b-cert">הכל תקין</button>
+      </div>
+      <div class="checklist" id="card"></div>
+      <div class="figure-caption" id="cap">מצב "אין סט זהוב": רשימת הדרישות מוצגת כולה מסומנת אדום, עם הסבר קצר — זו לא שגיאה, זו נקודת פתיחה.</div>
+    </div>
+    <div class="steps">
+      <div class="step"><b>איפה?</b> דשבורד ← לשונית Tick Files ← הכרטיס הזהוב בראש העמוד.</div>
+      <div class="step"><b>מה רואים?</b> כל דרישת איכות כשורה: סימן ✓/✗, הערך הנמדד מול הנדרש, והתקדמות בפורמט "הושג / יעד".</div>
+      <div class="step"><b>למה זה טוב?</b> בלי לפתוח מסמכים ובלי לנחש — המחוון ניזון מהדוחות השמורים, כך שטעינת הדשבורד נשארת מהירה.</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="figure-label">שלושת המצבים שהכרטיס מציג</div>
+    <div class="checklist">
+      <div class="row"><span class="mark no">✗</span><span class="name"><b>אין סט זהוב עדיין</b> — הכרטיס מציג את כל הדרישות מסומנות אדום ומסביר מה צריך כדי להתחיל. לא שגיאה.</span></div>
+      <div class="row"><span class="mark" style="color:var(--gold)">◆</span><span class="name"><b>יש סט — עוד לא אושר</b> — רואים בדיוק איזו דרישה חוסמת: למשל יומיים בלבד כשנדרשים חמישה, או אישור שניתן תחת חוקי מדידה ישנים.</span></div>
+      <div class="row"><span class="mark ok">✓</span><span class="name"><b>מאושר</b> — כל הדרישות סגורות והחוקיות של האישור בתוקף. רק אז כדאי לבנות על הסט הזה.</span></div>
+    </div>
+  </div>
+
+  <div class="callout">נקודת אמת אחת: הלוגיקה שקובעת אם דרישה עברה חיה בצד השרת בלבד — המסך רק מציג את התוצאה. כך שני הצדדים לעולם לא יסתרו זה את זה.</div>
+
+  <footer>עדכון #305 (מוזג) · בקשה #292 · נבדק: 178 בדיקות אוטומטיות ירוקות · תיעוד הדרישות: docs/golden-tick-dataset.md</footer>
+</main>
+<script>
+(function(){
+  var card=document.getElementById('card'),cap=document.getElementById('cap');
+  var BTNS={absent:'b-absent',partial:'b-partial',cert:'b-cert'};
+  var CAPS={
+    absent:'מצב "אין סט זהוב": רשימת הדרישות מוצגת כולה מסומנת אדום, עם הסבר קצר — זו לא שגיאה, זו נקודת פתיחה.',
+    partial:'מצב "יש סט — חסר לו": רואים את הערך הנמדד מול היעד בכל שורה, ואת הדרישה שחוסמת את האישור.',
+    cert:'מצב "הכל תקין": כל השורות ירוקות, כולל חוקיות האישור — הסט הזה מוכן לשימוש.'
+  };
+  function row(name,measured,required,ok,n){
+    var mark=ok?'<span class="mark ok">✓</span>':'<span class="mark no">✗</span>';
+    var val;
+    if(n){val=measured.toLocaleString('he')+' / '+required.toLocaleString('he');}
+    else{val=measured+' מול '+required;}
+    return '<div class="row">'+mark+'<span class="name">'+name+'</span><span class="val '+(ok?'ok':'no')+'">'+val+'</span></div>';
+  }
+  function render(state){
+    var h='';
+    var badge=state==='cert'?'<span class="badge gold">מאושר</span>'
+      :state==='partial'?'<span class="badge gold" style="background:rgba(243,186,47,.08)">יש סט · עוד לא אושר</span>'
+      :'<span class="badge flat">אין סט זהוב עדיין</span>';
+    h+='<div style="display:flex;align-items:center;gap:10px;margin:.6rem 0 .8rem">'+badge
+      +'<span style="font-size:.78rem;color:var(--muted)">גרסת חוקי המדידה: '+(state==='absent'?'— (האישור עוד לא רץ)':'בתוקף')+'</span></div>';
+    if(state==='absent'){
+      h+=row('סך חלונות אימון',0,500,false,true);
+      h+=row('חלונות לכל זוג שווקים (החלש)',0,50,false,true);
+      h+=row('ימי מדידה שונים',0,5,false,true);
+      h+=row('תקינות המדידה בתוקף','לא','נדרש',false,false);
+      h+='<div style="font-size:.82rem;color:var(--muted);padding-top:.6rem">אין תיקיית סט זהוב במערכת. הדרישות מוגדרות במסמך ה-charter והאיסוף מתואם בבקשה #281.</div>';
+    }else if(state==='partial'){
+      h+=row('סך חלונות אימון',2750,500,true,true);
+      h+=row('חלונות לכל זוג שווקים (החלש)',38,50,false,true);
+      h+=row('ימי מדידה שונים',2,5,false,true);
+      h+=row('קצב פערי דגימה','0.8%','עד 5%',true,false);
+      h+=row('תקינות המדידה בתוקף','כן','נדרש',true,false);
+    }else{
+      h+=row('סך חלונות אימון',2750,500,true,true);
+      h+=row('חלונות לכל זוג שווקים (החלש)',64,50,true,true);
+      h+=row('ימי מדידה שונים',6,5,true,true);
+      h+=row('קצב פערי דגימה','0.3%','עד 5%',true,false);
+      h+=row('תקינות המדידה בתוקף','כן','נדרש',true,false);
+    }
+    card.innerHTML=h;
+    cap.textContent=CAPS[state];
+    for(var k in BTNS){document.getElementById(BTN[k]||BTNS[k]).classList.toggle('active',k===state);}
+  }
+  var BTN={absent:'b-absent',partial:'b-partial',cert:'b-cert'};
+  document.getElementById('b-absent').addEventListener('click',function(){render('absent')});
+  document.getElementById('b-partial').addEventListener('click',function(){render('partial')});
+  document.getElementById('b-cert').addEventListener('click',function(){render('cert')});
+  render('absent');
+})();
+</script>
+</body>
+</html>
