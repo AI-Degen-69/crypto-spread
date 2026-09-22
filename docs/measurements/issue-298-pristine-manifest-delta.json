@@ -1,0 +1,142 @@
+{
+  "issue": 298,
+  "generated": "2026-09-22",
+  "method": "window identity match on (cid, series, slug, duration, start_ts); dropped = passed(old) AND NOT passed(new); source of truth: .pristine_baseline_manifest.json snapshot vs run/ticks/pristine/pristine_manifest.json",
+  "totals": {
+    "windows_total": {
+      "old": 6129,
+      "new": 5791
+    },
+    "windows_passed": {
+      "old": 5042,
+      "new": 4910
+    },
+    "ticks_written": {
+      "old": 1485319,
+      "new": 1428888
+    }
+  },
+  "per_day": [
+    {
+      "start_day": "2026-09-13",
+      "windows_total_old": 550,
+      "windows_total_new": 550,
+      "windows_passed_old": 425,
+      "windows_passed_new": 396,
+      "dropped_passed": 29,
+      "source_file_identical": true
+    },
+    {
+      "start_day": "2026-09-14",
+      "windows_total_old": 1700,
+      "windows_total_new": 1700,
+      "windows_passed_old": 1504,
+      "windows_passed_new": 1470,
+      "dropped_passed": 34,
+      "source_file_identical": true
+    },
+    {
+      "start_day": "2026-09-15",
+      "windows_total_old": 1695,
+      "windows_total_new": 1695,
+      "windows_passed_old": 1438,
+      "windows_passed_new": 1385,
+      "dropped_passed": 53,
+      "source_file_identical": true
+    },
+    {
+      "start_day": "2026-09-18",
+      "windows_total_old": 30,
+      "windows_total_new": 30,
+      "windows_passed_old": 10,
+      "windows_passed_new": 10,
+      "dropped_passed": 0,
+      "source_file_identical": true
+    },
+    {
+      "start_day": "2026-09-20",
+      "windows_total_old": 399,
+      "windows_total_new": 399,
+      "windows_passed_old": 248,
+      "windows_passed_new": 244,
+      "dropped_passed": 4,
+      "source_file_identical": true
+    },
+    {
+      "start_day": "2026-09-21",
+      "windows_total_old": 1755,
+      "windows_total_new": 1417,
+      "windows_passed_old": 1417,
+      "windows_passed_new": 1405,
+      "dropped_passed": 12,
+      "source_file_identical": false
+    }
+  ],
+  "dropped_passed_windows_total": 132,
+  "dropped_by_day": {
+    "2026-09-13": 29,
+    "2026-09-14": 34,
+    "2026-09-15": 53,
+    "2026-09-20": 4,
+    "2026-09-21": 12
+  },
+  "invariant_breaks_total": 0,
+  "bounds_violation_windows_total_new": 158,
+  "bounds_violation_by_day": {
+    "2026-09-13": 39,
+    "2026-09-14": 37,
+    "2026-09-15": 60,
+    "2026-09-18": 1,
+    "2026-09-20": 9,
+    "2026-09-21": 12
+  },
+  "newly_added_passed_windows": 0,
+  "source_files_sha256": {
+    "ticks_2026-09-13.jsonl": {
+      "old_sha256": "f36262b278ad4305504887a39762bb3908f3244a67a0db33ba9ccf63d0562eb2",
+      "new_sha256": "f36262b278ad4305504887a39762bb3908f3244a67a0db33ba9ccf63d0562eb2",
+      "identical": true
+    },
+    "ticks_2026-09-14.jsonl": {
+      "old_sha256": "5414b2dfde2ceee6ed26466229e227c7ea46266c6ac1f6c94bd82dba7a9b5867",
+      "new_sha256": "5414b2dfde2ceee6ed26466229e227c7ea46266c6ac1f6c94bd82dba7a9b5867",
+      "identical": true
+    },
+    "ticks_2026-09-15.jsonl": {
+      "old_sha256": "573e7b2ddf70c04f3a962984265fc51eba82b930ae4d7d5450e512f58ea67efc",
+      "new_sha256": "573e7b2ddf70c04f3a962984265fc51eba82b930ae4d7d5450e512f58ea67efc",
+      "identical": true
+    },
+    "ticks_2026-09-18.jsonl": {
+      "old_sha256": "178133b886540c3ec8bf97d371cab7178f288ebb12d7a768025a4ed10ac7004d",
+      "new_sha256": "178133b886540c3ec8bf97d371cab7178f288ebb12d7a768025a4ed10ac7004d",
+      "identical": true
+    },
+    "ticks_2026-09-20.jsonl": {
+      "old_sha256": "083a7ac73e777460507fbb977ec94656b2955c287abf3338a839b6ca79a234a6",
+      "new_sha256": "083a7ac73e777460507fbb977ec94656b2955c287abf3338a839b6ca79a234a6",
+      "identical": true
+    },
+    "ticks_2026-09-21.jsonl": {
+      "old_sha256": "8d1aacdf8719d6a1160414ac04d403907a034fe700fbeeabd488e45bbe61aeb7",
+      "new_sha256": "764a5e658f824400ebcf3cf1beade3d5ee0aab685273a5532a29f3514f5757a4",
+      "identical": false
+    }
+  },
+  "source_files_all_identical": false,
+  "caveat_2026_09_21": {
+    "source_file_changed_before_rebuild": true,
+    "detail": "ticks_2026-09-21.jsonl differs from the baseline-snapshot hash (rewritten/backfilled before this rebuild, mtime 2026-09-22 15:09). 338 windows that FAILED in the old manifest are absent from the new one (gates they failed then: sampling_gap 320, collector_error 8, early_cutoff 10); the repaired source no longer produces them. All 1,405 windows that passed before and still exist pass now; only 12 passed-before windows were dropped, all carrying bounds_violation.",
+    "vanished_previously_failing_windows": 338,
+    "vanished_by_then_gate": {
+      "collector_error": 8,
+      "early_cutoff": 10,
+      "sampling_gap": 320
+    },
+    "impact_on_bounds_gate_attribution": "exact on the 5 hash-identical days; on 09-21 the 12 drops still satisfy the invariant (every drop carries bounds_violation), but cannot be attributed solely to the new gate with hash-level certainty"
+  },
+  "verify_artifacts": {
+    "rebuild_log": "run/rebuild_298.log (exit 0, 'output verify: PASS')",
+    "independent_verify": "run/verify_298.json (status PASS, 4910 windows, 1428888 valid ticks)"
+  }
+}

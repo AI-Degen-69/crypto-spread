@@ -1,35 +1,49 @@
-﻿# CONSTRAINTS — Issue #297: pristine dataset — gate out windows with bounds-violation ticks
+# CONSTRAINTS — Issue #298: Rebuild run/ticks/pristine after the bounds_violation gate lands
 
-## Scope guard
-- Files touched: `scripts/build_pristine_dataset.py`,
-  `tests/test_build_pristine_dataset.py`, plus the three per-issue working files
-  (`tasks/plan.md`, `tasks/todo.md`, this file + `SPEC.md`). Nothing else.
-- Out of scope (hard): the sane-bounds values themselves (stay mid in [-0.01, 1.01],
-  touch_pair in [0.50, 1.50] as in `verify_tick_data.py:205-213`); `verify_tick_data.py`
-  behavior; the dashboard Sample Discrepancies panel; source tick files (read-only);
-  any CLI flag for this gate (always-on, like the other six gates); a pristine re-build
-  of `run/ticks/pristine/` (operator decision, post-merge — the dir is gitignored).
-- The gate is named `bounds_violation` (singular) in `failing_gates`; the counter is
-  `bounds_violations` (plural) in state/verdict/manifest — same naming split as
-  `time_reversal` gate vs `time_reversals` counter.
+Active working constraints for issue #298. Per-issue file; goes stale on merge.
+(Archived #297 constraints removed post-merge; #297 shipped as PR #299.)
 
-## Zero regressions
-- Targeted gate: `python -m pytest tests/test_build_pristine_dataset.py -q` passes —
-  all existing tests plus new ones (issue asks for all 67 + new bounds tests).
-- `python -m pytest tests/test_build_pristine_dataset.py -q -k bounds` passes (issue
-  verification command).
-- Full-repo sweep stays with CI on push (repo policy — never run locally).
+## Hard Gates (must hold before merge)
+
+1. **Zero code changes to the extractor or gates.** This issue is an operational rebuild +
+   findings record. `scripts/build_pristine_dataset.py`, gate thresholds, and all source
+   modules stay byte-identical to `master` (post-#297).
+2. **Source day files are read-only.** No modification or regeneration of any
+   `run/ticks/ticks_*.jsonl[.gz]`. Proof: `totals.source_files` SHA-256 map in the new
+   manifest must equal the pre-rebuild baseline map. The extractor must additionally
+   re-hash every source day file **after both read passes** and reject the build if any
+   post-pass hash differs from the pre-build snapshot map — an initial hash alone does not
+   prove the bytes read during pass 1/pass 2 were the hashed ones.
+3. **Default thresholds only.** The rebuild runs with no gate-tuning flags, so the gate set
+   matches the merged #297 behavior exactly.
+4. **Self-certification must PASS.** Exit 0 and `output verify: PASS`; new manifest carries
+   `output_verify.status == "PASS"` + the bounds-gate `policy_note` clause; independent
+   `python -m scripts.verify_tick_data run/ticks/pristine` cross-check also PASS.
+5. **Baseline preserved before overwrite.** `run/` is git-ignored; the current
+   `run/ticks/pristine/pristine_manifest.json` (6,129 windows / 5,042 passed / 1,485,319
+   ticks) is snapshotted to a scratch path **before** the rebuild starts.
+6. **Committed artifacts are docs only.** Only `docs/issues/298-pristine-manifest-delta-findings.md`
+   and `docs/measurements/issue-298-pristine-manifest-delta.json` (raw counts). No `run/`
+   content is ever committed.
+7. **Full-repo pytest sweep is CI-only** (repo policy). This issue changes no Python modules;
+   the targeted gate `python -m pytest tests/test_build_pristine_dataset.py -q` must stay
+   37/37 green — **regression evidence only**, not proof of extractor identity. The proof
+   that the extractor and gates are unchanged is Gate 1's byte-identity comparison
+   (`git diff origin/master...HEAD` shows no source-module changes).
+
+## Scope Guardrails
+
+- IN: baseline snapshot, rebuild run, acceptance verification, delta computation, committed
+  findings document, issue comment with the delta.
+- OUT: changing gates/thresholds; dashboard visibility (#295 owns); touching
+  `strategy/`, `server/`, `backtest/`; committing anything under `run/`.
+- NOTICED-BUT-NOT-TOUCHING: anything spotted during the rebuild that is out of scope becomes
+  a future issue candidate, recorded in the findings doc or plan — never a silent side change.
 
 ## Anti-cheat
-- No skipping, disabling, deleting, or weakening of any test or assertion.
-- No new external dependency (`requirements.txt` untouched).
-- No relaxation of existing gates to make fixtures pass.
 
-## Determinism & data-safety invariants (from the module docstring — must survive)
-- Sources never modified (existing `test_sources_untouched_hashes_before_after` stays green).
-- Byte-identical re-run over unchanged inputs with the SAME code is preserved — the new
-  counter is pure input-derived, no wall-clock, no set-iteration-order leaks into output.
-- Pass-1 memory stays O(windows): one scalar counter only, no tick retention.
-- Bounds-check semantics EXACTLY mirror `verify_tick_data.py:205-213`:
-  None means skip; non-numeric or out-of-range means violation.
-- A failing window never reaches pass-2 output: `passed_cids` derives from `passed`.
+- Delta numbers come from the two real manifests only — never from estimates or the 291
+  baseline doc (that doc is a fallback reference, not a substitute when the on-disk manifest
+  exists, and it does).
+- Every dropped window must carry `bounds_violation` in the new `failing_gates` — if any
+  drop fails this invariant, stop: the extractor changed or the matching is wrong.

@@ -1,65 +1,99 @@
-﻿# Plan — Issue #297: pristine dataset — gate out windows with bounds-violation ticks
+# Plan — Issue #298: Rebuild run/ticks/pristine after the bounds_violation gate lands
 
-Branch: `i297/pristine-bounds-violation-gate` | Issue: #297
-Stack: Python 3, pytest · Size: **Small** (one module + its test file; no architectural
-decision — the gate slots into an existing single-decision-path design) · Type: **Code**
+Branch: `i298/rebuild-pristine-after-bounds-gate` | Issue: #298
+Stack: Python 3, pytest · Size: **Standard** (operational long-running rebuild + analysis +
+2 committed docs; no production code change, but cross-artifact evidence work) ·
+Type: **Research + Docs** (quantitative delta analysis + durable findings record)
 
 ## Resolved inputs (planning record)
-- Issue supplies exact acceptance criteria, scope, file:line references, and one default
-  assumption (same thresholds as `verify_tick_data.py:205-213`, no knob) — adopted.
-- CodeRabbit posted a full implementation plan on the issue (comment 5780050825).
-  Reviewed against the actual code: accurate on structure, file:line refs, and the
-  critical first-tick seeding insight. Adopted as the task skeleton; this plan adds the
-  layers it lacks (evidence scan, .get defensiveness, VERIFY_POLICY_NOTE honesty,
-  full-file test gate, byte-identical guarantee wording).
-- Sub-issue mapping skipped: 3 linear tasks stay tracked here + `tasks/todo.md`.
+
+- Issue supplies 4 acceptance criteria and the exact rebuild command — adopted as-is.
+- CodeRabbit plan (comment 5780981530, fetched this session): reviewed against the actual
+  code and adopted as the task skeleton. Its key insight — snapshot the git-ignored manifest
+  BEFORE the rebuild overwrites it — is CONSTRAINTS hard-gate #5. Its findings-doc decision
+  (commit `docs/issues/298-...md` since `run/` can't be committed) matches repo convention
+  (`221-gil-contention-findings.md` template exists).
+- This plan adds what CodeRabbit lacked: (a) the SHA-256 read-only proof via
+  `totals.source_files` old-vs-new; (b) the drop-invariant assertion (every dropped window
+  carries `bounds_violation`); (c) baseline numbers verified on disk at planning time
+  (6,129 / 5,042 / 1,485,319 — match the 291 baseline doc, so no fallback needed);
+  (d) background-process execution for the ~5.2 GB rebuild so the session doesn't block.
+- Sub-issue mapping skipped: 5 linear tasks stay tracked here + `tasks/todo.md`.
 
 ## Evidence gathered at planning time
-- Real-data existence proof: `run/ticks/ticks_2026-09-18.jsonl` (7,180 ticks) has 1
-  bounds-violating tick in 1 window — the bug exists in the live dataset.
-- Existing pristine manifest: 6,129 windows scanned, 5,042 passed, 1,485,319 ticks
-  written. Post-merge re-build will drop the violating windows — operator decision,
-  recorded in CONSTRAINTS.md as out of scope for this branch.
-- Dual-path architecture verified: `scan_windows` (streaming) and
-  `evaluate_window_gates` (in-memory) both funnel through `judge_window`; the first
-  tick seeds state in `_new_window_state` and never passes `_add_tick_to_state`.
+
+- On-disk manifest inspected: keys `policy_note, gates, totals, per_pair_pristine_counts,
+  windows, output_verify`; 6,129 window rows with identity fields
+  `cid, series, slug, duration, start_ts, start_day` — sufficient for delta matching.
+- `build_pristine_dataset.py:145` discovers only top-level `ticks_*.jsonl*` → in-place
+  `--out run/ticks/pristine` cannot self-scan; `:371-374` already deletes stale output.
+- Sources: 6 day files, ~5.2 GB total; existing pristine ~4.9 GB. Rebuild is streaming;
+  expect tens of minutes → run as background process writing `run/rebuild_298.log`.
 
 ## Spec
-See `SPEC.md` — interface contracts frozen there (helper, seeding, judge, manifest,
-policy note) plus the acceptance-criteria → test mapping table.
+
+See `SPEC.md` — verified code facts, acceptance criteria, and the full method (snapshot →
+rebuild → verify → delta → findings doc → issue comment).
 
 ## Tasks
-- **TASK-1** [Backend/Logic] · Size S · `scripts/build_pristine_dataset.py`
-  Add `_tick_out_of_bounds(tick)` helper (thresholds hard-coded, None-safe, non-numeric
-  = violation). Seed `bounds_violations` in `_new_window_state` from the first tick
-  (error_ticks pattern). Increment in `_add_tick_to_state`. Add the `bounds_violation`
-  gate to `judge_window` via `agg.get("bounds_violations", 0)`; sync the `no_ticks`
-  early-return dict; add `bounds_violations` to the normal verdict dict. Add the key to
-  `manifest_keys`. Extend `VERIFY_POLICY_NOTE` with the bounds-gate clause.
-  · Depends on: — · Verify: module imports; new unit tests (TASK-2).
 
-- **TASK-2** [Tests] · Size S · `tests/test_build_pristine_dataset.py`
-  New `TestBoundsViolationGate` class near the existing gate tests (lines 91-166):
-  (a) touch_pair=1.74 mid-window → passed False, gate in failing_gates, counter == 1;
-  (b) mid=1.02 and mid=-0.02 → gate fires; (c) violation at tick index 0 → counted
-  (seeding path); (d) None mid/touch_pair → no violation (None-safe); (e) non-numeric
-  value → violation; (f) clean pristine_ticks() → no bounds_violation gate;
-  (g) e2e modeled on test_failing_window_absent_from_output: fixture with one clean +
-  one violating window (cid 0xbounds) → violating cid absent from output files and
-  passed_cids; manifest record has passed False + bounds_violation in failing_gates.
-  · Depends on: TASK-1 · Verify: `python -m pytest tests/test_build_pristine_dataset.py
-  -q -k bounds` (issue verification command).
+- **TASK-1** [Ops/Baseline] · Size S · scratch: `.pristine_baseline_manifest.json`
+  Copy `run/ticks/pristine/pristine_manifest.json` to the scratch path. Record top-line
+  counts (`totals.windows_total / windows_passed / ticks_written`) and per-day passed counts
+  (group windows by `start_day`, passed only). Assert counts equal the 291 baseline doc
+  (6,129 / 5,042 / 1,485,319).
+  · Depends on: — · Verify: printed counts match baseline doc; snapshot file exists.
 
-- **TASK-3** [Closeout] · Size XS · closeout
-  Full targeted gate `python -m pytest tests/test_build_pristine_dataset.py -q` (all
-  existing + new); confirm byte-identical + sources-untouched tests still green; tick
-  todos; `git diff --stat` shows only the two in-scope files + working files.
-  · Depends on: TASK-1, TASK-2 · Verify: targeted pytest green.
+- **TASK-2** [Ops/Rebuild] · Size M · runs `scripts/build_pristine_dataset.py`
+  Launch `python -m scripts.build_pristine_dataset run/ticks --out run/ticks/pristine` as a
+  background process logging to `run/rebuild_298.log` (no gate flags). Wait for exit code 0
+  and the `output verify: PASS` success line. On `RuntimeError` or exit≠0 → stop, report.
+  · Depends on: TASK-1 (snapshot must exist first) · Verify: exit 0 + PASS line in log.
 
-Checkpoints: after TASK-2 (gate proven end-to-end), after TASK-3 (clean closeout).
+- **TASK-3** [Verification] · Size S · read-only manifest checks
+  On the new manifest: (a) `policy_note` contains the bounds-gate clause; (b)
+  `output_verify.status == PASS`; (c) independent `python -m scripts.verify_tick_data
+  run/ticks/pristine --json` → PASS; (d) every window with `bounds_violation` in
+  `failing_gates` has `passed: false`; (e) the 09-18 evidence window is failing and its cid
+  is absent from output files; (f) `totals.source_files` == baseline map (read-only proof).
+  · Depends on: TASK-2 · Verify: all six checks green (scripted, output recorded).
+  **Acceptance record:** five of six checks green. The source-hash check did NOT hold:
+  `ticks_2026-09-21.jsonl` was externally rewritten before the rebuild, so the new manifest's
+  hash for it differs from the baseline map (5/6 matched). Every passed window still passes
+  and all 12 drops on that day carry `bounds_violation`, but the per-constraint proof of
+  source immutability is incomplete for 09-21 — recorded as a deviation, not silently
+  passed. Restoration + re-run tracked on #298.
 
-## Improvement proposal (recorded)
-- **Adopted (robustness):** defensive `agg.get("bounds_violations", 0)` in
-  `judge_window` instead of direct indexing — evidence: `evaluate_window_gates:95`
-  builds a minimal dict without the key for the empty-window path; today it is saved by
-  the `no_ticks` early return, but `.get` costs nothing and protects future callers.
+- **TASK-4** [Research/Delta] · Size M · `docs/issues/298-pristine-manifest-delta-findings.md`,
+  `docs/measurements/issue-298-pristine-manifest-delta.json`
+  One-off read-only Python: match old/new windows on `(cid, series, slug, duration,
+  start_ts)`; dropped = passed-before ∧ ¬passed-now. Assert every dropped window carries
+  `bounds_violation` in new `failing_gates`. Group drops by `start_day`; record
+  `windows_passed`/`ticks_written` deltas + total `bounds_violation` window count. Write the
+  findings doc (221 template: Executive Summary / Methodology w/ exact CLI + matching rule /
+  Results table before-after-delta per day / git-ignored `run/` caveat / gates unchanged,
+  #295 owns dashboard) and the raw JSON measurement. Delete the scratch snapshot.
+  · Depends on: TASK-3 · Verify: doc + JSON exist; numbers tie to the two manifests.
+
+- **TASK-5** [Closeout] · Size XS · git + issue
+  Commit the two docs files only (`git diff --stat` shows nothing else); comment the delta
+  summary on #298; tick todos; confirm `python -m pytest tests/test_build_pristine_dataset.py
+  -q` still 37/37 (extractor untouched).
+  · Depends on: TASK-4 · Verify: clean diff-stat + issue comment posted.
+
+Checkpoints: after TASK-2 (rebuild PASS), after TASK-4 (delta recorded).
+
+## Improvement proposals (recorded)
+
+- **Adopted (evidence):** SHA-256 map comparison (`totals.source_files` old-vs-new) as the
+  read-only proof — the manifest already carries per-source hashes, so the check is free and
+  stronger than "we didn't touch the files".
+- **Adopted (execution):** background rebuild with log file — 5.2 GB streaming is too slow
+  for a blocking call; log doubles as evidence for the findings doc.
+
+---
+
+# Archived — Issue #297 (shipped as PR #299, merged 41a6997)
+
+TASK-1/2/3 all completed `[x]`: bounds_violation gate (helper + seed + judge + manifest +
+policy note), 10 new tests, full targeted gate 37/37, 2 clean commits (313a69a + c0fa46a).
