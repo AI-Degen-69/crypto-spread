@@ -138,5 +138,48 @@
   "verify_artifacts": {
     "rebuild_log": "run/rebuild_298.log (exit 0, 'output verify: PASS')",
     "independent_verify": "run/verify_298.json (status PASS, 4910 windows, 1428888 valid ticks)"
+  },
+  "certification": {
+    "certified_rerun": {
+      "branch": "i298b/pristine-source-certification",
+      "date": "2026-09-22",
+      "motivation": "PR #300 review: constraint-2 source-hash gate did not hold for ticks_2026-09-21.jsonl",
+      "recovery_attempt": "original capture generation (8d1aacdf...) unrecoverable \u2014 working-copy checkout holds byte-identical post-rewrite generation; no backups exist. Provenance of the pre-rewrite 09-21 generation permanently degraded.",
+      "key_fact": "the rewrite happened BEFORE the #298 rebuild, so pre-rebuild source state == current file (764a5e65...); certification covers exactly the bytes the #298 build consumed",
+      "method": "full SHA-256 of all 6 sources + all 6 pristine outputs snapshotted pre-run; rebuild re-executed with default thresholds; post-run re-hash of sources and outputs; manifest map compared to both",
+      "results": {
+        "rebuild": "exit 0; wrote 4910 pristine windows (1428888 ticks); output verify: PASS",
+        "sources_unchanged_during_build": true,
+        "outputs_deterministic_vs_298_build": true,
+        "manifest_source_map_matches_pre_run_snapshot": true,
+        "manifest_source_map_matches_post_run_disk": true
+      },
+      "artifacts": "run/cert_298/ (pre_run_hashes.json, pristine_manifest_pre.json, rebuild_rerun.log, post_run_verification.json)",
+      "procedure": "SHA-256 over raw file bytes, 1 MiB streamed chunks (hashlib, files read binary); sources = run/ticks/ticks_*.jsonl, outputs = run/ticks/pristine/ticks_*.jsonl; maps sorted by filename",
+      "certified_source_sha256_pre_and_post_identical": {
+        "ticks_2026-09-13.jsonl": "f36262b278ad4305504887a39762bb3908f3244a67a0db33ba9ccf63d0562eb2",
+        "ticks_2026-09-14.jsonl": "5414b2dfde2ceee6ed26466229e227c7ea46266c6ac1f6c94bd82dba7a9b5867",
+        "ticks_2026-09-15.jsonl": "573e7b2ddf70c04f3a962984265fc51eba82b930ae4d7d5450e512f58ea67efc",
+        "ticks_2026-09-18.jsonl": "178133b886540c3ec8bf97d371cab7178f288ebb12d7a768025a4ed10ac7004d",
+        "ticks_2026-09-20.jsonl": "083a7ac73e777460507fbb977ec94656b2955c287abf3338a839b6ca79a234a6",
+        "ticks_2026-09-21.jsonl": "764a5e658f824400ebcf3cf1beade3d5ee0aab685273a5532a29f3514f5757a4"
+      },
+      "certified_output_sha256_pre_and_post_identical": {
+        "ticks_2026-09-13.jsonl": "e977755ee353679d9c5d0c6eca33c7c1c5ab0762201eb2d037ab183fe0331f59",
+        "ticks_2026-09-14.jsonl": "003e17e51b9a2515ad4b49cca55c1a9d8e934259067c61f3f6ef496011e801ed",
+        "ticks_2026-09-15.jsonl": "2e319a322d659e87eb941040a4287cda34ee37ab1982998105c4650bf95d48e0",
+        "ticks_2026-09-18.jsonl": "8397f074177e6036c858ed72afeff0d8790563d5501869be996cdd232e9396d7",
+        "ticks_2026-09-20.jsonl": "c21df1670eb7e3d6914f1641dbdf6c9445c1381f2c41c396083dde05e1c51a37",
+        "ticks_2026-09-21.jsonl": "fbc002e3a25bc40b4210dc0085a70e00f182e93dbaf229e0be9543dd6d1e934d"
+      },
+      "post_run_verification": {
+        "sources_unchanged_during_build": true,
+        "source_diffs": {},
+        "outputs_deterministic": true,
+        "output_diffs": {},
+        "manifest_map_matches_current_sources": true,
+        "manifest_map_matches_pre_run_snapshot": true
+      }
+    }
   }
 }

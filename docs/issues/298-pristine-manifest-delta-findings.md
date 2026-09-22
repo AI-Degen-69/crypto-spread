@@ -126,6 +126,40 @@ the dashboard is **#295's** scope, not this issue's.
   should log loudly / refuse without an explicit flag. This issue records the anomaly but
   does not touch anything outside its scope.
 
+## 5a. Certification addendum (post-review closure)
+
+The source-immutability gap flagged during PR #300 review was closed by a **certified
+re-run** of the rebuild against the current source generation (branch
+`i298b/pristine-source-certification`):
+
+- **Recovery attempt:** the original capture bytes (`8d1aacdf…`) do **not** survive
+  anywhere — the only other checkout (a working copy at commit 8aa1f70) holds a
+  byte-identical copy of the *current* generation (`764a5e65…`), and no backup directory or
+  archived copy exists. The 338 previously-failing windows of the original capture are
+  permanently unrecoverable; provenance is degraded, not restored. **However**, the rewrite
+  happened *before* the #298 rebuild, so the **pre-rebuild source state equals the current
+  file** — the certification below therefore covers exactly the bytes the #298 build
+  consumed.
+- **Certified re-run** (`run/cert_298/`): full SHA-256 of all 6 sources + all 6 pristine
+  outputs snapshotted before the run; rebuild re-executed with default thresholds →
+  `wrote 4910 pristine windows (1428888 ticks) …; output verify: PASS`;
+  post-run re-hash: sources **byte-identical** to pre-run (the constraint-#2 post-pass
+  requirement, now executed in practice), outputs **byte-identical** to the #298 build
+  (determinism), and the manifest's `totals.source_files` map matches both the pre-run
+  snapshot and the post-run on-disk state.
+- **Result:** the current dataset's integrity is now proven end-to-end on the exact bytes
+  it was built from. What remains permanently unverifiable is only the *pre-rewrite*
+  generation of `ticks_2026-09-21.jsonl` — a provenance footnote, not a dataset defect:
+  every passed window in the certified build was also passing in the baseline, and all 132
+  delta drops are attributable to the bounds gate on the 5 hash-identical days plus
+  invariant-satisfying on 09-21.
+- **Auditability:** the full certified pre/post SHA-256 maps (sources and outputs), the
+  exact file lists, and the binary hashing procedure are embedded in the committed raw JSON
+  (`docs/measurements/issue-298-pristine-manifest-delta.json` → `certification`), so the
+  proof survives even though `run/cert_298/` itself is git-ignored. Anyone can re-verify
+  by re-hashing `run/ticks/*.jsonl` and `run/ticks/pristine/ticks_*.jsonl` (raw bytes,
+  streamed 1 MiB chunks) and comparing to the embedded maps.
+
 ## 6. Artifacts Produced
 
 - `docs/measurements/issue-298-pristine-manifest-delta.json` — raw delta payload (this file's

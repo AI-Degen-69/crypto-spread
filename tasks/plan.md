@@ -63,6 +63,12 @@ rebuild → verify → delta → findings doc → issue comment).
   and all 12 drops on that day carry `bounds_violation`, but the per-constraint proof of
   source immutability is incomplete for 09-21 — recorded as a deviation, not silently
   passed. Restoration + re-run tracked on #298.
+  **Amended closure (certified re-run, `i298b/pristine-source-certification`):** original
+  capture bytes unrecoverable (only-copy checkout holds the identical post-rewrite
+  generation; no backups) — provenance of the pre-rewrite 09-21 generation is permanently
+  degraded, which is unfixable by any re-run. The pre-rebuild source state, however, equals
+  the current file, and a certified re-run with pre/post full-hash proof closed the
+  immutability gap end-to-end (findings §5a). TASK-3 accepted with the provenance footnote.
 
 - **TASK-4** [Research/Delta] · Size M · `docs/issues/298-pristine-manifest-delta-findings.md`,
   `docs/measurements/issue-298-pristine-manifest-delta.json`
