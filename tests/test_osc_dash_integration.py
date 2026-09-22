@@ -696,6 +696,9 @@ def test_golden_card_frontend_invariants():
     assert "loadGoldenCard" in html
     assert "/api/ticks/golden" in html
     assert "Golden Dataset" in html
+    # Issue #292 review follow-up: the absent state must render the checklist
+    # (the guard checks checks[] directly, not just the state name).
+    assert "d.state !== 'absent' || (d.checks || []).length" in html
 
 
 def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeypatch):

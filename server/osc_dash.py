@@ -5993,9 +5993,10 @@ async function loadGoldenCard(){
       + `<span style="font-size:11px;color:var(--dim)">Policy version: ${d.policy_version ? esc(String(d.policy_version)) : '— (certification has not run)'}</span></div>`;
 
     if(d.state === 'absent'){
-      html += `<div style="font-size:12px;color:var(--dim);line-height:1.5">No <code>run/ticks/golden/</code> exists yet (${esc(d.reason || '')}). `
-        + `Capture and certification are tracked by issue #281; the requirements are defined in the charter: <code>${esc(d.charter || 'docs/golden-tick-dataset.md')}</code>.</div>`;
-    } else {
+      html += `<div style="font-size:12px;color:var(--dim);line-height:1.5;margin-bottom:8px">No <code>run/ticks/golden/</code> exists yet (${esc(d.reason || '')}). `
+        + `Capture and certification are tracked by issue #281; the requirements are defined in the charter: <code>${esc(d.charter || 'docs/golden-tick-dataset.md')}</code> — all of them unmet below.</div>`;
+    }
+    if(d.state !== 'absent' || (d.checks || []).length){
       const rows = (d.checks || []).map(c => {
         const mark = c.ok ? '<span style="color:var(--up);font-weight:700">✓</span>' : '<span style="color:var(--down);font-weight:700">✗</span>';
         let target;
