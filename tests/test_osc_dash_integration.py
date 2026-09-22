@@ -3337,6 +3337,134 @@ def test_dash_no_book_status_labels_and_cockpit_styling():
     assert "Skipped — unpriceable book" in html
 
 
+def test_loadmanifest_preselects_preferred_file():
+    """Issue #279: first load pre-selects the ★-marked preferred file; a stored
+    manual choice (including All Files) survives later loadManifest() calls."""
+    import shutil
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("node is not available")
+    html = client.get("/").text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    script = html[start + len("<script>"):end]
+
+    dom_prelude = """
+    const setInterval = () => 0;
+    const clearInterval = () => {};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {};
+    // Property (not const) so the harness can swap the payload per scenario.
+    globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+    const EventSource = class { constructor() {} addEventListener() {} close() {} };
+    const WebSocket = class { constructor() {} addEventListener() {} send() {} close() {} };
+    const makeElem = () => ({
+      style: {}, textContent: '', innerHTML: '', appendChild: () => {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      addEventListener: () => {}, querySelectorAll: () => [], value: ''
+    });
+    const makeSel = (initialValue) => ({
+      value: initialValue,
+      innerHTML: '',
+      options: [],
+      appendChild(opt) { this.options.push(opt); },
+    });
+    let sel;
+    const window = { selectedBacktestFile: '', _btFileChosen: false, addEventListener: () => {}, location: { search: '' } };
+    globalThis.window = window;
+    const document = { getElementById: (id) => id === 'btFileSelect' ? sel : makeElem(), createElement: () => ({ textContent: '', value: '' }), querySelectorAll: () => [] };
+    globalThis.document = document;
+    const localStorage = { _data: {}, getItem(k) { return this._data[k] || null; }, setItem(k, v) { this._data[k] = String(v); } };
+    globalThis.localStorage = localStorage;
+    """
+
+    test_js = """
+    (async () => {
+    // Build a dropdown state from a manifest payload, then report the outcome.
+    globalThis.__runLoad = async (initialValue, stored, chosen, payload) => {
+      sel = makeSel(initialValue);
+      window.selectedBacktestFile = stored;
+      window._btFileChosen = chosen;
+      const files = payload.files.map(f => ({
+        name: f[0], lines: 10, lines_estimated: false,
+        is_preferred: f[1],
+      }));
+      await loadManifest.__withPayload({ files, preferred_file: payload.preferred });
+      return { selValue: sel.value, stored: window.selectedBacktestFile,
+               labels: sel.options.map(o => o.textContent) };
+    };
+
+    // 1. First load with a preferred file: it is ★-marked and pre-selected.
+    const first = await __runLoad('', '', false, {
+      preferred: 'ticks_b.jsonl',
+      files: [['ticks_a.jsonl', false], ['ticks_b.jsonl', true]],
+    });
+    if (first.labels.length !== 3) throw new Error('dropdown not built; options=' + JSON.stringify(first.labels));
+    if (first.selValue !== 'ticks_b.jsonl') throw new Error('expected preferred pre-select, got ' + first.selValue);
+    if (first.stored !== 'ticks_b.jsonl') throw new Error('window.selectedBacktestFile must mirror the pre-select, got ' + first.stored);
+    if (first.labels[2] !== '★ ticks_b.jsonl (10 lines)') throw new Error('expected star-marked label, got ' + first.labels[2]);
+    if (first.labels[0].startsWith('★') || first.labels[1].startsWith('★')) throw new Error('non-preferred options must not carry the star');
+
+    // 2. Stored selection (manual file pick) survives a manifest refresh.
+    const kept = await __runLoad('ticks_a.jsonl', 'ticks_a.jsonl', true, {
+      preferred: 'ticks_b.jsonl',
+      files: [['ticks_a.jsonl', false], ['ticks_b.jsonl', true]],
+    });
+    if (kept.selValue !== 'ticks_a.jsonl') throw new Error('manual pick must survive refresh, got ' + kept.selValue);
+
+    // 3. Manual All Files pick (empty value, empty stored) must not be
+    //    overridden by the preferred pre-select — _btFileChosen tells it apart
+    //    from a genuine first load.
+    const allFiles = await __runLoad('', '', true, {
+      preferred: 'ticks_b.jsonl',
+      files: [['ticks_a.jsonl', false], ['ticks_b.jsonl', true]],
+    });
+    if (allFiles.selValue !== '') throw new Error('manual All Files pick must survive, got ' + allFiles.selValue);
+    if (allFiles.stored !== '') throw new Error('stored must stay empty after a manual All Files pick');
+
+    // 4. No preferred file: default stays All Files.
+    const none = await __runLoad('', '', false, {
+      preferred: null,
+      files: [['ticks_a.jsonl', false]],
+    });
+    if (none.selValue !== '') throw new Error('no winner must keep All Files default, got ' + none.selValue);
+    if (none.stored !== '') throw new Error('stored must stay empty when nothing qualifies');
+    if (none.labels.some(l => l.startsWith('★'))) throw new Error('no star without a preferred file');
+
+    console.log('LOADMANIFEST_PRESELECT_TESTS_PASSED');
+    })().catch(e => { console.error(e); process.exit(1); });
+    """
+
+    # Make the fetch-driven loadManifest() run against a canned payload.
+    harness = """
+    // One-shot payload override: the next fetch consumes it once, every other
+    // fetch (the app's own init loadManifest calls) gets the standing payload.
+    const __standing = { files: null, preferred_file: null };
+    let __next;
+    loadManifest.__withPayload = (p) => {
+      __next = p;
+      return loadManifest();
+    };
+    globalThis.fetch = () => {
+      const p = __next !== undefined ? __next : __standing;
+      __next = undefined;
+      return Promise.resolve({ ok: true, json: async () => p });
+    };
+    """
+
+    res = subprocess.run(
+        [node_bin],
+        input=dom_prelude + "\n" + harness + "\n" + script + "\n" + test_js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "LOADMANIFEST_PRESELECT_TESTS_PASSED" in res.stdout
+
+
 def test_api_backtest_pnl_histogram_invariant_and_edge_cases():
     """Issue #136: Verify pnl_histogram computation, edge cases, and bucket count invariant."""
     from types import SimpleNamespace

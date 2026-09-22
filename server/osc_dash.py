@@ -4770,6 +4770,7 @@ let equityChartInstance = null;
 let pnlHistChartInstance = null;
 let btChartDialogInstance = null;
 window.selectedBacktestFile = "";
+window._btFileChosen = false; // Issue #279: flips on any manual dataset pick
 window._btSweepVisualData = null;
 window._btChartDialogTrigger = null;
 window._btRunning = false;
@@ -5651,11 +5652,19 @@ async function loadManifest(){
         opt.value = f.name;
         const linesFormatted = (f.lines||0).toLocaleString();
         const estPrefix = f.lines_estimated ? '~' : '';
-        opt.textContent = `${f.name} (${estPrefix}${linesFormatted} lines)`;
+        // Issue #279: the healthiest file is ★-marked and pre-selected on the
+        // first load only — a stored manual choice (including All Files) wins.
+        opt.textContent = `${f.is_preferred ? '★ ' : ''}${f.name} (${estPrefix}${linesFormatted} lines)`;
         sel.appendChild(opt);
       }
       if(currentVal && Array.from(sel.options).some(o => o.value === currentVal)){
         sel.value = currentVal;
+      } else if(!currentVal && !window._btFileChosen && d.preferred_file && Array.from(sel.options).some(o => o.value === d.preferred_file)){
+        // Issue #279: first load only — before any manual choice (an empty
+        // dropdown value is also what a manual All Files pick leaves behind,
+        // so _btFileChosen is what tells the two apart).
+        sel.value = d.preferred_file;
+        window.selectedBacktestFile = d.preferred_file;
       }
     }
 
@@ -8321,6 +8330,7 @@ function setupBacktestInputListeners(){
       // may change several knobs before explicitly starting the run.
       if (id === 'btFileSelect') {
         window.selectedBacktestFile = el.value;
+        window._btFileChosen = true;
       }
     });
   });

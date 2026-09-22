@@ -132,6 +132,14 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert "Opening the tab is read-only" in FULL_APP_HTML
 
 
+def test_dropdown_preferred_preselect_wiring():
+    """Issue #279: star-marked preferred option + first-load pre-select wiring."""
+    assert "`${f.is_preferred ? '★ ' : ''}${f.name} (${estPrefix}${linesFormatted} lines)`" in FULL_APP_HTML
+    assert "!window._btFileChosen && d.preferred_file" in FULL_APP_HTML
+    assert "window._btFileChosen = false; // Issue #279: flips on any manual dataset pick" in FULL_APP_HTML
+    assert "window._btFileChosen = true;" in FULL_APP_HTML
+
+
 def test_preferred_badge_uses_theme_tokens():
     """Issue #279: the ★ Preferred badge exists and colors via the --gold token."""
     assert "if (f.is_preferred)" in FULL_APP_HTML
