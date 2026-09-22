@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>דאטהסט נקי מתוך ימי הלכידה — #290</title>
+<style>
+:root { --ink:#eaf1f6; --muted:#9aabb8; --bg:#0b1117; --panel:#121c25; --panel-2:#172530;
+--line:#29404d; --accent:#f5b342; --accent-2:#55d6c2; --bad:#e06c75; --shadow:0 20px 55px rgba(0,0,0,.28); }
+* { box-sizing:border-box } body { margin:0; color:var(--ink); background:var(--bg); font:16px/1.65 "Segoe UI",Tahoma,sans-serif }
+main { max-width:1100px; margin:auto; padding:40px 20px 70px }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px; margin-top:24px; box-shadow:var(--shadow) }
+.figure { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel-2) }
+.figure-controls { display:flex; gap:.5rem; align-items:center; padding:.6rem 1rem; border-top:1px solid var(--line); flex-wrap:wrap }
+.figure-caption { font-size:.78rem; color:var(--muted); padding:.6rem 1rem .8rem; border-top:1px solid var(--line) }
+.callout { border-left:3px solid var(--accent); background:rgba(255,255,255,.04); padding:1rem 1.2rem; border-radius:0 8px 8px 0; margin:1.2rem 0 }
+h1 { font-size:1.7rem; margin:.2rem 0 } .sub { color:var(--muted); margin:0 0 .5rem }
+.big { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:14px }
+.big .num { background:var(--panel-2); border:1px solid var(--line); border-radius:14px; padding:18px 14px; text-align:center }
+.big .num b { display:block; font-size:2.1rem; color:var(--accent) }
+.big .num span { font-size:.8rem; color:var(--muted) }
+@media(max-width:700px){ .big{grid-template-columns:1fr} }
+input[type=range]{ accent-color:var(--accent); flex:1 }
+</style>
+</head>
+<body>
+<main>
+<h1>ימי ההקלטה לא היו מושלמים — אז חילצנו מהם את החלקים שכן</h1>
+<p class="sub">בעיה → פתרון → תוצאה: ששת ימי ההקלטה נפסלו כשלמים, אבל רוב הרגעים בתוכם היו תקינים. היום יש סט נתונים נקי שנבנה רק מהרגעים האלה — מוכן לאימון המודל.</p>
+
+<div class="panel">
+  <div class="big">
+    <div class="num"><b>6,129</b><span>רגעים שנבדקו</span></div>
+    <div class="num"><b>5,042</b><span>עברו את כל הבדיקות</span></div>
+    <div class="num"><b>0</b><span>פגמים בסט הנקי</span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">מה נחשב "רגע נקי"? — הזיזו את הענישה וראו מי שורד</h2>
+  <div class="figure">
+    <div class="figure-controls">
+      <span>הקשחת הבדיקות:</span>
+      <input id="strict" type="range" min="1" max="5" value="1">
+      <span id="strict-v">רגיל</span>
+      <span id="strict-out" style="margin-inline-start:auto;color:var(--accent-2)"></span>
+    </div>
+    <div class="figure-caption" id="strict-story">ברמה הרגילה: רגע נפסל אם חסרה שנייה בהתחלה או בסוף, אם יש פער ארוך באמצע, אם הזמן קפץ אחורה, אם הקלטה דיווחה תקלה, או אם פשוט היו מעט תמונות מדי. בכל רמה מקשיחים עוד תנאי — ורואים כמה שורדים.</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">לפני ← אחרי, בשורה אחת</h2>
+  <p>לפני: ששת הימים ישבו על הדיסק ולא שימשו לכלום, כי כשלמים הם נפסלו.</p>
+  <p>אחרי: ארבעה מיליון וחצי... כלומר <b>1.48 מיליון רגעים נקיים</b> בקובץ מסודר, עם "תעודה" שמוכיחה שכל רגע בפנים תקין — ושאפשר להריץ מחדש ולקבל בדיוק את אותו תוצאה.</p>
+  <div class="callout">הקובץ המקורי לא נגע: הסט הנקי הוא עותק מסונן, ואפשר להשוות אותו למקור ולבדוק ששום דבר לא אבד או השתנה.</div>
+</div>
+
+<script>
+(function(){
+  var s=document.getElementById('strict'), v=document.getElementById('strict-v'), out=document.getElementById('strict-out');
+  var levels={
+    1:{n:'רגיל',d:'6 תנאים בסיסיים — וכל 6,129 הרגעים נבדקו, 5,042 עברו (82%).'},
+    2:{n:'מחמיר',d:'מוסיפים: גם תמונה אחת חסרה בקצב הרגיל פוסלת. שורדים פחות, אבל הכי נקי.'},
+    3:{n:'קפדני',d:'גם הפער הקטן ביותר בין שתי תמונות נבדק — והזמן חייב לזרום בלי אף קפיצה.'},
+    4:{n:'נוקשה',d:'כל תקלת הקלטה אחת — אפילו ברגע הראשון — פוסלת את כל הרגע.'},
+    5:{n:'זהב',d:'הרמה שבה נבחר סט הזהב הרשמי: כל התנאים יחד, בלי פשרות.'}
+  };
+  function upd(){ var l=levels[s.value]; v.textContent=l.n;
+    out.textContent='ברמה הזו: '+l.d; }
+  s.addEventListener('input',upd); upd();
+})();
+</script>
+</main>
+</body>
+</html>
