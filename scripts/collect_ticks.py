@@ -26,6 +26,22 @@ Per-series failure is isolated (D2, D4):
 - `err` field on a snap means "this series failed this second", other 9
   series still write normally.
 
+Boundary prewarm (the 6–17s boundary-round bursts, measured on every capture
+day as a ~0.2 sampling-gap rate): all ten series' gamma caches expire at the
+same instant when the windows roll, so the boundary round pays ten market
+lookups in one burst and the venue throttles it. Gamma lists the NEXT window's
+market pre-open with full clobTokenIds (measured live 2026-09-22: a 5m market
+served ~14s before its start), so each series resolves its successor once its
+live window is inside PREWARM_LEAD_SEC and the boundary round pays no gamma
+lookups at all.
+
+Startup alignment: a collector started at a random time used to record
+windows that were already mid-flight — every one of them a guaranteed late
+start. Default behaviour now is to wait for the next quarter-hour (both
+durations start fresh there), skip the in-flight windows, and record from the
+fresh opens. `--no-align` restores record-immediately; `--once` is never
+aligned (it is a smoke test).
+
 Usage:
   python -m scripts.collect_ticks                  # continuous
   python -m scripts.collect_ticks --once           # one poll (smoke test)
@@ -126,6 +142,26 @@ WS_REST_DEDUP_TTL = 60.0
 #     cross-checked against REST instead of silently starving the tape.
 WS_TOKEN_WARMUP = 5.0
 WS_AUTHORITY_HORIZON = 90.0
+
+# Boundary prewarm. When a series' live window has this long left, one extra
+# gamma call parks the NEXT window's market in `_prewarm`; at the roll the
+# promotion in `resolve_series_market` hands it over with no HTTP at all.
+# 30s is ~20 warm rounds of headroom: the prewarm lands on an ordinary round
+# ~T-30, far from the boundary it exists to protect.
+#
+# The leads are staggered per series (base + index * PREWARM_STAGGER_SEC): all
+# ten windows hit any lead at the same round, so a single shared lead would
+# fire ten gamma calls as one burst — the exact failure this exists to remove,
+# relocated 30s earlier. Spacing the leads puts each series' call on a
+# different round; a round carries at most two.
+PREWARM_LEAD_SEC = 30.0
+PREWARM_STAGGER_SEC = 4.0
+PREWARM_STAGGER_STEPS = 5
+
+# Startup alignment wakes this long before the fresh boundary so the cold
+# round (measured 3.1s warm-process / 5.8s cold-process) and the first
+# prewarm land BEFORE the windows being recorded open.
+ALIGN_WAKE_LEAD_SEC = 12.0
 
 def assert_unique_series_slugs() -> None:
     """Fail loudly at import if two series share a slug.
@@ -263,6 +299,54 @@ def fetch_live_for_series(series_slug: str):
     }, None
 
 
+def fetch_next_market_for_series(series_slug: str, now: Optional[float] = None
+                                 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Fetch the market that opens NEXT for a series, pre-open, from gamma.
+
+    `fetch_live_for_series` filters candidates to `st <= now`, so it can never
+    see the successor. This variant selects the candidate with the smallest
+    start in the future — the market gamma already lists pre-open with full
+    clobTokenIds (measured 2026-09-22, ~14s before its start for a 5m series).
+    Same (info, err) shape; None info when gamma offers no future market yet.
+    """
+    if now is None:
+        now = time.time()
+    try:
+        r = SESSION.get(
+            f"{GAMMA_HOST}/events",
+            params={"series_slug": series_slug, "closed": "false", "limit": 500},
+            timeout=(3.05, 5.0),
+        )
+        r.raise_for_status()
+        events = r.json()
+    except Exception as e:
+        return None, f"gamma err {e}"
+    upcoming: list[tuple[float, dict[str, Any]]] = []
+    for ev in events:
+        for m in ev.get("markets") or []:
+            try:
+                raw = m.get("clobTokenIds")
+                tids = json.loads(raw) if isinstance(raw, str) else raw
+                if not tids or len(tids) != 2:
+                    continue
+                st = iso_to_unix(m.get("eventStartTime"))
+                et = iso_to_unix(m.get("endDate") or m.get("endDateIso"))
+                if st > now and et > st:
+                    upcoming.append((st, {
+                        "conditionId": m["conditionId"],
+                        "slug": m["slug"],
+                        "start_ts": st, "end_ts": et,
+                        "up_token": str(tids[0]), "down_token": str(tids[1]),
+                        "series": series_slug,
+                    }))
+            except Exception:
+                continue
+    if not upcoming:
+        return None, "no upcoming"
+    upcoming.sort(key=lambda x: x[0])
+    return upcoming[0][1], None
+
+
 # Gamma re-resolves a market whose conditionId, tokens and end_ts cannot change
 # until the window rolls, so the lookup was repeated ~390ms per tick for an
 # answer that was already known (issue #167). The cache is bounded in time, not
@@ -279,15 +363,52 @@ def reset_gamma_cache() -> None:
     _gamma_cache.clear()
 
 
+# { series_slug: next-window market info } — the boundary prewarm parking lot.
+# Deliberately separate from `_gamma_cache`: while the old window is still
+# trading, the pre-open market must never be served as if it were live.
+_prewarm: dict[str, dict[str, Any]] = {}
+
+
+def reset_prewarm() -> None:
+    """Drop every prewarmed next-market resolution (process restart / tests)."""
+    _prewarm.clear()
+
+
+# Startup alignment: set by main() to the next quarter-hour when the collector
+# joins mid-window. poll_once skips any window that opened before it, so a
+# late join records nothing until the fresh opens; it clears itself once the
+# boundary has passed.
+_join_cutoff: Optional[float] = None
+
+
+def next_fresh_boundary(now: float) -> float:
+    """The next instant both durations start a fresh window: a quarter-hour.
+
+    5m windows open on every fives, 15m only on quarter-hours, so the first
+    boundary where the whole slate is fresh is always a multiple of 900s.
+    """
+    return (int(now) // 900 + 1) * 900.0
+
+
 def resolve_series_market(series_slug: str, now: Optional[float] = None
                           ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """`fetch_live_for_series` behind a per-window cache. Same (info, err) shape.
 
     A failure is never cached: gamma erroring once must not blind the collector
     to that series until the entry would have expired anyway.
+
+    Prewarm promotion: if a next-market was parked while the live window was
+    inside PREWARM_LEAD_SEC and that market has now opened, it moves into the
+    live cache with no HTTP — the whole point of the prewarm. A cancelled or
+    replaced successor self-heals through GAMMA_CACHE_MAX_AGE like any other
+    stale resolution.
     """
     if now is None:
         now = time.time()
+    pre = _prewarm.get(series_slug)
+    if pre is not None and now >= pre["start_ts"]:
+        _gamma_cache[series_slug] = (now, pre)
+        _prewarm.pop(series_slug, None)
     cached = _gamma_cache.get(series_slug)
     if cached is not None:
         resolved_at, info = cached
@@ -549,10 +670,50 @@ def fetch_slate_tapes(jobs: list[tuple[str, dict, list[str]]]
         _one, [(i, cid, w, missing) for i, (cid, w, missing) in enumerate(jobs)]))
 
 
+def prewarm_round(now: float, fetches: list[SeriesFetch]) -> None:
+    """Park next-window markets for every series about to roll.
+
+    Runs at the END of a round, outside the book fan-out, so its gamma calls
+    never interleave with the same slug's live resolve (one worker per slug per
+    phase). Only a live window inside PREWARM_LEAD_SEC pays a call, so steady
+    state is ten calls once per 5 minutes on an ordinary round — not on the
+    boundary round the burst used to hit. An already-expired live market skips
+    the prewarm: that roll already happened and the next resolve will fetch.
+    """
+    for slug in [s for s, info in _prewarm.items()
+                 if info["start_ts"] < now - PREWARM_LEAD_SEC]:
+        _prewarm.pop(slug, None)  # missed its promotion (series errored); refetch
+    jobs: list[tuple[int, str]] = []
+    for i, fetched in enumerate(fetches):
+        if fetched.series in _prewarm or fetched.info is None:
+            continue
+        lead = PREWARM_LEAD_SEC + (i % PREWARM_STAGGER_STEPS) * PREWARM_STAGGER_SEC
+        remaining = fetched.info["end_ts"] - now
+        if 0.0 < remaining <= lead:
+            jobs.append((i, fetched.series))
+    if not jobs:
+        return
+
+    def _one(job: tuple[int, str]) -> tuple[str, Optional[dict[str, Any]]]:
+        """Resolve one series' successor; never raise into the round."""
+        i, slug = job
+        _ramp(i * SERIES_STAGGER_SEC)
+        try:
+            info, _err = fetch_next_market_for_series(slug, now)
+        except Exception:
+            return slug, None
+        return slug, info
+
+    for slug, info in get_poll_executor().map(_one, jobs):
+        if info is not None and info["start_ts"] > now:
+            _prewarm[slug] = info
+
+
 def poll_once(out_dir: Path, gzip: bool, stats: dict,
               ws_bridge: "Optional[CLOBStreamCollectorBridge]" = None,
               ) -> tuple[list[str], list[str]]:
     """One poll across all 10 series. Returns (closed_window_slugs, errors)."""
+    global _join_cutoff
     now = time.time()
     day_key = now_day_key()
     iso_now = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
@@ -592,6 +753,11 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
             continue
         cid = info["conditionId"]
         if cid not in windows:
+            if _join_cutoff is not None and info["start_ts"] < _join_cutoff:
+                # Late join: this window opened before recording was armed, so
+                # capturing it would guarantee a late start. Books were still
+                # fetched above, which warms the pool; nothing is recorded.
+                continue
             windows[cid] = {
                 "series": series_slug, "slug": info["slug"],
                 "start_ts": info["start_ts"], "end_ts": info["end_ts"],
@@ -744,6 +910,9 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
         if tick_ms > TICK_BUDGET_MS:
             errs.append(f"slow_tick:{tick_ms:.0f}ms")
 
+    # Boundary prewarm — after the round's writes, before the close sweep.
+    prewarm_round(now, fetches)
+
     closed_now = 0
     run_dir = run_dir_for(out_dir)
     for cid, w in list(windows.items()):
@@ -786,6 +955,10 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
             refresh_summary(run_dir)
         except Exception as e:
             errs.append(f"summary:{e}")
+    if _join_cutoff is not None and now >= _join_cutoff:
+        # The fresh boundary has been processed; from here every new cid is a
+        # normal mid-cycle adoption, not a late-join leftover.
+        _join_cutoff = None
     return closed, errs
 
 
@@ -872,6 +1045,9 @@ def main():
     ap.add_argument("--gzip", action="store_true", help="rotate daily file as .jsonl.gz")
     ap.add_argument("--no-ws", action="store_true",
                     help="disable the CLOB market WebSocket tape stream (REST polling only)")
+    ap.add_argument("--no-align", action="store_true",
+                    help="record immediately even mid-window (default: wait for the "
+                         "next quarter-hour and skip the in-flight windows)")
     args = ap.parse_args()
 
     out_dir: Path = args.out
@@ -918,6 +1094,36 @@ def main():
             f"ws_trades={stats.get('tape_captured_ws', 0)}"
         )
         return
+
+    global _join_cutoff
+    if not args.no_align:
+        # Startup alignment. The wait touches the manifest every <=20s so the
+        # watchdog (180s stale threshold) never reads the idle alignment as a
+        # wedge. Waking ALIGN_WAKE_LEAD_SEC early gives the cold round and the
+        # first prewarm time to land before the recorded windows open.
+        # Interruptible like the main loop: the ws bridge and pool are cleaned
+        # up on Ctrl+C here too, not just after collection has started.
+        target = next_fresh_boundary(time.time())
+        wake_at = target - ALIGN_WAKE_LEAD_SEC
+        try:
+            if wake_at > time.time():
+                print(f"aligning: first recorded windows open at "
+                      f"{datetime.fromtimestamp(target, tz=timezone.utc).isoformat()}; "
+                      f"waking {ALIGN_WAKE_LEAD_SEC:.0f}s early to warm up")
+                while True:
+                    remaining = wake_at - time.time()
+                    if remaining <= 0:
+                        break
+                    update_manifest(out_dir, stats)
+                    time.sleep(min(20.0, max(0.5, remaining)))
+            _join_cutoff = target
+            print(f"aligned: in-flight windows are skipped; recording from the "
+                  f"opens at ts={target:.0f}")
+        except KeyboardInterrupt:
+            print("interrupted during alignment")
+            stop_ws_bridge(ws_bridge)
+            shutdown_poll_executor()
+            return
 
     day_boundaries = 0
     current_day = now_day_key()
