@@ -8,6 +8,49 @@ reviews:
   high_level_summary: true
   poem: false
   collapse_walkthrough: true
+
+  # Tiger's tag vocabulary for PR titles (canonical: ~/.agents/config/coderabbit/)
+  auto_title_instructions: >-
+    Title format: "[TAG] short plain-English summary". The summary must be
+    understandable by a high-schooler, with no abbreviations. Choose exactly
+    one TAG:
+    [ADD] new capability on top of what exists
+    [CREATE] a new file, module or service
+    [FIX] wrong behaviour corrected
+    [IMPROVE] same behaviour, better
+    [REFACTOR] moved or renamed, behaviour unchanged
+    [OPTIMIZE] faster or cheaper
+    [TEST] tests only
+    [DOCUMENT] docs only
+    [FORMAT] whitespace, layout, lint
+    [UPDATE] dependency or data refresh
+    [CONFIGURE] settings, workflows, tooling
+    [REVERT] undo a previous change
+
+  # Enforce the vocabulary: a PR whose title does not match the TAG format
+  # cannot merge (request_changes_workflow blocks on error-level checks).
+  # custom_checks lives in the SAME mapping — a duplicate key would silently
+  # drop one of the two (CodeRabbit #7572).
+  pre_merge_checks:
+    title:
+      mode: error
+      requirements: >-
+        Title must start with exactly one of the TAGs: [ADD], [CREATE], [FIX],
+        [IMPROVE], [REFACTOR], [OPTIMIZE], [TEST], [DOCUMENT], [FORMAT],
+        [UPDATE], [CONFIGURE], [REVERT] — followed by a short plain-English
+        summary understandable by a high-schooler, with no abbreviations.
+    custom_checks:
+      - name: "No Hardcoded Secrets"
+        mode: "error"
+        instructions: "Fail if any private keys, Polymarket API keys, or wallet seed phrases appear in the diff."
+
+  # Secret scanning on every review (Polymarket / wallet keys).
+  tools:
+    betterleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+
   auto_review:
     enabled: true
     drafts: false
@@ -34,12 +77,6 @@ reviews:
       instructions: |
         - Ensure all unit tests are hermetic and mock external network calls.
         - Use pytest conventions.
-
-  pre_merge_checks:
-    custom_checks:
-      - name: "No Hardcoded Secrets"
-        mode: "error"
-        instructions: "Fail if any private keys, Polymarket API keys, or wallet seed phrases appear in the diff."
 
   finishing_touches:
     custom:

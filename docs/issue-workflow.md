@@ -1,75 +1,62 @@
 # Issue Workflow — `crypto-spread`
 
 How the issue-to-PR pipeline works in this repo: intake an idea as a GitHub
-issue, pick it, run the 4 stations, ship the PR, and babysit it to merge.
+issue, pick it, run the stations, ship the PR, and babysit it to merge.
 
-The skills are installed skills living under `~/.agents/skills/` (multiple
-authors, including Robert's own `*-issue` family and helper skills with
-Addy Osmani / ECC lineage). All 7 family skills are **globally deployed** to
-every agent and harness Robert's system holds — Claude Code (`~/.claude/skills/`),
-Gemini (`~/.gemini/config/skills/`), and Hermes (`AppData/Local/hermes/skills/`)
-— via junctions/symlinks back to the canonical originals under `~/.agents/skills/`,
-per #116 (previously #115). `create-issue` additionally ships a file-integrity
-sync script: `~/.agents/skills/create-issue/scripts/sync_skill.py`.
-
-Naming follows the `*-issue` convention settled in #116. This doc is
-`crypto-spread`-specific: examples name this repo's files and the base branch
-is `master`.
+The skills are the global pipeline skills living under `~/.agents/skills/`,
+deployed to every harness via junctions/symlinks (Hermes, Gemini/Antigravity;
+Claude Code was retired 2026-09-22). Naming follows the Station Roman-numeral
+convention. This doc is `crypto-spread`-specific: examples name this repo's
+files and the base branch is `master`.
 
 ---
 
-## 0. The skills in play
+## 0. The pipeline at a glance
 
-Two kinds of skills appear in the pipeline. The **7-skill family** is the
-pipeline itself. The **helpers** are not stations — they are skills the
-stations delegate to at specific moments.
-
-### The 7-skill family
-
-| Skill | Trigger | One-line purpose | SKILL.md path | Deployed in |
-|---|---|---|---|---|
-| `create-issue` | "issue create" | Raw idea → researched, published GitHub issue labeled `ready-for-agent`. | `~/.agents/skills/create-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
-| `workflow-issue` | "workflow issue" | Orchestrator: lists open issues, picks one, runs the stations, babysits the PR. | `~/.agents/skills/workflow-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
-| `plan-issue` | "plan" / `/plan-issue <n>` | Station 1: read issue, right-size, detect stack, lock `CONSTRAINTS.md`, write `tasks/plan.md`. | `~/.agents/skills/plan-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
-| `build-plan` | "build auto" / `/build-plan auto` | Station 2: execute `tasks/plan.md` — TDD per task, atomic commits. | `~/.agents/skills/build-plan/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
-| `review-build-and-pr` | "review build" / `/review-build-and-pr` | Station 3: 4-axis review, 100% test gate, push, open PR, hand off to babysitter. | `~/.agents/skills/review-build-and-pr/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
-| `explain-issue` | "explain" / `/explain-issue <n>` | Station 4: HTML ELI5 artifact (Hebrew, RTL) + manual verification guide. | `~/.agents/skills/explain-issue/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
-| `babysit-pr-and-merge` | "PR babysitter" | Sits on the PR through one CodeRabbit review round until mergeable. | `~/.agents/skills/babysit-pr-and-merge/SKILL.md` | Claude Code, Gemini, Hermes (symlink) |
+| Station | Skill | Trigger | One-line purpose |
+|---|---|---|---|
+| Entry | `pipeline-triage` | dirty repo / unclear next step | Read-only triage of git state, routes onward |
+| X | `x-workflow-issue` | "work issue" / `/x-workflow-issue <n>` | Orchestrator: discovery (no args) or drives II–VII |
+| I | `i-create-issue` | "issue create" | Raw idea → researched GitHub issue (`ready-for-agent`) |
+| II | `ii-plan-issue` | "plan" / `/ii-plan-issue <n>` | Read issue, right-size, lock `CONSTRAINTS.md`, write `tasks/plan.md` |
+| III | `iii-build-plan` | "build auto" / `/iii-build-plan auto` | Execute `tasks/plan.md` — TDD per task, atomic commits |
+| IIIB | `iiib-iterate-after-build` | corrections after build | Human-feedback fix loop (no push) |
+| IV | `iv-review-build-and-pr` | "ship" | Review, verification gate, push, open PR |
+| V | `v-babysit-pr-and-merge` | "PR babysitter" | One CodeRabbit round, triage, squash merge |
+| VI | `vi-prune-artifacts` | "prune" | Sweep closed-issue artifacts, preserve knowledge |
+| VII | `vii-present-pr` | "explain" / `/vii-present-pr <n>` | Standalone ELI5 HTML showcase + verification guide |
 
 ### Helper skills (used by the stations, not stations themselves)
 
 | Helper | Used by | Purpose |
 |---|---|---|
-| `context-engineering` | `workflow-issue` (Step 1) | Lock session scope and rules before opening files. |
-| `interview-me` | `plan-issue`, `workflow-issue` (Step 2) | Extract exact requirements one question at a time when the ask is vague. |
-| `spec-driven-development` | `plan-issue`, `workflow-issue` (Step 2) | Build a clean capability map and specification. |
-| `constraint-driven-development` | `plan-issue`, `workflow-issue` (Step 2) | Lock non-negotiable test/coverage/lint bars in `CONSTRAINTS.md`. |
-| `api-and-interface-design` | `workflow-issue` (Step 2) | Lock type definitions and interface boundaries before logic. |
-| `planning-and-task-breakdown` | `workflow-issue` (Step 2) | Generate an ordered bite-sized task plan. |
-| `test-driven-development` | `build-plan`, `workflow-issue` (Step 3) | Red → green → refactor per task. |
-| `incremental-implementation` | `build-plan`, `workflow-issue` (Step 3) | Small isolated steps with passing tests each step. |
-| `source-driven-development` | `build-plan`, `workflow-issue` (Step 3) | Ground library/framework calls in official docs. |
-| `debugging-and-error-recovery` | `workflow-issue` (Step 3) | Systematic root-cause investigation when tests fail. |
-| `code-simplification` | `build-plan`, `workflow-issue` (Step 3) | Clean up complexity without altering behavior. |
-| `code-review-and-quality` | `review-build-and-pr`, `workflow-issue` (Step 4) | Audit the diff across correctness, readability, edge cases, tests. |
-| `security-and-hardening` | `review-build-and-pr`, `workflow-issue` (Step 4) | Audit new inputs, secrets, session boundaries, dependencies. |
-| `performance-optimization` | `review-build-and-pr`, `workflow-issue` (Step 4) | Audit loops, data access, queries, serialization. |
-| `git-workflow-and-versioning` | `review-build-and-pr`, `workflow-issue` (Step 5) | Conventional commits, branch management, changelog. |
-| `shipping-and-launch` | `workflow-issue` (Step 5) | Rollout readiness, telemetry, rollback safety. |
-| `documentation-and-adrs` | `workflow-issue` (Step 5) | Record architectural decisions / update docs. |
+| `context-engineering` | Station X (Step 1) | Lock session scope and rules before opening files. |
+| `interview-me` | Station II, X (Step 2) | Extract exact requirements one question at a time when the ask is vague. |
+| `spec-driven-development` | Station II | Build a clean capability map and specification. |
+| `constraint-driven-development` | Station II | Lock non-negotiable test/coverage/lint bars in `CONSTRAINTS.md`. |
+| `api-and-interface-design` | Station II | Lock type definitions and interface boundaries before logic. |
+| `planning-and-task-breakdown` | Station II | Generate an ordered bite-sized task plan. |
+| `test-driven-development` | Station III | Red → green → refactor per task. |
+| `incremental-implementation` | Station III | Small isolated steps with passing tests each step. |
+| `source-driven-development` | Station III | Ground library/framework calls in official docs. |
+| `debugging-and-error-recovery` | Station III | Systematic root-cause investigation when tests fail. |
+| `code-simplification` | Station III | Clean up complexity without altering behavior. |
+| `code-review-and-quality` | Station IV | Audit the diff across correctness, readability, edge cases, tests. |
+| `security-and-hardening` | Station IV | Audit new inputs, secrets, session boundaries, dependencies. |
+| `performance-optimization` | Station IV | Audit loops, data access, queries, serialization. |
+| `git-workflow-and-versioning` | Stations IV–V | Conventional commits, branch management, changelog. The rules it applies are the ones in `docs/git-workflow.md`; where the helper disagrees with that doc, **the doc wins** for this repo. |
+| `shipping-and-launch` | Station X (Step 5) | Rollout readiness, telemetry, rollback safety. |
+| `documentation-and-adrs` | Station X (Step 5) | Record architectural decisions / update docs. |
 
 Robert's mental model of the whole loop, in his own phrasing:
 
 ```text
-issue create → work issue → build auto → ship → PR babysitter
+issue create → work issue → plan → build auto → ship → PR babysitter → prune
 ```
-
-Everything below explains what each step actually invokes and what the
-stations are under the hood.
 
 ---
 
-## 1. Intake — `create-issue`
+## 1. Intake — `i-create-issue` (Station I)
 
 Raw idea in chat → researched, shaped, published GitHub issue with the
 `ready-for-agent` label. Robert's phrasing: **"issue create."**
@@ -79,80 +66,70 @@ Raw idea in chat → researched, shaped, published GitHub issue with the
   cross-reference comments.
 - Research happens *before* drafting: real file paths and line numbers, or the
   issue is not `ready-for-agent`.
-- Publishes immediately — no approval gate. Adds `needs-triage` only when the
-  idea is genuinely unshaped even after research.
-- Intake template and conventions: `~/.agents/skills/create-issue/references/issue-tracker.md`.
+- Publishes immediately — no approval gate. Ambiguous intent becomes an
+  **Open questions** section plus the `needs-answers` label (resolved from
+  code at planning time), never a blocking interrogation.
+- Intake template and conventions: `~/.agents/skills/i-create-issue/references/issue-tracker.md`.
 
-## 2. Discover & pick — `workflow-issue`
+## 2. Discover & pick — `x-workflow-issue` (Station X)
 
-Invoked with **no arguments**, `workflow-issue` is the discovery step, not a silent
-pickup: it lists every open issue (`gh issue list --state open --limit 50`),
-groups them, recommends an execution order, and calls out the single next
-issue — then waits for you to choose. Pass an issue number only after seeing
-the inventory. Robert's phrasing: **"work issue."**
+Invoked with **no arguments**, `x-workflow-issue` is the discovery step, not a
+silent pickup: it lists up to 50 open issues (`gh issue list --state open --limit
+50`), groups them, recommends an execution order, and calls out the single
+next issue — then waits for you to choose. Pass an issue number only after
+seeing the inventory. Robert's phrasing: **"work issue."**
 
-As orchestrator it then walks the picked issue through the stations (§5).
+As orchestrator it then walks the picked issue through the stations.
 
-## 3. The 4-station pipeline
+## 3. Stations II–III — plan and build
 
-Each station is its own invocable skill. `workflow-issue` delegates to them; you
-can also invoke them directly.
-
-### Station 1 — `plan-issue` (Define & Plan)
+### Station II — `ii-plan-issue` (Define & Plan)
 
 Reads the issue (`gh issue view <n> --comments`), claims it
 (`gh issue edit <n> --add-assignee @me`), right-sizes the scope
-(Trivial / Small / Standard / Large), auto-detects the stack and test
-framework, checks whether `interview-me` clarification is actually needed
-(no synthetic questions when the issue is clear), runs
-`spec-driven-development`, locks `CONSTRAINTS.md` via
-`constraint-driven-development`, maps interfaces, and writes
-`tasks/plan.md`. Reports every skill it executed, in simple friendly Hebrew.
-Robert's phrasing: **"plan"** or `/plan-issue <n>`.
+(Trivial / Small / Standard / Large / X-Large), auto-detects the stack and
+test framework, resolves `needs-answers` open questions from code, checks
+whether `interview-me` clarification is actually needed (no synthetic
+questions when the issue is clear), locks `CONSTRAINTS.md` via
+`constraint-driven-development`, maps tasks to sub-issues with `blocked-by`
+edges for Standard/Large work, and writes `tasks/plan.md`. Robert's
+phrasing: **"plan"** or `/ii-plan-issue <n>`.
 
-### Station 2 — `build-plan` (Build & Verify)
+### Station III — `iii-build-plan` (Build & Verify)
 
-Consumes `tasks/plan.md` (created by Station 1 — it refuses to run without
+Consumes `tasks/plan.md` (created by Station II — it refuses to run without
 one). TDD per task (RED → GREEN → REGRESSION), official-doc grounding via
 `source-driven-development`, cleanup via `code-simplification`, atomic git
 commits per task, and a language-matched build-error resolver when compile
 or test breaks appear. Two modes:
 
-- `/build-plan auto` — run all tasks in sequence; stops only on a stuck test
-  or a dangerous, irreversible action. Robert's phrasing: **"build auto."**
-- `/build-plan` — execute the single next open task, commit, mark `[x]` in
-  `tasks/plan.md`, then stop for inspection.
+- `/iii-build-plan auto` — run all tasks in sequence; stops only on a stuck
+  test or a dangerous, irreversible action. Robert's phrasing: **"build auto."**
+- `/iii-build-plan` — execute the single next open task, commit, mark `[x]`
+  in `tasks/plan.md`, then stop for inspection.
 
-### Station 3 — `review-build-and-pr` (Review & Ship)
+Corrections from the operator after a fresh build go to Station IIIB
+(`iiib-iterate-after-build`), not back to III.
 
-Full test-suite gate first — **100% pass, no merge (or push) on red**. Then a
-4-axis parallel review: code quality (`code-review-and-quality`), security
-(`security-and-hardening`), test engineering (`test-engineer`), and a
-language specialist matched to the project (for this repo: the Python
-reviewer — asyncio, typing, PEP 8). Nits are fixed immediately with a fix
-commit. Then sync with `master`, push the branch, open the PR via
-`gh pr create` with a Conventional-Commits title, `Closes #<n>`, and
-`@coderabbitai summary` — and hand off to `babysit-pr-and-merge`. Robert's
-phrasing: **"ship."**
+## 4. Station IV — `iv-review-build-and-pr` (Review & Ship)
 
-### Station 4 — `explain-issue` (Visual Explain & Verify)
+**Proof-before-review gate first**: targeted tests for touched modules (this
+repo's fast-iteration policy — never the full suite locally; CI runs it) or
+the live browser check for UI changes. **No review runs on unproven code.**
 
-Optional closeout after Station 3. Generates an interactive standalone HTML
-artifact at `docs/issues/<id>-<kind>-<slug>.html` (`<kind>` ∈ {showcase, explained}, `<slug>` from the issue title — e.g. `docs/issues/147-showcase-run-folders.html`): dry facts (issue, PR
-link, branch/commit), Before vs After architecture, a visual flow diagram,
-and a project-tailored manual verification guide — all in Hebrew (ELI5,
-RTL), with code/commands in LTR blocks. Opens it live in the browser
-automatically. Robert's phrasing: **"explain."**
+Then the review axes: OCR delegation preview (deterministic file scope +
+rules), dynamic reviewers (`code-review-and-quality`, `security-and-hardening`,
+Python reviewer for this repo — asyncio, typing, PEP 8), the silent-failure
+hunt, and the Spec axis (missing / added-not-asked / implemented-wrong vs the
+issue and plan). Findings are merged into one deduplicated list, fixed with a
+`fix(review):` commit, and the full post-review verification gate runs before
+anything is pushed.
 
-### Artifact homes — global rule
+Then sync with `master`, push the branch, open the PR via `gh pr create` with
+a Conventional-Commits title, `Closes #<n>`, and `@coderabbitai summary` —
+and hand off to Station V. Robert's phrasing: **"ship."**
 
-Three homes, three purposes — never mixed:
-
-1. `runs/.../research-papers/` — **per-run** papers (one run's methodology, results, conclusions).
-2. `docs/issues/<id>-<kind>-<slug>.html` — **per-issue** HTML artifacts from this workflow (Station 4 showcases, research explainers).
-3. `.freebuff/`, `%TEMP%` — **scratch / transient preview only**. Never the canonical home of anything. (No doc or skill ever mandated `.freebuff/` — it grew organically as gitignored scratch.)
-
-## 4. Babysitter — `babysit-pr-and-merge`
+## 5. Station V — `v-babysit-pr-and-merge` (Babysitter)
 
 Sits on the PR through exactly **one** CodeRabbit review round (single-round
 cap to eliminate churn and conserve quota):
@@ -163,40 +140,38 @@ cap to eliminate churn and conserve quota):
   rather than blindly merging.
 - **Triage:** every comment gets ACCEPT or REJECT with an inline, technically
   argued reply; rejected threads are resolved with rationale.
-- **Fix loop:** accepted fixes are applied locally, tests are re-run
-  (self-heals by reverting and rejecting its own bad fix if red), batched into
-  one commit and pushed.
-- **Hard merge gate:** 100% test pass + clean CI/status checks before squash
-  merge; escalates to Robert only on blocking issues.
+- **Fix loop:** accepted fixes are applied locally, targeted tests re-run,
+  batched into one commit and pushed once. No secondary review round.
+- **Hard merge gate:** CI green (the full suite in GitHub Actions is the sole
+  merge gate for this repo) + blockers resolved before squash merge; the
+  squash title keeps Conventional Commits format but references the **PR**
+  number. Escalates to Robert only on blocking issues.
 
-Zero human in the loop otherwise. Invoked with no PR number, it processes the
-open-PR queue in priority order (stack dependencies first, then
-ready-to-merge, then actionable feedback, pipelining waits). Robert's
-phrasing: **"PR babysitter."**
+Zero human in the loop otherwise. Robert's phrasing: **"PR babysitter."**
 
-## 5. The orchestrator — `workflow-issue`
+## 6. Station VI — `vi-prune-artifacts` (Post-merge sweep)
 
-`workflow-issue` is the end-to-end assembly of the stations: discovery →
-assignment (claim + `context-engineering`) → planning (Station 1) → build
-(Station 2) → self-audit (the review helpers) → ship (Station 3) → babysitter.
-The station skills are the primitives; `workflow-issue` is the convenience path
-when you want one command to walk an issue all the way through.
+After Station V reports MERGED, run the `vi-prune-artifacts` skill: it
+deletes per-issue artifacts whose work is CLOSED and unreferenced —
+`docs/issues/<id>-*.html` for closed issues, orphaned scratch drafts —
+while always keeping dated finding reports, knowledge docs, and anything
+referenced from surviving documentation. Robert's phrasing: **"prune."**
 
-In practice Robert mixes the two: `work issue` for discovery, then direct
-station invocations (`build auto`, `ship`, `PR babysitter`). That is fully
-supported — the stations do not require the orchestrator.
+## 7. Station VII — `vii-present-pr` (Visual Explain & Verify)
 
----
+Optional closeout after the merge. Generates an interactive standalone HTML
+artifact at `docs/issues/<id>-presentation-*.html`: dry facts (issue, PR
+link, branch/commit), Before vs After architecture, a visual flow diagram,
+and a project-tailored manual verification guide — all in Hebrew (ELI5, RTL),
+with code/commands in LTR blocks. Robert's phrasing: **"explain."**
 
-## 6. Post-merge sweep — `prune-artifacts`
+### Artifact homes — global rule
 
-After `babysit-pr-and-merge` reports MERGED, run the `prune-artifacts` skill:
-it deletes per-issue artifacts whose work is closed and unreferenced —
-`docs/issues/<id>-*-*.html` for CLOSED issues, orphaned root
-`eli5_*.html` files, `docs/plan/issue-*.md` for CLOSED issues (removing
-`docs/plan/` if left empty), and shipped scratch drafts — while always keeping
-dated finding reports (`*_explained.html`, open-thread `*_showcase.html`).
-Robert's phrasing: **"prune."**
+Three homes, three purposes — never mixed:
+
+1. `runs/.../research-papers/` — **per-run** papers (one run's methodology, results, conclusions).
+2. `docs/issues/<id>-*.html` — **per-issue** HTML artifacts from this workflow.
+3. `.freebuff/`, `%TEMP%` — **scratch / transient preview only**. Never the canonical home of anything.
 
 ---
 
@@ -206,46 +181,29 @@ Robert's phrasing first, canonical trigger second.
 
 | Task | Skill | Robert's phrasing | Canonical trigger |
 |---|---|---|---|
-| Turn a raw idea into an issue | `create-issue` | "issue create" | `create-issue <idea>` |
-| See open issues and pick one | `workflow-issue` | "work issue" | `/workflow-issue` (no args = discovery) |
-| Run an issue end-to-end | `workflow-issue` | "work issue 42" | `/workflow-issue 42` |
-| Plan the picked issue | `plan-issue` | "plan" | `/plan-issue <n>` |
-| Implement the plan, all tasks | `build-plan` | "build auto" | `/build-plan auto` |
-| Implement just the next task | `build-plan` | "build" | `/build-plan` |
-| Review, push, open PR, babysit | `review-build-and-pr` | "ship" | `/review-build-and-pr` |
-| Explain what shipped + how to verify | `explain-issue` | "explain" | `/explain-issue <n>` |
-| Track CodeRabbit review and merge | `babysit-pr-and-merge` | "PR babysitter" | `babysit-pr-and-merge` |
-| Sweep stale artifacts post-merge | `prune-artifacts` | "prune" | `prune-artifacts` |
+| Turn a raw idea into an issue | `i-create-issue` | "issue create" | `i-create-issue <idea>` |
+| See open issues and pick one | `x-workflow-issue` | "work issue" | `/x-workflow-issue` (no args = discovery) |
+| Run an issue end-to-end | `x-workflow-issue` | "work issue 42" | `/x-workflow-issue 42` |
+| Plan the picked issue | `ii-plan-issue` | "plan" | `/ii-plan-issue <n>` |
+| Implement the plan, all tasks | `iii-build-plan` | "build auto" | `/iii-build-plan auto` |
+| Implement just the next task | `iii-build-plan` | "build" | `/iii-build-plan` |
+| Review, push, open PR | `iv-review-build-and-pr` | "ship" | `/iv-review-build-and-pr` |
+| Track CodeRabbit review and merge | `v-babysit-pr-and-merge` | "PR babysitter" | `v-babysit-pr-and-merge` |
+| Sweep stale artifacts post-merge | `vi-prune-artifacts` | "prune" | `vi-prune-artifacts` |
+| Explain what shipped + how to verify | `vii-present-pr` | "explain" | `/vii-present-pr <n>` |
 | Clarify vague requirements | `interview-me` | "grill me" | `interview-me` |
 | Audit the diff pre-commit | `code-review-and-quality` | "use code-review-and-quality" | `code-review-and-quality` |
 
 ---
 
-## Appendix: skill inventory (self-verifying)
+## Related
 
-Confirmed live on this machine (2026-09-11). Junctions verified via directory
-listing of each agent's skills root; a future session can re-verify by
-checking that each path below resolves.
-
-| Skill | SKILL.md (canonical) | Deployed junctions |
-|---|---|---|
-| `create-issue` | `~/.agents/skills/create-issue/SKILL.md` | `~/.claude/skills/create-issue`, `~/.gemini/config/skills/create-issue`, `AppData/Local/hermes/skills/create-issue` |
-| `plan-issue` | `~/.agents/skills/plan-issue/SKILL.md` | same three roots |
-| `build-plan` | `~/.agents/skills/build-plan/SKILL.md` | same three roots |
-| `review-build-and-pr` | `~/.agents/skills/review-build-and-pr/SKILL.md` | same three roots |
-| `explain-issue` | `~/.agents/skills/explain-issue/SKILL.md` | same three roots |
-| `workflow-issue` | `~/.agents/skills/workflow-issue/SKILL.md` | same three roots |
-| `babysit-pr-and-merge` | `~/.agents/skills/babysit-pr-and-merge/SKILL.md` | same three roots |
-
-Deployment mechanism: Windows junctions/symlinks back to `~/.agents/skills/`
-per #116; `create-issue` file-integrity is additionally ensured by
-`~/.agents/skills/create-issue/scripts/sync_skill.py`.
-
-Legacy names still present as junctions in some roots (`issue-create`,
-`pr-babysitter`) are deprecated aliases; use the `*-issue` / `babysit-pr-and-merge`
-forms above. Codex (`~/.codex/skills/`) does not currently carry the family.
-
-Related: the old ECC `orch-pipeline` guide (`docs/ecc-flow-guide.md`) was
-**superseded by this doc and removed** — this is the canonical process guide.
-Git conventions (branching, commits, PRs, the CI merge gate) live in
-`docs/git-workflow.md`.
+- Git conventions (branching, commits, PRs, the CI merge gate) live in
+  [`docs/git-workflow.md`](git-workflow.md) — the two docs are complementary:
+  this one is the pipeline, that one is the repo's git law. Where the
+  `git-workflow-and-versioning` helper disagrees with `git-workflow.md`,
+  the doc wins.
+- The old ECC `orch-pipeline` guide (`docs/ecc-flow-guide.md`) and the former
+  7-skill `*-issue` family (`create-issue`, `plan-issue`, `build-plan`,
+  `review-build-and-pr`, `explain-issue`, `workflow-issue`) were superseded by
+  the global Station pipeline (2026-09-22) and removed.
