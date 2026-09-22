@@ -153,6 +153,12 @@ re-run** of the rebuild against the current source generation (branch
   every passed window in the certified build was also passing in the baseline, and all 132
   delta drops are attributable to the bounds gate on the 5 hash-identical days plus
   invariant-satisfying on 09-21.
+- **Auditability:** the full certified pre/post SHA-256 maps (sources and outputs), the
+  exact file lists, and the binary hashing procedure are embedded in the committed raw JSON
+  (`docs/measurements/issue-298-pristine-manifest-delta.json` → `certification`), so the
+  proof survives even though `run/cert_298/` itself is git-ignored. Anyone can re-verify
+  by re-hashing `run/ticks/*.jsonl` and `run/ticks/pristine/ticks_*.jsonl` (raw bytes,
+  streamed 1 MiB chunks) and comparing to the embedded maps.
 
 ## 6. Artifacts Produced
 
