@@ -1,5 +1,6 @@
 """Integration tests for the 4-tab dashboard SPA and FastAPI API endpoints."""
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -334,6 +335,9 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert agg["total_windows"] == 2
     assert agg["windows_source"] == "cache"
 
+    # Issue #279: this CORRUPTED-data file is ineligible — no preferred winner.
+    assert client.get("/api/ticks/manifest").json()["preferred_file"] is None
+
     # Per-file market breakdown surfaces from the cache too.
     files = client.get("/api/ticks/manifest").json()["files"]
     assert files[0]["market_breakdown"][0]["series"] == "btc-up-or-down-5m"
@@ -360,6 +364,136 @@ def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
     entry = client.get("/api/ticks/manifest").json()["files"][0]
     assert entry["readiness"] is None
     assert entry["readiness_targets"] is None
+
+
+def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPLETE CAPTURE",
+                          level="RESEARCH_READY", windows=50, policy=None):
+    """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper)."""
+    from scripts.verify_tick_data import READINESS_POLICY_VERSION
+
+    target = tmp_path / name
+    target.write_text('{"a": 1}\n', encoding="utf-8")
+    cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / f"{name}.json").write_text(json.dumps({
+        "file": name,
+        "status": status,
+        "capture_state": {"label": capture_label},
+        "readiness": {"level": level,
+                      "policy_version": READINESS_POLICY_VERSION if policy is None else policy},
+        "windows_count": windows,
+        "fingerprint": osc_dash._file_fingerprint(target),
+        "series_counts": {},
+    }), encoding="utf-8")
+
+
+def test_manifest_preferred_file_picks_healthy_winner(tmp_path, monkeypatch):
+    """Issue #279: eligible = PASS + COMPLETE CAPTURE; the most-ready file wins."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-07.jsonl", status="WARN",
+                          capture_label="PARTIAL CAPTURE", level="RESEARCH_READY", windows=999)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", level="EXPLORATORY", windows=900)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-09.jsonl", level="RESEARCH_READY", windows=50)
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] == "ticks_2026-09-09.jsonl"
+    flagged = [f["name"] for f in data["files"] if f["is_preferred"]]
+    assert flagged == ["ticks_2026-09-09.jsonl"]
+
+
+def test_manifest_preferred_file_windows_tie_break(tmp_path, monkeypatch):
+    """Issue #279: equal readiness ranks by windows_count desc, then mtime desc."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    a = tmp_path / "ticks_2026-09-07.jsonl"
+    a.write_text('{"a": 1}\n', encoding="utf-8")
+    b = tmp_path / "ticks_2026-09-08.jsonl"
+    b.write_text('{"a": 1}\n', encoding="utf-8")
+    c = tmp_path / "ticks_2026-09-09.jsonl"
+    c.write_text('{"a": 1}\n', encoding="utf-8")
+    _write_verify_sidecar(tmp_path, a.name, level="EXPLORATORY", windows=100)
+    _write_verify_sidecar(tmp_path, b.name, level="EXPLORATORY", windows=300)
+    _write_verify_sidecar(tmp_path, c.name, level="EXPLORATORY", windows=100)
+    older = time.time() - 500
+    os.utime(a, (older, older))
+    os.utime(c, (older + 100, older + 100))  # c newer than a, same windows
+
+    data = client.get("/api/ticks/manifest").json()
+    # b wins on windows outright; among the 100-window ties the newer mtime wins.
+    assert data["preferred_file"] == "ticks_2026-09-08.jsonl"
+
+
+def test_pick_preferred_pure_ranking():
+    """Issue #279: pure ranking — level → windows_count → mtime, no I/O, no globals."""
+    def mk(name, **kw):
+        return {"name": name, "mtime": 0, "windows_count": 0, **kw}
+
+    files = [
+        mk("warn.jsonl", integrity_status="WARN", capture_state={"label": "PARTIAL CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=999, mtime=3),
+        mk("research.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "RESEARCH_READY"}, windows_count=40, mtime=2),
+        mk("explor.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=500, mtime=3),
+    ]
+    # WARN is never eligible despite the best level/windows/mtime.
+    assert osc_dash.pick_preferred(files)["name"] == "research.jsonl"
+    assert osc_dash.pick_preferred([]) is None
+    assert osc_dash.pick_preferred([files[0]]) is None
+
+    # windows_count beats mtime at equal level.
+    tie = [
+        mk("older.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=100, mtime=1),
+        mk("newer.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}, windows_count=99, mtime=99),
+    ]
+    assert osc_dash.pick_preferred(tie)["name"] == "older.jsonl"
+
+    # Fully equal keys resolve stably by the caller's (name-sorted) order.
+    same = [
+        mk("a.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}),
+        mk("b.jsonl", integrity_status="PASS", capture_state={"label": "COMPLETE CAPTURE"},
+           readiness={"level": "EXPLORATORY"}),
+    ]
+    assert osc_dash.pick_preferred(same)["name"] == "a.jsonl"
+
+
+def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeypatch):
+    """Issue #279: empty dir / uncached / all WARN-FAIL → preferred_file is None."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert data["files"] == []
+
+    # Uncached file: never eligible, never triggers a re-verify.
+    (tmp_path / "ticks_2026-09-08.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert all(f["is_preferred"] is False for f in data["files"])
+
+    # All files WARN/FAIL: fall back to the All-Files default behavior unchanged.
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", status="WARN",
+                          capture_label="PARTIAL CAPTURE")
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert all(f["is_preferred"] is False for f in data["files"])
+
+
+def test_manifest_preferred_file_rejects_stale_policy_cache(tmp_path, monkeypatch):
+    """Issue #279: a PASS+COMPLETE sidecar under an old readiness policy is stale —
+    every eligibility field stays null, so nothing is preferred."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-08.jsonl", policy="stale-policy-0")
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] is None
+    assert len(data["files"]) == 1
+    entry = data["files"][0]
+    assert entry["integrity_status"] is None
+    assert entry["capture_state"] is None
+    assert entry["readiness"] is None
+    assert entry["is_preferred"] is False
 
 
 def test_prewarm_verify_cache_from_sidecars(tmp_path, monkeypatch):
@@ -3218,6 +3352,134 @@ def test_dash_no_book_status_labels_and_cockpit_styling():
     assert "NOT QUOTED (UNPRICEABLE BOOK)" in html
     assert "WAITING FOR BOOK" in html
     assert "Skipped — unpriceable book" in html
+
+
+def test_loadmanifest_preselects_preferred_file():
+    """Issue #279: first load pre-selects the ★-marked preferred file; a stored
+    manual choice (including All Files) survives later loadManifest() calls."""
+    import shutil
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("node is not available")
+    html = client.get("/").text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    script = html[start + len("<script>"):end]
+
+    dom_prelude = """
+    const setInterval = () => 0;
+    const clearInterval = () => {};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {};
+    // Property (not const) so the harness can swap the payload per scenario.
+    globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+    const EventSource = class { constructor() {} addEventListener() {} close() {} };
+    const WebSocket = class { constructor() {} addEventListener() {} send() {} close() {} };
+    const makeElem = () => ({
+      style: {}, textContent: '', innerHTML: '', appendChild: () => {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      addEventListener: () => {}, querySelectorAll: () => [], value: ''
+    });
+    const makeSel = (initialValue) => ({
+      value: initialValue,
+      innerHTML: '',
+      options: [],
+      appendChild(opt) { this.options.push(opt); },
+    });
+    let sel;
+    const window = { selectedBacktestFile: '', _btFileChosen: false, addEventListener: () => {}, location: { search: '' } };
+    globalThis.window = window;
+    const document = { getElementById: (id) => id === 'btFileSelect' ? sel : makeElem(), createElement: () => ({ textContent: '', value: '' }), querySelectorAll: () => [] };
+    globalThis.document = document;
+    const localStorage = { _data: {}, getItem(k) { return this._data[k] || null; }, setItem(k, v) { this._data[k] = String(v); } };
+    globalThis.localStorage = localStorage;
+    """
+
+    test_js = """
+    (async () => {
+    // Build a dropdown state from a manifest payload, then report the outcome.
+    globalThis.__runLoad = async (initialValue, stored, chosen, payload) => {
+      sel = makeSel(initialValue);
+      window.selectedBacktestFile = stored;
+      window._btFileChosen = chosen;
+      const files = payload.files.map(f => ({
+        name: f[0], lines: 10, lines_estimated: false,
+        is_preferred: f[1],
+      }));
+      await loadManifest.__withPayload({ files, preferred_file: payload.preferred });
+      return { selValue: sel.value, stored: window.selectedBacktestFile,
+               labels: sel.options.map(o => o.textContent) };
+    };
+
+    // 1. First load with a preferred file: it is ★-marked and pre-selected.
+    const first = await __runLoad('', '', false, {
+      preferred: 'ticks_b.jsonl',
+      files: [['ticks_a.jsonl', false], ['ticks_b.jsonl', true]],
+    });
+    if (first.labels.length !== 3) throw new Error('dropdown not built; options=' + JSON.stringify(first.labels));
+    if (first.selValue !== 'ticks_b.jsonl') throw new Error('expected preferred pre-select, got ' + first.selValue);
+    if (first.stored !== 'ticks_b.jsonl') throw new Error('window.selectedBacktestFile must mirror the pre-select, got ' + first.stored);
+    if (first.labels[2] !== '★ ticks_b.jsonl (10 lines)') throw new Error('expected star-marked label, got ' + first.labels[2]);
+    if (first.labels[0].startsWith('★') || first.labels[1].startsWith('★')) throw new Error('non-preferred options must not carry the star');
+
+    // 2. Stored selection (manual file pick) survives a manifest refresh.
+    const kept = await __runLoad('ticks_a.jsonl', 'ticks_a.jsonl', true, {
+      preferred: 'ticks_b.jsonl',
+      files: [['ticks_a.jsonl', false], ['ticks_b.jsonl', true]],
+    });
+    if (kept.selValue !== 'ticks_a.jsonl') throw new Error('manual pick must survive refresh, got ' + kept.selValue);
+
+    // 3. Manual All Files pick (empty value, empty stored) must not be
+    //    overridden by the preferred pre-select — _btFileChosen tells it apart
+    //    from a genuine first load.
+    const allFiles = await __runLoad('', '', true, {
+      preferred: 'ticks_b.jsonl',
+      files: [['ticks_a.jsonl', false], ['ticks_b.jsonl', true]],
+    });
+    if (allFiles.selValue !== '') throw new Error('manual All Files pick must survive, got ' + allFiles.selValue);
+    if (allFiles.stored !== '') throw new Error('stored must stay empty after a manual All Files pick');
+
+    // 4. No preferred file: default stays All Files.
+    const none = await __runLoad('', '', false, {
+      preferred: null,
+      files: [['ticks_a.jsonl', false]],
+    });
+    if (none.selValue !== '') throw new Error('no winner must keep All Files default, got ' + none.selValue);
+    if (none.stored !== '') throw new Error('stored must stay empty when nothing qualifies');
+    if (none.labels.some(l => l.startsWith('★'))) throw new Error('no star without a preferred file');
+
+    console.log('LOADMANIFEST_PRESELECT_TESTS_PASSED');
+    })().catch(e => { console.error(e); process.exit(1); });
+    """
+
+    # Make the fetch-driven loadManifest() run against a canned payload.
+    harness = """
+    // One-shot payload override: the next fetch consumes it once, every other
+    // fetch (the app's own init loadManifest calls) gets the standing payload.
+    const __standing = { files: null, preferred_file: null };
+    let __next;
+    loadManifest.__withPayload = (p) => {
+      __next = p;
+      return loadManifest();
+    };
+    globalThis.fetch = () => {
+      const p = __next !== undefined ? __next : __standing;
+      __next = undefined;
+      return Promise.resolve({ ok: true, json: async () => p });
+    };
+    """
+
+    res = subprocess.run(
+        [node_bin],
+        input=dom_prelude + "\n" + harness + "\n" + script + "\n" + test_js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "LOADMANIFEST_PRESELECT_TESTS_PASSED" in res.stdout
 
 
 def test_api_backtest_pnl_histogram_invariant_and_edge_cases():

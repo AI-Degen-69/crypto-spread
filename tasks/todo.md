@@ -1,6 +1,6 @@
-# Todo — Issue #290
+# Todo — Issue #279
 
-- [x] TASK-1: Gate engine + cross-file window aggregation (`evaluate_window_gates`, `PristineGateParams`)
-- [x] TASK-2: Two-pass writer, `pristine_manifest.json`, CLI + guards (byte-stable output)
-- [x] TASK-3: Real run over the six days; re-verify output; counts vs issue's numbers
-- [x] TASK-4: Closeout — targeted suites green, todos ticked
+- [x] TASK-1: `pick_preferred()` + `preferred_file`/`is_preferred` in `/api/ticks/manifest` + endpoint tests
+- [x] TASK-2: ★ Preferred badge on the winning Tick Files row (tooltip, theme tokens)
+- [x] TASK-3: ★ in dropdown label + first-load pre-select of `preferred_file` (manual picks still persist)
+- [x] TASK-4: Closeout — targeted suites green (`test_osc_dash_integration.py` + `test_theme_tokens.py`), todos ticked

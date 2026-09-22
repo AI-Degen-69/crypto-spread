@@ -1,81 +1,90 @@
-# Plan — Issue #290: pristine-window dataset extractor for the existing capture days
+# Plan — Issue #279: auto-pick healthiest tick file as the default backtest dataset
 
-Stack: Python 3, pytest · Size: **Standard** (new CLI script + tests; touches no existing module)
-Type: **Code** (data tooling) · Branch: `feat/pristine-window-dataset`
+Stack: Python 3 + FastAPI, pytest · Size: **Standard** (one module + its endpoint/UI tests;
+2–3 files, one ranking decision) · Type: **Code** (Backend/Logic + light UI) ·
+Branch: `feat/preferred-tick-file-279`
 
 ## Resolved inputs (planning record)
-- Issue supplies exact file:line map; no `needs-answers` label, no open questions → nothing to
-  resolve from the operator.
-- `code-explorer` persona skipped: not Large/unfamiliar code — the issue names every reuse point.
-- `type-design-analyzer` persona applied to the frozen contract (findings in "Interface
-  contracts" below).
+- Issue supplies an exact eligibility formula and tie-break chain; no `needs-answers` label,
+  no open questions → nothing to resolve from the operator.
+- `code-explorer` persona skipped: not Large/unfamiliar code — the issue names every reuse
+  point (`api_ticks_manifest()`, `loadManifest()`, `btFileSelect`) with file:line.
+- `type-design-analyzer` persona applied to the frozen ranking contract (findings in
+  "Interface contracts" below): ranking must be pure and derived-only-from-arguments so the
+  endpoint cannot disagree with itself between files entries.
 - Sub-issue mapping skipped: skill reference `references/issue-tracker.md` does not exist on
-  disk; 4 linear tasks stay tracked here + `tasks/todo.md` only.
-- `err` is a top-level snap field (`scripts/collect_ticks.py:870`: `ub_err or db_err or tape_err`),
-  counted by `verify_tick_data.py:511` → the collector-error gate reads truthy `tick["err"]`.
-- Day files on disk: 2026-09-13/14/15/18/20/21 (six `.jsonl` days, as the issue states).
+  disk; 4 linear tasks stay tracked here + `tasks/todo.md` only (same as plan #290).
+- Verified in code: `api_ticks_manifest()` (`server/osc_dash.py:533`) already enriches every
+  file with `integrity_status`, `capture_state`, `readiness.level`, `windows_count` from the
+  verify cache (`:566-580`); the `All Files (Default)` option is the empty-value option of
+  `btFileSelect` (`:2930`); `window.selectedBacktestFile` mirrors the dropdown on manual
+  change (`:8277-8281`) and `loadManifest()` restores `sel.value || selectedBacktestFile`
+  across refreshes (`:5602`, `:5622-5624`) — so a manual "All Files" pick already survives
+  reloads via the empty-string value; only the **first** load (both empty) needs the
+  preferred pre-select.
 
 ## Spec
-See `SPEC.md` (Standard size). One-line spec: stream six day files, verdict every captured
-window against per-window continuity gates, write whole surviving windows keyed to their
-**start** day + a byte-stable `pristine_manifest.json`; sources are never modified.
+See `SPEC.md` (Standard size). One-line spec: rank verify-cache-healthy files in
+`api_ticks_manifest()`, expose `preferred_file` + per-file `is_preferred`, badge the winning
+Tick Files row with ★, and pre-select the winner in the Backtest dropdown on first load —
+falling back to today's "All Files (Default)" behavior when nothing qualifies.
 
 ## Interface contracts (frozen before logic)
-- `PristineGateParams` — frozen dataclass: `max_gap_sec=6.0`, `max_start_delay_sec=5.0`
-  (drives both late-start and early-cutoff, mirroring `verify_window_continuity` semantics),
-  `max_snap_interval_sec=3.0` (density floor: `min_snaps = ceil(duration / max_snap_interval_sec)`).
-  Frozen so thresholds cannot drift between windows → determinism invariant enforced.
-- `evaluate_window_gates(ticks, params) -> dict` — single constructor path computing
-  `passed` and `failing_gates` together, so they cannot disagree. Gate math mirrors
-  `verify_window_continuity`: `start_delay = max(0, first_ts − start_ts)`,
-  `end_cutoff = max(0, end_ts − last_ts)`, gaps `> max_gap_sec`, reversals `delta < 0`,
-  error ticks `truthy tick["err"]`, density `tick_count ≥ ceil(duration / max_snap_interval_sec)`
-  (issue's literal "≥1 snap per 3s of window duration").
-- `WindowVerdict` / manifest records — plain dicts at the JSON boundary (every repo artifact —
-  window records, verify reports, golden manifest — is a plain dict; a dataclass adds a
-  conversion layer with no invariant gain at the file boundary). Invariants enforced by
-  construction + tests, recorded as the accepted escape hatch.
-- Manifest ordering invariant: source hashes computed first, tick files written next,
-  `pristine_manifest.json` written **last**, atomically (`write_lines_atomic`/`write_json_atomic`
-  from `strategy.windows`) — a manifest never references a missing output file.
-- Manifest is byte-stable: **no wall-clock fields anywhere** (a build timestamp would break the
-  issue's byte-identical re-run requirement). Provenance = source sha256s + policy version.
-- CLI: `python -m scripts.build_pristine_dataset <ticks_dir> --out <dir>`; exit 0 success,
-  2 config error (`out == ticks_dir` resolved → refused: outputs share the `ticks_<day>.jsonl`
-  naming and would clobber sources; also no input day files found).
-- Two-pass streaming (memory): pass 1 gates per merged cid (scalar aggregates only),
-  pass 2 re-streams and copies raw lines of surviving cids to per-start-day files.
-  Memory stays O(windows), never O(ticks) — ~1.87M tick dicts would be ~2GB held at once.
-- Reuse, no copies: `scripts.rebuild_windows.iter_ticks` (jsonl/gz streaming),
-  `scripts.ship_to_drive.sha256_of` + its `DAY_RE` day-key pattern,
-  `scripts.verify_tick_data.verify_ticks_dir` (embedded output re-verify),
-  `strategy.windows.write_lines_atomic` / `write_json_atomic`,
-  window record fields per `strategy.windows.finalize_window` schema.
-
-## Dependency graph
-TASK-1 → TASK-2 → TASK-3 → TASK-4 (linear: gate engine unblocks writer; real-data run needs
-both; closeout needs the run). Risk-first: cross-file window merge + gate math land before any
-output writing.
+- `pick_preferred(files) -> dict | None` — **pure** function over the `out["files"]` entries.
+  Eligible = `integrity_status == "PASS"` AND `capture_state.label == "COMPLETE CAPTURE"`
+  (string compare on the exact labels `scripts/verify_tick_data.capture_state()` emits).
+  Rank: `readiness.level` (RESEARCH_READY=2 > EXPLORATORY=1 > INSUFFICIENT/other=0) →
+  `windows_count` desc → `mtime` desc (deterministic total order; files list is already
+  name-sorted upstream so equal keys keep stable name order). Returns the winning entry
+  reference or `None` when zero files qualify. No I/O, no globals.
+- Endpoint payload additions (additive only, no field renamed or removed):
+  `out["preferred_file"] = <name> | None`; each file entry gains `is_preferred: bool`
+  (exactly one `true` when a winner exists, all `false` otherwise).
+- UI contract: the ★ lives in the file-name cell of the Tick Files row
+  (`.loadManifest()` table, `:5673-5720+`) and in the dropdown option label; the badge is a
+  `<span title="…">` styled with existing theme tokens (`--gold`) — no new CSS file, no new
+  dependency.
+- Pre-select contract: on `loadManifest()`, when neither an existing `sel.value` nor
+  `window.selectedBacktestFile` is set (`currentVal` falsy) AND `d.preferred_file` names an
+  option, set `sel.value` and `window.selectedBacktestFile` to it; any manual choice —
+  including re-picking All Files — keeps persisting through `currentVal` exactly as today.
+  Backtest request path (`:4855`) reads the dropdown first, so no execution-path change.
 
 ## Tasks
+- **TASK-1** [Backend/Logic] · Size M · `server/osc_dash.py`, `tests/test_osc_dash_integration.py`
+  Add pure `pick_preferred()` + wire `preferred_file` / `is_preferred` into
+  `api_ticks_manifest()`. Endpoint tests: PASS+COMPLETE winner picked; WARN/FAIL mixes never
+  eligible; level tie broken by `windows_count`, then `mtime`; all-unverified (no cache)
+  → `preferred_file: null`, every `is_preferred` false; empty `run/ticks/` → `files: []` +
+  `preferred_file: null`. · Depends on: — · Verify: targeted pytest (new tests + existing
+  manifest endpoint tests at `tests/test_osc_dash_integration.py:208-330` stay green).
+- **TASK-2** [Design/UI] · Size S · `server/osc_dash.py` (Tick Files row builder)
+  Render exactly one ★ Preferred badge on the winning row's file-name cell (span with tooltip
+  naming why: integrity PASS, complete capture, readiness level, window count); zero badges
+  when no winner; colors/spacing via existing theme tokens. · Depends on: TASK-1 ·
+  Verify: targeted pytest HTML assertions + browser preview of the Tick Files tab.
+- **TASK-3** [Design/UI] · Size S · `server/osc_dash.py` (`loadManifest()` `:5595-5625`,
+  `btFileSelect` markup `:2928-2931`)
+  Mark the preferred option `★` in its label; on first load pre-select `preferred_file` and
+  set `window.selectedBacktestFile` (only when nothing stored yet); manual selection —
+  including All Files — must keep persisting across `loadManifest()` refreshes; no qualifier
+  → default stays "All Files". · Depends on: TASK-1 · Verify: targeted pytest (extend
+  `tests/test_theme_tokens.py:127-132` dropdown assertions + inline-script fixtures in
+  `tests/test_osc_dash_integration.py`) + browser preview.
+- **TASK-4** [Backend/Logic] · Size XS · closeout
+  Run the full targeted gate `python -m pytest tests/test_osc_dash_integration.py
+  tests/test_theme_tokens.py -q`; tick todos; confirm nothing else changed
+  (`git diff --stat`). · Depends on: TASK-1..3 · Verify: targeted pytest green.
 
-| ID | Size | Tag | Target files | What is built | Helper skill | Depends on | Verification |
-|---|---|---|---|---|---|---|---|
-| TASK-1 | M | [Backend/Logic] | `scripts/build_pristine_dataset.py`, `tests/test_build_pristine_dataset.py` | `PristineGateParams`, `evaluate_window_gates`, cross-file per-cid aggregation (midnight-spanning windows merged into one stream keyed to start day) | test-driven-development | — | `python -m pytest tests/test_build_pristine_dataset.py -k gate -q` |
-| TASK-2 | M | [Backend/Logic] | same | Two-pass writer: whole surviving windows grouped by start day → `run/ticks/pristine/ticks_<day>.jsonl`; `pristine_manifest.json` (per-window verdict + sources + sha256, per-pair counts, gates block, embedded output re-verify); CLI + guards; byte-stable output | test-driven-development, incremental-implementation | TASK-1 | `python -m pytest tests/test_build_pristine_dataset.py -q` (synthetic fixture: byte-identical re-run, source hashes unchanged, re-verify clean, overwrite guard, exit codes) |
-| TASK-3 | S | [Backend/Logic] | — (run/ is gitignored) | Real run over the six days; re-verify output dir; compare per-pair pristine counts to the issue's ~799–802 (5m) / ~208–209 (15m); source hash invariance before/after | verification-before-completion | TASK-2 | `python -m scripts.build_pristine_dataset run/ticks --out run/ticks/pristine` + `python -m scripts.verify_tick_data run/ticks/pristine` |
-| TASK-4 | XS | [Backend/Logic] | `tasks/todo.md` | Closeout: targeted suites green (`test_build_pristine_dataset`, `test_verify_tick_data`, `test_ship_to_drive` — sha256_of reuse), todos ticked | — | TASK-3 | targeted pytest runs |
+Checkpoints: after TASK-1 (endpoint contract proven by tests) and after TASK-3 (UI visible) —
+one-line progress reports in Mode A, not approval pauses.
 
-Checkpoints: after TASK-2 (gates + writer proven on synthetic data) and after TASK-3 (real six-day
-extraction certified) — one-line progress reports in Mode A, no approval pauses.
-
-## Improvement proposal (adopt by default)
-Embed a compact `verify_ticks_dir(out_dir)` verdict of the freshly written output inside
-`pristine_manifest.json` (`output_verify` key), mirroring the golden-manifest pattern of carrying
-each day's verify verdict (charter §3.1) — turns acceptance criterion #2 into a machine-checked,
-self-certifying artifact. Evidence: AC #2 ("Re-verifying the output with `scripts/verify_tick_data`
-reports zero…") + `docs/golden-tick-dataset.md` §3.1. Adopted into TASK-2. Rejected proposals: none.
-
-## Explicit out of scope (from the issue)
-No modification of any existing day file; no collector changes (PR #289 territory); no promotion
-into `run/ticks/golden/` and no golden-charter amendment; no backtest engine changes.
+## Improvement proposal (recorded)
+- **Adopted (simplification/hardening):** implement the ranking as a pure
+  `pick_preferred(files)` helper instead of inlining the comparison in the endpoint —
+  evidence, issue verbatim: *"Compute a per-file "preferred" ranking server-side in
+  `api_ticks_manifest()` … with a deterministic tie-break (level → windows_count → mtime);
+  covered by endpoint tests"*. A pure helper makes that determinism directly unit-testable
+  without HTTP fixtures and keeps the endpoint a thin serializer, matching how the file
+  already extracts `_aggregate_ticks`.
+- *(Rejected proposals would be recorded here with their reason — none so far this session.)*
