@@ -378,6 +378,52 @@ _SCAN_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
 _SCAN_TTL_SEC = 600.0
 
 
+# Issue #295: the only subdirectory of run/ticks/ the tick-file endpoints
+# resolve into. `pristine/` holds the derived replay-grade day files written
+# by scripts/build_pristine_dataset.py; golden/, quarantine/ and the internal
+# .verify_cache/ stay hidden and unresolvable.
+_TICKS_SUBDIR_ALLOWLIST = frozenset({"pristine"})
+
+
+def _resolve_tick_file(file: str) -> tuple[str, Path | None]:
+    """Resolve a `file` request value to a tick file under TICKS_DIR (Issue #295).
+
+    The single resolution point for every endpoint that takes a tick-file
+    parameter. Accepts a bare basename or `pristine/<basename>` — the only
+    allow-listed subdirectory. Everything else is rejected before any disk
+    access: backslashes, `..`, absolute paths, a leading `/`, more than two
+    segments, empty segments, and unlisted first segments. The existing
+    containment check (resolve + relative_to) is kept as the backstop.
+
+    Returns a discriminated result so callers can keep their existing three
+    response shapes:
+      ("ok", Path)        — resolved, exists, and is a file
+      ("invalid", None)   — bad param or containment failure
+      ("not_found", None) — missing or not a file
+    """
+    if (
+        not file
+        or "\\" in file
+        or ".." in file
+        or file.startswith("/")
+        or Path(file).is_absolute()
+    ):
+        return "invalid", None
+    parts = file.split("/")
+    if len(parts) > 2 or any(not p for p in parts):
+        return "invalid", None
+    if len(parts) == 2 and parts[0] not in _TICKS_SUBDIR_ALLOWLIST:
+        return "invalid", None
+    candidate = (TICKS_DIR / file).resolve()
+    try:
+        candidate.relative_to(TICKS_DIR.resolve())
+    except ValueError:
+        return "invalid", None
+    if not candidate.exists() or not candidate.is_file():
+        return "not_found", None
+    return "ok", candidate
+
+
 def _read_verify_cache(path: Path, expected_fingerprint: str | None = None) -> dict[str, Any] | None:
     """Read a cached verify report sidecar.
 
@@ -450,14 +496,16 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
     windows_known = True
     readiness_known = True
     source = "none"
-    cache_dir = files[0].parent / _VERIFY_CACHE_DIRNAME if files else None
     for f, _lines in entries:
+        # Issue #295: sidecars are keyed by the path relative to TICKS_DIR
+        # (a top-level basename or pristine/<basename>), so same-named files
+        # in different tiers never share a cache entry.
         cached = (
             _read_verify_cache(
-                cache_dir / f"{f.name}.json",
+                _verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()),
                 expected_fingerprint=_file_fingerprint(f),
             )
-            if cache_dir
+            if f.is_relative_to(TICKS_DIR)
             else None
         )
         if cached is None:
@@ -487,20 +535,20 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
         from scripts.verify_tick_data import assess_readiness
         aggregate_readiness = assess_readiness(
             valid_ticks=sum(int(cached.get("valid_ticks", 0)) for f, _ in entries
-                            for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+                            for cached in [_read_verify_cache(_verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()), expected_fingerprint=_file_fingerprint(f))] if cached),
             windows_count=total_windows,
             tape_entries=total_tape_entries,
             market_breakdown=aggregate_market,
             time_blocks=sorted(time_blocks),
             raw_lines=total_lines,
             corrupt_lines=sum(int(cached.get("corrupt_lines", 0)) for f, _ in entries
-                              for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+                              for cached in [_read_verify_cache(_verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()), expected_fingerprint=_file_fingerprint(f))] if cached),
             schema_errors=sum(int(cached.get("schema_errors", 0)) for f, _ in entries
-                             for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+                             for cached in [_read_verify_cache(_verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()), expected_fingerprint=_file_fingerprint(f))] if cached),
             sampling_gaps=sum(int(cached.get("sampling_gaps_count", 0)) for f, _ in entries
-                             for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+                             for cached in [_read_verify_cache(_verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()), expected_fingerprint=_file_fingerprint(f))] if cached),
             collector_errors=sum(int(cached.get("collector_errors", 0)) for f, _ in entries
-                                for cached in [_read_verify_cache(cache_dir / f"{f.name}.json", expected_fingerprint=_file_fingerprint(f))] if cached),
+                                for cached in [_read_verify_cache(_verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()), expected_fingerprint=_file_fingerprint(f))] if cached),
         )
 
     if not series_counts and entries:
@@ -595,24 +643,42 @@ def api_ticks_manifest():
             out["manifest"] = json.loads(mf.read_text(encoding="utf-8"))
         except Exception:
             pass
-    for f in sorted(TICKS_DIR.iterdir()):
-        if (
-            (f.suffix in (".jsonl", ".gz") or f.name.endswith(".jsonl.gz"))
-            and f.is_file()
-            and not f.name.endswith(".idx")
-        ):
-            size = f.stat().st_size
-            is_est = size >= 20_000_000
-            lines = (
-                int(size / 950) if is_est else _count_lines_fast(f)
-            )
-            out["files"].append({
-                "name": f.name,
-                "bytes": size,
-                "lines": lines,
-                "lines_estimated": is_est,
-                "mtime": f.stat().st_mtime,
-            })
+    def _list_tick_files(scan_dir: Path, *, subdir: str | None = None) -> None:
+        """Append one directory's tick files to `out["files"]`.
+
+        Issue #295: extended to the pristine/ subdirectory. A subdir entry's
+        `name` is its TICKS_DIR-relative path (`pristine/<basename>`), which
+        is both the display label and the value every endpoint round-trips.
+        """
+        for f in sorted(scan_dir.iterdir()):
+            if (
+                (f.suffix in (".jsonl", ".gz") or f.name.endswith(".jsonl.gz"))
+                and f.is_file()
+                and not f.name.endswith(".idx")
+            ):
+                size = f.stat().st_size
+                is_est = size >= 20_000_000
+                lines = (
+                    int(size / 950) if is_est else _count_lines_fast(f)
+                )
+                entry = {
+                    "name": f"{subdir}/{f.name}" if subdir else f.name,
+                    "bytes": size,
+                    "lines": lines,
+                    "lines_estimated": is_est,
+                    "mtime": f.stat().st_mtime,
+                }
+                if subdir:
+                    entry["is_pristine"] = True
+                out["files"].append(entry)
+
+    _list_tick_files(TICKS_DIR)
+    # Issue #295: surface the pristine/ derived datasets alongside the day
+    # files — only this one allow-listed subdirectory; golden/, quarantine/
+    # and the internal .verify_cache/ stay hidden.
+    pristine_dir = TICKS_DIR / "pristine"
+    if pristine_dir.is_dir():
+        _list_tick_files(pristine_dir, subdir="pristine")
     try:
         out["aggregate"] = _aggregate_ticks(
             [TICKS_DIR / f["name"] for f in out["files"]], out["manifest"]
@@ -620,7 +686,7 @@ def api_ticks_manifest():
         # Per-file market breakdown, when a cached verify report exists.
         for entry in out["files"]:
             cached = _read_verify_cache(
-                TICKS_DIR / _VERIFY_CACHE_DIRNAME / f"{entry['name']}.json",
+                _verify_sidecar_path(entry["name"]),
                 expected_fingerprint=_file_fingerprint(TICKS_DIR / entry["name"]),
             )
             entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
@@ -1379,22 +1445,16 @@ async def api_backtest(
 
     source_path_str: Optional[str] = None
     if file:
-        if "/" in file or "\\" in file or ".." in file:
+        # Issue #295: one shared resolver for all tick-file endpoints — allows
+        # the pristine/ subpath while still rejecting traversal.
+        status, source = _resolve_tick_file(file)
+        if status == "invalid":
             return {
                 "error": "invalid file param",
                 "params_hash": params.params_hash(),
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             }
-        source = (TICKS_DIR / file).resolve()
-        try:
-            source.relative_to(TICKS_DIR.resolve())
-        except ValueError:
-            return {
-                "error": "invalid file path",
-                "params_hash": params.params_hash(),
-                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-            }
-        if not source.exists() or not source.is_file():
+        if status == "not_found":
             return {
                 "error": f"file not found: {file}",
                 "params_hash": params.params_hash(),
@@ -1519,14 +1579,11 @@ async def api_backtest_sweep(
 
     source_path_str: Optional[str] = None
     if file:
-        if "/" in file or "\\" in file or ".." in file:
+        # Issue #295: shared resolver — pristine/ subpath allowed, traversal rejected.
+        status, source = _resolve_tick_file(file)
+        if status == "invalid":
             return JSONResponse(status_code=400, content={"error": "invalid file param"})
-        source = (TICKS_DIR / file).resolve()
-        try:
-            source.relative_to(TICKS_DIR.resolve())
-        except ValueError:
-            return JSONResponse(status_code=400, content={"error": "invalid file path"})
-        if not source.exists() or not source.is_file():
+        if status == "not_found":
             return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
         source_path_str = str(source)
 
@@ -2341,20 +2398,28 @@ def _file_fingerprint(path: Path) -> str:
 
 
 def _verify_sidecar_path(filename: str) -> Path:
-    """Path of the verify-report sidecar JSON for a tick file."""
+    """Path of the verify-report sidecar JSON for a tick file.
+
+    `filename` is the request-visible relative name (a bare basename, or
+    `pristine/<basename>` per Issue #295) — the sidecar mirrors the
+    subdirectory under .verify_cache/ so same-named files never collide.
+    """
     return TICKS_DIR / _VERIFY_CACHE_DIRNAME / f"{filename}.json"
 
 
 def _write_verify_sidecar(target: Path, rep: dict[str, Any]) -> None:
-    """Persist the full report (superset of the old counts sidecar), best-effort."""
+    """Persist the full report (superset of the old counts sidecar), best-effort.
+
+    Keyed by the target's path relative to TICKS_DIR (Issue #295), so a
+    pristine file and a same-named top-level day file get distinct sidecars.
+    """
     try:
-        cache_dir = TICKS_DIR / _VERIFY_CACHE_DIRNAME
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        rel_name = target.relative_to(TICKS_DIR)
+        sidecar = _verify_sidecar_path(rel_name.as_posix())
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
         payload = dict(rep)
         payload["ts"] = time.time()
-        (cache_dir / f"{target.name}.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        sidecar.write_text(json.dumps(payload), encoding="utf-8")
     except Exception:
         pass
 
@@ -2377,7 +2442,7 @@ def _prewarm_verify_cache() -> None:
                 continue
             try:
                 side = _read_verify_cache(
-                    cache_dir / f"{f.name}.json",
+                    _verify_sidecar_path(f.name),
                     expected_fingerprint=_file_fingerprint(f),
                 )
             except OSError:
@@ -2485,14 +2550,11 @@ async def api_ticks_verify(
             max_start_delay=max_start_delay,
         )
 
-    if "/" in file or "\\" in file or ".." in file:
+    # Issue #295: shared resolver — pristine/ subpath allowed, traversal rejected.
+    status, target = _resolve_tick_file(file)
+    if status == "invalid":
         return JSONResponse(status_code=400, content={"error": "invalid file param"})
-    target = (TICKS_DIR / file).resolve()
-    try:
-        target.relative_to(TICKS_DIR.resolve())
-    except ValueError:
-        return JSONResponse(status_code=400, content={"error": "invalid file path"})
-    if not target.exists() or not target.is_file():
+    if status == "not_found":
         return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
 
     fp = _file_fingerprint(target)
@@ -5757,6 +5819,9 @@ async function loadManifest(){
       let fileIdx = 0;
       for(const f of d.files){
         fileIdx++;
+        // Issue #295: a pristine entry's name is a subpath (pristine/<name>) —
+        // DOM ids must never carry the raw `/`, so build a sanitized token.
+        const domId = f.name.replaceAll('/', '_');
         const tr = document.createElement('tr');
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
         const linesFormatted = (f.lines||0).toLocaleString();
@@ -5772,11 +5837,11 @@ async function loadManifest(){
         btnName.title = 'Toggle integrity report';
         btnName.setAttribute('aria-label', `Toggle integrity report for ${f.name}`);
         btnName.setAttribute('aria-expanded', 'false');
-        btnName.innerHTML = `<span id="verify_arrow_${f.name}" style="display:inline-block;width:16px;color:var(--gold)" aria-hidden="true">▶</span>${esc(f.name)}`;
+        btnName.innerHTML = `<span id="verify_arrow_${domId}" style="display:inline-block;width:16px;color:var(--gold)" aria-hidden="true">▶</span>${esc(f.name)}`;
         btnName.addEventListener('click', () => {
           const expanded = btnName.getAttribute('aria-expanded') === 'true';
           btnName.setAttribute('aria-expanded', String(!expanded));
-          toggleFileVerify(f.name);
+          toggleFileVerify(domId);
         });
         tdName.appendChild(btnName);
         if (f.is_preferred) {
@@ -5817,7 +5882,7 @@ async function loadManifest(){
         tdActions.style.alignItems = 'center';
 
         const verifyBadge = document.createElement('span');
-        verifyBadge.id = 'verify_badge_' + f.name;
+        verifyBadge.id = 'verify_badge_' + domId;
         verifyBadge.style.cssText = 'font:700 10px var(--disp);color:var(--faint);white-space:nowrap';
         verifyBadge.textContent = '…';
 
@@ -5832,6 +5897,9 @@ async function loadManifest(){
         btnDel.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(255,87,87,0.12);color:var(--down);border-color:rgba(255,87,87,0.3);cursor:pointer';
         btnDel.textContent = '🗑️ Delete';
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
+        // Issue #295: pristine files are derived artifacts — the delete
+        // endpoint stays top-level-only, so the action is omitted entirely.
+        if (f.is_pristine) btnDel.style.display = 'none';
 
         tdIntegrity.appendChild(verifyBadge);
         tdActions.appendChild(btnRun);
@@ -5849,11 +5917,11 @@ async function loadManifest(){
         // Inline integrity accordion row: sits directly under the file row,
         // filled by verifyTickData() on load (no modal, no Verify button).
         const vRow = document.createElement('tr');
-        vRow.id = 'verify_row_' + f.name;
+        vRow.id = 'verify_row_' + domId;
         vRow.style.display = 'none';
         const vTd = document.createElement('td');
         vTd.colSpan = 7;
-        vTd.id = 'verify_cell_' + f.name;
+        vTd.id = 'verify_cell_' + domId;
         vTd.style.cssText = 'background:var(--panel2);padding:12px 16px;border-top:1px solid var(--line)';
         vTd.innerHTML = '<div style="text-align:center;color:var(--faint);font-size:11px">Integrity report will load here…</div>';
         vRow.appendChild(vTd);
@@ -6073,7 +6141,10 @@ function renderFileVerifyHtml(filename, d){  const {color: statusColor, label: s
 // pass (or a file the collector is still appending to) polls until the
 // background scan lands. refresh=true bypasses the cache (manual rescan).
 async function verifyTickData(filename, refresh){
-  const cell = document.getElementById('verify_cell_' + filename);
+  // Issue #295: DOM ids are built from a sanitized token (raw `/` replaced) —
+  // the fetch itself still uses the real relative name.
+  const domId = filename.replaceAll('/', '_');
+  const cell = document.getElementById('verify_cell_' + domId);
   if(cell && !cell.dataset.loaded){
     cell.innerHTML = '<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">Running integrity check on ' + esc(filename) + '… <span class="spinner"></span></div>';
   }
@@ -6096,13 +6167,13 @@ async function verifyTickData(filename, refresh){
           : `${lines} lines processed · ${elapsed}`;
         cell.innerHTML = `<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">Scanning ${esc(filename)} in background… <span class="spinner"></span><div class="mono" style="margin-top:6px;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums">${progHtml}</div></div>`;
       }
-      const badgeP = document.getElementById('verify_badge_' + filename);
+      const badgeP = document.getElementById('verify_badge_' + domId);
       if(badgeP){ badgeP.textContent = '⏳'; badgeP.style.color = 'var(--dim)'; }
       await new Promise(r => setTimeout(r, 2000));
     }
     if(cell){
       cell.dataset.loaded = '1';
-      const row = document.getElementById('verify_row_' + filename);
+      const row = document.getElementById('verify_row_' + domId);
       const readinessCell = row && row.previousElementSibling ? row.previousElementSibling.querySelector('td:nth-child(6)') : null;
       if(readinessCell && d.readiness){
         readinessCell.textContent = d.readiness.level || 'PENDING';
@@ -6114,7 +6185,7 @@ async function verifyTickData(filename, refresh){
         + `<div style="text-align:center;margin-top:6px"><button type="button" class="btn" style="font-size:10px;padding:3px 10px" aria-label="Rescan integrity report for ${esc(filename)}" onclick="verifyTickData('${esc(filename)}', true)">↻ Rescan</button></div>`;
     }
     // Refresh the status badge on the file row.
-    const badge = document.getElementById('verify_badge_' + filename);
+    const badge = document.getElementById('verify_badge_' + domId);
     if(badge){
       const {color, label} = fileVerifyStatusBits(d.status, d.capture_state);
       badge.textContent = label;
@@ -6129,8 +6200,8 @@ async function verifyTickData(filename, refresh){
 
 // Expand/collapse the inline verify accordion under a file row.
 function toggleFileVerify(filename){
-  const row = document.getElementById('verify_row_' + filename);
-  const arrow = document.getElementById('verify_arrow_' + filename);
+  const row = document.getElementById('verify_row_' + filename.replaceAll('/', '_'));
+  const arrow = document.getElementById('verify_arrow_' + filename.replaceAll('/', '_'));
   if(!row) return;
   const open = row.style.display !== 'none';
   row.style.display = open ? 'none' : '';

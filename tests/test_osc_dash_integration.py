@@ -371,12 +371,19 @@ def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
 
 def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPLETE CAPTURE",
                           level="RESEARCH_READY", windows=50, policy=None):
-    """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper)."""
+    """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper).
+
+    Issue #295: `name` may be a subpath (e.g. pristine/ticks_2026-09-13.jsonl) —
+    the tick file is created under that subdirectory and the sidecar at the
+    mirrored .verify_cache/ subpath, exactly as the server resolves them.
+    """
     from scripts.verify_tick_data import READINESS_POLICY_VERSION
 
     target = tmp_path / name
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('{"a": 1}\n', encoding="utf-8")
     cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
+    (cache_dir / name).parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(exist_ok=True)
     (cache_dir / f"{name}.json").write_text(json.dumps({
         "file": name,
@@ -468,6 +475,101 @@ def test_pick_preferred_pure_ranking():
            readiness={"level": "EXPLORATORY"}),
     ]
     assert osc_dash.pick_preferred(same)[0]["name"] == "a.jsonl"
+
+
+# --- Issue #295: pristine/ subpath datasets ---------------------------------
+
+
+def test_manifest_lists_pristine_files_as_distinct_datasets(tmp_path, monkeypatch):
+    """Issue #295: a same-named pristine file and day file both appear with
+    distinct names, and the pristine entry carries its own verify verdicts."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-13.jsonl",
+                          status="WARN", capture_label="PARTIAL CAPTURE",
+                          level="EXPLORATORY", windows=10)
+    _write_verify_sidecar(tmp_path, "pristine/ticks_2026-09-13.jsonl",
+                          status="PASS", capture_label="COMPLETE CAPTURE",
+                          level="RESEARCH_READY", windows=77)
+
+    data = client.get("/api/ticks/manifest").json()
+    by_name = {f["name"]: f for f in data["files"]}
+    assert set(by_name) == {
+        "ticks_2026-09-13.jsonl",
+        "pristine/ticks_2026-09-13.jsonl",
+    }
+    pristine = by_name["pristine/ticks_2026-09-13.jsonl"]
+    assert pristine["is_pristine"] is True
+    assert pristine["integrity_status"] == "PASS"
+    assert pristine["readiness"]["level"] == "RESEARCH_READY"
+    assert pristine["windows_count"] == 77
+    # The day file keeps its own (different) cached verdicts — no collision.
+    assert by_name["ticks_2026-09-13.jsonl"]["integrity_status"] == "WARN"
+
+
+def test_manifest_preferred_file_can_be_pristine(tmp_path, monkeypatch):
+    """Issue #295: a pristine entry wins preferred ranking under the same
+    eligibility rules and is starred by its exact subpath name."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "ticks_2026-09-13.jsonl",
+                          status="WARN", capture_label="PARTIAL CAPTURE",
+                          level="RESEARCH_READY", windows=999)
+    _write_verify_sidecar(tmp_path, "pristine/ticks_2026-09-13.jsonl",
+                          status="PASS", capture_label="COMPLETE CAPTURE",
+                          level="RESEARCH_READY", windows=50)
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["preferred_file"] == "pristine/ticks_2026-09-13.jsonl"
+    assert data["preferred_tier"] == 1
+    flagged = [f["name"] for f in data["files"] if f["is_preferred"]]
+    assert flagged == ["pristine/ticks_2026-09-13.jsonl"]
+
+
+def test_backtest_and_sweep_resolve_pristine_subpath(tmp_path, monkeypatch):
+    """Issue #295: file=pristine/<basename> replays the pristine file, not the
+    same-named day file."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    cid = "0xPRISTINE_01"
+    ticks = [
+        _make_fake_tick(1000.0 + i, cid, "btc-updown-5m-1000", "btc-up-or-down-5m", m)
+        for i, m in enumerate((0.50, 0.48, 0.52, 0.50))
+    ]
+    pristine_dir = tmp_path / "pristine"
+    pristine_dir.mkdir()
+    pristine_file = pristine_dir / "fake_pristine.jsonl"
+    pristine_file.write_text("".join(json.dumps(t) + "\n" for t in ticks), encoding="utf-8")
+    # A decoy day file with the same basename must NOT be replayed.
+    (tmp_path / "fake_pristine.jsonl").write_text("not-a-tick-file\n", encoding="utf-8")
+
+    res = client.get("/api/backtest?file=pristine%2Ffake_pristine.jsonl&offset=0.02")
+    assert res.status_code == 200
+    assert "error" not in res.json()
+
+    sweep = client.get("/api/backtest/sweep?axis=queue&file=pristine%2Ffake_pristine.jsonl")
+    assert sweep.status_code == 200
+    assert sweep.json()["axis"] == "queue"
+
+
+def test_endpoints_reject_traversal_and_unlisted_subdirs(tmp_path, monkeypatch):
+    """Issue #295: the shared resolver still blocks `..`, backslashes and
+    non-allow-listed subdirectories on every tick-file endpoint."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    bad_values = (
+        "..%2Fsecrets.jsonl",
+        "pristine%2F..%2Fsecrets.jsonl",
+        "golden%2Fticks_2026-09-13.jsonl",
+        "pristine%5Cticks_2026-09-13.jsonl",  # backslash, not a slash
+    )
+    for bad in bad_values:
+        res = client.get(f"/api/backtest?file={bad}")
+        assert res.status_code == 200
+        assert res.json().get("error") == "invalid file param", bad
+        sweep = client.get(f"/api/backtest/sweep?file={bad}")
+        assert sweep.status_code == 400, bad
+        verify = client.get(f"/api/ticks/verify?file={bad}&wait=1")
+        assert verify.status_code == 400, bad
+
+    missing = client.get("/api/ticks/verify?file=pristine%2Fnope.jsonl&wait=1")
+    assert missing.status_code == 404
 
 
 def test_manifest_preferred_file_absent_when_nothing_qualifies(tmp_path, monkeypatch):
