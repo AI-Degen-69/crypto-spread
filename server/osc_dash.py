@@ -424,6 +424,251 @@ def _resolve_tick_file(file: str) -> tuple[str, Path | None]:
     return "ok", candidate
 
 
+# --- Golden dataset certification card (Issue #292) -------------------------
+# The charter (docs/golden-tick-dataset.md) defines exact quality gates; this
+# endpoint reads run/ticks/golden/ + golden_manifest.json and renders each
+# gate as a checked/unchecked item with measured-vs-required values. Read-only
+# and cache-only: verify verdicts come from the .verify_cache sidecars (keyed
+# by relative name per Issue #295), never by re-streaming day files.
+_GOLDEN_DIRNAME = "golden"
+# Charter §1.2 — set-level golden targets (deliberately above the
+# RESEARCH_READY policy floors, which the readiness layer enforces).
+_GOLDEN_WINDOWS_TOTAL = 500
+_GOLDEN_WINDOWS_PER_PAIR = 50
+_GOLDEN_TIME_BLOCKS = 5
+_GOLDEN_VALID_TICKS = 50_000
+_GOLDEN_MAX_GAP_RATE = 0.05
+
+
+def _golden_check(name: str, measured: Any, required: Any, ok: bool,
+                  *, n: Any = None, N: Any = None, direction: str = "max") -> dict[str, Any]:
+    """One checklist row: measured vs required, with optional n/N progress."""
+    item: dict[str, Any] = {
+        "name": name,
+        "measured": measured,
+        "required": required,
+        "direction": direction,
+        "ok": bool(ok),
+    }
+    if n is not None:
+        item["n"] = n
+        item["N"] = N
+    return item
+
+
+def _golden_absent(reason: str) -> dict[str, Any]:
+    """The explicit 'no golden dataset yet' payload — 200 OK, never an error.
+
+    The issue requires the checklist rendered unchecked in this state, so the
+    canonical gates ship here computed over an empty day list (every target
+    unmet, currency unverified).
+    """
+    return {
+        "state": "absent",
+        "reason": reason,
+        "charter": "docs/golden-tick-dataset.md",
+        "policy_version": None,
+        "days": [],
+        # Trivially-true vacuous gates are forced unchecked here: an absent
+        # dataset has satisfied nothing, and the issue requires the checklist
+        # rendered entirely unchecked in this state.
+        "checks": [
+            {**c, "ok": False} for c in (
+                _golden_set_checks([])
+                + _golden_per_day_checks([])
+                + _golden_currency_checks({}, [])
+            )
+        ],
+    }
+
+
+def _golden_day_sidecar(golden_dir: Path, day_file: Path) -> dict[str, Any] | None:
+    """Cached verify verdict for one golden day file (fingerprint-matched)."""
+    try:
+        rel = day_file.relative_to(TICKS_DIR).as_posix()
+    except ValueError:
+        return None
+    return _read_verify_cache(
+        _verify_sidecar_path(rel),
+        expected_fingerprint=_file_fingerprint(day_file),
+    )
+
+
+def _golden_set_checks(days: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Charter §1.2 — set-level gates, computed from cached day verdicts only."""
+    from strategy.series import SERIES
+
+    checks: list[dict[str, Any]] = []
+    windows_total = sum(int(d.get("windows_count") or 0) for d in days)
+    checks.append(_golden_check(
+        "windows_total", windows_total, _GOLDEN_WINDOWS_TOTAL,
+        ok=windows_total >= _GOLDEN_WINDOWS_TOTAL,
+        n=windows_total, N=_GOLDEN_WINDOWS_TOTAL))
+
+    pair_windows: dict[str, int] = {}
+    for d in days:
+        for m in d.get("market_breakdown") or []:
+            key = f"{m.get('series', '')}"
+            pair_windows[key] = pair_windows.get(key, 0) + int(m.get("windows") or 0)
+    for series, _dur, _label in SERIES:
+        pair_windows.setdefault(series, 0)
+    worst_pair = min(pair_windows.items(), key=lambda kv: kv[1], default=("", 0))
+    checks.append(_golden_check(
+        "windows_per_market_pair", worst_pair[1], _GOLDEN_WINDOWS_PER_PAIR,
+        ok=worst_pair[1] >= _GOLDEN_WINDOWS_PER_PAIR,
+        n=worst_pair[1], N=_GOLDEN_WINDOWS_PER_PAIR))
+
+    time_blocks: set[str] = set()
+    for d in days:
+        time_blocks.update(d.get("time_blocks") or [])
+    checks.append(_golden_check(
+        "time_blocks", len(time_blocks), _GOLDEN_TIME_BLOCKS,
+        ok=len(time_blocks) >= _GOLDEN_TIME_BLOCKS,
+        n=len(time_blocks), N=_GOLDEN_TIME_BLOCKS))
+
+    valid_ticks = sum(int(d.get("valid_ticks") or 0) for d in days)
+    checks.append(_golden_check(
+        "valid_ticks", valid_ticks, _GOLDEN_VALID_TICKS,
+        ok=valid_ticks >= _GOLDEN_VALID_TICKS,
+        n=valid_ticks, N=_GOLDEN_VALID_TICKS))
+
+    gaps = sum(int(d.get("sampling_gaps_count") or 0) for d in days)
+    gap_rate = round(gaps / max(windows_total, 1), 6)
+    checks.append(_golden_check(
+        "sampling_gap_rate", gap_rate, _GOLDEN_MAX_GAP_RATE,
+        ok=gap_rate <= _GOLDEN_MAX_GAP_RATE, direction="min"))
+
+    missing_series = [s for s, _d, _l in SERIES if (pair_windows.get(s) or 0) == 0]
+    checks.append(_golden_check(
+        "all_10_series_present", len(SERIES) - len(missing_series), len(SERIES),
+        ok=not missing_series, n=len(SERIES) - len(missing_series), N=len(SERIES)))
+    return checks
+
+
+def _golden_per_day_checks(days: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Charter §1.1 — per-day gates, aggregated to a single checked/unchecked row."""
+    if not days:
+        return [_golden_check("every_golden_day_passes", 0, len(days), ok=False,
+                              n=0, N=0)]
+    all_pass = all(d.get("status") == "PASS" for d in days)
+    all_complete = all(
+        (d.get("capture_state") or {}).get("label") == "COMPLETE CAPTURE" for d in days)
+    zero_corrupt = all(int(d.get("corrupt_lines") or 0) == 0 for d in days)
+    zero_errors = all(int(d.get("collector_errors") or 0) == 0 for d in days)
+    zero_reversals = all(int(d.get("time_reversals") or 0) == 0 for d in days)
+    return [
+        _golden_check("every_golden_day_passes",
+                      sum(1 for d in days if d.get("status") == "PASS"), len(days),
+                      ok=all_pass, n=sum(1 for d in days if d.get("status") == "PASS"),
+                      N=len(days)),
+        _golden_check("complete_capture",
+                      sum(1 for d in days if (d.get("capture_state") or {}).get("label") == "COMPLETE CAPTURE"),
+                      len(days), ok=all_complete,
+                      n=sum(1 for d in days if (d.get("capture_state") or {}).get("label") == "COMPLETE CAPTURE"),
+                      N=len(days)),
+        _golden_check("zero_corrupt_rows", sum(int(d.get("corrupt_lines") or 0) for d in days),
+                      0, ok=zero_corrupt, direction="min"),
+        _golden_check("zero_collector_errors", sum(int(d.get("collector_errors") or 0) for d in days),
+                      0, ok=zero_errors, direction="min"),
+        _golden_check("zero_time_reversals", sum(int(d.get("time_reversals") or 0) for d in days),
+                      0, ok=zero_reversals, direction="min"),
+    ]
+
+
+def _golden_currency_checks(manifest: dict[str, Any],
+                            day_files: list[Path]) -> list[dict[str, Any]]:
+    """Certification currency: policy version + fresh per-day .idx sidecars."""
+    from scripts.verify_tick_data import READINESS_POLICY_VERSION
+
+    manifest_version = manifest.get("policy_version")
+    policy_ok = manifest_version == READINESS_POLICY_VERSION
+    idx_fresh = True
+    for df in day_files:
+        idx_path = df.with_name(df.name + ".idx")
+        if idx_path.exists():
+            try:
+                from backtest.index import is_fresh
+                idx_fresh = idx_fresh and is_fresh(df, idx_path)
+            except Exception:
+                idx_fresh = False
+        else:
+            idx_fresh = False
+    return [
+        _golden_check(
+            "policy_version_current", manifest_version, READINESS_POLICY_VERSION,
+            ok=policy_ok, direction="equal"),
+        _golden_check(
+            "idx_sidecars_fresh",
+            sum(1 for df in day_files if df.with_name(df.name + ".idx").exists()),
+            len(day_files), ok=idx_fresh,
+            n=sum(1 for df in day_files if df.with_name(df.name + ".idx").exists()),
+            N=len(day_files)),
+    ]
+
+
+@app.get("/api/ticks/golden")
+def api_ticks_golden():
+    """Golden-dataset certification state for the Tick Files card (Issue #292).
+
+    Read-only and cache-only: the charter's §1.1/§1.2 gates are computed from
+    the golden manifest plus each day's cached verify sidecar — dashboard
+    loads never re-stream day files. Absent golden dir is an explicit state,
+    not an error.
+    """
+    golden_dir = TICKS_DIR / _GOLDEN_DIRNAME
+    if not golden_dir.is_dir():
+        return _golden_absent("no golden dataset yet")
+
+    manifest: dict[str, Any] = {}
+    manifest_path = golden_dir / "golden_manifest.json"
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                manifest = loaded
+        except Exception:
+            return _golden_absent("golden manifest unreadable")
+
+    day_files = sorted(
+        f for f in golden_dir.iterdir()
+        if f.is_file() and f.suffix in (".jsonl", ".gz")
+        and not f.name.endswith(".idx") and f.name != "golden_manifest.json"
+    )
+    days: list[dict[str, Any]] = []
+    for df in day_files:
+        side = _golden_day_sidecar(golden_dir, df) or {}
+        days.append({
+            "day": df.name,
+            "status": side.get("status"),
+            "capture_state": side.get("capture_state"),
+            "readiness_level": (side.get("readiness") or {}).get("level"),
+            "windows_count": side.get("windows_count", 0),
+            "valid_ticks": side.get("valid_ticks", 0),
+            "corrupt_lines": side.get("corrupt_lines", 0),
+            "collector_errors": side.get("collector_errors", 0),
+            "time_reversals": side.get("time_reversals", 0),
+            "sampling_gaps_count": side.get("sampling_gaps_count", 0),
+            "market_breakdown": side.get("market_breakdown", []),
+            "time_blocks": side.get("time_blocks", []),
+            "has_verify_cache": bool(side),
+        })
+
+    checks = (
+        _golden_set_checks(days)
+        + _golden_per_day_checks(days)
+        + _golden_currency_checks(manifest, day_files)
+    )
+    state = "certified" if days and all(c["ok"] for c in checks) else "present"
+    return {
+        "state": state,
+        "reason": None,
+        "charter": "docs/golden-tick-dataset.md",
+        "policy_version": manifest.get("policy_version"),
+        "days": days,
+        "checks": checks,
+    }
+
+
 def _read_verify_cache(path: Path, expected_fingerprint: str | None = None) -> dict[str, Any] | None:
     """Read a cached verify report sidecar.
 
@@ -3389,6 +3634,14 @@ textarea:focus-visible,
 
   <!-- TAB 4: TICKS FILE MANAGER & INGESTION -->
   <div id="tab-ticks" class="tab-content">
+    <div class="card" style="border-top:2px solid var(--gold)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <h3 style="margin:0">🏆 Golden Dataset (Certification Checklist)</h3>
+        <button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadGoldenCard()">🔄 Refresh</button>
+      </div>
+      <div id="goldenCardWrap"><div style="color:var(--faint);font-size:12px">Loading golden dataset state…</div></div>
+    </div>
+
     <div class="card" style="border-top:2px solid var(--proj)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <h3 style="margin:0">💾 Tick Data Files (JSONL Repository)</h3>
@@ -4581,6 +4834,7 @@ function switchTab(name){
   }
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
+  if(name==='ticks') loadGoldenCard();
 }
 
 let isCollectorActive = false;
@@ -5717,6 +5971,57 @@ function showNotice(msg, isError){
   el.style.border = '1px solid ' + (isError ? 'rgba(240,104,77,0.3)' : 'rgba(51,201,181,0.3)');
   el.textContent = msg;
   setTimeout(()=>{ el.style.display = 'none'; }, 4000);
+}
+
+// Issue #292: golden-dataset certification card. The backend computes every
+// charter gate — this only renders state + checks[] (measured / required / ok,
+// with n/N progress where the backend supplies them).
+async function loadGoldenCard(){
+  const wrap = document.getElementById('goldenCardWrap');
+  if(!wrap) return;
+  try{
+    const res = await fetch('/api/ticks/golden');
+    const d = await res.json();
+    const fmt = v => (v === null || v === undefined) ? '—' : Number(v).toLocaleString();
+    const badge = d.state === 'certified'
+      ? '<span class="pill" style="background:rgba(51,201,181,0.15);color:var(--up);border-color:rgba(51,201,181,0.3);font-weight:700;font-size:11px;padding:3px 10px">CERTIFIED</span>'
+      : d.state === 'present'
+        ? '<span class="pill" style="background:rgba(243,186,47,0.15);color:var(--gold);border-color:var(--gold);font-weight:700;font-size:11px;padding:3px 10px">PRESENT · NOT CERTIFIED</span>'
+        : '<span class="pill pill-flat" style="font-size:11px;padding:3px 10px">NO GOLDEN DATASET YET</span>';
+
+    let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">${badge}`
+      + `<span style="font-size:11px;color:var(--dim)">Policy version: ${d.policy_version ? esc(String(d.policy_version)) : '— (certification has not run)'}</span></div>`;
+
+    if(d.state === 'absent'){
+      html += `<div style="font-size:12px;color:var(--dim);line-height:1.5">No <code>run/ticks/golden/</code> exists yet (${esc(d.reason || '')}). `
+        + `Capture and certification are tracked by issue #281; the requirements are defined in the charter: <code>${esc(d.charter || 'docs/golden-tick-dataset.md')}</code>.</div>`;
+    } else {
+      const rows = (d.checks || []).map(c => {
+        const mark = c.ok ? '<span style="color:var(--up);font-weight:700">✓</span>' : '<span style="color:var(--down);font-weight:700">✗</span>';
+        let target;
+        if(c.n !== undefined && c.n !== null){
+          target = `${fmt(c.measured)} / ${fmt(c.required)}`;
+        } else if(c.direction === 'equal'){
+          target = `${fmt(c.measured)} = ${fmt(c.required)}`;
+        } else if(c.direction === 'min'){
+          target = `${fmt(c.measured)} ≤ ${fmt(c.required)}`;
+        } else {
+          target = `${fmt(c.measured)} ≥ ${fmt(c.required)}`;
+        }
+        const label = String(c.name).replaceAll('_', ' ');
+        return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line)">`
+          + `<span style="width:18px;text-align:center">${mark}</span>`
+          + `<span style="flex:1;font-size:12px">${esc(label)}</span>`
+          + `<span class="mono" style="font-size:11px;color:${c.ok ? 'var(--up)' : 'var(--down)'};white-space:nowrap">${esc(target)}</span></div>`;
+      }).join('');
+      html += `<div>${rows}</div>`;
+      html += `<div style="margin-top:10px;font-size:11px;color:var(--dim)">`
+        + `${(d.days || []).length} golden day(s) · verdicts from cached verify reports · charter: <code>${esc(d.charter || '')}</code></div>`;
+    }
+    wrap.innerHTML = html;
+  }catch(err){
+    wrap.innerHTML = '<div style="color:var(--down);font-size:12px;padding:8px">Error loading golden dataset state</div>';
+  }
 }
 
 async function loadManifest(){

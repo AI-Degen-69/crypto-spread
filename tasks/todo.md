@@ -1,10 +1,9 @@
-# Todo — Issue #295
+# Todo — Issue #292
 
-Branch: `i295/list-pristine-tick-files-in-the-dashboard` · Plan: `tasks/plan.md`
+Branch: `i292/golden-dataset-card-tick-files` · Plan: `tasks/plan.md`
 
-- [x] T1 — Shared allow-listed tick-file resolver in `server/osc_dash.py` [Backend/Logic]
-- [x] T2 — Route `api_backtest` / `api_backtest_sweep` / `api_ticks_verify` through the resolver [Backend/Logic]
-- [x] T3 — Subpath-aware verify-cache sidecars (`_verify_sidecar_path` / `_write_verify_sidecar` + callers) [Backend/Logic]
-- [x] T4 — Manifest lists pristine files with `pristine/<name>` + `is_pristine`; frontend ids sanitized, delete omitted [Backend/Frontend]
-- [x] T5 — Tests: sidecar helper for subpaths, manifest disambiguation, pristine ranking, backtest/sweep resolution + rejection [Tests]
-- [x] Checkpoint: targeted suite green after T2 and after T4
+- [x] T1 — `GET /api/ticks/golden` endpoint: absent/present/certified states, §1.1+§1.2 checks, policy currency, sidecar-based (no re-stream) [Backend/Logic]
+- [x] T2 — Golden card UI at top of Tick Files: state badge, n/N checklist, stale-policy warning, explicit absent state [Frontend]
+- [x] T3 — Wire `loadGoldenCard()` into the ticks-tab lifecycle [Backend/Logic]
+- [x] T4 — Tests: absent-golden, stale-policy, certified, card HTML invariants [Tests]
+- [x] Checkpoint: targeted suite green after T1 and after T3
