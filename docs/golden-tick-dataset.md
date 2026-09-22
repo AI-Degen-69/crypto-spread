@@ -159,6 +159,19 @@ python -m scripts.backtest run/ticks/golden --offset 0.02 --queue 50
 
 ### 3.1 The golden manifest
 
+> **Assembly routes.** The set is normally assembled by dedicated capture (#281's original
+> plan: run the collector, verify each day, promote passers). Since the pristine pipeline
+> (issue #290, PRs #291/#299/#301) produces per-window-gated day files, a second route
+> exists and is the one used for the first certification (2026-09-22):
+> `python -m scripts.build_golden_dataset run/ticks/pristine` filters every pristine day
+> through the same §1.1 gates (failing days excluded and recorded), copies passers to
+> `run/ticks/golden/`, and writes the manifest below with full provenance
+> (`source: pristine/<basename>` + `source_sha256` per day). Measured at certification:
+> 6 days, 4,910 windows, weakest pair 159, 1,428,888 valid ticks, gap rate 0.0 —
+> every §1.2 target met with headroom. Charter fidelity is unaffected: whichever route
+> fills it, the gates, manifest schema, and re-certification policy below are identical.
+
+
 `run/ticks/golden/golden_manifest.json` records, per entry:
 
 - `day` — the UTC day key of the source file.

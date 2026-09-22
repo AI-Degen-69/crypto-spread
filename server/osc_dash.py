@@ -378,11 +378,11 @@ _SCAN_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
 _SCAN_TTL_SEC = 600.0
 
 
-# Issue #295: the only subdirectory of run/ticks/ the tick-file endpoints
-# resolve into. `pristine/` holds the derived replay-grade day files written
-# by scripts/build_pristine_dataset.py; golden/, quarantine/ and the internal
+# Issue #295/#281: the subdirectories of run/ticks/ the tick-file endpoints
+# resolve into. `pristine/` holds the derived replay-grade day files and
+# `golden/` the certified golden set; quarantine/ and the internal
 # .verify_cache/ stay hidden and unresolvable.
-_TICKS_SUBDIR_ALLOWLIST = frozenset({"pristine"})
+_TICKS_SUBDIR_ALLOWLIST = frozenset({"pristine", "golden"})
 
 
 def _resolve_tick_file(file: str) -> tuple[str, Path | None]:
@@ -718,8 +718,13 @@ def _scan_series_counts(path: Path) -> dict[str, int]:
     return counts
 
 
-def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict[str, Any]:
-    """Sum cheap totals across tick files; per-series counts from cache sources only."""
+def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
+                     *, file_count: int | None = None) -> dict[str, Any]:
+    """Sum cheap totals across tick files; per-series counts from cache sources only.
+
+    file_count: report this as total_files when given (issue #281 — tier copies
+    of one source day are summed once, but every listed row is still a file).
+    """
     total_bytes = 0
     total_lines = 0
     any_estimated = False
@@ -806,7 +811,7 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None) -> dict
                     series_counts[s] = series_counts.get(s, 0) + int(c)
 
     return {
-        "total_files": len(entries),
+        "total_files": len(entries) if file_count is None else file_count,
         "total_bytes": total_bytes,
         "total_lines": total_lines,
         "total_lines_estimated": any_estimated,
@@ -888,18 +893,21 @@ def api_ticks_manifest():
             out["manifest"] = json.loads(mf.read_text(encoding="utf-8"))
         except Exception:
             pass
-    def _list_tick_files(scan_dir: Path, *, subdir: str | None = None) -> None:
+    def _list_tick_files(scan_dir: Path, *, subdir: str | None = None,
+                         flag_field: str = "is_pristine") -> None:
         """Append one directory's tick files to `out["files"]`.
 
-        Issue #295: extended to the pristine/ subdirectory. A subdir entry's
-        `name` is its TICKS_DIR-relative path (`pristine/<basename>`), which
-        is both the display label and the value every endpoint round-trips.
+        Issue #295/#281: extended to the derived subdirectories. A subdir
+        entry's `name` is its TICKS_DIR-relative path (`pristine/<basename>`
+        or `golden/<basename>`), which is both the display label and the
+        value every endpoint round-trips; `flag_field` marks its origin.
         """
         for f in sorted(scan_dir.iterdir()):
             if (
                 (f.suffix in (".jsonl", ".gz") or f.name.endswith(".jsonl.gz"))
                 and f.is_file()
                 and not f.name.endswith(".idx")
+                and f.name != "golden_manifest.json"
             ):
                 size = f.stat().st_size
                 is_est = size >= 20_000_000
@@ -914,20 +922,29 @@ def api_ticks_manifest():
                     "mtime": f.stat().st_mtime,
                 }
                 if subdir:
-                    entry["is_pristine"] = True
+                    entry[flag_field] = True
                 out["files"].append(entry)
 
     _list_tick_files(TICKS_DIR)
-    # Issue #295: surface the pristine/ derived datasets alongside the day
-    # files — only this one allow-listed subdirectory; golden/, quarantine/
-    # and the internal .verify_cache/ stay hidden.
-    pristine_dir = TICKS_DIR / "pristine"
-    if pristine_dir.is_dir():
-        _list_tick_files(pristine_dir, subdir="pristine")
+    # Issue #295/#281: surface the derived datasets alongside the day files —
+    # only the allow-listed subdirectories; quarantine/ and the internal
+    # .verify_cache/ stay hidden.
+    for subdir, flag in (("pristine", "is_pristine"), ("golden", "is_golden")):
+        subdir_dir = TICKS_DIR / subdir
+        if subdir_dir.is_dir():
+            _list_tick_files(subdir_dir, subdir=subdir, flag_field=flag)
     try:
+        # Issue #281 (CodeRabbit round 1): golden/pristine hold copies of the
+        # same source day — each tier stays listed as an individual file, but
+        # every source day is counted once in the All Files aggregate (dedup
+        # by basename; out["files"] is ordered root → pristine → golden, and
+        # setdefault keeps the first/canonical copy).
+        agg_files: dict[str, Path] = {}
+        for f in out["files"]:
+            agg_files.setdefault(Path(f["name"]).name, TICKS_DIR / f["name"])
         out["aggregate"] = _aggregate_ticks(
-            [TICKS_DIR / f["name"] for f in out["files"]], out["manifest"]
-        )
+            list(agg_files.values()), out["manifest"],
+            file_count=len(out["files"]))
         # Per-file market breakdown, when a cached verify report exists.
         for entry in out["files"]:
             cached = _read_verify_cache(
@@ -5982,7 +5999,11 @@ async function loadGoldenCard(){
   try{
     const res = await fetch('/api/ticks/golden');
     const d = await res.json();
-    const fmt = v => (v === null || v === undefined) ? '—' : Number(v).toLocaleString();
+    const fmt = v => {
+      if(v === null || v === undefined) return '—';
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toLocaleString() : String(v);
+    };
     const badge = d.state === 'certified'
       ? '<span class="pill" style="background:rgba(51,201,181,0.15);color:var(--up);border-color:rgba(51,201,181,0.3);font-weight:700;font-size:11px;padding:3px 10px">CERTIFIED</span>'
       : d.state === 'present'
@@ -5991,6 +6012,12 @@ async function loadGoldenCard(){
 
     let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">${badge}`
       + `<span style="font-size:11px;color:var(--dim)">Policy version: ${d.policy_version ? esc(String(d.policy_version)) : '— (certification has not run)'}</span></div>`;
+    // Issue #281 follow-up: the set-level readiness is what golden certification
+    // is FOR — say it in words, since per-file rows can only ever read EXPLORATORY.
+    html += `<div style="font-size:11px;color:var(--dim);margin-bottom:8px">Set readiness: `
+      + `<span style="color:${d.state === 'certified' ? 'var(--up)' : 'var(--dim)'};font-weight:700">`
+      + `${d.state === 'certified' ? 'RESEARCH READY' : 'NOT READY'}</span>`
+      + ` — certification is measured over the whole ${esc(d.state === 'absent' ? 'set' : 'golden set')}, not per file.</div>`;
 
     if(d.state === 'absent'){
       html += `<div style="font-size:12px;color:var(--dim);line-height:1.5;margin-bottom:8px">No <code>run/ticks/golden/</code> exists yet (${esc(d.reason || '')}). `
@@ -6203,9 +6230,10 @@ async function loadManifest(){
         btnDel.style.cssText = 'padding:4px 10px;font-size:11px;background:rgba(255,87,87,0.12);color:var(--down);border-color:rgba(255,87,87,0.3);cursor:pointer';
         btnDel.textContent = '🗑️ Delete';
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
-        // Issue #295: pristine files are derived artifacts — the delete
-        // endpoint stays top-level-only, so the action is omitted entirely.
-        if (f.is_pristine) btnDel.style.display = 'none';
+        // Issue #295/#281: derived datasets (pristine/, golden/) are managed
+        // artifacts — the delete endpoint stays top-level-only, so the action
+        // is omitted for any subpath entry.
+        if (f.name.includes('/')) btnDel.style.display = 'none';
 
         tdIntegrity.appendChild(verifyBadge);
         tdActions.appendChild(btnRun);
