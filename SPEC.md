@@ -1,62 +1,64 @@
-# SPEC — Issue #298: Rebuild run/ticks/pristine after the bounds_violation gate lands
+# SPEC — Issue #313: dashboard single canonical port constant (5515)
 
-Per-issue specification. Source: issue #298 body + CodeRabbit coding plan
-(comment 5780981530), code-verified against `scripts/build_pristine_dataset.py`.
+Per-issue specification. Source: issue #313 body, code-verified against the repo.
 
 ## Context
 
-PR #299 (issue #297) added the always-on `bounds_violation` gate to the pristine extractor,
-but the derived dataset on disk (`run/ticks/pristine/`, built by PR #291) predates the gate.
-Known evidence: `run/ticks/ticks_2026-09-18.jsonl` holds 1 bounds-violating tick in 1 window
-currently inside the pristine dataset. This issue re-runs the extractor and produces a durable
-delta record for #295 dashboard consumers.
+The dashboard port `8802` is duplicated as a literal in six tracked consumer
+groups (Python server, PowerShell launcher, paper observer, tests, living docs)
+with nothing linking them. The operator wants the dashboard on **5515** with
+exactly one tracked place defining it.
 
 ## Verified Code Facts (checked, not assumed)
 
-- File discovery (`build_pristine_dataset.py:145`) globs `ticks_dir.glob("ticks_*.jsonl*")`
-  top-level only → the `pristine/` subdir is never scanned. In-place `--out run/ticks/pristine`
-  is safe.
-- Rebuild hygiene (`:371-374`): old manifest unlinked, stale day files deleted before writing.
-  Clean-rebuild semantics already exist — no helper script needed.
-- Self-certification (`:431-445`): `verify_ticks_dir(out_dir)` runs on fresh output; a non-PASS
-  aborts with `RuntimeError` and writes no manifest.
-- Baseline manifest verified on disk: `totals = {windows_total: 6129, windows_passed: 5042,
-  ticks_written: 1485319}`, six day files with `source_files` SHA-256 map; window identity
-  fields `cid, series, slug, duration, start_ts, start_day` all present. Old window rows do
-  NOT carry `bounds_violations` (pre-gate build) — delta matching uses identity fields only.
-- Template `docs/issues/221-gil-contention-findings.md` and dir `docs/measurements/` exist.
+- `server/osc_dash.py:9` docstring says "Serves on :8802"; `:207`
+  `allowed_ports = {8802, 8888, 8000, 80, 443}` with runtime `server_port` add
+  at `:208-209`.
+- `server/osc_dash.py:39` imports `strategy.live_trader` (heavy) — therefore
+  `scripts/observe_paper.py` must NOT import `server.osc_dash`; a dependency-free
+  leaf module is required.
+- `scripts/crypto-spread-menu.ps1:28` `$Port = 8802`, `:29` `$DashUrl`,
+  already sets `$env:PYTHONPATH` to project root at `:38` — a
+  `python -c "from server.ports import DASHBOARD_PORT; print(...)"` probe works
+  without new path plumbing.
+- `scripts/crypto-spread-isolated.ps1:34` `$Port = 8888` — deliberately separate,
+  passes `--port 8888` straight to uvicorn; never goes through the canonical constant.
+- `scripts/observe_paper.py:34` `BASE_URL = "http://127.0.0.1:8802"` with
+  `--url` override at `:142/150` — the override must keep working.
+- `tests/test_crypto_spread_menu.py:25` asserts `"8802" in content`; `:38/:47`
+  PID fixture uses port 8802; `:56` asserts `8802` in `status` stdout.
+- Naive substring search for `8802` false-matches research numbers, e.g.
+  `research/sweeps/phase1_1d.json:6615` `"pair_rate": 0.008802816901408451`.
+  The regression test must match port literals (`:8802`, `"8802"`, `= 8802`,
+  `port ... 8802`), not any `8802` substring.
+
+## Resolved Open Questions (from code, per issue defaults)
+
+1. Where does the single definition live / how does PS read it? → (a):
+   new leaf `server/ports.py` with `DASHBOARD_HOST`, `DASHBOARD_PORT = 5515`,
+   `DASHBOARD_URL`; Python imports it; the `.ps1` launcher resolves `$Port`
+   once via the python probe with loud failure. Parity test kept as backstop.
+2. Runtime override? → No. Plain constant `5515`; isolated runner keeps its own
+   `8888` for bind + allow-list.
+3. Allow-list leftovers? → Replace `8802` with the constant; keep
+   `8888`/`8000`/`80`/`443` + runtime add as-is.
 
 ## Acceptance Criteria (from the issue)
 
-1. Rebuild completes; `pristine_manifest.json` policy note includes the bounds-gate clause.
-2. Windows containing bounds-violation ticks are gone from the output and carry
-   `bounds_violation` in `failing_gates` in the manifest (`passed: false`).
-3. `output_verify` status is PASS.
-4. Delta vs the pre-rebuild manifest (windows dropped per day) is recorded — committed
-   findings doc + issue comment.
+- [ ] One tracked location defines the port once (`5515`); repo search over
+  `server/`, `scripts/`, `tests/`, `AGENTS.md`, `README.md`,
+  `docs/operations.md` finds no `8802` port literal.
+- [ ] Every tracked consumer resolves from it: `server/osc_dash.py`
+  (docstring + allow-list), `scripts/crypto-spread-menu.ps1` (probes, PID
+  registry, uvicorn args, UI text), `scripts/observe_paper.py` (`BASE_URL`).
+- [ ] Isolated runner still binds `8888`; `_verify_safe_origin` accepts both
+  canonical port and `8888`.
+- [ ] Regression test asserts canonical value `5515` + no hardcoded port
+  literal can silently return.
 
-## Method
+## Explicit Out of Scope
 
-1. Snapshot baseline manifest to `.pristine_baseline_manifest.json` (repo root, scratch,
-   deleted after TASK-4; never committed).
-2. Run `python -m scripts.build_pristine_dataset run/ticks --out run/ticks/pristine`
-   (no flags; long-running over ~5.2 GB → background process with log file).
-3. Verify: exit 0, `output verify: PASS`, policy clause, independent
-   `verify_tick_data run/ticks/pristine` PASS, every `bounds_violation` gate entry has
-   `passed: false`, the 09-18 evidence window is failing and absent from output, and
-   `totals.source_files` hashes equal the baseline (read-only proof).
-4. Delta: match old/new windows on `(cid, series, slug, duration, start_ts)`; dropped =
-   passed before, not passed now. Invariant to assert: every dropped window carries
-   `bounds_violation` in its new `failing_gates` (gates otherwise unchanged, same inputs).
-   Group drops by `start_day`; record `windows_passed` / `ticks_written` deltas and the
-   `bounds_violation` window count.
-5. Write `docs/issues/298-pristine-manifest-delta-findings.md` (Executive Summary /
-   Methodology with exact CLI + matching rule / Results table before-after-delta per day /
-   note that `run/` is git-ignored so this doc is the durable record / gates unchanged,
-   dashboard owned by #295) and `docs/measurements/issue-298-pristine-manifest-delta.json`.
-6. Comment the delta summary on issue #298.
-
-## Out of Scope
-
-Gate/threshold changes; dashboard work (#295); any `strategy/`, `server/`, `backtest/` edits;
-committing `run/` artifacts.
+- Frozen pages `docs/issues/*.html` (12 files) — byte-identical.
+- Gitignored runtime: `run/dash.pids.json`, `logs/*`, `.gstack/` logs, `.dev-port`.
+- No env-var/CLI port override. No `docs/glossary.md` change.
+- Nothing on `i312/golden-dataset-research-cut`.

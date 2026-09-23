@@ -14,11 +14,11 @@
 | `backtest/engine.py` | Pure function `replay(snaps, params) -> results`. Consumes tick jsonl, simulates SPREAD-2 (resting bid at `mid-offset`, queue gate, monotonic exit, pair capture). |
 | `backtest/index.py` | Per-file `<file>.jsonl.idx` sidecar (cid -> byte offset, ts). First backtest on a file scans once; subsequent calls jump to cid spans. |
 | `scripts/backtest.py` | Thin CLI: `python -m scripts.backtest run/ticks/ --offset 0.02 --queue 50 --exit btc-up-or-down-5m=0.09` |
-| `server/osc_dash.py` | FastAPI dashboard (`:8802`) — sole canonical dashboard for backtest analytics, replay, and live trader cockpit. |
+| `server/osc_dash.py` | FastAPI dashboard (`:5515`) — sole canonical dashboard for backtest analytics, replay, and live trader cockpit. |
 
 ### Dashboard Runtime & Stack
 
-`server/osc_dash.py` (FastAPI on `:8802`) is the sole canonical dashboard for this repository.
+`server/osc_dash.py` (FastAPI on `:5515`) is the sole canonical dashboard for this repository.
 
 ## Run a day of capture
 
@@ -62,8 +62,8 @@ python -m scripts.backtest run/ticks/ticks_2026-08-29.jsonl --out run\backtest\b
 
 Dash:
 ```
-http://127.0.0.1:8802/api/backtest?offset=0.02&queue=50&pair_cost=0.99&quote_lo=0.10&quote_hi=0.90
-http://127.0.0.1:8802/api/ticks/manifest
+http://127.0.0.1:5515/api/backtest?offset=0.02&queue=50&pair_cost=0.99&quote_lo=0.10&quote_hi=0.90
+http://127.0.0.1:5515/api/ticks/manifest
 ```
 
 CLI flags map 1:1 to `BacktestParams` fields — `--offset`, `--queue`,

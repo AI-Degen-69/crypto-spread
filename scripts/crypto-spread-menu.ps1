@@ -5,7 +5,7 @@
 # Usage:
 #   .\scripts\crypto-spread-menu.ps1          # single-key menu: press once, runs, exits
 #   .\scripts\crypto-spread-menu.ps1 status   # [S] system status telemetry
-#   .\scripts\crypto-spread-menu.ps1 open     # [1] start dashboard, restart if live on :8802
+#   .\scripts\crypto-spread-menu.ps1 open     # [1] start dashboard, restart if live on :$Port
 #   .\scripts\crypto-spread-menu.ps1 stop     # [2] stop dashboard & clean up processes
 #   .\scripts\crypto-spread-menu.ps1 poll     # [3] single collector poll (one sample now)
 #   .\scripts\crypto-spread-menu.ps1 rebuild  # [4] rebuild windows + summary from run/ticks
@@ -25,7 +25,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Port        = 8802
+# Ensure PYTHONPATH includes project root for python -m invocations
+$env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectPath;$env:PYTHONPATH" } else { $ProjectPath }
+# Single source of truth: server/ports.py (issue #313). Loud fail if the probe fails.
+try { $Port = [int]((python -c "from server.ports import DASHBOARD_PORT; print(DASHBOARD_PORT)" 2>$null) | Out-String).Trim() } catch { throw "Cannot resolve DASHBOARD_PORT from server/ports.py: $($_.Exception.Message)" }
+if (-not $Port) { throw "Cannot resolve DASHBOARD_PORT from server/ports.py: empty probe result" }
 $DashUrl     = "http://127.0.0.1:$Port"
 $RunDir      = Join-Path $ProjectPath "run"
 $TicksDir    = Join-Path $RunDir "ticks"
@@ -33,9 +37,6 @@ $LogDir      = Join-Path $ProjectPath "logs"
 $DashPidFile = Join-Path $RunDir "dash.pids.json"
 $OutLog      = Join-Path $LogDir "dash.out.log"
 $ErrLog      = Join-Path $LogDir "dash.err.log"
-
-# Ensure PYTHONPATH includes project root for python -m invocations
-$env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectPath;$env:PYTHONPATH" } else { $ProjectPath }
 
 # Ensure runtime directory exists
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
@@ -131,12 +132,12 @@ function Csm-Phase  { param([string]$Text) Write-Host ""; Write-ProfileRuleWithT
 
 # ── Process & Network Primitives ──
 function Test-Port {
-    <# True when port 8802 is in LISTENING state. #>
+    <# True when port $Port is in LISTENING state. #>
     return [bool](netstat -ano | Select-String ":$Port\s+.*LISTENING")
 }
 
 function Get-PortPid {
-    <# PID of process LISTENING on port 8802, or $null. #>
+    <# PID of process LISTENING on port $Port, or $null. #>
     $line = netstat -ano | Select-String ":$Port\s+.*LISTENING" | Select-Object -First 1
     if (-not $line) { return $null }
     return [int](($line.ToString() -split "\s+")[-1])
@@ -188,7 +189,7 @@ function Save-DashInstance {
 }
 
 function Test-DashboardServer {
-    <# True when port 8802 answers as crypto-spread dashboard #>
+    <# True when port $Port answers as crypto-spread dashboard #>
     try {
         $r = Invoke-RestMethod -Uri "$DashUrl/api/oscillation" -UseBasicParsing -TimeoutSec 3
         return ($null -ne $r -and $null -ne $r.summary)
@@ -199,7 +200,7 @@ function Test-DashboardServer {
 
 function Adopt-DashboardInstance {
     param([int]$ExpectedPid)
-    <# Record running dashboard process on port 8802 as owned by this menu.
+    <# Record running dashboard process on port $Port as owned by this menu.
        $ExpectedPid is the port owner observed BEFORE the HTTP probe; adoption
        is refused if the port changed hands since (TOCTOU guard), so a foreign
        process can never be recorded (and later force-killed) as ours. #>
@@ -220,7 +221,7 @@ function Show-SystemStatus {
     Csm-Banner -Title "CRYPTO SPREAD — TELEMETRY & SYSTEM STATUS" -Subtitle "5m/15m BTC/ETH/BNB/SOL/XRP Spread Capture Lab"
     
     # 1. Dashboard Process & Port Status
-    Write-ProfileSection -Title "Dashboard Server (:8802)"
+    Write-ProfileSection -Title "Dashboard Server (:$Port)"
     $isListening = Test-Port
     $inst = Get-DashInstance
     $portPid = Get-PortPid
@@ -311,10 +312,10 @@ function Show-SystemStatus {
 # ── Host Dashboard Action ──
 function Host-Dashboard {
     param([switch]$NoReload)
-    # [1] always ends with a fresh dashboard: a live one on :8802 is stopped first.
+    # [1] always ends with a fresh dashboard: a live one on :$Port is stopped first.
     $inst = Get-DashInstance
     if (($null -ne $inst) -or ((Test-Port) -and (Test-DashboardServer))) {
-        Csm-Step "Dashboard already live on :8802 — restarting for a clean state..."
+        Csm-Step "Dashboard already live on :$Port — restarting for a clean state..."
         Stop-DashboardProcess | Out-Null
         Start-Sleep -Milliseconds 500
     } elseif (Test-Port) {
@@ -496,8 +497,8 @@ function Show-MenuGrid {
 
     $groups = @(
         @{ Header = "🟢 DASHBOARD"; Items = @(
-            @{ K = "1"; Icon = "▶"; IconColor = "Success";   V = "Start / Restart Dashboard"; D = "Fresh stable dashboard on :8802 (no --reload) & opens browser" }
-            @{ K = "2"; Icon = "■"; IconColor = "Error";     V = "Stop Dashboard Process";     D = "Stops dashboard process tree & frees port 8802" }
+            @{ K = "1"; Icon = "▶"; IconColor = "Success";   V = "Start / Restart Dashboard"; D = "Fresh stable dashboard on :$Port (no --reload) & opens browser" }
+            @{ K = "2"; Icon = "■"; IconColor = "Error";     V = "Stop Dashboard Process";     D = "Stops dashboard process tree & frees port $Port" }
             @{ K = "S"; Icon = "≡"; IconColor = "Info";      V = "Check System Status";        D = "System telemetry, collector status & tick store metrics" }
         ) }
         @{ Header = "🟡 COLLECTOR & TICKS"; Items = @(

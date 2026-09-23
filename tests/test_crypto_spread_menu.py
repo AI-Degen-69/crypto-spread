@@ -22,7 +22,7 @@ def test_menu_script_exists():
     assert "Invoke-RebuildStats" in content
     assert "NoReload" in content
     assert "dash.pids.json" in content
-    assert "8802" in content
+    assert "server/ports.py" in content or "DASHBOARD_PORT" in content
 
 
 def test_pid_registry_format(tmp_path):
@@ -35,7 +35,7 @@ def test_pid_registry_format(tmp_path):
             "pid": 12345,
             "started_ticks": 638600000000000000,
             "started": "2026-09-06T04:00:00.000Z",
-            "port": 8802
+            "port": 5515
         }
     }
     fake_pid_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -44,7 +44,7 @@ def test_pid_registry_format(tmp_path):
     assert read_data["strategy"] == "crypto-spread"
     assert read_data["dash"]["pid"] == 12345
     assert read_data["dash"]["started_ticks"] == 638600000000000000
-    assert read_data["dash"]["port"] == 8802
+    assert read_data["dash"]["port"] == 5515
 
 
 def test_menu_script_status_execution():
@@ -53,4 +53,4 @@ def test_menu_script_status_execution():
     res = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, encoding="utf-8", errors="replace", timeout=60)
     assert res.returncode == 0, f"Script failed with stdout={res.stdout} stderr={res.stderr}"
     assert "CRYPTO SPREAD" in res.stdout
-    assert "8802" in res.stdout
+    assert "5515" in res.stdout
