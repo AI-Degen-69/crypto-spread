@@ -200,6 +200,32 @@ The golden dataset is **re-certified** (full sequence above, manifest rewritten)
 A golden dataset whose manifest cites a policy version older than the installed one is **not**
 the golden dataset — it is a stale copy, and the dashboard's readiness badges will show it.
 
+## 3.3 The research cut — a derived, non-canonical working subset
+
+The **research cut** is a derived, deterministic subset of the golden dataset, built by
+`scripts/build_research_cut.py` into `run/ticks/research/`. It exists because the full
+golden set is 8–20× above the §1.2 floors: perfect for certification, expensive for the
+iterative sweep loop (#311), where a full-set sweep costs on the order of 100
+minutes wall-time (load + simulation over 1.43M ticks).
+
+- **Build:** `python -m scripts.build_research_cut --multiplier 3 --seed 0` (golden dir
+  is read-only; the build re-verifies every golden day's sha256 afterwards).
+- **Policy:** stratified sampling by market-duration × UTC day × window class
+  (`oscillating`/`monotonic`/`flat`), uniform within the finest cell, fixed seed.
+  Targets `M×` the charter floors (M=3: ≥1,500 windows, ≥150 per market-duration pair,
+  ≥4 days, all 10 series) so the cut independently passes `verify_tick_data` at
+  `RESEARCH_READY` with headroom. M=3 (not 4) because the scarcest golden pair
+  (bnb 15m, 159 windows) cannot meet M=4's 200-per-pair floor — 150 ≤ 159 fits.
+- **Fidelity:** cut lines are byte-identical copies of golden raw lines, so replay
+  results are identical per window — the build's guardrail gate replays the sampled
+  windows from both sides and fails loudly on any mismatch.
+- **Provenance:** `run/ticks/research/research_manifest.json` records source=golden,
+  per-day source sha256, policy, seed, multiplier, selected window ids, and the
+  guardrail results. Same inputs ⇒ byte-identical output.
+- **The rule:** the cut is a working artifact for exploration and sweep iteration.
+  **Final claims re-run on the full golden set** before being recorded as conclusions.
+  The golden dataset remains the single canonical dataset per this charter.
+
 ## 4. Replay-speed budget
 
 **Budget: a backtest or sweep over the golden dataset runs at ≤ ~1s per window wall-time on a

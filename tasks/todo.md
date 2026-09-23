@@ -1,7 +1,6 @@
-# tasks/todo.md — Issue #302 working checklist
+# tasks/todo.md — Issue #312 research cut
 
-- [x] T1 — scripts/tick_safety.py (guard, backup, events, hash store, loud log) + tests
-- [x] T2 — collector: --allow-rewrite flag + loud resume in write_snap
-- [x] T3 — watchdog: explicit --allow-rewrite restarts
-- [x] T4 — verifier: hash-change cross-check + reporting/exit contract
-- [x] T5 — docs: runbook + charter + #298 findings pointer
+- [x] T1 — selection engine (stratified, deterministic, floors at M×)
+- [x] T2 — emission + research_manifest.json + .idx sidecars
+- [x] T3 — guardrail gate (golden integrity + replay parity)
+- [x] T4 — CLI + docs (golden charter § + glossary entry)
