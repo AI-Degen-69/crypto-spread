@@ -194,15 +194,18 @@ def test_cut_passes_verify_research_ready(tmp_path):
     cut = tmp_path / "cut"
     build_research_cut(golden, cut, multiplier=1, seed=0)
 
+    # Index sidecars: assert what the BUILDER emitted — no rebuild here, so
+    # this fails if the build ever stops writing fresh sidecars itself.
+    from backtest.index import is_fresh
+    day_files = sorted(cut.glob("*.jsonl"))
+    assert day_files
+    for p in day_files:
+        idx = p.with_suffix(p.suffix + ".idx")
+        assert idx.is_file(), p.name
+        assert is_fresh(p, idx), p.name
+
     rep = verify_ticks_dir(cut)
     assert rep["readiness"]["level"] == "RESEARCH_READY"
-    # Index sidecars: the cut is SMALL by design, so build_index is cheap —
-    # assert the sidecars materialize on demand (same contract as before,
-    # without making the build itself pay for an eager full re-scan).
-    from backtest.index import build_index
-    for p in cut.glob("*.jsonl"):
-        build_index(p)
-        assert p.with_suffix(p.suffix + ".idx").exists()
 
 
 def test_guardrail_replay_parity(tmp_path):
@@ -324,6 +327,25 @@ def test_out_inside_golden_refused(tmp_path):
         build(golden, golden / "sub", multiplier=1, seed=0)
     # Golden files survived the refusal.
     assert len(list(golden.glob("*.jsonl"))) == 1
+
+
+def test_allocate_splits_pair_floor_proportionally():
+    """Phase 1 spreads each pair's floor by cell size (largest-remainder),
+    not largest-first: a 90/1/9 split of need=47 gives 42/0/4 + remainder.
+    """
+    from scripts.build_research_cut import _allocate
+
+    big = ("s", 300, "d1", "oscillating")
+    tiny = ("s", 300, "d1", "flat")
+    mid = ("s", 300, "d2", "oscillating")
+    cells = {big: [f"w{i}" for i in range(90)],
+             tiny: ["x"],
+             mid: [f"y{i}" for i in range(9)]}
+    per = _allocate(cells, 50, 50)
+    # Quotas 42/0/4 + 1 leftover: the size-1 cell has no room past its base
+    # 1, so the remainder falls to the next-largest remainder (big).
+    assert per == {big: 44, tiny: 1, mid: 5}
+    assert sum(per.values()) == 50
 
 
 def test_missing_golden_dir_fails_loudly(tmp_path):

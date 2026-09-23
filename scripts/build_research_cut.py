@@ -136,20 +136,35 @@ def _allocate(cells: dict[tuple, list[str]], target_total: int,
         """Windows allocated so far to one (series, duration) pair."""
         return sum(n for k, n in per_cell.items() if k[:2] == pair)
 
-    # Phase 1: floor guarantee per pair, into that pair's OWN cells only.
+    # Phase 1: floor guarantee per pair, split PROPORTIONALLY across that
+    # pair's own cells (largest-remainder, capped by real cell sizes).
+    # Largest-first pouring here would over-represent the biggest (day,
+    # class) cells and break the "uniform within the finest cell" promise —
+    # at M=3 the floors already sum to the target, so Phase 2 never runs and
+    # Phase 1 IS the whole allocation.
     for pair in pairs:
-        avail = sum(sizes[k] for k in cells if k[:2] == pair)
+        pcells = [k for k in cells if k[:2] == pair]
+        avail = sum(sizes[k] for k in pcells)
         need = min(floor_per_market, avail) - pair_selected(pair)
-        for key in sorted((k for k in cells if k[:2] == pair),
-                          key=lambda k: -sizes[k]):
+        if need <= 0:
+            continue
+        psum = avail
+        quotas: dict[tuple, list[int]] = {}
+        for key in pcells:
+            q, r = divmod(sizes[key] * need, psum)
+            quotas[key] = [q, r]
+        for key in pcells:
+            take = min(quotas[key][0], sizes[key] - per_cell[key])
+            per_cell[key] += take
+            need -= take
+        leftovers = sorted(pcells,
+                           key=lambda k: (-quotas[k][1], -sizes[k]))
+        for key in leftovers:
             if need <= 0:
                 break
-            room = sizes[key] - per_cell[key]
-            if room <= 0:
-                continue
-            give = min(need, room)
-            per_cell[key] += give
-            need -= give
+            if per_cell[key] < sizes[key]:
+                per_cell[key] += 1
+                need -= 1
 
     # Phase 2: spend the remaining budget proportionally by cell size, capped
     # by real availability; leftovers from flooring/caps go largest-first.
@@ -196,6 +211,26 @@ def build_research_cut(golden_dir: Path, out_dir: Path, *,
 
     # --- Snapshot the golden set for the integrity guardrail ----------------
     golden_before = {p.name: sha256_of(p) for p in sorted(golden_dir.glob("*.jsonl"))}
+
+    # Cross-check against the golden manifest itself: before/after equality
+    # below only catches in-build writes, not pre-existing drift of a day
+    # file away from its certified hash. Skipped when there is no manifest
+    # (synthetic test fixtures) — the before/after check still applies.
+    golden_manifest_path = golden_dir / GOLDEN_MANIFEST_NAME
+    if golden_manifest_path.is_file():
+        try:
+            recorded = {d["file"]: d.get("sha256") or d.get("source_sha256")
+                        for d in json.loads(
+                            golden_manifest_path.read_text(encoding="utf-8")
+                        ).get("days", [])}
+        except (ValueError, KeyError, AttributeError) as e:
+            raise ValueError(f"unreadable {golden_manifest_path}: {e}")
+        drifted = [name for name, sha in golden_before.items()
+                   if name in recorded and recorded[name] != sha]
+        if drifted:
+            raise ValueError(
+                "golden drift: these day files no longer match "
+                f"{GOLDEN_MANIFEST_NAME}: {sorted(drifted)}")
 
     # --- Group snaps into windows (pure, in-memory) -------------------------
     # Single ingestion pass: every raw line is parsed EXACTLY ONCE, and the
@@ -265,9 +300,20 @@ def build_research_cut(golden_dir: Path, out_dir: Path, *,
     # sidecars are built eagerly per cut file (issue acceptance: `is_fresh`
     # must hold for every cut file) — one scan each, cheap next to ingestion.
     cid_to_day = {cid: w["day"] for cid, w in windows.items()}
+    # The builder owns out_dir's cut files — and ONLY those. A non-empty dir
+    # without a previous research manifest (e.g. a typo like --out run/ticks,
+    # the PARENT of the golden dir) is refused before any delete, so no
+    # unrelated collector files can never be wiped by a wrong flag.
     if out_dir.exists():
-        for p in sorted(out_dir.glob("*")):
-            if p.is_file() and p.suffix in (".jsonl", ".gz", ".idx", ".json"):
+        existing = [p for p in out_dir.iterdir() if p.is_file()]
+        if existing and not (out_dir / MANIFEST_NAME).is_file():
+            raise ValueError(
+                f"--out {out_dir} is non-empty and holds no {MANIFEST_NAME} "
+                f"(not a previous research cut); refusing to delete its files")
+        for p in (sorted(out_dir.glob("ticks_*.jsonl"))
+                  + sorted(out_dir.glob("ticks_*.jsonl.idx"))
+                  + [out_dir / MANIFEST_NAME]):
+            if p.is_file():
                 p.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -332,8 +378,9 @@ def build_research_cut(golden_dir: Path, out_dir: Path, *,
         "seed": seed,
         "policy": {
             "stratification": "series × day × window_class",
-            "cell_allocation": "proportional, min 1 per non-empty cell, "
-                               "market floor at multiplier × 50",
+            "cell_allocation": "pair floors split proportionally across "
+                               "cells (largest-remainder), min 1 per "
+                               "non-empty cell",
             "window_attribution": "day of first snap; snaps written whole",
             "emission": "raw-line byte-identical copies",
         },
