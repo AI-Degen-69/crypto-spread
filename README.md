@@ -4,7 +4,7 @@
 
 **רכיבי ליבה קיימים:**
 - `scripts/measure_5m_oscillation.py` — מודד כל שנייה 10 סדרות, כותב `run/oscillation_*.jsonl`
-- `server/osc_dash.py` — :8802 Live + /summary עם גרפים
+- `server/osc_dash.py` — :5515 Live + /summary עם גרפים
 - `strategy/markets.py` — fetch live 5m/15m via `gamma-api /events?series_slug`
 - `run/` — 635 חלונות היסטוריים (82 oscillating 74% ב-5m, touch_pair 1.01)
 - `runs/` — תיקיות-ריצה עצמאיות (paper/live), ראה `docs/run-conventions.md`
@@ -17,11 +17,11 @@
 **הרצה עצמאית:**
 ```powershell
 python -m scripts.measure_5m_oscillation   # אוסף
-python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # דשבורד
+python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 5515  # דשבורד
 ```
 
 **הבא (היסטורי):** לבנות בוט עצמאי — config חדש (SPREAD 2 כיעד), quotes `mid-2¢` בשני הצדדים, queue gate 50, pair_cost <0.995, ויציאה מונוטונית לפי הרף פר נכס. (סטטוס נוכחי: מנוע מסחר חי/סימולציה פעיל ב-`strategy/live_trader.py` עם לוח בקרה חי ב-`server/osc_dash.py`).
 
 ## Dashboard Architecture
 
-- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 8802) is the sole canonical dashboard. No Node.js runtime is used or tracked in this repository.
+- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 5515) is the sole canonical dashboard. No Node.js runtime is used or tracked in this repository.

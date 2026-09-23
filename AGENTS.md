@@ -29,7 +29,7 @@ python -m scripts.verify_tick_data run/ticks # verify tick integrity & data qual
 python -m scripts.rebuild_windows           # rebuild oscillation_windows.jsonl + summary from real run/ticks
 python -m scripts.backtest run/ticks --offset 0.02 --queue 50  # replay
 python -m scripts.sweep_backtest run/ticks --preset grid        # quant parameter sweep (1D: sensitivity; joint: grid; stochastic: random)
-python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
+python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 5515  # dashboard
 ```
 
 ## Testing & Fast Iteration Policy
@@ -46,7 +46,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - `scripts/run_layout.py` — single source of truth for the `runs/` naming + manifest schema (`new_run_dir`/`write_manifest`/`write_summary_html`/`write_paper_stub`).
 - `scripts/measure_5m_oscillation.py` — legacy top-of-book collector (best_bid/ask/mid only). Kept for reference; `collect_ticks` is the source of truth for replay.
 - `backtest/` — offline replay engine. `engine.py:replay()` is pure (no venue calls), `index.py` builds per-file cid sidecars for slider-speed sweeps.
-- `server/osc_dash.py` — FastAPI dashboard on `:8802`. Pages: `/`, `/oscillation`, `/summary`, `/analysis`. APIs: `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/backtest` (query: offset/queue/pair_cost/quote_lo/quote_hi/exit_*), `/api/ticks/manifest|verify|file|upload-chunk|upload-stream`, collector control `/api/collector/status|start|stop|poll-once`, live execution & cockpit `/api/live/account|state|control|orders|cancel_all|cancel_order|test_order|config|latency|stream`.
+- `server/osc_dash.py` — FastAPI dashboard on `:5515`. Pages: `/`, `/oscillation`, `/summary`, `/analysis`. APIs: `/api/oscillation`, `/api/goals`, `/api/analysis`, `/api/backtest` (query: offset/queue/pair_cost/quote_lo/quote_hi/exit_*), `/api/ticks/manifest|verify|file|upload-chunk|upload-stream`, collector control `/api/collector/status|start|stop|poll-once`, live execution & cockpit `/api/live/account|state|control|orders|cancel_all|cancel_order|test_order|config|latency|stream`.
 - `strategy/` — `series.py` (10-series universe, single source), `markets.py` (book/tape fetchers, `LiveMarket`), `live_trader.py` (order flow & execution engine), `config.py:17` (`MakerConfig`) — heavily commented with hunter-fleet values; most fields are legacy, verify against `README.md:22` before reusing.
 - `run/` — gitignored (`.gitignore:6`). Contains `ticks/` (replay-grade) and legacy `oscillation_*.jsonl`. Regenerated; do not commit.
 - `runs/` — gitignored (`.gitignore:7`). Self-contained `paper|live` run folders (`runs/paper|live/YYYY-MM-DD_HH-MM_TZ/`); convention in `docs/run-conventions.md`.
@@ -59,7 +59,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 |---|---|---|---|
 | `strategy/live_trader.py` (`LiveTraderEngine`) | **Canonical** | Core Strategy & Trading | Sole canonical trading engine for both execution modes (`mode="paper"` and `mode="live"` for real money). Manages order flow, CLOB order execution, 1s tick loops, stop losses, leg chases, and state exposed via `/api/live/*`. |
 | `scripts/shadow_ev_pilot.py` | **Canonical** | Strategy Research & Validation | Headless paper EV pilot runner. Runs autonomous validation sessions (e.g. overnight 11h), instantiating `LiveTraderEngine(load_persisted=False)` in paper mode, logging snapshots, and generating self-contained artifact bundles in `runs/paper/`. |
-| `server/osc_dash.py` | **Canonical** | Operations & Cockpit | Sole canonical dashboard server (FastAPI on `:8802`). Serves UI tabs and exposes `/api/live/*` endpoints controlling the active `LiveTraderEngine` instance. |
+| `server/osc_dash.py` | **Canonical** | Operations & Cockpit | Sole canonical dashboard server (FastAPI on `:5515`). Serves UI tabs and exposes `/api/live/*` endpoints controlling the active `LiveTraderEngine` instance. |
 | `scripts/collect_ticks.py` | **Canonical** | Market Data | Sole replay-grade tick data collector. Captures order books and tape deltas for the 10 series to `run/ticks/`. |
 | `scripts/backtest.py` & `backtest/engine.py` | **Canonical** | Quantitative Research | Pure offline simulation engine and CLI for replaying tick datasets and running quantitative parameter sweeps. |
 | `bot/paper_bot.py` | **Removed** | Legacy | Historical standalone polling script from early exploratory phase. Removed from repository following micro-pilot validation (Issue #148); superseded by `LiveTraderEngine` and `scripts.shadow_ev_pilot`. |
@@ -76,7 +76,7 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802  # dashboard
 - Collector uses a pooled `requests.Session` with `(3.05, 5.0)` timeouts (connect, read) and `max_retries=0` — failed markets are skipped for that poll, not retried.
 - `strategy/markets.py` sanitizes slugs via `_SAFE_SLUG_RE` before embedding in HTML/DB; `full_book`/`parse_book` tolerates malformed price rows (counted in `malformed`) but raises `ValueError` on structural payload mismatch.
 - Context files: `AGENTS.md` (this file) is the canonical project rules; `CLAUDE.md` carries the Claude-facing subset; `CONSTRAINTS.md` and `SPEC.md` are per-issue working files holding the active issue's quality gates and specification — neither is a standing architecture document, and both go stale the moment their issue merges (see §5 of `docs/git-workflow.md`). No `opencode.json` exists.
-- Dashboard: `server/osc_dash.py` (FastAPI on :8802) is the sole canonical dashboard.
+- Dashboard: `server/osc_dash.py` (FastAPI on :5515) is the sole canonical dashboard.
 
 ## GBrain search guidance
 
