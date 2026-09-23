@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>קובץ הזהב — נולד מהימים הטהורים (#309)</title>
+<style>
+:root{--ink:#eaf1f6;--muted:#9aabb8;--bg:#0b1117;--panel:#121c25;--panel2:#172530;--line:#29404d;
+--accent:#C792EA;--accent-ink:#241233;--good:#55d6c2;--bad:#f0684d;--gold:#f3ba2f;
+--shadow:0 20px 55px rgba(0,0,0,.28)}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:16px/1.65 "Segoe UI",Tahoma,sans-serif}
+main{max-width:1100px;margin:auto;padding:40px 20px 70px}
+h1{font-size:1.7rem;margin:.2em 0}h1 small{display:block;font-size:.95rem;color:var(--muted);font-weight:400;margin-top:6px}
+.lede{color:var(--muted);max-width:720px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:26px;margin-top:24px;box-shadow:var(--shadow)}
+.figure{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel2)}
+.figure-controls{display:flex;gap:.5rem;align-items:center;padding:.7rem 1rem;border-top:1px solid var(--line);flex-wrap:wrap}
+.ctrl-btn{font-size:.78rem;padding:.45rem 1rem;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;color:#111}
+.ctrl-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+.ctrl-btn.mode{background:var(--panel2);color:var(--ink)}
+.ctrl-btn.mode.active{background:var(--ink);color:var(--bg);font-weight:700}
+#stepinfo{font-size:.78rem;color:var(--muted);margin-inline-start:auto}
+.figure-caption{font-size:.8rem;color:var(--muted);padding:.6rem 1rem .8rem;border-top:1px solid var(--line)}
+.callout{border-inline-start:3px solid var(--accent);background:rgba(255,255,255,.04);padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0}
+.numbers{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:14px}
+.num{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center}
+.num b{display:block;font-size:1.35rem;color:var(--accent)}
+.num span{font-size:.75rem;color:var(--muted)}
+.steps{margin-top:14px;font-size:.85rem;color:var(--muted);line-height:1.9}
+.steps code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:.8rem;color:var(--ink)}
+a{color:var(--accent)}
+@media (prefers-reduced-motion: reduce){#cv{display:none}.static-note{display:block}}
+.static-note{display:none;font-size:.85rem;color:var(--muted);padding:1rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>קובץ הזהב מוכן — והוא נבנה מהימים הכי נקיים שיש
+    <small>שישה ימי מדידה מושלמים עברו בדיקה קפדנית והפכו לסט העבודה הרשמי של המחקר. לחצו "הרצה" וראו יום עובר את כל התחנות.</small>
+  </h1>
+  <p class="lede">במקום שבועות של איסוף חדש, לקחנו את ששת הימים שכבר הוכחו כמושלמים, הרצנו אותם שוב על כל חוקי האיכות, ונעלנו אותם בכספת משלהם — עם פנקס שמתעד מאיפה כל יום הגיע. אפס הפתעות: מה שנכנס לכספת — נבדק, חתום, ולא יכול להשתבש בשקט.</p>
+
+  <div class="panel">
+    <div class="figure">
+      <canvas id="cv" width="860" height="320" style="width:100%;height:auto;display:block"></canvas>
+      <div class="static-note">המצגת האינטראקטיבית דורשת דפדפן עם הנפשות. המסלול: יום מקור ← בדיקת איכות ← העתקה בטוחה ← פנקס ← כספת הזהב. יום פגום נעצר בבדיקה ונרשם בפנקס — הוא לעולם לא מגיע לכספת.</div>
+      <div class="figure-controls">
+        <button class="ctrl-btn mode active" id="m-clean">יום נקי</button>
+        <button class="ctrl-btn mode" id="m-flawed">יום עם פגם</button>
+        <button class="ctrl-btn primary" id="b-step">צעד ⏭</button>
+        <button class="ctrl-btn" id="b-play">הרצה ▶</button>
+        <button class="ctrl-btn" id="b-reset">איפוס ↺</button>
+        <span id="stepinfo">תחנה 0/5</span>
+      </div>
+      <div class="figure-caption" id="cap">לחצו "צעד" כדי ללוות יום אחד מהמקור ועד הכספת — או "יום עם פגם" כדי לראות מה קורה ליום שנכשל.</div>
+    </div>
+
+    <div class="callout" style="margin-top:18px">
+      <b>למה 6 קבצים ולא קובץ אחד גדול?</b> כי קובץ אחד משורשר קובר יום פגום בתוך יום טוב — ואף אחד לא יראה את זה. שישה קבצים + פנקס אחד = כל יום נבדק בנפרד, חתום בנפרד, ואם יום אחד יתקלקל בעתיד — מוציאים אותו בלי לגעת בשאר.
+    </div>
+
+    <div class="numbers">
+      <div class="num"><b>6</b><span>ימים בכספת</span></div>
+      <div class="num"><b>4,910</b><span>חלונות מדידה</span></div>
+      <div class="num"><b>1,428,888</b><span>דגימות תקינות</span></div>
+      <div class="num"><b>0.0</b><span>קצב פערי דגימה</span></div>
+      <div class="num"><b>13/13</b><span>דרישות איכות — ירוק</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <b>מה קיבלתם בפועל?</b>
+    <div class="steps">
+      1. פתחו את הדשבורד (<code>python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 8802</code>) ועברו ללשונית <b>Tick Files</b>.<br>
+      2. בראש העמוד: כרטיס זהוב עם הכתפיה <b>CERTIFIED</b> — כל 13 דרישות האיכות בירוק, ולידן "הושג / יעד".<br>
+      3. ברשימת הקבצים למטה: שש שורות <code>golden/ticks_…</code> לכל אחת כפתור "Run Backtest" (ואין מחיקה — זה הזהב).<br>
+      4. לחצו על אחת מהן — הריצה תנגן בדיוק את היום הזה מהכספת, לא עותק ולא קובץ אחר.
+    </div>
+    <p style="font-size:.8rem;color:var(--muted);margin-bottom:0">
+      עבודה מלאה: <a href="https://github.com/AI-Degen-69/crypto-spread/issues/281">בקשה #281</a> ·
+      <a href="https://github.com/AI-Degen-69/crypto-spread/pull/309">עדכון #309 🟢 מוזג</a>
+    </p>
+  </div>
+</main>
+
+<script>
+(function(){
+"use strict";
+const dpr = window.devicePixelRatio||1;
+const cvEl = document.getElementById('cv');
+const ctx0 = cvEl.getContext('2d');
+const W = 860, H = 320;
+cvEl.width = W*dpr; cvEl.height = H*dpr; cvEl.style.width='100%';
+ctx0.scale(dpr,dpr);
+const ctx = ctx0;
+
+const css = getComputedStyle(document.documentElement);
+const ACCENT = (css.getPropertyValue('--accent')||'#C792EA').trim();
+const GOOD   = (css.getPropertyValue('--good')||'#55d6c2').trim();
+const BAD    = (css.getPropertyValue('--bad')||'#f0684d').trim();
+const GOLD   = (css.getPropertyValue('--gold')||'#f3ba2f').trim();
+const LINE   = (css.getPropertyValue('--line')||'#29404d').trim();
+const MUTED  = (css.getPropertyValue('--muted')||'#9aabb8').trim();
+const INK    = (css.getPropertyValue('--ink')||'#eaf1f6').trim();
+
+const STATIONS = [
+  {x: 90,  label:'יום מקור',      sub:'pristine'},
+  {x: 265, label:'בדיקת איכות',   sub:'13 חוקים'},
+  {x: 440, label:'העתקה בטוחה',   sub:'אטומית'},
+  {x: 615, label:'פנקס המקור',    sub:'תיעוד מלא'},
+  {x: 780, label:'כספת הזהב',     sub:'CERTIFIED'}
+];
+const RAIL_Y = 150, TRAY_Y = 262;
+
+const CAPS = [
+  'לחצו "צעד" כדי ללוות יום אחד מהמקור ועד הכספת — או "יום עם פגם" כדי לראות מה קורה ליום שנכשל.',
+  'היום מגיע מהמדף של הימים הטהורים — כבר דגימות באיכות גבוהה, אבל עוד לא חתומות כזהב.',
+  'בדיקת האיכות: כיסוי מלא של היום, אפס שורות פגומות, אפס פערי דגימה. רק עוברים ממשיכים.',
+  'ההעתקה בטוחה: היום מועתק לכספת דרך קובץ ביניים — אם משהו משתבש באמצע, הישן נשאר שלם.',
+  'פנקס המקור נרשם: מאיפה היום הגיע, טביעת אצבע שלו, ותוצאות הבדיקה — כדי שאפשר יהיה לאמת אחר כך.',
+  'היום נחתם כזהב. הסט המלא עבר את כל דרישות המחקר — 6 ימים, 4,910 חלונות, אפס הפתעות.',
+  'היום הפגום נעצר בבדיקה — והסיבה נרשמת בפנקס. הוא לא מגיע לכספת, וגם לא נשכח.',
+  'העתקה לא אטומית יכולה הייתה להשאיר יום חצי-כתוב בכספת. עכשיו זה בלתי אפשרי: או היום המלא, או הקודם.'
+];
+
+let mode='clean', step=0, pos=null, target=null, done=0, playing=false, timer=null;
+
+function tokenHome(){ return {x: STATIONS[0].x, y: RAIL_Y}; }
+function reset(){ step=0; pos=tokenHome(); target=tokenHome(); playing=false; clearInterval(timer); upd(); }
+function stepTarget(){
+  if(mode==='flawed' && step>=2){
+    // after failing the gate: drop to the exclusion tray beside the gate
+    return {x: STATIONS[1].x + 70, y: TRAY_Y};
+  }
+  const i = Math.min(step, STATIONS.length-1);
+  return {x: STATIONS[i].x, y: RAIL_Y};
+}
+function doStep(){
+  if(mode==='flawed' && step>=2){ step=6; }
+  else if(step<5){ step++; }
+  else { done++; step=0; }
+  target = stepTarget();
+  upd();
+}
+function upd(){
+  document.getElementById('stepinfo').textContent =
+    'תחנה ' + (step>=6?'✗':Math.min(step,5)) + '/5 · ימים בכספת: ' + done;
+  document.getElementById('cap').textContent = CAPS[Math.min(step, CAPS.length-1)];
+}
+
+function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // rail
+  ctx.strokeStyle=LINE; ctx.lineWidth=14; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(STATIONS[0].x,RAIL_Y); ctx.lineTo(STATIONS[4].x,RAIL_Y); ctx.stroke();
+  // stations
+  STATIONS.forEach((s,i)=>{
+    const reached = step>i || (step>=5 && mode==='clean');
+    ctx.strokeStyle = reached?ACCENT:LINE; ctx.lineWidth=1.5;
+    ctx.fillStyle = reached?'rgba(199,146,234,0.10)':'rgba(255,255,255,0.03)';
+    rr(s.x-46, RAIL_Y-38, 92, 76, 12); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = reached?INK:MUTED; ctx.textAlign='center';
+    ctx.font='bold 12px "Segoe UI"'; ctx.fillText(s.label, s.x, RAIL_Y-8);
+    ctx.font='10px "Segoe UI"'; ctx.fillStyle=MUTED; ctx.fillText(s.sub, s.x, RAIL_Y+10);
+    ctx.fillStyle = reached?ACCENT:MUTED; ctx.font='bold 11px "Segoe UI"';
+    ctx.fillText(String(i+1), s.x, RAIL_Y+27);
+  });
+  // vault glow when reached
+  if(step>=5 && mode==='clean'){
+    ctx.strokeStyle=GOLD; ctx.lineWidth=2;
+    rr(STATIONS[4].x-52, RAIL_Y-44, 104, 88, 14); ctx.stroke();
+    ctx.fillStyle=GOLD; ctx.font='bold 10px "Segoe UI"'; ctx.textAlign='center';
+    ctx.fillText('✓ CERTIFIED', STATIONS[4].x, RAIL_Y-50);
+  }
+  // exclusion tray (flawed path)
+  if(mode==='flawed'){
+    ctx.strokeStyle=BAD; ctx.setLineDash([5,4]); ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(STATIONS[1].x, RAIL_Y+40);
+    ctx.lineTo(STATIONS[1].x+70, TRAY_Y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle='rgba(240,104,77,0.08)'; ctx.strokeStyle=BAD;
+    rr(STATIONS[1].x+16, TRAY_Y-20, 170, 44, 10); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=BAD; ctx.font='bold 11px "Segoe UI"'; ctx.textAlign='center';
+    ctx.fillText('נפסל + נרשם בפנקס', STATIONS[1].x+101, TRAY_Y+4);
+  }
+  // token
+  if(pos){
+    const failed = mode==='flawed' && step>=2;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y - 52, 13, 0, Math.PI*2);
+    ctx.fillStyle = failed?BAD:(step>=5?GOLD:ACCENT);
+    ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,.4)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle= failed?'#fff':'#241233'; ctx.font='bold 10px "Segoe UI"';
+    ctx.textAlign='center'; ctx.fillText(failed?'✗':'✓', pos.x, pos.y-48.5);
+    if(failed){
+      ctx.fillStyle=MUTED; ctx.font='10px "Segoe UI"';
+      ctx.fillText('הסיבה מתועדת — שקיפות מלאה', pos.x, pos.y-24);
+    }
+  }
+}
+
+function loop(){
+  if(!pos) pos = tokenHome();
+  if(!target) target = tokenHome();
+  pos.x += (target.x-pos.x)*0.12;
+  pos.y += (target.y-pos.y)*0.12;
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+const mc=document.getElementById('m-clean'), mf=document.getElementById('m-flawed');
+mc.onclick=()=>{ mode='clean'; mc.classList.add('active'); mf.classList.remove('active'); reset(); };
+mf.onclick=()=>{ mode='flawed'; mf.classList.add('active'); mc.classList.remove('active'); reset(); };
+document.getElementById('b-step').onclick=doStep;
+document.getElementById('b-reset').onclick=reset;
+document.getElementById('b-play').onclick=()=>{
+  playing=!playing;
+  document.getElementById('b-play').textContent = playing?'עצירה ⏸':'הרצה ▶';
+  clearInterval(timer);
+  if(playing){ timer=setInterval(doStep, 1100); doStep(); }
+};
+reset();
+})();
+</script>
+</body>
+</html>
