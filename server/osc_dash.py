@@ -5306,6 +5306,21 @@ async function runBacktest(fileOverride){
     const data = await res.json();
     if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
 
+    if (!res.ok || (data && data.error)) {
+      const errMsg = (data && data.error) ? data.error : `HTTP ${res.status}`;
+      $('btHash').textContent = `Backtest error: ${errMsg}`;
+      const lastRun = $('btLastRunTime');
+      if (lastRun) lastRun.textContent = `✗ error: ${errMsg}`;
+      const elTime = $('btElapsedTime');
+      if (elTime) {
+        elTime.textContent = '--';
+        elTime.style.color = 'var(--down)';
+      }
+      const elSub = $('btElapsedSub');
+      if (elSub) elSub.textContent = 'Failed';
+      return;
+    }
+
     const ov = data.overall || {};
     const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
     const tookMs = window._btStartTime ? (performance.now() - window._btStartTime) : 0;
@@ -5693,15 +5708,8 @@ async function runSweepVisual(){
   const exitStop15m = $('btExit15m') ? $('btExit15m').value : 0.05;
   const exitRev = $('btExitReversal') ? $('btExitReversal').value : 0.02;
   const meta = $('btSweepMeta');
-  window._btSweepStartTime = performance.now();
   if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
-  if(btn){ btn.disabled = true; btn.textContent = '⏳ Sweeping 0s…'; }
-  if(meta){ meta.textContent = `sweeping ${axis}… 0s`; }
-  window._btSweepTimerId = setInterval(() => {
-    const t = fmtElapsed(performance.now() - window._btSweepStartTime);
-    if(btn && btn.disabled){ btn.textContent = `⏳ Sweeping ${t}…`; }
-    if(meta && meta.textContent.startsWith('sweeping')){ meta.textContent = `sweeping ${axis}… ${t}`; }
-  }, 500);
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Waiting…'; }
   try{
     // Both endpoints share the one-worker guard. If an explicit regular
     // backtest is already running, wait for that local run instead of showing
@@ -5715,6 +5723,14 @@ async function runSweepVisual(){
       if(meta){ meta.textContent = 'backtest is still running; try the sweep again when it finishes.'; }
       return;
     }
+    window._btSweepStartTime = performance.now();
+    if(btn){ btn.textContent = '⏳ Sweeping 0s…'; }
+    if(meta){ meta.textContent = `sweeping ${axis}… 0s`; }
+    window._btSweepTimerId = setInterval(() => {
+      const t = fmtElapsed(performance.now() - window._btSweepStartTime);
+      if(btn && btn.disabled){ btn.textContent = `⏳ Sweeping ${t}…`; }
+      if(meta && meta.textContent.startsWith('sweeping')){ meta.textContent = `sweeping ${axis}… ${t}`; }
+    }, 500);
     let url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&size=${encodeURIComponent(size)}&offset=${encodeURIComponent(offset)}&queue=${encodeURIComponent(queue)}&exit_default_5m=${encodeURIComponent(exitStop5m)}&exit_default_15m=${encodeURIComponent(exitStop15m)}&exit_reversal=${encodeURIComponent(exitRev)}`;
     if(fileVal){ url += `&file=${encodeURIComponent(fileVal)}`; }
     const res = await fetch(url);
