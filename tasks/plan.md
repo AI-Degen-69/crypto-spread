@@ -56,7 +56,7 @@ Stack: Python (FastAPI/uvicorn) + PowerShell 7 launchers · Tests: pytest (targe
   `server/`, `scripts/` (tracked `.ps1`/`.py`), `tests/`, living docs with
   word-boundary port pattern (so `0.008802...` research floats never false-fail).
 - Helper skill: test-driven-development. Depends on: T1, T3.
-- Verify: `python -m pytest tests/test_crypto_spread_menu.py -q`.
+- Verify: `python -m pytest tests/test_dashboard_ports.py tests/test_crypto_spread_menu.py -q`.
 
 ### CHECKPOINT 2 — docs + tests green; only frozen HTML still mentions 8802.
 
@@ -65,7 +65,7 @@ Stack: Python (FastAPI/uvicorn) + PowerShell 7 launchers · Tests: pytest (targe
   `docs/issues/*.html`, gitignored runtime, or non-port numbers; run both
   targeted suites once more.
 - Helper skill: incremental-implementation. Depends on: T1–T5.
-- Verify: `python -m pytest tests/test_crypto_spread_menu.py tests/test_osc_dash_integration.py -q -k "menu or origin"`.
+- Verify: `python -m pytest tests/test_dashboard_ports.py tests/test_crypto_spread_menu.py tests/test_osc_dash_integration.py -q -k "menu or origin or port"`.
 
 ## Improvement proposal (adopted by default)
 - Regression scan uses word-boundary port matching, not naive `8802` substring —
