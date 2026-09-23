@@ -53,6 +53,7 @@ FLOOR_WINDOWS_PER_MARKET = 50
 
 
 def _expected_market_pairs() -> set[tuple[str, int]]:
+    """All 10 (series, duration) pairs every cut must represent."""
     return {(slug, duration) for slug, duration, _label in SERIES}
 
 
@@ -132,6 +133,7 @@ def _allocate(cells: dict[tuple, list[str]], target_total: int,
     pairs = sorted({key[:2] for key in cells})
 
     def pair_selected(pair: tuple) -> int:
+        """Windows allocated so far to one (series, duration) pair."""
         return sum(n for k, n in per_cell.items() if k[:2] == pair)
 
     # Phase 1: floor guarantee per pair, into that pair's OWN cells only.
@@ -383,6 +385,7 @@ def _cid_of_line(line: str) -> str | None:
 
 
 def main() -> int:
+    """CLI entry: parse flags, build the cut, print totals + next step."""
     ap = argparse.ArgumentParser(description="Build the golden dataset research cut (#312)")
     ap.add_argument("--golden", type=Path, default=ROOT / "run" / "ticks" / "golden",
                     help="golden dataset dir (read-only)")
