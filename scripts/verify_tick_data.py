@@ -251,6 +251,63 @@ def _check(name: str, measured: float, required: float, *, direction: str = "min
     }
 
 
+def apply_hash_crosscheck(day_file: Path, report: dict[str, Any]) -> None:
+    """Flag a day file whose bytes changed without a logged rewrite (issue #302).
+
+    Compares the file's current SHA-256 against the last recorded hash
+    (run/ticks/verify_hashes.json). An unexplained change — no matching
+    old→new rewrite event in run/ticks/rewrite_events.jsonl — gets a loud
+    sample_issues entry and raises the status to WARN (FAIL for a completed
+    past day, whose bytes must never change). Afterwards the store is updated
+    with the current hash so the same change is flagged exactly once.
+    """
+    from scripts.tick_safety import (
+        read_hash_store, read_rewrite_events, update_hash_store)
+    from scripts.ship_to_drive import sha256_of
+
+    report["hash_crosscheck"] = {"flagged": False}
+    out_dir = day_file.parent
+    name = day_file.name
+    try:
+        current = sha256_of(day_file)
+    except OSError:
+        return
+    recorded = read_hash_store(out_dir)
+    last = recorded.get(name)
+    if last is None or last == current:
+        update_hash_store(out_dir, name, current)
+        return
+
+    events = [e for e in read_rewrite_events(out_dir) if e.get("day_file") == name]
+    explained = any(
+        e.get("old_sha256") == last and e.get("new_sha256") == current
+        for e in events
+    )
+    if explained:
+        update_hash_store(out_dir, name, current)
+        return
+
+    completed_past_day = bool(report.get("capture_state", {}).get("label") == "COMPLETE CAPTURE")
+    flagged_status = "FAIL" if completed_past_day else "WARN"
+    detail = {
+        "kind": "unexplained_rewrite",
+        "file": name,
+        "recorded_sha256": last,
+        "current_sha256": current,
+        "note": "day file bytes changed without a logged rewrite event — "
+                "possible silent rewrite; the previous generation was not backed up",
+    }
+    report.setdefault("sample_issues", []).insert(0, detail)
+    report["hash_crosscheck"] = {"flagged": True, **detail}
+    if report.get("status") in ("PASS", "WARN") and flagged_status == "FAIL":
+        report["status"] = "FAIL"
+        report["capture_state"] = capture_state("FAIL", report)
+    elif report.get("status") == "PASS":
+        report["status"] = "WARN"
+        report["capture_state"] = capture_state("WARN", report)
+    update_hash_store(out_dir, name, current)
+
+
 def capture_state(status: str, report: dict[str, Any]) -> dict[str, str]:
     """Describe the capture state and safe action while preserving raw status."""
     if status == "PASS":
@@ -723,6 +780,7 @@ def verify_ticks_dir(
             max_gap_sec=max_gap_sec,
             max_start_delay=max_start_delay,
         )
+        apply_hash_crosscheck(f, rep)
         file_reports.append(rep)
         tot_raw_lines += rep.get("raw_lines", 0)
         tot_corrupt_lines += rep.get("corrupt_lines", 0)
@@ -774,6 +832,8 @@ def verify_ticks_dir(
     else:
         verdict = "PASS"
 
+    hash_issues = sum(1 for r in file_reports if r.get("hash_crosscheck", {}).get("flagged"))
+
     return {
         "status": verdict,
         "capture_state": capture_state(verdict, {
@@ -803,6 +863,7 @@ def verify_ticks_dir(
         "missing_fields": dict(tot_missing_fields),
         "time_blocks": sorted(aggregated_time_blocks),
         "readiness": aggregate_readiness,
+        "hash_rewrites_unexplained": hash_issues,
         "files": file_reports,
     }
 
@@ -828,6 +889,9 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"Time Reversals      : {report['total_time_reversals']:,}")
         if report.get("readiness"):
             lines.append(f"Research Readiness  : {report['readiness'].get('level', 'PENDING')}")
+        if report.get("hash_rewrites_unexplained"):
+            lines.append(f"Unexplained Rewrites : {report['hash_rewrites_unexplained']:,} "
+                         "(day file bytes changed without a logged rewrite event)")
 
         lines.append("\nPer-File Summary:")
         for fr in report.get("files", []):
@@ -838,6 +902,9 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
                 f"{fr.get('sampling_gaps_count', 0)} gaps, {fr.get('collector_errors', 0)} errs, "
                 f"readiness={fr.get('readiness', {}).get('level', 'PENDING')}"
             )
+            if fr.get("hash_crosscheck", {}).get("flagged"):
+                lines.append("      ⚠ UNEXPLAINED REWRITE — bytes changed without a "
+                             "logged rewrite event (previous generation not backed up)")
             if verbose and fr.get("sample_issues"):
                 for issue in fr["sample_issues"][:5]:
                     lines.append(f"      • Line {issue.get('line')}: {issue.get('detail')}")
@@ -853,6 +920,10 @@ def format_report_text(report: dict[str, Any], verbose: bool = False) -> str:
         lines.append(f"Collector Errors    : {report.get('collector_errors', 0):,}")
         if report.get("readiness"):
             lines.append(f"Research Readiness  : {report['readiness'].get('level', 'PENDING')}")
+        hc = report.get("hash_crosscheck") or {}
+        if hc.get("flagged"):
+            lines.append(f"UNEXPLAINED REWRITE : bytes changed without a logged "
+                         "rewrite event (previous generation not backed up)")
 
         if verbose and report.get("sample_issues"):
             lines.append("\nSample Discrepancies (sample_issues, max 20 — see docs/operations.md):")

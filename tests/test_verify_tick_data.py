@@ -390,3 +390,85 @@ def test_est_total_lines(tmp_path):
     big = tmp_path / "big.jsonl"
     big.write_bytes(b"x" * 21_000_000)
     assert est_total_lines(big) == 21_000_000 // 950
+
+
+def _crosscheck_day(tmp_path, *, body: bytes) -> Path:
+    """A real day file verified once, so the hash store records its baseline."""
+    from scripts.verify_tick_data import apply_hash_crosscheck
+
+    day = tmp_path / "ticks_2026-09-13.jsonl"
+    day.write_bytes(body)
+    rep = verify_tick_file(day)
+    apply_hash_crosscheck(day, rep)
+    assert rep["hash_crosscheck"]["flagged"] is False  # baseline recorded
+    return day
+
+
+def test_hash_crosscheck_flags_unexplained_change(tmp_path):
+    """Issue #302: bytes changed with no logged rewrite event → loud flag.
+    The crosscheck only ever raises status, never lowers it (this tiny file
+    already fails for other reasons, so it stays FAIL)."""
+    from scripts.verify_tick_data import apply_hash_crosscheck
+
+    day = _crosscheck_day(tmp_path, body=b'{"a": 1}\n')
+    day.write_bytes(b'{"a": 999}\n')  # silent mutation
+    rep = verify_tick_file(day)
+    apply_hash_crosscheck(day, rep)
+
+    assert rep["hash_crosscheck"]["flagged"] is True
+    assert any(i.get("kind") == "unexplained_rewrite" for i in rep["sample_issues"])
+    assert rep["status"] == "FAIL"  # pre-existing failure is preserved
+    # Second verification does not re-flag the same change (store was updated).
+    rep2 = verify_tick_file(day)
+    apply_hash_crosscheck(day, rep2)
+    assert rep2["hash_crosscheck"]["flagged"] is False
+
+
+def test_hash_crosscheck_raises_pass_to_warn_on_unexplained_change(tmp_path):
+    """Issue #302: a passing report with an unexplained change is raised to WARN."""
+    from scripts.verify_tick_data import apply_hash_crosscheck
+
+    day = tmp_path / "ticks_2026-09-13.jsonl"
+    day.write_bytes(b'{"a": 1}\n')
+    apply_hash_crosscheck(day, {"status": "PASS",
+                                "capture_state": {"label": "PARTIAL CAPTURE"}})
+    day.write_bytes(b'{"a": 2}\n')
+    rep = {"status": "PASS", "capture_state": {"label": "PARTIAL CAPTURE"}}
+    apply_hash_crosscheck(day, rep)
+    assert rep["status"] == "WARN" and rep["hash_crosscheck"]["flagged"] is True
+
+
+def test_hash_crosscheck_explained_rewrite_does_not_flag(tmp_path):
+    """Issue #302: a change with a matching old→new rewrite event is legitimate."""
+    from scripts.tick_safety import record_rewrite_event
+    from scripts.verify_tick_data import apply_hash_crosscheck
+    from scripts.ship_to_drive import sha256_of
+
+    day = _crosscheck_day(tmp_path, body=b'{"a": 1}\n')
+    old_sha = sha256_of(day)
+    day.write_bytes(b'{"a": 2}\n')
+    new_sha = sha256_of(day)
+    record_rewrite_event(tmp_path, day.name, old_sha, new_sha, "backup/x")
+
+    rep = verify_tick_file(day)
+    apply_hash_crosscheck(day, rep)
+    assert rep["hash_crosscheck"]["flagged"] is False
+
+
+def test_hash_crosscheck_fails_completed_past_day_on_unexplained_change(tmp_path):
+    """Issue #302: an unexplained change to a COMPLETE-past-day file is FAIL."""
+    from scripts.verify_tick_data import apply_hash_crosscheck
+    from tests.test_build_golden_dataset import _write_day
+
+    _write_day(tmp_path, "ticks_2026-09-13.jsonl", n_windows=1)
+    day = tmp_path / "ticks_2026-09-13.jsonl"
+    rep = verify_tick_file(day)
+    assert (rep.get("capture_state") or {}).get("label") == "COMPLETE CAPTURE"
+    apply_hash_crosscheck(day, rep)
+    assert rep["hash_crosscheck"]["flagged"] is False
+
+    day.write_bytes(b'{"tampered": true}\n')
+    rep2 = verify_tick_file(day)
+    apply_hash_crosscheck(day, rep2)
+    assert rep2["hash_crosscheck"]["flagged"] is True
+    assert rep2["status"] == "FAIL"
