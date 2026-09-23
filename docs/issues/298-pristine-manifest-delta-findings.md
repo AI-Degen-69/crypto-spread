@@ -124,7 +124,9 @@ the dashboard is **#295's** scope, not this issue's.
 - **Future-issue candidate:** a "no silent rewrites of captured day files" guard — e.g. the
   collector appending to an existing day file, or any tool that rewrites `run/ticks/*.jsonl`,
   should log loudly / refuse without an explicit flag. This issue records the anomaly but
-  does not touch anything outside its scope.
+  does not touch anything outside its scope. *(Implemented by issue #302 —
+  `scripts/tick_safety.py`: loud `[tick-safety]` logs, `--allow-rewrite` with mandatory
+  backup + rewrite-event trail, and a verifier hash cross-check.)*
 
 ## 5a. Certification addendum (post-review closure)
 

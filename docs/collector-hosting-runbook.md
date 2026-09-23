@@ -45,6 +45,30 @@
   itself and logs `WEDGED: ... killing [...]`. No operator action needed; if
   `WEDGED` repeats, redeploy and inspect `run/collector.log`.
 
+## 3b. Day-file rewrite safety (issue #302)
+
+Raw day files are the only non-reproducible artifact in the repo — a lost
+generation is lost forever (the 2026-09-21 incident, #298). Silent rewrites
+are therefore impossible by design:
+
+- **Resume, not rewrite (default).** A collector restart re-appends to today's
+  file — crash recovery works unchanged. Every day file's first write in a
+  process run prints one loud `[tick-safety]` line to stderr (→
+  `run/collector.log`): path, mode (`CREATE`/`APPEND`/`REWRITE`), size.
+- **`--allow-rewrite`.** Passed explicitly (the watchdog already passes it on
+  every respawn), this starts a FRESH generation: the old file is moved to
+  `run/ticks/backup/<name>.<old-sha8>` — never destroyed in place — and the
+  rewrite (old + new SHA-256, backup path) is logged and recorded in
+  `run/ticks/rewrite_events.jsonl`.
+- **Cross-check.** `python -m scripts.verify_tick_data` compares each day
+  file's SHA-256 against the last recorded hash
+  (`run/ticks/verify_hashes.json`). A change with no matching rewrite event
+  prints `UNEXPLAINED REWRITE`, appears as `Unexplained Rewrites` in the
+  summary, and raises the status (WARN, or FAIL for a completed past day).
+
+Never pass `--allow-rewrite` manually unless you intend to supersede a
+generation; the backup + event trail is your recovery path.
+
 ## 4. Pull day files (with checksums)
 
 From the service Shell tab (or `scp`/`render disks` equivalent), per closed UTC day:

@@ -99,6 +99,11 @@ python -m scripts.collect_ticks        # the collector the watchdog keeps alive
 - Day-boundary rotation is the collector's own: `write_snap` appends to
   `run/ticks/ticks_<day_key>.jsonl` and `now_day_key` flips at UTC midnight — no operator action
   and no file stitching at boundaries.
+- Day-file safety (issue #302): silent rewrites of raw day files are impossible —
+  resume appends are loud, explicit rewrites require `--allow-rewrite` and back the old
+  generation up to `run/ticks/backup/`, and `verify_tick_data` flags any hash change
+  without a logged rewrite event. A golden day's `source_sha256` provenance therefore
+  stays auditable end-to-end (see `docs/collector-hosting-runbook.md` §3b).
 
 ### 2.2 Expected volume (measured, not assumed)
 

@@ -82,6 +82,16 @@ def test_cli_exposes_no_ws_flag():
     assert "--no-ws" in r.stdout
 
 
+def test_cli_exposes_allow_rewrite_flag():
+    """Issue #302: --allow-rewrite is the explicit opt-in for day-file rewrites."""
+    r = subprocess.run(
+        [sys.executable, "-m", "scripts.collect_ticks", "--help"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=10,
+    )
+    assert r.returncode == 0
+    assert "--allow-rewrite" in r.stdout
+
+
 def test_manifest_includes_ws_telemetry(tmp_path: Path):
     """Socket health fields survive into manifest.json for the dashboard."""
     import scripts.collect_ticks as ct
@@ -728,3 +738,51 @@ def test_manifest_carries_the_tape_source_split(slate, tmp_path):
     assert data["tape_captured_ws"] == 12
     assert data["tape_captured_rest"] == 3
     assert data["tape_rest_skipped"] == 7
+
+
+def test_write_snap_resume_append_is_loud_but_never_refused(tmp_path, monkeypatch):
+    """Issue #302: a re-run resuming today's file appends (crash recovery) —
+    allowed but loudly logged exactly once per process, with no backup/event."""
+    import scripts.collect_ticks as ct
+    from scripts.tick_safety import read_rewrite_events
+
+    target = tmp_path / "ticks_2026-09-13.jsonl"
+    target.write_text('{"original": true}\n', encoding="utf-8")
+    ct.reset_write_log()
+
+    ct.write_snap({"ts": 1.0}, tmp_path, "2026-09-13", gzip=False)
+    ct.write_snap({"ts": 2.0}, tmp_path, "2026-09-13", gzip=False)
+    # Both snaps appended — resume is preserved; no backup, no rewrite event.
+    assert target.read_text(encoding="utf-8") == '{"original": true}\n{"ts": 1.0}\n{"ts": 2.0}\n'
+    assert not (tmp_path / "backup").exists()
+    assert read_rewrite_events(tmp_path) == []
+
+
+def test_write_snap_rewrites_with_flag_backs_up_and_proceeds(tmp_path, monkeypatch, capsys):
+    """Issue #302: a rewrite authorized by --allow-rewrite moves the old
+    generation to backup, records a rewrite event, and the append lands on the
+    fresh file — the collector's own write path stays append-only."""
+    import scripts.collect_ticks as ct
+    from scripts.ship_to_drive import sha256_of
+    from scripts.tick_safety import (guard_day_write, loud_log,
+                                     read_rewrite_events, record_rewrite_event)
+
+    target = tmp_path / "ticks_2026-09-13.jsonl"
+    target.write_text('{"original": true}\n', encoding="utf-8")
+    old_sha = sha256_of(target)
+    ct.reset_write_log()
+
+    notice = guard_day_write(target, "rewrite", allow_rewrite=True)
+    assert notice is not None
+    loud_log(target, "rewrite", old_sha256=notice.old_sha256)
+    # Old generation preserved in backup/; the fresh file then gets the append.
+    backup = tmp_path / "backup" / f"{target.name}.{old_sha[:8]}"
+    assert backup.exists()
+    ct.write_snap({"ts": 1.0}, tmp_path, "2026-09-13", gzip=False)
+    record_rewrite_event(tmp_path, target.name, notice.old_sha256,
+                         sha256_of(target), notice.backup_path)
+    events = read_rewrite_events(tmp_path)
+    assert len(events) == 1 and events[0]["old_sha256"] == old_sha
+    # Loud: one stderr line carries the path, the rewrite mode and the old hash.
+    err = capsys.readouterr().err
+    assert "REWRITE" in err and str(target) in err and old_sha in err

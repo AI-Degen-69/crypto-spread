@@ -179,14 +179,18 @@ def test_posix_kill_of_a_gone_pid_is_silent(monkeypatch):
 def test_collector_cmd_defaults_to_bare_module(monkeypatch):
     monkeypatch.delenv("COLLECT_OUT", raising=False)
     monkeypatch.delenv("COLLECT_EXTRA_ARGS", raising=False)
-    assert wd.collector_cmd() == [wd.sys.executable, "-m", "scripts.collect_ticks"]
+    # Issue #302: the watchdog restarts the collector with an explicit
+    # --allow-rewrite so an automated respawn is loud, never silently blocked.
+    assert wd.collector_cmd() == [
+        wd.sys.executable, "-m", "scripts.collect_ticks", "--allow-rewrite"]
 
 
 def test_collector_cmd_honours_host_overrides(monkeypatch):
     monkeypatch.setenv("COLLECT_OUT", "/data")
     monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--gzip")
     assert wd.collector_cmd() == [
-        wd.sys.executable, "-m", "scripts.collect_ticks", "--out", "/data", "--gzip"]
+        wd.sys.executable, "-m", "scripts.collect_ticks",
+        "--out", "/data", "--allow-rewrite", "--gzip"]
 
 
 def test_windows_kill_still_uses_taskkill(monkeypatch):
@@ -226,7 +230,8 @@ def test_collector_cmd_refuses_once(monkeypatch, tmp_path):
     """`--once` under the watchdog means an instant exit + restart churn."""
     monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--gzip --once")
     assert wd.collector_cmd() == [
-        wd.sys.executable, "-m", "scripts.collect_ticks", "--gzip"]
+        wd.sys.executable, "-m", "scripts.collect_ticks",
+        "--allow-rewrite", "--gzip"]
     assert "--once" in (tmp_path / "watchdog.log").read_text()
 
 
@@ -325,13 +330,14 @@ def test_extra_out_is_refused_with_its_value(monkeypatch):
     monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--gzip --out /evil --days 1")
     assert wd.collector_cmd() == [
         wd.sys.executable, "-m", "scripts.collect_ticks",
-        "--out", "/data", "--gzip", "--days", "1"]
+        "--out", "/data", "--allow-rewrite", "--gzip", "--days", "1"]
 
 
 def test_extra_out_equals_form_is_refused(monkeypatch):
     monkeypatch.setenv("COLLECT_EXTRA_ARGS", "--out=/evil --gzip")
     assert wd.collector_cmd() == [
-        wd.sys.executable, "-m", "scripts.collect_ticks", "--gzip"]
+        wd.sys.executable, "-m", "scripts.collect_ticks",
+        "--allow-rewrite", "--gzip"]
 
 
 def test_partial_garbage_probe_is_unknown(monkeypatch):

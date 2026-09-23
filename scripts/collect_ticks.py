@@ -434,10 +434,31 @@ def resolve_series_market(series_slug: str, now: Optional[float] = None
     return info, None
 
 
+# Day files touched in this process — the loud log fires once per file, not
+# once per snap (issue #302; reset_write_log() clears it for tests/restarts).
+_day_files_touched: set[str] = set()
+
+
+def reset_write_log() -> None:
+    """Forget which day files were already logged this run."""
+    _day_files_touched.clear()
+
+
 def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
-    """Append one tick line to run/ticks/ticks_<day>.jsonl[.gz]; returns path."""
+    """Append one tick line to run/ticks/ticks_<day>.jsonl[.gz]; returns path.
+
+    Append-only by design (issue #302): this path can never truncate or replace
+    a generation — day-file rewrites go through tick_safety.guard_day_write,
+    authorized by --allow-rewrite. Crash-recovery resume is preserved, and the
+    process's first touch of a day file prints one loud line (CREATE or APPEND)
+    to stderr so a re-run resuming today's file is visible in collector.log.
+    """
     suffix = ".jsonl.gz" if gzip else ".jsonl"
     path = out_dir / f"ticks_{day_key}{suffix}"
+    from scripts.tick_safety import loud_log
+
+    first_touch = path.name not in _day_files_touched
+    existed = path.exists()
     payload = (json.dumps(line) + "\n").encode("utf-8")
     if gzip:
         import gzip as _gzip
@@ -446,6 +467,11 @@ def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
     else:
         with open(path, "ab") as f:
             f.write(payload)
+    if not existed:
+        loud_log(path, "create")
+    elif first_touch:
+        loud_log(path, "append")  # a re-run resuming today's file: loud, once
+    _day_files_touched.add(path.name)
     return str(path)
 
 
@@ -1062,6 +1088,11 @@ def main():
     ap.add_argument("--gzip", action="store_true", help="rotate daily file as .jsonl.gz")
     ap.add_argument("--no-ws", action="store_true",
                     help="disable the CLOB market WebSocket tape stream (REST polling only)")
+    ap.add_argument("--allow-rewrite", action="store_true",
+                    help="authorize day-file rewrites for truncating writers "
+                         "(tick_safety.guard_day_write). The collector's own write "
+                         "path is append-only; rewrites back the old generation up "
+                         "to run/ticks/backup/ and log both SHA-256 hashes (#302)")
     ap.add_argument("--no-align", action="store_true",
                     help="record immediately even mid-window (default: wait for the "
                          "next quarter-hour and skip the in-flight windows)")
