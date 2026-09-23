@@ -379,18 +379,20 @@ _SCAN_TTL_SEC = 600.0
 
 
 # Issue #295/#281: the subdirectories of run/ticks/ the tick-file endpoints
-# resolve into. `pristine/` holds the derived replay-grade day files and
-# `golden/` the certified golden set; quarantine/ and the internal
-# .verify_cache/ stay hidden and unresolvable.
-_TICKS_SUBDIR_ALLOWLIST = frozenset({"pristine", "golden"})
+# resolve into. `pristine/` holds the derived replay-grade day files,
+# `golden/` the certified golden set, and `backtest/` the fast BACKTEST cut
+# (the research cut: 1,500 stratified windows for UI backtests and sweeps);
+# quarantine/ and the internal .verify_cache/ stay hidden and unresolvable.
+_TICKS_SUBDIR_ALLOWLIST = frozenset({"pristine", "golden", "backtest"})
 
 
 def _resolve_tick_file(file: str) -> tuple[str, Path | None]:
     """Resolve a `file` request value to a tick file under TICKS_DIR (Issue #295).
 
     The single resolution point for every endpoint that takes a tick-file
-    parameter. Accepts a bare basename or `pristine/<basename>` — the only
-    allow-listed subdirectory. Everything else is rejected before any disk
+    parameter. Accepts a bare basename or `<subdir>/<basename>` where subdir
+    is allow-listed (pristine, golden, backtest). Everything else is rejected
+    before any disk
     access: backslashes, `..`, absolute paths, a leading `/`, more than two
     segments, empty segments, and unlisted first segments. The existing
     containment check (resolve + relative_to) is kept as the backstop.
@@ -898,8 +900,8 @@ def api_ticks_manifest():
         """Append one directory's tick files to `out["files"]`.
 
         Issue #295/#281: extended to the derived subdirectories. A subdir
-        entry's `name` is its TICKS_DIR-relative path (`pristine/<basename>`
-        or `golden/<basename>`), which is both the display label and the
+        entry's `name` is its TICKS_DIR-relative path (e.g.
+        `backtest/<basename>`), which is both the display label and the
         value every endpoint round-trips; `flag_field` marks its origin.
         """
         for f in sorted(scan_dir.iterdir()):
@@ -929,13 +931,14 @@ def api_ticks_manifest():
     # Issue #295/#281: surface the derived datasets alongside the day files —
     # only the allow-listed subdirectories; quarantine/ and the internal
     # .verify_cache/ stay hidden.
-    for subdir, flag in (("pristine", "is_pristine"), ("golden", "is_golden")):
+    for subdir, flag in (("pristine", "is_pristine"), ("golden", "is_golden"),
+                           ("backtest", "is_backtest")):
         subdir_dir = TICKS_DIR / subdir
         if subdir_dir.is_dir():
             _list_tick_files(subdir_dir, subdir=subdir, flag_field=flag)
     try:
-        # Issue #281 (CodeRabbit round 1): golden/pristine hold copies of the
-        # same source day — each tier stays listed as an individual file, but
+        # Issue #281 (CodeRabbit round 1): golden/pristine/backtest hold copies
+        # of the same source day — each tier stays listed as an individual file, but
         # every source day is counted once in the All Files aggregate (dedup
         # by basename; out["files"] is ordered root → pristine → golden, and
         # setdefault keeps the first/canonical copy).

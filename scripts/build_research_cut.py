@@ -12,7 +12,7 @@ every market-duration pair, every source day, and every window class at a
 chosen multiple `M` (default 3) of the charter floors — RESEARCH_READY by
 construction, replayed in a fraction of the time.
 
-Rules (`docs/golden-tick-dataset.md`, §research-cut):
+Rules (`docs/golden-tick-dataset.md`, §3.3, the backtest set):
 - The golden dataset is READ-ONLY. Every golden day file's sha256 is verified
   unchanged after the build; the manifest records per-day source provenance.
 - Cut lines are byte-identical copies of golden raw lines — replay results on
@@ -436,8 +436,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Build the golden dataset research cut (#312)")
     ap.add_argument("--golden", type=Path, default=ROOT / "run" / "ticks" / "golden",
                     help="golden dataset dir (read-only)")
-    ap.add_argument("--out", type=Path, default=ROOT / "run" / "ticks" / "research",
-                    help="output dir for the cut")
+    ap.add_argument("--out", type=Path, default=ROOT / "run" / "ticks" / "backtest",
+                    help="output dir for the cut (the BACKTEST set)")
     ap.add_argument("--multiplier", type=int, default=DEFAULT_MULTIPLIER,
                     help="floor multiplier M (default 3: >=1500 windows, >=150/market)")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED,

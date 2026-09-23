@@ -200,10 +200,11 @@ The golden dataset is **re-certified** (full sequence above, manifest rewritten)
 A golden dataset whose manifest cites a policy version older than the installed one is **not**
 the golden dataset — it is a stale copy, and the dashboard's readiness badges will show it.
 
-## 3.3 The research cut — a derived, non-canonical working subset
+## 3.3 The backtest set — a derived, non-canonical working subset
 
-The **research cut** is a derived, deterministic subset of the golden dataset, built by
-`scripts/build_research_cut.py` into `run/ticks/research/`. It exists because the full
+The **backtest set** (built as the issue-#312 research cut) is a derived,
+deterministic subset of the golden dataset, built by
+`scripts/build_research_cut.py` into `run/ticks/backtest/`. It exists because the full
 golden set is 8–20× above the §1.2 floors: perfect for certification, expensive for the
 iterative sweep loop (#311), where a full-set sweep costs on the order of 100
 minutes wall-time (load + simulation over 1.43M ticks).
@@ -219,7 +220,7 @@ minutes wall-time (load + simulation over 1.43M ticks).
 - **Fidelity:** cut lines are byte-identical copies of golden raw lines, so replay
   results are identical per window — the build's guardrail gate replays the sampled
   windows from both sides and fails loudly on any mismatch.
-- **Provenance:** `run/ticks/research/research_manifest.json` records source=golden,
+- **Provenance:** `run/ticks/backtest/research_manifest.json` records source=golden,
   per-day source sha256, policy, seed, multiplier, selected window ids, and the
   guardrail results. Same inputs ⇒ byte-identical output.
 - **The rule:** the cut is a working artifact for exploration and sweep iteration.
