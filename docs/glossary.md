@@ -70,6 +70,7 @@ loud, use **the trading engine** and **real money**.
 | **the golden dataset** | The single canonical backtest dataset: verified golden days + the golden manifest in `run/ticks/golden/`, per [`golden-tick-dataset.md`](golden-tick-dataset.md) |
 | **a golden day** | One UTC day file inside the golden dataset that passed its per-day verify gate (`PASS` + `COMPLETE CAPTURE`) |
 | **the golden manifest** | `run/ticks/golden/golden_manifest.json` — which days are in the set, each day's verify verdict, and the policy version the certification ran under |
+| **the research cut** | A derived, non-canonical subset of the golden dataset in `run/ticks/research/` (`scripts/build_research_cut.py`, issue #312) — stratified, deterministic, floor-respecting at a multiplier of the charter floors. Working data for sweep iteration; final claims re-run on the golden set |
 
 The collector misses seconds. That gap is why the fill rule reads the tape *and* the book
 ([ADR-0002](adr/0002-single-hard-coded-fill-rule.md)), and it is why a backtest predicts

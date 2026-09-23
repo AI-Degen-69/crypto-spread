@@ -1,38 +1,28 @@
-# CONSTRAINTS.md — Issue #302: forbid silent rewrites of capture files
-
-Branch: `i302/no-silent-rewrites` · Size: Standard · Type: Code + Docs
+# CONSTRAINTS.md — Issue #312 (golden dataset research cut)
 
 ## Hard boundaries
-1. **Zero regressions:** targeted suites green —
-   `python -m pytest tests/test_tick_safety.py tests/test_collect_ticks_smoke.py tests/test_collect_ticks_prewarm_align.py tests/test_verify_tick_data.py tests/test_collector_watchdog.py -q`.
-   Full suite stays with CI.
-2. **Capture format is sacred:** no change to the capture format, window gates,
-   thresholds, or the pristine extractor. This is data-safety plumbing only.
-3. **Append path untouched:** normal per-snap writes stay `"ab"` append —
-   crash-recovery resume must keep working byte-for-byte.
-4. **No silent destruction:** a superseded generation is moved to
-   `run/ticks/backup/`, never destroyed in place; every rewrite leaves a
-   rewrite event + both hashes on disk.
-5. **Watchdog semantics preserved:** single-writer PID enforcement unchanged;
-   `--once`/`--out` refusal logic unchanged; watchdog adds `--allow-rewrite`
-   explicitly so respawns stay logged, not blocked.
-6. **Exit-code contract:** verifier keeps `1` on FAIL and on WARN with
-   `--strict`; the cross-check may only raise status, never lower it.
-7. **No new dependencies.** stdlib + existing project modules only.
-8. **Anti-cheat:** no skipping/disabling tests, no deleted assertions,
-   no suppressed linters. Existing refusal-test idiom
-   (`pytest.raises(..., match=...)`) is followed, not bypassed.
+- **The golden dataset is read-only.** `run/ticks/golden/**` must be byte-identical
+  before and after any build (sha256 per day file re-verified in-task). No code path
+  may open a golden file for writing.
+- **Determinism:** same inputs (golden dir, multiplier, seed) ⇒ byte-identical cut
+  output and byte-identical manifest (except `ts` fields if any — the manifest records
+  no wall-clock time that affects content).
+- **The cut is derived, never canonical:** the manifest records source=golden with
+  per-day source_sha256; final research claims re-run on the full golden set.
 
-## Interfaces (locked)
-- `scripts/tick_safety.py` (new): day-path helper, `guard_day_write()`,
-  `loud_log()`, rewrite-event append/read, hash-store read/update.
-  Reuses `sha256_of` from `scripts/ship_to_drive.py`.
-- `collect_ticks.write_snap(..., allow_rewrite: bool)` — refuses via the guard
-  on truncating rewrite without the flag; appends stay silent-fast.
-- `collector_watchdog.collector_cmd()` — appends `--allow-rewrite` explicitly.
-- `verify_tick_data` cross-check: peer check function, `sample_issues` entry +
-  status raise on unexplained hash change; store updated after the check.
-- Paths: `run/ticks/backup/`, `run/ticks/rewrite_events.jsonl`,
-  `run/ticks/verify_hashes.json`.
+## Quality guardrails
+- Zero regressions: `tests/test_verify_tick_data.py`, `tests/test_build_golden_dataset.py`
+  must stay green; new behavior requires `tests/test_build_research_cut.py` coverage.
+- The cut must independently pass `verify_tick_data` at RESEARCH_READY with the
+  multiplier headroom (M=3: ≥1,500 windows, ≥150 per market-duration pair, ≥4 days,
+  all 10 series). M=4 is infeasible: the scarcest golden pair (bnb 15m) holds 159
+  windows < 200.
+- Guardrail gate (replay parity + golden integrity) must pass inside the build; a
+  failing gate fails the build loudly — no partial artifacts presented as complete.
+- Anti-cheat: no skipping/disabling of existing tests, no assertion deletion, no
+  lint suppression, no test weakening.
+- No new external dependencies (stdlib only: json, random, hashlib, argparse, pathlib).
 
-## Where this plan and the issue disagree, the issue wins.
+## Out of scope (do not touch)
+- Charter gates, certification sequence, `READINESS_POLICIES` values.
+- Sweep running (later issues), `.gz` output, index format.
