@@ -177,6 +177,11 @@ def collector_cmd() -> list[str]:
     out = os.environ.get("COLLECT_OUT", "").strip()
     if out:
         cmd += ["--out", out]
+    # Issue #302: watchdog respawns are explicit rewrite-allowing restarts —
+    # the collector appends to today's file, so the guard never fires in the
+    # normal path; the flag keeps an automated restart loud instead of
+    # silently blocked if a future write path ever becomes truncating.
+    cmd += ["--allow-rewrite"]
     extra = os.environ.get("COLLECT_EXTRA_ARGS", "").split()
     cleaned: list[str] = []
     skip_next = False
