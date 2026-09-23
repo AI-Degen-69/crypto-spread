@@ -1,8 +1,7 @@
-# Todo — Issue #281
+# tasks/todo.md — Issue #302 working checklist
 
-Branch: `i281/golden-from-pristine` · Plan: `tasks/plan.md`
-
-- [x] T1 — `scripts/build_golden_dataset.py`: §1.1 gate filter over pristine days, copy to `golden/`, manifest §3.1, `.idx` sidecars, idempotent [Backend/Logic]
-- [x] T2 — Charter note: pristine-derived assembly route documented in `docs/golden-tick-dataset.md` [Docs]
-- [x] T3 — Tests: pass/exclude/idempotency/sidecars/verdict-preservation [Tests]
-- [x] Checkpoint: run the script on the real `run/ticks/pristine` and inspect the manifest
+- [x] T1 — scripts/tick_safety.py (guard, backup, events, hash store, loud log) + tests
+- [x] T2 — collector: --allow-rewrite flag + loud resume in write_snap
+- [x] T3 — watchdog: explicit --allow-rewrite restarts
+- [x] T4 — verifier: hash-change cross-check + reporting/exit contract
+- [x] T5 — docs: runbook + charter + #298 findings pointer
