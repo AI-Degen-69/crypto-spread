@@ -3479,9 +3479,10 @@ textarea:focus-visible,
         </div>
       </div>
 
-      <div style="margin-top:14px;display:flex;gap:8px">
+      <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
       </div>
         </div>
       </div>
@@ -3501,6 +3502,7 @@ textarea:focus-visible,
         <div class="box" title="Proportion of windows where safety stop exit was triggered on adverse drift"><div class="lbl">Exit Stop Rate ℹ️</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
         <div class="box" title="Maximum peak-to-trough equity drawdown"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
         <div class="box" title="Proportion of windows with net positive P&L (merged pairs + profitable exits)"><div class="lbl">Win Rate ℹ️</div><div class="val" id="btWinRate">0.0%</div><div class="sub" id="btWinsCount">0 / 0 profitable</div></div>
+        <div class="box" title="Total wall-clock duration of the last backtest sweep (measured by Run Sweep)"><div class="lbl">Elapsed Time ℹ️</div><div class="val" id="btElapsedTime" style="color:var(--cyan)">--</div><div class="sub" id="btElapsedSub">Sweep duration</div></div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -5149,13 +5151,50 @@ function setBacktestLoadingState(isLoading){
     btn.disabled = true;
     btn.classList.add('thinking');
     if(icon) icon.innerHTML = '<span class="spinner"></span>';
-    if(text) text.innerHTML = 'Simulating <span class="thinking-dots"><span></span><span></span><span></span></span>';
+    if(text) text.innerHTML = 'Simulating 0s <span class="thinking-dots"><span></span><span></span><span></span></span>';
+    const lastRun = $('btLastRunTime');
+    if(lastRun) lastRun.textContent = '';
+    const elTime = $('btElapsedTime');
+    if(elTime){
+      elTime.textContent = '0s';
+      elTime.style.color = 'var(--gold)';
+    }
+    const elSub = $('btElapsedSub');
+    if(elSub) elSub.textContent = 'Simulating…';
   } else {
     btn.disabled = false;
     btn.classList.remove('thinking');
     if(icon) icon.textContent = '▶';
     if(text) text.textContent = 'Run Sweep';
   }
+}
+
+function fmtElapsed(ms){
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return m + 'm ' + String(rest).padStart(2, '0') + 's';
+}
+
+function startBtTimer(){
+  stopBtTimer();
+  window._btStartTime = performance.now();
+  window._btTimerId = setInterval(() => {
+    const elapsed = fmtElapsed(performance.now() - window._btStartTime);
+    const text = $('btnRunSweepText');
+    if(text && window._btRunning){
+      text.innerHTML = 'Simulating ' + elapsed + ' <span class="thinking-dots"><span></span><span></span><span></span></span>';
+    }
+    const elTime = $('btElapsedTime');
+    if(elTime && window._btRunning){
+      elTime.textContent = elapsed;
+    }
+  }, 500);
+}
+
+function stopBtTimer(){
+  if(window._btTimerId){ clearInterval(window._btTimerId); window._btTimerId = null; }
 }
 
 function runBacktestOnFile(filename){
@@ -5220,6 +5259,7 @@ async function runBacktest(fileOverride){
   window._btAbort = ctl;
   window._btRunning = true;
   setBacktestLoadingState(true);
+  startBtTimer();
   try {
     const getVal = (id, def) => {
       const el = $(id);
@@ -5266,9 +5306,42 @@ async function runBacktest(fileOverride){
     const data = await res.json();
     if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
 
+    if (!res.ok || (data && data.error)) {
+      const errMsg = (data && data.error) ? data.error : `HTTP ${res.status}`;
+      $('btHash').textContent = `Backtest error: ${errMsg}`;
+      const lastRun = $('btLastRunTime');
+      if (lastRun) lastRun.textContent = `✗ error: ${errMsg}`;
+      const elTime = $('btElapsedTime');
+      if (elTime) {
+        elTime.textContent = '--';
+        elTime.style.color = 'var(--down)';
+      }
+      const elSub = $('btElapsedSub');
+      if (elSub) elSub.textContent = 'Failed';
+      return;
+    }
+
     const ov = data.overall || {};
     const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
-    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}`;
+    const tookMs = window._btStartTime ? (performance.now() - window._btStartTime) : 0;
+    const tookStr = fmtElapsed(tookMs);
+    const tookTxt = tookStr ? ` · took ${tookStr}` : '';
+    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}${tookTxt}`;
+    // Persistent "how long did the results take" badge next to the Run Sweep
+    // button — the in-button counter resets to "Run Sweep" when the run ends.
+    const lastRun = $('btLastRunTime');
+    if(lastRun && window._btStartTime){
+      lastRun.textContent = `✓ results in ${tookStr}`;
+    }
+    const elTime = $('btElapsedTime');
+    if(elTime){
+      elTime.textContent = tookStr;
+      elTime.style.color = 'var(--cyan)';
+    }
+    const elSub = $('btElapsedSub');
+    if(elSub){
+      elSub.textContent = 'Sweep duration';
+    }
     $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);
     $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
     $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
@@ -5477,7 +5550,12 @@ async function runBacktest(fileOverride){
     if (window._btAbort === ctl) {
       window._btAbort = null;
       window._btRunning = false;
+      stopBtTimer();
       setBacktestLoadingState(false);
+      const elSub = $('btElapsedSub');
+      if (elSub && elSub.textContent === 'Simulating…') {
+        elSub.textContent = 'Execution time';
+      }
     }
   }
 }
@@ -5630,8 +5708,8 @@ async function runSweepVisual(){
   const exitStop15m = $('btExit15m') ? $('btExit15m').value : 0.05;
   const exitRev = $('btExitReversal') ? $('btExitReversal').value : 0.02;
   const meta = $('btSweepMeta');
-  if(btn){ btn.disabled = true; btn.textContent = '⏳ Sweeping…'; }
-  if(meta){ meta.textContent = `sweeping ${axis}…`; }
+  if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Waiting…'; }
   try{
     // Both endpoints share the one-worker guard. If an explicit regular
     // backtest is already running, wait for that local run instead of showing
@@ -5645,6 +5723,14 @@ async function runSweepVisual(){
       if(meta){ meta.textContent = 'backtest is still running; try the sweep again when it finishes.'; }
       return;
     }
+    window._btSweepStartTime = performance.now();
+    if(btn){ btn.textContent = '⏳ Sweeping 0s…'; }
+    if(meta){ meta.textContent = `sweeping ${axis}… 0s`; }
+    window._btSweepTimerId = setInterval(() => {
+      const t = fmtElapsed(performance.now() - window._btSweepStartTime);
+      if(btn && btn.disabled){ btn.textContent = `⏳ Sweeping ${t}…`; }
+      if(meta && meta.textContent.startsWith('sweeping')){ meta.textContent = `sweeping ${axis}… ${t}`; }
+    }, 500);
     let url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&size=${encodeURIComponent(size)}&offset=${encodeURIComponent(offset)}&queue=${encodeURIComponent(queue)}&exit_default_5m=${encodeURIComponent(exitStop5m)}&exit_default_15m=${encodeURIComponent(exitStop15m)}&exit_reversal=${encodeURIComponent(exitRev)}`;
     if(fileVal){ url += `&file=${encodeURIComponent(fileVal)}`; }
     const res = await fetch(url);
@@ -5658,6 +5744,7 @@ async function runSweepVisual(){
   }catch(err){
     if(meta){ meta.textContent = 'sweep failed: ' + err; }
   }finally{
+    if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
   }
 }
@@ -5802,7 +5889,8 @@ function renderSweepVisual(data){
   if(meta){
     const overallText = bestOverall ? `best overall: ${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : 'best overall: —';
     const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
-    meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}`;
+    const tookTxt = (window._btSweepStartTime) ? ` · took ${fmtElapsed(performance.now() - window._btSweepStartTime)}` : '';
+    meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${tookTxt}`;
   }
   const mkOpts = () => sweepChartOptions(data, false);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
