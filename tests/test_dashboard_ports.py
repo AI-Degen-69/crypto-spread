@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PORT_LITERAL_RE = re.compile(r"(?<!\d)8802(?!\d)")
 
 # In-scope paths per issue #313 acceptance criteria.
+# Note: this gate file itself is excluded from the scan — it must spell the
+# banned literal to forbid it (pattern + vectors below).
 SCOPED_FILES = [
     ROOT / "server" / "osc_dash.py",
     ROOT / "server" / "ports.py",
