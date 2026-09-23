@@ -1511,6 +1511,8 @@ def test_backtest_ui_pagination_and_tooltips_elements():
     assert "Pair Capture Rate ℹ️" in html
     assert "Exit Stop Rate ℹ️" in html
     assert "Win Rate ℹ️" in html
+    assert "Elapsed Time ℹ️" in html
+    assert "btElapsedTime" in html
     assert "renderBacktestTradesPage" in html
 
 
