@@ -6,7 +6,7 @@ Unified 4-tab SPA:
 - Tab 3: Statistical Analysis & Distributions
 - Tab 4: Ticks File Repository & Ingestion Manager
 
-Serves on :8802
+Serves on :5515 (canonical port lives in server/ports.py)
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from strategy.live_trader import get_live_trader_engine, fetch_polymarket_account_value
 from strategy.streaming import DashboardEnvelope
 from sse_starlette.sse import EventSourceResponse
+from server.ports import DASHBOARD_PORT
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
@@ -204,7 +205,7 @@ def _verify_safe_origin(request: Request) -> None:
         if p.hostname not in ("127.0.0.1", "localhost", "::1", "testclient"):
             raise HTTPException(status_code=403, detail="Forbidden: cross-origin request rejected")
         server_port = request.url.port
-        allowed_ports = {8802, 8888, 8000, 80, 443}
+        allowed_ports = {DASHBOARD_PORT, 8888, 8000, 80, 443}
         if server_port:
             allowed_ports.add(server_port)
         if p.port is not None and p.port not in allowed_ports:
