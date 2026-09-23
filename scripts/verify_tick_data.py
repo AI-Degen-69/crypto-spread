@@ -279,10 +279,11 @@ def apply_hash_crosscheck(day_file: Path, report: dict[str, Any]) -> None:
         return
 
     events = [e for e in read_rewrite_events(out_dir) if e.get("day_file") == name]
-    explained = any(
-        e.get("old_sha256") == last and e.get("new_sha256") == current
-        for e in events
-    )
+    # The recorded (pre-change) generation must have been superseded via a
+    # logged rewrite. Matching on old_sha256 only: after an allowed rewrite the
+    # collector keeps appending to the fresh file, so the event's new_sha256 is
+    # a prefix-era hash — the transition itself is what needs evidence.
+    explained = any(e.get("old_sha256") == last for e in events)
     if explained:
         update_hash_store(out_dir, name, current)
         return
