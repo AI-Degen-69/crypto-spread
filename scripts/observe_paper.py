@@ -1,6 +1,7 @@
 """Paper-run observer: journal live cockpit state for later strategy analysis.
 
-Polls GET /api/live/state on the dashboard (default 127.0.0.1:8802) every
+Polls GET /api/live/state on the dashboard (default 127.0.0.1:5515, see
+server/ports.py) every
 POLL_SEC seconds and appends two files under run/observations/:
 
   obs_YYYY-MM-DD.jsonl  - one snapshot per second: per-market quote/mid/fill/
@@ -31,7 +32,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Set
 
-BASE_URL = "http://127.0.0.1:8802"
+from server.ports import DASHBOARD_URL
+
+BASE_URL = DASHBOARD_URL
 OBS_DIR = Path("run") / "observations"
 POLL_SEC = 1.0
 
