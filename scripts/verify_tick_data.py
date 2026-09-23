@@ -252,14 +252,17 @@ def _check(name: str, measured: float, required: float, *, direction: str = "min
 
 
 def apply_hash_crosscheck(day_file: Path, report: dict[str, Any]) -> None:
-    """Flag a day file whose bytes changed without a logged rewrite (issue #302).
+    """Flag a day file whose recorded generation was replaced without a log (issue #302).
 
-    Compares the file's current SHA-256 against the last recorded hash
-    (run/ticks/verify_hashes.json). An unexplained change — no matching
-    old→new rewrite event in run/ticks/rewrite_events.jsonl — gets a loud
-    sample_issues entry and raises the status to WARN (FAIL for a completed
-    past day, whose bytes must never change). Afterwards the store is updated
-    with the current hash so the same change is flagged exactly once.
+    The collector grows the live day file by append, so the current file hash
+    naturally drifts from any previously recorded one — that is healthy, not
+    suspicious. The crosscheck therefore records the hash of the file's
+    GROWING PREFIX: the first ``len(recorded_bytes)`` bytes of the current
+    file must be byte-identical to what was verified before. A prefix that
+    changed means an existing generation was modified or replaced in place —
+    an unexplained rewrite (loud sample_issues entry + status raised to WARN,
+    FAIL for a completed past day, whose bytes must never change). Afterwards
+    the store records the current state so the same change flags exactly once.
     """
     from scripts.tick_safety import (
         read_hash_store, read_rewrite_events, update_hash_store)
@@ -269,23 +272,29 @@ def apply_hash_crosscheck(day_file: Path, report: dict[str, Any]) -> None:
     out_dir = day_file.parent
     name = day_file.name
     try:
+        recorded = read_hash_store(out_dir)
+        entry = recorded.get(name)
+        last_sha, last_size = (entry.split(":", 1) + [""])[:2] if entry else (None, None)
+        last_size = int(last_size) if last_size else None
         current = sha256_of(day_file)
-    except OSError:
-        return
-    recorded = read_hash_store(out_dir)
-    last = recorded.get(name)
-    if last is None or last == current:
-        update_hash_store(out_dir, name, current)
+    except (OSError, ValueError):
         return
 
+    if last_sha is None:
+        update_hash_store(out_dir, name, f"{current}:{day_file.stat().st_size}")
+        return
+
+    # Append-only growth: the file grew but its verified prefix is intact.
+    if (day_file.stat().st_size >= (last_size or 0)
+            and _prefix_sha256(day_file, last_size) == last_sha):
+        update_hash_store(out_dir, name, f"{current}:{day_file.stat().st_size}")
+        return
+
+    # The verified prefix itself changed — a real replacement or in-place edit.
     events = [e for e in read_rewrite_events(out_dir) if e.get("day_file") == name]
-    # The recorded (pre-change) generation must have been superseded via a
-    # logged rewrite. Matching on old_sha256 only: after an allowed rewrite the
-    # collector keeps appending to the fresh file, so the event's new_sha256 is
-    # a prefix-era hash — the transition itself is what needs evidence.
-    explained = any(e.get("old_sha256") == last for e in events)
+    explained = any(e.get("old_sha256") == last_sha for e in events)
     if explained:
-        update_hash_store(out_dir, name, current)
+        update_hash_store(out_dir, name, f"{current}:{day_file.stat().st_size}")
         return
 
     completed_past_day = bool(report.get("capture_state", {}).get("label") == "COMPLETE CAPTURE")
@@ -293,10 +302,11 @@ def apply_hash_crosscheck(day_file: Path, report: dict[str, Any]) -> None:
     detail = {
         "kind": "unexplained_rewrite",
         "file": name,
-        "recorded_sha256": last,
+        "recorded_sha256": last_sha,
         "current_sha256": current,
-        "note": "day file bytes changed without a logged rewrite event — "
-                "possible silent rewrite; the previous generation was not backed up",
+        "note": "the previously verified prefix of this day file changed without "
+                "a logged rewrite event — possible silent rewrite; the previous "
+                "generation was not backed up",
     }
     report.setdefault("sample_issues", []).insert(0, detail)
     report["hash_crosscheck"] = {"flagged": True, **detail}
@@ -306,7 +316,23 @@ def apply_hash_crosscheck(day_file: Path, report: dict[str, Any]) -> None:
     elif report.get("status") == "PASS":
         report["status"] = "WARN"
         report["capture_state"] = capture_state("WARN", report)
-    update_hash_store(out_dir, name, current)
+    update_hash_store(out_dir, name, f"{current}:{day_file.stat().st_size}")
+
+
+def _prefix_sha256(path: Path, size: int) -> str:
+    """SHA-256 of the first `size` bytes of a file (streamed, day-file safe)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        remaining = size
+        while remaining > 0:
+            chunk = f.read(min(1 << 20, remaining))
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+    return h.hexdigest()
 
 
 def capture_state(status: str, report: dict[str, Any]) -> dict[str, str]:
@@ -985,6 +1011,7 @@ def main() -> int:
             max_gap_sec=args.max_gap,
             max_start_delay=args.max_start_delay,
         )
+        apply_hash_crosscheck(target, report)
     else:
         report = verify_ticks_dir(
             target,

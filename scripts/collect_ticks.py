@@ -444,30 +444,20 @@ def reset_write_log() -> None:
     _day_files_touched.clear()
 
 
-def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool,
-               allow_rewrite: bool = False) -> str:
+def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool) -> str:
     """Append one tick line to run/ticks/ticks_<day>.jsonl[.gz]; returns path.
 
-    Issue #302: the per-snap write stays append (crash-recovery resume) and is
-    never refused. Safety lives on the process's first touch of a day file:
-    without the flag a re-run resumes appending — allowed but loudly logged
-    once; with --allow-rewrite the existing generation is backed up (never
-    destroyed) and the run starts a fresh file, with both SHA-256 hashes and a
-    rewrite event recorded. The hard refuse (TickRewriteRefused) belongs to
-    truncating writers via tick_safety.guard_day_write, not to this append path.
+    Append-only by design (issue #302): this path can never truncate or replace
+    a generation — day-file rewrites go through tick_safety.guard_day_write,
+    authorized by --allow-rewrite. Crash-recovery resume is preserved, and the
+    process's first touch of a day file prints one loud line (CREATE or APPEND)
+    to stderr so a re-run resuming today's file is visible in collector.log.
     """
     suffix = ".jsonl.gz" if gzip else ".jsonl"
     path = out_dir / f"ticks_{day_key}{suffix}"
-    from scripts.tick_safety import guard_day_write, loud_log, record_rewrite_event
-    from scripts.ship_to_drive import sha256_of
+    from scripts.tick_safety import loud_log
 
     first_touch = path.name not in _day_files_touched
-    notice = None
-    if first_touch and allow_rewrite and path.exists():
-        notice = guard_day_write(path, "rewrite", allow_rewrite=True)
-        if notice is not None:
-            loud_log(path, "rewrite", old_sha256=notice.old_sha256)
-
     existed = path.exists()
     payload = (json.dumps(line) + "\n").encode("utf-8")
     if gzip:
@@ -477,13 +467,7 @@ def write_snap(line: dict, out_dir: Path, day_key: str, gzip: bool,
     else:
         with open(path, "ab") as f:
             f.write(payload)
-
-    if notice is not None:
-        new_sha = sha256_of(path)
-        record_rewrite_event(out_dir, path.name, notice.old_sha256, new_sha,
-                             notice.backup_path)
-        loud_log(path, "rewrite", old_sha256=notice.old_sha256, new_sha256=new_sha)
-    elif not existed:
+    if not existed:
         loud_log(path, "create")
     elif first_touch:
         loud_log(path, "append")  # a re-run resuming today's file: loud, once
@@ -770,7 +754,6 @@ def prewarm_round(now: float, fetches: list[SeriesFetch]) -> None:
 
 def poll_once(out_dir: Path, gzip: bool, stats: dict,
               ws_bridge: "Optional[CLOBStreamCollectorBridge]" = None,
-              allow_rewrite: bool = False,
               ) -> tuple[list[str], list[str]]:
     """One poll across all 10 series. Returns (closed_window_slugs, errors)."""
     global _join_cutoff
@@ -919,7 +902,7 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
         record_tape_sample(stats, now, bool(tape_list), len(tape_list))
 
         try:
-            write_snap(snap, out_dir, day_key, gzip, allow_rewrite=allow_rewrite)
+            write_snap(snap, out_dir, day_key, gzip)
         except Exception as e:
             errs.append(f"write:{e}")
         w["snap_count"] += 1
@@ -1106,9 +1089,10 @@ def main():
     ap.add_argument("--no-ws", action="store_true",
                     help="disable the CLOB market WebSocket tape stream (REST polling only)")
     ap.add_argument("--allow-rewrite", action="store_true",
-                    help="allow rewriting an existing day file: the old generation is "
-                         "backed up to run/ticks/backup/ and both SHA-256 hashes are "
-                         "logged loudly (issue #302 — never destroys data in place)")
+                    help="authorize day-file rewrites for truncating writers "
+                         "(tick_safety.guard_day_write). The collector's own write "
+                         "path is append-only; rewrites back the old generation up "
+                         "to run/ticks/backup/ and log both SHA-256 hashes (#302)")
     ap.add_argument("--no-align", action="store_true",
                     help="record immediately even mid-window (default: wait for the "
                          "next quarter-hour and skip the in-flight windows)")
@@ -1145,8 +1129,7 @@ def main():
           f"ws={'on' if ws_bridge is not None else 'off'}")
     if args.once:
         try:
-            closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge,
-                                     allow_rewrite=args.allow_rewrite)
+            closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge)
             update_manifest(out_dir, stats)
         finally:
             stop_ws_bridge(ws_bridge)
@@ -1194,8 +1177,7 @@ def main():
     current_day = now_day_key()
     try:
         while True:
-            closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge,
-                                     allow_rewrite=args.allow_rewrite)
+            closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge)
             ws_bridge = restart_ws_bridge_if_dead(ws_bridge, stats, disabled=args.no_ws)
             new_day = now_day_key()
             if new_day != current_day:
