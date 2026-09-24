@@ -3359,6 +3359,15 @@ textarea:focus-visible,
       </span>
       <span class="nav-label">Backtest Sweeper</span>
     </button>
+    <button class="sidebar-tab-btn" id="tab-btn-jungleking" onclick="switchTab('jungleking')" title="Jungle King — OFAT Parameter Manifest">
+      <span class="nav-icon">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 17l2-9 5 5 2-7 2 7 5-5 2 9"></path>
+          <line x1="3" y1="20" x2="21" y2="20"></line>
+        </svg>
+      </span>
+      <span class="nav-label">Jungle King</span>
+    </button>
     <button class="sidebar-tab-btn" id="tab-btn-summary" onclick="switchTab('summary')" title="Stats Summary">
       <span class="nav-icon">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -3762,6 +3771,20 @@ textarea:focus-visible,
       <canvas id="btChartDialogCanvas" class="bt-chart-dialog-canvas"></canvas>
     </div>
   </div>
+  </div>
+
+  <!-- TAB: JUNGLE KING — OFAT manifest quick reference (issue #319, read-only) -->
+  <div id="tab-jungleking" class="tab-content">
+    <div class="card" style="border-top:2px solid var(--proj)">
+      <h3>Jungle King — OFAT Parameter Manifest</h3>
+      <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
+        One-Factor-at-a-Time candidate ranges over the golden dataset: vary one
+        parameter across its range while every other stays at its baseline.
+        This is a read-only quick reference — runs live in the Backtest Sweeper.
+      </div>
+    </div>
+    <div id="jkNotice" class="card" style="display:none;border-top:2px solid var(--down);color:var(--down);font-size:12.5px;line-height:1.6"></div>
+    <div id="jkGroups"></div>
   </div>
 
   <!-- TAB 3: STATISTICAL ANALYSIS & DISTRIBUTIONS -->
@@ -5002,6 +5025,50 @@ function switchTab(name){
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
   if(name==='ticks') loadGoldenCard();
+  if(name==='jungleking') loadJungleKing();
+}
+
+// ── Jungle King tab (issue #319) ──────────────────────────────────────────
+// Read-only quick reference over /api/jungle-king. One fetch, cached for the
+// session; the manifest is static research data, not a live feed.
+let JK_DATA = null;
+
+async function loadJungleKing(){
+  if(JK_DATA){ renderJungleKing(JK_DATA); return; }
+  try{
+    const res = await fetch('/api/jungle-king');
+    if(!res.ok){
+      let detail = 'HTTP ' + res.status;
+      try{ detail = (await res.json()).detail || detail; }catch(e){}
+      throw new Error(detail);
+    }
+    JK_DATA = await res.json();
+    renderJungleKing(JK_DATA);
+  }catch(err){
+    JK_DATA = null;
+    const n = $('jkNotice');
+    if(n){
+      n.style.display = 'block';
+      n.textContent = 'Jungle King manifest unavailable (' + err.message + '). Check research/jungle-king/param_ranges.json.';
+    }
+  }
+}
+
+function renderJungleKing(data){
+  // Presentation is built out in TASK-3 (#322); the skeleton proves the
+  // payload path end to end.
+  const wrap = $('jkGroups');
+  if(!wrap) return;
+  const notice = $('jkNotice');
+  if(notice) notice.style.display = 'none';
+  wrap.innerHTML = '';
+  (data.groups || []).forEach(function(g){
+    const sec = document.createElement('div');
+    sec.className = 'card';
+    sec.style.marginTop = '12px';
+    sec.textContent = (g.title || g.key) + ' — ' + (g.params || []).length + ' parameters';
+    wrap.appendChild(sec);
+  });
 }
 
 let isCollectorActive = false;
