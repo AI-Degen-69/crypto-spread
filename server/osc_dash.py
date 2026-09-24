@@ -1032,6 +1032,150 @@ def api_params_spec():
     }
 
 
+# ── Jungle King (issue #319) ─────────────────────────────────────────────────
+# research/jungle-king/ is the OFAT manifest over the golden dataset: a
+# checklist README (baseline rows marked [x]) and a machine-readable twin,
+# param_ranges.json, holding the candidate values per parameter. This endpoint
+# joins the manifest with the parameter registry (BacktestParams.param_spec(),
+# issue #164's single label source) so the tab renders one payload — no second
+# hand-written label copy in the client, no mutation path.
+
+JUNGLE_KING_MANIFEST = ROOT / "research" / "jungle-king" / "param_ranges.json"
+JUNGLE_KING_README = ROOT / "research" / "jungle-king" / "README.md"
+
+# Manifest baselines mirror the operator-replicable CLI defaults
+# (scripts/backtest.py), not the engine defaults — provenance guard in
+# SPEC-319.md: documenting the difference, not "fixing" it.
+#   queue_gate: CLI --queue 50 vs engine 0 (disabled)
+#   quote_shares: CLI --size 120 vs engine 5
+#   entry_delay_pct: manifest baseline 0.0 vs engine default None (off)
+_JUNGLE_KING_BASELINE_OVERRIDES: dict[str, float] = {
+    "queue_gate": 50.0,
+    "quote_shares": 120,
+    "entry_delay_pct": 0.0,
+}
+
+# Group layout mirrors the manifest README's own section order.
+_JUNGLE_KING_GROUPS: list[tuple[str, str, tuple[str, ...]]] = [
+    ("trading_knobs", "Trading Tuning Knobs", (
+        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct", "exit_reversal",
+    )),
+    ("exit_thresholds", "Exit Thresholds per Slug / Duration", tuple(
+        f"exit_thresh_by_slug.{s}" for s in (
+            "default_5m", "default_15m", "btc-up-or-down-5m",
+            "sol-up-or-down-5m", "btc-up-or-down-15m", "sol-up-or-down-15m",
+        )
+    )),
+    ("structural_limits", "Structural Limits", (
+        "max_pair_cost", "quote_range", "dead_zone_val",
+    )),
+    ("execution_assumptions", "Execution Assumptions (held at baseline)", (
+        "taker_fee_rate", "merge_gas_usd", "tick_size", "min_quote_shares",
+    )),
+]
+
+_JK_ASSET_LABELS = {"btc": "BTC", "eth": "ETH", "bnb": "BNB", "sol": "SOL", "xrp": "XRP"}
+
+
+def _jk_reg_entry(registry: dict, name: str) -> dict | None:
+    """Registry entry for a manifest key; per-slug exits inherit the parent."""
+    if name.startswith("exit_thresh_by_slug."):
+        return registry.get("trading_knobs", {}).get("exit_thresh_by_slug")
+    for entries in registry.values():
+        if name in entries:
+            return entries[name]
+    return None
+
+
+def _jk_label(name: str, entry: dict | None) -> str:
+    """One label per parameter, from the registry where it exists."""
+    if entry is None:
+        return name
+    if name.startswith("exit_thresh_by_slug."):
+        slug = name.split(".", 1)[1]
+        m = re.match(r"([a-z]{3})-up-or-down-(\d+m)$", slug)
+        if m:
+            return f"Exit Stop Loss — {_JK_ASSET_LABELS.get(m.group(1), m.group(1).upper())} {m.group(2)}"
+        return f"Exit Stop Loss — {slug}"
+    return entry["label"]
+
+
+def _jk_baseline(name: str, values: list, entry: dict | None) -> float | None:
+    """The manifest's baseline: the registry default as it appears in values.
+
+    Returns the matched value (so `baseline` is always one of `values`) or
+    None when the default is absent from the manifest's candidate list.
+    """
+    if name in _JUNGLE_KING_BASELINE_OVERRIDES:
+        return _JUNGLE_KING_BASELINE_OVERRIDES[name]
+    if entry is None:
+        return None
+    default = entry["default"]
+    if name.startswith("exit_thresh_by_slug."):
+        default = default.get(name.split(".", 1)[1]) if isinstance(default, dict) else None
+    if default is None:
+        return None
+    if isinstance(default, (tuple, list)):
+        hits = [v for v in values if isinstance(v, list) and list(v) == list(default)]
+    else:
+        hits = [v for v in values if v == default]
+    return hits[0] if hits else None
+
+
+@app.get("/api/jungle-king")
+def api_jungle_king():
+    """The Jungle King OFAT manifest as one JSON payload (issue #319).
+
+    Read-only quick reference: param_ranges.json joined server-side with the
+    parameter registry, grouped in the manifest's own order. Missing manifest
+    keys cannot silently vanish — an unmapped key is a 500, not a blank card.
+    """
+    if not JUNGLE_KING_MANIFEST.exists():
+        raise HTTPException(status_code=404, detail=f"Jungle King manifest missing: {JUNGLE_KING_MANIFEST.name}")
+    try:
+        raw = json.loads(JUNGLE_KING_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Jungle King manifest unreadable: {exc}") from exc
+    if not isinstance(raw, dict) or not raw:
+        raise HTTPException(status_code=500, detail="Jungle King manifest malformed (expected a non-empty object)")
+
+    from backtest.engine import BacktestParams
+    registry = BacktestParams.param_spec()
+    groups = []
+    placed: set[str] = set()
+    for key, title, names in _JUNGLE_KING_GROUPS:
+        params = []
+        for name in names:
+            if name not in raw:
+                continue
+            placed.add(name)
+            values = raw[name]
+            entry = _jk_reg_entry(registry, name)
+            baseline = _jk_baseline(name, values, entry)
+            params.append({
+                "name": name,
+                "label": _jk_label(name, entry),
+                "unit": entry["unit"] if entry else None,
+                "param_class": entry["param_class"] if entry else "tuning",
+                "baseline": baseline,
+                "values": values,
+                "baseline_in_values": baseline in values if baseline is not None else False,
+                "registry": None if entry is None else {
+                    "label": entry["label"], "why": entry["why"],
+                    "default": entry["default"], "bounds": entry["bounds"],
+                },
+            })
+        groups.append({"key": key, "title": title, "params": params})
+    missing = sorted(n for n in raw if n not in placed)
+    if missing:
+        raise HTTPException(status_code=500, detail=f"Jungle King manifest keys not mapped to a group: {missing}")
+    return {
+        "groups": groups,
+        "source": "research/jungle-king/param_ranges.json",
+        "generated_from": "research/jungle-king/README.md + BacktestParams.param_spec()",
+    }
+
+
 def _clamp_to_spec(name: str, value: Any) -> Any:
     """Clamp one knob to the bounds the registry advertises.
 

@@ -4075,6 +4075,173 @@ def test_backtest_param_preview_zero_handling_node():
     assert "BT_PARAM_PREVIEW_ZERO_TESTS_PASSED" in res.stdout
 
 
+# ── Jungle King tab (issue #319) ─────────────────────────────────────────────
+# The OFAT manifest (research/jungle-king/) as a read-only quick reference.
+# Contract: SPEC-319.md — manifest groups in manifest order, registry join
+# server-side, baseline prominent, nothing mutable.
+
+def _jk_baselines():
+    """Baseline per manifest key, read from the checklist README [x] rows.
+
+    The viewer must present the manifest's own baselines (operator-replicable
+    CLI defaults), not engine defaults — the provenance guard in SPEC-319.md.
+    Rows don't name their parameter; the `####` heading above does, so parse
+    line by line tracking the current heading. The Exit Thresholds section has
+    one shared baseline applying to all six per-slug keys.
+    """
+    import re
+    readme = Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    exit_slugs = ("default_5m", "default_15m", "btc-up-or-down-5m",
+                  "sol-up-or-down-5m", "btc-up-or-down-15m", "sol-up-or-down-15m")
+    baselines: dict[str, float] = {}
+    current = None                      # param name, or "exit:*" for the shared section
+    for line in text.splitlines():
+        h4 = re.match(r"^#### .+? `([a-z_]+)`\s*$", line)
+        if h4:
+            current = h4.group(1)
+            continue
+        if re.match(r"^### .+Exit Thresholds", line):
+            current = "exit:*"
+            continue
+        if re.match(r"^### ", line):
+            current = None
+            continue
+        m = re.match(r'^- \[x\] ([0-9.eE+-]+) .*\*\*Baseline\*\*', line)
+        if m and current:
+            value = float(m.group(1))
+            if current == "exit:*":
+                for slug in exit_slugs:
+                    baselines[f"exit_thresh_by_slug.{slug}"] = value
+            else:
+                baselines[current] = value
+    return baselines
+
+
+def _flatten_registry():
+    """param_spec() grouped dict → {param_name: spec_entry}.
+
+    Only exit_thresh_by_slug.* flattens to per-slug keys, mirroring the
+    manifest's per-slug naming.
+    """
+    out: dict[str, dict] = {}
+    for entries in _spec().values():
+        for name, v in entries.items():
+            if name == "exit_thresh_by_slug":
+                for slug in ("default_5m", "default_15m", "btc-up-or-down-5m",
+                             "sol-up-or-down-5m", "btc-up-or-down-15m", "sol-up-or-down-15m"):
+                    out[f"exit_thresh_by_slug.{slug}"] = v
+                continue
+            out[name] = v
+    return out
+
+
+def test_jungle_king_endpoint_serves_full_manifest():
+    body = client.get("/api/jungle-king").json()
+    assert set(body.keys()) == {"groups", "source", "generated_from"}
+    groups = body["groups"]
+    assert [g["key"] for g in groups] == [
+        "trading_knobs", "exit_thresholds", "structural_limits", "execution_assumptions"
+    ]
+    params = [p for g in groups for p in g["params"]]
+    manifest = json.loads(
+        (Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "param_ranges.json")
+        .read_text(encoding="utf-8")
+    )
+    assert [p["name"] for p in params] == list(manifest.keys())
+    for p in params:
+        assert p["values"] == manifest[p["name"]]
+        # quote_range's baseline is the [lo, hi] pair; every other key is scalar.
+        assert isinstance(p["baseline"], (int, float)) or (
+            isinstance(p["baseline"], list) and len(p["baseline"]) == 2
+        )
+        assert isinstance(p["baseline_in_values"], bool)
+        assert p["param_class"] in ("tuning", "structural", "assumption")
+        assert "label" in p and "unit" in p
+
+
+def test_jungle_king_baseline_matches_manifest_checklist():
+    body = client.get("/api/jungle-king").json()
+    params = [p for g in body["groups"] for p in g["params"]]
+    by_name = {p["name"]: p for p in params}
+    readme_baselines = _jk_baselines()
+    assert readme_baselines, "README checklist parsing broke"
+    for name, value in readme_baselines.items():
+        assert name in by_name, f"{name} missing from endpoint"
+        assert by_name[name]["baseline"] == value, f"{name} baseline drifted from the manifest checklist"
+    assert by_name["offset"]["baseline_in_values"] is True
+
+
+def test_jungle_king_registry_join_and_exit_inheritance():
+    body = client.get("/api/jungle-king").json()
+    params = [p for g in body["groups"] for p in g["params"]]
+    by_name = {p["name"]: p for p in params}
+    registry = _flatten_registry()
+    # Shared params carry the registry's identity (one label source — issue #164 rule).
+    for name in ("offset", "max_pair_cost", "taker_fee_rate", "dead_zone_val"):
+        assert by_name[name]["registry"] is not None
+        assert by_name[name]["label"] == registry[name]["label"]
+        assert by_name[name]["param_class"] == registry[name]["param_class"]
+    # exit_thresh_by_slug.* inherits the parent's class (tuning) and derives its label.
+    exit5 = by_name["exit_thresh_by_slug.btc-up-or-down-5m"]
+    assert exit5["param_class"] == "tuning"
+    assert registry["exit_thresh_by_slug.btc-up-or-down-5m"]["param_class"] == "tuning"
+    assert "BTC" in exit5["label"] and "5m" in exit5["label"]
+    # Checklist-only knobs (enable_leg_chase, dead_zone_unit,
+    # naked_leg_at_expiry) are README rows, not param_ranges.json keys — the
+    # payload renders exactly the manifest's 19 keys (SPEC-319.md edge case).
+    assert "enable_leg_chase" not in by_name
+    assert "dead_zone_unit" not in by_name
+    assert "naked_leg_at_expiry" not in by_name
+
+
+def test_jungle_king_group_membership_matches_manifest_sections():
+    body = client.get("/api/jungle-king").json()
+    groups = {g["key"]: [p["name"] for p in g["params"]] for g in body["groups"]}
+    assert groups["trading_knobs"] == [
+        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct", "exit_reversal",
+    ]
+    assert len(groups["exit_thresholds"]) == 6
+    assert all(n.startswith("exit_thresh_by_slug.") for n in groups["exit_thresholds"])
+    assert groups["structural_limits"] == ["max_pair_cost", "quote_range", "dead_zone_val"]
+    assert groups["execution_assumptions"] == ["taker_fee_rate", "merge_gas_usd", "tick_size", "min_quote_shares"]
+    assert sum(len(g["params"]) for g in body["groups"]) == 19
+
+
+def test_jungle_king_missing_manifest_is_a_clean_error():
+    from server import osc_dash
+    saved = osc_dash.JUNGLE_KING_MANIFEST
+    try:
+        osc_dash.JUNGLE_KING_MANIFEST = osc_dash.ROOT / "research" / "jungle-king" / "nope.json"
+        r = client.get("/api/jungle-king")
+        assert r.status_code != 200
+        assert r.json()["detail"]
+    finally:
+        osc_dash.JUNGLE_KING_MANIFEST = saved
+
+
+# ── Jungle King tab skeleton (issue #319, TASK-2) ────────────────────────────
+
+def test_root_serves_jungle_king_tab_anchors():
+    html = client.get("/").text
+    assert "tab-btn-jungleking" in html
+    assert "tab-jungleking" in html
+    assert "loadJungleKing" in html
+    assert "Jungle King" in html
+
+
+# ── Jungle King presentation (issue #319, TASK-3) ────────────────────────────
+
+def test_jungle_king_render_js_present():
+    """The render path exists and is wired into switchTab + the fetch hook."""
+    html = client.get("/").text
+    assert "function loadJungleKing" in html
+    assert "function renderJungleKing" in html
+    assert "jkBaselineChip" in html
+    assert "fetch('/api/jungle-king')" in html
+
+
+
 
 
 
