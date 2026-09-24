@@ -3207,6 +3207,23 @@ textarea:focus-visible,
 .form-group .input-hint.err{color:var(--down);font-weight:600}
 .tab-content{display:none}
 .tab-content.active{display:block}
+/* Jungle King tab (issue #319) */
+.jk-group-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:10px}
+.jk-group-title{font:700 13px var(--disp);color:var(--tx);letter-spacing:.02em}
+.jk-group-count{font:600 10px var(--mono);color:var(--faint)}
+.jk-param{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--panel2)}
+.jk-param-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.jk-param-label{font:600 12.5px var(--body);color:var(--tx);cursor:default}
+.jk-badge{font:700 9px var(--mono);letter-spacing:.06em;padding:2px 7px;border-radius:99px;border:1px solid}
+.jk-badge-tuning{color:var(--up);border-color:var(--up);background:var(--upS)}
+.jk-badge-structural{color:var(--gold);border-color:var(--gold);background:rgba(232,184,75,.12)}
+.jk-badge-assumption{color:var(--proj);border-color:var(--proj);background:rgba(123,155,247,.12)}
+.jk-baseline{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.jk-baseline-lbl{font:700 9px var(--mono);letter-spacing:.1em;color:var(--faint)}
+.jk-baseline-val{font:700 15px var(--mono);color:var(--cyan)}
+.jk-chips{display:flex;flex-wrap:wrap;gap:4px}
+.jk-chip{font:500 10.5px var(--mono);padding:2px 7px;border-radius:5px;border:1px solid var(--line-hi);color:var(--dim);background:var(--panel)}
+.jk-chip.jkBaselineChip{color:#0a0d12;background:var(--up);border-color:var(--up);font-weight:700}
 .toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 .toggle-switch{position:relative;display:inline-block;width:34px;height:18px}
 .toggle-switch input{opacity:0;width:0;height:0}
@@ -5054,21 +5071,73 @@ async function loadJungleKing(){
   }
 }
 
+function jkEsc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function jkNum(v){
+  if(typeof v !== 'number') return String(v);
+  return Math.abs(v) >= 1000 ? v.toLocaleString('en-US') : String(v);
+}
+
+function jkFmt(v){
+  if(Array.isArray(v)) return '[' + v.map(jkNum).join(', ') + ']';
+  return jkNum(v);
+}
+
+function jkIsBaseline(v, baseline){
+  if(baseline === null || baseline === undefined) return false;
+  if(Array.isArray(v) || Array.isArray(baseline)) return JSON.stringify(v) === JSON.stringify(baseline);
+  return v === baseline;
+}
+
+const JK_CLASS_BADGES = {
+  tuning:     {cls:'jk-badge-tuning',     label:'TUNING KNOB'},
+  structural: {cls:'jk-badge-structural', label:'STRUCTURAL LIMIT'},
+  assumption: {cls:'jk-badge-assumption', label:'EXECUTION ASSUMPTION'}
+};
+
 function renderJungleKing(data){
-  // Presentation is built out in TASK-3 (#322); the skeleton proves the
-  // payload path end to end.
   const wrap = $('jkGroups');
   if(!wrap) return;
   const notice = $('jkNotice');
   if(notice) notice.style.display = 'none';
-  wrap.innerHTML = '';
-  (data.groups || []).forEach(function(g){
-    const sec = document.createElement('div');
-    sec.className = 'card';
-    sec.style.marginTop = '12px';
-    sec.textContent = (g.title || g.key) + ' — ' + (g.params || []).length + ' parameters';
-    wrap.appendChild(sec);
+  const groups = data.groups || [];
+  let params = 0, baselineChips = 0;
+  let html = '';
+  groups.forEach(function(g){
+    const ps = g.params || [];
+    params += ps.length;
+    html += '<div class="card jk-group" style="margin-top:12px">'
+         +  '<div class="jk-group-head"><span class="jk-group-title">' + jkEsc(g.title || g.key) + '</span>'
+         +  '<span class="jk-group-count">' + ps.length + ' parameters</span></div>';
+    ps.forEach(function(p){
+      const badge = JK_CLASS_BADGES[p.param_class] || JK_CLASS_BADGES.tuning;
+      const why = p.registry && p.registry.why ? p.registry.why : '';
+      html += '<div class="jk-param">'
+           +  '<div class="jk-param-head">'
+           +  '<span class="jk-param-label" title="' + jkEsc(why) + '">' + jkEsc(p.label) + '</span>'
+           +  '<span class="jk-badge ' + badge.cls + '">' + badge.label + '</span>'
+           +  '</div>'
+           +  '<div class="jk-baseline"><span class="jk-baseline-lbl">BASELINE</span>'
+           +  '<span class="jk-baseline-val">' + (p.baseline === null || p.baseline === undefined ? '—' : jkFmt(p.baseline)) + '</span></div>'
+           +  '<div class="jk-chips">';
+      (p.values || []).forEach(function(v){
+        const isBase = jkIsBaseline(v, p.baseline);
+        if(isBase) baselineChips++;
+        html += '<span class="jk-chip' + (isBase ? ' jkBaselineChip' : '') + '">' + jkFmt(v) + '</span>';
+      });
+      html += '</div></div>';
+    });
+    html += '</div>';
   });
+  if(params === 0){
+    wrap.innerHTML = '<div class="card" style="color:var(--dim);margin-top:12px">No parameters in the Jungle King manifest.</div>';
+  } else {
+    wrap.innerHTML = html;
+  }
+  // Render stats for tests; harmless in the browser.
+  window.__jkRenderStats = {groups: groups.length, params: params, baselineChips: baselineChips};
 }
 
 let isCollectorActive = false;

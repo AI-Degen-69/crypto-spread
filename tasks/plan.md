@@ -79,7 +79,7 @@ Family cross-references posted on each; #319 is the parent.
   fetches `/api/jungle-king` once and renders into the container.
 - Depends on: TASK-1 (the hook fetches the new endpoint).
 
-### TASK-3 (T3, #322) — presentation: baseline, chips, class badges, empty state
+### TASK-3 (T3, #322) — presentation: baseline, chips, class badges, empty state [x]
 - Size: **M** · Tag: **[Design/UI]** · Verification: **pytest (render-level) + browser check on :5515**
 - Target files: `server/osc_dash.py` (JS + CSS inside `FULL_APP_HTML`).
 - Build: one card per parameter; baseline value prominent + highlighted chip in

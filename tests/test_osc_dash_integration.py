@@ -4241,6 +4241,112 @@ def test_jungle_king_render_js_present():
     assert "fetch('/api/jungle-king')" in html
 
 
+def test_jungle_king_render_node():
+    """Run renderJungleKing in Node against the served script + real payload.
+
+    Fetch is stubbed to return /api/jungle-king's actual JSON, so the render
+    path is exercised exactly as the browser will run it: 19 parameters across
+    4 groups, a highlighted baseline chip for every parameter that has one,
+    and class badges present throughout.
+    """
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    script = html[start + len("<script>"):end]
+
+    payload = client.get("/api/jungle-king").text
+
+    dom_prelude = """
+    const setInterval = () => 0;
+    const clearInterval = () => {};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {};
+    const EventSource = class { constructor() {} addEventListener() {} close() {} };
+    const WebSocket = class { constructor() {} addEventListener() {} send() {} close() {} };
+    const localStorage = {
+      _data: {},
+      getItem(k) { return this._data[k] || null; },
+      setItem(k, v) { this._data[k] = String(v); }
+    };
+    globalThis.localStorage = localStorage;
+    const elements = {};
+    const makeElem = (id) => {
+      if (!elements[id]) {
+        elements[id] = {
+          id: id,
+          style: {},
+          textContent: '',
+          innerHTML: '',
+          value: '',
+          appendChild: () => {},
+          addEventListener: () => {},
+          classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+          querySelectorAll: () => []
+        };
+      }
+      return elements[id];
+    };
+    const window = { selectedBacktestFile: '', addEventListener: () => {}, location: { search: '' } };
+    globalThis.window = window;
+    const document = {
+      getElementById: (id) => makeElem(id),
+      querySelectorAll: () => []
+    };
+    globalThis.document = document;
+    globalThis.$ = (id) => makeElem(id);
+    globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => JSON.parse(%PAYLOAD%) });
+    """.replace("%PAYLOAD%", json.dumps(payload))
+
+    test_js = """
+    if (typeof renderJungleKing !== 'function') {
+      throw new Error('renderJungleKing is not defined');
+    }
+    renderJungleKing(JSON.parse(%PAYLOAD%));
+    const stats = window.__jkRenderStats;
+    if (!stats || stats.params !== 19) {
+      throw new Error('expected 19 params rendered, got ' + (stats && stats.params));
+    }
+    if (stats.groups !== 4) {
+      throw new Error('expected 4 groups rendered, got ' + stats.groups);
+    }
+    if (stats.baselineChips !== 19) {
+      throw new Error('expected a highlighted baseline chip for all 19 params, got ' + stats.baselineChips);
+    }
+    const grid = elements['jkGroups'];
+    if (!grid || grid.innerHTML.indexOf('jk-param') === -1) {
+      throw new Error('jkGroups markup was not produced');
+    }
+    if (grid.innerHTML.indexOf('jkBaselineChip') === -1) {
+      throw new Error('baseline chips missing from markup');
+    }
+    for (const badge of ['TUNING KNOB', 'STRUCTURAL LIMIT', 'EXECUTION ASSUMPTION']) {
+      if (grid.innerHTML.indexOf(badge) === -1) {
+        throw new Error('missing class badge: ' + badge);
+      }
+    }
+    console.log('JK_RENDER_OK');
+    """.replace("%PAYLOAD%", json.dumps(payload))
+
+    res = subprocess.run(
+        [node_bin],
+        input=dom_prelude + "\n" + script + "\n" + test_js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "JK_RENDER_OK" in res.stdout
+
+
 
 
 
