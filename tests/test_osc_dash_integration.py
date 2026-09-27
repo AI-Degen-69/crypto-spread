@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -4139,6 +4140,7 @@ def _flatten_registry():
 
 
 def test_jungle_king_endpoint_serves_full_manifest():
+    """Serve all manifest entries in the expected four-group response."""
     body = client.get("/api/jungle-king").json()
     assert set(body.keys()) == {"groups"}
     groups = body["groups"]
@@ -4163,6 +4165,7 @@ def test_jungle_king_endpoint_serves_full_manifest():
 
 
 def test_jungle_king_baseline_matches_manifest_checklist():
+    """Keep each displayed baseline aligned with the README checklist."""
     body = client.get("/api/jungle-king").json()
     params = [p for g in body["groups"] for p in g["params"]]
     by_name = {p["name"]: p for p in params}
@@ -4175,6 +4178,7 @@ def test_jungle_king_baseline_matches_manifest_checklist():
 
 
 def test_jungle_king_registry_join_and_exit_inheritance():
+    """Use registry metadata and inherit tuning class for per-slug exits."""
     body = client.get("/api/jungle-king").json()
     params = [p for g in body["groups"] for p in g["params"]]
     by_name = {p["name"]: p for p in params}
@@ -4198,6 +4202,7 @@ def test_jungle_king_registry_join_and_exit_inheritance():
 
 
 def test_jungle_king_group_membership_matches_manifest_sections():
+    """Preserve manifest grouping and cover exactly its 19 keys."""
     body = client.get("/api/jungle-king").json()
     groups = {g["key"]: [p["name"] for p in g["params"]] for g in body["groups"]}
     assert groups["trading_knobs"] == [
@@ -4229,6 +4234,7 @@ _JK_MANIFEST = json.loads(
     json.dumps({**_JK_MANIFEST, "quote_range": [[-0.1, 0.9]]}),
 ])
 def test_jungle_king_malformed_manifest_is_a_clean_error(tmp_path, monkeypatch, contents):
+    """Reject unreadable, incomplete, or non-numeric manifest shapes."""
     from server import osc_dash
     manifest = tmp_path / "param_ranges.json"
     manifest.write_text(contents, encoding="utf-8")
@@ -4241,6 +4247,7 @@ def test_jungle_king_malformed_manifest_is_a_clean_error(tmp_path, monkeypatch, 
 
 
 def test_jungle_king_missing_manifest_is_not_found(tmp_path, monkeypatch):
+    """Return a not-found response when the source manifest is absent."""
     from server import osc_dash
     monkeypatch.setattr(osc_dash, "JUNGLE_KING_MANIFEST", tmp_path / "missing.json")
 
@@ -4251,6 +4258,7 @@ def test_jungle_king_missing_manifest_is_not_found(tmp_path, monkeypatch):
 
 
 def test_jungle_king_baseline_outside_candidates_is_kept(tmp_path, monkeypatch):
+    """Return the baseline separately when it is outside candidate values."""
     from server import osc_dash
     manifest = {**_JK_MANIFEST, "offset": [0.01, 0.03]}
     manifest_path = tmp_path / "param_ranges.json"
@@ -4271,6 +4279,7 @@ def test_jungle_king_baseline_outside_candidates_is_kept(tmp_path, monkeypatch):
 
 
 def test_jungle_king_endpoint_is_get_only_and_does_not_modify_manifest():
+    """Keep the manifest endpoint read-only and reject write methods."""
     manifest_path = Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "param_ranges.json"
     before = manifest_path.read_bytes()
 
@@ -4283,6 +4292,7 @@ def test_jungle_king_endpoint_is_get_only_and_does_not_modify_manifest():
 
 
 def test_jungle_king_panel_has_no_mutating_controls_or_requests():
+    """Keep the tab free of sweep, write, and execution controls."""
     html = client.get("/").text
     panel = re.search(r'<div id="tab-jungleking".*?(?=<!-- TAB 3:)', html, re.DOTALL)
     loader = re.search(r"function loadJungleKing\(\)\s*\{(?P<body>.*?)\n\}", html, re.DOTALL)
@@ -4298,6 +4308,7 @@ def test_jungle_king_panel_has_no_mutating_controls_or_requests():
 # ── Jungle King tab skeleton (issue #319, TASK-2) ────────────────────────────
 
 def test_root_serves_jungle_king_tab_anchors():
+    """Serve the sidebar button, panel, and loader hook in the dashboard."""
     html = client.get("/").text
     assert "tab-btn-jungleking" in html
     assert "tab-jungleking" in html
@@ -4308,7 +4319,7 @@ def test_root_serves_jungle_king_tab_anchors():
 # ── Jungle King presentation (issue #319, TASK-3) ────────────────────────────
 
 def test_jungle_king_render_js_present():
-    """The render path exists and is wired into switchTab + the fetch hook."""
+    """Wire rendering and baseline indicators into the tab load path."""
     html = client.get("/").text
     assert "function loadJungleKing" in html
     assert "function renderJungleKing" in html
@@ -4319,6 +4330,9 @@ def test_jungle_king_render_js_present():
 
 def test_jungle_king_client_coalesces_pending_loads():
     """Repeated tab opens share one pending fetch."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        raise RuntimeError("Node.js is required for the Jungle King client tests")
     html = client.get("/").text
     load_match = re.search(r"function loadJungleKing\(\)\s*\{(?P<body>.*?)\n\}", html, re.DOTALL)
     assert load_match is not None
@@ -4344,13 +4358,16 @@ def test_jungle_king_client_coalesces_pending_loads():
       console.log('JK_LOAD_OK');
     }}).catch(err => {{ console.error(err); process.exitCode = 1; }});
     """
-    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
     assert "JK_LOAD_OK" in result.stdout
 
 
 def test_jungle_king_retries_after_failed_fetch():
     """An error is shown and a later open retries the failed request."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        raise RuntimeError("Node.js is required for the Jungle King client tests")
     html = client.get("/").text
     load_match = re.search(r"function loadJungleKing\(\)\s*\{(?P<body>.*?)\n\}", html, re.DOTALL)
     assert load_match is not None
@@ -4376,13 +4393,16 @@ def test_jungle_king_retries_after_failed_fetch():
       console.log('JK_RETRY_OK');
     }})().catch(err=>{{console.error(err);process.exitCode=1;}});
     """
-    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
     assert "JK_RETRY_OK" in result.stdout
 
 
 def test_jungle_king_render_node():
     """Render the real API payload through the page's renderer."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        raise RuntimeError("Node.js is required for the Jungle King client tests")
     html = client.get("/").text
     helpers = re.search(r"function jkEsc\(s\)\s*\{.*?(?=\nlet isCollectorActive)", html, re.DOTALL)
     assert helpers is not None
@@ -4415,7 +4435,7 @@ def test_jungle_king_render_node():
     result.outsideRangeBaselineLabels = (elements.jkGroups.innerHTML.match(/class=\"jk-chip-baseline-tag\"/g) || []).length;
     console.log(JSON.stringify(result));
     """
-    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
     rendered = json.loads(result.stdout.strip())
     assert rendered["groupCards"] == 4

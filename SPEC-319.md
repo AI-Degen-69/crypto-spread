@@ -28,11 +28,12 @@ New endpoint `GET /api/jungle-king` — 200 JSON:
           "label": str,                        # registry label when shared; manifest-derived otherwise
           "unit": str | null,
           "param_class": "tuning" | "structural" | "assumption",
-          "baseline": number,
-          "values": [number, ...],             # manifest order preserved
+          "baseline": number | [number, number], # quote_range is a [lo, hi] pair
+          "values": [number | [number, number], ...], # manifest order preserved
           "baseline_in_values": bool,
           "registry": {                        # subset of /api/params/spec entry, or null
-            "label": str, "why": str, "default": number,
+            "label": str, "why": str,
+            "default": number | [number, number] | null,
             "bounds": [low, high] | null
           }
         }
