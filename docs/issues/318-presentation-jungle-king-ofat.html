@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>ניסוי הוגן: משנים דבר אחד בכל פעם</title>
+<style>
+:root{--bg:#FAF8F4;--paper:#fff;--ink:rgba(0,0,0,.82);--muted:rgba(0,0,0,.57);--line:rgba(0,0,0,.1);--blue:#2563EB;--blue-soft:#EFF6FF;--blue-deep:#1E40AF;--shadow:0 18px 50px rgba(36,54,76,.09)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.75 Georgia,"Times New Roman",serif}
+a{color:var(--blue-deep)}
+.page{max-width:1060px;margin:auto;padding:34px 24px 70px;display:grid;grid-template-columns:190px minmax(0,720px);gap:42px;align-items:start}
+aside{position:sticky;top:24px;padding-top:12px;font:13px/1.65 "Segoe UI",Tahoma,sans-serif}
+aside strong{display:block;color:var(--blue-deep);font-size:12px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px}
+aside a{display:block;color:var(--muted);text-decoration:none;padding:5px 0}
+aside a:hover{color:var(--blue-deep)}
+article{min-width:0}
+.kicker{font:700 12px/1.4 "Segoe UI",Tahoma,sans-serif;letter-spacing:.1em;text-transform:uppercase;color:var(--blue-deep)}
+h1{font-size:clamp(2.1rem,5vw,3.6rem);line-height:1.12;letter-spacing:-.035em;margin:.55rem 0 1rem;max-width:700px}
+.lede{font-size:1.2rem;line-height:1.6;color:var(--muted);max-width:680px;margin:0}
+.figure{background:var(--paper);border:1px solid var(--line);border-radius:18px;overflow:hidden;margin:30px 0 20px;box-shadow:var(--shadow)}
+.figure-head{padding:22px 24px 4px}
+.figure-head h2{font-size:1.38rem;line-height:1.35;margin:0 0 6px}
+.figure-head p{font-size:.98rem;color:var(--muted);margin:0}
+.diagram-wrap{padding:12px 12px 0}
+.diagram{display:block;width:100%;height:auto;min-height:200px}
+.control{padding:6px 24px 20px}
+.control label{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font:700 14px/1.5 "Segoe UI",Tahoma,sans-serif}
+#selected{font-size:1.25rem;color:var(--blue-deep);font-variant-numeric:tabular-nums}
+input[type=range]{direction:ltr;width:100%;margin:16px 0 2px;accent-color:var(--blue);cursor:pointer}
+input[type=range]:focus-visible{outline:3px solid rgba(37,99,235,.34);outline-offset:4px;border-radius:6px}
+.ticks{display:flex;justify-content:space-between;direction:ltr;font:12px/1.4 "Segoe UI",Tahoma,sans-serif;color:var(--muted);font-variant-numeric:tabular-nums}
+.caption{border-top:1px solid var(--line);padding:12px 24px 16px;color:var(--muted);font-size:.9rem}
+section.support{padding:18px 0 6px;border-top:1px solid var(--line);margin-top:30px}
+section.support h2{font-size:1.35rem;line-height:1.35;margin:0 0 8px}
+section.support p{margin:.35rem 0;color:var(--muted)}
+.pills{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.pill{border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--paper);font:13px/1.5 "Segoe UI",Tahoma,sans-serif}
+.links{font:14px/1.7 "Segoe UI",Tahoma,sans-serif;padding-top:18px;color:var(--muted)}
+.links a{margin-inline-start:6px}
+@media(max-width:820px){.page{display:block;max-width:760px;padding:26px 18px 50px}aside{position:static;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:0;margin-bottom:28px}aside strong{margin:0}aside a{padding:0}}
+@media(max-width:520px){body{font-size:16px}.page{padding-inline:14px}.figure-head{padding-inline:17px}.control{padding-inline:17px}.caption{padding-inline:17px}.diagram-wrap{padding-inline:2px}.ticks{font-size:11px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<div class="page">
+  <aside aria-label="ניווט בעמוד">
+    <strong>במילים פשוטות</strong>
+    <a href="#idea">הרעיון</a>
+    <a href="#included">מה הוכן</a>
+    <a href="#try">לנסות במערכת</a>
+  </aside>
+  <article>
+    <header id="idea">
+      <div class="kicker">מחקר חדש · עדכון שהוכנס למערכת</div>
+      <h1>משנים דבר אחד — כדי לדעת מה באמת עזר</h1>
+      <p class="lede">עד עכשיו לא הייתה רשימה רחבה ומסודרת של הערכים שאפשר להשוות. עכשיו יש בסיס לניסויים הוגנים: משנים ערך אחד בכל פעם, וכל השאר נשארים קבועים.</p>
+    </header>
+
+    <figure class="figure" aria-labelledby="figure-title" aria-describedby="figure-caption">
+      <div class="figure-head">
+        <h2 id="figure-title">הזיזו את הערך הכחול. השאר נשאר בבסיס.</h2>
+        <p>כך משווים בין ערכי מרווח שונים בלי לערבב שינויים נוספים.</p>
+      </div>
+      <div class="diagram-wrap">
+        <svg class="diagram" viewBox="0 0 720 262" role="img" aria-labelledby="svg-title svg-desc">
+          <title id="svg-title">ניסוי שמחליף רק את ערך המרווח</title>
+          <desc id="svg-desc">שלוש נקודות מציגות ערכי מרווח אפשריים. שלוש הגדרות אחרות נשארות קבועות בערכי הבסיס שלהן.</desc>
+          <rect x="20" y="18" width="680" height="112" rx="14" fill="#EFF6FF" stroke="#bfdbfe"/>
+          <text x="666" y="48" text-anchor="end" fill="#1E40AF" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="700">הערך היחיד שמשתנה · מרווח הציטוט</text>
+          <line x1="150" y1="88" x2="570" y2="88" stroke="#93b4f8" stroke-width="5" stroke-linecap="round"/>
+          <circle id="dot0" cx="150" cy="88" r="11" fill="#fff" stroke="#2563EB" stroke-width="3"/>
+          <circle id="dot1" cx="360" cy="88" r="11" fill="#2563EB" stroke="#fff" stroke-width="3"/>
+          <circle id="dot2" cx="570" cy="88" r="11" fill="#fff" stroke="#2563EB" stroke-width="3"/>
+          <text x="150" y="116" text-anchor="middle" fill="#4b5563" font-family="Segoe UI,Arial,sans-serif" font-size="13">0.010</text>
+          <text x="360" y="116" text-anchor="middle" fill="#1E40AF" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">0.020 · בסיס</text>
+          <text x="570" y="116" text-anchor="middle" fill="#4b5563" font-family="Segoe UI,Arial,sans-serif" font-size="13">0.030</text>
+          <text id="selected-svg" x="360" y="67" text-anchor="middle" fill="#1E40AF" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="700">נבדק עכשיו: 0.020</text>
+          <line x1="150" y1="151" x2="570" y2="151" stroke="#e5e7eb" stroke-width="1"/>
+          <text x="666" y="180" text-anchor="end" fill="#57534e" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="700">נשארים קבועים בכל ההשוואות</text>
+          <rect x="395" y="194" width="220" height="46" rx="10" fill="#fafaf9" stroke="#d6d3d1"/>
+          <rect x="250" y="194" width="132" height="46" rx="10" fill="#fafaf9" stroke="#d6d3d1"/>
+          <rect x="105" y="194" width="132" height="46" rx="10" fill="#fafaf9" stroke="#d6d3d1"/>
+          <text x="505" y="213" text-anchor="middle" fill="#57534e" font-family="Segoe UI,Arial,sans-serif" font-size="12">גודל הזמנה</text>
+          <text x="505" y="231" text-anchor="middle" fill="#111827" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">120 יחידות</text>
+          <text x="316" y="213" text-anchor="middle" fill="#57534e" font-family="Segoe UI,Arial,sans-serif" font-size="12">עומק תור</text>
+          <text x="316" y="231" text-anchor="middle" fill="#111827" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">50 יחידות</text>
+          <text x="171" y="213" text-anchor="middle" fill="#57534e" font-family="Segoe UI,Arial,sans-serif" font-size="12">תקרת זוג</text>
+          <text x="171" y="231" text-anchor="middle" fill="#111827" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">0.99</text>
+        </svg>
+      </div>
+      <div class="control">
+        <label for="range">בחרו ערך להשוואה <output id="selected" for="range">0.020</output></label>
+        <input id="range" type="range" min="0" max="2" step="1" value="1" aria-label="בחירת ערך מרווח להשוואה" aria-valuetext="0.020, ערך הבסיס">
+        <div class="ticks" aria-hidden="true"><span>0.010</span><span>0.020 · בסיס</span><span>0.030</span></div>
+      </div>
+      <figcaption class="caption" id="figure-caption">זהו דגם של שיטת ההשוואה, לא תוצאות של ניסוי. הרשימה שהוכנה מגדירה מה אפשר יהיה לבדוק; הריצות עצמן שייכות לשלב הבא.</figcaption>
+    </figure>
+
+    <section class="support" id="included">
+      <h2>מה הוכן בעדכון הזה?</h2>
+      <p>נאספו טווחי ערכים מלאים ל־19 הגדרות, כולל נקודת הבסיס. יש גם רשימה קריאה לבני אדם וגם רשימה מסודרת לשימוש בהמשך. חלק מההגדרות הן גבולות בטיחות, וחלק מתארות הנחות ביצוע — הן נשארות קבועות בניסויים הראשיים.</p>
+      <div class="pills" aria-label="קבוצות ההגדרות">
+        <span class="pill">ערכי אסטרטגיה לבדיקה</span>
+        <span class="pill">גבולות בטיחות</span>
+        <span class="pill">הנחות ביצוע קבועות</span>
+        <span class="pill">ספי יציאה לפי שוק ומשך</span>
+      </div>
+      <p>עדיין לא הורצו ניסויים ולא נבחרו ערכים מנצחים. עכשיו יש בסיס רחב ומוגדר שמאפשר לעשות זאת באופן עקבי בהמשך.</p>
+    </section>
+
+    <section class="support" id="try">
+      <h2>לנסות במערכת עצמה</h2>
+      <p>פתחו את לשונית Backtest (בדיקה על נתוני עבר) בדשבורד הקיים. השתמשו באותו חלון ובאותם ערכי בסיס בשתי הרצות, ושנו רק את מרווח הציטוט. תוכלו להשוות בין הריצות. הרשימה החדשה עדיין אינה מחוברת למסך או מופעלת אוטומטית.</p>
+    </section>
+
+    <footer class="links">
+      <a href="https://github.com/AI-Degen-69/crypto-spread/issues/311">הבקשה המקורית</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/AI-Degen-69/crypto-spread/pull/318">העדכון הוכנס למערכת</a>
+    </footer>
+  </article>
+</div>
+<script>
+(function(){
+  "use strict";
+  var values = ["0.010", "0.020", "0.030"];
+  var range = document.getElementById("range");
+  var output = document.getElementById("selected");
+  var label = document.getElementById("selected-svg");
+  var dots = [document.getElementById("dot0"), document.getElementById("dot1"), document.getElementById("dot2")];
+  function update(){
+    var index = Number(range.value);
+    var value = values[index];
+    output.value = value;
+    output.textContent = value;
+    label.textContent = "נבדק עכשיו: " + value;
+    range.setAttribute("aria-valuetext", value + (index === 1 ? ", ערך הבסיס" : ", ערך להשוואה"));
+    dots.forEach(function(dot, i){
+      dot.setAttribute("r", i === index ? "13" : "9");
+      dot.setAttribute("fill", i === index ? "#2563EB" : "#fff");
+      dot.setAttribute("stroke", i === index ? "#1E40AF" : "#2563EB");
+    });
+  }
+  range.addEventListener("input", update);
+  update();
+})();
+</script>
+</body>
+</html>

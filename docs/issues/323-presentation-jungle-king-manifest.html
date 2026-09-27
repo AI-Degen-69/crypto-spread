@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>כל ערכי ההשוואה, במקום אחד</title>
+<style>
+:root{--bg:#0b1117;--panel:#121c25;--panel2:#172530;--line:#29404d;--ink:#eaf1f6;--muted:#a7b5c1;--soft:#728493;--accent:#C792EA;--accent2:#6D28D9;--accentInk:#1e1028;--green:#55d6c2;--greenInk:#06281f;--shadow:0 24px 60px rgba(0,0,0,.28)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 "Segoe UI",Tahoma,Arial,sans-serif}
+a{color:var(--accent)}
+main{max-width:1080px;margin:auto;padding:44px 24px 72px}
+header{max-width:760px;margin-bottom:30px}
+.kicker{font-size:.72rem;letter-spacing:.12em;color:var(--accent);font-weight:700}
+h1{font-size:clamp(2.25rem,6vw,4.25rem);line-height:1.08;letter-spacing:-.045em;margin:12px 0 16px;max-width:760px}
+.lede{font-size:1.12rem;color:var(--muted);margin:0;max-width:720px}
+.visual{border:1px solid var(--line);border-radius:20px;background:var(--panel);overflow:hidden;box-shadow:var(--shadow)}
+.visual-top{padding:22px 24px 0}
+.visual-top h2{font-size:1.1rem;margin:0 0 5px}
+.visual-top p{color:var(--muted);font-size:.9rem;margin:0}
+.tabs{display:flex;gap:8px;overflow-x:auto;padding:20px 24px 14px;border-bottom:1px solid var(--line);scrollbar-width:thin}
+.tab{flex:0 0 auto;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--muted);font-family:inherit;font-size:.82rem;font-weight:600;padding:9px 13px;cursor:pointer}
+.tab[aria-selected="true"]{background:rgba(199,146,234,.14);border-color:var(--accent);color:var(--ink)}
+.tab:focus-visible,select:focus-visible,.chip:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.explorer{padding:22px 24px 24px}
+.group-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+.group-meta h3{font-size:1.15rem;margin:0}
+.count{font: .75rem ui-monospace,Consolas,monospace;color:var(--soft);white-space:nowrap}
+.picker{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.picker label{font-size:.83rem;color:var(--muted);font-weight:600}
+select{max-width:100%;min-width:min(100%,300px);padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:#0d151c;color:var(--ink);font:inherit}
+.focus{border:1px solid var(--line);border-radius:14px;background:#0e171f;padding:18px}
+.focus-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}
+.focus h4{font-size:1rem;margin:0}
+.class{flex:0 0 auto;border:1px solid rgba(199,146,234,.65);color:var(--accent);border-radius:999px;padding:3px 9px;font:700 .62rem ui-monospace,Consolas,monospace;letter-spacing:.04em}
+.baseline{display:flex;align-items:baseline;gap:10px;margin:15px 0 12px}
+.baseline small{font: .65rem ui-monospace,Consolas,monospace;color:var(--soft);letter-spacing:.1em}
+.baseline strong{font:700 1.45rem ui-monospace,Consolas,monospace;color:var(--green)}
+.range-label{font-size:.76rem;color:var(--muted);margin-bottom:9px}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #304452;background:#121f29;color:#d4e0e9;border-radius:7px;padding:5px 8px;font: .74rem ui-monospace,Consolas,monospace;white-space:nowrap}
+.chip.is-base{background:var(--green);border-color:var(--green);color:var(--greenInk);font-weight:800}
+.chip em{font:700 .55rem "Segoe UI",Tahoma,sans-serif;letter-spacing:.06em;font-style:normal}
+.note{margin:14px 0 0;color:var(--muted);font-size:.84rem}
+.legend{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:.77rem;margin-top:16px}
+.legend-mark{background:var(--green);color:var(--greenInk);font:bold .55rem ui-monospace,Consolas,monospace;border-radius:4px;padding:4px 6px}
+.footnote{padding:13px 24px;border-top:1px solid var(--line);font-size:.77rem;color:var(--soft)}
+.support{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}
+.support section{border-top:2px solid var(--accent);padding:15px 2px 0}
+.support h2{font-size:.94rem;margin:0 0 5px}
+.support p{color:var(--muted);font-size:.84rem;margin:0}
+.links{display:flex;gap:16px;flex-wrap:wrap;margin-top:24px;font-size:.82rem}
+@media(max-width:640px){main{padding:28px 15px 48px}.visual-top,.explorer{padding-inline:16px}.tabs{padding-inline:16px}.footnote{padding-inline:16px}.support{grid-template-columns:1fr}.focus{padding:14px}.group-meta{align-items:flex-start}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="kicker">העדכון ל־Jungle King</div>
+    <h1>כל ערכי ההשוואה, במקום אחד</h1>
+    <p class="lede">חיפוש בקובצי המחקר הקשה לזכור מהו ערך הבסיס ומה אפשר להשוות. עכשיו הדשבורד מציג את 19 ההגדרות, קבוצותיהן וסימוני הבסיס — בלי להפעיל ניסוי או לשנות דבר.</p>
+  </header>
+
+  <section class="visual" aria-labelledby="visual-title">
+    <div class="visual-top">
+      <h2 id="visual-title">בחרו קבוצה והגדרה כדי לעיין בטווח</h2>
+      <p>הנקודה הירוקה היא ערך הבסיס. יתר הערכים הם אפשרויות להשוואה, לא תוצאות שכבר נמדדו.</p>
+    </div>
+    <div class="tabs" role="tablist" aria-label="קבוצות ההגדרות">
+      <button class="tab" id="tab-tuning" role="tab" aria-selected="true" aria-controls="explorer" tabindex="0" data-group="tuning">ערכי אסטרטגיה</button>
+      <button class="tab" id="tab-exits" role="tab" aria-selected="false" aria-controls="explorer" tabindex="-1" data-group="exits">ספי יציאה</button>
+      <button class="tab" id="tab-limits" role="tab" aria-selected="false" aria-controls="explorer" tabindex="-1" data-group="limits">גבולות בטיחות</button>
+      <button class="tab" id="tab-assumptions" role="tab" aria-selected="false" aria-controls="explorer" tabindex="-1" data-group="assumptions">הנחות ביצוע</button>
+    </div>
+    <div class="explorer" id="explorer" role="tabpanel" aria-labelledby="tab-tuning" tabindex="0">
+      <div class="group-meta"><h3 id="group-title">ערכי אסטרטגיה</h3><span class="count" id="group-count">6 הגדרות</span></div>
+      <div class="picker">
+        <label for="param-select">הגדרה</label>
+        <select id="param-select" aria-label="בחירת הגדרה"></select>
+      </div>
+      <div class="focus" aria-live="polite" aria-atomic="true">
+        <div class="focus-head"><h4 id="param-title"></h4><span class="class" id="param-class"></span></div>
+        <div class="baseline"><small>ערך בסיס</small><strong id="param-baseline"></strong></div>
+        <div class="range-label" id="range-label"></div>
+        <div class="chips" id="value-chips" aria-label="ערכים אפשריים"></div>
+        <p class="note" id="param-note"></p>
+      </div>
+      <div class="legend"><span class="legend-mark">בסיס</span><span>הערך שממנו מתחילים בהשוואה</span></div>
+    </div>
+    <div class="footnote">הדף הזה מסביר את התצוגה; כדי להשתמש בה, פתחו את הדשבורד עצמו ובחרו Jungle King.</div>
+  </section>
+
+  <div class="support">
+    <section>
+      <h2>מה התצוגה כן עושה</h2>
+      <p>מציגה ארבע קבוצות ו־19 הגדרות, עם ערך בסיס וטווח מועמדים מסודר לכל אחת. גבולות והנחות מסומנים בנפרד מערכים שמשנים.</p>
+    </section>
+    <section>
+      <h2>מה היא לא עושה</h2>
+      <p>היא לא מריצה בדיקות, לא מסמנת ערכים שכבר נוסו, ולא משנה הגדרות. כל הרצה נעשית בנפרד במסך בדיקות העבר.</p>
+    </section>
+  </div>
+  <nav class="links" aria-label="קישורים קשורים">
+    <a href="https://github.com/AI-Degen-69/crypto-spread/issues/319">הבקשה המקורית</a>
+    <a href="https://github.com/AI-Degen-69/crypto-spread/pull/323">העדכון שהוכנס למערכת</a>
+  </nav>
+</main>
+<script>
+(function(){
+  "use strict";
+  const groups = {
+    tuning:{title:"ערכי אסטרטגיה",items:[
+      {name:"מרווח ציטוט",cls:"ערך שמשנים",base:"0.02",values:["0.001","0.002","0.005","0.008","0.01","0.012","0.015","0.018","0.02","0.022","0.025","0.028","0.03","0.035","0.04","0.05","0.06","0.08","0.1","0.15","0.2","0.3","0.4","0.49"]},
+      {name:"עומק תור",cls:"ערך שמשנים",base:"50",values:["0","5","10","20","35","50","75","100","150","200","300","500","1,000","2,500","5,000","10,000","50,000","100,000"],note:"ערך הבסיס הוא ברירת המחדל של ההרצות, ושונה מברירת המחדל הפנימית של המנוע."},
+      {name:"גודל הזמנה לכל צד",cls:"ערך שמשנים",base:"120",values:["5","10","20","35","50","75","100","120","150","200","250","300","500","750","1,000","2,000","5,000","10,000"],note:"ערך הבסיס הוא ברירת המחדל של ההרצות, ושונה מברירת המחדל הפנימית של המנוע."},
+      {name:"השהיה לפני כניסה",cls:"ערך שמשנים",base:"0",unit:"שניות",values:["0","1","2","3","5","10","15","20","30","45","60","90","120","180","240","300","600","900","1,800","3,600"]},
+      {name:"השהיה יחסית לאורך החלון",cls:"ערך שמשנים",base:"0",unit:"חלק מהחלון",values:["0","0.01","0.02","0.03","0.05","0.08","0.1","0.12","0.15","0.2","0.25","0.3","0.4","0.5","0.75","1"]},
+      {name:"מרווח ביטול יציאה",cls:"ערך שמשנים",base:"0.02",values:["0.001","0.005","0.01","0.012","0.015","0.018","0.02","0.022","0.025","0.028","0.03","0.035","0.04","0.05","0.075","0.1","0.15","0.2","0.3","0.5"]}
+    ]},
+    exits:{title:"ספי יציאה",items:[
+      {name:"סף יציאה — ברירת מחדל, 5 דקות",cls:"ערך שמשנים",base:"0.05",unit:"דולר",values:["0.01","0.02","0.03","0.04","0.045","0.05","0.055","0.06","0.07","0.08","0.09","0.1","0.12","0.14","0.16","0.18","0.2","0.25","0.3","0.4","0.5"]},
+      {name:"סף יציאה — ברירת מחדל, 15 דקות",cls:"ערך שמשנים",base:"0.05",unit:"דולר",values:["0.01","0.02","0.03","0.04","0.045","0.05","0.055","0.06","0.07","0.08","0.09","0.1","0.12","0.14","0.16","0.18","0.2","0.25","0.3","0.4","0.5"]},
+      {name:"סף יציאה — BTC, 5 דקות",cls:"ערך שמשנים",base:"0.05",unit:"דולר",values:["0.01","0.02","0.03","0.04","0.045","0.05","0.055","0.06","0.07","0.08","0.09","0.1","0.12","0.14","0.16","0.18","0.2","0.25","0.3","0.4","0.5"]},
+      {name:"סף יציאה — SOL, 5 דקות",cls:"ערך שמשנים",base:"0.05",unit:"דולר",values:["0.01","0.02","0.03","0.04","0.045","0.05","0.055","0.06","0.07","0.08","0.09","0.1","0.12","0.14","0.16","0.18","0.2","0.25","0.3","0.4","0.5"]},
+      {name:"סף יציאה — BTC, 15 דקות",cls:"ערך שמשנים",base:"0.05",unit:"דולר",values:["0.01","0.02","0.03","0.04","0.045","0.05","0.055","0.06","0.07","0.08","0.09","0.1","0.12","0.14","0.16","0.18","0.2","0.25","0.3","0.4","0.5"]},
+      {name:"סף יציאה — SOL, 15 דקות",cls:"ערך שמשנים",base:"0.05",unit:"דולר",values:["0.01","0.02","0.03","0.04","0.045","0.05","0.055","0.06","0.07","0.08","0.09","0.1","0.12","0.14","0.16","0.18","0.2","0.25","0.3","0.4","0.5"]}
+    ]},
+    limits:{title:"גבולות בטיחות",items:[
+      {name:"תקרת עלות לזוג",cls:"גבול בטיחות",base:"0.99",unit:"דולר",values:["0.5","0.6","0.7","0.8","0.85","0.9","0.92","0.94","0.95","0.96","0.97","0.98","0.99","1"]},
+      {name:"טווח מחיר מותר",cls:"גבול בטיחות",base:"[0.1, 0.9]",unit:"טווח",values:["[0, 1]","[0.01, 0.99]","[0.02, 0.98]","[0.05, 0.95]","[0.08, 0.92]","[0.1, 0.9]","[0.12, 0.88]","[0.15, 0.85]","[0.2, 0.8]","[0.25, 0.75]","[0.3, 0.7]","[0.35, 0.65]","[0.4, 0.6]","[0.45, 0.55]"]},
+      {name:"אזור לא־פעיל בסוף חלון",cls:"גבול בטיחות",base:"0.1",unit:"חלק מהחלון",values:["0","0.01","0.02","0.05","0.08","0.1","0.12","0.15","0.2","0.25","0.3","0.4","0.5","0.6","0.75","1"]}
+    ]},
+    assumptions:{title:"הנחות ביצוע",items:[
+      {name:"עמלת לקיחה",cls:"הנחת ביצוע",base:"0.07",values:["0","0.01","0.02","0.03","0.05","0.07","0.08","0.1","0.12","0.15","0.2","0.3"]},
+      {name:"עלות מיזוג",cls:"הנחת ביצוע",base:"0",unit:"דולר",values:["0","0.001","0.005","0.01","0.02","0.05","0.1","0.2","0.5","1","2","5","10"]},
+      {name:"קפיצת מחיר מינימלית",cls:"הנחת ביצוע",base:"0.001",unit:"דולר",values:["0.0001","0.0005","0.001","0.002","0.005","0.01","0.02","0.05"]},
+      {name:"גודל הזמנה מינימלי",cls:"הנחת ביצוע",base:"5",unit:"יחידות",values:["1","2","5","10","20","50","100","200","500"]}
+    ]}
+  };
+  const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+  const select = document.getElementById('param-select');
+  const title = document.getElementById('group-title');
+  const count = document.getElementById('group-count');
+  const panel = document.getElementById('explorer');
+  let current = 'tuning';
+  function render(){
+    const group = groups[current];
+    title.textContent = group.title;
+    count.textContent = group.items.length + ' הגדרות';
+    panel.setAttribute('aria-labelledby', 'tab-' + current);
+    select.replaceChildren();
+    group.items.forEach(function(item,index){
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = item.name;
+      select.appendChild(option);
+    });
+    showItem(0);
+  }
+  function showItem(index){
+    const item = groups[current].items[index];
+    document.getElementById('param-title').textContent = item.name;
+    document.getElementById('param-class').textContent = item.cls;
+    document.getElementById('param-baseline').textContent = item.base + (item.unit ? ' ' + item.unit : '');
+    document.getElementById('range-label').textContent = item.values.length + ' ערכים אפשריים · הבסיס מודגש בתוך הטווח';
+    document.getElementById('param-note').textContent = item.note || 'התצוגה מציגה טווחים בלבד; היא אינה אומרת אילו ערכים כבר נוסו.';
+    const chips = document.getElementById('value-chips');
+    chips.replaceChildren();
+    item.values.forEach(function(value){
+      const chip = document.createElement('span');
+      chip.className = 'chip' + (value === item.base ? ' is-base' : '');
+      chip.textContent = value;
+      if(value === item.base){
+        const marker = document.createElement('em');
+        marker.textContent = 'בסיס';
+        chip.appendChild(marker);
+        chip.setAttribute('aria-label', value + ', ערך בסיס');
+      }
+      chips.appendChild(chip);
+    });
+  }
+  function activate(tab, focus){
+    current = tab.dataset.group;
+    tabs.forEach(function(candidate){
+      const active = candidate === tab;
+      candidate.setAttribute('aria-selected', String(active));
+      candidate.tabIndex = active ? 0 : -1;
+    });
+    if(focus) tab.focus();
+    render();
+  }
+  tabs.forEach(function(tab,index){
+    tab.addEventListener('click',function(){activate(tab,false);});
+    tab.addEventListener('keydown',function(event){
+      let next = index;
+      if(event.key === 'ArrowLeft') next = (index + 1) % tabs.length;
+      else if(event.key === 'ArrowRight') next = (index + tabs.length - 1) % tabs.length;
+      else if(event.key === 'Home') next = 0;
+      else if(event.key === 'End') next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      activate(tabs[next],true);
+    });
+  });
+  select.addEventListener('change',function(){showItem(Number(select.value));});
+  render();
+})();
+</script>
+</body>
+</html>
