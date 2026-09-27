@@ -24,4 +24,4 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 5515  # דשבור
 
 ## Dashboard Architecture
 
-- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 5515) is the sole canonical dashboard. No Node.js runtime is used or tracked in this repository.
+- **Canonical Dashboard**: `server/osc_dash.py` (Python FastAPI on port 5515) is the sole canonical dashboard. Node.js is used only to exercise inline JavaScript in tests; it is not an application runtime or dependency.

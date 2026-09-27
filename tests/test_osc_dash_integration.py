@@ -1,6 +1,8 @@
-"""Integration tests for the 4-tab dashboard SPA and FastAPI API endpoints."""
+"""Integration tests for the dashboard SPA and FastAPI API endpoints."""
 import json
 import os
+import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -47,8 +49,8 @@ def _make_fake_tick(ts: float, cid: str, slug: str, series: str, mid: float, tap
     }
 
 
-def test_root_returns_4tab_spa():
-    """Verify that root endpoint serves the full 4-tab SPA HTML with all containers."""
+def test_root_returns_dashboard_spa():
+    """Verify that root endpoint serves the dashboard SPA with all containers."""
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
@@ -58,12 +60,14 @@ def test_root_returns_4tab_spa():
     assert "tab-btn-cockpit" in html
     assert "tab-btn-marketdata" in html
     assert "tab-btn-backtest" in html
+    assert "tab-btn-jungleking" in html
     assert "tab-btn-summary" in html
     assert "tab-btn-ticks" in html
     assert "tab-marketdata" in html
     assert "tab-backtest" in html
     assert "tab-summary" in html
     assert "tab-ticks" in html
+    assert 'id="tab-jungleking" class="tab-content" aria-labelledby="tab-btn-jungleking"' in html
     assert "collectorBadge" in html
     assert "tapeBadge" in html
     assert "switchTab" in html
@@ -147,8 +151,8 @@ def test_sidebar_dom_structure_and_header_streamlining():
     assert 'id="sidebarToggleBtn"' in html
     assert 'onclick="toggleSidebarPin()"' in html
 
-    # All 5 navigation tab buttons exist with SVG icons and labels
-    for tab_id in ["tab-btn-cockpit", "tab-btn-marketdata", "tab-btn-backtest", "tab-btn-summary", "tab-btn-ticks"]:
+    # All navigation tab buttons exist with SVG icons and labels.
+    for tab_id in ["tab-btn-cockpit", "tab-btn-marketdata", "tab-btn-backtest", "tab-btn-jungleking", "tab-btn-summary", "tab-btn-ticks"]:
         assert f'id="{tab_id}"' in html
 
     assert 'sidebarBotStatusPill' in html
@@ -4075,6 +4079,372 @@ def test_backtest_param_preview_zero_handling_node():
     assert "BT_PARAM_PREVIEW_ZERO_TESTS_PASSED" in res.stdout
 
 
+# ── Jungle King tab (issue #319) ─────────────────────────────────────────────
+# The OFAT manifest (research/jungle-king/) as a read-only quick reference.
+# Contract: SPEC-319.md — manifest groups in manifest order, registry join
+# server-side, baseline prominent, nothing mutable.
+
+def _jk_baselines():
+    """Baseline per manifest key, read from the checklist README [x] rows.
+
+    The viewer must present the manifest's own baselines (operator-replicable
+    CLI defaults), not engine defaults — the provenance guard in SPEC-319.md.
+    Rows don't name their parameter; the `####` heading above does, so parse
+    line by line tracking the current heading. The Exit Thresholds section has
+    one shared baseline applying to all six per-slug keys.
+    """
+    readme = Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    exit_slugs = ("default_5m", "default_15m", "btc-up-or-down-5m",
+                  "sol-up-or-down-5m", "btc-up-or-down-15m", "sol-up-or-down-15m")
+    baselines: dict[str, float] = {}
+    current = None                      # param name, or "exit:*" for the shared section
+    for line in text.splitlines():
+        h4 = re.match(r"^#### .+? `([a-z_]+)`\s*$", line)
+        if h4:
+            current = h4.group(1)
+            continue
+        if re.match(r"^### .+Exit Thresholds", line):
+            current = "exit:*"
+            continue
+        if re.match(r"^### ", line):
+            current = None
+            continue
+        m = re.match(r'^- \[x\] ([0-9.eE+-]+) .*\*\*Baseline\*\*', line)
+        if m and current:
+            value = float(m.group(1))
+            if current == "exit:*":
+                for slug in exit_slugs:
+                    baselines[f"exit_thresh_by_slug.{slug}"] = value
+            else:
+                baselines[current] = value
+    return baselines
 
 
+def _flatten_registry():
+    """param_spec() grouped dict → {param_name: spec_entry}.
 
+    Only exit_thresh_by_slug.* flattens to per-slug keys, mirroring the
+    manifest's per-slug naming.
+    """
+    out: dict[str, dict] = {}
+    for entries in _spec().values():
+        for name, v in entries.items():
+            if name == "exit_thresh_by_slug":
+                for slug in ("default_5m", "default_15m", "btc-up-or-down-5m",
+                             "sol-up-or-down-5m", "btc-up-or-down-15m", "sol-up-or-down-15m"):
+                    out[f"exit_thresh_by_slug.{slug}"] = v
+                continue
+            out[name] = v
+    return out
+
+
+def test_jungle_king_endpoint_serves_full_manifest():
+    """Serve all manifest entries in the expected four-group response."""
+    body = client.get("/api/jungle-king").json()
+    assert set(body.keys()) == {"groups"}
+    groups = body["groups"]
+    assert [g["key"] for g in groups] == [
+        "trading_knobs", "exit_thresholds", "structural_limits", "execution_assumptions"
+    ]
+    params = [p for g in groups for p in g["params"]]
+    manifest = json.loads(
+        (Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "param_ranges.json")
+        .read_text(encoding="utf-8")
+    )
+    assert [p["name"] for p in params] == list(manifest.keys())
+    for p in params:
+        assert p["values"] == manifest[p["name"]]
+        # quote_range's baseline is the [lo, hi] pair; every other key is scalar.
+        assert isinstance(p["baseline"], (int, float)) or (
+            isinstance(p["baseline"], list) and len(p["baseline"]) == 2
+        )
+        assert isinstance(p["baseline_in_values"], bool)
+        assert p["param_class"] in ("tuning", "structural", "assumption")
+        assert "label" in p and "unit" in p
+
+
+def test_jungle_king_baseline_matches_manifest_checklist():
+    """Keep each displayed baseline aligned with the README checklist."""
+    body = client.get("/api/jungle-king").json()
+    params = [p for g in body["groups"] for p in g["params"]]
+    by_name = {p["name"]: p for p in params}
+    readme_baselines = _jk_baselines()
+    assert readme_baselines, "README checklist parsing broke"
+    for name, value in readme_baselines.items():
+        assert name in by_name, f"{name} missing from endpoint"
+        assert by_name[name]["baseline"] == value, f"{name} baseline drifted from the manifest checklist"
+    assert by_name["offset"]["baseline_in_values"] is True
+
+
+def test_jungle_king_registry_join_and_exit_inheritance():
+    """Use registry metadata and inherit tuning class for per-slug exits."""
+    body = client.get("/api/jungle-king").json()
+    params = [p for g in body["groups"] for p in g["params"]]
+    by_name = {p["name"]: p for p in params}
+    registry = _flatten_registry()
+    # Shared params carry the registry's identity (one label source — issue #164 rule).
+    for name in ("offset", "max_pair_cost", "taker_fee_rate", "dead_zone_val"):
+        assert by_name[name]["registry"] is not None
+        assert by_name[name]["label"] == registry[name]["label"]
+        assert by_name[name]["param_class"] == registry[name]["param_class"]
+    # exit_thresh_by_slug.* inherits the parent's class (tuning) and derives its label.
+    exit5 = by_name["exit_thresh_by_slug.btc-up-or-down-5m"]
+    assert exit5["param_class"] == "tuning"
+    assert registry["exit_thresh_by_slug.btc-up-or-down-5m"]["param_class"] == "tuning"
+    assert "BTC" in exit5["label"] and "5m" in exit5["label"]
+    # Checklist-only knobs (enable_leg_chase, dead_zone_unit,
+    # naked_leg_at_expiry) are README rows, not param_ranges.json keys — the
+    # payload renders exactly the manifest's 19 keys (SPEC-319.md edge case).
+    assert "enable_leg_chase" not in by_name
+    assert "dead_zone_unit" not in by_name
+    assert "naked_leg_at_expiry" not in by_name
+
+
+def test_jungle_king_group_membership_matches_manifest_sections():
+    """Preserve manifest grouping and cover exactly its 19 keys."""
+    body = client.get("/api/jungle-king").json()
+    groups = {g["key"]: [p["name"] for p in g["params"]] for g in body["groups"]}
+    assert groups["trading_knobs"] == [
+        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct", "exit_reversal",
+    ]
+    assert len(groups["exit_thresholds"]) == 6
+    assert all(n.startswith("exit_thresh_by_slug.") for n in groups["exit_thresholds"])
+    assert groups["structural_limits"] == ["max_pair_cost", "quote_range", "dead_zone_val"]
+    assert groups["execution_assumptions"] == ["taker_fee_rate", "merge_gas_usd", "tick_size", "min_quote_shares"]
+    assert sum(len(g["params"]) for g in body["groups"]) == 19
+
+
+_JK_MANIFEST = json.loads(
+    (Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "param_ranges.json")
+    .read_text(encoding="utf-8")
+)
+
+
+@pytest.mark.parametrize("contents", [
+    "{not-json",
+    "{}",
+    json.dumps({"offset": [0.02]}),
+    json.dumps({**_JK_MANIFEST, "offset": []}),
+    json.dumps({**_JK_MANIFEST, "offset": [0.02, "bad"]}),
+    json.dumps({**_JK_MANIFEST, "offset": [True]}),
+    json.dumps({**_JK_MANIFEST, "offset": [float("nan")]}),
+    json.dumps({**_JK_MANIFEST, "quote_range": [[0.1, "bad"]]}),
+    json.dumps({**_JK_MANIFEST, "quote_range": [[0.9, 0.1]]}),
+    json.dumps({**_JK_MANIFEST, "quote_range": [[-0.1, 0.9]]}),
+])
+def test_jungle_king_malformed_manifest_is_a_clean_error(tmp_path, monkeypatch, contents):
+    """Reject unreadable, incomplete, or non-numeric manifest shapes."""
+    from server import osc_dash
+    manifest = tmp_path / "param_ranges.json"
+    manifest.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(osc_dash, "JUNGLE_KING_MANIFEST", manifest)
+
+    response = client.get("/api/jungle-king")
+
+    assert response.status_code == 500
+    assert response.json()["detail"]
+
+
+def test_jungle_king_missing_manifest_is_not_found(tmp_path, monkeypatch):
+    """Return a not-found response when the source manifest is absent."""
+    from server import osc_dash
+    monkeypatch.setattr(osc_dash, "JUNGLE_KING_MANIFEST", tmp_path / "missing.json")
+
+    response = client.get("/api/jungle-king")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]
+
+
+def test_jungle_king_baseline_outside_candidates_is_kept(tmp_path, monkeypatch):
+    """Return the baseline separately when it is outside candidate values."""
+    from server import osc_dash
+    manifest = {**_JK_MANIFEST, "offset": [0.01, 0.03]}
+    manifest_path = tmp_path / "param_ranges.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(osc_dash, "JUNGLE_KING_MANIFEST", manifest_path)
+
+    response = client.get("/api/jungle-king")
+
+    assert response.status_code == 200
+    offset = next(
+        param
+        for group in response.json()["groups"]
+        for param in group["params"]
+        if param["name"] == "offset"
+    )
+    assert offset["baseline"] == 0.02
+    assert offset["baseline_in_values"] is False
+
+
+def test_jungle_king_endpoint_is_get_only_and_does_not_modify_manifest():
+    """Keep the manifest endpoint read-only and reject write methods."""
+    manifest_path = Path(__file__).resolve().parent.parent / "research" / "jungle-king" / "param_ranges.json"
+    before = manifest_path.read_bytes()
+
+    response = client.get("/api/jungle-king")
+    rejected_write = client.post("/api/jungle-king", json={"offset": [0.03]})
+
+    assert response.status_code == 200
+    assert rejected_write.status_code == 405
+    assert manifest_path.read_bytes() == before
+
+
+def test_jungle_king_panel_has_no_mutating_controls_or_requests():
+    """Keep the tab free of sweep, write, and execution controls."""
+    html = client.get("/").text
+    panel = re.search(r'<div id="tab-jungleking".*?(?=<!-- TAB 3:)', html, re.DOTALL)
+    loader = re.search(r"function loadJungleKing\(\)\s*\{(?P<body>.*?)\n\}", html, re.DOTALL)
+
+    assert panel is not None
+    assert loader is not None
+    assert not re.search(r"<(?:button|form|input)\b", panel.group(0), re.IGNORECASE)
+    assert "/api/backtest" not in loader.group(0)
+    assert "/api/collector/" not in loader.group(0)
+    assert "/api/live/" not in loader.group(0)
+
+
+# ── Jungle King tab skeleton (issue #319, TASK-2) ────────────────────────────
+
+def test_root_serves_jungle_king_tab_anchors():
+    """Serve the sidebar button, panel, and loader hook in the dashboard."""
+    html = client.get("/").text
+    assert "tab-btn-jungleking" in html
+    assert "tab-jungleking" in html
+    assert "loadJungleKing" in html
+    assert "Jungle King" in html
+
+
+# ── Jungle King presentation (issue #319, TASK-3) ────────────────────────────
+
+def test_jungle_king_render_js_present():
+    """Wire rendering and baseline indicators into the tab load path."""
+    html = client.get("/").text
+    assert "function loadJungleKing" in html
+    assert "function renderJungleKing" in html
+    assert "jkBaselineChip" in html
+    assert "jkBaselineMissing" in html
+    assert "fetch('/api/jungle-king')" in html
+
+
+def test_jungle_king_client_coalesces_pending_loads():
+    """Repeated tab opens share one pending fetch."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        raise RuntimeError("Node.js is required for the Jungle King client tests")
+    html = client.get("/").text
+    load_match = re.search(r"function loadJungleKing\(\)\s*\{(?P<body>.*?)\n\}", html, re.DOTALL)
+    assert load_match is not None
+    payload = json.dumps(client.get("/api/jungle-king").json())
+    expected_groups = len(client.get("/api/jungle-king").json()["groups"])
+    harness = f"""
+    const elements = {{ jkGroups: {{ innerHTML: '' }}, jkNotice: {{style: {{}}}} }};
+    const $ = (id) => elements[id] || null;
+    const window = {{}};
+    function renderJungleKing(data) {{ elements.jkGroups.innerHTML = String(data.groups.length); }}
+    let JK_DATA = null;
+    let JK_LOAD_PROMISE = null;
+    let resolveFetch;
+    let fetchCount = 0;
+    globalThis.fetch = () => {{ fetchCount += 1; return new Promise(resolve => {{ resolveFetch = resolve; }}); }};
+    {load_match.group(0)}
+    const first = loadJungleKing();
+    const second = loadJungleKing();
+    if (first !== second || fetchCount !== 1) throw new Error('pending calls were not coalesced');
+    resolveFetch({{ok:true, json:async()=>({payload})}});
+    Promise.all([first, second]).then(() => {{
+      if (elements.jkGroups.innerHTML !== '{expected_groups}') throw new Error('successful load was not rendered');
+      console.log('JK_LOAD_OK');
+    }}).catch(err => {{ console.error(err); process.exitCode = 1; }});
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
+    assert "JK_LOAD_OK" in result.stdout
+
+
+def test_jungle_king_retries_after_failed_fetch():
+    """An error is shown and a later open retries the failed request."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        raise RuntimeError("Node.js is required for the Jungle King client tests")
+    html = client.get("/").text
+    load_match = re.search(r"function loadJungleKing\(\)\s*\{(?P<body>.*?)\n\}", html, re.DOTALL)
+    assert load_match is not None
+    harness = f"""
+    const elements = {{ jkGroups: {{ innerHTML: 'stale' }}, jkNotice: {{style: {{}}, textContent: ''}} }};
+    const $ = (id) => elements[id] || null;
+    const window = {{}};
+    function renderJungleKing(data) {{ elements.jkGroups.innerHTML = String(data.groups.length); }}
+    let JK_DATA = null;
+    let JK_LOAD_PROMISE = null;
+    let fetchCount = 0;
+    globalThis.fetch = async () => {{
+      fetchCount += 1;
+      if (fetchCount === 1) return {{ok:false, status:500, json:async()=>({{detail:'corrupt manifest'}})}};
+      return {{ok:true, json:async()=>({{groups:[]}})}};
+    }};
+    {load_match.group(0)}
+    (async()=>{{
+      await loadJungleKing();
+      if (elements.jkGroups.innerHTML !== '' || !elements.jkNotice.textContent.includes('corrupt manifest')) throw new Error('failure state was not reported');
+      await loadJungleKing();
+      if (fetchCount !== 2 || JK_DATA === null || elements.jkGroups.innerHTML !== '0') throw new Error('later open did not retry');
+      console.log('JK_RETRY_OK');
+    }})().catch(err=>{{console.error(err);process.exitCode=1;}});
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
+    assert "JK_RETRY_OK" in result.stdout
+
+
+def test_jungle_king_render_node():
+    """Render the real API payload through the page's renderer."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        raise RuntimeError("Node.js is required for the Jungle King client tests")
+    html = client.get("/").text
+    helpers = re.search(r"function jkEsc\(s\)\s*\{.*?(?=\nlet isCollectorActive)", html, re.DOTALL)
+    assert helpers is not None
+    payload = json.dumps(client.get("/api/jungle-king").json())
+    harness = f"""
+    const elements = {{ jkGroups: {{ innerHTML: '' }}, jkNotice: {{style: {{}}}} }};
+    const $ = (id) => elements[id] || null;
+    const window = {{}};
+    {helpers.group(0)}
+    const payload = {payload};
+    renderJungleKing({{groups: []}});
+    if (!elements.jkGroups.innerHTML.includes('No parameters')) throw new Error('missing empty-state notice');
+    renderJungleKing(payload);
+    const html = elements.jkGroups.innerHTML;
+    const result = {{
+      groupCards: (html.match(/class=\"card jk-group/g) || []).length,
+      parameterCards: (html.match(/class=\"jk-param\"/g) || []).length,
+      baselineChips: (html.match(/jkBaselineChip/g) || []).length,
+      baselineLabels: (html.match(/class=\"jk-chip-baseline-tag\"/g) || []).length,
+      tuningBadges: (html.match(/TUNING KNOB/g) || []).length,
+      structuralBadges: (html.match(/STRUCTURAL LIMIT/g) || []).length,
+      assumptionBadges: (html.match(/EXECUTION ASSUMPTION/g) || []).length
+    }};
+    const outside = JSON.parse(JSON.stringify(payload));
+    outside.groups[0].params[0].baseline_in_values = false;
+    outside.groups[0].params[0].values = [0.01, 0.03];
+    renderJungleKing(outside);
+    result.missingBaselineMarkers = (elements.jkGroups.innerHTML.match(/jkBaselineMissing/g) || []).length;
+    result.outsideRangeBaselineChips = (elements.jkGroups.innerHTML.match(/jkBaselineChip/g) || []).length;
+    result.outsideRangeBaselineLabels = (elements.jkGroups.innerHTML.match(/class=\"jk-chip-baseline-tag\"/g) || []).length;
+    console.log(JSON.stringify(result));
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
+    rendered = json.loads(result.stdout.strip())
+    assert rendered["groupCards"] == 4
+    assert rendered["parameterCards"] == 19
+    assert rendered["baselineChips"] == 19
+    assert rendered["baselineLabels"] == 19
+    assert rendered["tuningBadges"] > 0
+    assert rendered["structuralBadges"] > 0
+    assert rendered["assumptionBadges"] > 0
+    assert rendered["missingBaselineMarkers"] == 1
+    assert rendered["outsideRangeBaselineChips"] == 18
+    assert rendered["outsideRangeBaselineLabels"] == 18
