@@ -32,15 +32,18 @@ cancellation, and which balance is shown.
 
 This is why "live" is not a name for the engine, and why the mode's own name is **real money**.
 
-## The five tabs
+## The six tabs
 
 | Name | `switchTab()` | Label on screen |
 |---|---|---|
 | **the trading platform** | `cockpit` | Trading Platform |
 | **the market data tab** | `marketdata` | Collector's Market Data |
 | **the backtest tab** | `backtest` | Backtest Sweeper |
+| **the Jungle King tab** | `jungleking` | Jungle King |
 | **the summary tab** | `summary` | Stats Summary |
 | **the files tab** | `ticks` | Tick Files |
+
+The Jungle King tab is a read-only view of the OFAT parameter manifest; it does not start a sweep.
 
 The trading platform is the trading engine's **display**, not the engine. The engine keeps
 running with the tab closed.

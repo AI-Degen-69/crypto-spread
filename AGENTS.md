@@ -5,7 +5,7 @@ Independent lab for 5m/15m SPREAD-2 capture on BTC/ETH/BNB/SOL/XRP.
 ## Naming
 
 `docs/glossary.md` is the agreed name for every entity here — the two engines, the two execution
-modes, the five dashboard tabs, the data artifacts, and the terms that have already caused bugs
+modes, the six dashboard tabs, the data artifacts, and the terms that have already caused bugs
 (`mid` vs the recorded one-sided `"mid"` field, tuning knob vs structural limit). Read it before
 naming anything in a comment, a commit message or a chat reply. Where it disagrees with an older
 code comment, the glossary wins.

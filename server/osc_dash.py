@@ -1,10 +1,9 @@
 """Oscillation & Backtest Lab dashboard for 5m/15m crypto spread capture.
 
-Unified 4-tab SPA:
-- Tab 1: Collector market data & recent closed windows
-- Tab 2: Backtest Simulator Sweeper with Equity Curve
-- Tab 3: Statistical Analysis & Distributions
-- Tab 4: Ticks File Repository & Ingestion Manager
+Unified dashboard SPA tabs:
+- Trading Platform and Collector's Market Data
+- Backtest Sweeper and Jungle King
+- Stats Summary and Tick Files
 
 Serves on :5515 (canonical port lives in server/ports.py)
 """
@@ -1041,14 +1040,14 @@ def api_params_spec():
 # hand-written label copy in the client, no mutation path.
 
 JUNGLE_KING_MANIFEST = ROOT / "research" / "jungle-king" / "param_ranges.json"
-JUNGLE_KING_README = ROOT / "research" / "jungle-king" / "README.md"
 
-# Manifest baselines mirror the operator-replicable CLI defaults
-# (scripts/backtest.py), not the engine defaults — provenance guard in
-# SPEC-319.md: documenting the difference, not "fixing" it.
+# Baselines come from the research README checklist. queue_gate and
+# quote_shares mirror the operator-replicable CLI defaults, not the engine
+# defaults; entry_delay_pct is 0.0 in the README while the engine default is
+# None (off). SPEC-319.md locks this provenance — do not "correct" it.
 #   queue_gate: CLI --queue 50 vs engine 0 (disabled)
 #   quote_shares: CLI --size 120 vs engine 5
-#   entry_delay_pct: manifest baseline 0.0 vs engine default None (off)
+#   entry_delay_pct: README baseline 0.0 vs engine default None (off)
 _JUNGLE_KING_BASELINE_OVERRIDES: dict[str, float] = {
     "queue_gate": 50.0,
     "quote_shares": 120,
@@ -1074,8 +1073,6 @@ _JUNGLE_KING_GROUPS: list[tuple[str, str, tuple[str, ...]]] = [
     )),
 ]
 
-_JK_ASSET_LABELS = {"btc": "BTC", "eth": "ETH", "bnb": "BNB", "sol": "SOL", "xrp": "XRP"}
-
 
 def _jk_reg_entry(registry: dict, name: str) -> dict | None:
     """Registry entry for a manifest key; per-slug exits inherit the parent."""
@@ -1095,17 +1092,13 @@ def _jk_label(name: str, entry: dict | None) -> str:
         slug = name.split(".", 1)[1]
         m = re.match(r"([a-z]{3})-up-or-down-(\d+m)$", slug)
         if m:
-            return f"Exit Stop Loss — {_JK_ASSET_LABELS.get(m.group(1), m.group(1).upper())} {m.group(2)}"
+            return f"Exit Stop Loss — {m.group(1).upper()} {m.group(2)}"
         return f"Exit Stop Loss — {slug}"
     return entry["label"]
 
 
-def _jk_baseline(name: str, values: list, entry: dict | None) -> float | None:
-    """The manifest's baseline: the registry default as it appears in values.
-
-    Returns the matched value (so `baseline` is always one of `values`) or
-    None when the default is absent from the manifest's candidate list.
-    """
+def _jk_baseline(name: str, entry: dict | None) -> Any:
+    """Return the baseline even when it is outside the candidate range."""
     if name in _JUNGLE_KING_BASELINE_OVERRIDES:
         return _JUNGLE_KING_BASELINE_OVERRIDES[name]
     if entry is None:
@@ -1113,13 +1106,31 @@ def _jk_baseline(name: str, values: list, entry: dict | None) -> float | None:
     default = entry["default"]
     if name.startswith("exit_thresh_by_slug."):
         default = default.get(name.split(".", 1)[1]) if isinstance(default, dict) else None
-    if default is None:
-        return None
-    if isinstance(default, (tuple, list)):
-        hits = [v for v in values if isinstance(v, list) and list(v) == list(default)]
-    else:
-        hits = [v for v in values if v == default]
-    return hits[0] if hits else None
+    if isinstance(default, tuple):
+        return list(default)
+    return default
+
+
+def _jk_is_finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _jk_is_valid_candidate(name: str, value: Any) -> bool:
+    if name != "quote_range":
+        return _jk_is_finite_number(value)
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not all(_jk_is_finite_number(bound) for bound in value)
+    ):
+        return False
+    low, high = value
+    return 0.0 <= low < high <= 1.0
 
 
 @app.get("/api/jungle-king")
@@ -1135,9 +1146,22 @@ def api_jungle_king():
     try:
         raw = json.loads(JUNGLE_KING_MANIFEST.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=f"Jungle King manifest unreadable: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Jungle King manifest is unreadable or malformed",
+        ) from exc
+    except RecursionError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Jungle King manifest is malformed",
+        ) from exc
     if not isinstance(raw, dict) or not raw:
         raise HTTPException(status_code=500, detail="Jungle King manifest malformed (expected a non-empty object)")
+
+    expected_names = {name for _, _, names in _JUNGLE_KING_GROUPS for name in names}
+    missing = sorted(expected_names - raw.keys())
+    if missing:
+        raise HTTPException(status_code=500, detail=f"Jungle King manifest parameters missing: {missing}")
 
     from backtest.engine import BacktestParams
     registry = BacktestParams.param_spec()
@@ -1150,17 +1174,34 @@ def api_jungle_king():
                 continue
             placed.add(name)
             values = raw[name]
+            if not isinstance(values, list) or not values or any(
+                not _jk_is_valid_candidate(name, value) for value in values
+            ):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Jungle King parameter {name!r} must have a non-empty list of finite numbers or valid ranges",
+                )
             entry = _jk_reg_entry(registry, name)
-            baseline = _jk_baseline(name, values, entry)
+            if entry is None or entry.get("param_class") not in {"tuning", "structural", "assumption"}:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Jungle King parameter {name!r} is missing a valid registry classification",
+                )
+            baseline = _jk_baseline(name, entry)
+            if baseline is None or not _jk_is_valid_candidate(name, baseline):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Jungle King parameter {name!r} has no valid baseline",
+                )
             params.append({
                 "name": name,
                 "label": _jk_label(name, entry),
-                "unit": entry["unit"] if entry else None,
-                "param_class": entry["param_class"] if entry else "tuning",
+                "unit": entry["unit"],
+                "param_class": entry["param_class"],
                 "baseline": baseline,
                 "values": values,
                 "baseline_in_values": baseline in values if baseline is not None else False,
-                "registry": None if entry is None else {
+                "registry": {
                     "label": entry["label"], "why": entry["why"],
                     "default": entry["default"], "bounds": entry["bounds"],
                 },
@@ -1169,11 +1210,7 @@ def api_jungle_king():
     missing = sorted(n for n in raw if n not in placed)
     if missing:
         raise HTTPException(status_code=500, detail=f"Jungle King manifest keys not mapped to a group: {missing}")
-    return {
-        "groups": groups,
-        "source": "research/jungle-king/param_ranges.json",
-        "generated_from": "research/jungle-king/README.md + BacktestParams.param_spec()",
-    }
+    return {"groups": groups}
 
 
 def _clamp_to_spec(name: str, value: Any) -> Any:
@@ -3209,7 +3246,7 @@ textarea:focus-visible,
 .tab-content.active{display:block}
 /* Jungle King tab (issue #319) */
 .jk-group-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:10px}
-.jk-group-title{font:700 13px var(--disp);color:var(--tx);letter-spacing:.02em}
+.jk-group-title{font:700 13px var(--disp);color:var(--tx);letter-spacing:.02em;margin:0}
 .jk-group-count{font:600 10px var(--mono);color:var(--faint)}
 .jk-param{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--panel2)}
 .jk-param-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
@@ -3224,6 +3261,8 @@ textarea:focus-visible,
 .jk-chips{display:flex;flex-wrap:wrap;gap:4px}
 .jk-chip{font:500 10.5px var(--mono);padding:2px 7px;border-radius:5px;border:1px solid var(--line-hi);color:var(--dim);background:var(--panel)}
 .jk-chip.jkBaselineChip{color:#0a0d12;background:var(--up);border-color:var(--up);font-weight:700}
+.jk-chip-baseline-tag{margin-left:5px;font-size:8px;letter-spacing:.04em;white-space:nowrap}
+.jk-chip.jkBaselineMissing{color:var(--gold);border-color:var(--gold);background:rgba(232,184,75,.12);font-weight:700}
 .toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 .toggle-switch{position:relative;display:inline-block;width:34px;height:18px}
 .toggle-switch input{opacity:0;width:0;height:0}
@@ -3376,9 +3415,9 @@ textarea:focus-visible,
       </span>
       <span class="nav-label">Backtest Sweeper</span>
     </button>
-    <button class="sidebar-tab-btn" id="tab-btn-jungleking" onclick="switchTab('jungleking')" title="Jungle King — OFAT Parameter Manifest">
+    <button class="sidebar-tab-btn" id="tab-btn-jungleking" onclick="switchTab('jungleking')" title="Jungle King — OFAT Manifest" aria-label="Jungle King">
       <span class="nav-icon">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M3 17l2-9 5 5 2-7 2 7 5-5 2 9"></path>
           <line x1="3" y1="20" x2="21" y2="20"></line>
         </svg>
@@ -3791,16 +3830,16 @@ textarea:focus-visible,
   </div>
 
   <!-- TAB: JUNGLE KING — OFAT manifest quick reference (issue #319, read-only) -->
-  <div id="tab-jungleking" class="tab-content">
+  <div id="tab-jungleking" class="tab-content" aria-labelledby="tab-btn-jungleking">
     <div class="card" style="border-top:2px solid var(--proj)">
-      <h3>Jungle King — OFAT Parameter Manifest</h3>
+      <h3>Jungle King — OFAT Manifest</h3>
       <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
         One-Factor-at-a-Time candidate ranges over the golden dataset: vary one
         parameter across its range while every other stays at its baseline.
-        This is a read-only quick reference — runs live in the Backtest Sweeper.
+        This is a read-only quick reference; start sweeps from the Backtest Sweeper.
       </div>
     </div>
-    <div id="jkNotice" class="card" style="display:none;border-top:2px solid var(--down);color:var(--down);font-size:12.5px;line-height:1.6"></div>
+    <div id="jkNotice" class="card" role="status" aria-live="polite" style="display:none;border-top:2px solid var(--down);color:var(--down);font-size:12.5px;line-height:1.6"></div>
     <div id="jkGroups"></div>
   </div>
 
@@ -5047,28 +5086,52 @@ function switchTab(name){
 
 // ── Jungle King tab (issue #319) ──────────────────────────────────────────
 // Read-only quick reference over /api/jungle-king. One fetch, cached for the
-// session; the manifest is static research data, not a live feed.
+// session; the manifest is static research data, not a stream.
 let JK_DATA = null;
+let JK_LOAD_PROMISE = null;
 
-async function loadJungleKing(){
-  if(JK_DATA){ renderJungleKing(JK_DATA); return; }
-  try{
-    const res = await fetch('/api/jungle-king');
-    if(!res.ok){
-      let detail = 'HTTP ' + res.status;
-      try{ detail = (await res.json()).detail || detail; }catch(e){}
-      throw new Error(detail);
+function loadJungleKing(){
+  if(JK_DATA){ renderJungleKing(JK_DATA); return Promise.resolve(); }
+  if(JK_LOAD_PROMISE) return JK_LOAD_PROMISE;
+  JK_LOAD_PROMISE = (async function(){
+    let data;
+    try{
+      const res = await fetch('/api/jungle-king');
+      if(!res.ok){
+        let detail = 'HTTP ' + res.status;
+        try{ detail = (await res.json()).detail || detail; }
+        catch(e){ detail += ' (the server returned an unreadable error message)'; }
+        throw new Error(detail);
+      }
+      data = await res.json();
+    }catch(err){
+      JK_DATA = null;
+      const n = $('jkNotice');
+      const groups = $('jkGroups');
+      if(groups) groups.innerHTML = '';
+      if(n){
+        n.style.display = 'block';
+        n.textContent = 'Jungle King manifest unavailable (' + err.message + '). Check research/jungle-king/param_ranges.json.';
+      }
+      return;
     }
-    JK_DATA = await res.json();
-    renderJungleKing(JK_DATA);
-  }catch(err){
-    JK_DATA = null;
-    const n = $('jkNotice');
-    if(n){
-      n.style.display = 'block';
-      n.textContent = 'Jungle King manifest unavailable (' + err.message + '). Check research/jungle-king/param_ranges.json.';
+
+    JK_DATA = data;
+    try{
+      renderJungleKing(JK_DATA);
+    }catch(err){
+      JK_DATA = null;
+      const n = $('jkNotice');
+      const groups = $('jkGroups');
+      if(groups) groups.innerHTML = '';
+      if(n){
+        n.style.display = 'block';
+        n.textContent = 'Jungle King data loaded but could not be displayed. Reload the dashboard and try again.';
+      }
+      console.error('Jungle King renderer failed:', err);
     }
-  }
+  })().finally(function(){ JK_LOAD_PROMISE = null; });
+  return JK_LOAD_PROMISE;
 }
 
 function jkEsc(s){
@@ -5103,16 +5166,16 @@ function renderJungleKing(data){
   const notice = $('jkNotice');
   if(notice) notice.style.display = 'none';
   const groups = data.groups || [];
-  let params = 0, baselineChips = 0;
+  let params = 0;
   let html = '';
   groups.forEach(function(g){
     const ps = g.params || [];
     params += ps.length;
     html += '<div class="card jk-group" style="margin-top:12px">'
-         +  '<div class="jk-group-head"><span class="jk-group-title">' + jkEsc(g.title || g.key) + '</span>'
-         +  '<span class="jk-group-count">' + ps.length + ' parameters</span></div>';
+         +  '<div class="jk-group-head"><h4 class="jk-group-title">' + jkEsc(g.title || g.key) + '</h4>'
+         +  '<span class="jk-group-count">' + ps.length + ' items</span></div>';
     ps.forEach(function(p){
-      const badge = JK_CLASS_BADGES[p.param_class] || JK_CLASS_BADGES.tuning;
+      const badge = JK_CLASS_BADGES[p.param_class] || {cls:'', label:'UNKNOWN CLASS'};
       const why = p.registry && p.registry.why ? p.registry.why : '';
       html += '<div class="jk-param">'
            +  '<div class="jk-param-head">'
@@ -5122,22 +5185,23 @@ function renderJungleKing(data){
            +  '<div class="jk-baseline"><span class="jk-baseline-lbl">BASELINE</span>'
            +  '<span class="jk-baseline-val">' + (p.baseline === null || p.baseline === undefined ? '—' : jkFmt(p.baseline)) + '</span></div>'
            +  '<div class="jk-chips">';
+      if(p.baseline_in_values === false){
+        html += '<span class="jk-chip jkBaselineMissing" title="Baseline is outside the candidate range">BASELINE OUTSIDE RANGE</span>';
+      }
       (p.values || []).forEach(function(v){
         const isBase = jkIsBaseline(v, p.baseline);
-        if(isBase) baselineChips++;
-        html += '<span class="jk-chip' + (isBase ? ' jkBaselineChip' : '') + '">' + jkFmt(v) + '</span>';
+        html += '<span class="jk-chip' + (isBase ? ' jkBaselineChip' : '') + '">' + jkFmt(v)
+             + (isBase ? '<span class="jk-chip-baseline-tag">BASELINE</span>' : '') + '</span>';
       });
       html += '</div></div>';
     });
     html += '</div>';
   });
   if(params === 0){
-    wrap.innerHTML = '<div class="card" style="color:var(--dim);margin-top:12px">No parameters in the Jungle King manifest.</div>';
+    wrap.innerHTML = '<div class="card" role="status" style="color:var(--dim);margin-top:12px">No parameters in the Jungle King manifest.</div>';
   } else {
     wrap.innerHTML = html;
   }
-  // Render stats for tests; harmless in the browser.
-  window.__jkRenderStats = {groups: groups.length, params: params, baselineChips: baselineChips};
 }
 
 let isCollectorActive = false;
@@ -9298,7 +9362,7 @@ def favicon():
 @app.get("/summary", response_class=HTMLResponse)
 @app.get("/analysis", response_class=HTMLResponse)
 def root_spa_page():
-    """Serve the complete unified 4-tab SPA interface."""
+    """Serve the complete unified dashboard SPA interface."""
     return HTMLResponse(FULL_APP_HTML, headers={"Cache-Control": "no-cache"})
 
 
