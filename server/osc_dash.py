@@ -1112,6 +1112,7 @@ def _jk_baseline(name: str, entry: dict | None) -> Any:
 
 
 def _jk_is_finite_number(value: Any) -> bool:
+    """Return whether a non-boolean integer or float is finite."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     try:
@@ -1121,6 +1122,7 @@ def _jk_is_finite_number(value: Any) -> bool:
 
 
 def _jk_is_valid_candidate(name: str, value: Any) -> bool:
+    """Validate a scalar candidate or a bounded two-value quote range."""
     if name != "quote_range":
         return _jk_is_finite_number(value)
     if (
@@ -3260,7 +3262,7 @@ textarea:focus-visible,
 .jk-baseline-val{font:700 15px var(--mono);color:var(--cyan)}
 .jk-chips{display:flex;flex-wrap:wrap;gap:4px}
 .jk-chip{font:500 10.5px var(--mono);padding:2px 7px;border-radius:5px;border:1px solid var(--line-hi);color:var(--dim);background:var(--panel)}
-.jk-chip.jkBaselineChip{color:#0a0d12;background:var(--up);border-color:var(--up);font-weight:700}
+.jk-chip.jkBaselineChip{color:var(--bg);background:var(--up);border-color:var(--up);font-weight:700}
 .jk-chip-baseline-tag{margin-left:5px;font-size:8px;letter-spacing:.04em;white-space:nowrap}
 .jk-chip.jkBaselineMissing{color:var(--gold);border-color:var(--gold);background:rgba(232,184,75,.12);font-weight:700}
 .toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
