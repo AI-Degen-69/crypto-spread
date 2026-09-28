@@ -186,9 +186,9 @@ def test_sweep_visual_options_zero_reference_line():
     """Issue #332: sweepChartOptions contains y-grid callbacks testing tick.value === 0."""
     assert "maintainAspectRatio: !!detail" in FULL_APP_HTML
     assert "ctx.tick && ctx.tick.value === 0" in FULL_APP_HTML
-    assert 'height="90"' in FULL_APP_HTML
-    assert "cv.height = 70;" in FULL_APP_HTML
-    assert "minmax(160px,1fr)" in FULL_APP_HTML
+    assert 'height="120"' in FULL_APP_HTML
+    assert "cv.height = 95;" in FULL_APP_HTML
+    assert "minmax(220px,1fr)" in FULL_APP_HTML
 
 
 @requires_node

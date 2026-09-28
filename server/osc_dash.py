@@ -4194,7 +4194,7 @@ textarea:focus-visible,
           <h4 style="margin:0;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
           <span id="btEquityWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run. Check tape data density for this dataset.</span>
         </div>
-        <canvas id="chartEquity" height="100"></canvas>
+        <canvas id="chartEquity" height="120"></canvas>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px">
@@ -4204,7 +4204,7 @@ textarea:focus-visible,
             <span id="btPnlHistWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run.</span>
           </div>
         </div>
-        <canvas id="chartPnlHist" height="100"></canvas>
+        <canvas id="chartPnlHist" height="120"></canvas>
       </div>
       </div>
       </div>
@@ -4234,9 +4234,9 @@ textarea:focus-visible,
       <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}</style>
       <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px">
         <h4 style="margin:0 0 4px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
-        <div style="position:relative;height:90px"><canvas id="chartSweepAgg" height="90"></canvas></div>
+        <div style="position:relative;height:120px"><canvas id="chartSweepAgg" height="120"></canvas></div>
       </div>
-      <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px"></div>
+      <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px"></div>
       </div>
       </div>
     </div>
@@ -6339,11 +6339,36 @@ async function runBacktest(fileOverride){
       }
     }
 
+    const minPnl = pnlValues.length ? Math.min(...pnlValues) : 0;
+    const maxPnl = pnlValues.length ? Math.max(...pnlValues) : 0;
+    const pnlSpan = Math.max(Math.abs(maxPnl - minPnl), Math.abs(maxPnl) * 0.15, 0.5);
+    const pnlPad = Math.max(pnlSpan * 0.20, 0.35);
+
     destroyChartInstance('chartEquity');
     const ctx = $('chartEquity').getContext('2d');
     const theme = getThemeTokens();
     equityChartInstance = new Chart(ctx, {
       type: 'line',
+      plugins: [{
+        id: 'equityZeroLine',
+        afterDraw: function(chart) {
+          const yScale = chart.scales.y;
+          if (!yScale) return;
+          const y0 = yScale.getPixelForValue(0);
+          if (y0 >= chart.chartArea.top && y0 <= chart.chartArea.bottom) {
+            const c = chart.ctx;
+            c.save();
+            c.beginPath();
+            c.setLineDash([6, 4]);
+            c.strokeStyle = theme.gold;
+            c.lineWidth = 1.5;
+            c.moveTo(chart.chartArea.left, y0);
+            c.lineTo(chart.chartArea.right, y0);
+            c.stroke();
+            c.restore();
+          }
+        }
+      }],
       data: {
         labels: labels,
         datasets: [{
@@ -6358,20 +6383,31 @@ async function runBacktest(fileOverride){
       },
       options: {
         responsive: true,
+        layout: {
+          padding: { left: 8, right: 14, top: 14, bottom: 10 }
+        },
         plugins: { legend: { display: false } },
         scales: {
           x: {
+            offset: true,
             title: { display: true, text: 'Window', color: theme.dim },
             ticks: { color: theme.dim, maxTicksLimit: 12 },
             grid: { color: theme.line }
           },
           y: {
+            grace: '18%',
+            suggestedMax: Math.max(0, maxPnl) + pnlPad,
+            suggestedMin: Math.min(0, minPnl) - pnlPad,
             title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
             ticks: {
               color: theme.dim,
               callback: function(v){ return '$' + Number(v).toFixed(2); }
             },
-            grid: { color: theme.line }
+            grid: {
+              color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+              lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+              borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
+            }
           }
         }
       }
@@ -6399,13 +6435,17 @@ async function runBacktest(fileOverride){
     destroyChartInstance('chartPnlHist');
     if ($('chartPnlHist')) {
       const histCtx = $('chartPnlHist').getContext('2d');
-      const histLabels = histBuckets.map(b => {
-        const loSign = b.lo < 0 ? '-$' : '$';
-        const hiSign = b.hi < 0 ? '-$' : '$';
-        const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
-        const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
-        return `${loStr}..${hiStr}`;
-      });
+      const minEdge = histBuckets.length ? (histBuckets[0].lo / 100) : 0;
+      const maxEdge = histBuckets.length ? (histBuckets[histBuckets.length - 1].hi / 100) : 1;
+      const dataPoints = histBuckets.map(b => ({
+        x: (b.lo + b.hi) / 200,
+        y: b.count
+      }));
+      const allEdges = [];
+      for (let i = 0; i <= histBuckets.length; i++) {
+        const val = i === histBuckets.length ? histBuckets[i - 1].hi / 100 : histBuckets[i].lo / 100;
+        allEdges.push(Math.round(val * 100) / 100);
+      }
       const histCounts = histBuckets.map(b => b.count);
       const histBgColors = histBuckets.map(b => {
         if (b.hi <= 0) return hexToRgba(theme.down, 0.7);
@@ -6418,21 +6458,47 @@ async function runBacktest(fileOverride){
         return theme.dim;
       });
 
+      const maxHistCount = histCounts.length ? Math.max(...histCounts) : 0;
+      const histYPad = Math.max(1, Math.ceil(maxHistCount * 0.25));
+
       pnlHistChartInstance = new Chart(histCtx, {
         type: 'bar',
+        plugins: [{
+          id: 'pnlHistZeroLine',
+          afterDraw: function(chart) {
+            const xScale = chart.scales.x;
+            if (!xScale) return;
+            const x0 = xScale.getPixelForValue(0);
+            if (x0 >= chart.chartArea.left && x0 <= chart.chartArea.right) {
+              const c = chart.ctx;
+              c.save();
+              c.beginPath();
+              c.setLineDash([6, 4]);
+              c.strokeStyle = theme.gold;
+              c.lineWidth = 2;
+              c.moveTo(x0, chart.chartArea.top);
+              c.lineTo(x0, chart.chartArea.bottom);
+              c.stroke();
+              c.restore();
+            }
+          }
+        }],
         data: {
-          labels: histLabels,
           datasets: [{
             label: 'Windows',
-            data: histCounts,
+            data: dataPoints,
             backgroundColor: histBgColors,
             borderColor: histBorderColors,
             borderWidth: 1,
-            borderRadius: 3,
+            barPercentage: 1.0,
+            categoryPercentage: 1.0,
           }]
         },
         options: {
           responsive: true,
+          layout: {
+            padding: { left: 8, right: 14, top: 14, bottom: 8 }
+          },
           plugins: {
             legend: { display: false },
             tooltip: {
@@ -6440,7 +6506,7 @@ async function runBacktest(fileOverride){
                 title: function(items) {
                   if (!items.length) return '';
                   const b = histBuckets[items[0].dataIndex];
-                  if (!b) return items[0].label;
+                  if (!b) return '';
                   const loSign = b.lo < 0 ? '-$' : '$';
                   const hiSign = b.hi < 0 ? '-$' : '$';
                   const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
@@ -6456,15 +6522,49 @@ async function runBacktest(fileOverride){
           },
           scales: {
             x: {
-              title: { display: true, text: 'P&L Range ($)', color: theme.dim },
-              ticks: { color: theme.dim, maxRotation: 45, minRotation: 0, autoSkip: true, maxTicksLimit: 14 },
-              grid: { color: theme.line }
+              type: 'linear',
+              offset: false,
+              min: minEdge,
+              max: maxEdge,
+              afterBuildTicks: function(scale) {
+                let chosen = allEdges;
+                if (allEdges.length > 14) {
+                  const stride = Math.ceil(allEdges.length / 10);
+                  chosen = allEdges.filter((v, idx) => idx % stride === 0 || Math.abs(v) < 0.001 || idx === allEdges.length - 1);
+                }
+                scale.ticks = chosen.map(v => ({ value: v }));
+              },
+              title: { display: true, text: 'Window P&L ($)', color: theme.dim },
+              ticks: {
+                color: theme.dim,
+                maxRotation: 45,
+                minRotation: 0,
+                autoSkip: false,
+                callback: function(v) {
+                  const num = Number(v);
+                  return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
+                }
+              },
+              grid: {
+                offset: false,
+                color: function(ctx) {
+                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? theme.gold : theme.line;
+                },
+                lineWidth: function(ctx) {
+                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? 2 : 1;
+                },
+                borderDash: function(ctx) {
+                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? [6, 4] : [];
+                }
+              }
             },
             y: {
+              beginAtZero: true,
+              grace: 1,
+              suggestedMax: maxHistCount + histYPad,
               title: { display: true, text: 'Windows Count', color: theme.dim },
               ticks: { color: theme.dim, precision: 0 },
-              grid: { color: theme.line },
-              beginAtZero: true
+              grid: { color: theme.line }
             }
           }
         }
@@ -6718,7 +6818,50 @@ function sweepAxisLabel(axis){
   })[axis] || axis;
 }
 
-function sweepChartOptions(data, detail){
+function formatSweepTickValue(axis, val){
+  const num = Number(val);
+  if (!Number.isFinite(num)) return String(val);
+  if (axis === 'queue') {
+    return Math.round(num).toString();
+  }
+  if (axis === 'offset' || axis === 'exit_rev') {
+    const cents = num * 100;
+    const rounded = Number(cents.toFixed(2));
+    return `${rounded}¢`;
+  }
+  if (axis === 'exit_stop') {
+    const cents = num * 100;
+    const rounded = Number(cents.toFixed(1));
+    return `${rounded}¢`;
+  }
+  return Number.isInteger(num) ? String(num) : num.toFixed(3);
+}
+
+function sweepZeroLinePlugin(){
+  return {
+    id: 'sweepZeroLine',
+    afterDraw: function(chart) {
+      const yScale = chart.scales.y;
+      if (!yScale) return;
+      const y0 = yScale.getPixelForValue(0);
+      if (y0 >= chart.chartArea.top && y0 <= chart.chartArea.bottom) {
+        const c = chart.ctx;
+        const theme = (typeof getThemeTokens === 'function') ? getThemeTokens() : {};
+        c.save();
+        c.beginPath();
+        c.setLineDash([6, 4]);
+        c.strokeStyle = theme.gold;
+        c.lineWidth = 1.5;
+        c.moveTo(chart.chartArea.left, y0);
+        c.lineTo(chart.chartArea.right, y0);
+        c.stroke();
+        c.restore();
+      }
+    }
+  };
+}
+
+function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];
   const labels = points.map(p => p.label);
@@ -6726,39 +6869,56 @@ function sweepChartOptions(data, detail){
   const axisLabel = sweepAxisLabel(data.axis);
   const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
   const maxTicks = detail ? Math.min(14, xVals.length) : Math.min(4, xVals.length);
-  // Small cards name the axis once in the btSweepMeta line, so the per-card
-  // axis title is redundant and only collides with rotated ticks. Cards also
-  // show compact value-only ticks; the full "axis=value" label lives in the
-  // tooltip and in the expanded dialog.
-  const integerAxis = xVals.every(n => Number.isInteger(n));
-  const compactTick = num => integerAxis ? String(num) : num.toFixed(3);
   return {
     responsive: true,
     maintainAspectRatio: !!detail,
     parsing: false,
+    layout: {
+      padding: { left: detail ? 8 : (isAgg ? 6 : 4), right: detail ? 12 : (isAgg ? 8 : 6), top: 12, bottom: 8 }
+    },
     plugins: {
       legend: { display: false },
-      tooltip: { callbacks: { title: function(items){ return labels[items[0].dataIndex] || ''; } } }
+      tooltip: {
+        callbacks: {
+          title: function(items){
+            if (!items.length) return '';
+            const p = points[items[0].dataIndex];
+            if (!p) return '';
+            return `${axisLabel}: ${formatSweepTickValue(data.axis, p.value)}`;
+          }
+        }
+      }
     },
     scales: {
       x: {
-        type: 'linear', offset: false,
+        type: 'linear', offset: true,
         afterBuildTicks: function(scale){
           const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));
           scale.ticks = xVals.filter((value, index) => index % step === 0 || index === xVals.length - 1)
-            .map((value, index) => ({ value: value, label: xTickLabels.get(value) }));
+            .map((value, index) => ({ value: value, label: formatSweepTickValue(data.axis, value) }));
         },
         title: { display: !!detail, text: axisLabel, color: theme.dim },
-        ticks: { autoSkip: false, color: theme.dim, maxTicksLimit: maxTicks, maxRotation: detail ? 35 : 55, minRotation: detail ? 0 : 35, callback: function(v){ const num = Number(v); return detail ? (xTickLabels.get(num) || String(num)) : compactTick(num); } },
+        ticks: {
+          autoSkip: false,
+          color: theme.dim,
+          maxTicksLimit: maxTicks,
+          maxRotation: detail ? 0 : 35,
+          minRotation: 0,
+          callback: function(v){
+            return formatSweepTickValue(data.axis, Number(v));
+          }
+        },
         grid: { color: theme.line }
       },
       y: {
         beginAtZero: true,
-        title: { display: true, text: 'Total P&L ($)', color: theme.dim },
+        grace: '18%',
+        title: { display: (!!detail || !!isAgg), text: 'Total P&L ($)', color: theme.dim },
         ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } },
         grid: {
-          color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.dim : theme.line; },
-          lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 1.5 : 1; }
+          color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+          lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+          borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
         }
       }
     }
@@ -6809,6 +6969,7 @@ function openBtChartDetail(seriesKey, title, trigger){
   const colors = sweepChartColors(data, seriesKey, theme);
   btChartDialogInstance = new Chart(canvas.getContext('2d'), {
     type: 'bar',
+    plugins: [sweepZeroLinePlugin()],
     data: { datasets: [{ label: 'Total P&L ($)', data: points.map((p, i) => ({x:Number(p.value), y:values[i]})), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
     options: sweepChartOptions(data, true)
   });
@@ -6870,7 +7031,7 @@ function renderSweepVisual(data){
     const tookTxt = (window._btSweepStartTime) ? ` · took ${fmtElapsed(performance.now() - window._btSweepStartTime)}` : '';
     meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${tookTxt}`;
   }
-  const mkOpts = () => sweepChartOptions(data, false);
+  const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
   destroyChartInstance('chartSweepAgg');
   const aggCtx = $('chartSweepAgg');
@@ -6878,8 +7039,9 @@ function renderSweepVisual(data){
     const aggregateColors = chartColors(null);
     new Chart(aggCtx.getContext('2d'), {
       type: 'bar',
+      plugins: [sweepZeroLinePlugin()],
       data: { datasets: [{ label: 'Total P&L ($)', data: xy(points.map(p => (p.overall.total_pnl_cents || 0) / 100)), backgroundColor: aggregateColors, borderColor: aggregateColors, borderWidth: 1 }] },
-      options: mkOpts()
+      options: mkOpts(true)
     });
   }
   const aggregate = $('btSweepAggCard');
@@ -6895,7 +7057,7 @@ function renderSweepVisual(data){
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.setAttribute('aria-label', `Open ${(data.series_labels || {})[seriesKey] || seriesKey} Sweep Visual chart detail for ${points.length} tested values`);
-    card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:6px 8px`;
+    card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:8px 10px`;
     const activate = event => {
       if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
       if(event.type === 'keydown') event.preventDefault();
@@ -6904,14 +7066,14 @@ function renderSweepVisual(data){
     card.addEventListener('click', activate);
     card.addEventListener('keydown', activate);
     const title = document.createElement('div');
-    title.style.cssText = 'font:700 10px var(--disp);color:var(--faint);margin-bottom:2px';
+    title.style.cssText = 'font:700 11px var(--disp);color:var(--faint);margin-bottom:4px';
     title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
     const cvWrap = document.createElement('div');
-    cvWrap.style.cssText = 'position:relative;height:70px';
+    cvWrap.style.cssText = 'position:relative;height:95px';
     const cv = document.createElement('canvas');
     const cvId = 'chartSweep_' + idx;
     cv.id = cvId;
-    cv.height = 70;
+    cv.height = 95;
     cvWrap.appendChild(cv);
     card.appendChild(title);
     card.appendChild(cvWrap);
@@ -6921,8 +7083,9 @@ function renderSweepVisual(data){
     destroyChartInstance(cvId);
     new Chart(cv.getContext('2d'), {
       type: 'bar',
+      plugins: [sweepZeroLinePlugin()],
       data: { datasets: [{ data: xy(y), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
-      options: mkOpts()
+      options: mkOpts(false)
     });
   });
 }
@@ -6964,10 +7127,11 @@ async function renderSummaryCharts(){
       },
       options:{
         responsive:true,
+        layout:{padding:{left:6,right:10,top:12,bottom:6}},
         plugins:{legend:{position:'bottom',labels:{color:theme.dim}}},
         scales:{
-          x:{ticks:{color:theme.dim},grid:{color:theme.line}},
-          y:{ticks:{color:theme.dim},grid:{color:theme.line}}
+          x:{offset:true,ticks:{color:theme.dim},grid:{color:theme.line}},
+          y:{beginAtZero:true,grace:'15%',ticks:{color:theme.dim},grid:{color:theme.line}}
         }
       }
     });
@@ -6998,7 +7162,7 @@ async function renderSummaryCharts(){
     new Chart(canvasHist,{
       type:'bar',
       data:{labels:bLabels,datasets:[{label:'Windows',data:bCounts,backgroundColor:theme.gold}]},
-      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:theme.dim}},y:{ticks:{color:theme.dim},grid:{color:theme.line}}}}
+      options:{responsive:true,layout:{padding:{left:6,right:10,top:12,bottom:6}},plugins:{legend:{display:false}},scales:{x:{offset:true,ticks:{color:theme.dim}},y:{beginAtZero:true,grace:'15%',ticks:{color:theme.dim},grid:{color:theme.line}}}}
     });
   }
 
@@ -7044,7 +7208,7 @@ async function renderSummaryCharts(){
     new Chart(canvasPair,{
       type:'bar',
       data:{labels:pBuckets,datasets:[{data:pCounts,backgroundColor:theme.proj}]},
-      options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:theme.dim}},y:{ticks:{color:theme.dim},grid:{color:theme.line}}}}
+      options:{responsive:true,layout:{padding:{left:6,right:10,top:12,bottom:6}},plugins:{legend:{display:false}},scales:{x:{offset:true,ticks:{color:theme.dim}},y:{beginAtZero:true,grace:'15%',ticks:{color:theme.dim},grid:{color:theme.line}}}}
     });
   }
 }
