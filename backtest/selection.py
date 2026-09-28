@@ -38,7 +38,18 @@ def parse_series_tokens(raw: Optional[Iterable[str] | str] = None) -> tuple[str,
         for part in str(item).split(","):
             tok = part.strip().lower()
             if tok:
+                if len(tok) > 64:
+                    raise ValueError(
+                        f"Series token too long ({len(tok)} chars, max 64): "
+                        f"'{tok[:64]}…'."
+                    )
                 tokens.append(tok)
+    # A pathological query (megabytes of tokens) would burn CPU matching
+    # every tick; 32 tokens already cover the 10-series universe twice over.
+    if len(tokens) > 32:
+        raise ValueError(
+            f"Too many series tokens ({len(tokens)}, max 32)."
+        )
     slugs = [slug.lower() for slug, _dur, _label in SERIES]
     for tok in tokens:
         if not any(tok in slug for slug in slugs):
@@ -81,6 +92,14 @@ def parse_durations(raw: Optional[Iterable[str | int] | str] = None) -> tuple[in
     return tuple(values)
 
 
+def _as_int(value) -> Optional[int]:
+    """Best-effort int coercion; None when unparseable (never raises)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _pair_matches(
     series_slug: str,
     duration: int,
@@ -92,7 +111,9 @@ def _pair_matches(
         hay = str(series_slug or "").lower()
         if not any(tok in hay for tok in series_tokens):
             return False
-    if durations and duration not in durations:
+    # Tolerant compare: a malformed (non-integer) duration label matches
+    # nothing instead of crashing the slice.
+    if durations and _as_int(duration) not in durations:
         return False
     return True
 
@@ -108,10 +129,10 @@ def tick_matches(
     mirroring the substring style of `BacktestParams.exit_thresh()`.
     """
     if series_tokens:
-        hay = f"{tick.get('series', '')} {tick.get('slug', '')}".lower()
+        hay = f"{tick.get('series') or ''} {tick.get('slug') or ''}".lower()
         if not any(tok in hay for tok in series_tokens):
             return False
-    if durations and tick.get("duration") not in durations:
+    if durations and _as_int(tick.get("duration")) not in durations:
         return False
     return True
 
@@ -135,7 +156,20 @@ def found_pairs(grouped: Iterable[tuple[str, list[dict]]]) -> dict[tuple[str, in
     for _cid, group in grouped:
         if not group:
             continue
-        key = (group[0].get("series", ""), group[0].get("duration", 0))
+        key = (group[0].get("series", ""), _as_int(group[0].get("duration")) or 0)
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+def found_pairs_from_windows(windows: Iterable[dict]) -> dict[tuple[str, int], int]:
+    """Count windows per (series, duration) pair from replay `per_window` rows.
+
+    Lets callers that already replayed (CLI) build coverage without grouping
+    the tick stream a second time.
+    """
+    out: dict[tuple[str, int], int] = {}
+    for w in windows:
+        key = (w.get("series", ""), _as_int(w.get("duration")) or 0)
         out[key] = out.get(key, 0) + 1
     return out
 
@@ -203,20 +237,23 @@ def expected_pairs(
 
 def build_coverage(
     source: str | Path,
-    grouped: Iterable[tuple[str, list[dict]]],
+    found: dict[tuple[str, int], int],
     series_tokens: tuple[str, ...] = (),
     durations: tuple[int, ...] = (),
 ) -> dict:
     """Completeness report: pairs found in the slice vs pairs expected.
 
-    Per-pair window counts are informational — date filters, start-delay
-    filters, and midnight-crossing windows can change them. Pair counts are
-    the completeness check. Single-file sources are informational only for
-    the same reason (a window's ticks may straddle two daily files).
+    `found` maps (series, duration) → window counts — from `found_pairs()`
+    over grouped windows, or from `found_pairs_from_windows()` over replay
+    `per_window` rows (no second grouping pass). Per-pair window counts are
+    informational — date filters, start-delay filters, and midnight-crossing
+    windows can change them. Pair counts are the completeness check.
+    Single-file sources are informational only for the same reason (a
+    window's ticks may straddle two daily files).
     """
     st = tuple(series_tokens or ())
     du = tuple(durations or ())
-    found = found_pairs(grouped)
+    found = dict(found or {})
     expected, expected_windows, origin = expected_pairs(source, st, du)
     found_set = set(found)
     return {

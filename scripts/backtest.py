@@ -27,6 +27,7 @@ from backtest import BacktestParams, group_by_cid, iter_ticks, replay
 from backtest.selection import (
     apply_selection,
     build_coverage,
+    found_pairs_from_windows,
     parse_durations,
     parse_series_tokens,
 )
@@ -136,8 +137,11 @@ def main(argv: list[str] | None = None):
     durations = parse_durations(args.durations)
 
     t0 = time.perf_counter()
-    raw_snaps = list(iter_ticks(args.source))
-    snaps = list(apply_selection(raw_snaps, series_tokens, durations))
+    snaps = list(iter_ticks(args.source))
+    n_raw = len(snaps)
+    # `apply_selection` returns the input unchanged when unfiltered, so the
+    # common path materializes exactly one list.
+    snaps = apply_selection(snaps, series_tokens, durations)
     # Optional date-range filter (for midnight-crossing targeted replay)
     if args.start or args.end:
         from datetime import datetime, timezone
@@ -162,10 +166,10 @@ def main(argv: list[str] | None = None):
         snaps = filtered_snaps
     elapsed_load = time.perf_counter() - t0
     if not snaps:
-        if raw_snaps and (series_tokens or durations):
+        if n_raw and (series_tokens or durations):
             # Valid selection, zero matching ticks: zero windows, not an
             # error — the coverage report names the missing pairs.
-            coverage = build_coverage(args.source, [], series_tokens, durations)
+            coverage = build_coverage(args.source, {}, series_tokens, durations)
             print(f"selection: series={','.join(series_tokens) or 'all'} "
                   f"durations={','.join(str(d) for d in durations) or 'all'}  "
                   f"pairs=0/{coverage['pairs_expected']} "
@@ -186,8 +190,11 @@ def main(argv: list[str] | None = None):
     results = replay(snaps, params)
     elapsed_replay = time.perf_counter() - t1
 
+    # Coverage reads replay's per_window rows — no second grouping pass
+    # over the tick stream. `.get` keeps stubbed replays (tests) working.
     coverage = build_coverage(
-        args.source, group_by_cid(snaps), series_tokens, durations)
+        args.source, found_pairs_from_windows(results.get("per_window") or []),
+        series_tokens, durations)
     results["selection"] = coverage["selection"]
     results["coverage"] = coverage
     sel_txt = (f"series={','.join(series_tokens) or 'all'} "

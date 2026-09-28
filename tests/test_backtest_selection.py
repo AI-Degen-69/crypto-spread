@@ -15,6 +15,7 @@ from backtest.selection import (
     expected_pairs,
     find_golden_manifest,
     found_pairs,
+    found_pairs_from_windows as sel_found_pairs_from_windows,
     parse_durations,
     parse_series_tokens,
 )
@@ -176,7 +177,7 @@ def test_build_coverage_reports_found_vs_expected(tmp_path):
                                ("btc-up-or-down-15m", 900, 18)]),
     ])
     grouped = [("0xa", [_tick("btc-up-or-down-5m", 300, "0xa")])]
-    cov = build_coverage(src, grouped, ("btc",), ())
+    cov = build_coverage(src, found_pairs(grouped), ("btc",), ())
     assert cov["filtered"] is True
     assert cov["selection"] == {"series": ["btc"], "durations": []}
     assert cov["pairs_found"] == 1
@@ -187,7 +188,42 @@ def test_build_coverage_reports_found_vs_expected(tmp_path):
 
 def test_build_coverage_unfiltered_marks_not_filtered(tmp_path):
     """Full runs report filtered=False with the canonical pair count."""
-    cov = build_coverage(tmp_path, [], (), ())
+    cov = build_coverage(tmp_path, {}, (), ())
     assert cov["filtered"] is False
     assert cov["pairs_expected"] == 10
     assert cov["expected_source"] == "canonical"
+
+
+def test_none_series_and_slug_never_crash_nor_match():
+    """A malformed tick with None fields is unmatched, not an exception."""
+    tick = {"cid": "0x1", "series": None, "slug": None, "duration": 300}
+    assert apply_selection([tick], ("btc",), ()) == []
+    # Unfiltered input still passes through untouched.
+    assert apply_selection([tick]) == [tick]
+
+
+def test_malformed_duration_label_matches_nothing():
+    """A non-integer duration label is unmatched rather than crashing."""
+    tick = {"cid": "0x1", "series": "btc-up-or-down-5m",
+            "slug": "x", "duration": "soon"}
+    assert apply_selection([tick], (), (300,)) == []
+    assert apply_selection([tick]) == [tick]
+
+
+def test_selection_input_size_is_capped():
+    """Pathological queries fail fast instead of burning per-tick CPU."""
+    with pytest.raises(ValueError, match="Too many"):
+        parse_series_tokens(["btc"] * 33)
+    with pytest.raises(ValueError, match="too long"):
+        parse_series_tokens(["b" * 65])
+
+
+def test_found_pairs_from_windows_matches_grouped_count():
+    """Coverage from replay rows agrees with coverage from grouped ticks."""
+    grouped = [
+        ("0xa", [_tick("btc-up-or-down-5m", 300, "0xa")]),
+        ("0xb", [_tick("eth-up-or-down-15m", 900, "0xb")]),
+    ]
+    rows = [{"series": "btc-up-or-down-5m", "duration": 300},
+            {"series": "eth-up-or-down-15m", "duration": 900}]
+    assert sel_found_pairs_from_windows(rows) == found_pairs(grouped)

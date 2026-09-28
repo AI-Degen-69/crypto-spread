@@ -49,10 +49,12 @@ Type: **Code [Backend/Logic]** — verification via targeted pytest per task.
   `apply_selection(snaps, series_tokens, durations) -> list[dict]` (empty
   selection returns input unchanged),
   `expected_pairs(source, tokens, durations) -> (pairs, windows_per_pair,
-  origin)`, `found_pairs(grouped)`, and
-  `build_coverage(source, grouped, tokens, durations) -> dict` with keys
+  origin)`, `found_pairs(grouped)`, `found_pairs_from_windows(per_window)`,
+  and `build_coverage(source, found, tokens, durations) -> dict` with keys
   `filtered, selection, pairs_found, pairs_expected, missing_pairs,
   windows_found, windows_expected, expected_source`.
+  (Review fix: callers pass a found-map — CLI from replay rows, worker from
+  grouped ticks — so the CLI never groups the 1.4M-tick stream twice.)
 - `replay()` signature unchanged; `aggregate` gains `per_duration`
   (`{"300": <same row as per_series>, "900": ...}`), empty map on empty input.
 - CLI: `--series` (repeatable/comma-separated), `--durations` (`300,900`);

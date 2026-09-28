@@ -1433,6 +1433,7 @@ def _run_backtest_simulation_worker(
     from backtest.selection import (
         apply_selection,
         build_coverage,
+        found_pairs,
         parse_durations,
         parse_series_tokens,
     )
@@ -1457,7 +1458,7 @@ def _run_backtest_simulation_worker(
     grouped = group_by_cid(snaps)
     if not grouped:
         gp = params.grouped_params()
-        empty_cov = build_coverage(cov_source, [], series_tokens, duration_values)
+        empty_cov = build_coverage(cov_source, {}, series_tokens, duration_values)
         return {
             "params_hash": params.params_hash(),
             "params": empty_params,
@@ -1690,7 +1691,8 @@ def _run_backtest_simulation_worker(
             "monotonic": a["monotonic"],
         }
 
-    coverage = build_coverage(cov_source, grouped, series_tokens, duration_values)
+    coverage = build_coverage(
+        cov_source, found_pairs(grouped), series_tokens, duration_values)
 
     gp = params.grouped_params()
     return {
