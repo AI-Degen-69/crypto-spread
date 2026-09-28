@@ -239,6 +239,40 @@ def generate_sensitivity_grid(
             p = replace(base, dead_zone_val=dv, dead_zone_unit="sec")
             grid.append((f"dead_zone_sec={dv:.0f}", p))
 
+    # 9. Entry delay (issues #145/#137) — TUNING knobs, swept by default. One
+    # mixed axis: seconds rows clear `entry_delay_pct` (None) and percent rows
+    # zero `entry_delay_sec`, because pct takes precedence when set
+    # (`backtest/engine.py:139-141`). The off-point is the Baseline row.
+    entry_delay_secs = [15.0, 30.0, 60.0]
+    for dv in entry_delay_secs:
+        if dv != base.entry_delay_sec or base.entry_delay_pct is not None:
+            p = replace(base, entry_delay_sec=dv, entry_delay_pct=None)
+            grid.append((f"entry_delay={dv:.0f}s", p))
+    entry_delay_pcts = [0.10, 0.20]
+    for dv in entry_delay_pcts:
+        if dv != base.entry_delay_pct:
+            p = replace(base, entry_delay_sec=0.0, entry_delay_pct=dv)
+            grid.append((f"entry_delay={dv * 100:.0f}%", p))
+
+    # 10. Leg chase (issue #164) — a TUNING knob, swept by default. The
+    # off-point is the Baseline row itself when the base has it disabled.
+    if base.enable_leg_chase is not True:
+        grid.append(("leg_chase=on", replace(base, enable_leg_chase=True)))
+    if base.enable_leg_chase is not False:
+        grid.append(("leg_chase=off", replace(base, enable_leg_chase=False)))
+
+    # 11. Naked leg at expiry (issue #229) — a STRUCTURAL limit (issue #233):
+    # only on explicit opt-in, like pair_cost/quote_range/dead_zone. The gate
+    # follows the registry (`param_class_for`), not a hard-coded list, so a
+    # future reclassification flows through without touching this file.
+    naked_leg_structural = (
+        BacktestParams.param_class_for("naked_leg_at_expiry") == "structural"
+    )
+    if include_structural or not naked_leg_structural:
+        for v in ("close", "hold"):
+            if v != base.naked_leg_at_expiry:
+                grid.append((f"naked_leg={v}", replace(base, naked_leg_at_expiry=v)))
+
     return grid
 
 
@@ -247,6 +281,7 @@ def generate_sensitivity_grid(
 SENSITIVITY_AXES = (
     "offset", "queue", "exit_5m", "exit_rev", "pair_cost",
     "quote_range", "dead_zone_pct", "dead_zone_sec",
+    "entry_delay", "leg_chase", "naked_leg",
 )
 
 
@@ -503,7 +538,8 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #233: naming a structural axis with --only IS explicit intent,
     # so it implies --include-structural for the sensitivity grid.
     include_structural = args.include_structural or args.only in (
-        "pair_cost", "quote_range", "dead_zone_pct", "dead_zone_sec", "dead_zone")
+        "pair_cost", "quote_range", "dead_zone_pct", "dead_zone_sec", "dead_zone",
+        "naked_leg")
 
     whitelist = set(s.strip() for s in args.series.split(",") if s.strip()) if args.series else None
 
