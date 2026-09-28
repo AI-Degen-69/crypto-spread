@@ -1698,6 +1698,43 @@ def _sweep_fixture(tmp_path, slugs, name="sweep_base.jsonl"):
     return path
 
 
+# A second fixture with one genuine 15m series. `_make_fake_tick` pins every
+# window's duration at 300, and the engine keys the stop threshold on that
+# duration (`default_{'5m' if duration == 300 else '15m'}`), so a 5m-only
+# fixture can never exercise the `default_15m` stop the `exit_stop` sweep
+# replaces. `_make_fake_tick_15m` is the same shape with the 15m clock and
+# duration, so the parity tests below prove the sweep and the backtest agree
+# on the 15m thresholds too, not just on `default_5m`.
+def _make_fake_tick_15m(ts: float, cid: str, slug: str, series: str, mid: float,
+                        tape: list | None = None) -> dict:
+    """`_make_fake_tick` with a 15m duration and a matching window clock."""
+    tick = _make_fake_tick(ts, cid, slug, series, mid, tape)
+    tick["duration"] = 900
+    tick["label"] = "BTC 15m"
+    tick["start_ts"] = ts - 30
+    tick["end_ts"] = ts + 870
+    tick["t_rem"] = 870
+    return tick
+
+
+def _sweep_fixture_15m(tmp_path, slugs, name="sweep_base.jsonl"):
+    """Fixture mixing 5m windows with one real 15m series that actually fills."""
+    path = _sweep_fixture(tmp_path, slugs, name=name)
+    rows = []
+    for w in range(4):
+        cid = f"0x_btc-up-or-down-15m_{w}"
+        for i in range(30):
+            mid = 0.50 + 0.03 * ((i + w) % 4 - 1)
+            tape = [{"price": 0.48, "size": 20}] if i == 5 else []
+            rows.append(_make_fake_tick_15m(
+                2000.0 + w * 1200 + i, cid, "btc-15m-w", "btc-up-or-down-15m",
+                mid, tape
+            ))
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
 # Every knob the Backtester exposes, with values chosen to differ from the
 # engine defaults so a dropped parameter cannot hide behind an equal default.
 _NON_DEFAULT = {
@@ -1901,9 +1938,9 @@ def test_every_sweep_point_reproduces_a_backtest_at_the_same_settings(
     import concurrent.futures
 
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
-    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
-                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
-                              "bnb-up-or-down-5m"])
+    _sweep_fixture_15m(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                                  "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                                  "bnb-up-or-down-5m"])
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
     try:
@@ -1915,12 +1952,20 @@ def test_every_sweep_point_reproduces_a_backtest_at_the_same_settings(
         assert len(data["points"]) == len(osc_dash.SWEEP_AXES[axis])
 
         filled: list = []
+        filled_15m: list = []
         for value in osc_dash.SWEEP_AXES[axis]:
             back = client.get("/api/backtest", params={
                 "file": "sweep_base.jsonl", **_axis_point_query(axis, value)})
             assert back.status_code == 200
             b = back.json()
             assert b["n_windows"] > 0, f"{axis}={value} replayed no windows"
+            # The fixture must contain the 15m slice for every run (its windows
+            # are simulated), but a far point legitimately fills nothing — the
+            # equality above still pins that zero to the backtest's zero.
+            assert b["per_duration"]["900"]["windows"] > 0, \
+                f"{axis}={value}: the 15m windows were not simulated"
+            if b["per_duration"]["900"]["pairs"] > 0:
+                filled_15m.append(value)
 
             point = _sweep_point_at(data, value)
             assert point["overall"]["total_pnl_cents"] == b["overall"]["total_pnl_cents"], \
@@ -1938,6 +1983,11 @@ def test_every_sweep_point_reproduces_a_backtest_at_the_same_settings(
         # If no point of an axis ever fills, the equalities above compare
         # nothing but zeros, and that is the case this guard exists to catch.
         assert filled, f"{axis} filled no pairs at any point; comparison is vacuous"
+        # Non-vacuous for the 15m half too: at least one point of every axis
+        # must trade a 15m window, or the `default_15m` stop the `exit_stop`
+        # sweep replaces would never be read by either endpoint.
+        assert filled_15m, (f"{axis}: no point traded a 15m window; the 15m "
+                            "thresholds are untested")
     finally:
         pool.shutdown(wait=True)
 
@@ -1958,9 +2008,9 @@ def test_offset_sweep_matches_a_plain_backtest_without_the_queue_memo(
     import backtest.engine as bt_engine
 
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
-    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
-                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
-                              "bnb-up-or-down-5m"])
+    _sweep_fixture_15m(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                                  "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                                  "bnb-up-or-down-5m"])
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
 
@@ -1997,6 +2047,8 @@ def test_offset_sweep_matches_a_plain_backtest_without_the_queue_memo(
         assert point["overall"]["total_pnl_cents"] == b["overall"]["total_pnl_cents"]
         assert point["overall"]["pairs"] == b["overall"]["pairs"]
         assert point["overall"]["windows"] == b["n_windows"]
+        assert b["per_duration"]["900"]["pairs"] > 0, \
+            "the 15m windows did not trade; the memo-off parity is 5m-only"
 
         # The other half of the proof: the shared memo really is shared when it
         # is used. Without this, "all memo is None" would only prove the memo
@@ -2070,14 +2122,13 @@ def test_sweep_override_note_wording_node():
         pytest.skip("Node.js not installed")
 
     html = client.get("/").text
-    # Harness only what the note needs: the helper and the one formatter it
-    # calls. Running the whole page script would drag in the DOM the note never
-    # touches, which is what the stub-heavy harnesses above exist to avoid.
+    # Harness only what the note needs: the helper itself. It no longer calls
+    # the tick formatter — submitted values are shown exactly as typed — so the
+    # harness runs the one function and nothing else.
     parts = []
-    for name in ("formatSweepTickValue", "sweepOverrideNote"):
-        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
-        assert found is not None, f"{name} is no longer a top-level function"
-        parts.append(found.group(0))
+    found = re.search(r"function sweepOverrideNote\(.*?\n\}", html, re.DOTALL)
+    assert found is not None, "sweepOverrideNote is no longer a top-level function"
+    parts.append(found.group(0))
 
     test_js = "\n".join(parts) + """
     if (typeof sweepOverrideNote !== 'function') {
@@ -2092,11 +2143,17 @@ def test_sweep_override_note_wording_node():
     assert(queueHit.includes('submitted 50'), queueHit);
     assert(queueHit.includes('that bar is your setting'), queueHit);
 
+    // A queue value with sub-unit precision must be shown exactly as typed —
+    // the displayed value may never disagree with the match decision.
+    const queueFrac = sweepOverrideNote('queue', { queue: 50.4 }, queuePoints);
+    assert(queueFrac.includes('submitted 50.4'), queueFrac);
+    assert(queueFrac.includes('no bar equals it'), queueFrac);
+
     // An offset between two bars: no bar may be claimed as theirs.
     const offsetPoints = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040];
     const offsetMiss = sweepOverrideNote('offset', { offset: 0.022 }, offsetPoints);
     assert(offsetMiss.includes('sweeps Quote offset'), offsetMiss);
-    assert(offsetMiss.includes('2.2'), offsetMiss);
+    assert(offsetMiss.includes('submitted 0.022'), offsetMiss);
     assert(offsetMiss.includes('no bar equals it'), offsetMiss);
 
     // Reversal buffer keeps the same shape.
@@ -2111,17 +2168,24 @@ def test_sweep_override_note_wording_node():
     const mixed = sweepOverrideNote('exit_stop',
       { exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09 }, stopPoints);
     assert(mixed.includes('all six stop thresholds'), mixed);
-    assert(mixed.includes('5m 6'), mixed);
-    assert(mixed.includes('15m 7'), mixed);
-    assert(mixed.includes('BTC 8'), mixed);
-    assert(mixed.includes('SOL 9'), mixed);
+    assert(mixed.includes('5m 0.06'), mixed);
+    assert(mixed.includes('15m 0.07'), mixed);
+    assert(mixed.includes('BTC 0.08'), mixed);
+    assert(mixed.includes('SOL 0.09'), mixed);
     assert(mixed.includes('no bar is your mixed setting'), mixed);
+
+    // A stop value with more precision than the axis list must be shown as
+    // typed, not rounded onto a bar it does not actually match.
+    const stopFrac = sweepOverrideNote('exit_stop',
+      { exit5m: 0.064, exit15m: 0.064, exitBtc: 0.064, exitSol: 0.064 }, stopPoints);
+    assert(stopFrac.includes('submitted: 5m 0.064'), stopFrac);
+    assert(stopFrac.includes('no bar equals your value'), stopFrac);
 
     // Uniform stops equal to an axis point: that bar is theirs.
     const uniformHit = sweepOverrideNote('exit_stop',
       { exit5m: 0.08, exit15m: 0.08, exitBtc: 0.08, exitSol: 0.08 }, stopPoints);
     assert(uniformHit.includes('all six stop thresholds'), uniformHit);
-    assert(uniformHit.includes('the bar at 8'), uniformHit);
+    assert(uniformHit.includes('the bar at 0.08'), uniformHit);
     assert(uniformHit.includes('is your setting'), uniformHit);
 
     // Uniform stops off the axis: still honest about the six, still no claim.

@@ -6828,16 +6828,24 @@ function sweepOverrideNote(axis, v, pointValues){
   const points = Array.isArray(pointValues) ? pointValues : [];
   const equals = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-6;
   const onAxis = value => points.some(p => equals(p, value));
+  // The operator's value is shown exactly as submitted. The tick formatter
+  // rounds (50.4 → 50, 6.4¢ keeps one decimal), and a rounded display next to
+  // "no bar equals it" reads as a contradiction — the match decision above
+  // compares the exact number, so the note must show the same number.
+  const exact = value => {
+    const num = Number(value);
+    return Number.isFinite(num) ? String(num) : String(value);
+  };
 
   if(axis === 'exit_stop'){
     const yours = [['5m', v.exit5m], ['15m', v.exit15m],
                    ['BTC', v.exitBtc], ['SOL', v.exitSol]];
-    const listed = yours.map(p => `${p[0]} ${formatSweepTickValue('exit_stop', p[1])}`).join(' · ');
+    const listed = yours.map(p => `${p[0]} ${exact(p[1])}`).join(' · ');
     const head = `sweeps stop distance — replaces all six stop thresholds with one value (submitted: ${listed})`;
     const uniform = yours.every(p => equals(p[1], yours[0][1]));
     if(!uniform) return `${head}; the sweep tests one uniform value, so no bar is your mixed setting`;
     return onAxis(v.exit5m)
-      ? `${head}; the bar at ${formatSweepTickValue('exit_stop', v.exit5m)} is your setting`
+      ? `${head}; the bar at ${exact(v.exit5m)} is your setting`
       : `${head}; no bar equals your value`;
   }
 
@@ -6847,7 +6855,7 @@ function sweepOverrideNote(axis, v, pointValues){
     exit_rev: ['Reversal buffer', v.exitReversal]
   })[axis];
   if(!single) return '';
-  const shown = formatSweepTickValue(axis, single[1]);
+  const shown = exact(single[1]);
   return `sweeps ${single[0]} — replaces the submitted ${shown}`
     + (onAxis(single[1]) ? ' (that bar is your setting)' : '; no bar equals it');
 }
