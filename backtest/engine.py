@@ -1268,6 +1268,56 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
     )
 
 
+def _new_group_acc() -> dict:
+    """Fresh raw accumulator for one per-group aggregate row."""
+    return {
+        "windows": 0, "entered": 0, "pair": 0, "exit": 0, "filled_up_only": 0,
+        "filled_down_only": 0, "oscillating": 0, "monotonic": 0, "flat": 0,
+        "total_pnl_cents": 0.0, "total_fees_cents": 0.0,
+        "wins": 0, "peak_pnl": 0.0, "cum_pnl": 0.0, "max_dd": 0.0,
+        "reentry_count": 0, "reentry_pnl_cents": 0.0,
+    }
+
+
+def _accumulate_group(a: dict, w: "WindowResult") -> None:
+    """Fold one window into a raw per-group accumulator (series or duration)."""
+    a["windows"] += 1
+    if getattr(w, "entered", False):
+        a["entered"] += 1
+    if w.pair_captured:
+        a["pair"] += 1
+    if w.exit_taken:
+        a["exit"] += 1
+    a.setdefault("pairs_count", 0)
+    a["pairs_count"] += w.pairs_count
+    a.setdefault("stops_count", 0)
+    a["stops_count"] += w.stops_count
+    if w.filled_up and not w.filled_down:
+        a["filled_up_only"] += 1
+    if w.filled_down and not w.filled_up:
+        a["filled_down_only"] += 1
+    if w.class_label == "oscillating":
+        a["oscillating"] += 1
+    elif w.class_label == "monotonic":
+        a["monotonic"] += 1
+    elif w.class_label == "flat":
+        a["flat"] += 1
+    a["total_pnl_cents"] += w.pnl_cents
+    a["total_fees_cents"] += w.fees_cents
+    if w.reentry_count > 0:
+        a["reentry_count"] += 1
+        a["reentry_pnl_cents"] += w.pnl_cents - w.fees_cents
+
+    if w.pnl_cents > 0:
+        a["wins"] += 1
+    a["cum_pnl"] += w.pnl_cents
+    if a["cum_pnl"] > a["peak_pnl"]:
+        a["peak_pnl"] = a["cum_pnl"]
+    s_dd = a["peak_pnl"] - a["cum_pnl"]
+    if s_dd > a["max_dd"]:
+        a["max_dd"] = s_dd
+
+
 def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
     """Replay all snaps, return aggregate + per-window results.
 
@@ -1278,12 +1328,17 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "per_window": [WindowResult, ...],
         "aggregate": {
             "per_series": {slug: {windows, pair_rate, exit_rate, ...}},
+            "per_duration": {300|900: {windows, pair_rate, exit_rate, ...}},
             "overall":   {windows, pair_rate, exit_rate, total_pnl_cents, ...}
         }
       }
       Both `per_series` and `overall` levels carry `reentry_count` /
       `reentry_pnl_cents` (issue #95): how many windows were recovered via
       drift-skip re-entry and their net P&L (per share, unscaled by size).
+      `per_duration` (issue #308) reuses the `per_series` row shape keyed by
+      window duration in seconds; integer keys serialize to JSON strings
+      (`"300"`, `"900"`). `overall` is still derived from the per-series
+      totals exactly as before.
     """
     snaps_list = list(snaps)
     n_snaps = len(snaps_list)
@@ -1293,13 +1348,8 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             continue
         per_window.append(_simulate_window(group, params))
 
-    per_series: dict[str, dict] = defaultdict(lambda: {
-        "windows": 0, "entered": 0, "pair": 0, "exit": 0, "filled_up_only": 0,
-        "filled_down_only": 0, "oscillating": 0, "monotonic": 0, "flat": 0,
-        "total_pnl_cents": 0.0, "total_fees_cents": 0.0,
-        "wins": 0, "peak_pnl": 0.0, "cum_pnl": 0.0, "max_dd": 0.0,
-        "reentry_count": 0, "reentry_pnl_cents": 0.0,
-    })
+    per_series: dict[str, dict] = defaultdict(_new_group_acc)
+    per_duration: dict[int, dict] = defaultdict(_new_group_acc)
 
     cum_pnl = 0.0
     peak_pnl = 0.0
@@ -1348,42 +1398,9 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         })
 
         # Per series tracking
-        a = per_series[w.series]
-        a["windows"] += 1
-        if getattr(w, "entered", False):
-            a["entered"] += 1
-        if w.pair_captured:
-            a["pair"] += 1
-        if w.exit_taken:
-            a["exit"] += 1
-        a.setdefault("pairs_count", 0)
-        a["pairs_count"] += w.pairs_count
-        a.setdefault("stops_count", 0)
-        a["stops_count"] += w.stops_count
-        if w.filled_up and not w.filled_down:
-            a["filled_up_only"] += 1
-        if w.filled_down and not w.filled_up:
-            a["filled_down_only"] += 1
-        if w.class_label == "oscillating":
-            a["oscillating"] += 1
-        elif w.class_label == "monotonic":
-            a["monotonic"] += 1
-        elif w.class_label == "flat":
-            a["flat"] += 1
-        a["total_pnl_cents"] += w.pnl_cents
-        a["total_fees_cents"] += w.fees_cents
-        if w.reentry_count > 0:
-            a["reentry_count"] += 1
-            a["reentry_pnl_cents"] += w.pnl_cents - w.fees_cents
-
-        if w.pnl_cents > 0:
-            a["wins"] += 1
-        a["cum_pnl"] += w.pnl_cents
-        if a["cum_pnl"] > a["peak_pnl"]:
-            a["peak_pnl"] = a["cum_pnl"]
-        s_dd = a["peak_pnl"] - a["cum_pnl"]
-        if s_dd > a["max_dd"]:
-            a["max_dd"] = s_dd
+        _accumulate_group(per_series[w.series], w)
+        # Per duration tracking (same row shape, keyed by window seconds)
+        _accumulate_group(per_duration[w.duration], w)
 
     def _finalize(d: dict) -> dict:
         """Compute aggregate summary ratios and rates from raw metric counts."""
@@ -1435,6 +1452,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "trades_sample": trades_sample,
         "aggregate": {
             "per_series": {k: _finalize(v) for k, v in per_series.items()},
+            "per_duration": {k: _finalize(v) for k, v in per_duration.items()},
             "overall": _finalize(overall),
         },
     }
