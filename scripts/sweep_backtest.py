@@ -375,11 +375,21 @@ def generate_random_grid(
     `--include-structural`), in which case they vary as before.
     """
     rng = random.Random(seed)
+    # Issue #307: a second stream for the new axes only. Legacy draws keep
+    # their exact order, so a fixed seed replays the legacy prefix bit-for-bit.
+    rng_new = random.Random(seed ^ 0x9E3779B9)
     size = max(5, int(size))
     offsets = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040]
     queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
     exit_5ms = [0.06, 0.08, 0.09, 0.10, 0.11, 0.12, 0.14, 0.16]
     exit_reversals = [0.010, 0.015, 0.020, 0.030]
+    # (entry_delay_sec, entry_delay_pct) pairs; (0.0, None) is the off-point.
+    entry_delays = [
+        (0.0, None), (15.0, None), (30.0, None), (60.0, None),
+        (0.0, 0.10), (0.0, 0.20),
+    ]
+    leg_chases = [False, True]
+    naked_legs = ["close", "hold"] if include_structural else ["close"]
     # Structural axes (issue #233): only sampled when explicitly opted in.
     # Issue #227 hard-caps max_pair_cost at 1.00 (a binary pair settles there),
     # so the old [1.01 .. 1.10] sweep is five values the engine now refuses.
@@ -409,6 +419,12 @@ def generate_random_grid(
             continue
         seen.add(key)
 
+        # New-axis draws happen only for accepted rows, on the separate
+        # stream, so the legacy acceptance sequence never shifts.
+        ed_sec, ed_pct = rng_new.choice(entry_delays)
+        chase = rng_new.choice(leg_chases)
+        naked = rng_new.choice(naked_legs)
+
         ex_dict = {
             "default_5m": e5,
             "default_15m": round(e5 + 0.01, 2),
@@ -420,6 +436,16 @@ def generate_random_grid(
         label = f"rand_off={off:.3f}_q={q:.0f}_ex={e5:.2f}_rev={rev:.3f}"
         if include_structural:
             label += f"_qr={qr[0]:.2f}-{qr[1]:.2f}"
+        # Sparse segments, only for non-baseline new-axis values, so a
+        # baseline draw keeps the exact legacy label.
+        if ed_pct is not None:
+            label += f"_ed={ed_pct * 100:.0f}%"
+        elif ed_sec != 0.0:
+            label += f"_ed={ed_sec:.0f}s"
+        if chase:
+            label += "_chase=on"
+        if naked != "close":
+            label += "_naked=hold"
         p = BacktestParams(
             offset=off,
             queue_gate=q,
@@ -430,6 +456,10 @@ def generate_random_grid(
             merge_gas_usd=0.0,
             taker_fee_rate=0.07,
             quote_range=qr,
+            entry_delay_sec=ed_sec,
+            entry_delay_pct=ed_pct,
+            enable_leg_chase=chase,
+            naked_leg_at_expiry=naked,
         )
         grid.append((label, p))
     return grid
