@@ -5,7 +5,13 @@ and that Chart.js configs and CSS rules do not carry hardcoded hex literals.
 """
 
 import re
+import shutil
+import subprocess
+import pytest
 from server.osc_dash import FULL_APP_HTML
+
+NODE_BIN = shutil.which("node")
+requires_node = pytest.mark.skipif(not NODE_BIN, reason="Node.js is not installed")
 
 
 def test_root_tokens_defined():
@@ -174,3 +180,91 @@ def test_component_styles_use_css_variables():
     # .spinner and .thinking-dots use --bg
     assert re.search(r"\.spinner\{[^}]*border-top-color:var\(--bg\)", FULL_APP_HTML)
     assert re.search(r"\.thinking-dots span\{[^}]*background:var\(--bg\)", FULL_APP_HTML)
+
+
+def test_sweep_visual_options_zero_reference_line():
+    """Issue #332: sweepChartOptions contains y-grid callbacks testing tick.value === 0."""
+    assert "maintainAspectRatio: !!detail" in FULL_APP_HTML
+    assert "ctx.tick && ctx.tick.value === 0" in FULL_APP_HTML
+    assert 'height="90"' in FULL_APP_HTML
+    assert "cv.height = 70;" in FULL_APP_HTML
+    assert "minmax(160px,1fr)" in FULL_APP_HTML
+
+
+@requires_node
+def test_sweep_chart_colors_sign_and_gold_precedence():
+    """Issue #332: sweepChartColors colors profit=up, loss=down, zero/dim, and best=gold."""
+    start = FULL_APP_HTML.find("function sweepChartColors(")
+    assert start != -1, "sweepChartColors function missing from FULL_APP_HTML"
+    idx = FULL_APP_HTML.find("{", start)
+    depth = 0
+    end = idx
+    for i in range(idx, len(FULL_APP_HTML)):
+        if FULL_APP_HTML[i] == "{":
+            depth += 1
+        elif FULL_APP_HTML[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    fn_code = FULL_APP_HTML[start:end]
+
+    test_script = f"""
+    {fn_code}
+    const theme = {{ gold: 'GOLD', up: 'UP', down: 'DOWN', dim: 'DIM', proj: 'PROJ' }};
+
+    // 1. Mixed aggregate: positive, negative, zero, best overall
+    const dataMixed = {{
+        points: [
+            {{ value: 10, overall: {{ total_pnl_cents: 500 }} }},
+            {{ value: 20, overall: {{ total_pnl_cents: -300 }} }},
+            {{ value: 30, overall: {{ total_pnl_cents: 0 }} }},
+            {{ value: 40, overall: {{ total_pnl_cents: 800 }} }}
+        ],
+        best_overall: {{ value: 40 }}
+    }};
+    const colorsMixed = sweepChartColors(dataMixed, null, theme);
+    if (JSON.stringify(colorsMixed) !== JSON.stringify(['UP', 'DOWN', 'DIM', 'GOLD'])) {{
+        throw new Error('Mixed aggregate failed: ' + JSON.stringify(colorsMixed));
+    }}
+
+    // 2. All negative aggregate: best overall is least negative, must be GOLD (gold wins over sign)
+    const dataAllNeg = {{
+        points: [
+            {{ value: 10, overall: {{ total_pnl_cents: -500 }} }},
+            {{ value: 20, overall: {{ total_pnl_cents: -100 }} }},
+            {{ value: 30, overall: {{ total_pnl_cents: -400 }} }}
+        ],
+        best_overall: {{ value: 20 }}
+    }};
+    const colorsAllNeg = sweepChartColors(dataAllNeg, null, theme);
+    if (JSON.stringify(colorsAllNeg) !== JSON.stringify(['DOWN', 'GOLD', 'DOWN'])) {{
+        throw new Error('All negative aggregate failed: ' + JSON.stringify(colorsAllNeg));
+    }}
+
+    // 3. Per-market matching seriesKey
+    const dataMarket = {{
+        points: [
+            {{ value: 10, per_series: {{ btc_5m: 200 }} }},
+            {{ value: 20, per_series: {{ btc_5m: -100 }} }}
+        ],
+        best_market: {{ series: 'btc_5m', value: 10 }}
+    }};
+    const colorsMarket = sweepChartColors(dataMarket, 'btc_5m', theme);
+    if (JSON.stringify(colorsMarket) !== JSON.stringify(['GOLD', 'DOWN'])) {{
+        throw new Error('Per-market matching failed: ' + JSON.stringify(colorsMarket));
+    }}
+
+    // 4. Per-market non-matching best_market series
+    const colorsOtherMarket = sweepChartColors(dataMarket, 'eth_5m', theme);
+    if (JSON.stringify(colorsOtherMarket) !== JSON.stringify(['DIM', 'DIM'])) {{
+        throw new Error('Per-market non-matching failed: ' + JSON.stringify(colorsOtherMarket));
+    }}
+
+    console.log('SWEEP_CHART_COLORS_PASSED');
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert res.returncode == 0, f"Node test failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_CHART_COLORS_PASSED" in res.stdout
+
