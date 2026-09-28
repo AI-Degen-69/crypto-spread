@@ -279,6 +279,34 @@ def test_api_ticks_manifest_aggregate(tmp_path, monkeypatch):
     assert files_by_name[f2.name]["windows_15m"] is None
 
 
+def test_manifest_large_file_uses_cached_raw_lines(tmp_path, monkeypatch):
+    """Large files show exact cached raw_lines, not the size/950 estimate."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    big = tmp_path / "ticks_2026-09-14.jsonl"
+    big.write_bytes(b"x" * 20_000_001)  # >= 20 MB forces the estimate path
+    _write_verify_sidecar(tmp_path, big.name, raw_lines=429545)
+
+    data = client.get("/api/ticks/manifest").json()
+    entry = {f["name"]: f for f in data["files"]}[big.name]
+    assert entry["lines"] == 429545
+    assert entry["lines_estimated"] is False
+    assert data["aggregate"]["total_lines"] == 429545
+    assert data["aggregate"]["total_lines_estimated"] is False
+
+
+def test_manifest_large_file_without_cache_still_estimates(tmp_path, monkeypatch):
+    """Large files with no verify sidecar keep the old size/950 estimate."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    big = tmp_path / "ticks_2026-09-14.jsonl"
+    big.write_bytes(b"x" * 20_000_001)
+
+    data = client.get("/api/ticks/manifest").json()
+    entry = {f["name"]: f for f in data["files"]}[big.name]
+    assert entry["lines"] == int(20_000_001 / 950)
+    assert entry["lines_estimated"] is True
+    assert data["aggregate"]["total_lines_estimated"] is True
+
+
 def test_tick_files_render_readiness_vocabulary():
     html = client.get("/").text
     tick_files = html[html.index("async function loadManifest()"):html.index("// Sequential verify queue")]
@@ -521,7 +549,8 @@ def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
 
 
 def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPLETE CAPTURE",
-                          level="RESEARCH_READY", windows=50, policy=None, market_breakdown=None):
+                          level="RESEARCH_READY", windows=50, policy=None, market_breakdown=None,
+                          raw_lines=None, late_starts=0, early_cutoffs=0, problems=None):
     """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper).
 
     Issue #295: `name` may be a subpath (e.g. pristine/ticks_2026-09-13.jsonl) —
@@ -537,7 +566,7 @@ def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPL
     cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
     (cache_dir / name).parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(exist_ok=True)
-    (cache_dir / f"{name}.json").write_text(json.dumps({
+    payload = {
         "file": name,
         "status": status,
         "capture_state": {"label": capture_label},
@@ -547,7 +576,88 @@ def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPL
         "market_breakdown": market_breakdown if market_breakdown is not None else [],
         "fingerprint": osc_dash._file_fingerprint(target),
         "series_counts": {},
-    }), encoding="utf-8")
+    }
+    if raw_lines is not None:
+        payload["raw_lines"] = raw_lines
+    # Window-quality inputs. Absent by default, matching the verifier's shape for
+    # a clean capture, so `problems` can inject any one of them for the
+    # "is this file trustworthy" assertions.
+    payload["late_starts_count"] = late_starts
+    payload["early_cutoffs_count"] = early_cutoffs
+    for key, value in (problems or {}).items():
+        payload[key] = value
+    (cache_dir / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_manifest_window_quality_reports_windows_not_lines(tmp_path, monkeypatch):
+    """The dataset picker reports research-grade windows, not line counts.
+
+    A line is an artefact of how the collector wrote the file; a window is the
+    unit the engine replays and the unit a robustness claim rests on. Three
+    numbers, each stricter than the last: full windows (captured start to
+    close), clean windows (no integrity or continuity problem anywhere in the
+    capture), and research windows (clean *and* broad enough to generalise).
+    """
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    # Clean, broad, research-ready.
+    _write_verify_sidecar(tmp_path, "ready.jsonl", windows=820, late_starts=10,
+                          early_cutoffs=5, level="RESEARCH_READY")
+    # Clean but only one day, so not research-ready by policy (needs 3+ blocks).
+    _write_verify_sidecar(tmp_path, "exploratory.jsonl", windows=1470, level="EXPLORATORY")
+    # Structural damage anywhere in the capture disqualifies the clean count.
+    _write_verify_sidecar(tmp_path, "gappy.jsonl", windows=400, level="RESEARCH_READY",
+                          problems={"sampling_gaps_count": 12})
+    # Never verified: we do not know, and must not print a zero.
+    (tmp_path / "unverified.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
+
+    files = {f["name"]: f for f in client.get("/api/ticks/manifest").json()["files"]}
+
+    ready = files["ready.jsonl"]["window_quality"]
+    assert ready["full_windows"] == 820 - 10 - 5, "late starts and cutoffs are not full windows"
+    assert ready["clean_windows"] == 805
+    assert ready["research_windows"] == 805
+    assert ready["readiness_level"] == "RESEARCH_READY"
+
+    exploratory = files["exploratory.jsonl"]["window_quality"]
+    assert exploratory["full_windows"] == 1470
+    assert exploratory["clean_windows"] == 1470
+    assert exploratory["research_windows"] is None, (
+        "a single day cannot clear the 3+ time-block research bar")
+
+    gappy = files["gappy.jsonl"]["window_quality"]
+    assert gappy["full_windows"] == 400, "the count is still reported"
+    assert gappy["clean_windows"] is None, "sampling gaps mean no window is verifiably clean"
+    assert gappy["research_windows"] is None
+
+    assert files["unverified.jsonl"]["window_quality"] is None, (
+        "an unverified file must report unknown, not a verified zero")
+
+
+def test_manifest_window_quality_honours_the_readiness_policy(tmp_path, monkeypatch):
+    """A sidecar written under a superseded policy contributes no window counts.
+
+    Its `windows_count` was measured against thresholds that no longer apply, so
+    letting it into the picker would rank a file by a standard that has moved.
+    """
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "stale.jsonl", windows=9999, policy="2020-01-01.old")
+
+    entry = {f["name"]: f
+             for f in client.get("/api/ticks/manifest").json()["files"]}["stale.jsonl"]
+    assert entry["window_quality"] is None
+    assert entry.get("windows_count") is None, (
+        "a stale sidecar's window count must not be ranked or displayed")
+
+
+def test_manifest_window_quality_never_goes_negative(tmp_path, monkeypatch):
+    """More broken windows than windows yields 0, not a negative count."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _write_verify_sidecar(tmp_path, "bad.jsonl", windows=3, late_starts=5,
+                          early_cutoffs=4, level="INSUFFICIENT")
+
+    wq = {f["name"]: f["window_quality"]
+          for f in client.get("/api/ticks/manifest").json()["files"]}["bad.jsonl"]
+    assert wq["full_windows"] == 0
 
 
 def test_manifest_preferred_file_picks_healthy_winner(tmp_path, monkeypatch):
@@ -1331,7 +1441,7 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
         for t in ticks:
             f.write(json.dumps(t) + "\n")
 
-    url = "/api/backtest?file=fake_round.jsonl&offset=0.03&queue=75&pair_cost=0.98&exit_default_5m=0.15&size=150&gas=0.02"
+    url = "/api/backtest?file=fake_round.jsonl&offset=0.03&queue=75&pair_cost=0.98&exit_default_5m=0.15&size=150"
     response = client.get(url)
     assert response.status_code == 200
     data = response.json()
@@ -1342,7 +1452,9 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert data["params"]["pair_cost"] == 0.98
     assert data["params"]["exit_default_5m"] == 0.15
     assert data["params"]["size"] == 150
-    assert data["params"]["gas"] == 0.02
+    # `gas` is gone from the echoed params: Polymarket sponsors the merge, so
+    # there is no cost to report and nothing for a caller to set.
+    assert "gas" not in data["params"]
     assert "overall" in data
     assert "max_drawdown_cents" in data["overall"]
     assert "win_rate" in data["overall"]
@@ -1567,6 +1679,173 @@ def test_api_backtest_sweep_concurrency_releases_guard(tmp_path, monkeypatch):
     mock_pool.shutdown(wait=True)
     assert responses["first"].status_code == 200
     assert not osc_dash._BACKTEST_RUNNING
+
+
+def _sweep_fixture(tmp_path, slugs, name="sweep_base.jsonl"):
+    """Ticks that actually fill, so P&L is a real discriminator between bases."""
+    rows = []
+    for slug in slugs:
+        for w in range(4):
+            cid = f"0x_{slug}_{w}"
+            for i in range(30):
+                mid = 0.50 + 0.03 * ((i + w) % 4 - 1)
+                tape = [{"price": 0.48, "size": 20}] if i == 5 else []
+                rows.append(_make_fake_tick(
+                    1000.0 + w * 400 + i, cid, f"{slug}-w", slug, mid, tape
+                ))
+    path = tmp_path / name
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+# Every knob the Backtester exposes, with values chosen to differ from the
+# engine defaults so a dropped parameter cannot hide behind an equal default.
+_NON_DEFAULT = {
+    "offset": 0.02, "queue": 50, "pair_cost": 0.95,
+    "exit_default_5m": 0.06, "exit_default_15m": 0.07,
+    "exit_btc_5m": 0.08, "exit_sol_5m": 0.09, "exit_reversal": 0.03,
+    "size": 5, "quote_lo": 0.20, "quote_hi": 0.80,
+    "entry_delay_pct": 4.0, "dead_zone_pct": 12.0,
+    "naked_leg_at_expiry": "hold", "enable_leg_chase": True,
+}
+
+
+def test_sweep_base_point_equals_a_backtest_with_the_same_settings(tmp_path, monkeypatch):
+    """A sweep point on the axis must reproduce the backtest shown beside it.
+
+    The sweep used to hand-roll its own BacktestParams from six knobs, so every
+    later control (pair cost, quote range, dead zone, entry delay, naked-leg,
+    leg-chase) silently fell back to an engine default while the page showed the
+    operator's value. This pins the two endpoints to one base.
+    """
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                              "bnb-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        back = client.get("/api/backtest", params={"file": "sweep_base.jsonl", **_NON_DEFAULT})
+        assert back.status_code == 200
+        b = back.json()
+        # The fixture must actually trade, or this test would pass vacuously.
+        assert b["overall"]["pairs"] > 0, "fixture did not fill; test would be vacuous"
+
+        sweep = client.get("/api/backtest/sweep", params={
+            "axis": "queue", "file": "sweep_base.jsonl", **_NON_DEFAULT})
+        assert sweep.status_code == 200
+        at_base = [p for p in sweep.json()["points"] if p["value"] == _NON_DEFAULT["queue"]]
+        assert len(at_base) == 1
+        point = at_base[0]
+
+        assert point["overall"]["total_pnl_cents"] == b["overall"]["total_pnl_cents"]
+        assert point["overall"]["pairs"] == b["overall"]["pairs"]
+        assert point["overall"]["windows"] == b["n_windows"]
+
+        # And the old default-parameter base really did differ, so this test
+        # has teeth: a sweep that ignored the page is detectably wrong.
+        stale = client.get("/api/backtest/sweep", params={"axis": "queue", "file": "sweep_base.jsonl"})
+        stale_point = [p for p in stale.json()["points"] if p["value"] == _NON_DEFAULT["queue"]][0]
+        assert stale_point["overall"]["total_pnl_cents"] != point["overall"]["total_pnl_cents"]
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_every_backtest_knob_reaches_the_sweep_base():
+    """The sweep endpoint must accept the same parameter surface as the backtest.
+
+    Guards against the original regression: each knob was added to the backtest
+    endpoint only, and the sweep kept a stale private copy of the list.
+    """
+    import inspect
+
+    backtest_params = set(inspect.signature(osc_dash.api_backtest).parameters)
+    sweep_params = set(inspect.signature(osc_dash.api_backtest_sweep).parameters)
+    missing = backtest_params - sweep_params
+    assert missing == set(), (
+        "sweep endpoint is missing knobs the backtest accepts: " f"{sorted(missing)}"
+    )
+    assert {"axis", "limit_windows"} <= sweep_params
+    for venue in ("taker_fee_rate", "tick_size", "min_quote_shares", "gas"):
+        assert venue not in sweep_params, f"{venue} is a pinned venue fact, not a control"
+
+
+def test_sweep_axis_moves_only_its_own_parameter():
+    """Each axis varies one field and holds the rest of the operator's config."""
+    from dataclasses import asdict
+
+    params, _echo = osc_dash._build_backtest_params(
+        offset=0.03, queue=77, pair_cost=0.95, exit_default_5m=0.06,
+        exit_default_15m=0.08, exit_btc_5m=0.09, exit_sol_5m=0.11,
+        exit_reversal=0.03, size=9, quote_lo=0.20, quote_hi=0.80,
+        entry_delay_sec=0.0, entry_delay_pct=4.0, dead_zone_val=0.1,
+        dead_zone_pct=5.0, dead_zone_unit="pct",
+        naked_leg_at_expiry="hold", enable_leg_chase=True,
+    )
+    expected = {
+        "queue": {"queue_gate"},
+        "offset": {"offset"},
+        "exit_stop": {"exit_thresh_by_slug"},
+        "exit_rev": {"exit_reversal"},
+    }
+    for axis, value in [("queue", 25.0), ("offset", 0.04),
+                        ("exit_stop", 0.15), ("exit_rev", 0.02)]:
+        variant, _label = osc_dash._sweep_params_for_value(params, axis, value)
+        before, after = asdict(params), asdict(variant)
+        changed = {k for k in before if before[k] != after[k]}
+        assert changed == expected[axis], f"{axis} changed {sorted(changed)}"
+
+
+def test_sweep_honours_market_and_duration_selection(tmp_path, monkeypatch):
+    """The market/timeframe chips must narrow a sweep, as they narrow a backtest."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                              "bnb-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        def run(**extra):
+            r = client.get("/api/backtest/sweep", params={
+                "axis": "queue", "file": "sweep_base.jsonl", **_NON_DEFAULT, **extra})
+            assert r.status_code == 200
+            return r.json()
+
+        every = run()
+        assert len(every["points"][0]["series_present"]) == 5
+
+        two = run(series="btc,eth")
+        assert two["points"][0]["series_present"] == ["btc-up-or-down-5m", "eth-up-or-down-5m"]
+        assert two["n_windows"] < every["n_windows"]
+
+        # A typo must fail loudly, never silently replay zero windows.
+        assert client.get("/api/backtest/sweep", params={
+            "axis": "queue", "file": "sweep_base.jsonl", "series": "bcc"}).status_code == 400
+        assert client.get("/api/backtest/sweep", params={
+            "axis": "queue", "file": "sweep_base.jsonl", "durations": "7"}).status_code == 400
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_button_sends_every_control_to_both_endpoints():
+    """The page must build one query for both runs, so they cannot disagree."""
+    html = osc_dash.FULL_APP_HTML
+    assert "function btControlValues(" in html
+    assert "function btControlQuery(" in html
+    for knob in ("pair_cost", "exit_btc_5m", "exit_sol_5m", "quote_lo", "quote_hi",
+                 "entry_delay_pct", "dead_zone_pct", "naked_leg_at_expiry",
+                 "enable_leg_chase", "max_start_delay", "series", "durations"):
+        assert knob in html, f"{knob} never reaches the request"
+    # Both endpoints consume the shared builder, not a private copy.
+    assert "/api/backtest?${btControlQuery(v)}" in html
+    assert "/api/backtest/sweep?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in html
+    # The sweep reader must not re-read controls behind the helper's back.
+    assert "const offset = $('btOffset')" not in html
+    assert "const queue = $('btQueue')" not in html
 
 
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
@@ -3308,20 +3587,19 @@ def test_params_spec_serves_param_class_for_every_knob():
 
 
 def test_backtest_tab_renders_a_dedicated_structural_limits_section():
-    """The Backtest tab separates structural limits into their own card/section."""
+    """The Backtest tab separates risk limits into their own card/section."""
     html = client.get("/").text
-    assert "btSecStructural" in html, "no dedicated Structural Limits section on the Backtest tab"
-    assert "Structural Limits" in html
-    # The section header names what it is, so an operator cannot mistake a
-    # safety ceiling for a daily dial.
-    assert "Engine Invariants" in html
+    assert "btSecStructural" in html, "no dedicated Risk Limits section on the Backtest tab"
+    assert "Risk Limits" in html
+    # No explainer paragraphs: headers alone carry the meaning.
+    assert "bt-section-desc" not in html
 
 
 def test_backtest_structural_section_contains_all_structural_controls():
     """Every structural control's markup sits inside the structural section."""
     html = client.get("/").text
     sec_start = html.index("btSecStructural")
-    sec_end = html.index("btSecExecutionBody")
+    sec_end = html.index("id=\"btSecGeometry\"")
     section = html[sec_start:sec_end]
     for frag in ('data-param="max_pair_cost"', 'id="btQuoteLo"', 'id="btQuoteHi"',                     'data-param="dead_zone_pct"',
                      'data-param="naked_leg_at_expiry"'):
@@ -3334,17 +3612,92 @@ def test_backtest_structural_section_contains_all_structural_controls():
     assert 'data-param="max_pair_cost"' not in operator
 
 
-def test_backtest_tuning_section_is_relabelled_as_tuning_knobs():
-    """The operator section says what it is: tuning knobs, not all controls."""
+def test_backtest_operator_section_is_labelled_quote_placement():
+    """The operator section says what it is: quote placement, not all controls."""
     html = client.get("/").text
-    assert "Tuning Knobs" in html
+    assert "Quote Placement" in html
+
+
+def test_backtest_execution_section_shows_only_tick_size():
+    """The Fill Model section is gone entirely; so is the Tick Size control.
+
+    Taker fee rate, min quote shares, merge gas and tick size are all venue
+    facts, not operator choices, so none of them renders on any tab. Tick size
+    is pinned at the venue's own increment of 0.001 and is no longer even a
+    query parameter on `/api/backtest` — widening it fabricates fills, so it
+    must not be reachable from the UI or the URL bar.
+    """
+    html = client.get("/").text
+    assert "Fill Model" not in html
+    assert "Tick Size" not in html
+    for gone in ('id="btTakerFee"', 'id="btMinShares"', 'id="btGas"',
+                 'id="btTickSize"', 'data-param="tick_size"',
+                 "btSecExecutionBody"):
+        assert gone not in html, f"{gone} is a venue constant and should not render"
+
+
+def test_api_backtest_ignores_a_venue_constant_even_if_sent():
+    """No venue constant is settable by hand-editing the URL.
+
+    `/api/backtest` does not declare these parameters, so FastAPI drops them and
+    the engine keeps its own value. This is the guard against someone pasting
+    `&tick_size=0.01` into the address bar and reading the inflated pair rate as
+    a real result, or `&gas=5` and quietly deleting the merge economics.
+    """
+    import inspect
+    from server.osc_dash import api_backtest
+    names = set(inspect.signature(api_backtest).parameters)
+    for dropped in ("taker_fee_rate", "tick_size", "min_quote_shares", "gas"):
+        assert dropped not in names, f"{dropped} is still settable via the API"
+
+
+def test_backtest_geometry_lives_inside_parameters():
+    """Geometry preview is the last group inside Backtest Setup & Run."""
+    html = client.get("/").text
+    params = html.index("btSecParameters")
+    overall = html.index("btSecOverall")
+    segment = html[params:overall]
+    for frag in ("btSecScope", "btSecOperator", "btSecStructural", "btSecGeometry"):
+        assert frag in segment, f"{frag} not inside Backtest Setup"
+    assert "Strategy Geometry Preview" in segment
+
+
+def test_backtest_scope_holds_universe_controls():
+    """Dataset, markets, timeframe, and window filter live in Backtest Scope."""
+    html = client.get("/").text
+    scope_start = html.index("btSecScope")
+    scope_end = html.index("btSecOperator")
+    scope = html[scope_start:scope_end]
+    for frag in ('id="btFileSelect"', 'id="btTokenChips"', 'id="btDurBoth"',
+                  'id="btMaxStartDelay"'):
+        assert frag in scope, f"scope control {frag!r} not inside btSecScope"
+    # And they left Quote Placement: only quote-level dials remain there.
+    op_start = html.index("btSecOperatorBody")
+    op_end = html.index("btSecStructural")
+    operator = html[op_start:op_end]
+    for frag in ('id="btFileSelect"', 'id="btTokenChips"', 'id="btDurBoth"',
+                  'id="btMaxStartDelay"'):
+        assert frag not in operator, f"scope control {frag!r} still in Quote Placement"
+    assert 'data-param="offset"' in operator
+
+
+def test_backtest_run_buttons_sit_at_setup_top_level():
+    """Run Sweep / Reset live directly under Setup, not inside Geometry."""
+    html = client.get("/").text
+    params = html.index('id="btSecParametersBody"')
+    accordion = html.index('class="bt-accordion"')
+    geo = html.index('id="btSecGeometry"')
+    for frag in ('id="btnRunSweep"', 'id="btnResetParams"', 'id="btLastRunTime"'):
+        pos = html.index(frag)
+        assert params < pos < accordion, f"{frag} not at setup top level"
+        assert pos < geo, f"{frag} still inside Geometry"
 
 
 def test_issue_270_backtest_peer_sections_and_accessible_chart_dialog():
-    """Issue #270: six peer sections and a view-only accessible chart dialog exist."""
+    """Issue #270: peer sections and a view-only accessible chart dialog exist."""
     html = client.get("/").text
     sections = {
-        "btSecParametersBody": "Backtest Parameters",
+        "btSecParametersBody": "Backtest Setup",
         "btSecGeometryBody": "Strategy Geometry Preview",
         "btSecOverallBody": "Overall Execution Results",
         "btSecSweepBody": "Sweep Visual",
@@ -3983,6 +4336,13 @@ def test_loadmanifest_preselects_preferred_file():
       const files = payload.files.map(f => ({
         name: f[0], lines: 10, lines_estimated: false,
         is_preferred: f[1],
+        // Windows, not lines, drive the label (see loadManifest). The default
+        // here is a verified EXPLORATORY day: clean, 1,470 full windows, not
+        // research-ready (a single day can never hold 3+ time blocks).
+        window_quality: f[2] === undefined ? {
+          full_windows: 1470, clean_windows: 1470, research_windows: null,
+          readiness_level: 'EXPLORATORY', status: 'PASS',
+        } : f[2],
       }));
       await loadManifest.__withPayload({ files, preferred_file: payload.preferred });
       return { selValue: sel.value, stored: window.selectedBacktestFile,
@@ -3997,8 +4357,41 @@ def test_loadmanifest_preselects_preferred_file():
     if (first.labels.length !== 3) throw new Error('dropdown not built; options=' + JSON.stringify(first.labels));
     if (first.selValue !== 'ticks_b.jsonl') throw new Error('expected preferred pre-select, got ' + first.selValue);
     if (first.stored !== 'ticks_b.jsonl') throw new Error('window.selectedBacktestFile must mirror the pre-select, got ' + first.stored);
-    if (first.labels[2] !== '★ ticks_b.jsonl (10 lines)') throw new Error('expected star-marked label, got ' + first.labels[2]);
+    if (first.labels[2] !== '★ ticks_b.jsonl (1,470 exploratory windows)') throw new Error('expected star-marked label, got ' + first.labels[2]);
     if (first.labels[0].startsWith('★') || first.labels[1].startsWith('★')) throw new Error('non-preferred options must not carry the star');
+
+    // 1b. The label reports windows, never lines. A line count is a property of
+    // how the collector wrote the file and tells an operator nothing about how
+    // much research the file supports.
+    if (/lines/.test(first.labels.join(' '))) throw new Error('labels must not report line counts, got ' + JSON.stringify(first.labels));
+
+    // 1c. The readiness tier the file actually earned is stated, so two files
+    // are comparable at a glance. A research-ready file says so; an
+    // insufficient one says so rather than implying a usable dataset.
+    const researchReady = await __runLoad('', '', false, {
+      preferred: 'ticks_r.jsonl',
+      files: [['ticks_r.jsonl', true, {
+        full_windows: 820, clean_windows: 820, research_windows: 820,
+        readiness_level: 'RESEARCH_READY', status: 'PASS',
+      }]],
+    });
+    if (researchReady.labels[1] !== '★ ticks_r.jsonl (820 research windows)') throw new Error('research-ready label wrong, got ' + researchReady.labels[1]);
+
+    const insufficient = await __runLoad('', '', false, {
+      preferred: 'ticks_i.jsonl',
+      files: [['ticks_i.jsonl', true, {
+        full_windows: 10, clean_windows: null, research_windows: null,
+        readiness_level: 'INSUFFICIENT', status: 'WARN',
+      }]],
+    });
+    if (insufficient.labels[1] !== '★ ticks_i.jsonl (10 insufficient windows)') throw new Error('insufficient label wrong, got ' + insufficient.labels[1]);
+
+    // 1d. No verify report means we do not know — never print a misleading zero.
+    const unverified = await __runLoad('', '', false, {
+      preferred: 'ticks_u.jsonl',
+      files: [['ticks_u.jsonl', true, null]],
+    });
+    if (unverified.labels[1] !== '★ ticks_u.jsonl (windows unknown — not verified)') throw new Error('unverified label wrong, got ' + unverified.labels[1]);
 
     // 2. Stored selection (manual file pick) survives a manifest refresh.
     const kept = await __runLoad('ticks_a.jsonl', 'ticks_a.jsonl', true, {
@@ -4120,7 +4513,10 @@ def test_backtest_param_preview_grid_in_html():
     # Container & SVG elements
     assert 'id="btParamPreviewWrap"' in html
     assert 'id="btParamPreviewSvg"' in html
-    assert 'id="btPreviewMetricsPills"' in html
+    # The pills strip and the "2D price" sub-label were removed; the chart
+    # stands alone.
+    assert 'id="btPreviewMetricsPills"' not in html
+    assert "2D price" not in html
     assert "Strategy Geometry Preview" in html
     # Single visible instance: the collapsible section header is the only
     # heading; the inner duplicate title and the legend were removed.
@@ -4131,11 +4527,7 @@ def test_backtest_param_preview_grid_in_html():
 
     # CSS styles and responsive SVG contract
     assert "#btParamPreviewWrap" in html
-    assert ".bt-preview-pill" in html
-    assert ".bt-preview-pill-cyan" in html
-    assert ".bt-preview-pill-up" in html
-    assert ".bt-preview-pill-down" in html
-    assert 'viewBox="0 0 900 300"' in html
+    assert 'viewBox="0 0 900 420"' in html
     assert 'preserveAspectRatio="xMidYMid meet"' in html
     assert "function layoutBacktestPreviewLabels" in html
     assert "minGap = 25" in html
@@ -4217,14 +4609,6 @@ def test_backtest_param_preview_zero_handling_node():
 
     if (networkCalls > 0) {
       throw new Error(`expected 0 network calls during preview, got: ${networkCalls}`);
-    }
-
-    const pillsHtml = $('btPreviewMetricsPills').innerHTML;
-    if (!pillsHtml.includes('0.0') || !pillsHtml.includes('Spread:')) {
-      throw new Error(`expected Spread: 0.0 when btOffset=0, got: ${pillsHtml}`);
-    }
-    if (!pillsHtml.includes('Stop: <b>-0.0')) {
-      throw new Error(`expected Stop: -0.0 when btExit5m=0, got: ${pillsHtml}`);
     }
 
     const svgHtml = $('btParamPreviewSvg').innerHTML;

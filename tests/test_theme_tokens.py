@@ -133,8 +133,20 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
 
 
 def test_dropdown_preferred_preselect_wiring():
-    """Issue #279: star-marked preferred option + first-load pre-select wiring."""
-    assert "`${f.is_preferred ? '★ ' : ''}${f.name} (${estPrefix}${linesFormatted} lines)`" in FULL_APP_HTML
+    """Issue #279: star-marked preferred option + first-load pre-select wiring.
+
+    The parenthesised detail is a window count, not a line count: lines describe
+    how the collector wrote the file, windows describe how much research it can
+    support. The strongest count the file can back is shown, tagged with the
+    readiness tier it earned, so two files are comparable at a glance.
+    """
+    assert "`${f.is_preferred ? '★ ' : ''}${f.name} (${detail})`" in FULL_APP_HTML
+    # No line counts may reappear in the dataset picker.
+    assert "linesFormatted" not in FULL_APP_HTML
+    assert "lines)`" not in FULL_APP_HTML
+    # An unverifiable file says so rather than printing a misleading zero.
+    assert "windows unknown — not verified" in FULL_APP_HTML
+    assert "research windows" in FULL_APP_HTML
     assert "!window._btFileChosen && d.preferred_file" in FULL_APP_HTML
     assert "window._btFileChosen = false; // Issue #279: flips on any manual dataset pick" in FULL_APP_HTML
     assert "window._btFileChosen = true;" in FULL_APP_HTML
