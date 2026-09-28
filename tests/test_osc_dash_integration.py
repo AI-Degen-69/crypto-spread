@@ -2098,23 +2098,24 @@ def test_sweep_override_note_is_wired_into_the_meta_block():
     # The card owns the verdict now — it calls the note helper with the same
     # pre-request snapshot and the response's point values.
     assert "sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)))" in html
-    assert "sweepCard(submitted, data)" in html
+    assert "sweepCard(submitted, data, statsHtml)" in html
     assert "function sweepCard(" in html
     # The renderer must not go behind the snapshot's back and read the page.
     renderer = html[html.index("function renderSweepVisual(data, submitted)"):]
     renderer = renderer[:renderer.index("\nfunction ")]
     assert "$('btOffset')" not in renderer
     assert "$('btQueue')" not in renderer
-    # The note renders as a full configuration card with labeled sections,
-    # not a grey continuation of the stat line.
+    # The display is the card alone: the grey stat sentence is gone, the
+    # subject is a title above the card, best-overall/best-market fold into
+    # a stat row inside it.
     assert 'class="sweep-card"' in html
-    assert 'sweep-lab' in html
-    assert 'Subject parameter' in html
+    assert 'sweep-title-main' in html
+    assert 'sweep-stats' in html
+    assert 'Best overall' in html
+    assert 'Best market' in html
     assert 'Parameters held' in html
     assert 'Designed constraints / rules' in html
-    # The plain stat line keeps its states.
-    for preserved in ("best overall:", "best market:", "windows ·"):
-        assert preserved in renderer, f"{preserved} lost from the meta line"
+    assert 'sweep-cols' in html
 
 
 def test_sweep_override_note_wording_node():
@@ -2159,28 +2160,31 @@ def test_sweep_override_note_wording_node():
       series_labels: {'eth-up-or-down-5m': '5m ETH'}
     };
 
-    // Card skeleton: the labeled sections, in the sketch's order.
+    // Card skeleton: title above the card, then the three labeled columns.
     const card = sweepCard(v, data);
     assert(card.includes('sweep-card'), card);
-    assert(card.includes('Subject parameter'), card);
+    assert(card.includes('sweep-title-main'), card);
     assert(card.includes('Shares Ahead Queue'), card);
-    assert(card.includes('Values'), card);
-    assert(card.includes('0, 10, 25, 50, 100, 200'), card);
+    assert(card.includes('testing 0, 10, 25, 50, 100, 200'), card);
     assert(card.includes('Markets'), card);
+    assert(card.includes('sweep-mkt'), card);
     assert(card.includes('5m ETH'), card);
     assert(card.includes('Parameters held'), card);
     assert(card.includes('Designed constraints / rules'), card);
+    // Stats fold into the card when the renderer passes them.
+    const withStats = sweepCard(v, data, '<span class="sweep-stats">S</span>');
+    assert(withStats.includes('sweep-stats'), withStats);
 
     // Every held parameter shows the operator's submitted value.
     assert(card.includes('Spread Offset ($)'), card);
     assert(card.includes('0.020'), card);
-    assert(card.includes('Queue Depth Filter (shares)'), card);
+    assert(card.includes('Queue Depth Filter'), card);
     assert(card.includes('>50<'), card);
-    assert(card.includes('Late Entry (% of window)'), card);
+    assert(card.includes('Late Entry (% window)'), card);
     assert(card.includes('4%'), card);
-    assert(card.includes('Exit Stop Loss 5m ($)'), card);
+    assert(card.includes('Exit Stop 5m ($)'), card);
     assert(card.includes('0.06'), card);
-    assert(card.includes('Exit Stop Loss 15m ($)'), card);
+    assert(card.includes('Exit Stop 15m ($)'), card);
     assert(card.includes('0.07'), card);
     assert(card.includes('Reversal Buffer ($)'), card);
     assert(card.includes('0.030'), card);
@@ -2190,15 +2194,15 @@ def test_sweep_override_note_wording_node():
     // Constraints read from the same snapshot.
     assert(card.includes('Quotable Range ($)'), card);
     assert(card.includes('[0.20, 0.80]'), card);
-    assert(card.includes('Dead Zone (% of window)'), card);
+    assert(card.includes('Dead Zone (% window)'), card);
     assert(card.includes('12%'), card);
     assert(card.includes('Naked Leg at Expiry'), card);
     assert(card.includes('Hold'), card);
 
     // The subject row is marked, exactly one per axis.
-    assert(card.includes('subject of this sweep'), card);
+    assert(card.includes('← subject'), card);
     assert(card.includes('sweep-row subject'), card);
-    assert(card.split('subject of this sweep').length - 1 === 1, card);
+    assert(card.split('← subject').length - 1 === 1, card);
 
     // The verdict survives in the card: on-axis value claims the bar (gold).
     assert(card.includes('that bar is your setting'), card);
@@ -2213,13 +2217,13 @@ def test_sweep_override_note_wording_node():
     // exit_stop subject: one marker, and the mixed-set verdict still refuses
     // to claim a bar.
     const stopCard = sweepCard(v, { ...data, axis: 'exit_stop' });
-    assert(stopCard.includes('Exit Stop Loss 5m ($)'), stopCard);
-    assert(stopCard.split('subject of this sweep').length - 1 === 1, stopCard);
+    assert(stopCard.includes('Exit Stop 5m ($)'), stopCard);
+    assert(stopCard.split('← subject').length - 1 === 1, stopCard);
     assert(stopCard.includes('no bar is your mixed setting'), stopCard);
 
     // Unknown axis: no claim, card still renders the held knobs.
     const unk = sweepCard(v, { ...data, axis: 'not-an-axis' });
-    assert(!unk.includes('subject of this sweep'), unk);
+    assert(!unk.includes('← subject'), unk);
     assert(unk.includes('Parameters held'), unk);
 
     // Markets fallback when the response narrows nothing.

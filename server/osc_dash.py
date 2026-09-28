@@ -4232,19 +4232,23 @@ textarea:focus-visible,
       </div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
       <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}
-      #btSweepMeta .sweep-card{display:block;margin-top:8px;padding:12px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;font:12px/1.6 var(--body)}
-      #btSweepMeta .sweep-card-head{display:flex;flex-wrap:wrap;gap:4px 26px;margin-bottom:10px}
-      #btSweepMeta .sweep-lab{display:block;font:700 9px var(--disp);letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
-      #btSweepMeta .sweep-subject{font:600 14px var(--disp);color:var(--tx)}
-      #btSweepMeta .sweep-values{font:11px var(--mono);color:var(--dim)}
-      #btSweepMeta .sweep-cols{display:grid;grid-template-columns:1.2fr 1fr;gap:10px 22px;border-top:1px solid var(--line);padding-top:10px}
+      #btSweepMeta .sweep-title{display:flex;flex-wrap:wrap;gap:2px 14px;align-items:baseline;margin-bottom:6px}
+      #btSweepMeta .sweep-title-main{font:600 15px var(--disp);color:var(--tx)}
+      #btSweepMeta .sweep-title-sub{font:11px var(--mono);color:var(--dim)}
+      #btSweepMeta .sweep-card{display:block;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;font:12px/1.5 var(--body)}
+      #btSweepMeta .sweep-lab{display:block;font:700 9px var(--disp);letter-spacing:1px;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
+      #btSweepMeta .sweep-cols{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:8px 18px}
       #btSweepMeta .sweep-dl{display:block}
-      #btSweepMeta .sweep-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:2px 6px;border-radius:5px}
+      #btSweepMeta .sweep-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:1px 6px;border-radius:5px}
       #btSweepMeta .sweep-row.subject{background:var(--panel);box-shadow:inset 0 0 0 1px var(--gold)}
-      #btSweepMeta .sweep-row .k{color:var(--dim)}
+      #btSweepMeta .sweep-row .k{color:var(--dim);font-size:11px}
       #btSweepMeta .sweep-row .v{color:var(--tx);font:11px var(--mono);text-align:left}
       #btSweepMeta .sweep-tag{font:700 8px var(--disp);letter-spacing:.6px;text-transform:uppercase;color:var(--gold)}
-      #btSweepMeta .sweep-verdict{display:block;margin-top:10px;padding-top:8px;border-top:1px solid var(--line);font-size:11.5px}
+      #btSweepMeta .sweep-mkt{display:inline-block;font:11px var(--mono);color:var(--tx);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:0 0 4px 4px}
+      #btSweepMeta .sweep-stats{display:flex;flex-wrap:wrap;gap:6px 24px;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--line)}
+      #btSweepMeta .sweep-stats > span{display:block}
+      #btSweepMeta .sweep-stat-v{font:11.5px var(--mono);color:var(--tx)}
+      #btSweepMeta .sweep-verdict{display:block;margin-top:8px;padding-top:6px;border-top:1px solid var(--line);font-size:11.5px}
       #btSweepMeta .sweep-verdict.yours{color:var(--gold)}
       #btSweepMeta .sweep-verdict.none{color:var(--warn)}
       </style>
@@ -6881,9 +6885,11 @@ function sweepOverrideNote(axis, v, pointValues){
            submittedLabel: '', items: [], verdict };
 }
 
-// The configuration card under the chart: what was swept, what was held.
+// The sweep display: subject + tested values as a title above, then one
+// compact card with three columns — parameters held, designed constraints,
+// participating markets — and the where-am-I verdict at the bottom.
 // `v` is the pre-request snapshot, `data` the sweep response (axis + markets).
-function sweepCard(v, data){
+function sweepCard(v, data, statsHtml){
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
   const axisName = ({
@@ -6894,42 +6900,46 @@ function sweepCard(v, data){
   })[data.axis] || data.axis;
   const values = (data.points || []).map(p => p.label).join(', ');
   const mkts = (data.series_order || []).map(k => (data.series_labels || {})[k] || k);
-  const mktsTxt = mkts.length ? mkts.join(' · ') : 'All markets';
+  const mktsHtml = mkts.length
+    ? mkts.map(m => `<span class="sweep-mkt">${m}</span>`).join('')
+    : '<span class="sweep-row"><span class="k">All markets</span></span>';
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
-    + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject of this sweep</span>' : ''}</span>`
+    + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
     + `<span class="v">${val}</span></span>`;
-  const params = [
-    row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset'),
-    row('Queue Depth Filter (shares)', String(Math.round(v.queue)), data.axis === 'queue'),
-    row('Late Entry (% of window)', pct(v.entryDelayPct)),
-    row('Exit Stop Loss 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop'),
-    row('Exit Stop Loss 15m ($)', v.exit15m.toFixed(2)),
-    row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev'),
-    row('Leg Chase', onoff(v.legChase)),
-  ];
   const held = `
     <span class="sweep-dl">
       <span class="sweep-lab">Parameters held</span>
-      ${params.join('')}
+      ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
+      ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
+      ${row('Late Entry (% window)', pct(v.entryDelayPct))}
+      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop')}
+      ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2))}
+      ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
+      ${row('Leg Chase', onoff(v.legChase))}
     </span>`;
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
       ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`)}
-      ${row('Dead Zone (% of window)', pct(v.deadZonePct))}
+      ${row('Dead Zone (% window)', pct(v.deadZonePct))}
       ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
+    </span>`;
+  const markets = `
+    <span class="sweep-dl">
+      <span class="sweep-lab">Markets</span>
+      ${mktsHtml}
     </span>`;
   const verdict = sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)));
   const verdictHtml = (verdict && verdict.verdict)
     ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
     : '';
-  return `<span class="sweep-card">`
-    + `<span class="sweep-card-head">`
-    + `<span><span class="sweep-lab">Subject parameter</span><span class="sweep-subject">${axisName}</span></span>`
-    + `<span><span class="sweep-lab">Values</span><span class="sweep-values">${values}</span></span>`
-    + `<span><span class="sweep-lab">Markets</span><span class="sweep-values">${mktsTxt}</span></span>`
+  return `<span class="sweep-title">`
+    + `<span class="sweep-title-main">${axisName}</span>`
+    + `<span class="sweep-title-sub">testing ${values}</span>`
     + `</span>`
-    + `<span class="sweep-cols">${held}${rules}</span>`
+    + `<span class="sweep-card">`
+    + (statsHtml || '')
+    + `<span class="sweep-cols">${held}${rules}${markets}</span>`
     + verdictHtml
     + `</span>`;
 }
@@ -7142,15 +7152,18 @@ function renderSweepVisual(data, submitted){
   const bestMarket = data.best_market || null;
   const meta = $('btSweepMeta');
   if(meta){
-    const overallText = bestOverall ? `best overall: ${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : 'best overall: —';
-    const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
-    const tookTxt = (window._btSweepStartTime) ? ` · took ${fmtElapsed(performance.now() - window._btSweepStartTime)}` : '';
-    // Top line stays the plain stat line; beneath it the full configuration
-    // card: subject parameter, tested values, markets, every knob held, the
-    // designed constraints, and the where-am-I verdict highlighted.
-    const cardHtml = sweepCard(submitted, data);
-    meta.innerHTML = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${tookTxt}`
-      + cardHtml;
+    const overallText = bestOverall ? `${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : '—';
+    const marketText = bestMarket ? `${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : '—';
+    const tookTxt = (window._btSweepStartTime) ? fmtElapsed(performance.now() - window._btSweepStartTime) : '';
+    const statsHtml = `<span class="sweep-stats">`
+      + `<span><span class="sweep-lab">Best overall</span><span class="sweep-stat-v">${overallText}</span></span>`
+      + `<span><span class="sweep-lab">Best market</span><span class="sweep-stat-v">${marketText}</span></span>`
+      + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${data.n_windows || 0}</span></span>`
+      + (tookTxt ? `<span><span class="sweep-lab">Took</span><span class="sweep-stat-v">${tookTxt}</span></span>` : '')
+      + `</span>`;
+    // The card is the whole display: title (subject + tested values), stat
+    // row, three columns, verdict. The old grey sentence is gone.
+    meta.innerHTML = sweepCard(submitted, data, statsHtml);
   }
   const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
