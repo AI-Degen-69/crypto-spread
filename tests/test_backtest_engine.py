@@ -20,6 +20,7 @@ from backtest.engine import (
     _taker_fee,
     group_by_cid,
     iter_ticks,
+    iter_windows_streaming,
     load_ticks,
     replay,
     SETTLE_SOURCES,
@@ -183,6 +184,85 @@ def test_group_by_cid_skips_blank_cid():
     snaps = [{**snap(1.0, 0.5), "cid": ""}, snap(2.0, 0.5)]
     out = group_by_cid(snaps)
     assert len(out) == 1
+
+
+# --- streaming windows + raw market pre-filter -------------------------------
+
+def _write_jsonl(path: Path, rows: list[dict]) -> Path:
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return path
+
+
+def test_iter_windows_streaming_matches_group_by_cid(tmp_path):
+    """The streaming reader must group windows exactly as the batch one does."""
+    rows = [snap(1.0, 0.50), snap(2.0, 0.51),
+            {**snap(3.0, 0.49), "cid": "0xOTHER", "series": "eth-up-or-down-5m"}]
+    f = _write_jsonl(tmp_path / "t.jsonl", rows)
+
+    batch = sorted((c, len(g)) for c, g in group_by_cid(iter_ticks(f)))
+    streamed = sorted((c, len(g)) for _s, c, g in iter_windows_streaming(f))
+
+    assert batch == streamed
+    assert len(streamed) == 2
+
+
+def test_iter_windows_streaming_rejoins_a_window_across_files(tmp_path):
+    """A cid split across two daily files is one window, not two halves."""
+    _write_jsonl(tmp_path / "ticks_2026-09-13.jsonl",
+                 [snap(1.0, 0.50), snap(2.0, 0.50)])
+    _write_jsonl(tmp_path / "ticks_2026-09-14.jsonl",
+                 [snap(3.0, 0.50), {**snap(4.0, 0.50), "cid": "0xOTHER"}])
+    got = dict((c, len(g)) for _s, c, g in iter_windows_streaming(tmp_path))
+    assert got[CID] == 3, "the straddling window must be re-joined"
+    assert got["0xOTHER"] == 1
+    assert sorted(got.items()) == sorted(
+        (c, len(g)) for c, g in group_by_cid(iter_ticks(tmp_path)))
+
+
+@pytest.mark.parametrize("tokens,expected_cids", [
+    ((), {CID, "0xOTHER"}),
+    (("btc",), {CID}),
+    (("eth",), {"0xOTHER"}),
+    (("btc", "eth"), {CID, "0xOTHER"}),
+    (("5m",), {CID, "0xOTHER"}),
+    (("updown",), {CID, "0xOTHER"}),   # slug-only token, must still match
+    (("sol",), set()),                 # no such market in the fixture
+])
+def test_iter_windows_streaming_raw_filter_agrees_with_the_parsed_one(
+        tmp_path, tokens, expected_cids):
+    """The raw pre-filter must accept exactly what `tick_matches` would accept.
+
+    It reads `series` and `slug` out of the line without parsing, so a token
+    that only appears in the slug (`updown`) must still be honoured, and one
+    matching neither must be dropped.
+    """
+    from backtest.selection import tick_matches
+
+    # The second market must change BOTH series and slug, or it still carries
+    # "btc" in its slug and a btc selection would legitimately keep it.
+    other = {**snap(3.0, 0.49), "cid": "0xOTHER",
+             "series": "eth-up-or-down-5m", "slug": "eth-updown-5m-1788000000"}
+    rows = [snap(1.0, 0.50), snap(2.0, 0.50), other]
+    f = _write_jsonl(tmp_path / "t.jsonl", rows)
+
+    raw = {c for _s, c, _g in iter_windows_streaming(f, tokens)}
+
+    # The authority: parse everything, then apply the real per-tick filter.
+    expected = {s["cid"] for s in iter_ticks(f) if tick_matches(s, tokens, ())}
+
+    assert raw == expected == expected_cids
+
+
+def test_iter_windows_streaming_keeps_a_line_it_cannot_read(tmp_path):
+    """A line whose fields cannot be located is parsed, not silently dropped."""
+    f = tmp_path / "t.jsonl"
+    f.write_text(json.dumps({"cid": "0xNOKEY", "ts": 1.0,
+                             "series": "sol-up-or-down-5m", "duration": 300}) + "\n",
+                 encoding="utf-8")
+    # The series is present, so a btc selection drops it...
+    assert [c for _s, c, _g in iter_windows_streaming(f, ("btc",))] == []
+    # ...and an empty selection keeps it.
+    assert len([c for _s, c, _g in iter_windows_streaming(f, ())]) == 1
 
 
 # --- simulation: fills -----------------------------------------------------

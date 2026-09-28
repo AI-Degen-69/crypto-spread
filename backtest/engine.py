@@ -90,6 +90,122 @@ def iter_ticks(source) -> Iterator[dict]:
             yield s
 
 
+def iter_windows_streaming(source, series_tokens: Iterable[str] = ()) -> Iterator[tuple[int, str, list[dict]]]:
+    """Yield `(cid, snaps)` one window at a time, holding at most one in memory.
+
+    `group_by_cid(iter_ticks(source))` materialises the entire dataset first, so
+    replaying "All Files" needs every tick of every day resident at once. Those
+    files total several GB on disk, and as Python dicts the resident set runs to
+    several times that — which is how a single sweep reached 5 GB and pinned the
+    dashboard for minutes with no result. This yields each window as it closes
+    so the caller can simulate and discard it, bounding memory by the largest
+    single window rather than the whole corpus.
+
+    Two properties `group_by_cid` provides that this must keep:
+
+    - A window whose ticks straddle midnight is split across two daily files
+      (Plan D3). The buffers persist across files, so its second half re-joins
+      the first instead of being emitted as two truncated windows.
+    - Every window is emitted whole, never a fragment.
+
+    The collector polls all markets each second, so a tick stream interleaves
+    cids round-robin: `A B C D E A B C D E ...`, not `A A A ... B B B`. Buffering
+    on "previous cid" would therefore emit one window per tick, so a window is
+    tracked per (series, duration) instead — exactly one market window is open
+    per market at a time, and a new cid for that market means the old one is
+    complete. That bounds memory to the open windows (one per market, ~10)
+    rather than to the whole corpus.
+
+    **Yield order is completion order, not chronological order.** A window is
+    emitted when its market opens the next one, so windows finish roughly in
+    time order but not exactly, and not at all across markets. Each yield is
+    `(seq, cid, snaps)`, where `seq` is the order the window was *first seen* in
+    the tick stream. A caller needing chronological order must sort by
+    `(snaps[0]["ts"], seq)`, which reproduces `group_by_cid` exactly: it sorts by
+    first ts, and because its sort is stable over a list in first-seen order,
+    windows sharing an opening timestamp fall back to that same order. Markets
+    that open on the same second do tie — ten of them routinely do — so the
+    tie-break is load-bearing, not cosmetic. Sorting on results is cheap
+    because a result is fixed-size per window, unlike the windows themselves.
+
+    Unparseable lines are skipped, matching `iter_ticks`.
+
+    `series_tokens` pre-filters on the raw line, before `json.loads`. A market
+    selection used to cost nothing on the read: every tick of every file was
+    parsed and only then discarded, so selecting BTC+ETH still paid full price
+    for all ten markets. Parsing dominates — a 205k-row day file measured 11.6s
+    to parse against 1.2s to read — so this is where narrowing the selection has
+    to pay off.
+
+    The filter is an exact mirror of `selection.tick_matches`, not a guess: it
+    pulls the `series` and `slug` string values straight out of the raw line and
+    applies the same `token in (series + " " + slug)` test, lowercased. Testing
+    both fields matters because a token can match either — `updown` appears in
+    the slug but not the series. A line whose two values cannot be located is
+    parsed anyway, so the filter can only ever skip a line that provably fails
+    the same test the parsed path would apply.
+    """
+    def _files(path: Path) -> list[Path]:
+        if path.is_dir():
+            return [f for f in sorted(path.iterdir())
+                    if f.is_file() and f.suffix in (".jsonl", ".gz")]
+        return [path]
+
+    tokens = tuple(t.lower() for t in (series_tokens or ()))
+
+    def _string_field(line: str, key: str) -> str | None:
+        """The JSON string value for `key`, or None if it is not plainly there."""
+        i = line.find(key)
+        if i < 0:
+            return None
+        start = line.find('"', i + len(key))
+        if start < 0:
+            return None
+        end = line.find('"', start + 1)
+        if end < 0:
+            return None
+        return line[start + 1:end]
+
+    def _keep_raw(line: str) -> bool:
+        if not tokens:
+            return True
+        series = _string_field(line, '"series"')
+        slug = _string_field(line, '"slug"')
+        if series is None and slug is None:
+            return True  # cannot tell — parse it and let the real filter decide
+        hay = f"{series or ''} {slug or ''}".lower()
+        return any(t in hay for t in tokens)
+
+    # (series, duration) -> (cid, snaps, first-seen seq) for the open window.
+    open_windows: dict[tuple, tuple[str, list[dict], int]] = {}
+    seq = 0
+
+    for f in _files(Path(source)):
+        for line in _open_text(f):
+            if not _keep_raw(line):
+                continue  # provably outside the selection; never parsed
+            snap = _json_or_skip(line)
+            if snap is None:
+                continue
+            cid = snap.get("cid")
+            if cid is None:
+                continue
+            key = (snap.get("series", ""), snap.get("duration", 0))
+            held = open_windows.get(key)
+            if held is not None:
+                if held[0] == cid:
+                    held[1].append(snap)
+                    continue
+                # The market has moved on: the held window is complete.
+                yield held[2], held[0], held[1]
+            open_windows[key] = (cid, [snap], seq)
+            seq += 1
+
+    for cid, snaps, s in open_windows.values():
+        if snaps:
+            yield s, cid, snaps
+
+
 def group_by_cid(snaps: Iterable[dict]) -> list[tuple[str, list[dict]]]:
     """Group a chronological snap stream by cid, sorted by ts within each group.
 
@@ -129,7 +245,42 @@ class BacktestParams:
     })
     exit_reversal: float = 0.02
     quote_shares: int = 5
+    # Venue minimum price increment, from Gamma's `orderPriceMinTickSize`. NOT
+    # a tuning knob and not operator-settable: no tab renders it and the
+    # `/api/backtest` signature no longer accepts it, so 0.001 is the only value
+    # a dashboard run can ever use.
+    #
+    # It is the tolerance handed to the shared fill rule
+    # `book_math.resting_bid_filled(..., tick, ...)`: a tape print counts as
+    # filling our resting bid when it lands within `tick` of it. It is not a
+    # price grid we snap to, and the reason it cannot be tightened is measured:
+    #
+    #   * The grid really is 0.001. Over the golden dataset the GCD of every
+    #     observed resting price is exactly 0.001, with levels at 0.001, 0.002,
+    #     ... 0.999. The book merely *concentrates* on whole cents, which is why
+    #     a glance at the UI suggests prices only move by a cent.
+    #   * Our own resting bid is off the cent grid ~85% of the time. We rest at
+    #     `mid - offset`, and the mid is a midpoint of a 0.001-grid book, so we
+    #     sit at prices like 0.2965 that nobody else quotes at. The print that
+    #     fills us comes back at *our* price, not at a round number.
+    #   * ~2% of tape prints are Polymarket's size-weighted average for a swept
+    #     match (sizes run to 2,000+ shares), landing up to 0.005 off a cent.
+    #     Without a band those genuine fills are missed entirely.
+    #
+    # So 0.001 is the tightest value that still absorbs sweep-average rounding,
+    # and the only defensible one, because it is the venue's own increment.
+    # Widening it fabricates fills: measured on ticks_2026-09-13, 0.005 lifts the
+    # pair rate 0.357 -> 0.429 and 0.01 lifts it 0.357 -> 0.500 while *improving*
+    # P&L from -579c to -540c. That improvement is invented fills, not signal —
+    # the same trap ADR-0002 and the "fewer fills than the market would give,
+    # never more" rule in `book_math.resting_bid_filled` exist to prevent.
     tick_size: float = 0.001
+    # Venue constants, likewise not operator-settable. `merge_gas_usd` is 0
+    # because CTF merges are sponsored by the Relayer (gasless); `taker_fee_rate`
+    # is Polymarket's crypto coefficient; `min_quote_shares` is the venue's
+    # order-size floor and the engine never reads it at all — `quote_shares` is
+    # the size actually used. All three remain here for the CLI and the sweep
+    # lab, which construct BacktestParams directly.
     merge_gas_usd: float = 0.0
     taker_fee_rate: float = 0.07     # crypto fee coefficient
     min_quote_shares: int = 5
@@ -216,14 +367,41 @@ class BacktestParams:
              "$", (0.001, 0.50), ("backtest", "cockpit"), "tuning"),
         ],
         "execution_assumptions": [
-            ("merge_gas_usd", "Gas Merge Cost ($)", "Real cost, not a tuning knob",
-             "$", (0.0, 100.0), ("backtest",), "assumption"),
-            ("taker_fee_rate", "Taker Fee Rate", "Venue fee coefficient — assumption",
-             "coef", (0.0, 1.0), ("backtest",), "assumption"),
-            ("tick_size", "Tick Size ($)", "Price granularity assumption",
-             "$", (0.0, 1.0), ("backtest",), "assumption"),
-            ("min_quote_shares", "Min Quote Shares", "Minimum order size floor",
-             "shares", (1, 100000), ("backtest",), "assumption"),
+            # All four are venue facts rather than operator decisions, so
+            # `surfaces=()` retires them from every tab: a constant the operator
+            # cannot change is not a knob, and rendering one invites the belief
+            # that it can be.
+            #
+            # The pinned bounds are the second half of that. These are not
+            # rendered, so bounds are no longer a UI affordance -- they are the
+            # contract the engine will not be pushed outside, and a range of one
+            # says "this is the venue's value, full stop" in a form no caller
+            # can misread as a range.
+            #
+            #   merge_gas_usd  -> 0.0     Polymarket sponsors the merge.
+            #   taker_fee_rate -> 0.07    Polymarket's crypto coefficient. This
+            #                               one is NOT free: the engine still
+            #                               charges it on every exit, merge and
+            #                               settlement via `_taker_fee`. It is
+            #                               just not the operator's to change.
+            #   tick_size      -> 0.001   The venue's minimum price increment,
+            #                               and the fill-rule tolerance. Widening
+            #                               it fabricates fills; see the field
+            #                               comment above for the measurements.
+            #   min_quote_shares -> 5     The venue's order-size floor, and read
+            #                               by nothing in the engine.
+            ("merge_gas_usd", "Gas Merge Cost ($)",
+             "Always 0 — Polymarket sponsors the merge (Relayer), so it costs us nothing",
+             "$", (0.0, 0.0), (), "assumption"),
+            ("taker_fee_rate", "Taker Fee Rate",
+             "Always 0.07 — Polymarket's crypto fee coefficient, charged on exits and settlement",
+             "coef", (0.07, 0.07), (), "assumption"),
+            ("tick_size", "Tick Size ($)",
+             "Always 0.001 — the venue's minimum price increment, and the tolerance within which a print counts as filling our bid",
+             "$", (0.001, 0.001), (), "assumption"),
+            ("min_quote_shares", "Min Quote Shares",
+             "Always 5 — the venue's order-size floor (read by nothing in the engine)",
+             "shares", (5, 5), (), "assumption"),
         ],
         "window_policy": [
             # Issue #229: Dead zone governs the end of the window (rules §8 & §14).
@@ -696,8 +874,24 @@ def _window_clock(first: dict) -> tuple[float, float] | None:
     return (start_ts, end_ts - start_ts)
 
 
-def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> WindowResult:
-    """Replay one condition window of ticks under BacktestParams and return WindowResult."""
+def _simulate_window(window_snaps: list[dict], params: BacktestParams,
+                     queue_memo: dict | None = None) -> WindowResult:
+    """Replay one condition window of ticks under BacktestParams and return WindowResult.
+
+    `queue_memo` is an optional scratch dict a caller can share across several
+    parameter sets replaying the *same* window — which is exactly what a sweep
+    does. The queue gate measured 77% of sweep time, re-walking the whole book
+    with two price coercions per level on every tick. A sweep axis that does not
+    move `offset` (queue, exit_stop, exit_rev — three of the four) leaves the
+    resting price identical at every tick, so every axis point recomputes the
+    same depth sums from the same book. Sharing the memo collapses that to one
+    computation per tick instead of one per axis point. The `offset` axis moves
+    the resting price, so it gets no reuse, which is why the key includes it.
+
+    The memo holds a reference to the book it was computed from, so its
+    `id()` — used as the key — cannot be recycled by a freed object while the
+    entry is still live.
+    """
     if not window_snaps:
         return WindowResult("", "", "", 0, 0, "no_data", 0.0, 0.0,
                             False, False, False, False, "", 0.0, 0.0,
@@ -933,8 +1127,26 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams) -> Window
             # used to sum to 0.0 here and pass the gate, i.e. an absent book
             # read as front-of-queue -- the reading issue #138 rejected in the
             # live engine. Unknown depth now fails the gate, matching live.
-            q_up = book_math.queue_ahead(ub.get("bids"), resting_up)
-            q_dn = book_math.queue_ahead(db.get("bids"), resting_down)
+            #
+            # The memo is keyed on the book's identity and our resting price, so
+            # a sweep reusing it across axis points that do not move `offset`
+            # computes this once per tick rather than once per axis point.
+            up_bids = ub.get("bids")
+            dn_bids = db.get("bids")
+            if queue_memo is not None:
+                k_up = (id(up_bids), resting_up)
+                k_dn = (id(dn_bids), resting_down)
+                hit = queue_memo.get(k_up)
+                q_up = hit[0] if hit is not None else book_math.queue_ahead(up_bids, resting_up)
+                if hit is None:
+                    queue_memo[k_up] = (q_up, up_bids)
+                hit = queue_memo.get(k_dn)
+                q_dn = hit[0] if hit is not None else book_math.queue_ahead(dn_bids, resting_down)
+                if hit is None:
+                    queue_memo[k_dn] = (q_dn, dn_bids)
+            else:
+                q_up = book_math.queue_ahead(up_bids, resting_up)
+                q_dn = book_math.queue_ahead(dn_bids, resting_down)
             queue_ok = (q_up is not None and q_dn is not None
                         and q_up <= params.queue_gate
                         and q_dn <= params.queue_gate)

@@ -35,14 +35,20 @@ ONE_SIDED_NUDGE = 0.005
 
 
 def _as_price(value: Any) -> Optional[float]:
-    """Coerce a venue- or JSON-supplied price to float, or None if it is junk."""
+    """Coerce a venue- or JSON-supplied price to float, or None if it is junk.
+
+    `math.isfinite` rather than the NaN/`inf` tuple comparison it replaced: this
+    is the single hottest function in replay (the queue gate alone called it
+    1.5M times per 13k ticks), and building a tuple of two floats and doing two
+    equality tests per call was a measurable share of a sweep.
+    """
     if value is None:
         return None
     try:
         price = float(value)
     except (TypeError, ValueError):
         return None
-    if price != price or price in (float("inf"), float("-inf")):
+    if not math.isfinite(price):
         return None  # NaN / Infinity survive json.loads and only break later
     return price
 

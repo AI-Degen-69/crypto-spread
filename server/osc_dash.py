@@ -697,6 +697,82 @@ def _read_verify_cache(path: Path, expected_fingerprint: str | None = None) -> d
     return None
 
 
+def _cached_line_count(path: Path) -> int | None:
+    """Exact line count from a fingerprint-matched verify sidecar, if present.
+
+    Verify reports record `raw_lines` (physical jsonl rows). Preferring it
+    over the size/950 estimate fixes the ~3x inflated "~N lines" labels on
+    files >= 20 MB (real full-depth rows average ~3kB, not 950B). Returns
+    None when no matched sidecar exists so callers keep their old fallback.
+    """
+    try:
+        if not path.is_relative_to(TICKS_DIR):
+            return None
+        cached = _read_verify_cache(
+            _verify_sidecar_path(path.relative_to(TICKS_DIR).as_posix()),
+            expected_fingerprint=_file_fingerprint(path),
+        )
+        if cached is not None and "raw_lines" in cached:
+            return int(cached["raw_lines"])
+    except Exception:
+        pass
+    return None
+
+
+def _window_quality(cached: dict[str, Any] | None, usable: bool) -> dict[str, Any] | None:
+    """Per-file research-grade window counts, from the cached verify report.
+
+    Replaces the raw line count in the dataset picker. A line is an artefact of
+    how the collector wrote the file — rows-per-window varies with depth and
+    capture density, so it says nothing about how much research the file can
+    support. Windows do: they are the unit the engine replays, the unit the
+    readiness policy is written in, and the unit a robustness claim rests on.
+
+    Three numbers, each answering a different question an operator asks when
+    picking a file:
+
+    - `full_windows`   — windows captured start to close. A window that opened
+      before collection or closed early is partial: the engine sees a truncated
+      path, and a truncated path is not a real trade. This is
+      `windows_count` minus the late starts and early cutoffs, using the same
+      5s threshold the Backtester's "Full Windows Only" filter applies.
+    - `clean_windows`  — full windows in a capture with no detected integrity
+      or continuity problem: no corrupt rows, no schema errors, no collector
+      errors, no sampling gaps, no time reversals, no crossed books. This is
+      the "can I trust the data at all" number.
+    - `research_windows` — clean windows in a file that also clears the
+      RESEARCH_READY readiness bar, which additionally demands breadth (all
+      ten market/duration pairs, enough windows each, several days). Breadth
+      is what makes a robustness claim general rather than one-market luck, so
+      this is the number to judge a file by.
+
+    Returns None when no usable sidecar exists, so a caller can say "unknown"
+    rather than print a verified zero.
+    """
+    if not usable or not cached:
+        return None
+    windows = int(cached.get("windows_count", 0) or 0)
+    late = int(cached.get("late_starts_count", 0) or 0)
+    early = int(cached.get("early_cutoffs_count", 0) or 0)
+    full = max(0, windows - late - early)
+    problems = (
+        int(cached.get("corrupt_lines", 0) or 0)
+        + int(cached.get("schema_errors", 0) or 0)
+        + int(cached.get("collector_errors", 0) or 0)
+        + int(cached.get("sampling_gaps_count", 0) or 0)
+        + int(cached.get("time_reversals", 0) or 0)
+        + int(cached.get("crossed_books", 0) or 0)
+    )
+    level = (cached.get("readiness") or {}).get("level")
+    return {
+        "full_windows": full,
+        "clean_windows": full if problems == 0 else None,
+        "research_windows": full if (problems == 0 and level == "RESEARCH_READY") else None,
+        "readiness_level": level,
+        "status": cached.get("status"),
+    }
+
+
 def _scan_series_counts(path: Path) -> dict[str, int]:
     """One-time streaming scan of a tick file for per-series counts (TTL-cached)."""
     key = str(path)
@@ -734,8 +810,12 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
     for f in files:
         size = f.stat().st_size
         total_bytes += size
-        is_est = size >= 20_000_000
-        lines = int(size / 950) if is_est else _count_lines_fast(f)
+        cached_lines = _cached_line_count(f)
+        if cached_lines is not None:
+            lines, is_est = cached_lines, False
+        else:
+            is_est = size >= 20_000_000
+            lines = int(size / 950) if is_est else _count_lines_fast(f)
         any_estimated = any_estimated or is_est
         total_lines += lines
         entries.append((f, lines))
@@ -934,10 +1014,14 @@ def api_ticks_manifest():
                 and f.name != "golden_manifest.json"
             ):
                 size = f.stat().st_size
-                is_est = size >= 20_000_000
-                lines = (
-                    int(size / 950) if is_est else _count_lines_fast(f)
-                )
+                cached_lines = _cached_line_count(f)
+                if cached_lines is not None:
+                    lines, is_est = cached_lines, False
+                else:
+                    is_est = size >= 20_000_000
+                    lines = (
+                        int(size / 950) if is_est else _count_lines_fast(f)
+                    )
                 entry = {
                     "name": f"{subdir}/{f.name}" if subdir else f.name,
                     "bytes": size,
@@ -1010,6 +1094,11 @@ def api_ticks_manifest():
                                            if cache_current else None)
             entry["integrity_status"] = (cached or {}).get("status") if cache_current else None
             entry["capture_state"] = (cached or {}).get("capture_state") if cache_current else None
+            # Window counts for the dataset picker, in place of raw lines. Needs
+            # a current-policy sidecar: a stale one must not report a window
+            # count measured under superseded thresholds (same rule as the tier
+            # ranking below).
+            entry["window_quality"] = _window_quality(cached, cache_current)
             # Stale-policy sidecars contribute nothing to ranking (Issue #294
             # review): their old windows_count must not leak into tier 2.
             if cache_current:
@@ -1384,10 +1473,32 @@ _BACKTEST_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _BACKTEST_LOCK = threading.Lock()
 _BACKTEST_RUNNING = False
 
+# Wall-clock ceiling for one backtest or sweep. Without it a run that wedges —
+# a worker thrashing, a pathological parameter set, a dataset that is far larger
+# than expected — holds the single-worker pool and the backtest lock forever,
+# and the dashboard answers every subsequent run with "already in progress"
+# until someone restarts the server. Exceeding this aborts the request and
+# releases the guards, so the failure is visible and recoverable rather than
+# permanent.
+BACKTEST_TIMEOUT_SEC = float(os.environ.get("BACKTEST_TIMEOUT_SEC", "900"))
+
 
 def get_backtest_pool() -> ProcessPoolExecutor:
-    """Lazy-initialized singleton ProcessPoolExecutor for CPU-heavy backtest sweeps."""
+    """Lazy-initialized singleton ProcessPoolExecutor for CPU-heavy backtest sweeps.
+
+    Recreated if the previous one is broken. A worker killed mid-run — an
+    out-of-memory kill, or a hard crash — leaves the pool permanently unable to
+    accept work, and every later backtest fails with `BrokenProcessPool` until
+    the server is restarted. Rebuilding on first use makes the pool recoverable
+    rather than a one-way trip.
+    """
     global _BACKTEST_POOL
+    if _BACKTEST_POOL is not None and getattr(_BACKTEST_POOL, "_broken", False):
+        try:
+            _BACKTEST_POOL.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        _BACKTEST_POOL = None
     if _BACKTEST_POOL is None:
         ctx = multiprocessing.get_context("spawn")
         _BACKTEST_POOL = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
@@ -1428,12 +1539,12 @@ def _run_backtest_simulation_worker(
     parameters across the process boundary (`series_sel`/`durations_sel` are
     plain strings, parsed here with the shared selection module).
     """
-    from backtest import BacktestParams, iter_ticks
-    from backtest.engine import _simulate_window, group_by_cid
+    from backtest import BacktestParams
+    from backtest.engine import _simulate_window, iter_windows_streaming
     from backtest.selection import (
         apply_selection,
         build_coverage,
-        found_pairs,
+        found_pairs_from_windows,
         parse_durations,
         parse_series_tokens,
     )
@@ -1447,16 +1558,53 @@ def _run_backtest_simulation_worker(
     duration_values = parse_durations(durations_sel)
     cov_source = source_file_str or ticks_dir_str
 
-    if source_file_str:
-        snaps = list(iter_ticks(Path(source_file_str)))
-    else:
-        snaps = list(iter_ticks(Path(ticks_dir_str)))
-    # Issue #308: dataset filter — same semantics as the CLI flags. Ticks
-    # sharing one cid share series/duration, so whole windows drop here.
-    snaps = list(apply_selection(snaps, series_tokens, duration_values))
+    # Stream one window at a time instead of materialising every tick. Same
+    # reason as the sweep worker: "All Files" is several GB of ticks, which as
+    # Python dicts pinned a single-worker pool past 5 GB and held the backtest
+    # lock for the entire run. Selection drops whole windows (ticks sharing a
+    # cid share series/duration), so filtering per window is equivalent to
+    # filtering the tick stream up front.
+    source = Path(source_file_str) if source_file_str else Path(ticks_dir_str)
+    # Simulate each window as it completes and keep only the (small) result, so
+    # the tick payload never accumulates. `iter_windows_streaming` yields in
+    # completion order, so the results are re-sorted by first ts here to match
+    # `group_by_cid` — the equity curve and drawdown are order-dependent.
+    results: list[tuple[float, int, Any]] = []
+    n_snaps = 0
+    # Push the market selection down into the reader so unselected rows are
+    # never parsed at all, not parsed-then-discarded.
+    for seq, _cid, g in iter_windows_streaming(source, series_tokens):
+        if not g:
+            continue
+        g = list(apply_selection(g, series_tokens, duration_values))
+        if not g:
+            continue
+        if max_start_delay > 0:
+            first_ts = float(g[0].get("ts", 0.0) or 0.0)
+            start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
+            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+            if delay > max_start_delay:
+                continue
+        n_snaps += len(g)
+        results.append((float(g[0].get("ts", 0.0) or 0.0), seq,
+                        _simulate_window(g, params)))
+    # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, including the
+    # first-seen tie-break for markets that open on the same timestamp. The
+    # equity curve and max drawdown are order-dependent, so this must match.
+    results.sort(key=lambda t: (t[0], t[1]))
+    per_window = [w for _ts, _seq, w in results]
+    # `limit_windows` takes the earliest N, as it did when it sliced a
+    # ts-sorted `grouped`. It therefore cannot short-circuit the loop: windows
+    # arrive in completion order, so which N are earliest is only known after
+    # the sort. The dashboard never sends this parameter — it exists for
+    # debugging, and correctness beats skipping work on a path nobody uses.
+    if limit_windows and limit_windows > 0:
+        per_window = per_window[:limit_windows]
+    # Coverage counts windows per (series, duration); the results already carry
+    # both, so there is no need to keep the tick payload around to re-derive it.
+    window_rows = [{"series": w.series, "duration": w.duration} for w in per_window]
 
-    grouped = group_by_cid(snaps)
-    if not grouped:
+    if not per_window:
         gp = params.grouped_params()
         empty_cov = build_coverage(cov_source, {}, series_tokens, duration_values)
         return {
@@ -1486,23 +1634,8 @@ def _run_backtest_simulation_worker(
             "n_windows": 0,
         }
 
-    if max_start_delay > 0:
-        filtered_grouped = []
-        for _cid, g in grouped:
-            if not g:
-                continue
-            first_ts = float(g[0].get("ts", 0.0) or 0.0)
-            start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
-            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
-            if delay <= max_start_delay:
-                filtered_grouped.append((_cid, g))
-        grouped = filtered_grouped
-
-    if limit_windows and limit_windows > 0:
-        grouped = grouped[:limit_windows]
-
-    per_window = [_simulate_window(g, params) for _cid, g in grouped]
-    n_snaps = sum(len(g) for _cid, g in grouped)
+    # The max_start_delay and limit_windows filters ran inside the streaming loop
+    # above, and per_window is already built and ts-sorted.
 
     # Compute Equity Curve and Max Drawdown scaled by size
     cum_pnl = 0.0
@@ -1692,7 +1825,7 @@ def _run_backtest_simulation_worker(
         }
 
     coverage = build_coverage(
-        cov_source, found_pairs(grouped), series_tokens, duration_values)
+        cov_source, found_pairs_from_windows(window_rows), series_tokens, duration_values)
 
     gp = params.grouped_params()
     return {
@@ -1794,72 +1927,131 @@ def _run_sweep_worker(
     size: int,
     max_start_delay: float,
     limit_windows: int,
+    series_sel: str = "",
+    durations_sel: str = "",
 ) -> dict:
     """Load ticks once, replay one param point per axis value.
 
     Returns {"axis", "points": [{label, value, overall, per_series}],
     "n_windows", "n_snaps"} where overall/per_series carry only the totals the
     chart needs (windows, pairs, exits, total/avg PnL in cents).
+
+    `series_sel`/`durations_sel` are the operator's market and timeframe chips,
+    passed as plain strings and re-parsed here with the shared selection module
+    — same as the backtest worker, so both honour the same selection semantics.
     """
-    from backtest import BacktestParams, iter_ticks
-    from backtest.engine import _simulate_window, group_by_cid
+    from backtest import BacktestParams
+    from backtest.engine import _simulate_window, iter_windows_streaming
+    from backtest.selection import (
+        apply_selection,
+        parse_durations,
+        parse_series_tokens,
+    )
     from strategy.series import SERIES, token_for_slug
 
     base = BacktestParams(**base_params_dict)
+    # Validated in the endpoint; already-valid strings, so this cannot raise.
+    series_tokens = parse_series_tokens(series_sel)
+    duration_values = parse_durations(durations_sel)
     values = list(SWEEP_AXES.get(axis, []))
-
-    if source_file_str:
-        snaps = list(iter_ticks(Path(source_file_str)))
-    else:
-        snaps = list(iter_ticks(Path(ticks_dir_str)))
-    grouped = group_by_cid(snaps)
-    if max_start_delay and max_start_delay > 0:
-        kept = []
-        for _cid, g in grouped:
-            if not g:
-                continue
-            first_ts = float(g[0].get("ts", 0.0) or 0.0)
-            start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
-            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
-            if delay <= max_start_delay:
-                kept.append((_cid, g))
-        grouped = kept
-    if limit_windows and limit_windows > 0:
-        grouped = grouped[:limit_windows]
 
     series_order = [s[0] for s in SERIES]
     series_labels = {
         slug: f"{duration // 60:02d}m {token_for_slug(slug)}"
         for slug, duration, _label in SERIES
     }
-    points = []
-    for v in values:
-        params, label = _sweep_params_for_value(base, axis, float(v))
 
-        per_window = [_simulate_window(g, params) for _cid, g in grouped]
-        overall_pnl = sum(w.pnl_cents * size for w in per_window)
-        pairs = sum(1 for w in per_window if w.pair_captured)
-        exits = sum(1 for w in per_window if w.exit_taken)
-        n = len(per_window)
-        per_series: Dict[str, float] = {}
-        for w in per_window:
-            per_series[w.series] = per_series.get(w.series, 0.0) + w.pnl_cents * size
+    # One streaming pass, every axis point simulated per window.
+    #
+    # This used to materialise the whole dataset (`list(iter_ticks(...))` then
+    # `group_by_cid`) and hold it for the whole sweep, which on "All Files" is
+    # several GB of ticks as Python dicts. The worker peaked past 5 GB, ran for
+    # minutes with nothing to show, and — because the pool has a single worker —
+    # held the backtest lock for that whole time, so the dashboard answered every
+    # later run with "already in progress". Streaming one window at a time caps
+    # memory at the largest single window and lets the OS reclaim each window as
+    # soon as it is simulated.
+    variants = [_sweep_params_for_value(base, axis, float(v)) for v in values]
+    acc = [{"pnl": 0.0, "pairs": 0, "exits": 0, "n": 0,
+            "per_series": {}} for _ in variants]
+
+    source = Path(source_file_str) if source_file_str else Path(ticks_dir_str)
+    # Simulate each window as it completes and retain only the (small) results —
+    # never the tick payload, which is what made "All Files" exhaust memory.
+    # Windows arrive in completion order, so a `limit_windows` cap (earliest N)
+    # can only be applied after the sort; the dashboard never sends it, and
+    # correctness beats skipping work on a debug-only path.
+    rows: list[tuple[float, int, list[Any]]] = []
+    n_snaps = 0
+    for seq, _cid, g in iter_windows_streaming(source, series_tokens):
+        if not g:
+            continue
+        # Market/timeframe chips, same semantics as the backtest worker: a
+        # whole window drops together, so filtering per window is equivalent to
+        # filtering the tick stream up front. The market tokens are already
+        # pushed into the reader above; this applies the duration half and
+        # stays the authority on the match.
+        g = list(apply_selection(g, series_tokens, duration_values))
+        if not g:
+            continue
+        if max_start_delay and max_start_delay > 0:
+            first_ts = float(g[0].get("ts", 0.0) or 0.0)
+            start_ts = float(g[0].get("start_ts", 0.0) or 0.0)
+            delay = max(0.0, first_ts - start_ts) if (first_ts and start_ts) else 0.0
+            if delay > max_start_delay:
+                continue
+        n_snaps += len(g)
+        # One memo per window, shared by every axis point. Only the axes that
+        # leave `offset` alone can reuse it — the offset axis moves the resting
+        # price at every tick, so it would pay the bookkeeping and never hit
+        # (measured: 0.87x, i.e. slower). The other three gain because the queue
+        # gate, which is 77% of sweep time, is then computed once per tick
+        # instead of once per axis point.
+        reuse = axis != "offset"
+        memo: dict = {} if reuse else None
+        rows.append((float(g[0].get("ts", 0.0) or 0.0), seq,
+                     [_simulate_window(g, p, queue_memo=memo) for p, _l in variants]))
+    # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, ties included.
+    rows.sort(key=lambda t: (t[0], t[1]))
+    if limit_windows and limit_windows > 0:
+        rows = rows[:limit_windows]
+
+    n_windows = len(rows)
+    for a in acc:
+        a["n"] = 0
+        a["pnl"] = 0.0
+        a["pairs"] = 0
+        a["exits"] = 0
+        a["per_series"] = {}
+    for _ts, _seq, ws in rows:
+        for a, w in zip(acc, ws):
+            a["pnl"] += w.pnl_cents * size
+            a["pairs"] += 1 if w.pair_captured else 0
+            a["exits"] += 1 if w.exit_taken else 0
+            a["n"] += 1
+            a["per_series"][w.series] = (
+                a["per_series"].get(w.series, 0.0) + w.pnl_cents * size)
+
+    points = []
+    for a, (value, (_params, label)) in zip(acc, zip(values, variants)):
+        overall_pnl = a["pnl"]
+        n = a["n"]
         per_series_values = {
-            slug: round(per_series.get(slug, 0.0), 2)
+            slug: round(a["per_series"].get(slug, 0.0), 2)
             for slug in series_order
         }
         points.append({
             "label": label,
-            "value": float(v),
+            "value": float(value),
             "overall": {
                 "windows": n,
-                "pairs": pairs,
-                "exits": exits,
+                "pairs": a["pairs"],
+                "exits": a["exits"],
                 "total_pnl_cents": round(overall_pnl, 2),
                 "avg_pnl_cents": round(overall_pnl / n, 2) if n else 0.0,
             },
             "per_series": per_series_values,
-            "series_present": sorted(per_series),
+            "series_present": sorted(a["per_series"]),
         })
 
     best_overall, best_market = _select_sweep_bests(
@@ -1872,60 +2064,47 @@ def _run_sweep_worker(
         "series_labels": series_labels,
         "best_overall": best_overall,
         "best_market": best_market,
-        "n_snaps": sum(len(g) for _cid, g in grouped),
-        "n_windows": len(grouped),
+        "n_snaps": n_snaps,
+        "n_windows": n_windows,
     }
 
 
-@app.get(
-    "/api/backtest",
-    responses={
-        200: {"description": "Backtest simulation results"},
-        429: {"description": "Backtest simulation already in progress"},
-    },
-)
-async def api_backtest(
-    file: str = "",
-    offset: float = 0.02,
-    queue: float = 0.0,
-    pair_cost: float = 0.99,
-    exit_default_5m: float = 0.05,
-    exit_default_15m: float = 0.05,
-    exit_btc_5m: float = 0.05,
-    exit_sol_5m: float = 0.05,
-    exit_reversal: float = 0.02,
-    size: int = 5,
-    gas: float = 0.0,
-    max_start_delay: float = 0.0,
-    filter_partial: bool = False,
-    quote_lo: float = 0.10,
-    quote_hi: float = 0.90,
-    entry_delay_sec: float = 0.0,
-    entry_delay_pct: float | None = None,
-    dead_zone_val: float = 0.10,
-    dead_zone_pct: float | None = None,
-    dead_zone_unit: str = "pct",
-    naked_leg_at_expiry: str = "close",
-    taker_fee_rate: float = 0.07,
-    tick_size: float = 0.001,
-    min_quote_shares: int = 5,
-    enable_leg_chase: bool = False,
-    limit_windows: int = 0,
-    series: str = "",
-    durations: str = "",
-):
-    """Run backtest simulation on selected tick file or all files in run/ticks/."""
-    from backtest import BacktestParams
-    from backtest.selection import parse_durations, parse_series_tokens
+def _build_backtest_params(
+    *,
+    offset: float,
+    queue: float,
+    pair_cost: float,
+    exit_default_5m: float,
+    exit_default_15m: float,
+    exit_btc_5m: float,
+    exit_sol_5m: float,
+    exit_reversal: float,
+    size: int,
+    quote_lo: float,
+    quote_hi: float,
+    entry_delay_sec: float,
+    entry_delay_pct: float | None,
+    dead_zone_val: float,
+    dead_zone_pct: float | None,
+    dead_zone_unit: str,
+    naked_leg_at_expiry: str,
+    enable_leg_chase: bool,
+) -> tuple[Any, dict]:
+    """Build one BacktestParams from request values, plus the echo both endpoints report.
 
-    # Issue #308: market-series / time-frame selection, same semantics as the
-    # CLI flags. A typo must fail loudly (HTTP 400), never replay zero
-    # windows silently.
-    try:
-        series_tokens = parse_series_tokens(series)
-        duration_values = parse_durations(durations)
-    except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+    `/api/backtest` and `/api/backtest/sweep` must build the *same* base
+    configuration: a sweep is a backtest whose one axis varies. The sweep
+    endpoint used to hand-roll its own subset and silently dropped every knob
+    added after it (pair cost, quote range, dead zone, entry delay, naked-leg,
+    leg-chase, per-market exits), so it ran against engine defaults while the
+    page showed the operator's numbers. Both now call this one function, so the
+    two cannot drift again — the same failure #164 fixed for clamping.
+
+    `echo` carries the effective values back for the run-summary blocks; the
+    endpoints add their own request-scoped fields (max_start_delay, selection)
+    on top.
+    """
+    from backtest import BacktestParams
 
     exit_thresh = {
         "default_5m": exit_default_5m,
@@ -1935,11 +2114,7 @@ async def api_backtest(
         "btc-up-or-down-15m": exit_btc_5m,
         "sol-up-or-down-15m": exit_sol_5m,
     }
-
     size = max(5, int(size))
-
-    if filter_partial and max_start_delay <= 0:
-        max_start_delay = 5.0
 
     # Quotable range (issue #228), clamped like the live engine's
     # update_config: each end to the price domain. An inverted or degenerate
@@ -1970,14 +2145,14 @@ async def api_backtest(
     else:
         entry_delay_sec = max(0.0, min(3600.0, entry_delay_sec))
 
-    # Issue #164: every numeric knob is clamped to the bounds the registry
-    # advertises, so the API refuses exactly what the engine refuses and what
-    # the UI's min/max already showed. Previously each endpoint clamped with
-    # its own inline min/max calls, which is how a bound tightened in the
-    # engine could stay loose here.
     if dead_zone_pct is not None:
         dead_zone_val = max(0.0, min(100.0, float(dead_zone_pct))) / 100.0 if math.isfinite(float(dead_zone_pct)) else 0.10
         dead_zone_unit = "pct"
+        dz_pct_echo: float | None = dead_zone_val * 100.0
+    else:
+        # No percentage given (the "sec" unit, or the legacy seconds form): the
+        # echoed value stays None rather than inventing a percent.
+        dz_pct_echo = None
     dz_unit = dead_zone_unit if dead_zone_unit in ("pct", "sec") else "pct"
     # The registry bound (0.0, 3600.0) is the union across units; under "pct"
     # the engine itself refuses anything above 1.0, so the clamp must be
@@ -1988,6 +2163,8 @@ async def api_backtest(
     else:
         dz_val = min(max(dead_zone_val, 0.0), dz_high)
     naked_expiry = naked_leg_at_expiry if naked_leg_at_expiry in ("close", "hold") else "close"
+    leg_chase = bool(enable_leg_chase)
+
     params = BacktestParams(
         offset=_clamp_to_spec("offset", offset),
         queue_gate=_clamp_to_spec("queue_gate", queue),
@@ -1995,17 +2172,111 @@ async def api_backtest(
         exit_thresh_by_slug=exit_thresh,
         exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
         quote_shares=_clamp_to_spec("quote_shares", size),
-        merge_gas_usd=_clamp_to_spec("merge_gas_usd", gas),
         quote_range=(quote_lo, quote_hi),
         entry_delay_sec=_clamp_to_spec("entry_delay_sec", entry_delay_sec),
         entry_delay_pct=(entry_delay_pct / 100.0) if entry_delay_pct is not None else None,
         dead_zone_val=dz_val,
         dead_zone_unit=dz_unit,
         naked_leg_at_expiry=naked_expiry,
-        enable_leg_chase=bool(enable_leg_chase),
-        taker_fee_rate=_clamp_to_spec("taker_fee_rate", taker_fee_rate),
-        tick_size=_clamp_to_spec("tick_size", tick_size),
-        min_quote_shares=_clamp_to_spec("min_quote_shares", min_quote_shares),
+        enable_leg_chase=leg_chase,
+        # taker_fee_rate, min_quote_shares, merge_gas_usd and tick_size are
+        # venue facts with no control on this tab, and neither endpoint accepts
+        # them: they now take the BacktestParams defaults (0.07, 5, 0.0, 0.001).
+        # The CLI and the sweep lab construct BacktestParams directly and are
+        # unaffected.
+    )
+    echo = {
+        "offset": offset,
+        "queue": queue,
+        "pair_cost": pair_cost,
+        "exit_default_5m": exit_default_5m,
+        "exit_default_15m": exit_default_15m,
+        "exit_btc_5m": exit_btc_5m,
+        "exit_sol_5m": exit_sol_5m,
+        "exit_reversal": exit_reversal,
+        "size": size,
+        "quote_lo": quote_lo,
+        "quote_hi": quote_hi,
+        "entry_delay_sec": entry_delay_sec,
+        "entry_delay_pct": entry_delay_pct,
+        "dead_zone_pct": dz_pct_echo,
+        "naked_leg_at_expiry": naked_expiry,
+        "enable_leg_chase": leg_chase,
+    }
+    return params, echo
+
+
+
+@app.get(
+    "/api/backtest",
+    responses={
+        200: {"description": "Backtest simulation results"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest(
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    limit_windows: int = 0,
+    series: str = "",
+    durations: str = "",
+):
+    """Run backtest simulation on selected tick file or all files in run/ticks/."""
+    from backtest import BacktestParams
+    from backtest.selection import parse_durations, parse_series_tokens
+
+    # Issue #308: market-series / time-frame selection, same semantics as the
+    # CLI flags. A typo must fail loudly (HTTP 400), never replay zero
+    # windows silently.
+    try:
+        series_tokens = parse_series_tokens(series)
+        duration_values = parse_durations(durations)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    size = max(5, int(size))
+
+    if filter_partial and max_start_delay <= 0:
+        max_start_delay = 5.0
+
+    params, echo = _build_backtest_params(
+        offset=offset,
+        queue=queue,
+        pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m,
+        exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m,
+        exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal,
+        size=size,
+        quote_lo=quote_lo,
+        quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec,
+        entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val,
+        dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit,
+        naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase,
     )
 
     if not TICKS_DIR.exists():
@@ -2040,48 +2311,53 @@ async def api_backtest(
             }
         source_path_str = str(source)
 
+    # Two echo blocks, matching the pre-refactor semantics field for field.
+    # `params` reports the values the engine actually used (clamped); `raw`
+    # reports what the request asked for before registry clamping but after
+    # range/percent normalisation — which is why a non-finite quote_lo never
+    # reaches the JSON encoder. The shared builder returns the normalised set
+    # so neither block can drift.
     empty_params = {
         "offset": params.offset,
         "queue": params.queue_gate,
         "pair_cost": params.max_pair_cost,
-        "exit_default_5m": exit_default_5m,
-        "exit_default_15m": exit_default_15m,
-        "exit_btc_5m": exit_btc_5m,
-        "exit_sol_5m": exit_sol_5m,
+        "exit_default_5m": echo["exit_default_5m"],
+        "exit_default_15m": echo["exit_default_15m"],
+        "exit_btc_5m": echo["exit_btc_5m"],
+        "exit_sol_5m": echo["exit_sol_5m"],
         "exit_reversal": params.exit_reversal,
-        "size": size,
-        "gas": params.merge_gas_usd,
+        "size": echo["size"],
         "max_start_delay": max_start_delay,
-        "quote_lo": quote_lo,
-        "quote_hi": quote_hi,
+        "quote_lo": echo["quote_lo"],
+        "quote_hi": echo["quote_hi"],
         "entry_delay_sec": params.entry_delay_sec,
         "entry_delay_pct": params.entry_delay_pct,
-        "dead_zone_pct": params.dead_zone_val * 100.0 if params.dead_zone_unit == "pct" else None,
+        "dead_zone_pct": (params.dead_zone_val * 100.0) if params.dead_zone_unit == "pct" else None,
         "series": series,
         "durations": durations,
     }
 
     raw_params = {
-        "offset": offset,
-        "queue": queue,
-        "pair_cost": pair_cost,
-        "exit_default_5m": exit_default_5m,
-        "exit_default_15m": exit_default_15m,
-        "exit_btc_5m": exit_btc_5m,
-        "exit_sol_5m": exit_sol_5m,
-        "size": size,
-        "gas": gas,
+        "offset": echo["offset"],
+        "queue": echo["queue"],
+        "pair_cost": echo["pair_cost"],
+        "exit_default_5m": echo["exit_default_5m"],
+        "exit_default_15m": echo["exit_default_15m"],
+        "exit_btc_5m": echo["exit_btc_5m"],
+        "exit_sol_5m": echo["exit_sol_5m"],
+        "exit_reversal": echo["exit_reversal"],
+        "size": echo["size"],
         "max_start_delay_sec": max_start_delay,
-        "quote_lo": quote_lo,
-        "quote_hi": quote_hi,
-        "entry_delay_sec": entry_delay_sec,
-        "entry_delay_pct": entry_delay_pct,
-        "dead_zone_pct": dead_zone_pct,
+        "quote_lo": echo["quote_lo"],
+        "quote_hi": echo["quote_hi"],
+        "entry_delay_sec": echo["entry_delay_sec"],
+        "entry_delay_pct": echo["entry_delay_pct"],
+        "dead_zone_pct": echo["dead_zone_pct"],
         "series": series,
         "durations": durations,
     }
 
-    global _BACKTEST_RUNNING
+    global _BACKTEST_RUNNING, _BACKTEST_POOL
     semaphore = get_backtest_semaphore()
     with _BACKTEST_LOCK:
         if _BACKTEST_RUNNING or semaphore.locked():
@@ -2124,7 +2400,15 @@ async def api_backtest(
                 _BACKTEST_RUNNING = False
 
     worker_task = asyncio.create_task(_run_shielded())
-    return await asyncio.shield(worker_task)
+    try:
+        return await asyncio.wait_for(asyncio.shield(worker_task),
+                                      timeout=BACKTEST_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        _BACKTEST_POOL = None  # abandon the wedged worker; the next call rebuilds
+        raise HTTPException(
+            status_code=504,
+            detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
+                    "Narrow the dataset, markets or timeframes and try again."))
 
 
 @app.get(
@@ -2140,26 +2424,60 @@ async def api_backtest_sweep(
     size: int = 5,
     max_start_delay: float = 0.0,
     limit_windows: int = 0,
+    filter_partial: bool = False,
     offset: float = 0.02,
     queue: float = 0.0,
+    pair_cost: float = 0.99,
     exit_default_5m: float = 0.05,
     exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
     exit_reversal: float = 0.02,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    series: str = "",
+    durations: str = "",
 ):
     """Replay one sensitivity axis and return X-Y points.
 
     X = axis value, Y = total PnL (cents). One aggregate series plus one per
     market series, so the UI draws 1 big chart + 10 small ones. The base point
     is the caller's current backtest settings; only the axis moves.
+
+    The base is built by the same `_build_backtest_params` the plain backtest
+    uses, so every knob on the page reaches the sweep. This endpoint used to
+    hand-roll a six-knob subset and silently fell back to engine defaults for
+    pair cost, quote range, dead zone, entry delay, naked-leg and leg-chase —
+    so a sweep could contradict the backtest shown beside it. Market and
+    duration selection are honoured too, which also makes a sweep over two
+    markets roughly half the work.
     """
     from backtest import BacktestParams
+    from backtest.selection import parse_durations, parse_series_tokens
 
     if axis not in SWEEP_AXES:
         return JSONResponse(
             status_code=400,
             content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
         )
+    # Same fail-loud rule as the backtest endpoint (issue #308): a typo must
+    # 400, never replay zero windows silently.
+    try:
+        series_tokens = parse_series_tokens(series)
+        duration_values = parse_durations(durations)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
     size = max(5, int(size))
+
+    if filter_partial and max_start_delay <= 0:
+        max_start_delay = 5.0
 
     source_path_str: Optional[str] = None
     if file:
@@ -2171,23 +2489,28 @@ async def api_backtest_sweep(
             return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
         source_path_str = str(source)
 
-    exit_thresh = {
-        "default_5m": exit_default_5m,
-        "default_15m": exit_default_15m,
-        "btc-up-or-down-5m": exit_default_5m,
-        "sol-up-or-down-5m": exit_default_5m,
-        "btc-up-or-down-15m": exit_default_15m,
-        "sol-up-or-down-15m": exit_default_15m,
-    }
-    base = BacktestParams(
-        offset=_clamp_to_spec("offset", offset),
-        queue_gate=_clamp_to_spec("queue_gate", queue),
-        exit_thresh_by_slug=exit_thresh,
-        exit_reversal=_clamp_to_spec("exit_reversal", exit_reversal),
-        quote_shares=_clamp_to_spec("quote_shares", size),
+    params, _echo = _build_backtest_params(
+        offset=offset,
+        queue=queue,
+        pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m,
+        exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m,
+        exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal,
+        size=size,
+        quote_lo=quote_lo,
+        quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec,
+        entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val,
+        dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit,
+        naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase,
     )
 
-    global _BACKTEST_RUNNING
+    global _BACKTEST_RUNNING, _BACKTEST_POOL
     semaphore = get_backtest_semaphore()
     with _BACKTEST_LOCK:
         if _BACKTEST_RUNNING or semaphore.locked():
@@ -2204,17 +2527,18 @@ async def api_backtest_sweep(
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
-            base_dict = asdict(base)
             return await loop.run_in_executor(
                 pool,
                 _run_sweep_worker,
                 str(TICKS_DIR),
                 source_path_str,
-                base_dict,
+                asdict(params),
                 axis,
                 size,
                 max_start_delay,
                 limit_windows,
+                series,
+                durations,
             )
         finally:
             semaphore.release()
@@ -2223,7 +2547,15 @@ async def api_backtest_sweep(
                 _BACKTEST_RUNNING = False
 
     worker_task = asyncio.create_task(_run_shielded())
-    return await asyncio.shield(worker_task)
+    try:
+        return await asyncio.wait_for(asyncio.shield(worker_task),
+                                      timeout=BACKTEST_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        _BACKTEST_POOL = None  # abandon the wedged worker; the next call rebuilds
+        raise HTTPException(
+            status_code=504,
+            detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
+                    "Narrow the dataset, markets or timeframes and try again."))
 
 
 @app.get("/api/analysis")
@@ -3474,7 +3806,6 @@ textarea:focus-visible,
 .bt-section-head[aria-expanded="false"] .bt-section-chevron{transform:rotate(-90deg)}
 .bt-section-body{min-width:0}
 .bt-section-body[hidden]{display:none}
-.bt-section-desc{font:500 10px var(--mono);color:var(--faint);margin:0 0 8px;line-height:1.5}
 .bt-section-dot{display:inline-block;width:8px;height:8px;border-radius:50%}
 .bt-section-dot-green{background:var(--up)}
 .bt-section-dot-red{background:var(--down)}
@@ -3503,15 +3834,6 @@ textarea:focus-visible,
 /* ── Backtest Strategy Geometry Preview (Issue #263) ───────────────────────── */
 #btParamPreviewWrap{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:14px;transition:border-color .15s ease}
 #btParamPreviewWrap:hover{border-color:var(--line-hi)}
-.bt-preview-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:10px}
-.bt-preview-sub{font:500 10px var(--mono);color:var(--dim)}
-.bt-preview-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
-.bt-preview-pill{font:600 10px var(--mono);line-height:1.35;padding:4px 8px;border-radius:7px;border:1px solid var(--line);background:var(--panel);display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
-.bt-preview-pill b{color:var(--tx);font-weight:700}
-.bt-preview-pill-up{color:var(--up);border-color:rgba(51,201,181,0.3);background:rgba(51,201,181,0.08)}
-.bt-preview-pill-down{color:var(--down);border-color:rgba(240,104,77,0.3);background:rgba(240,104,77,0.08)}
-.bt-preview-pill-gold{color:var(--gold);border-color:rgba(235,178,58,0.3);background:rgba(235,178,58,0.08)}
-.bt-preview-pill-cyan{color:var(--cyan);border-color:rgba(56,189,248,0.3);background:rgba(56,189,248,0.08)}
 .bt-preview-chart-shell{width:100%;background:rgba(10,13,18,0.55);border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .bt-preview-chart-shell svg{display:block;width:100%;height:clamp(180px, calc((100vw - 300px) / 3), 540px);aspect-ratio:auto}
 </style></head><body>
@@ -3642,26 +3964,25 @@ textarea:focus-visible,
     <div class="bt-section bt-peer-section" id="btSecParameters">
       <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecParametersBody" onclick="toggleBtSection(this,'btSecParametersBody')">
         <span class="bt-section-dot bt-section-dot-green"></span>
-        <span>⚡ Backtest Parameters</span>
+        <span>⚡ Backtest Setup &amp; Run</span>
         <span class="bt-section-chevron" aria-hidden="true">▾</span>
       </button>
       <div class="bt-section-body" id="btSecParametersBody">
       <div class="mono" id="btHash" style="font-size:11px;color:var(--dim);margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+        <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
+        <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
+      </div>
       <div class="bt-accordion" style="margin-top:12px">
-        <!-- ── 1. OPERATOR CONTROLS (live-replicable) ─────────────────────── -->
-        <div class="bt-section" id="btSecOperator">
-          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperatorBody')">
+        <!-- ── 0. BACKTEST SCOPE (universe: dataset, markets, timeframe, windows) -->
+        <div class="bt-section" id="btSecScope">
+          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecScopeBody" onclick="toggleBtSection(this,'btSecScopeBody')">
             <span class="bt-section-dot bt-section-dot-green"></span>
-            <span>Tuning Knobs — set these live on the book</span>
+            <span>Backtest Scope</span>
             <span class="bt-section-chevron" aria-hidden="true">▾</span>
           </button>
-          <div class="bt-section-body" id="btSecOperatorBody">
-          <div class="bt-section-desc">
-            These are the parameters you actually tune when trading live:
-            where you rest, how much book you clear through, your stop
-            placement, your sizing, and when quoting starts. Structural
-            limits (engine invariants) have their own section below.
-          </div>
+          <div class="bt-section-body" id="btSecScopeBody">
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
               <label>Tick File Dataset</label>
@@ -3691,6 +4012,27 @@ textarea:focus-visible,
                 <button type="button" id="btDurBoth" class="tab-btn active" aria-pressed="true" style="font-size:11px;padding:4px 10px" onclick="setBtDuration('both')">Both</button>
               </div>
             </div>
+            <div class="form-group">
+              <label>Partial Windows Filter</label>
+              <select id="btMaxStartDelay">
+                <option value="0" selected>All (No filter)</option>
+                <option value="5.0">Full Windows Only (≤5s delay)</option>
+                <option value="2.0">Strict Full Windows (≤2s delay)</option>
+              </select>
+            </div>
+          </div>
+          </div>
+        </div>
+
+        <!-- ── 1. QUOTE PLACEMENT (live-replicable) ─────────────────────────── -->
+        <div class="bt-section" id="btSecOperator">
+          <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOperatorBody" onclick="toggleBtSection(this,'btSecOperatorBody')">
+            <span class="bt-section-dot bt-section-dot-green"></span>
+            <span>Quote Placement</span>
+            <span class="bt-section-chevron" aria-hidden="true">▾</span>
+          </button>
+          <div class="bt-section-body" id="btSecOperatorBody">
+          <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
               <label data-param-label="offset"></label>
               <input type="number" step="0.005" id="btOffset" data-param="offset" value="0.02">
@@ -3736,31 +4078,18 @@ textarea:focus-visible,
                 <option value="1">On — chase the unfilled leg within the cap</option>
               </select>
             </div>
-            <div class="form-group">
-              <label>Partial Windows Filter</label>
-              <select id="btMaxStartDelay">
-                <option value="0" selected>All (No filter)</option>
-                <option value="5.0">Full Windows Only (≤5s delay)</option>
-                <option value="2.0">Strict Full Windows (≤2s delay)</option>
-              </select>
-            </div>
           </div>
           </div>
         </div>
 
-        <!-- ── 1b. STRUCTURAL LIMITS (engine invariants, issue #233) ───── -->
+        <!-- ── 2. RISK LIMITS (engine invariants, issue #233) ─────────────── -->
         <div class="bt-section" id="btSecStructural">
           <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecStructuralBody" onclick="toggleBtSection(this,'btSecStructuralBody')">
             <span class="bt-section-dot bt-section-dot-red"></span>
-            <span>Structural Limits — Engine Invariants &amp; Safety Bounds</span>
+            <span>Risk Limits</span>
             <span class="bt-section-chevron" aria-hidden="true">▾</span>
           </button>
           <div class="bt-section-body" id="btSecStructuralBody">
-          <div class="bt-section-desc">
-            These bound what the engine may do at all (ADR-0003). They are not
-            daily tuning dials: a sweep changes them only with explicit intent
-            (<code>--include-structural</code>). Badged <span class="param-structural-badge">STRUCTURAL</span> here and in the Cockpit.
-          </div>
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
               <label for="btQuoteLo">Quotable Range Lo</label>
@@ -3789,46 +4118,16 @@ textarea:focus-visible,
           </div>
         </div>
 
-        <!-- ── 2. EXECUTION / FILLS (assumption — not live-settable) ──────── -->
-        <div class="bt-section">
-          <button type="button" class="bt-section-head" aria-expanded="false" aria-controls="btSecExecutionBody" onclick="toggleBtSection(this,'btSecExecutionBody')">
-            <span class="bt-section-dot bt-section-dot-amber"></span>
-            <span>Execution Assumptions — model-side, not directly settable live</span>
-            <span class="bt-section-chevron" aria-hidden="true">▾</span>
-          </button>
-          <div class="bt-section-body" id="btSecExecutionBody">
-          <div class="bt-section-desc">
-            Costs and price granularity the replay assumes. How the book fills
-            you is not here and is not settable: there is one fill rule, the
-            same one the live engine runs (ADR-0002).
-          </div>
-          <div class="form-grid" style="margin-top:6px">
-            <div class="form-group">
-              <label data-param-label="taker_fee_rate"></label>
-              <input type="number" min="0" max="1" step="0.01" id="btTakerFee" data-param="taker_fee_rate" value="0.07">
-            </div>
-            <div class="form-group">
-              <label data-param-label="tick_size"></label>
-              <input type="number" min="0" max="1" step="0.001" id="btTickSize" data-param="tick_size" value="0.001">
-            </div>
-            <div class="form-group">
-              <label data-param-label="min_quote_shares"></label>
-              <input type="number" min="1" max="100000" step="1" id="btMinShares" data-param="min_quote_shares" value="5">
-            </div>
-            <div class="form-group">
-              <label data-param-label="merge_gas_usd"></label>
-              <input type="number" step="0.01" id="btGas" data-param="merge_gas_usd" value="0.00">
-            </div>
-          </div>
-          </div>
-        </div>
+        <!-- ── 3. (removed) ───────────────────────────────────────────────────
+             The execution-assumption section used to sit here. Every field in
+             it — taker fee rate, min quote shares, merge gas, tick size — is a
+             venue fact rather than an operator choice, so all four are now
+             held by the engine, documented on the BacktestParams field
+             comments in `backtest/engine.py`, and settable by neither a tab
+             nor the /api/backtest query string. -->
 
-      </div>
-      </div>
-      </div>
-
-      <!-- ── 3. STRATEGY GEOMETRY PREVIEW (2D Price-Time Grid, Issue #198) ── -->
-      <div class="bt-section bt-peer-section" id="btSecGeometry">
+        <!-- ── 4. GEOMETRY PREVIEW (lives with the parameters it visualizes) ── -->
+        <div class="bt-section" id="btSecGeometry">
         <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecGeometryBody" onclick="toggleBtSection(this,'btSecGeometryBody')">
           <span class="bt-section-dot bt-section-dot-blue"></span>
           <span>📐 Strategy Geometry Preview</span>
@@ -3836,28 +4135,20 @@ textarea:focus-visible,
         </button>
         <div class="bt-section-body" id="btSecGeometryBody">
       <div id="btParamPreviewWrap">
-        <div class="bt-preview-header">
-          <span class="bt-preview-sub">2D price × time</span>
-          <div id="btPreviewMetricsPills" class="bt-preview-pills" aria-label="Preview metrics">
-            <!-- Dynamic metric summary pills rendered by updateBacktestParamPreview() -->
-          </div>
-        </div>
         <div class="bt-preview-chart-shell">
-          <svg id="btParamPreviewSvg" viewBox="0 0 900 300" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Strategy price levels across the active window">
+          <svg id="btParamPreviewSvg" viewBox="0 0 900 420" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Strategy price levels across the active window">
             <!-- Rendered by updateBacktestParamPreview() -->
           </svg>
         </div>
       </div>
 
-      <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
-        <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
-        <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
-        <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
-      </div>
+        </div>
         </div>
       </div>
+      </div>
+    </div>
 
-    <div class="bt-section bt-peer-section" id="btSecOverall">
+      <div class="bt-section bt-peer-section" id="btSecOverall">
       <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecOverallBody" onclick="toggleBtSection(this,'btSecOverallBody')">
         <span class="bt-section-dot bt-section-dot-green"></span>
         <span>📈 Overall Execution Results</span>
@@ -3874,14 +4165,16 @@ textarea:focus-visible,
         <div class="box" title="Proportion of windows with net positive P&L (merged pairs + profitable exits)"><div class="lbl">Win Rate ℹ️</div><div class="val" id="btWinRate">0.0%</div><div class="sub" id="btWinsCount">0 / 0 profitable</div></div>
         <div class="box" title="Total wall-clock duration of the last backtest sweep (measured by Run Sweep)"><div class="lbl">Elapsed Time ℹ️</div><div class="val" id="btElapsedTime" style="color:var(--cyan)">--</div><div class="sub" id="btElapsedSub">Sweep duration</div></div>
       </div>
-      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
+      <style>.bt-charts-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.bt-charts-row>div{margin-top:0 !important}@media (max-width:900px){.bt-charts-row{grid-template-columns:1fr}}</style>
+      <div class="bt-charts-row">
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <h4 style="margin:0;font:700 11px var(--disp);color:var(--faint)">Cumulative Equity Curve</h4>
           <span id="btEquityWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run. Check tape data density for this dataset.</span>
         </div>
-        <canvas id="chartEquity" height="140"></canvas>
+        <canvas id="chartEquity" height="100"></canvas>
       </div>
-      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px">
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px">
           <h4 style="margin:0;font:700 11px var(--disp);color:var(--faint)">Per-Window P&amp;L Distribution (Histogram)</h4>
           <div style="display:flex;align-items:center;gap:8px">
@@ -3889,7 +4182,8 @@ textarea:focus-visible,
             <span id="btPnlHistWarning" style="display:none;font-size:11px;font-weight:600;color:var(--gold);background:rgba(235,178,58,0.12);padding:2px 8px;border-radius:4px;border:1px solid rgba(235,178,58,0.3)">⚠️ 0 fills recorded in this run.</span>
           </div>
         </div>
-        <canvas id="chartPnlHist" height="140"></canvas>
+        <canvas id="chartPnlHist" height="100"></canvas>
+      </div>
       </div>
       </div>
       </div>
@@ -5745,7 +6039,6 @@ function toggleBtSection(btn, bodyId){
     btSecLogBody: true,
     btSecOperatorBody: true,
     btSecStructuralBody: true,
-    btSecExecutionBody: false,
     btSecPolicyBody: false
   };
   Object.keys(defaults).forEach(function(id){
@@ -5807,6 +6100,71 @@ function setBtDuration(dur) {
   updateBtFilterUI();
 }
 
+// One reader for every Backtester control, so "Run Sweep" and "Run Backtest"
+// cannot disagree about what the page is set to. The sweep varies only the
+// chosen axis; every other knob is exactly the number typed above.
+function btControlValues(overrides){
+  const o = overrides || {};
+  const getVal = (id, def) => {
+    const el = $(id);
+    if (!el) return def;
+    const v = String(el.value).trim();
+    return (v !== '' && Number.isFinite(Number(v))) ? Number(v) : def;
+  };
+  const size = Math.max(5, Math.round(getVal('btSize', 5)));
+  return {
+    offset: getVal('btOffset', 0.02),
+    queue: getVal('btQueue', 50),
+    pairCost: getVal('btPairCost', 0.99),
+    exit5m: getVal('btExit5m', 0.05),
+    exit15m: getVal('btExit15m', 0.05),
+    exitBtc: getVal('btExitBtc', 0.05),
+    exitSol: getVal('btExitSol', 0.05),
+    exitReversal: getVal('btExitReversal', 0.02),
+    size: (o.size !== undefined) ? o.size : size,
+    maxStartDelay: getVal('btMaxStartDelay', 0.0),
+    quoteLo: getVal('btQuoteLo', 0.10),
+    quoteHi: getVal('btQuoteHi', 0.90),
+    entryDelayPct: Math.max(0, Math.min(100, getVal('btEntryDelay', 0.0))),
+    // Issue #164: knobs the live engine has always had, now simulated too.
+    deadZonePct: Math.max(0, Math.min(100, getVal('btDeadZoneVal', 10.0))),
+    nakedLegAtExpiry: $('btNakedLegAtExpiry') ? $('btNakedLegAtExpiry').value : 'close',
+    legChase: $('btLegChase') ? $('btLegChase').value : '0',
+    // The fee coefficient, min order size, merge gas and tick size are venue
+    // facts with no control on this tab; neither endpoint takes them, so the
+    // engine uses its own defaults. Nothing to read here.
+  };
+}
+
+// Shared query string for both endpoints: every knob the page exposes, plus
+// the market/timeframe chips when they narrow the universe.
+function btControlQuery(v, axis){
+  let q = `offset=${v.offset}&queue=${v.queue}&pair_cost=${v.pairCost}`
+        + `&exit_default_5m=${v.exit5m}&exit_default_15m=${v.exit15m}`
+        + `&exit_btc_5m=${v.exitBtc}&exit_sol_5m=${v.exitSol}`
+        + `&size=${v.size}&max_start_delay=${v.maxStartDelay}`
+        + `&quote_lo=${v.quoteLo}&quote_hi=${v.quoteHi}`
+        + `&entry_delay_pct=${v.entryDelayPct}&exit_reversal=${v.exitReversal}`
+        + `&dead_zone_pct=${v.deadZonePct}`
+        + `&naked_leg_at_expiry=${encodeURIComponent(v.nakedLegAtExpiry)}`
+        + `&enable_leg_chase=${v.legChase}`;
+  const fileVal = ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
+  if(fileVal){ q += `&file=${encodeURIComponent(fileVal)}`; }
+  // Market / timeframe selection (chip multi-select): all tokens or
+  // both frames = omit the param, which the API reads as "all".
+  const btToks = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
+  if (btToks.length > 0 && btToks.length < 5) {
+    q += `&series=${encodeURIComponent(btToks.map(t => t.toLowerCase()).join(','))}`;
+  }
+  const btDur = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
+  if (btDur === '5m') {
+    q += `&durations=300`;
+  } else if (btDur === '15m') {
+    q += `&durations=900`;
+  }
+  return q;
+}
+
 async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
@@ -5815,59 +6173,14 @@ async function runBacktest(fileOverride){
   setBacktestLoadingState(true);
   startBtTimer();
   try {
-    const getVal = (id, def) => {
-      const el = $(id);
-      if (!el) return def;
-      const v = String(el.value).trim();
-      return (v !== '' && Number.isFinite(Number(v))) ? Number(v) : def;
-    };
-
-    const offset = getVal('btOffset', 0.02);
-    const queue = getVal('btQueue', 50);
-    const pairCost = getVal('btPairCost', 0.99);
-    const exit5m = getVal('btExit5m', 0.05);
-    const exit15m = getVal('btExit15m', 0.05);
-    const exitBtc = getVal('btExitBtc', 0.05);
-    const exitSol = getVal('btExitSol', 0.05);
-    const size = Math.max(5, Math.round(getVal('btSize', 5)));
+    const v = btControlValues();
+    const size = v.size;
     if ($('btSize')) $('btSize').value = size;
-    const gas = getVal('btGas', 0.0);
-
-    const maxStartDelay = getVal('btMaxStartDelay', 0.0);
-    const quoteLo = getVal('btQuoteLo', 0.10);
-    const quoteHi = getVal('btQuoteHi', 0.90);
-    const entryDelayPct = Math.max(0, Math.min(100, getVal('btEntryDelay', 0.0)));
-    // Issue #164: knobs the live engine has always had, now simulated too.
-    const exitReversal = getVal('btExitReversal', 0.02);
-    const deadZonePct = Math.max(0, Math.min(100, getVal('btDeadZoneVal', 10.0)));
-    const nakedLegAtExpiry = $('btNakedLegAtExpiry') ? $('btNakedLegAtExpiry').value : 'close';
-    const legChase = $('btLegChase') ? $('btLegChase').value : '0';
-    // Rendered from the registry, so they must actually reach the engine.
-    const takerFee = getVal('btTakerFee', 0.07);
-    const tickSize = getVal('btTickSize', 0.001);
-    const minShares = getVal('btMinShares', 5);
-
     const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
-
-    let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_pct=${entryDelayPct}&exit_reversal=${exitReversal}&dead_zone_pct=${deadZonePct}&naked_leg_at_expiry=${nakedLegAtExpiry}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
-    if (fileVal) {
-      url += `&file=${encodeURIComponent(fileVal)}`;
-    }
-    // Market / timeframe selection (chip multi-select): all tokens or
-    // both frames = omit the param, which the API reads as "all".
-    const btToks = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
-    if (btToks.length > 0 && btToks.length < 5) {
-      url += `&series=${encodeURIComponent(btToks.map(t => t.toLowerCase()).join(','))}`;
-    }
-    const btDur = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
-    if (btDur === '5m') {
-      url += `&durations=300`;
-    } else if (btDur === '15m') {
-      url += `&durations=900`;
-    }
+    const url = `/api/backtest?${btControlQuery(v)}`;
     const res = await fetch(url, {signal: ctl.signal});
     const data = await res.json();
     if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
@@ -6248,7 +6561,6 @@ function resetBtParams(){
   $('btExitBtc').value = "0.05";
   $('btExitSol').value = "0.05";
   $('btSize').value = "5";
-  $('btGas').value = "0.00";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
   if ($('btQuoteLo')) $('btQuoteLo').value = "0.10";
   if ($('btQuoteHi')) $('btQuoteHi').value = "0.90";
@@ -6266,13 +6578,11 @@ function resetBtParams(){
 async function runSweepVisual(){
   const btn = $('btnRunSweepVisual');
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
-  const fileVal = ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
-  const size = $('btSize') ? $('btSize').value : 5;
-  const offset = $('btOffset') ? $('btOffset').value : 0.02;
-  const queue = $('btQueue') ? $('btQueue').value : 0;
-  const exitStop5m = $('btExit5m') ? $('btExit5m').value : 0.05;
-  const exitStop15m = $('btExit15m') ? $('btExit15m').value : 0.05;
-  const exitRev = $('btExitReversal') ? $('btExitReversal').value : 0.02;
+  // Same reader the backtest uses, so the sweep's base point is exactly the
+  // configuration shown on this page. Only `axis` varies; every other knob is
+  // held at the operator's value. `size` is pinned to the page value because
+  // the sweep scales P&L by it — sweeping it would scale the axis itself.
+  const v = btControlValues();
   const meta = $('btSweepMeta');
   if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
   if(btn){ btn.disabled = true; btn.textContent = '⏳ Waiting…'; }
@@ -6297,8 +6607,7 @@ async function runSweepVisual(){
       if(btn && btn.disabled){ btn.textContent = `⏳ Sweeping ${t}…`; }
       if(meta && meta.textContent.startsWith('sweeping')){ meta.textContent = `sweeping ${axis}… ${t}`; }
     }, 500);
-    let url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&size=${encodeURIComponent(size)}&offset=${encodeURIComponent(offset)}&queue=${encodeURIComponent(queue)}&exit_default_5m=${encodeURIComponent(exitStop5m)}&exit_default_15m=${encodeURIComponent(exitStop15m)}&exit_reversal=${encodeURIComponent(exitRev)}`;
-    if(fileVal){ url += `&file=${encodeURIComponent(fileVal)}`; }
+    const url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}`;
     const res = await fetch(url);
     if(res.status === 429){
       if(meta){ meta.textContent = 'busy — a backtest is already running, retry shortly.'; }
@@ -6732,11 +7041,30 @@ async function loadManifest(){
       for(const f of d.files){
         const opt = document.createElement('option');
         opt.value = f.name;
-        const linesFormatted = (f.lines||0).toLocaleString();
-        const estPrefix = f.lines_estimated ? '~' : '';
+        // Windows, not lines. A line count is a property of how the collector
+        // wrote the file, not of how much research the file supports; a window
+        // is the unit the engine replays and the unit a robustness claim rests
+        // on. The strongest count the file can back is shown, with the
+        // readiness tier it earned, so two files are comparable at a glance.
+        // No usable verify report means we genuinely do not know — say so
+        // rather than print a misleading zero.
+        const wq = f.window_quality;
+        let detail;
+        if(!wq){
+          detail = 'windows unknown — not verified';
+        }else{
+          const best = wq.research_windows != null ? wq.research_windows
+                    : (wq.clean_windows != null ? wq.clean_windows : wq.full_windows);
+          const tier = wq.readiness_level === 'RESEARCH_READY' ? 'research-ready'
+                    : (wq.readiness_level === 'EXPLORATORY' ? 'exploratory' : 'insufficient');
+          const n = (best != null ? best : 0).toLocaleString();
+          detail = wq.readiness_level === 'RESEARCH_READY'
+            ? `${n} research windows`
+            : `${n} ${tier} windows`;
+        }
         // Issue #279: the healthiest file is ★-marked and pre-selected on the
         // first load only — a stored manual choice (including All Files) wins.
-        opt.textContent = `${f.is_preferred ? '★ ' : ''}${f.name} (${estPrefix}${linesFormatted} lines)`;
+        opt.textContent = `${f.is_preferred ? '★ ' : ''}${f.name} (${detail})`;
         sel.appendChild(opt);
       }
       if(currentVal && Array.from(sel.options).some(o => o.value === currentVal)){
@@ -9218,7 +9546,6 @@ function updateBacktestParamPreview(){
   };
 
   const offset = Math.max(0, readFinite('btOffset', 0.02));
-  const pairCostMax = Math.max(0, readFinite('btPairCost', 0.99));
   const exitStop = Math.max(0, readFinite('btExit5m', 0.05));
   const exitReversal = Math.max(0, readFinite('btExitReversal', 0.02));
   const entryDelayPct = Math.max(0, Math.min(100, readFinite('btEntryDelay', 0)));
@@ -9230,31 +9557,18 @@ function updateBacktestParamPreview(){
   const windowPct = 100;
   const delayPct = entryDelayPct;
   const deadPct = deadZonePct;
-  const activePct = Math.max(0, windowPct - delayPct - deadPct);
 
   // Price calculations
   const mid = 0.50;
   const longBid = Math.max(0, mid - offset);
   const shortComp = Math.min(1.0, mid + offset);
-  const pairCost = Math.max(0, (mid - offset) * 2);
   const stopPrice = Math.max(0, longBid - exitStop);
   const revPrice = Math.min(1.0, stopPrice + exitReversal);
-
-  // Update Summary Pills
-  const pillsEl = $('btPreviewMetricsPills');
-  if (pillsEl) {
-    pillsEl.innerHTML = `
-      <span class="bt-preview-pill bt-preview-pill-cyan" title="Quoted spread width (2 × offset)">Spread: <b>${(offset * 200).toFixed(1)}¢</b></span>
-      <span class="bt-preview-pill ${pairCost <= pairCostMax ? 'bt-preview-pill-up' : 'bt-preview-pill-down'}" title="Calculated pair cost vs max limit">Pair Cost: <b>$${pairCost.toFixed(3)}</b> <span style="font-size:9.5px;opacity:.7">/ max $${pairCostMax.toFixed(2)}</span></span>
-      <span class="bt-preview-pill bt-preview-pill-down" title="Adverse distance to trigger stop exit">Stop: <b>-${(exitStop * 100).toFixed(1)}¢</b></span>
-      <span class="bt-preview-pill bt-preview-pill-gold" title="Active quoting window as a percentage">Active: <b>${activePct.toFixed(0)}%</b></span>
-    `;
-  }
 
   // Dimensions: reserve a stable right gutter for labels instead of stretching
   // the plot to the edge of the SVG at wide viewport sizes.
   const w = 900;
-  const h = 300;
+  const h = 420;
   const padL = 58;
   const padR = 245;
   const padT = 24;
@@ -9411,7 +9725,7 @@ function setupBacktestInputListeners(){
   const inputIds = [
     'btOffset', 'btQueue', 'btPairCost', 'btExit5m',
     'btExit15m', 'btExitBtc', 'btExitSol',
-    'btSize', 'btGas', 'btFileSelect', 'btMaxStartDelay',
+    'btSize', 'btFileSelect', 'btMaxStartDelay',
     'btQuoteLo', 'btQuoteHi', 'btEntryDelay',
     'btExitReversal', 'btDeadZoneVal'
   ];

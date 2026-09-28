@@ -264,12 +264,59 @@ def test_model_side_assumptions_are_not_offered_as_live_knobs():
 
     `fill_model` used to head this list. Issue #226 removed it outright: how a
     venue fills you is not an assumption to tune, it is one rule (ADR-0002).
+
+    All four are venue facts rather than operator choices, so none of them is on
+    any tab. `tick_size` is the sharpest case: it is the tolerance within which
+    a tape print counts as filling our resting bid, so widening it fabricates
+    fills and improves the P&L for the wrong reason. It is pinned to the venue's
+    own increment of 0.001 and is not reachable from a tab or the API.
     """
-    for name in ("taker_fee_rate", "tick_size", "merge_gas_usd"):
+    for name in ("taker_fee_rate", "tick_size", "merge_gas_usd", "min_quote_shares"):
         spec = next(g[name] for g in SPEC.values() if name in g)
         assert "cockpit" not in spec["surfaces"], (
             f"{name} is an execution assumption and must not appear in the Cockpit")
-        assert "backtest" in spec["surfaces"]
+        assert "backtest" not in spec["surfaces"], (
+            f"{name} is a venue constant and must not be rendered on any tab")
+        assert spec["surfaces"] == (), (
+            f"{name} should be retired from every surface, got {spec['surfaces']}")
+
+
+def test_tick_size_is_pinned_to_the_venue_increment():
+    """0.001 is the only value, and the bounds say so as a range of one.
+
+    Pinning the bounds is the belt to the removed control's braces: nothing
+    renders it and `/api/backtest` no longer accepts it, and this stops any
+    future caller from widening it through the registry instead.
+    """
+    spec = next(g["tick_size"] for g in SPEC.values() if "tick_size" in g)
+    assert spec["default"] == 0.001
+    assert spec["bounds"] == (0.001, 0.001)
+    assert BacktestParams().tick_size == 0.001
+
+
+def test_every_execution_assumption_is_pinned_to_its_venue_value():
+    """The other three are pinned the same way, and none of them is free.
+
+    `merge_gas_usd` is 0 because Polymarket sponsors the merge through the
+    Relayer, so the cost is genuinely zero rather than merely unmeasured.
+    `taker_fee_rate` is 0.07 and the engine still charges it on every exit,
+    merge and settlement — pinning it removes the operator's choice, not the
+    cost. `min_quote_shares` is 5 and is read by nothing in the engine at all.
+    """
+    live = BacktestParams()
+    expected = {
+        "merge_gas_usd": 0.0,
+        "taker_fee_rate": 0.07,
+        "tick_size": 0.001,
+        "min_quote_shares": 5,
+    }
+    for name, value in expected.items():
+        spec = next(g[name] for g in SPEC.values() if name in g)
+        assert spec["default"] == value, f"{name} default drifted"
+        assert spec["bounds"] == (value, value), (
+            f"{name} bounds are a range, so a caller could still move it: "
+            f"{spec['bounds']}")
+        assert getattr(live, name) == value
 
 
 def test_grouped_params_still_works_unchanged():
