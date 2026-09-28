@@ -3670,6 +3670,25 @@ textarea:focus-visible,
               </select>
             </div>
             <div class="form-group">
+              <label>Market</label>
+              <select id="btMarketSelect">
+                <option value="">All Markets</option>
+                <option value="btc">BTC</option>
+                <option value="eth">ETH</option>
+                <option value="bnb">BNB</option>
+                <option value="sol">SOL</option>
+                <option value="xrp">XRP</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Timeframe</label>
+              <select id="btTimeframeSelect">
+                <option value="">Both (5m + 15m)</option>
+                <option value="300">5m only</option>
+                <option value="900">15m only</option>
+              </select>
+            </div>
+            <div class="form-group">
               <label data-param-label="offset"></label>
               <input type="number" step="0.005" id="btOffset" data-param="offset" value="0.02">
             </div>
@@ -5784,6 +5803,15 @@ async function runBacktest(fileOverride){
     let url = `/api/backtest?offset=${offset}&queue=${queue}&pair_cost=${pairCost}&exit_default_5m=${exit5m}&exit_default_15m=${exit15m}&exit_btc_5m=${exitBtc}&exit_sol_5m=${exitSol}&size=${size}&gas=${gas}&max_start_delay=${maxStartDelay}&quote_lo=${quoteLo}&quote_hi=${quoteHi}&entry_delay_pct=${entryDelayPct}&exit_reversal=${exitReversal}&dead_zone_pct=${deadZonePct}&naked_leg_at_expiry=${nakedLegAtExpiry}&enable_leg_chase=${legChase}&taker_fee_rate=${takerFee}&tick_size=${tickSize}&min_quote_shares=${minShares}`;
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
+    }
+    // Market / timeframe selection (#308 follow-up): empty = all.
+    const marketVal = $('btMarketSelect') ? $('btMarketSelect').value : '';
+    const timeframeVal = $('btTimeframeSelect') ? $('btTimeframeSelect').value : '';
+    if (marketVal) {
+      url += `&series=${encodeURIComponent(marketVal)}`;
+    }
+    if (timeframeVal) {
+      url += `&durations=${encodeURIComponent(timeframeVal)}`;
     }
     const res = await fetch(url, {signal: ctl.signal});
     const data = await res.json();
