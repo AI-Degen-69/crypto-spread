@@ -7618,6 +7618,15 @@ async function verifyTickData(filename, refresh){
       badge.textContent = label;
       badge.style.color = color;
     }
+    // Update manifest entry and runtime badge if active file was verified
+    if(window.tickManifestFiles && Array.isArray(d.market_breakdown)){
+      const entry = window.tickManifestFiles.find(f => f.name === filename);
+      if(entry){
+        entry.market_breakdown = d.market_breakdown;
+        entry.windows_count = d.windows_count || entry.windows_count;
+        updateBtRuntimeEstimate();
+      }
+    }
   }catch(e){
     if(cell){
       cell.innerHTML = `<div style="color:var(--down);padding:10px;text-align:center;font-size:12px">Error verifying ${esc(filename)}: ${esc(e.message)}</div>`;
