@@ -48,7 +48,9 @@ Type: **Code [Backend/Logic]** — verification via targeted pytest per task.
   `parse_durations(raw) -> tuple[int, ...]`,
   `apply_selection(snaps, series_tokens, durations) -> list[dict]` (empty
   selection returns input unchanged),
-  `build_coverage(selection, found_pairs, source) -> dict` with keys
+  `expected_pairs(source, tokens, durations) -> (pairs, windows_per_pair,
+  origin)`, `found_pairs(grouped)`, and
+  `build_coverage(source, grouped, tokens, durations) -> dict` with keys
   `filtered, selection, pairs_found, pairs_expected, missing_pairs,
   windows_found, windows_expected, expected_source`.
 - `replay()` signature unchanged; `aggregate` gains `per_duration`
