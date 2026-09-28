@@ -6800,7 +6800,7 @@ async function runSweepVisual(){
     }
     const data = await res.json();
     if(data.error){ if(meta){ meta.textContent = data.error; } return; }
-    renderSweepVisual(data);
+    renderSweepVisual(data, v);
   }catch(err){
     if(meta){ meta.textContent = 'sweep failed: ' + err; }
   }finally{
@@ -6816,6 +6816,40 @@ function sweepAxisLabel(axis){
     exit_stop: 'Stop distance — 5m + 15m markets',
     exit_rev: 'Reversal buffer — distance from anchor'
   })[axis] || axis;
+}
+
+// What the sweep replaces. Every other knob stays at the number typed on the
+// page, but the chart cannot show which one moved, and `exit_stop` is the
+// special case: one control stands for six thresholds inside the engine. The
+// values here are what the page submitted — not a server-confirmed echo of what
+// ran, which is why the note says "your" and not "effective".
+function sweepOverrideNote(axis, v, pointValues){
+  if(!v) return '';
+  const points = Array.isArray(pointValues) ? pointValues : [];
+  const equals = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-6;
+  const onAxis = value => points.some(p => equals(p, value));
+
+  if(axis === 'exit_stop'){
+    const yours = [['5m', v.exit5m], ['15m', v.exit15m],
+                   ['BTC', v.exitBtc], ['SOL', v.exitSol]];
+    const listed = yours.map(p => `${p[0]} ${formatSweepTickValue('exit_stop', p[1])}`).join(' · ');
+    const head = `sweeps stop distance — replaces all six stop thresholds (yours: ${listed})`;
+    const uniform = yours.every(p => equals(p[1], yours[0][1]));
+    if(!uniform) return `${head}; the sweep tests one uniform value, so no bar is your mixed setting`;
+    return onAxis(v.exit5m)
+      ? `${head}; the bar at ${formatSweepTickValue('exit_stop', v.exit5m)} is your setting`
+      : `${head}; no bar equals your value`;
+  }
+
+  const single = ({
+    queue: ['Queue depth', v.queue],
+    offset: ['Quote offset', v.offset],
+    exit_rev: ['Reversal buffer', v.exitReversal]
+  })[axis];
+  if(!single) return '';
+  const shown = formatSweepTickValue(axis, single[1]);
+  return `sweeps ${single[0]} — replaces your ${shown}`
+    + (onAxis(single[1]) ? ' (that bar is your setting)' : '; no bar equals it');
 }
 
 function formatSweepTickValue(axis, val){
@@ -7013,7 +7047,7 @@ function setupBtChartDialog(){
   aggregate.addEventListener('keydown', activate);
 }
 
-function renderSweepVisual(data){
+function renderSweepVisual(data, submitted){
   window._btSweepVisualData = data;
   setupBtChartDialog();
   const theme = getThemeTokens();
@@ -7029,7 +7063,8 @@ function renderSweepVisual(data){
     const overallText = bestOverall ? `best overall: ${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : 'best overall: —';
     const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
     const tookTxt = (window._btSweepStartTime) ? ` · took ${fmtElapsed(performance.now() - window._btSweepStartTime)}` : '';
-    meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${tookTxt}`;
+    const overrideTxt = sweepOverrideNote(data.axis, submitted, xVals);
+    meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${overrideTxt ? ` · ${overrideTxt}` : ''}${tookTxt}`;
   }
   const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
