@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>מה נמדד בעצם? — עדכון 337</title>
+<style>
+  :root{
+    --bg:#101418; --panel:#181f26; --panel2:#1f2830; --line:#2b3742;
+    --fg:#e8edf2; --dim:#9db0c0; --gold:#e3b341; --teal:#39c6a5; --red:#e06c5f;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--fg); font-family:"Segoe UI",Arial,sans-serif; line-height:1.65; padding:24px 16px 64px;}
+  .wrap{max-width:760px; margin:0 auto;}
+  .kicker{color:var(--teal); font-size:13px; letter-spacing:1px; font-weight:600;}
+  h1{font-size:clamp(26px,5vw,38px); line-height:1.25; margin:8px 0 12px;}
+  h1 em{color:var(--gold); font-style:normal;}
+  .lede{color:var(--dim); font-size:17px; max-width:60ch;}
+  .lede b{color:var(--fg);}
+  .demo{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin:28px 0;}
+  .demo h2{font-size:15px; color:var(--dim); font-weight:600; margin-bottom:14px;}
+  .chips{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;}
+  .chip{border:1px solid var(--line); background:var(--panel2); color:var(--fg); border-radius:999px; padding:7px 14px; font-size:14px; cursor:pointer; transition:.15s;}
+  .chip[aria-pressed="true"]{border-color:var(--teal); color:var(--teal); font-weight:600;}
+  .vals{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px;}
+  .val{border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:8px; padding:6px 12px; font-size:14px; cursor:pointer;}
+  .val[aria-pressed="true"]{border-color:var(--gold); color:var(--gold); font-weight:600;}
+  .caption{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:14px 16px; font-size:15px; min-height:88px;}
+  .caption .axis{color:var(--teal); font-weight:700;}
+  .caption .note{color:var(--gold);}
+  .caption .muted{color:var(--red);}
+  .caption .sep{color:var(--line); margin:0 6px;}
+  .proven{display:grid; gap:10px; margin-top:8px;}
+  .row{display:flex; gap:12px; align-items:baseline; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px;}
+  .row .n{color:var(--teal); font-weight:800; font-size:18px; min-width:26px;}
+  .row p{color:var(--dim); font-size:15px;}
+  .row p b{color:var(--fg);}
+  .try{margin-top:22px; border-inline-start:3px solid var(--gold); padding:4px 14px; color:var(--dim); font-size:15px;}
+  .try b{color:var(--fg);}
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="kicker">עדכון 337 — גרף הסוויפ בלוח הבקרה</p>
+  <h1>הגרף טען שהוא בודק <em>את ההגדרות שלך</em>. עכשיו זה מוכח — וכתוב בשורה אחת.</h1>
+  <p class="lede">הבעיה: הגרף שבודק "מה קורה אם מזיזים כוונון אחד" כביכול מחזיק את <b>כל</b> ההגדרות האחרות שהקלדת — אבל זה מעולם לא נבדק, וכוונון העצירה החליף בשקט שישה ספים בבת אחת. התוצאה: לא ידעת אם המספרים על המסך באמת מדברים על התצורה שלך.</p>
+
+  <div class="demo">
+    <h2>נסה בעצמך — בחר כוונון וערך, וראה את השורה שהגרף מציג עכשיו</h2>
+    <div class="chips" id="axes" role="group" aria-label="בחירת כוונון"></div>
+    <div class="vals" id="vals" role="group" aria-label="הערך שהקלדת"></div>
+    <div class="caption" id="cap" aria-live="polite"></div>
+  </div>
+
+  <div class="proven">
+    <div class="row"><span class="n">✓</span><p><b>כל נקודה = בדיקה רגילה.</b> כל עמודה בכל כוונון הושוו אחד לאחד מול בדיקה רגילה עם אותן הגדרות בדיוק — והם זהים.</p></div>
+    <div class="row"><span class="n">✓</span><p><b>המסלול המיוחד של ההיסט נתפס.</b> לכוונון ההיסט יש דרך חישוב נפרדת — הוכח שהיא נותנת בדיוק את אותה תוצאה.</p></div>
+    <div class="row"><span class="n">✓</span><p><b>גם שווקי 15 הדקות נבדקים.</b> כוונון העצירה מחליף ספים גם שם — וההבטחה נבדקה גם עליהם, לא רק על 5 הדקות.</p></div>
+  </div>
+
+  <div class="try"><b>לראות את זה במערכת עצמה:</b> פתח את לוח הבקרה, עבור לטאב ה-Backtester, הרץ את Sweep Visual — מתחת לגרף תופיע השורה החדשה, כולל הסימון איזו עמודה היא בדיוק ההגדרה שלך.</div>
+</div>
+
+<script>
+(function(){
+  var AXES = [
+    { id:"queue",  label:"עומק התור",      axis:"Queue depth",  vals:[50, 50.4],  bars:[0,10,25,50,100,200] },
+    { id:"offset", label:"היסט המחיר",      axis:"Quote offset", vals:[0.02, 0.022], bars:[0.010,0.015,0.020,0.025,0.030,0.035,0.040] },
+    { id:"stop",   label:"מרחק עצירה",     axis:"stop distance", vals:["mixed","uniform-08"], bars:[0.06,0.08,0.10,0.12,0.14,0.16] }
+  ];
+  var ai = 0, vi = 0;
+  var elAxes = document.getElementById("axes");
+  var elVals = document.getElementById("vals");
+  var elCap  = document.getElementById("cap");
+
+  function fmtStop(x){ return (x*100).toFixed(0) + "¢"; }
+
+  function note(axis, val){
+    if(axis.id === "stop"){
+      if(val === "mixed"){
+        return "sweeps stop distance — replaces all six stop thresholds with one value " +
+               "(submitted: 5m 6¢ · 15m 7¢ · BTC 8¢ · SOL 9¢)" +
+               "<span class='sep'>·</span><span class='muted'>the sweep tests one uniform value, so no bar is your mixed setting</span>";
+      }
+      return "sweeps stop distance — replaces all six stop thresholds with one value " +
+             "(submitted: 5m 8¢ · 15m 8¢ · BTC 8¢ · SOL 8¢)" +
+             "<span class='sep'>·</span><span class='note'>the bar at 8¢ is your setting</span>";
+    }
+    var on = axis.bars.some(function(b){ return Math.abs(b - val) < 1e-6; });
+    var shown = (axis.id === "queue") ? String(val) : (val*100).toFixed(1) + "¢";
+    var mid = "sweeps " + axis.axis + " — replaces the submitted " + shown;
+    return on ? mid + "<span class='sep'>·</span><span class='note'>(that bar is your setting)</span>"
+              : mid + "<span class='sep'>·</span><span class='muted'>; no bar equals it</span>";
+  }
+
+  function render(){
+    var axis = AXES[ai], val = axis.vals[vi];
+    var html = "<span class='axis'>" + axis.label + "</span><span class='sep'>·</span>" + note(axis, val);
+    elCap.innerHTML = html;
+    Array.prototype.forEach.call(elAxes.children, function(c,i){ c.setAttribute("aria-pressed", i===ai); });
+    Array.prototype.forEach.call(elVals.children, function(c,i){ c.setAttribute("aria-pressed", i===vi); });
+  }
+
+  AXES.forEach(function(a,i){
+    var b = document.createElement("button");
+    b.className = "chip"; b.type = "button"; b.textContent = a.label;
+    b.onclick = function(){ ai = i; vi = 0; buildVals(); render(); };
+    elAxes.appendChild(b);
+  });
+
+  function buildVals(){
+    elVals.innerHTML = "";
+    AXES[ai].vals.forEach(function(v,i){
+      var b = document.createElement("button");
+      b.className = "val"; b.type = "button";
+      b.textContent = (v === "mixed") ? "הגדרות מעורבות (6/7/8/9¢)" :
+                      (v === "uniform-08") ? "אחיד 8¢" :
+                      (AXES[ai].id === "queue") ? ("הקלדת " + v) : ("הקלדת " + (v*100).toFixed(1) + "¢");
+      b.onclick = function(){ vi = i; render(); };
+      elVals.appendChild(b);
+    });
+  }
+
+  buildVals();
+  render();
+})();
+</script>
+</body>
+</html>

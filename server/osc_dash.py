@@ -4231,7 +4231,17 @@ textarea:focus-visible,
         </div>
       </div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
-      <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}</style>
+      <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}
+      #btSweepMeta .sweep-note{margin-top:6px;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;font-size:11px;line-height:1.7}
+      #btSweepMeta .sweep-note-label{display:block;font:700 9.5px var(--disp);letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
+      #btSweepMeta .sweep-note-head{color:var(--dim)}
+      #btSweepMeta .sweep-note-head b{color:var(--tx);font-weight:600}
+      #btSweepMeta .sweep-note-yours{color:var(--gold)}
+      #btSweepMeta .sweep-note-none{color:var(--warn)}
+      #btSweepMeta .sweep-note-item{color:var(--dim)}
+      #btSweepMeta .sweep-note-item b{color:var(--tx);font-weight:600}
+      #btSweepMeta .sweep-note-chip{display:inline-block;background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:2px 3px 2px 0;font-weight:600}
+      </style>
       <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px">
         <h4 style="margin:0 0 4px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
         <div style="position:relative;height:120px"><canvas id="chartSweepAgg" height="120"></canvas></div>
@@ -6840,13 +6850,15 @@ function sweepOverrideNote(axis, v, pointValues){
   if(axis === 'exit_stop'){
     const yours = [['5m', v.exit5m], ['15m', v.exit15m],
                    ['BTC', v.exitBtc], ['SOL', v.exitSol]];
-    const listed = yours.map(p => `${p[0]} ${exact(p[1])}`).join(' · ');
-    const head = `sweeps stop distance — replaces all six stop thresholds with one value (submitted: ${listed})`;
+    const items = yours.map(p => ({ label: p[0], value: exact(p[1]) }));
     const uniform = yours.every(p => equals(p[1], yours[0][1]));
-    if(!uniform) return `${head}; the sweep tests one uniform value, so no bar is your mixed setting`;
-    return onAxis(v.exit5m)
-      ? `${head}; the bar at ${exact(v.exit5m)} is your setting`
-      : `${head}; no bar equals your value`;
+    const verdict = !uniform
+      ? { cls: 'none', text: 'the sweep tests one uniform value, so no bar is your mixed setting' }
+      : onAxis(v.exit5m)
+        ? { cls: 'yours', text: `the bar at ${exact(v.exit5m)} is your setting` }
+        : { cls: 'none', text: 'no bar equals your value' };
+    return { head: 'sweeps stop distance — replaces all six stop thresholds with one value',
+             submittedLabel: 'submitted', items, verdict };
   }
 
   const single = ({
@@ -6856,8 +6868,29 @@ function sweepOverrideNote(axis, v, pointValues){
   })[axis];
   if(!single) return '';
   const shown = exact(single[1]);
-  return `sweeps ${single[0]} — replaces the submitted ${shown}`
-    + (onAxis(single[1]) ? ' (that bar is your setting)' : '; no bar equals it');
+  const verdict = onAxis(single[1])
+    ? { cls: 'yours', text: 'that bar is your setting' }
+    : { cls: 'none', text: 'no bar equals it' };
+  return { head: `sweeps ${single[0]} — replaces the submitted ${shown}`,
+           submittedLabel: '', items: [], verdict };
+}
+
+// Render the override note as its own boxed strip inside the meta block:
+// uppercase label, headline, submitted chips, then the verdict line. `note`
+// is '' (temporary status text occupies the whole block) or the structured
+// object sweepOverrideNote returns.
+function sweepNoteHtml(note){
+  if(!note) return '';
+  const chips = (note.items || [])
+    .map(it => `<span class="sweep-note-chip">${it.label} <b>${it.value}</b></span>`)
+    .join('');
+  const submitted = note.submittedLabel
+    ? `<span class="sweep-note-head">${note.submittedLabel}:</span> ${chips}<br>`
+    : '';
+  return `<span class="sweep-note"><span class="sweep-note-label">WHAT THIS SWEEP REPLACES</span><br>`
+    + `<span class="sweep-note-head">${note.head}</span><br>`
+    + submitted
+    + `<span class="sweep-note-${note.verdict.cls}">${note.verdict.text}</span></span>`;
 }
 
 function formatSweepTickValue(axis, val){
@@ -7071,8 +7104,12 @@ function renderSweepVisual(data, submitted){
     const overallText = bestOverall ? `best overall: ${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : 'best overall: —';
     const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
     const tookTxt = (window._btSweepStartTime) ? ` · took ${fmtElapsed(performance.now() - window._btSweepStartTime)}` : '';
-    const overrideTxt = sweepOverrideNote(data.axis, submitted, xVals);
-    meta.textContent = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${overrideTxt ? ` · ${overrideTxt}` : ''}${tookTxt}`;
+    // Top line stays the plain stat line; the override note is its own boxed
+    // strip beneath it (structured, highlighted) instead of one long grey
+    // sentence — every fact gets a place: label, headline, chips, verdict.
+    const overrideNote = sweepOverrideNote(data.axis, submitted, xVals);
+    meta.innerHTML = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${tookTxt}`
+      + sweepNoteHtml(overrideNote);
   }
   const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);

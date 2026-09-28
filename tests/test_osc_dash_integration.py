@@ -2083,7 +2083,7 @@ def test_sweep_axis_select_offers_every_sweep_axis():
         "the parity tests and the sweep axes have drifted apart"
 
 
-def test_sweep_override_note_is_wired_into_the_meta_line():
+def test_sweep_override_note_is_wired_into_the_meta_block():
     """The submitted snapshot must reach the renderer that writes the note.
 
     The note is only honest if it is built from the values captured before the
@@ -2096,12 +2096,17 @@ def test_sweep_override_note_is_wired_into_the_meta_line():
     assert "renderSweepVisual(data, v);" in html
     assert "function renderSweepVisual(data, submitted)" in html
     assert "sweepOverrideNote(data.axis, submitted, xVals)" in html
+    assert "sweepNoteHtml(overrideNote)" in html
     # The renderer must not go behind the snapshot's back and read the page.
     renderer = html[html.index("function renderSweepVisual(data, submitted)"):]
     renderer = renderer[:renderer.index("\nfunction ")]
     assert "$('btOffset')" not in renderer
     assert "$('btQueue')" not in renderer
-    # The note is appended to the existing meta line, which keeps its states.
+    # The note renders as its own boxed strip with a label, not a grey
+    # continuation of the stat line.
+    assert 'class="sweep-note"' in html
+    assert 'sweep-note-label' in html
+    # The plain stat line keeps its states.
     for preserved in ("best overall:", "best market:", "windows ·"):
         assert preserved in renderer, f"{preserved} lost from the meta line"
 
@@ -2122,81 +2127,92 @@ def test_sweep_override_note_wording_node():
         pytest.skip("Node.js not installed")
 
     html = client.get("/").text
-    # Harness only what the note needs: the helper itself. It no longer calls
-    # the tick formatter — submitted values are shown exactly as typed — so the
-    # harness runs the one function and nothing else.
+    # Harness what the note needs: the pure helper plus its renderer, so the
+    # tests below assert on the exact HTML strip the meta block receives.
     parts = []
-    found = re.search(r"function sweepOverrideNote\(.*?\n\}", html, re.DOTALL)
-    assert found is not None, "sweepOverrideNote is no longer a top-level function"
-    parts.append(found.group(0))
+    for name in ("sweepOverrideNote", "sweepNoteHtml"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
 
     test_js = "\n".join(parts) + """
     if (typeof sweepOverrideNote !== 'function') {
       throw new Error('sweepOverrideNote is not defined');
     }
     const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const strip = (axis, v, pts) => sweepNoteHtml(sweepOverrideNote(axis, v, pts));
 
-    // A queue value that sits on the axis: the operator's own bar is called out.
+    // A queue value that sits on the axis: the operator's own bar is called
+    // out, in the highlighted verdict class.
     const queuePoints = [0, 10, 25, 50, 100, 200];
-    const queueHit = sweepOverrideNote('queue', { queue: 50 }, queuePoints);
+    const queueHit = strip('queue', { queue: 50 }, queuePoints);
     assert(queueHit.includes('sweeps Queue depth'), queueHit);
-    assert(queueHit.includes('submitted 50'), queueHit);
+    assert(queueHit.includes('replaces the submitted 50'), queueHit);
     assert(queueHit.includes('that bar is your setting'), queueHit);
+    assert(queueHit.includes('sweep-note-yours'), queueHit);
+    assert(queueHit.includes('WHAT THIS SWEEP REPLACES'), queueHit);
 
     // A queue value with sub-unit precision must be shown exactly as typed —
     // the displayed value may never disagree with the match decision.
-    const queueFrac = sweepOverrideNote('queue', { queue: 50.4 }, queuePoints);
-    assert(queueFrac.includes('submitted 50.4'), queueFrac);
+    const queueFrac = strip('queue', { queue: 50.4 }, queuePoints);
+    assert(queueFrac.includes('replaces the submitted 50.4'), queueFrac);
     assert(queueFrac.includes('no bar equals it'), queueFrac);
+    assert(queueFrac.includes('sweep-note-none'), queueFrac);
 
     // An offset between two bars: no bar may be claimed as theirs.
     const offsetPoints = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040];
-    const offsetMiss = sweepOverrideNote('offset', { offset: 0.022 }, offsetPoints);
+    const offsetMiss = strip('offset', { offset: 0.022 }, offsetPoints);
     assert(offsetMiss.includes('sweeps Quote offset'), offsetMiss);
     assert(offsetMiss.includes('submitted 0.022'), offsetMiss);
     assert(offsetMiss.includes('no bar equals it'), offsetMiss);
 
     // Reversal buffer keeps the same shape.
-    const revHit = sweepOverrideNote('exit_rev', { exitReversal: 0.02 },
-                                     [0.010, 0.015, 0.020, 0.025, 0.030]);
+    const revHit = strip('exit_rev', { exitReversal: 0.02 },
+                         [0.010, 0.015, 0.020, 0.025, 0.030]);
     assert(revHit.includes('sweeps Reversal buffer'), revHit);
     assert(revHit.includes('that bar is your setting'), revHit);
 
-    // Mixed stop thresholds: the note must say all six are replaced, list what
-    // it replaces, and refuse to claim any bar is the operator's setting.
+    // Mixed stop thresholds: the note must say all six are replaced, list
+    // every submitted threshold as its own chip, and refuse to claim any bar
+    // is the operator's setting.
     const stopPoints = [0.06, 0.08, 0.10, 0.12, 0.14, 0.16];
-    const mixed = sweepOverrideNote('exit_stop',
+    const mixed = strip('exit_stop',
       { exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09 }, stopPoints);
     assert(mixed.includes('all six stop thresholds'), mixed);
-    assert(mixed.includes('5m 0.06'), mixed);
-    assert(mixed.includes('15m 0.07'), mixed);
-    assert(mixed.includes('BTC 0.08'), mixed);
-    assert(mixed.includes('SOL 0.09'), mixed);
+    assert(mixed.includes('submitted:'), mixed);
+    assert(mixed.includes('sweep-note-chip'), mixed);
+    assert(mixed.includes('5m <b>0.06</b>'), mixed);
+    assert(mixed.includes('15m <b>0.07</b>'), mixed);
+    assert(mixed.includes('BTC <b>0.08</b>'), mixed);
+    assert(mixed.includes('SOL <b>0.09</b>'), mixed);
     assert(mixed.includes('no bar is your mixed setting'), mixed);
+    assert(mixed.includes('sweep-note-none'), mixed);
 
     // A stop value with more precision than the axis list must be shown as
     // typed, not rounded onto a bar it does not actually match.
-    const stopFrac = sweepOverrideNote('exit_stop',
+    const stopFrac = strip('exit_stop',
       { exit5m: 0.064, exit15m: 0.064, exitBtc: 0.064, exitSol: 0.064 }, stopPoints);
-    assert(stopFrac.includes('submitted: 5m 0.064'), stopFrac);
+    assert(stopFrac.includes('5m <b>0.064</b>'), stopFrac);
     assert(stopFrac.includes('no bar equals your value'), stopFrac);
 
     // Uniform stops equal to an axis point: that bar is theirs.
-    const uniformHit = sweepOverrideNote('exit_stop',
+    const uniformHit = strip('exit_stop',
       { exit5m: 0.08, exit15m: 0.08, exitBtc: 0.08, exitSol: 0.08 }, stopPoints);
     assert(uniformHit.includes('all six stop thresholds'), uniformHit);
     assert(uniformHit.includes('the bar at 0.08'), uniformHit);
     assert(uniformHit.includes('is your setting'), uniformHit);
+    assert(uniformHit.includes('sweep-note-yours'), uniformHit);
 
     // Uniform stops off the axis: still honest about the six, still no claim.
-    const uniformMiss = sweepOverrideNote('exit_stop',
+    const uniformMiss = strip('exit_stop',
       { exit5m: 0.075, exit15m: 0.075, exitBtc: 0.075, exitSol: 0.075 }, stopPoints);
     assert(uniformMiss.includes('all six stop thresholds'), uniformMiss);
     assert(uniformMiss.includes('no bar equals your value'), uniformMiss);
 
-    // No snapshot, no claim — the renderer keeps the line it always showed.
+    // No snapshot, no note — the meta block keeps its plain stat line.
     assert(sweepOverrideNote('queue', null, queuePoints) === '', 'null snapshot');
     assert(sweepOverrideNote('not-an-axis', { queue: 50 }, queuePoints) === '', 'unknown axis');
+    assert(sweepNoteHtml('') === '', 'empty note renders nothing');
 
     console.log('SWEEP_OVERRIDE_NOTE_TESTS_PASSED');
     process.exit(0);
