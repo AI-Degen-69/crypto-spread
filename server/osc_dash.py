@@ -747,15 +747,21 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
     time_blocks: set[str] = set()
     windows_known = True
     readiness_known = True
+    split_known = True
     source = "none"
     for f, _lines in entries:
         # Issue #295: sidecars are keyed by the path relative to TICKS_DIR
         # (a top-level basename or pristine/<basename>), so same-named files
         # in different tiers never share a cache entry.
+        # Issue #303 round 1: split counts derive only from accepted,
+        # fingerprint-matched verify-sidecar market_breakdown data. A sidecar
+        # accepted via TTL for other fields (file changed within the TTL) must
+        # not contribute its previous file's split counts.
+        expected_fp = _file_fingerprint(f)
         cached = (
             _read_verify_cache(
                 _verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()),
-                expected_fingerprint=_file_fingerprint(f),
+                expected_fingerprint=expected_fp,
             )
             if f.is_relative_to(TICKS_DIR)
             else None
@@ -763,6 +769,7 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
         if cached is None:
             windows_known = False
             readiness_known = False
+            split_known = False
             continue
         source = "verify_cache"
         for s, c in cached.get("series_counts", {}).items():
@@ -770,6 +777,13 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
         total_windows += int(cached.get("windows_count", 0))
         total_tape_entries += int(cached.get("tape_entries", 0))
         time_blocks.update(cached.get("time_blocks", []))
+        # Absent market_breakdown (or a fingerprint mismatch) means split
+        # coverage is incomplete — never a verified zero.
+        if "market_breakdown" not in cached or cached.get("fingerprint") != expected_fp:
+            split_known = False
+            if not cached.get("readiness"):
+                readiness_known = False
+            continue
         for market in cached.get("market_breakdown", []):
             key = (market.get("series", ""), int(market.get("duration", 0)))
             item = market_totals.setdefault(key, {"series": key[0], "duration": key[1], "windows": 0, "trades": 0})
@@ -779,9 +793,15 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
             readiness_known = False
 
     aggregate_market = []
+    total_windows_5m = 0
+    total_windows_15m = 0
     for market in sorted(market_totals.values(), key=lambda m: (m["series"], m["duration"])):
         market["trades_per_window"] = round(market["trades"] / market["windows"], 1) if market["windows"] else 0.0
         aggregate_market.append(market)
+        if market["duration"] == 300:
+            total_windows_5m += market["windows"]
+        elif market["duration"] == 900:
+            total_windows_15m += market["windows"]
     aggregate_readiness = None
     if readiness_known and entries:
         from scripts.verify_tick_data import assess_readiness
@@ -818,7 +838,9 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
         "total_lines": total_lines,
         "total_lines_estimated": any_estimated,
         "total_windows": total_windows,
-        "windows_source": "cache" if (windows_known and entries) else ("partial" if entries else "none"),
+        "total_windows_5m": total_windows_5m if entries else None,
+        "total_windows_15m": total_windows_15m if entries else None,
+        "windows_source": "cache" if (windows_known and split_known and entries) else ("partial" if entries else "none"),
         "tape_entries_total": total_tape_entries or int((manifest or {}).get("tape_entries_total", 0)),
         "series_counts": series_counts,
         "series_counts_source": source if series_counts else "none",
@@ -949,12 +971,39 @@ def api_ticks_manifest():
             list(agg_files.values()), out["manifest"],
             file_count=len(out["files"]))
         # Per-file market breakdown, when a cached verify report exists.
+        # Issue #303 round 1: split counts derive only from accepted,
+        # fingerprint-matched sidecar market_breakdown data. An absent
+        # market_breakdown field (or a fingerprint mismatch after the file
+        # changed within the sidecar TTL) keeps windows_5m/15m unknown —
+        # never a verified zero. Other cached fields keep existing TTL
+        # acceptance.
         for entry in out["files"]:
+            expected_fp = _file_fingerprint(TICKS_DIR / entry["name"])
             cached = _read_verify_cache(
                 _verify_sidecar_path(entry["name"]),
-                expected_fingerprint=_file_fingerprint(TICKS_DIR / entry["name"]),
+                expected_fingerprint=expected_fp,
             )
-            entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
+            split_usable = (
+                cached is not None
+                and "market_breakdown" in cached
+                and cached.get("fingerprint") == expected_fp
+            )
+            entry["market_breakdown"] = (cached.get("market_breakdown", [])
+                                         if split_usable else [])
+            if split_usable:
+                entry["windows_5m"] = sum(
+                    int(market.get("windows", 0))
+                    for market in entry["market_breakdown"]
+                    if int(market.get("duration", 0)) == 300
+                )
+                entry["windows_15m"] = sum(
+                    int(market.get("windows", 0))
+                    for market in entry["market_breakdown"]
+                    if int(market.get("duration", 0)) == 900
+                )
+            else:
+                entry["windows_5m"] = None
+                entry["windows_15m"] = None
             cache_current = _readiness_cache_is_current(cached)
             entry["readiness"] = (cached or {}).get("readiness") if cache_current else None
             entry["readiness_targets"] = ((cached or {}).get("readiness", {}).get("targets")
@@ -979,6 +1028,8 @@ def api_ticks_manifest():
             "total_lines": 0,
             "total_lines_estimated": False,
             "total_windows": 0,
+            "total_windows_5m": None,
+            "total_windows_15m": None,
             "windows_source": "none",
             "tape_entries_total": 0,
             "series_counts": {},
@@ -3191,6 +3242,8 @@ textarea:focus-visible,
 .tbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
 .tbl th{font:700 11px var(--disp);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:10px 8px;border-bottom:1px solid var(--line-dark);font-size:13px;vertical-align:middle}
+#manifestTableWrap{overflow-x:auto}
+#manifestTableWrap .tbl{min-width:980px}
 .price-up{color:var(--up);font-weight:700;font-family:var(--mono)}
 .price-down{color:var(--down);font-weight:700;font-family:var(--mono)}
 .price-small{font-size:10px;font-weight:500;opacity:.85}
@@ -6541,37 +6594,33 @@ async function loadManifest(){
       const a = d.aggregate || {};
       const m = d.manifest || {};
       if((a.total_files||0) > 0){
-        const mb = ((a.total_bytes||0)/(1024*1024)).toFixed(1)+' MB';
-        const lineFmt = (a.total_lines||0).toLocaleString();
-        const linesVal = (a.total_lines_estimated ? '~' : '') + lineFmt;
-        const winFmt = (a.total_windows||0).toLocaleString();
-        const winVal = (a.windows_source === 'partial' ? '≥' : '') + winFmt;
+        const formatWindowTotal = value => value == null
+          ? '—'
+          : `${a.windows_source === 'partial' ? '≥' : ''}${value.toLocaleString()}`;
+        const windows5m = formatWindowTotal(a.total_windows_5m);
+        const windows15m = formatWindowTotal(a.total_windows_15m);
         const tapeRate = m.tape_empty_rate !== undefined ? (m.tape_empty_rate * 100).toFixed(1) + '%' : '—';
         const tapeCrit = m.tape_empty_rate !== undefined && m.tape_empty_rate > 0.99;
         const tile = (label, val, color) => `
-          <div style="flex:1;min-width:110px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;text-align:center">
+          <div style="min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;text-align:center;overflow-wrap:anywhere">
             <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em">${label}</div>
             <div class="mono" style="font-size:15px;font-weight:700;color:${color||'var(--tx)'};margin-top:3px">${val}</div>
           </div>`;
         const tiles = document.createElement('div');
-        tiles.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px';
+        tiles.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:8px;margin-bottom:12px';
         const readiness = a.readiness || {};
         const readinessColor = readiness.level === 'RESEARCH_READY' ? 'var(--up)' : readiness.level === 'EXPLORATORY' ? 'var(--gold)' : readiness.level === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
         tiles.innerHTML =
           tile('Files', a.total_files||0)
-          + tile('Tick Snapshots', linesVal, 'var(--up)')
-          + tile('Market Windows', winVal, 'var(--gold)')
-          + tile('Tape Entries', (a.tape_entries_total||0).toLocaleString())
+          + tile('Market Windows', `${windows5m} × 5m · ${windows15m} × 15m`, 'var(--gold)')
           + tile('Tape Empty · lower is better', tapeRate, tapeCrit ? 'var(--down)' : (m.tape_empty_rate !== undefined ? 'var(--gold)' : 'var(--dim)'))
           + tile('Research Readiness', readiness.level || 'PENDING', readinessColor);
         aggWrap.appendChild(tiles);
         const legend = document.createElement('div');
         legend.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;margin:0 0 12px;padding:9px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--dim);font-size:11px;line-height:1.35';
-        legend.innerHTML = '<div><strong style="color:var(--tx)">Tick Snapshots</strong> · valid JSONL rows, not trades.</div>'
-          + '<div><strong style="color:var(--tx)">Market Windows</strong> · unique (series, cid) intervals.</div>'
-          + '<div><strong style="color:var(--tx)">Tape Entries</strong> · entries recorded in tape_delta.</div>'
-          + '<div><strong style="color:var(--tx)">Tape Empty</strong> · snapshots with empty tape_delta; lower is better.</div>'
-          + '<div><strong style="color:var(--tx)">Avg / Window</strong> · tape entries divided by market windows; zero when no windows exist.</div>';
+        legend.innerHTML = '<div><strong style="color:var(--tx)">Market Windows</strong> · unique (series, cid) intervals.</div>'
+          + '<div><strong style="color:var(--tx)">5m / 15m counts</strong> · 5m means 300-second windows; 15m means 900-second windows. Counts come from verification reports; ≥ means some files are not verified yet.</div>'
+          + '<div><strong style="color:var(--tx)">Tape Empty</strong> · snapshots with empty tape_delta; lower is better.</div>';
         aggWrap.appendChild(legend);
       }
     }
@@ -6579,12 +6628,12 @@ async function loadManifest(){
     const tbl = document.createElement('table');
     tbl.className = 'tbl';
     const thead = document.createElement('tr');
-    thead.innerHTML = '<th>File Name</th><th>Size</th><th>Tick Snapshots</th><th>Last Modified</th><th>Integrity</th><th>Research Readiness</th><th>Actions</th>';
+    thead.innerHTML = '<th>Last Modified</th><th>File Name</th><th>5m / 15m</th><th>Integrity</th><th>Research Readiness</th><th>Actions</th><th>Size</th>';
     tbl.appendChild(thead);
 
     if(!d.files || d.files.length === 0){
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="5" style="text-align:center;color:var(--faint);padding:18px">No files found in run/ticks/</td>';
+      tr.innerHTML = '<td colspan="7" style="text-align:center;color:var(--faint);padding:18px">No files found in run/ticks/</td>';
       tbl.appendChild(tr);
     } else {
       let fileIdx = 0;
@@ -6595,10 +6644,11 @@ async function loadManifest(){
         const domId = f.name.replaceAll('/', '_');
         const tr = document.createElement('tr');
         const mb = (f.bytes/(1024*1024)).toFixed(2)+' MB';
-        const linesFormatted = (f.lines||0).toLocaleString();
-        const linesHtml = f.lines_estimated
-          ? `~${linesFormatted} <span style="color:var(--dim);font-size:10px">(est.)</span>`
-          : linesFormatted;
+        const formatFileWindows = value => value == null ? '—' : value.toLocaleString();
+
+        const tdMtime = document.createElement('td');
+        tdMtime.className = 'mono';
+        tdMtime.textContent = new Date(f.mtime*1000).toLocaleString('en-US');
 
         const tdName = document.createElement('td');
         tdName.className = 'mono';
@@ -6627,22 +6677,17 @@ async function loadManifest(){
           tdName.appendChild(pref);
         }
 
-        const tdSize = document.createElement('td');
-        tdSize.className = 'mono';
-        tdSize.textContent = mb;
-
-        const tdLines = document.createElement('td');
-        tdLines.className = 'mono';
-        tdLines.innerHTML = linesHtml;
-
-        const tdMtime = document.createElement('td');
-        tdMtime.className = 'mono';
-        tdMtime.textContent = new Date(f.mtime*1000).toLocaleString('en-US');
+        const tdWindows = document.createElement('td');
+        tdWindows.className = 'mono windows-cell';
+        tdWindows.textContent = `${formatFileWindows(f.windows_5m)} / ${formatFileWindows(f.windows_15m)}`;
+        if (f.windows_5m == null || f.windows_15m == null) {
+          tdWindows.title = 'Not verified';
+        }
 
         const tdIntegrity = document.createElement('td');
         tdIntegrity.className = 'mono';
         const tdReadiness = document.createElement('td');
-        tdReadiness.className = 'mono';
+        tdReadiness.className = 'mono readiness-cell';
         const readinessLevel = f.readiness && f.readiness.level;
         tdReadiness.textContent = readinessLevel || '…';
         tdReadiness.style.color = readinessLevel === 'RESEARCH_READY' ? 'var(--up)' : readinessLevel === 'EXPLORATORY' ? 'var(--gold)' : readinessLevel === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
@@ -6677,13 +6722,17 @@ async function loadManifest(){
         tdActions.appendChild(btnRun);
         tdActions.appendChild(btnDel);
 
-        tr.appendChild(tdName);
-        tr.appendChild(tdSize);
-        tr.appendChild(tdLines);
+        const tdSize = document.createElement('td');
+        tdSize.className = 'mono';
+        tdSize.textContent = mb;
+
         tr.appendChild(tdMtime);
+        tr.appendChild(tdName);
+        tr.appendChild(tdWindows);
         tr.appendChild(tdIntegrity);
         tr.appendChild(tdReadiness);
         tr.appendChild(tdActions);
+        tr.appendChild(tdSize);
         tbl.appendChild(tr);
 
         // Inline integrity accordion row: sits directly under the file row,
@@ -6926,18 +6975,23 @@ async function verifyTickData(filename, refresh){
       const res = await fetch('/api/ticks/verify?file=' + encodeURIComponent(filename) + (refresh ? '&refresh=1' : ''));
       d = await res.json();
       if(d.error){ throw new Error(d.error); }
-      if(!d.pending){ break; }
-      // Backend is scanning in the background — poll until the report lands.
-      if(cell){
+      if(!d.pending && !d.stale){ break; }
+      // Backend is scanning in the background — poll until the fresh,
+      // fingerprint-matched report lands. A stale snapshot carries the
+      // previous market_breakdown, so its counts stay provisional until
+      // the rescan finishes (Issue #303 round 1).
+      if(cell && (d.pending || d.stale)){
         const p = d.progress || {};
         const lines = (p.lines || 0).toLocaleString();
         const est = p.est_total || 0;
         const pct = est > 0 ? Math.min(99, Math.round((p.lines || 0) / est * 100)) : null;
         const elapsed = p.elapsed_sec != null ? p.elapsed_sec + 's' : '';
-        const progHtml = est > 0
+        const progHtml = d.stale
+          ? `Refreshing ${esc(filename)} from the current file…`
+          : est > 0
           ? `${lines} / ${est.toLocaleString()} lines · ${pct}% · ${elapsed}`
           : `${lines} lines processed · ${elapsed}`;
-        cell.innerHTML = `<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">Scanning ${esc(filename)} in background… <span class="spinner"></span><div class="mono" style="margin-top:6px;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums">${progHtml}</div></div>`;
+        cell.innerHTML = `<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">${d.stale ? progHtml : `Scanning ${esc(filename)} in background…`} <span class="spinner"></span><div class="mono" style="margin-top:6px;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums">${d.stale ? '' : progHtml}</div></div>`;
       }
       const badgeP = document.getElementById('verify_badge_' + domId);
       if(badgeP){ badgeP.textContent = '⏳'; badgeP.style.color = 'var(--dim)'; }
@@ -6946,7 +7000,19 @@ async function verifyTickData(filename, refresh){
     if(cell){
       cell.dataset.loaded = '1';
       const row = document.getElementById('verify_row_' + domId);
-      const readinessCell = row && row.previousElementSibling ? row.previousElementSibling.querySelector('td:nth-child(6)') : null;
+      const fileRow = row && row.previousElementSibling;
+      const readinessCell = fileRow ? fileRow.querySelector('.readiness-cell') : null;
+      const windowsCell = fileRow ? fileRow.querySelector('.windows-cell') : null;
+      // The poll loop above exits only on a fresh fingerprint-matched
+      // report, but guard anyway: never present a stale snapshot's
+      // provisional breakdown as verified counts.
+      if(windowsCell && Array.isArray(d.market_breakdown) && !d.stale){
+        const countWindows = duration => d.market_breakdown
+          .filter(market => Number(market.duration) === duration)
+          .reduce((total, market) => total + Number(market.windows || 0), 0);
+        windowsCell.textContent = `${countWindows(300).toLocaleString()} / ${countWindows(900).toLocaleString()}`;
+        windowsCell.removeAttribute('title');
+      }
       if(readinessCell && d.readiness){
         readinessCell.textContent = d.readiness.level || 'PENDING';
         readinessCell.style.color = d.readiness.level === 'RESEARCH_READY' ? 'var(--up)' : d.readiness.level === 'EXPLORATORY' ? 'var(--gold)' : d.readiness.level === 'INSUFFICIENT' ? 'var(--down)' : 'var(--dim)';
