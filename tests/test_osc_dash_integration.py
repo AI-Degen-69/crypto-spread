@@ -1848,6 +1848,186 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
     assert "const queue = $('btQueue')" not in html
 
 
+# ── Issue #335: every axis holds the operator's configuration ────────────────
+# `test_sweep_base_point_equals_a_backtest_with_the_same_settings` above proves
+# the base is shared for one axis and one point. These extend the guarantee to
+# every axis and every value an operator can actually click, plus the one axis
+# (`offset`) whose numbers come from a different simulation path.
+
+# Which Backtester control each axis replaces. `exit_stop` takes four: the
+# sweep writes all six per-slug thresholds, and `_build_backtest_params`
+# derives those six from these four inputs, so setting all four is the only way
+# a plain backtest can build the same parameter set as the swept point.
+_AXIS_CONTROLS = {
+    "queue": ("queue",),
+    "offset": ("offset",),
+    "exit_stop": ("exit_default_5m", "exit_default_15m",
+                  "exit_btc_5m", "exit_sol_5m"),
+    "exit_rev": ("exit_reversal",),
+}
+
+
+def _axis_point_query(axis: str, value: float) -> dict:
+    """`_NON_DEFAULT` with every control of `axis` set to one point value.
+
+    Sent verbatim to both endpoints, so the backtest and the sweep point are
+    the same request by construction and any difference belongs to the
+    endpoint, not to the test.
+    """
+    query = dict(_NON_DEFAULT)
+    for control in _AXIS_CONTROLS[axis]:
+        query[control] = value
+    return query
+
+
+def _sweep_point_at(data: dict, value: float) -> dict:
+    """The single sweep point tested at `value`, or a failing assertion."""
+    matches = [p for p in data["points"]
+               if abs(float(p["value"]) - float(value)) < 1e-9]
+    assert len(matches) == 1, f"expected one point at {value}, got {len(matches)}"
+    return matches[0]
+
+
+@pytest.mark.parametrize("axis", sorted(osc_dash.SWEEP_AXES))
+def test_every_sweep_point_reproduces_a_backtest_at_the_same_settings(
+        tmp_path, monkeypatch, axis):
+    """Each axis point must equal a plain backtest whose axis control matches.
+
+    The sweep is sold as "the backtest on this page, with one thing varied".
+    That is only true if *every* point, not just the one that happens to sit at
+    the operator's value, equals the backtest run with that axis value typed
+    in. A knob the sweep drops shows up as a P&L difference on some point.
+    """
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                              "bnb-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        sweep = client.get("/api/backtest/sweep", params={
+            "axis": axis, "file": "sweep_base.jsonl",
+            **_axis_point_query(axis, osc_dash.SWEEP_AXES[axis][0])})
+        assert sweep.status_code == 200
+        data = sweep.json()
+        assert len(data["points"]) == len(osc_dash.SWEEP_AXES[axis])
+
+        filled: list = []
+        for value in osc_dash.SWEEP_AXES[axis]:
+            back = client.get("/api/backtest", params={
+                "file": "sweep_base.jsonl", **_axis_point_query(axis, value)})
+            assert back.status_code == 200
+            b = back.json()
+            assert b["n_windows"] > 0, f"{axis}={value} replayed no windows"
+
+            point = _sweep_point_at(data, value)
+            assert point["overall"]["total_pnl_cents"] == b["overall"]["total_pnl_cents"], \
+                f"{axis}={value}: sweep and backtest disagree on P&L"
+            assert point["overall"]["pairs"] == b["overall"]["pairs"], \
+                f"{axis}={value}: sweep and backtest disagree on pairs"
+            assert point["overall"]["windows"] == b["n_windows"], \
+                f"{axis}={value}: sweep and backtest disagree on windows"
+            if b["overall"]["pairs"] > 0:
+                filled.append(value)
+
+        # Non-vacuous, but per axis rather than per point: at the far end of the
+        # offset axis the resting quote is legitimately never reached, so zero
+        # fills there is a real result the two endpoints must still agree on.
+        # If no point of an axis ever fills, the equalities above compare
+        # nothing but zeros, and that is the case this guard exists to catch.
+        assert filled, f"{axis} filled no pairs at any point; comparison is vacuous"
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_offset_sweep_matches_a_plain_backtest_without_the_queue_memo(
+        tmp_path, monkeypatch):
+    """The memo-off path must be an optimisation, not a different simulation.
+
+    Only the `offset` axis runs with `queue_memo=None` (the `reuse` branch at
+    `server/osc_dash.py:2012-2015`), because sweeping the offset moves the
+    resting price the memo is keyed on. That makes it the one axis produced by a
+    path the other three never exercise: if the memo ever stopped being
+    equivalent to a cold computation, the offset chart would drift while the
+    other three stayed correct — and nothing would notice.
+    """
+    import concurrent.futures
+
+    import backtest.engine as bt_engine
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                              "bnb-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+
+    seen: list = []
+    real_simulate = bt_engine._simulate_window
+
+    def spy(window_snaps, params, queue_memo=None):
+        seen.append(queue_memo)
+        return real_simulate(window_snaps, params, queue_memo=queue_memo)
+
+    monkeypatch.setattr(bt_engine, "_simulate_window", spy)
+    try:
+        value = 0.025
+        offset_query = _axis_point_query("offset", value)
+        sweep = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl", **offset_query})
+        assert sweep.status_code == 200
+        assert seen, "the offset sweep simulated nothing"
+        assert all(m is None for m in seen), \
+            "offset axis reused a queue memo; its resting price changes per point"
+
+        point = _sweep_point_at(sweep.json(), value)
+        seen.clear()
+
+        back = client.get("/api/backtest", params={
+            "file": "sweep_base.jsonl", **offset_query})
+        assert back.status_code == 200
+        b = back.json()
+        assert b["overall"]["pairs"] > 0, "fixture did not fill; test would be vacuous"
+        # The plain backtest passes no memo at all, so this is the cold path the
+        # memo is supposed to be equivalent to.
+        assert all(m is None for m in seen)
+
+        assert point["overall"]["total_pnl_cents"] == b["overall"]["total_pnl_cents"]
+        assert point["overall"]["pairs"] == b["overall"]["pairs"]
+        assert point["overall"]["windows"] == b["n_windows"]
+
+        # The other half of the proof: the shared memo really is shared when it
+        # is used. Without this, "all memo is None" would only prove the memo
+        # feature had been switched off everywhere.
+        seen.clear()
+        queue = client.get("/api/backtest/sweep", params={
+            "axis": "queue", "file": "sweep_base.jsonl", **_NON_DEFAULT})
+        assert queue.status_code == 200
+        assert any(isinstance(m, dict) for m in seen), \
+            "queue axis did not use the shared queue memo"
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_axis_select_offers_every_sweep_axis():
+    """An axis added to SWEEP_AXES must be reachable from the page.
+
+    The parity tests are parametrised from `SWEEP_AXES` itself, so the axis
+    list cannot go untested — but only if the operator can select it. A new
+    axis also needs its Backtester controls in `_AXIS_CONTROLS`, or the parity
+    test would silently compare a sweep against a backtest of something else.
+    """
+    html = osc_dash.FULL_APP_HTML
+    select_start = html.index('<select id="btSweepAxis"')
+    select = html[select_start:html.index("</select>", select_start)]
+    for axis in osc_dash.SWEEP_AXES:
+        assert f'<option value="{axis}"' in select, f"{axis} is not offered"
+    assert set(_AXIS_CONTROLS) == set(osc_dash.SWEEP_AXES), \
+        "the parity tests and the sweep axes have drifted apart"
+
+
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
     """Verify /api/backtest rejects concurrent simulation runs with HTTP 429 when already in flight (Issue #259)."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
