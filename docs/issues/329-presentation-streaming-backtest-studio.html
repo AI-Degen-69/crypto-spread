@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>בדיקת אסטרטגיות בהזרמה חכמה: מהיר יותר, ללא עומס זיכרון</title>
+<style>
+:root {
+  --bg: #0b1118;
+  --surface: #121a24;
+  --surface-subtle: #172230;
+  --border: #233549;
+  --border-focus: #10b981;
+  --text-main: #f1f5f9;
+  --text-muted: #94a3b8;
+  --text-dim: #64748b;
+  --accent: #10b981;
+  --accent-glow: rgba(16, 185, 129, 0.18);
+  --amber: #f59e0b;
+  --amber-glow: rgba(245, 158, 11, 0.18);
+  --rose: #f43f5e;
+  --rose-glow: rgba(244, 63, 94, 0.18);
+  --shadow: 0 20px 48px rgba(0, 0, 0, 0.35);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text-main);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.6;
+  padding: 36px 20px 80px;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+header {
+  margin-bottom: 32px;
+}
+
+.kicker {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-glow);
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  margin-bottom: 12px;
+}
+
+h1 {
+  font-size: clamp(1.9rem, 4.5vw, 3rem);
+  font-weight: 800;
+  line-height: 1.18;
+  letter-spacing: -0.03em;
+  margin-bottom: 12px;
+  color: #fff;
+}
+
+.subtitle {
+  font-size: 1.12rem;
+  color: var(--text-muted);
+  max-width: 780px;
+}
+
+/* Centerpiece Simulator */
+.studio-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  margin-bottom: 32px;
+}
+
+.studio-head {
+  padding: 20px 24px;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.studio-title h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.studio-title p {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.mode-toggles {
+  display: inline-flex;
+  background: #090e14;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.mode-btn {
+  padding: 7px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.86rem;
+  font-weight: 600;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: #042417;
+  font-weight: 700;
+}
+
+.mode-btn.active.old-mode {
+  background: var(--rose);
+  color: #fff;
+}
+
+/* Simulator Viewport */
+.sim-viewport {
+  padding: 24px;
+  position: relative;
+}
+
+.metrics-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.metric-pill {
+  background: #090f16;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 16px;
+}
+
+.metric-label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-size: 1.4rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.metric-value small {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Canvas Area */
+.canvas-wrap {
+  width: 100%;
+  height: 240px;
+  background: #080c12;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Controls */
+.sim-controls {
+  margin-top: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.action-btns {
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #042417;
+  font-weight: 700;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.1);
+}
+
+.btn-secondary {
+  background: var(--surface-subtle);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+.btn-secondary:hover {
+  background: #1f2d3d;
+}
+
+.status-pill {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  background: #090f16;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.status-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 6px;
+  background: var(--accent);
+}
+
+.status-indicator.lag {
+  background: var(--rose);
+}
+
+/* Support Grid */
+.support-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+  margin-bottom: 32px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+}
+
+.card h3 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin-bottom: 12px;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.card-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.diff-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.diff-item {
+  display: flex;
+  gap: 12px;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.diff-tag {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  height: fit-content;
+}
+
+.diff-tag.was {
+  background: var(--rose-glow);
+  color: var(--rose);
+  border: 1px solid rgba(244, 63, 94, 0.3);
+}
+
+.diff-tag.now {
+  background: var(--accent-glow);
+  color: var(--accent);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+/* Accordion overview of the studio UI */
+.studio-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.section-row {
+  background: #0a1017;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.88rem;
+}
+
+.section-name {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.section-desc {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Try it live box */
+.live-box {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.06), rgba(23, 34, 48, 0.8));
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 14px;
+  padding: 22px 26px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.live-text h4 {
+  font-size: 1.1rem;
+  color: #fff;
+  margin-bottom: 4px;
+}
+
+.live-text p {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.live-link {
+  background: var(--accent);
+  color: #042417;
+  font-weight: 700;
+  text-decoration: none;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 0.92rem;
+  transition: transform 0.15s ease;
+}
+
+.live-link:hover {
+  transform: translateY(-1px);
+}
+
+@media (max-width: 640px) {
+  body { padding: 24px 14px 60px; }
+  .studio-head { flex-direction: column; align-items: flex-start; }
+  .sim-controls { flex-direction: column; align-items: flex-start; }
+  .action-btns { width: 100%; }
+  .btn { flex: 1; justify-content: center; }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <header>
+    <span class="kicker">עדכון מערכת · PR #329</span>
+    <h1>בדיקת אסטרטגיות בהזרמה חכמה</h1>
+    <p class="subtitle">
+      במקום להעמיס קבצי ענק של מיליוני נתונים על זיכרון המחשב עד לקריסה, נתוני השוק זורמים כעת חלון אחר חלון. הממשק חולק ל-4 אזורי עבודה נקיים עם בקרה מדויקת על כללי הבורסה.
+    </p>
+  </header>
+
+  <!-- Interactive Centerpiece: Streaming vs Bulk Replay Simulator -->
+  <section class="studio-card" aria-label="סימולטור השוואת ביצועים">
+    <div class="studio-head">
+      <div class="studio-title">
+        <h2>הדגמת שיטת העיבוד: הזרמה ישירה לעומת טעינה כוללת</h2>
+        <p>לחץ על הפעלה וראה כיצד המערכת החדשה מעבדת חלונות בזמן אמת בלי להעמיס על המחשב</p>
+      </div>
+      <div class="mode-toggles" role="tablist">
+        <button id="mode-stream" class="mode-btn active" role="tab" aria-selected="true">הזרמה חדשה (Streaming)</button>
+        <button id="mode-bulk" class="mode-btn old-mode" role="tab" aria-selected="false">השיטה הישנה (Bulk)</button>
+      </div>
+    </div>
+
+    <div class="sim-viewport">
+      <div class="metrics-bar">
+        <div class="metric-pill">
+          <div class="metric-label">צריכת זיכרון (RAM)</div>
+          <div class="metric-value" id="val-memory">38 <small>MB (קבוע ויציב)</small></div>
+        </div>
+        <div class="metric-pill">
+          <div class="metric-label">חלונות מסחר שחושבו</div>
+          <div class="metric-value" id="val-windows">0 <small>/ 288 חלונות</small></div>
+        </div>
+        <div class="metric-pill">
+          <div class="metric-label">תגובתיות המחשב</div>
+          <div class="metric-value" id="val-responsiveness" style="color: var(--accent);">מיידית וחלקה</div>
+        </div>
+      </div>
+
+      <div class="canvas-wrap">
+        <canvas id="pipeline-canvas"></canvas>
+      </div>
+
+      <div class="sim-controls">
+        <div class="action-btns">
+          <button id="btn-toggle" class="btn btn-primary">הפעל הדגמה</button>
+          <button id="btn-step" class="btn btn-secondary">חלון הבא ❯</button>
+          <button id="btn-reset" class="btn btn-secondary">איפוס</button>
+        </div>
+        <div class="status-pill">
+          מצב: <strong id="sim-status">מוכן להרצה</strong>
+          <span id="status-dot" class="status-indicator"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Support Grid -->
+  <div class="support-grid">
+    
+    <!-- Block 1: Before vs After -->
+    <article class="card">
+      <h3>
+        <span>מה השתנה במערכת</span>
+        <span class="card-badge">לפני ואחרי</span>
+      </h3>
+      <ul class="diff-list">
+        <li class="diff-item">
+          <span class="diff-tag was">בעבר</span>
+          <span>בחירת מספר קבצי טיקים צברה ג'יגה-בייטים בזיכרון, האטה את הדפדפן ועלולה הייתה לתקוע את המחשב.</span>
+        </li>
+        <li class="diff-item">
+          <span class="diff-tag now">עכשיו</span>
+          <span>הזרמת נתונים מיידית: כל חלון זמן מנותח ברגע שהוא מסתיים ונפלט לתוצאות, ללא הצטברות בזיכרון.</span>
+        </li>
+        <li class="diff-item">
+          <span class="diff-tag was">בעבר</span>
+          <span>בדיקה כבדה שהסתבכה הייתה יכולה לנעול את שרתי הבדיקה לצמיתות ללא דרך יציאה.</span>
+        </li>
+        <li class="diff-item">
+          <span class="diff-tag now">עכשיו</span>
+          <span>מנגנון השבתת בטיחות אוטומטי (Timeout): לאחר 15 דקות בדיקה תקועה נסגרת בבטחה והמערכת ממשיכה כרגיל.</span>
+        </li>
+        <li class="diff-item">
+          <span class="diff-tag was">בעבר</span>
+          <span>רשימת הקבצים הציגה ספירת שורות טקסט פיזיות במקום חלונות מסחר ממשיים שניתן להריץ עליהם.</span>
+        </li>
+        <li class="diff-item">
+          <span class="diff-tag now">עכשיו</span>
+          <span>בורר הנתונים מציג במפורש כמות חלונות מאומתים ותגיות איכות (מלא, נקי, מחקרי).</span>
+        </li>
+      </ul>
+    </article>
+
+    <!-- Block 2: The New 4-Group Studio UI -->
+    <article class="card">
+      <h3>
+        <span>מבנה הסטודיו החדש</span>
+        <span class="card-badge">בלשונית Backtest</span>
+      </h3>
+      <p style="font-size: 0.88rem; color: var(--text-muted); margin-bottom: 12px;">
+        עשרות הגדרות מפוזרות אורגנו ב-4 אקורדיונים ברורים, עם כפתורי הרצה ואיפוס בראש הדף:
+      </p>
+      <div class="studio-sections">
+        <div class="section-row">
+          <span class="section-name">1. היקף הבדיקה (Scope)</span>
+          <span class="section-desc">בחירת קבצי שוק, סינון מטבעות וזמני חלון</span>
+        </div>
+        <div class="section-row">
+          <span class="section-name">2. מיקום ציטוטים (Quote Placement)</span>
+          <span class="section-desc">מרווח, עומק תור, ועלות צמד מבוקשת</span>
+        </div>
+        <div class="section-row">
+          <span class="section-name">3. מגבלות מבניות (Structural Limits)</span>
+          <span class="section-desc">סטופ-לוס, מרדף רגל פתוחה, והגנת פקיעה</span>
+        </div>
+        <div class="section-row">
+          <span class="section-name">4. תצוגה גיאומטרית (Geometry Preview)</span>
+          <span class="section-desc">גרף אינטראקטיבי המציג את תחומי המסחר</span>
+        </div>
+      </div>
+      <div style="margin-top: 14px; font-size: 0.83rem; color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 10px;">
+        💡 <strong>נעילת קבועי בורסה:</strong> שדות גז ועמלות לא ניתנים עוד לשינוי פיקטיבי – הם נעולים בדיוק לכללי Polymarket.
+      </div>
+    </article>
+
+  </div>
+
+  <!-- Real System Verification Box -->
+  <footer class="live-box">
+    <div class="live-text">
+      <h4>נסה בעצמך במערכת החיה</h4>
+      <p>פתח את לשונית Backtest בלוח הבקרה הפעיל, בחר קובץ נתונים, והפעל בדיקה מהירה או סריקה</p>
+    </div>
+    <a href="http://127.0.0.1:5515" target="_blank" rel="noopener" class="live-link">
+      פתח את לוח הבקרה (פורט 5515) ❯
+    </a>
+  </footer>
+
+</div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('pipeline-canvas');
+  const ctx = canvas.getContext('2d');
+  
+  // UI Elements
+  const modeStreamBtn = document.getElementById('mode-stream');
+  const modeBulkBtn = document.getElementById('mode-bulk');
+  const btnToggle = document.getElementById('btn-toggle');
+  const btnStep = document.getElementById('btn-step');
+  const btnReset = document.getElementById('btn-reset');
+  const valMemory = document.getElementById('val-memory');
+  const valWindows = document.getElementById('val-windows');
+  const valResp = document.getElementById('val-responsiveness');
+  const simStatus = document.getElementById('sim-status');
+  const statusDot = document.getElementById('status-dot');
+
+  let mode = 'stream'; // 'stream' | 'bulk'
+  let isRunning = false;
+  let animFrameId = null;
+  let currentWindow = 0;
+  const maxWindows = 288;
+  
+  // Particles for streaming animation
+  let particles = [];
+  let dpr = window.devicePixelRatio || 1;
+
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  function spawnParticle() {
+    if (particles.length > 35) return;
+    particles.push({
+      x: 30,
+      y: 120 + (Math.random() - 0.5) * 20,
+      vx: 3 + Math.random() * 2,
+      progress: 0,
+      color: mode === 'stream' ? '#10b981' : '#f43f5e'
+    });
+  }
+
+  function render() {
+    const w = canvas.getBoundingClientRect().width;
+    const h = 240;
+    ctx.clearRect(0, 0, w, h);
+
+    // Stage 1: Data Source Box
+    ctx.fillStyle = '#0f1722';
+    ctx.strokeStyle = '#233549';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(20, 40, 110, 160, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 12px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('קובץ נתוני שוק', 75, 70);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '11px monospace';
+    ctx.fillText('1.2 GB Ticks', 75, 92);
+    ctx.fillText('288 חלונות', 75, 112);
+
+    // Stage 2: Engine Processing Box
+    const engineX = w / 2 - 65;
+    ctx.fillStyle = '#0f1722';
+    ctx.strokeStyle = mode === 'stream' ? '#10b981' : '#f43f5e';
+    ctx.beginPath();
+    ctx.roundRect(engineX, 40, 130, 160, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#f1f5f9';
+    ctx.font = 'bold 13px system-ui';
+    ctx.fillText('מנוע Replay', engineX + 65, 70);
+    ctx.fillStyle = mode === 'stream' ? '#10b981' : '#f43f5e';
+    ctx.font = '11px system-ui';
+    ctx.fillText(mode === 'stream' ? 'הזרמה (1s Yield)' : 'טעינה בבת אחת', engineX + 65, 92);
+
+    // Memory bar in engine
+    ctx.fillStyle = '#070b10';
+    ctx.fillRect(engineX + 15, 120, 100, 14);
+    const memRatio = mode === 'stream' ? 0.22 : Math.min(1.0, (currentWindow / maxWindows) * 0.95 + 0.1);
+    ctx.fillStyle = mode === 'stream' ? '#10b981' : '#f43f5e';
+    ctx.fillRect(engineX + 15, 120, 100 * memRatio, 14);
+
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = '10px monospace';
+    ctx.fillText(mode === 'stream' ? 'RAM: ~38MB' : 'RAM: ' + Math.round(memRatio * 4200) + 'MB', engineX + 65, 155);
+
+    // Stage 3: Live Output Box
+    const outX = w - 130;
+    ctx.fillStyle = '#0f1722';
+    ctx.strokeStyle = '#233549';
+    ctx.beginPath();
+    ctx.roundRect(outX, 40, 110, 160, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 12px system-ui';
+    ctx.fillText('לוח תוצאות', outX + 55, 70);
+    ctx.fillStyle = '#10b981';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText(currentWindow + ' / ' + maxWindows, outX + 55, 110);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '10px system-ui';
+    ctx.fillText(mode === 'stream' ? 'נפלט מיידית' : (currentWindow < maxWindows ? 'ממתין לסיום' : 'הסתיים'), outX + 55, 135);
+
+    // Connecting arrows & stream animation
+    if (mode === 'stream') {
+      // Draw stream line 1
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.25)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(130, 120);
+      ctx.lineTo(engineX, 120);
+      ctx.stroke();
+
+      // Draw stream line 2
+      ctx.beginPath();
+      ctx.moveTo(engineX + 130, 120);
+      ctx.lineTo(outX, 120);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw active particles
+      particles.forEach((p, idx) => {
+        p.x += p.vx;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      particles = particles.filter(p => p.x < w - 20);
+    } else {
+      // Bulk mode: giant clogged bottleneck
+      ctx.fillStyle = 'rgba(244, 63, 94, 0.15)';
+      ctx.fillRect(130, 110, engineX - 130, 20);
+      ctx.fillStyle = '#f43f5e';
+      ctx.font = '10px system-ui';
+      ctx.fillText('צוואר בקבוק ענק', (130 + engineX) / 2, 105);
+    }
+  }
+
+  function updateMetrics() {
+    valWindows.innerHTML = currentWindow + ' <small>/ ' + maxWindows + ' חלונות</small>';
+    if (mode === 'stream') {
+      valMemory.innerHTML = '38 <small>MB (קבוע ויציב)</small>';
+      valResp.textContent = 'מיידית וחלקה';
+      valResp.style.color = 'var(--accent)';
+      statusDot.className = 'status-indicator';
+    } else {
+      const ram = Math.round(200 + (currentWindow / maxWindows) * 3800);
+      valMemory.innerHTML = ram + ' <small>MB (מטפס ומכביד)</small>';
+      if (currentWindow > 100) {
+        valResp.textContent = 'איטית / תקיעות ב-UI';
+        valResp.style.color = 'var(--rose)';
+        statusDot.className = 'status-indicator lag';
+      } else {
+        valResp.textContent = 'העמסה הדרגתית';
+        valResp.style.color = 'var(--amber)';
+      }
+    }
+  }
+
+  function tick() {
+    if (!isRunning) return;
+
+    if (currentWindow < maxWindows) {
+      if (mode === 'stream') {
+        currentWindow = Math.min(maxWindows, currentWindow + 2);
+        if (Math.random() > 0.4) spawnParticle();
+      } else {
+        // Bulk lags behind, then finishes all at once
+        currentWindow = Math.min(maxWindows, currentWindow + 1);
+      }
+      updateMetrics();
+      render();
+      animFrameId = requestAnimationFrame(tick);
+    } else {
+      isRunning = false;
+      btnToggle.textContent = 'הפעל שוב';
+      simStatus.textContent = 'הבדיקה הושלמה בהצלחה';
+      render();
+    }
+  }
+
+  // Event Listeners
+  modeStreamBtn.addEventListener('click', () => {
+    mode = 'stream';
+    modeStreamBtn.classList.add('active');
+    modeBulkBtn.classList.remove('active');
+    simStatus.textContent = 'מצב הזרמה פעיל';
+    updateMetrics();
+    render();
+  });
+
+  modeBulkBtn.addEventListener('click', () => {
+    mode = 'bulk';
+    modeBulkBtn.classList.add('active');
+    modeStreamBtn.classList.remove('active');
+    simStatus.textContent = 'מצב טעינה מסיבית פעיל';
+    updateMetrics();
+    render();
+  });
+
+  btnToggle.addEventListener('click', () => {
+    if (currentWindow >= maxWindows) {
+      currentWindow = 0;
+    }
+    isRunning = !isRunning;
+    if (isRunning) {
+      btnToggle.textContent = 'השהה הדגמה';
+      simStatus.textContent = 'מעבד נתונים...';
+      tick();
+    } else {
+      btnToggle.textContent = 'המשך הדגמה';
+      simStatus.textContent = 'מושהה';
+      cancelAnimationFrame(animFrameId);
+    }
+  });
+
+  btnStep.addEventListener('click', () => {
+    if (isRunning) {
+      isRunning = false;
+      btnToggle.textContent = 'המשך הדגמה';
+      cancelAnimationFrame(animFrameId);
+    }
+    if (currentWindow < maxWindows) {
+      currentWindow = Math.min(maxWindows, currentWindow + (mode === 'stream' ? 12 : 6));
+      spawnParticle();
+      updateMetrics();
+      render();
+      simStatus.textContent = 'התקדם שלב אחד';
+    }
+  });
+
+  btnReset.addEventListener('click', () => {
+    isRunning = false;
+    cancelAnimationFrame(animFrameId);
+    currentWindow = 0;
+    particles = [];
+    btnToggle.textContent = 'הפעל הדגמה';
+    simStatus.textContent = 'מוכן להרצה';
+    updateMetrics();
+    render();
+  });
+
+  // Initial draw
+  render();
+})();
+</script>
+
+</body>
+</html>
