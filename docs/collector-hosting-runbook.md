@@ -2,7 +2,10 @@
 
 > Only the tick collector moves off-machine. Dashboard and trading engine stay local.
 > Host decision: **Render** (background worker + disk). **Fly.io** is the cheaper
-> fallback. Full comparison: `../SPEC.md` Deliverable 1.
+> fallback. Full comparison: the #283 PR discussion
+> (https://github.com/AI-Degen-69/crypto-spread/pull/284), which the per-issue
+> SPEC.md this runbook originally cited was pruned with (Station VI convention,
+> `docs/git-workflow.md` §5).
 
 ## 1. Deploy (Render, primary)
 
