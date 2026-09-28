@@ -520,6 +520,119 @@ def test_cli_only_exit_rev_end_to_end(tmp_path: Path):
     assert len(data["runs"]) == 5
 
 
+def test_sensitivity_grid_new_tuning_axes_by_default():
+    """Issue #307: entry_delay + leg_chase are tuning axes, swept by default."""
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base)
+    by_label = dict(grid)
+    assert sorted(lbl for lbl in by_label if lbl.startswith("entry_delay=")) == [
+        "entry_delay=10%",
+        "entry_delay=15s",
+        "entry_delay=20%",
+        "entry_delay=30s",
+        "entry_delay=60s",
+    ]
+    assert sorted(lbl for lbl in by_label if lbl.startswith("leg_chase=")) == [
+        "leg_chase=on",
+    ]
+    # Structural axis stays hidden without opt-in.
+    assert not any(lbl.startswith("naked_leg=") for lbl in by_label)
+
+
+def test_sensitivity_grid_entry_delay_clears_inactive_field():
+    """Issue #307: one mixed axis — pct takes precedence, so rows clear it."""
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base)
+    sec_rows = {lbl: p for lbl, p in grid if lbl.startswith("entry_delay=") and lbl.endswith("s")}
+    pct_rows = {lbl: p for lbl, p in grid if lbl.startswith("entry_delay=") and lbl.endswith("%")}
+    assert sec_rows and pct_rows
+    assert all(p.entry_delay_pct is None for p in sec_rows.values())
+    assert all(p.entry_delay_sec == 0.0 for p in pct_rows.values())
+    assert sorted(p.entry_delay_sec for p in sec_rows.values()) == [15.0, 30.0, 60.0]
+    assert sorted(p.entry_delay_pct for p in pct_rows.values()) == pytest.approx([0.10, 0.20])
+
+
+def test_sensitivity_grid_new_axes_touch_nothing_else():
+    """Issue #307: one knob at a time — new rows keep every other field."""
+    base = BacktestParams()
+    grid = generate_sensitivity_grid(base, include_structural=True)
+    for lbl, p in grid:
+        if lbl.startswith(("entry_delay=", "leg_chase=", "naked_leg=")):
+            assert p.offset == base.offset
+            assert p.queue_gate == base.queue_gate
+            assert p.quote_range == base.quote_range
+            assert p.max_pair_cost == base.max_pair_cost
+            assert p.exit_reversal == base.exit_reversal
+    chase = dict(grid)["leg_chase=on"]
+    assert chase.enable_leg_chase is True
+    naked = dict(grid)["naked_leg=hold"]
+    assert naked.naked_leg_at_expiry == "hold"
+
+
+def test_sensitivity_grid_naked_leg_structural_opt_in():
+    """Issue #307: naked_leg follows the #233 structural rule via --only too."""
+    base = BacktestParams()
+    assert BacktestParams.param_class_for("naked_leg_at_expiry") == "structural"
+    grid = generate_sensitivity_grid(base, include_structural=True)
+    assert [lbl for lbl, _ in grid if lbl.startswith("naked_leg=")] == ["naked_leg=hold"]
+    filtered = filter_sensitivity_grid(grid, "naked_leg")
+    assert [lbl for lbl, _ in filtered] == ["Baseline", "naked_leg=hold"]
+
+
+def _write_dummy_ticks(path: Path) -> None:
+    snap = {
+        "cid": "0x1", "series": "btc-up-or-down-5m", "slug": "btc-up-or-down-5m",
+        "duration": 300, "ts": 100.0, "start_ts": 100.0,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+    }
+    path.write_text(json.dumps(snap) + "\n", encoding="utf-8")
+
+
+def test_cli_only_new_axes_end_to_end(tmp_path: Path):
+    """Issue #307: --only entry_delay / leg_chase / naked_leg run isolated."""
+    dummy = tmp_path / "ticks_new_axes.jsonl"
+    _write_dummy_ticks(dummy)
+    expectations = {
+        "entry_delay": ["Baseline", "entry_delay=15s", "entry_delay=30s",
+                        "entry_delay=60s", "entry_delay=10%", "entry_delay=20%"],
+        "leg_chase": ["Baseline", "leg_chase=on"],
+        "naked_leg": ["Baseline", "naked_leg=hold"],
+    }
+    for axis, labels in expectations.items():
+        out_json = tmp_path / f"sweep_{axis}.json"
+        code = main([str(dummy), "--preset", "sensitivity",
+                     "--only", axis, "--out", str(out_json)])
+        assert code == 0
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        assert [r["param_label"] for r in data["runs"]] == labels
+
+
+def test_random_grid_samples_new_axes_within_registry_bounds():
+    """Issue #307: random draws stay inside param_spec bounds; seed-stable."""
+    grid1 = generate_random_grid(count=20, seed=7)
+    grid2 = generate_random_grid(count=20, seed=7)
+    assert [lbl for lbl, _ in grid1] == [lbl for lbl, _ in grid2]
+    assert all(lbl.startswith("rand_off=") for lbl, _ in grid1)
+    for _, p in grid1:
+        assert (p.entry_delay_sec, p.entry_delay_pct) in [
+            (0.0, None), (15.0, None), (30.0, None), (60.0, None),
+            (0.0, 0.10), (0.0, 0.20),
+        ]
+        assert isinstance(p.enable_leg_chase, bool)
+        # Structural default: naked leg never sampled without opt-in.
+        assert p.naked_leg_at_expiry == "close"
+    assert len({p.entry_delay_sec for _, p in grid1}) > 1
+    assert len({p.enable_leg_chase for _, p in grid1}) > 1
+
+
+def test_random_grid_include_structural_samples_naked_leg():
+    """Issue #307: explicit opt-in unlocks naked_leg in the random sampler."""
+    grid = generate_random_grid(count=30, seed=11, include_structural=True)
+    assert {p.naked_leg_at_expiry for _, p in grid} == {"close", "hold"}
+    assert any("_naked=hold" in lbl for lbl, _ in grid)
+
+
 def test_cli_only_rejected_with_non_sensitivity_preset(tmp_path: Path):
     """CodeRabbit on #112: --only must not label a grid/random run as isolated."""
     dummy_tick_file = tmp_path / "ticks_test.jsonl"
