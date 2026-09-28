@@ -2095,17 +2095,23 @@ def test_sweep_override_note_is_wired_into_the_meta_block():
     assert "function sweepOverrideNote(" in html
     assert "renderSweepVisual(data, v);" in html
     assert "function renderSweepVisual(data, submitted)" in html
-    assert "sweepOverrideNote(data.axis, submitted, xVals)" in html
-    assert "sweepNoteHtml(overrideNote)" in html
+    # The card owns the verdict now — it calls the note helper with the same
+    # pre-request snapshot and the response's point values.
+    assert "sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)))" in html
+    assert "sweepCard(submitted, data)" in html
+    assert "function sweepCard(" in html
     # The renderer must not go behind the snapshot's back and read the page.
     renderer = html[html.index("function renderSweepVisual(data, submitted)"):]
     renderer = renderer[:renderer.index("\nfunction ")]
     assert "$('btOffset')" not in renderer
     assert "$('btQueue')" not in renderer
-    # The note renders as its own boxed strip with a label, not a grey
-    # continuation of the stat line.
-    assert 'class="sweep-note"' in html
-    assert 'sweep-note-label' in html
+    # The note renders as a full configuration card with labeled sections,
+    # not a grey continuation of the stat line.
+    assert 'class="sweep-card"' in html
+    assert 'sweep-lab' in html
+    assert 'Subject parameter' in html
+    assert 'Parameters held' in html
+    assert 'Designed constraints / rules' in html
     # The plain stat line keeps its states.
     for preserved in ("best overall:", "best market:", "windows ·"):
         assert preserved in renderer, f"{preserved} lost from the meta line"
@@ -2127,92 +2133,98 @@ def test_sweep_override_note_wording_node():
         pytest.skip("Node.js not installed")
 
     html = client.get("/").text
-    # Harness what the note needs: the pure helper plus its renderer, so the
-    # tests below assert on the exact HTML strip the meta block receives.
+    # Harness what the card needs: the pure note helper (verdict) plus the
+    # card builder, so the tests assert on the exact HTML the meta block
+    # receives.
     parts = []
-    for name in ("sweepOverrideNote", "sweepNoteHtml"):
+    for name in ("sweepOverrideNote", "sweepCard"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
 
     test_js = "\n".join(parts) + """
-    if (typeof sweepOverrideNote !== 'function') {
-      throw new Error('sweepOverrideNote is not defined');
-    }
     const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
-    const strip = (axis, v, pts) => sweepNoteHtml(sweepOverrideNote(axis, v, pts));
+    const v = {
+      offset: 0.02, queue: 50, pairCost: 0.95,
+      exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09,
+      exitReversal: 0.03, size: 5, maxStartDelay: 0,
+      quoteLo: 0.20, quoteHi: 0.80, entryDelayPct: 4,
+      deadZonePct: 12, nakedLegAtExpiry: 'hold', legChase: '1'
+    };
+    const data = {
+      axis: 'queue',
+      points: [{label:'0', value:0},{label:'10', value:10},{label:'25', value:25},
+               {label:'50', value:50},{label:'100', value:100},{label:'200', value:200}],
+      series_order: ['eth-up-or-down-5m'],
+      series_labels: {'eth-up-or-down-5m': '5m ETH'}
+    };
 
-    // A queue value that sits on the axis: the operator's own bar is called
-    // out, in the highlighted verdict class.
-    const queuePoints = [0, 10, 25, 50, 100, 200];
-    const queueHit = strip('queue', { queue: 50 }, queuePoints);
-    assert(queueHit.includes('sweeps Queue depth'), queueHit);
-    assert(queueHit.includes('replaces the submitted 50'), queueHit);
-    assert(queueHit.includes('that bar is your setting'), queueHit);
-    assert(queueHit.includes('sweep-note-yours'), queueHit);
-    assert(queueHit.includes('WHAT THIS SWEEP REPLACES'), queueHit);
+    // Card skeleton: the labeled sections, in the sketch's order.
+    const card = sweepCard(v, data);
+    assert(card.includes('sweep-card'), card);
+    assert(card.includes('Subject parameter'), card);
+    assert(card.includes('Shares Ahead Queue'), card);
+    assert(card.includes('Values'), card);
+    assert(card.includes('0, 10, 25, 50, 100, 200'), card);
+    assert(card.includes('Markets'), card);
+    assert(card.includes('5m ETH'), card);
+    assert(card.includes('Parameters held'), card);
+    assert(card.includes('Designed constraints / rules'), card);
 
-    // A queue value with sub-unit precision must be shown exactly as typed —
-    // the displayed value may never disagree with the match decision.
-    const queueFrac = strip('queue', { queue: 50.4 }, queuePoints);
-    assert(queueFrac.includes('replaces the submitted 50.4'), queueFrac);
-    assert(queueFrac.includes('no bar equals it'), queueFrac);
-    assert(queueFrac.includes('sweep-note-none'), queueFrac);
+    // Every held parameter shows the operator's submitted value.
+    assert(card.includes('Spread Offset ($)'), card);
+    assert(card.includes('0.020'), card);
+    assert(card.includes('Queue Depth Filter (shares)'), card);
+    assert(card.includes('>50<'), card);
+    assert(card.includes('Late Entry (% of window)'), card);
+    assert(card.includes('4%'), card);
+    assert(card.includes('Exit Stop Loss 5m ($)'), card);
+    assert(card.includes('0.06'), card);
+    assert(card.includes('Exit Stop Loss 15m ($)'), card);
+    assert(card.includes('0.07'), card);
+    assert(card.includes('Reversal Buffer ($)'), card);
+    assert(card.includes('0.030'), card);
+    assert(card.includes('Leg Chase'), card);
+    assert(card.includes('Enabled'), card);
 
-    // An offset between two bars: no bar may be claimed as theirs.
-    const offsetPoints = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040];
-    const offsetMiss = strip('offset', { offset: 0.022 }, offsetPoints);
-    assert(offsetMiss.includes('sweeps Quote offset'), offsetMiss);
-    assert(offsetMiss.includes('submitted 0.022'), offsetMiss);
-    assert(offsetMiss.includes('no bar equals it'), offsetMiss);
+    // Constraints read from the same snapshot.
+    assert(card.includes('Quotable Range ($)'), card);
+    assert(card.includes('[0.20, 0.80]'), card);
+    assert(card.includes('Dead Zone (% of window)'), card);
+    assert(card.includes('12%'), card);
+    assert(card.includes('Naked Leg at Expiry'), card);
+    assert(card.includes('Hold'), card);
 
-    // Reversal buffer keeps the same shape.
-    const revHit = strip('exit_rev', { exitReversal: 0.02 },
-                         [0.010, 0.015, 0.020, 0.025, 0.030]);
-    assert(revHit.includes('sweeps Reversal buffer'), revHit);
-    assert(revHit.includes('that bar is your setting'), revHit);
+    // The subject row is marked, exactly one per axis.
+    assert(card.includes('subject of this sweep'), card);
+    assert(card.includes('sweep-row subject'), card);
+    assert(card.split('subject of this sweep').length - 1 === 1, card);
 
-    // Mixed stop thresholds: the note must say all six are replaced, list
-    // every submitted threshold as its own chip, and refuse to claim any bar
-    // is the operator's setting.
-    const stopPoints = [0.06, 0.08, 0.10, 0.12, 0.14, 0.16];
-    const mixed = strip('exit_stop',
-      { exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09 }, stopPoints);
-    assert(mixed.includes('all six stop thresholds'), mixed);
-    assert(mixed.includes('submitted:'), mixed);
-    assert(mixed.includes('sweep-note-chip'), mixed);
-    assert(mixed.includes('5m <b>0.06</b>'), mixed);
-    assert(mixed.includes('15m <b>0.07</b>'), mixed);
-    assert(mixed.includes('BTC <b>0.08</b>'), mixed);
-    assert(mixed.includes('SOL <b>0.09</b>'), mixed);
-    assert(mixed.includes('no bar is your mixed setting'), mixed);
-    assert(mixed.includes('sweep-note-none'), mixed);
+    // The verdict survives in the card: on-axis value claims the bar (gold).
+    assert(card.includes('that bar is your setting'), card);
+    assert(card.includes('sweep-verdict yours'), card);
 
-    // A stop value with more precision than the axis list must be shown as
-    // typed, not rounded onto a bar it does not actually match.
-    const stopFrac = strip('exit_stop',
-      { exit5m: 0.064, exit15m: 0.064, exitBtc: 0.064, exitSol: 0.064 }, stopPoints);
-    assert(stopFrac.includes('5m <b>0.064</b>'), stopFrac);
-    assert(stopFrac.includes('no bar equals your value'), stopFrac);
+    // Off-axis value: honest "no bar" verdict in the warning color.
+    const offCard = sweepCard({ ...v, queue: 77 }, data);
+    assert(offCard.includes('>77<'), offCard);
+    assert(offCard.includes('no bar equals it'), offCard);
+    assert(offCard.includes('sweep-verdict none'), offCard);
 
-    // Uniform stops equal to an axis point: that bar is theirs.
-    const uniformHit = strip('exit_stop',
-      { exit5m: 0.08, exit15m: 0.08, exitBtc: 0.08, exitSol: 0.08 }, stopPoints);
-    assert(uniformHit.includes('all six stop thresholds'), uniformHit);
-    assert(uniformHit.includes('the bar at 0.08'), uniformHit);
-    assert(uniformHit.includes('is your setting'), uniformHit);
-    assert(uniformHit.includes('sweep-note-yours'), uniformHit);
+    // exit_stop subject: one marker, and the mixed-set verdict still refuses
+    // to claim a bar.
+    const stopCard = sweepCard(v, { ...data, axis: 'exit_stop' });
+    assert(stopCard.includes('Exit Stop Loss 5m ($)'), stopCard);
+    assert(stopCard.split('subject of this sweep').length - 1 === 1, stopCard);
+    assert(stopCard.includes('no bar is your mixed setting'), stopCard);
 
-    // Uniform stops off the axis: still honest about the six, still no claim.
-    const uniformMiss = strip('exit_stop',
-      { exit5m: 0.075, exit15m: 0.075, exitBtc: 0.075, exitSol: 0.075 }, stopPoints);
-    assert(uniformMiss.includes('all six stop thresholds'), uniformMiss);
-    assert(uniformMiss.includes('no bar equals your value'), uniformMiss);
+    // Unknown axis: no claim, card still renders the held knobs.
+    const unk = sweepCard(v, { ...data, axis: 'not-an-axis' });
+    assert(!unk.includes('subject of this sweep'), unk);
+    assert(unk.includes('Parameters held'), unk);
 
-    // No snapshot, no note — the meta block keeps its plain stat line.
-    assert(sweepOverrideNote('queue', null, queuePoints) === '', 'null snapshot');
-    assert(sweepOverrideNote('not-an-axis', { queue: 50 }, queuePoints) === '', 'unknown axis');
-    assert(sweepNoteHtml('') === '', 'empty note renders nothing');
+    // Markets fallback when the response narrows nothing.
+    const allMkts = sweepCard(v, { ...data, series_order: [] });
+    assert(allMkts.includes('All markets'), allMkts);
 
     console.log('SWEEP_OVERRIDE_NOTE_TESTS_PASSED');
     process.exit(0);

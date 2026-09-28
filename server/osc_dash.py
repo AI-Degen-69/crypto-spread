@@ -4232,15 +4232,21 @@ textarea:focus-visible,
       </div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
       <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}
-      #btSweepMeta .sweep-note{margin-top:6px;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;font-size:11px;line-height:1.7}
-      #btSweepMeta .sweep-note-label{display:block;font:700 9.5px var(--disp);letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
-      #btSweepMeta .sweep-note-head{color:var(--dim)}
-      #btSweepMeta .sweep-note-head b{color:var(--tx);font-weight:600}
-      #btSweepMeta .sweep-note-yours{color:var(--gold)}
-      #btSweepMeta .sweep-note-none{color:var(--warn)}
-      #btSweepMeta .sweep-note-item{color:var(--dim)}
-      #btSweepMeta .sweep-note-item b{color:var(--tx);font-weight:600}
-      #btSweepMeta .sweep-note-chip{display:inline-block;background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:2px 3px 2px 0;font-weight:600}
+      #btSweepMeta .sweep-card{display:block;margin-top:8px;padding:12px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;font:12px/1.6 var(--body)}
+      #btSweepMeta .sweep-card-head{display:flex;flex-wrap:wrap;gap:4px 26px;margin-bottom:10px}
+      #btSweepMeta .sweep-lab{display:block;font:700 9px var(--disp);letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
+      #btSweepMeta .sweep-subject{font:600 14px var(--disp);color:var(--tx)}
+      #btSweepMeta .sweep-values{font:11px var(--mono);color:var(--dim)}
+      #btSweepMeta .sweep-cols{display:grid;grid-template-columns:1.2fr 1fr;gap:10px 22px;border-top:1px solid var(--line);padding-top:10px}
+      #btSweepMeta .sweep-dl{display:block}
+      #btSweepMeta .sweep-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:2px 6px;border-radius:5px}
+      #btSweepMeta .sweep-row.subject{background:var(--panel);box-shadow:inset 0 0 0 1px var(--gold)}
+      #btSweepMeta .sweep-row .k{color:var(--dim)}
+      #btSweepMeta .sweep-row .v{color:var(--tx);font:11px var(--mono);text-align:left}
+      #btSweepMeta .sweep-tag{font:700 8px var(--disp);letter-spacing:.6px;text-transform:uppercase;color:var(--gold)}
+      #btSweepMeta .sweep-verdict{display:block;margin-top:10px;padding-top:8px;border-top:1px solid var(--line);font-size:11.5px}
+      #btSweepMeta .sweep-verdict.yours{color:var(--gold)}
+      #btSweepMeta .sweep-verdict.none{color:var(--warn)}
       </style>
       <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px">
         <h4 style="margin:0 0 4px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
@@ -6875,22 +6881,57 @@ function sweepOverrideNote(axis, v, pointValues){
            submittedLabel: '', items: [], verdict };
 }
 
-// Render the override note as its own boxed strip inside the meta block:
-// uppercase label, headline, submitted chips, then the verdict line. `note`
-// is '' (temporary status text occupies the whole block) or the structured
-// object sweepOverrideNote returns.
-function sweepNoteHtml(note){
-  if(!note) return '';
-  const chips = (note.items || [])
-    .map(it => `<span class="sweep-note-chip">${it.label} <b>${it.value}</b></span>`)
-    .join('');
-  const submitted = note.submittedLabel
-    ? `<span class="sweep-note-head">${note.submittedLabel}:</span> ${chips}<br>`
+// The configuration card under the chart: what was swept, what was held.
+// `v` is the pre-request snapshot, `data` the sweep response (axis + markets).
+function sweepCard(v, data){
+  const pct = x => x + '%';
+  const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
+  const axisName = ({
+    queue: 'Shares Ahead Queue',
+    offset: 'Spread Offset',
+    exit_stop: 'Exit Stop Loss',
+    exit_rev: 'Reversal Buffer'
+  })[data.axis] || data.axis;
+  const values = (data.points || []).map(p => p.label).join(', ');
+  const mkts = (data.series_order || []).map(k => (data.series_labels || {})[k] || k);
+  const mktsTxt = mkts.length ? mkts.join(' · ') : 'All markets';
+  const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
+    + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject of this sweep</span>' : ''}</span>`
+    + `<span class="v">${val}</span></span>`;
+  const params = [
+    row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset'),
+    row('Queue Depth Filter (shares)', String(Math.round(v.queue)), data.axis === 'queue'),
+    row('Late Entry (% of window)', pct(v.entryDelayPct)),
+    row('Exit Stop Loss 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop'),
+    row('Exit Stop Loss 15m ($)', v.exit15m.toFixed(2)),
+    row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev'),
+    row('Leg Chase', onoff(v.legChase)),
+  ];
+  const held = `
+    <span class="sweep-dl">
+      <span class="sweep-lab">Parameters held</span>
+      ${params.join('')}
+    </span>`;
+  const rules = `
+    <span class="sweep-dl">
+      <span class="sweep-lab">Designed constraints / rules</span>
+      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`)}
+      ${row('Dead Zone (% of window)', pct(v.deadZonePct))}
+      ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
+    </span>`;
+  const verdict = sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)));
+  const verdictHtml = (verdict && verdict.verdict)
+    ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
     : '';
-  return `<span class="sweep-note"><span class="sweep-note-label">WHAT THIS SWEEP REPLACES</span><br>`
-    + `<span class="sweep-note-head">${note.head}</span><br>`
-    + submitted
-    + `<span class="sweep-note-${note.verdict.cls}">${note.verdict.text}</span></span>`;
+  return `<span class="sweep-card">`
+    + `<span class="sweep-card-head">`
+    + `<span><span class="sweep-lab">Subject parameter</span><span class="sweep-subject">${axisName}</span></span>`
+    + `<span><span class="sweep-lab">Values</span><span class="sweep-values">${values}</span></span>`
+    + `<span><span class="sweep-lab">Markets</span><span class="sweep-values">${mktsTxt}</span></span>`
+    + `</span>`
+    + `<span class="sweep-cols">${held}${rules}</span>`
+    + verdictHtml
+    + `</span>`;
 }
 
 function formatSweepTickValue(axis, val){
@@ -7104,12 +7145,12 @@ function renderSweepVisual(data, submitted){
     const overallText = bestOverall ? `best overall: ${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : 'best overall: —';
     const marketText = bestMarket ? `best market: ${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : 'best market: —';
     const tookTxt = (window._btSweepStartTime) ? ` · took ${fmtElapsed(performance.now() - window._btSweepStartTime)}` : '';
-    // Top line stays the plain stat line; the override note is its own boxed
-    // strip beneath it (structured, highlighted) instead of one long grey
-    // sentence — every fact gets a place: label, headline, chips, verdict.
-    const overrideNote = sweepOverrideNote(data.axis, submitted, xVals);
+    // Top line stays the plain stat line; beneath it the full configuration
+    // card: subject parameter, tested values, markets, every knob held, the
+    // designed constraints, and the where-am-I verdict highlighted.
+    const cardHtml = sweepCard(submitted, data);
     meta.innerHTML = `${axisLabel} · ${data.n_windows || 0} windows · ${overallText} · ${marketText}${tookTxt}`
-      + sweepNoteHtml(overrideNote);
+      + cardHtml;
   }
   const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
