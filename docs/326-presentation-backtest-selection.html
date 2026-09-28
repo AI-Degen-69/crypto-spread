@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>לבדוק שוק אחד בכל פעם — עדכון #326</title>
+<style>
+  :root { --accent: #0f766e; --accent-soft: #ccfbf1; --ink: #1f2937; --muted: #6b7280; --paper: #fafaf9; --card: #ffffff; --line: #e7e5e4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: var(--paper); color: var(--ink); line-height: 1.7; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .strip { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; }
+  .strip p { margin: 6px 0; }
+  .tag { display: inline-block; font-size: .8rem; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 1px 12px; margin-inline-end: 8px; font-weight: 700; }
+  .demo { background: var(--card); border: 2px solid var(--accent); border-radius: 14px; padding: 20px; margin-bottom: 20px; }
+  .demo h2 { margin: 0 0 12px; font-size: 1.15rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  button.pick { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 6px 16px; font-size: .95rem; cursor: pointer; font-family: inherit; }
+  button.pick[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  .bignum { font-size: 3rem; font-weight: 800; color: var(--accent); line-height: 1.1; margin: 8px 0 0; }
+  .bar { height: 18px; border-radius: 9px; background: var(--line); overflow: hidden; display: flex; margin: 12px 0 4px; direction: ltr; }
+  .bar span { display: block; height: 100%; }
+  .bar .m5 { background: var(--accent); }
+  .bar .m15 { background: #f59e0b; }
+  .legend { font-size: .85rem; color: var(--muted); display: flex; gap: 16px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-inline-end: 4px; }
+  .check { font-size: .95rem; margin-top: 10px; }
+  .note { font-size: .85rem; color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>לבדוק שוק אחד בכל פעם</h1>
+  <p class="sub">עדכון #326 &middot; מה שהשתנה בבדיקות ההיסטוריה של הבוט</p>
+
+  <section class="strip" aria-label="before after">
+    <p><span class="tag">לפני</span>כל בדיקה רצה על כל 5 השווקים ושני טווחי הזמן ביחד — אי אפשר היה לשאול "איך BTC לבד?"</p>
+    <p><span class="tag">עכשיו</span>אפשר לבחור שוק אחד, טווח זמן אחד, או שילוב — ולראות מיד כמה חלונות נבדקו.</p>
+  </section>
+
+  <section class="demo" aria-label="live demo">
+    <h2>נסו כאן: בחרו שוק וטווח זמן</h2>
+    <div class="row" id="markets" role="group" aria-label="market"></div>
+    <div class="row" id="frames" role="group" aria-label="timeframe"></div>
+    <p class="bignum"><span id="wins">4910</span> <small style="font-size:1rem;font-weight:400">חלונות נבדקים</small></p>
+    <div class="bar" aria-hidden="true"><span class="m5" id="bar5"></span><span class="m15" id="bar15"></span></div>
+    <div class="legend">
+      <span><i class="dot" style="background:#0f766e"></i>5 דקות (<span id="n5">3926</span>)</span>
+      <span><i class="dot" style="background:#f59e0b"></i>15 דקות (<span id="n15">984</span>)</span>
+    </div>
+    <p class="check" id="cover"></p>
+  </section>
+
+  <section class="strip">
+    <p><span class="tag">בטיחות</span><span id="safe">שום שוק לא נעלם בשקט — המערכת מדווחת כמה נמצאו מתוך כמה שצפויים.</span></p>
+    <p class="note">המספרים כאן אמיתיים: 4,910 חלונות מ־6 ימי הקלטה, 5 שווקים × 2 טווחי זמן.</p>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+  var DATA = [
+    ["BTC", "5m", 800], ["BTC", "15m", 209],
+    ["ETH", "5m", 795], ["ETH", "15m", 207],
+    ["BNB", "5m", 773], ["BNB", "15m", 159],
+    ["SOL", "5m", 780], ["SOL", "15m", 204],
+    ["XRP", "5m", 778], ["XRP", "15m", 205]
+  ];
+  var MARKETS = ["הכל", "BTC", "ETH", "BNB", "SOL", "XRP"];
+  var FRAMES = [["הכל", "both"], ["5 דקות", "5m"], ["15 דקות", "15m"]];
+  var selM = "הכל", selF = "both";
+  var mBox = document.getElementById("markets");
+  var fBox = document.getElementById("frames");
+
+  function buttons(box, items, get, set) {
+    items.forEach(function (it) {
+      var b = document.createElement("button");
+      b.className = "pick";
+      b.textContent = typeof it === "string" ? it : it[0];
+      b.setAttribute("aria-pressed", get() === (typeof it === "string" ? it : it[1]) ? "true" : "false");
+      b.addEventListener("click", function () { set(typeof it === "string" ? it : it[1]); paint(); });
+      box.appendChild(b);
+    });
+  }
+  function refresh(box, items, cur) {
+    var btns = box.children;
+    for (var i = 0; i < btns.length; i++) {
+      var v = typeof items[i] === "string" ? items[i] : items[i][1];
+      btns[i].setAttribute("aria-pressed", v === cur ? "true" : "false");
+    }
+  }
+  buttons(mBox, MARKETS, function () { return selM; }, function (v) { selM = v; });
+  buttons(fBox, FRAMES, function () { return selF; }, function (v) { selF = v; });
+
+  function paint() {
+    refresh(mBox, MARKETS, selM);
+    refresh(fBox, FRAMES, selF);
+    var n5 = 0, n15 = 0, pairs = 0;
+    DATA.forEach(function (r) {
+      var okM = selM === "הכל" || r[0] === selM;
+      var okF = selF === "both" || r[1] === selF;
+      if (okM && okF) {
+        pairs++;
+        if (r[1] === "5m") { n5 += r[2]; } else { n15 += r[2]; }
+      }
+    });
+    var total = n5 + n15;
+    var mCount = selM === "הכל" ? 5 : 1;
+    var fCount = selF === "both" ? 2 : 1;
+    var expected = mCount * fCount;
+    document.getElementById("wins").textContent = total;
+    document.getElementById("n5").textContent = n5;
+    document.getElementById("n15").textContent = n15;
+    document.getElementById("bar5").style.width = (total ? (n5 / total * 100) : 0) + "%";
+    document.getElementById("bar15").style.width = (total ? (n15 / total * 100) : 0) + "%";
+    document.getElementById("cover").textContent =
+      total === 0 ? "אין חלונות תואמים — הבחירה תקינה, פשוט אין נתונים."
+                  : "נמצאו " + pairs + " מתוך " + expected + " צמדי שוק־זמן צפויים. שום דבר לא אבד.";
+  }
+  paint();
+})();
+</script>
+</body>
+</html>
