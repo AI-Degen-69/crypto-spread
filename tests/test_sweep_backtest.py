@@ -626,6 +626,25 @@ def test_random_grid_samples_new_axes_within_registry_bounds():
     assert len({p.enable_leg_chase for _, p in grid1}) > 1
 
 
+def test_random_grid_legacy_draws_pinned_for_fixed_seed():
+    """Issue #307: a fixed seed replays the pre-change legacy draw order.
+
+    The separate RNG stream must never shift legacy acceptance: pin the
+    legacy fields of the first rows for seed 42.
+    """
+    grid = generate_random_grid(count=6, seed=42)
+    legacy = [
+        (p.offset, p.queue_gate,
+         p.exit_thresh_by_slug["default_5m"], p.exit_reversal)
+        for _, p in grid
+    ]
+    assert legacy[:3] == [
+        (0.035, 0.0, 0.06, 0.020),
+        (0.015, 10.0, 0.09, 0.010),
+        (0.035, 200.0, 0.08, 0.030),
+    ]
+
+
 def test_random_grid_include_structural_samples_naked_leg():
     """Issue #307: explicit opt-in unlocks naked_leg in the random sampler."""
     grid = generate_random_grid(count=30, seed=11, include_structural=True)
