@@ -4231,12 +4231,12 @@ textarea:focus-visible,
         </div>
       </div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
-      <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:10px}</style>
-      <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
-        <h4 style="margin:0 0 6px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
-        <canvas id="chartSweepAgg" height="140"></canvas>
+      <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}</style>
+      <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px">
+        <h4 style="margin:0 0 4px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
+        <canvas id="chartSweepAgg" height="90"></canvas>
       </div>
-      <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px"></div>
+      <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px"></div>
       </div>
       </div>
     </div>
@@ -6734,6 +6734,7 @@ function sweepChartOptions(data, detail){
   const compactTick = num => integerAxis ? String(num) : num.toFixed(3);
   return {
     responsive: true,
+    maintainAspectRatio: !!detail,
     parsing: false,
     plugins: {
       legend: { display: false },
@@ -6751,17 +6752,34 @@ function sweepChartOptions(data, detail){
         ticks: { autoSkip: false, color: theme.dim, maxTicksLimit: maxTicks, maxRotation: detail ? 35 : 55, minRotation: detail ? 0 : 35, callback: function(v){ const num = Number(v); return detail ? (xTickLabels.get(num) || String(num)) : compactTick(num); } },
         grid: { color: theme.line }
       },
-      y: { beginAtZero: true, title: { display: true, text: 'Total P&L ($)', color: theme.dim }, ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } }, grid: { color: theme.line } }
+      y: {
+        beginAtZero: true,
+        title: { display: true, text: 'Total P&L ($)', color: theme.dim },
+        ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } },
+        grid: {
+          color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.dim : theme.line; },
+          lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 1.5 : 1; }
+        }
+      }
     }
   };
 }
 
 function sweepChartColors(data, seriesKey, theme){
   return (data.points || []).map(point => {
-    const best = seriesKey
-      ? data.best_market && data.best_market.series === seriesKey && data.best_market.value === point.value
-      : data.best_overall && data.best_overall.value === point.value;
-    return best ? theme.gold : theme.proj;
+    const isBest = seriesKey
+      ? !!(data.best_market && data.best_market.series === seriesKey && data.best_market.value === point.value)
+      : !!(data.best_overall && data.best_overall.value === point.value);
+    if(isBest) return theme.gold;
+    const rawVal = seriesKey
+      ? ((point.per_series || {})[seriesKey])
+      : ((point.overall || {}).total_pnl_cents);
+    const num = Number(rawVal);
+    if(Number.isFinite(num)){
+      if(num > 0) return theme.up;
+      if(num < 0) return theme.down;
+    }
+    return theme.dim;
   });
 }
 
@@ -6877,7 +6895,7 @@ function renderSweepVisual(data){
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.setAttribute('aria-label', `Open ${(data.series_labels || {})[seriesKey] || seriesKey} Sweep Visual chart detail for ${points.length} tested values`);
-    card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:10px`;
+    card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:6px 8px`;
     const activate = event => {
       if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
       if(event.type === 'keydown') event.preventDefault();
@@ -6886,12 +6904,12 @@ function renderSweepVisual(data){
     card.addEventListener('click', activate);
     card.addEventListener('keydown', activate);
     const title = document.createElement('div');
-    title.style.cssText = 'font:700 11px var(--disp);color:var(--faint);margin-bottom:4px';
+    title.style.cssText = 'font:700 10px var(--disp);color:var(--faint);margin-bottom:2px';
     title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
     const cv = document.createElement('canvas');
     const cvId = 'chartSweep_' + idx;
     cv.id = cvId;
-    cv.height = 110;
+    cv.height = 70;
     card.appendChild(title);
     card.appendChild(cv);
     grid.appendChild(card);
