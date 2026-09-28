@@ -1529,6 +1529,7 @@ def _run_backtest_simulation_worker(
 
     # Per-series aggregation
     def _new_outcome_row():
+        """Fresh zeroed outcome row for one per-series/per-duration bucket."""
         return {
             "windows": 0,
             "pairs": 0,

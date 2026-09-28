@@ -1412,9 +1412,8 @@ def test_api_backtest_series_and_durations_selection(tmp_path, monkeypatch):
     assert both["n_windows"] == 1
 
     # CLI/API parity: same totals on the same file as the CLI replay path.
-    from backtest import group_by_cid as _gbc, iter_ticks as _it, replay as _replay
+    from backtest import iter_ticks as _it, replay as _replay
     from backtest.engine import BacktestParams as _BP
-    from backtest.selection import apply_selection as _sel
     snaps = [s for s in _it(tmp_path / "fake_sel.jsonl")
              if "btc" in s.get("series", "")]
     cli_out = _replay(snaps, _BP(offset=0.02, queue_gate=0.0))

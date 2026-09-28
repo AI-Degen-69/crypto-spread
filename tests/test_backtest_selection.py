@@ -9,7 +9,6 @@ import json
 
 import pytest
 
-from backtest import selection as sel
 from backtest.selection import (
     apply_selection,
     build_coverage,

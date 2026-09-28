@@ -118,6 +118,11 @@ Verify: `python -m pytest tests/test_osc_dash_integration.py -q` + CLI/API
 totals parity on the same golden file.
 CHECKPOINT 2: end-to-end — filtered CLI run, API parity, full-run
 per-duration sum equals `n_windows`.
+Build result: invariant unit-proven (`test_replay_per_duration_windows_sum_to_overall`)
++ CLI spot-checked on golden file (09-18: pairs + per-duration print OK).
+Full-golden 4,910-window run deferred to Station IV: the 4.5GB load+replay
+exceeds the local tool time budget; no background processes allowed here.
+The sum invariant is structural (one bucket per window), not data-dependent.
 
 ## Improvement proposal (adopted by default, edge-case hardening)
 

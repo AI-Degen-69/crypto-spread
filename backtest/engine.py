@@ -1279,7 +1279,7 @@ def _new_group_acc() -> dict:
     }
 
 
-def _accumulate_group(a: dict, w: "WindowResult") -> None:
+def _accumulate_group(a: dict, w: WindowResult) -> None:
     """Fold one window into a raw per-group accumulator (series or duration)."""
     a["windows"] += 1
     if getattr(w, "entered", False):
