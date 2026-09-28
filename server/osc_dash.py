@@ -747,15 +747,21 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
     time_blocks: set[str] = set()
     windows_known = True
     readiness_known = True
+    split_known = True
     source = "none"
     for f, _lines in entries:
         # Issue #295: sidecars are keyed by the path relative to TICKS_DIR
         # (a top-level basename or pristine/<basename>), so same-named files
         # in different tiers never share a cache entry.
+        # Issue #303 round 1: split counts derive only from accepted,
+        # fingerprint-matched verify-sidecar market_breakdown data. A sidecar
+        # accepted via TTL for other fields (file changed within the TTL) must
+        # not contribute its previous file's split counts.
+        expected_fp = _file_fingerprint(f)
         cached = (
             _read_verify_cache(
                 _verify_sidecar_path(f.relative_to(TICKS_DIR).as_posix()),
-                expected_fingerprint=_file_fingerprint(f),
+                expected_fingerprint=expected_fp,
             )
             if f.is_relative_to(TICKS_DIR)
             else None
@@ -763,6 +769,7 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
         if cached is None:
             windows_known = False
             readiness_known = False
+            split_known = False
             continue
         source = "verify_cache"
         for s, c in cached.get("series_counts", {}).items():
@@ -770,6 +777,13 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
         total_windows += int(cached.get("windows_count", 0))
         total_tape_entries += int(cached.get("tape_entries", 0))
         time_blocks.update(cached.get("time_blocks", []))
+        # Absent market_breakdown (or a fingerprint mismatch) means split
+        # coverage is incomplete — never a verified zero.
+        if "market_breakdown" not in cached or cached.get("fingerprint") != expected_fp:
+            split_known = False
+            if not cached.get("readiness"):
+                readiness_known = False
+            continue
         for market in cached.get("market_breakdown", []):
             key = (market.get("series", ""), int(market.get("duration", 0)))
             item = market_totals.setdefault(key, {"series": key[0], "duration": key[1], "windows": 0, "trades": 0})
@@ -826,7 +840,7 @@ def _aggregate_ticks(files: list[Path], manifest: dict[str, Any] | None,
         "total_windows": total_windows,
         "total_windows_5m": total_windows_5m if entries else None,
         "total_windows_15m": total_windows_15m if entries else None,
-        "windows_source": "cache" if (windows_known and entries) else ("partial" if entries else "none"),
+        "windows_source": "cache" if (windows_known and split_known and entries) else ("partial" if entries else "none"),
         "tape_entries_total": total_tape_entries or int((manifest or {}).get("tape_entries_total", 0)),
         "series_counts": series_counts,
         "series_counts_source": source if series_counts else "none",
@@ -957,13 +971,26 @@ def api_ticks_manifest():
             list(agg_files.values()), out["manifest"],
             file_count=len(out["files"]))
         # Per-file market breakdown, when a cached verify report exists.
+        # Issue #303 round 1: split counts derive only from accepted,
+        # fingerprint-matched sidecar market_breakdown data. An absent
+        # market_breakdown field (or a fingerprint mismatch after the file
+        # changed within the sidecar TTL) keeps windows_5m/15m unknown —
+        # never a verified zero. Other cached fields keep existing TTL
+        # acceptance.
         for entry in out["files"]:
+            expected_fp = _file_fingerprint(TICKS_DIR / entry["name"])
             cached = _read_verify_cache(
                 _verify_sidecar_path(entry["name"]),
-                expected_fingerprint=_file_fingerprint(TICKS_DIR / entry["name"]),
+                expected_fingerprint=expected_fp,
             )
-            entry["market_breakdown"] = (cached or {}).get("market_breakdown", [])
-            if cached is not None:
+            split_usable = (
+                cached is not None
+                and "market_breakdown" in cached
+                and cached.get("fingerprint") == expected_fp
+            )
+            entry["market_breakdown"] = (cached.get("market_breakdown", [])
+                                         if split_usable else [])
+            if split_usable:
                 entry["windows_5m"] = sum(
                     int(market.get("windows", 0))
                     for market in entry["market_breakdown"]
@@ -6948,18 +6975,23 @@ async function verifyTickData(filename, refresh){
       const res = await fetch('/api/ticks/verify?file=' + encodeURIComponent(filename) + (refresh ? '&refresh=1' : ''));
       d = await res.json();
       if(d.error){ throw new Error(d.error); }
-      if(!d.pending){ break; }
-      // Backend is scanning in the background — poll until the report lands.
-      if(cell){
+      if(!d.pending && !d.stale){ break; }
+      // Backend is scanning in the background — poll until the fresh,
+      // fingerprint-matched report lands. A stale snapshot carries the
+      // previous market_breakdown, so its counts stay provisional until
+      // the rescan finishes (Issue #303 round 1).
+      if(cell && (d.pending || d.stale)){
         const p = d.progress || {};
         const lines = (p.lines || 0).toLocaleString();
         const est = p.est_total || 0;
         const pct = est > 0 ? Math.min(99, Math.round((p.lines || 0) / est * 100)) : null;
         const elapsed = p.elapsed_sec != null ? p.elapsed_sec + 's' : '';
-        const progHtml = est > 0
+        const progHtml = d.stale
+          ? `Refreshing ${esc(filename)} from the current file…`
+          : est > 0
           ? `${lines} / ${est.toLocaleString()} lines · ${pct}% · ${elapsed}`
           : `${lines} lines processed · ${elapsed}`;
-        cell.innerHTML = `<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">Scanning ${esc(filename)} in background… <span class="spinner"></span><div class="mono" style="margin-top:6px;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums">${progHtml}</div></div>`;
+        cell.innerHTML = `<div style="text-align:center;padding:16px;color:var(--dim);font-size:13px">${d.stale ? progHtml : `Scanning ${esc(filename)} in background…`} <span class="spinner"></span><div class="mono" style="margin-top:6px;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums">${d.stale ? '' : progHtml}</div></div>`;
       }
       const badgeP = document.getElementById('verify_badge_' + domId);
       if(badgeP){ badgeP.textContent = '⏳'; badgeP.style.color = 'var(--dim)'; }
@@ -6971,7 +7003,10 @@ async function verifyTickData(filename, refresh){
       const fileRow = row && row.previousElementSibling;
       const readinessCell = fileRow ? fileRow.querySelector('.readiness-cell') : null;
       const windowsCell = fileRow ? fileRow.querySelector('.windows-cell') : null;
-      if(windowsCell && Array.isArray(d.market_breakdown)){
+      // The poll loop above exits only on a fresh fingerprint-matched
+      // report, but guard anyway: never present a stale snapshot's
+      // provisional breakdown as verified counts.
+      if(windowsCell && Array.isArray(d.market_breakdown) && !d.stale){
         const countWindows = duration => d.market_breakdown
           .filter(market => Number(market.duration) === duration)
           .reduce((total, market) => total + Number(market.windows || 0), 0);
