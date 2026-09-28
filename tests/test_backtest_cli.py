@@ -134,6 +134,102 @@ def test_winning_preset_invocation_from_the_module_docstring_parses(
     assert p.exit_thresh_by_slug["default_15m"] == 0.50
 
 
+def _two_market_ticks(tmp_path):
+    """Two windows: one BTC 5m, one ETH 15m."""
+    path = tmp_path / "ticks_sel.jsonl"
+    rows = []
+    for cid, series, dur in (("0xbtc", "btc-up-or-down-5m", 300),
+                             ("0xeth", "eth-up-or-down-15m", 900)):
+        start = 1_760_000_000.0
+        for i in range(2):
+            rows.append({
+                "ts": start + i,
+                "cid": cid,
+                "series": series,
+                "slug": series,
+                "duration": dur,
+                "start_ts": start,
+                "end_ts": start + float(dur),
+                "up": {"best_bid": 0.49, "best_ask": 0.51},
+                "down": {"best_bid": 0.49, "best_ask": 0.51},
+            })
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return path
+
+
+def _captured_snaps(monkeypatch):
+    """Intercept the snaps the CLI hands to `replay` (real aggregate shape)."""
+    seen = {}
+
+    def _fake_replay(snaps, params):
+        from backtest import group_by_cid as _gbc
+        seen["snaps"] = list(snaps)
+        seen["cids"] = sorted({s["cid"] for s in snaps})
+        grouped = _gbc(snaps)
+        return {
+            "n_windows": len(grouped),
+            "aggregate": {
+                "overall": {
+                    "windows": len(grouped), "pair_rate": 0.0, "exit_rate": 0.0,
+                    "total_pnl_cents": 0.0, "avg_pnl_cents": 0.0,
+                    "total_fees_cents": 0.0},
+                "per_series": {},
+                "per_duration": {},
+            },
+        }
+
+    monkeypatch.setattr(cli, "replay", _fake_replay)
+    return seen
+
+
+def test_series_selection_reaches_replay_before_grouping(tmp_path, monkeypatch, capsys):
+    """`--series btc` drops the ETH window before it ever enters simulation."""
+    seen = _captured_snaps(monkeypatch)
+    src = _two_market_ticks(tmp_path)
+    assert cli.main([str(src), "--series", "btc"]) == 0
+    assert seen["cids"] == ["0xbtc"]
+    out = capsys.readouterr().out
+    assert "series=btc" in out
+    assert "pairs=" in out
+
+
+def test_durations_selection_and_combined_filter(tmp_path, monkeypatch, capsys):
+    """`--durations 900` keeps only the 15m window; combined narrows to one."""
+    seen = _captured_snaps(monkeypatch)
+    src = _two_market_ticks(tmp_path)
+    assert cli.main([str(src), "--durations", "900"]) == 0
+    assert seen["cids"] == ["0xeth"]
+    assert cli.main([str(src), "--series", "eth", "--durations", "900"]) == 0
+    assert seen["cids"] == ["0xeth"]
+    # Valid selection, zero matching ticks: exit 0 with a coverage report —
+    # replay never runs, so `seen` still holds the previous run.
+    assert cli.main([str(src), "--series", "eth", "--durations", "300"]) == 0
+    out = capsys.readouterr().out
+    assert "no windows match the selection" in out
+    assert "pairs=0/1" in out
+
+
+def test_unknown_series_token_is_refused_not_silently_empty(tmp_path, monkeypatch):
+    """A typo'd `--series` raises instead of replaying zero windows."""
+    _captured_snaps(monkeypatch)
+    src = _two_market_ticks(tmp_path)
+    with pytest.raises(ValueError, match="bcc"):
+        cli.main([str(src), "--series", "bcc"])
+    with pytest.raises(ValueError, match="60"):
+        cli.main([str(src), "--durations", "60"])
+
+
+def test_unfiltered_run_reports_all_pairs(tmp_path, monkeypatch, capsys):
+    """No flags: both windows replay and the header says selection is all."""
+    seen = _captured_snaps(monkeypatch)
+    src = _two_market_ticks(tmp_path)
+    assert cli.main([str(src)]) == 0
+    assert seen["cids"] == ["0xbtc", "0xeth"]
+    out = capsys.readouterr().out
+    assert "series=all" in out
+    assert "durations=all" in out
+
+
 def test_help_renders_instead_of_crashing(capsys):
     """`--help` must print usage, not die formatting its own help strings.
 
