@@ -4234,7 +4234,7 @@ textarea:focus-visible,
       <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}</style>
       <div id="btSweepAggCard" class="bt-chart-card" tabindex="0" role="button" aria-label="Open aggregate Sweep Visual chart detail" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px">
         <h4 style="margin:0 0 4px;font:700 11px var(--disp);color:var(--faint)">ALL MARKETS — total P&amp;L vs param</h4>
-        <canvas id="chartSweepAgg" height="90"></canvas>
+        <div style="position:relative;height:90px"><canvas id="chartSweepAgg" height="90"></canvas></div>
       </div>
       <div id="btSweepGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px"></div>
       </div>
@@ -6906,12 +6906,15 @@ function renderSweepVisual(data){
     const title = document.createElement('div');
     title.style.cssText = 'font:700 10px var(--disp);color:var(--faint);margin-bottom:2px';
     title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
+    const cvWrap = document.createElement('div');
+    cvWrap.style.cssText = 'position:relative;height:70px';
     const cv = document.createElement('canvas');
     const cvId = 'chartSweep_' + idx;
     cv.id = cvId;
     cv.height = 70;
+    cvWrap.appendChild(cv);
     card.appendChild(title);
-    card.appendChild(cv);
+    card.appendChild(cvWrap);
     grid.appendChild(card);
     const y = points.map(p => ((p.per_series || {})[seriesKey] || 0) / 100);
     const colors = chartColors(seriesKey);
