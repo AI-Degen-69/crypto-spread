@@ -75,6 +75,12 @@ def test_root_returns_dashboard_spa():
     assert "uploadFileStream" in html
     assert "chip-token-BTC" in html
     assert "chip-token-ETH" in html
+    # Backtester market/timeframe selection controls.
+    assert 'id="btMarketSelect"' in html
+    assert 'id="btTimeframeSelect"' in html
+    assert '<option value="btc">BTC</option>' in html
+    assert '<option value="300">5m only</option>' in html
+    assert '<option value="900">15m only</option>' in html
     assert "btnDur5m" in html
     assert "cockpitActiveMarketsBadge" in html
     assert "toggleCockpitToken" in html
