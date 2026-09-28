@@ -6833,7 +6833,7 @@ function sweepOverrideNote(axis, v, pointValues){
     const yours = [['5m', v.exit5m], ['15m', v.exit15m],
                    ['BTC', v.exitBtc], ['SOL', v.exitSol]];
     const listed = yours.map(p => `${p[0]} ${formatSweepTickValue('exit_stop', p[1])}`).join(' · ');
-    const head = `sweeps stop distance — replaces all six stop thresholds (yours: ${listed})`;
+    const head = `sweeps stop distance — replaces all six stop thresholds with one value (submitted: ${listed})`;
     const uniform = yours.every(p => equals(p[1], yours[0][1]));
     if(!uniform) return `${head}; the sweep tests one uniform value, so no bar is your mixed setting`;
     return onAxis(v.exit5m)
@@ -6848,7 +6848,7 @@ function sweepOverrideNote(axis, v, pointValues){
   })[axis];
   if(!single) return '';
   const shown = formatSweepTickValue(axis, single[1]);
-  return `sweeps ${single[0]} — replaces your ${shown}`
+  return `sweeps ${single[0]} — replaces the submitted ${shown}`
     + (onAxis(single[1]) ? ' (that bar is your setting)' : '; no bar equals it');
 }
 

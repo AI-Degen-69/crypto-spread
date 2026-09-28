@@ -2024,6 +2024,9 @@ def test_sweep_axis_select_offers_every_sweep_axis():
     select = html[select_start:html.index("</select>", select_start)]
     for axis in osc_dash.SWEEP_AXES:
         assert f'<option value="{axis}"' in select, f"{axis} is not offered"
+    offered = set(re.findall(r'<option value="([^"]+)"', select))
+    assert offered == set(osc_dash.SWEEP_AXES), \
+        f"the axis dropdown and SWEEP_AXES disagree: {offered ^ set(osc_dash.SWEEP_AXES)}"
     assert set(_AXIS_CONTROLS) == set(osc_dash.SWEEP_AXES), \
         "the parity tests and the sweep axes have drifted apart"
 
@@ -2086,7 +2089,7 @@ def test_sweep_override_note_wording_node():
     const queuePoints = [0, 10, 25, 50, 100, 200];
     const queueHit = sweepOverrideNote('queue', { queue: 50 }, queuePoints);
     assert(queueHit.includes('sweeps Queue depth'), queueHit);
-    assert(queueHit.includes('your 50'), queueHit);
+    assert(queueHit.includes('submitted 50'), queueHit);
     assert(queueHit.includes('that bar is your setting'), queueHit);
 
     // An offset between two bars: no bar may be claimed as theirs.
