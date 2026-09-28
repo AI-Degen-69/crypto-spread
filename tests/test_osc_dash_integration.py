@@ -2028,6 +2028,124 @@ def test_sweep_axis_select_offers_every_sweep_axis():
         "the parity tests and the sweep axes have drifted apart"
 
 
+def test_sweep_override_note_is_wired_into_the_meta_line():
+    """The submitted snapshot must reach the renderer that writes the note.
+
+    The note is only honest if it is built from the values captured before the
+    request, which is what `runSweepVisual` already holds in `v`. Re-reading the
+    controls inside the renderer would let a mid-flight edit describe a
+    configuration that never ran.
+    """
+    html = osc_dash.FULL_APP_HTML
+    assert "function sweepOverrideNote(" in html
+    assert "renderSweepVisual(data, v);" in html
+    assert "function renderSweepVisual(data, submitted)" in html
+    assert "sweepOverrideNote(data.axis, submitted, xVals)" in html
+    # The renderer must not go behind the snapshot's back and read the page.
+    renderer = html[html.index("function renderSweepVisual(data, submitted)"):]
+    renderer = renderer[:renderer.index("\nfunction ")]
+    assert "$('btOffset')" not in renderer
+    assert "$('btQueue')" not in renderer
+    # The note is appended to the existing meta line, which keeps its states.
+    for preserved in ("best overall:", "best market:", "windows ·"):
+        assert preserved in renderer, f"{preserved} lost from the meta line"
+
+
+def test_sweep_override_note_wording_node():
+    """The note must name the swept field, and the six for `exit_stop`.
+
+    `exit_stop` is the axis that discards per-market distinctions: it writes the
+    swept value into all six thresholds. The behaviour is deliberate (the
+    comment in `_sweep_params_for_value` says so), but an operator who set BTC
+    and SOL apart and then read the chart was misled about what was measured.
+    """
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    # Harness only what the note needs: the helper and the one formatter it
+    # calls. Running the whole page script would drag in the DOM the note never
+    # touches, which is what the stub-heavy harnesses above exist to avoid.
+    parts = []
+    for name in ("formatSweepTickValue", "sweepOverrideNote"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+
+    test_js = "\n".join(parts) + """
+    if (typeof sweepOverrideNote !== 'function') {
+      throw new Error('sweepOverrideNote is not defined');
+    }
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+    // A queue value that sits on the axis: the operator's own bar is called out.
+    const queuePoints = [0, 10, 25, 50, 100, 200];
+    const queueHit = sweepOverrideNote('queue', { queue: 50 }, queuePoints);
+    assert(queueHit.includes('sweeps Queue depth'), queueHit);
+    assert(queueHit.includes('your 50'), queueHit);
+    assert(queueHit.includes('that bar is your setting'), queueHit);
+
+    // An offset between two bars: no bar may be claimed as theirs.
+    const offsetPoints = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040];
+    const offsetMiss = sweepOverrideNote('offset', { offset: 0.022 }, offsetPoints);
+    assert(offsetMiss.includes('sweeps Quote offset'), offsetMiss);
+    assert(offsetMiss.includes('2.2'), offsetMiss);
+    assert(offsetMiss.includes('no bar equals it'), offsetMiss);
+
+    // Reversal buffer keeps the same shape.
+    const revHit = sweepOverrideNote('exit_rev', { exitReversal: 0.02 },
+                                     [0.010, 0.015, 0.020, 0.025, 0.030]);
+    assert(revHit.includes('sweeps Reversal buffer'), revHit);
+    assert(revHit.includes('that bar is your setting'), revHit);
+
+    // Mixed stop thresholds: the note must say all six are replaced, list what
+    // it replaces, and refuse to claim any bar is the operator's setting.
+    const stopPoints = [0.06, 0.08, 0.10, 0.12, 0.14, 0.16];
+    const mixed = sweepOverrideNote('exit_stop',
+      { exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09 }, stopPoints);
+    assert(mixed.includes('all six stop thresholds'), mixed);
+    assert(mixed.includes('5m 6'), mixed);
+    assert(mixed.includes('15m 7'), mixed);
+    assert(mixed.includes('BTC 8'), mixed);
+    assert(mixed.includes('SOL 9'), mixed);
+    assert(mixed.includes('no bar is your mixed setting'), mixed);
+
+    // Uniform stops equal to an axis point: that bar is theirs.
+    const uniformHit = sweepOverrideNote('exit_stop',
+      { exit5m: 0.08, exit15m: 0.08, exitBtc: 0.08, exitSol: 0.08 }, stopPoints);
+    assert(uniformHit.includes('all six stop thresholds'), uniformHit);
+    assert(uniformHit.includes('the bar at 8'), uniformHit);
+    assert(uniformHit.includes('is your setting'), uniformHit);
+
+    // Uniform stops off the axis: still honest about the six, still no claim.
+    const uniformMiss = sweepOverrideNote('exit_stop',
+      { exit5m: 0.075, exit15m: 0.075, exitBtc: 0.075, exitSol: 0.075 }, stopPoints);
+    assert(uniformMiss.includes('all six stop thresholds'), uniformMiss);
+    assert(uniformMiss.includes('no bar equals your value'), uniformMiss);
+
+    // No snapshot, no claim — the renderer keeps the line it always showed.
+    assert(sweepOverrideNote('queue', null, queuePoints) === '', 'null snapshot');
+    assert(sweepOverrideNote('not-an-axis', { queue: 50 }, queuePoints) === '', 'unknown axis');
+
+    console.log('SWEEP_OVERRIDE_NOTE_TESTS_PASSED');
+    process.exit(0);
+    """
+
+    res = subprocess.run(
+        [node_bin, "-e", test_js],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_OVERRIDE_NOTE_TESTS_PASSED" in res.stdout
+
+
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
     """Verify /api/backtest rejects concurrent simulation runs with HTTP 429 when already in flight (Issue #259)."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
