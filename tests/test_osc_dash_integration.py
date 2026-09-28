@@ -224,6 +224,10 @@ def test_api_ticks_manifest(tmp_path, monkeypatch):
     assert data["files"][0]["name"] == "test_ticks.jsonl"
     assert data["files"][0]["lines"] == 2
     assert data["files"][0]["lines_estimated"] is False
+    assert data["files"][0]["windows_5m"] is None
+    assert data["files"][0]["windows_15m"] is None
+    assert data["aggregate"]["total_windows_5m"] == 0
+    assert data["aggregate"]["total_windows_15m"] == 0
 
 
 def test_api_ticks_manifest_aggregate(tmp_path, monkeypatch):
@@ -233,6 +237,15 @@ def test_api_ticks_manifest_aggregate(tmp_path, monkeypatch):
     f1.write_text('{"a": 1}\n{"a": 2}\n', encoding="utf-8")
     f2 = tmp_path / "ticks_2026-09-08.jsonl"
     f2.write_text('{"a": 3}\n', encoding="utf-8")
+    _write_verify_sidecar(
+        tmp_path,
+        f1.name,
+        windows=5,
+        market_breakdown=[
+            {"series": "btc-up-or-down-5m", "duration": 300, "windows": 2, "trades": 0},
+            {"series": "eth-up-or-down-15m", "duration": 900, "windows": 3, "trades": 0},
+        ],
+    )
 
     response = client.get("/api/ticks/manifest")
     assert response.status_code == 200
@@ -244,10 +257,24 @@ def test_api_ticks_manifest_aggregate(tmp_path, monkeypatch):
     assert agg["total_lines_estimated"] is False
     assert agg["tape_entries_total"] == 0
     assert agg["series_counts_source"] in ("none", "verify_cache", "scan_cache")
+    assert agg["total_windows_5m"] == 2
+    assert agg["total_windows_15m"] == 3
+    assert agg["windows_source"] == "partial"
+    files_by_name = {entry["name"]: entry for entry in data["files"]}
+    assert files_by_name[f1.name]["windows_5m"] == 2
+    assert files_by_name[f1.name]["windows_15m"] == 3
+    assert files_by_name[f2.name]["windows_5m"] is None
+    assert files_by_name[f2.name]["windows_15m"] is None
 
 
 def test_tick_files_render_readiness_vocabulary():
     html = client.get("/").text
+    tick_files = html[html.index("async function loadManifest()"):html.index("// Sequential verify queue")]
+    tick_verify = html[html.index("async function verifyTickData"):html.index("// Expand/collapse the inline verify accordion")]
+    aggregate_labels = re.search(r"const tiles = document.createElement\('div'\);[\s\S]*?tiles.innerHTML =([\s\S]*?)aggWrap.appendChild\(tiles\);", tick_files)
+    assert aggregate_labels is not None
+    table_headers = re.search(r"thead.innerHTML = '([^']+)'", tick_files)
+    assert table_headers is not None
     assert "Tick Snapshots" in html
     assert "Market Windows" in html
     assert "Research Readiness" in html
@@ -262,10 +289,37 @@ def test_tick_files_render_readiness_vocabulary():
     assert "toggleReadinessTooltip" in html
     assert "The targets tell us whether this file contains enough varied data" in html
     assert "claim_note" not in html
-    assert "valid JSONL rows, not trades" in html
-    assert "unique (series, cid) intervals" in html
-    assert "snapshots with empty tape_delta; lower is better" in html
-    assert "tape entries divided by market windows" in html
+    assert "Tick Snapshots" not in aggregate_labels.group(1)
+    assert "Tape Entries'" not in aggregate_labels.group(1)
+    assert "lineFmt" not in tick_files
+    assert "linesVal" not in tick_files
+    assert "linesHtml" not in tick_files
+    assert "Tick Snapshots</th>" not in tick_files
+    assert "Tape Entries / Window" in html
+    assert "valid JSONL rows, not trades" not in tick_files
+    assert "unique (series, cid) intervals" in tick_files
+    assert "snapshots with empty tape_delta; lower is better" in tick_files
+    assert "tape entries divided by market windows" not in tick_files
+    assert re.findall(r"<th>(.*?)</th>", table_headers.group(1)) == [
+        "Last Modified", "File Name", "5m / 15m", "Integrity",
+        "Research Readiness", "Actions", "Size",
+    ]
+    assert "5m means 300-second windows" in tick_files
+    assert "15m means 900-second windows" in tick_files
+    assert "Counts come from verification reports" in tick_files
+    assert "≥ means some files are not verified yet" in tick_files
+    assert "${windows5m} × 5m" in tick_files
+    assert "${windows15m} × 15m" in tick_files
+    assert "formatFileWindows" in tick_files
+    assert "value == null ? '—'" in tick_files
+    assert "windows-cell" in tick_files
+    assert "windowsCell.textContent" in tick_verify
+    assert "countWindows(300)" in tick_verify
+    assert "countWindows(900)" in tick_verify
+    assert "Not verified" in tick_files
+    assert "readiness-cell" in tick_files
+    assert 'colspan="7"' in tick_files
+    assert 'td:nth-child(6)' not in tick_files
     assert "padStart(2, '0')" in html
     assert "data-scale-max" in html
     assert "tick-progress-marker exploratory" in html
@@ -278,6 +332,9 @@ def test_tick_files_render_readiness_vocabulary():
     assert "MEASURED · ${measuredText}" in html
     assert "height:18px" in html
     assert "Next milestone: ${milestoneText" in html
+    assert "manifestAggregateWrap" in html
+    assert "total_windows_5m" in tick_files
+    assert "total_windows_15m" in tick_files
     assert "tick-progress-value" not in html
     assert html.count('class=\"tick-progress-track\"') == 1
     assert "aria-label=\"${esc(label)} measured" in html
@@ -296,6 +353,33 @@ def test_api_ticks_manifest_aggregate_empty_dir(tmp_path, monkeypatch):
     assert agg["total_lines"] == 0
     assert agg["series_counts"] == {}
     assert agg["series_counts_source"] == "none"
+    assert agg["total_windows_5m"] is None
+    assert agg["total_windows_15m"] is None
+
+
+def test_manifest_unverified_split_totals_are_partial_subtotals(tmp_path, monkeypatch):
+    """Partial coverage reports a zero known subtotal when no file is verified."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    (tmp_path / "ticks_2026-09-08.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
+
+    aggregate = client.get("/api/ticks/manifest").json()["aggregate"]
+    assert aggregate["windows_source"] == "partial"
+    assert aggregate["total_windows_5m"] == 0
+    assert aggregate["total_windows_15m"] == 0
+
+
+def test_manifest_verified_zero_split_counts(tmp_path, monkeypatch):
+    """A matching verify sidecar with no windows means exact zero, not unknown."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    filename = "ticks_2026-09-08.jsonl"
+    _write_verify_sidecar(tmp_path, filename, windows=0, market_breakdown=[])
+
+    data = client.get("/api/ticks/manifest").json()
+    assert data["files"][0]["windows_5m"] == 0
+    assert data["files"][0]["windows_15m"] == 0
+    assert data["aggregate"]["total_windows_5m"] == 0
+    assert data["aggregate"]["total_windows_15m"] == 0
+    assert data["aggregate"]["windows_source"] == "cache"
 
 
 def test_api_ticks_manifest_aggregate_tape_from_manifest(tmp_path, monkeypatch):
@@ -325,12 +409,19 @@ def test_manifest_aggregate_counts_duplicated_tiers_once(tmp_path, monkeypatch):
         + json.dumps({"series": "eth-up-or-down-5m", "duration": 300, "cid": "w2",
                       "ts": 2.0, "tape_delta": []}) + "\n"
     )
-    for name in ("ticks_2026-09-13.jsonl",):
-        (tmp_path / name).write_text(body, encoding="utf-8")
-        (tmp_path / "pristine").mkdir(exist_ok=True)
-        (tmp_path / "pristine" / name).write_text(body, encoding="utf-8")
-        (tmp_path / "golden").mkdir(exist_ok=True)
-        (tmp_path / "golden" / name).write_text(body, encoding="utf-8")
+    name = "ticks_2026-09-13.jsonl"
+    (tmp_path / name).write_text(body, encoding="utf-8")
+    (tmp_path / "pristine").mkdir(exist_ok=True)
+    (tmp_path / "pristine" / name).write_text(body, encoding="utf-8")
+    (tmp_path / "golden").mkdir(exist_ok=True)
+    (tmp_path / "golden" / name).write_text(body, encoding="utf-8")
+    breakdown = [
+        {"series": "btc-up-or-down-5m", "duration": 300, "windows": 1, "trades": 0},
+        {"series": "eth-up-or-down-5m", "duration": 300, "windows": 1, "trades": 0},
+        {"series": "sol-up-or-down-15m", "duration": 900, "windows": 1, "trades": 0},
+    ]
+    for name in ("ticks_2026-09-13.jsonl", "pristine/ticks_2026-09-13.jsonl", "golden/ticks_2026-09-13.jsonl"):
+        _write_verify_sidecar(tmp_path, name, windows=3, market_breakdown=breakdown)
 
     data = client.get("/api/ticks/manifest").json()
     names = [f["name"] for f in data["files"]]
@@ -341,6 +432,8 @@ def test_manifest_aggregate_counts_duplicated_tiers_once(tmp_path, monkeypatch):
     assert data["aggregate"]["total_files"] == 3  # all rows remain files
     agg_lines = data["aggregate"]["total_lines"]
     assert agg_lines == 2  # 2 rows in one day, not 6 across copies
+    assert data["aggregate"]["total_windows_5m"] == 2
+    assert data["aggregate"]["total_windows_15m"] == 1
 
 
 def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
@@ -351,7 +444,8 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     f1.write_text(
         json.dumps({"series": "btc-up-or-down-5m", "duration": 300, "cid": "w1", "ts": 1.0, "tape_delta": [{"price": 0.5, "size": 1}]}) + "\n"
         + json.dumps({"series": "btc-up-or-down-5m", "duration": 300, "cid": "w1", "ts": 2.0, "tape_delta": []}) + "\n"
-        + json.dumps({"series": "eth-up-or-down-5m", "duration": 300, "cid": "w2", "ts": 1.0, "tape_delta": []}) + "\n",
+        + json.dumps({"series": "eth-up-or-down-5m", "duration": 300, "cid": "w2", "ts": 1.0, "tape_delta": []}) + "\n"
+        + json.dumps({"series": "sol-up-or-down-15m", "duration": 900, "cid": "w3", "ts": 1.0, "tape_delta": []}) + "\n",
         encoding="utf-8",
     )
 
@@ -365,7 +459,9 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert agg["series_counts_source"] == "verify_cache"
     assert agg["series_counts"]["btc-up-or-down-5m"] == 2
     assert agg["series_counts"]["eth-up-or-down-5m"] == 1
-    assert agg["total_windows"] == 2
+    assert agg["total_windows"] == 3
+    assert agg["total_windows_5m"] == 2
+    assert agg["total_windows_15m"] == 1
     assert agg["windows_source"] == "cache"
 
     # Issue #279/#294: CORRUPTED-data file is ineligible for tier 1 but
@@ -380,6 +476,8 @@ def test_verify_writes_counts_cache_fed_to_manifest(tmp_path, monkeypatch):
     assert files[0]["market_breakdown"][0]["windows"] == 1
     assert files[0]["market_breakdown"][0]["trades"] == 1
     assert files[0]["market_breakdown"][0]["trades_per_window"] == 1.0
+    assert files[0]["windows_5m"] == 2
+    assert files[0]["windows_15m"] == 1
     assert "readiness" in files[0]
 
 
@@ -394,16 +492,24 @@ def test_manifest_hides_stale_policy_readiness(tmp_path, monkeypatch):
         "file": f1.name,
         "status": "PASS",
         "readiness": {"level": "RESEARCH_READY", "policy_version": "old-policy"},
+        "windows_count": 3,
+        "market_breakdown": [
+            {"series": "btc-up-or-down-5m", "duration": 300, "windows": 2, "trades": 0},
+            {"series": "eth-up-or-down-15m", "duration": 900, "windows": 1, "trades": 0},
+        ],
+        "series_counts": {},
         "fingerprint": osc_dash._file_fingerprint(f1),
     }), encoding="utf-8")
 
     entry = client.get("/api/ticks/manifest").json()["files"][0]
     assert entry["readiness"] is None
     assert entry["readiness_targets"] is None
+    assert entry["windows_5m"] == 2
+    assert entry["windows_15m"] == 1
 
 
 def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPLETE CAPTURE",
-                          level="RESEARCH_READY", windows=50, policy=None):
+                          level="RESEARCH_READY", windows=50, policy=None, market_breakdown=None):
     """Write a fingerprint-matched verify sidecar for `name` (Issue #279 helper).
 
     Issue #295: `name` may be a subpath (e.g. pristine/ticks_2026-09-13.jsonl) —
@@ -414,7 +520,8 @@ def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPL
 
     target = tmp_path / name
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text('{"a": 1}\n', encoding="utf-8")
+    if not target.exists():
+        target.write_text('{"a": 1}\n', encoding="utf-8")
     cache_dir = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME
     (cache_dir / name).parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(exist_ok=True)
@@ -425,6 +532,7 @@ def _write_verify_sidecar(tmp_path, name, *, status="PASS", capture_label="COMPL
         "readiness": {"level": level,
                       "policy_version": READINESS_POLICY_VERSION if policy is None else policy},
         "windows_count": windows,
+        "market_breakdown": market_breakdown if market_breakdown is not None else [],
         "fingerprint": osc_dash._file_fingerprint(target),
         "series_counts": {},
     }), encoding="utf-8")
