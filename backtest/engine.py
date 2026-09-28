@@ -146,6 +146,7 @@ def iter_windows_streaming(source, series_tokens: Iterable[str] = ()) -> Iterato
     the same test the parsed path would apply.
     """
     def _files(path: Path) -> list[Path]:
+        """Resolve a directory or single file path into an ordered list of capture files."""
         if path.is_dir():
             return [f for f in sorted(path.iterdir())
                     if f.is_file() and f.suffix in (".jsonl", ".gz")]
@@ -167,6 +168,7 @@ def iter_windows_streaming(source, series_tokens: Iterable[str] = ()) -> Iterato
         return line[start + 1:end]
 
     def _keep_raw(line: str) -> bool:
+        """Fast pre-filter test on raw json line against series tokens before json.loads."""
         if not tokens:
             return True
         series = _string_field(line, '"series"')
@@ -178,6 +180,7 @@ def iter_windows_streaming(source, series_tokens: Iterable[str] = ()) -> Iterato
 
     # (series, duration) -> (cid, snaps, first-seen seq) for the open window.
     open_windows: dict[tuple, tuple[str, list[dict], int]] = {}
+    closed_cids: set[str] = set()
     seq = 0
 
     for f in _files(Path(source)):
@@ -190,6 +193,8 @@ def iter_windows_streaming(source, series_tokens: Iterable[str] = ()) -> Iterato
             cid = snap.get("cid")
             if cid is None:
                 continue
+            if cid in closed_cids:
+                raise ValueError(f"cid reappeared after closure: {cid}")
             key = (snap.get("series", ""), snap.get("duration", 0))
             held = open_windows.get(key)
             if held is not None:
@@ -197,6 +202,7 @@ def iter_windows_streaming(source, series_tokens: Iterable[str] = ()) -> Iterato
                     held[1].append(snap)
                     continue
                 # The market has moved on: the held window is complete.
+                closed_cids.add(held[0])
                 yield held[2], held[0], held[1]
             open_windows[key] = (cid, [snap], seq)
             seq += 1

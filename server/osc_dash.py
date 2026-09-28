@@ -708,11 +708,12 @@ def _cached_line_count(path: Path) -> int | None:
     try:
         if not path.is_relative_to(TICKS_DIR):
             return None
+        fp = _file_fingerprint(path)
         cached = _read_verify_cache(
             _verify_sidecar_path(path.relative_to(TICKS_DIR).as_posix()),
-            expected_fingerprint=_file_fingerprint(path),
+            expected_fingerprint=fp,
         )
-        if cached is not None and "raw_lines" in cached:
+        if cached is not None and cached.get("fingerprint") == fp and "raw_lines" in cached:
             return int(cached["raw_lines"])
     except Exception:
         pass
@@ -1098,7 +1099,8 @@ def api_ticks_manifest():
             # a current-policy sidecar: a stale one must not report a window
             # count measured under superseded thresholds (same rule as the tier
             # ranking below).
-            entry["window_quality"] = _window_quality(cached, cache_current)
+            entry["window_quality"] = _window_quality(
+                cached, cache_current and (cached or {}).get("fingerprint") == expected_fp)
             # Stale-policy sidecars contribute nothing to ranking (Issue #294
             # review): their old windows_count must not leak into tier 2.
             if cache_current:
@@ -2404,7 +2406,15 @@ async def api_backtest(
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        _BACKTEST_POOL = None  # abandon the wedged worker; the next call rebuilds
+        pool = _BACKTEST_POOL
+        _BACKTEST_POOL = None
+        if pool is not None:
+            for proc in list(getattr(pool, "_processes", {}).values()):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            pool.shutdown(wait=False, cancel_futures=True)
         raise HTTPException(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -2551,7 +2561,15 @@ async def api_backtest_sweep(
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        _BACKTEST_POOL = None  # abandon the wedged worker; the next call rebuilds
+        pool = _BACKTEST_POOL
+        _BACKTEST_POOL = None
+        if pool is not None:
+            for proc in list(getattr(pool, "_processes", {}).values()):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            pool.shutdown(wait=False, cancel_futures=True)
         raise HTTPException(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
