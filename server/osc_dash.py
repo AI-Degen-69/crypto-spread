@@ -3854,6 +3854,9 @@ textarea:focus-visible,
 #btParamPreviewWrap:hover{border-color:var(--line-hi)}
 .bt-preview-chart-shell{width:100%;background:rgba(10,13,18,0.55);border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .bt-preview-chart-shell svg{display:block;width:100%;height:clamp(180px, calc((100vw - 300px) / 3), 540px);aspect-ratio:auto}
+/* ── Backtest Runtime Estimation Badge (Issue #330) ───────────────────────── */
+.bt-runtime-badge{display:inline-flex;align-items:center;gap:6px;font:600 11px var(--mono);padding:4px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--cyan);user-select:none;transition:all .15s ease}
+.bt-runtime-badge:hover{border-color:var(--line-hi)}
 </style></head><body>
 <aside class="cui-sidebar" id="app-sidebar" aria-label="Main Navigation">
   <div class="sidebar-header">
@@ -3987,9 +3990,10 @@ textarea:focus-visible,
       </button>
       <div class="bt-section-body" id="btSecParametersBody">
       <div class="mono" id="btHash" style="font-size:11px;color:var(--dim);margin-bottom:8px"></div>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
         <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
       </div>
       <div class="bt-accordion" style="margin-top:12px">
@@ -4004,7 +4008,7 @@ textarea:focus-visible,
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
               <label>Tick File Dataset</label>
-              <select id="btFileSelect">
+              <select id="btFileSelect" onchange="updateBtRuntimeEstimate()">
                 <option value="">All Files (Default)</option>
               </select>
             </div>
@@ -6027,6 +6031,7 @@ function runBacktestOnFile(filename){
     }
     sel.value = filename;
   }
+  updateBtRuntimeEstimate();
   switchTab('backtest');
   runBacktest(filename);
 }
@@ -6092,6 +6097,7 @@ function updateBtFilterUI() {
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
     b.className = on ? 'tab-btn active' : 'tab-btn';
   });
+  updateBtRuntimeEstimate();
 }
 
 function toggleBtToken(tok) {
@@ -6116,6 +6122,66 @@ function setBtDuration(dur) {
   if (selectedBtDuration === dur) return;
   selectedBtDuration = dur;
   updateBtFilterUI();
+}
+
+// Interactive Backtest Runtime Estimation (Issue #330)
+function calculateBtEstimatedRuntime(fileOverride){
+  const files = window.tickManifestFiles || [];
+  const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
+  const targetFiles = fileVal ? files.filter(f => f.name === fileVal) : files;
+
+  let matchedWindows = 0;
+  for (const f of targetFiles) {
+    if (f.market_breakdown && f.market_breakdown.length > 0) {
+      for (const mb of f.market_breakdown) {
+        const tok = (mb.series || '').split('-')[0].toUpperCase();
+        const dur = mb.duration;
+        if (typeof selectedBtTokens !== 'undefined' && !selectedBtTokens.has(tok)) continue;
+        if (typeof selectedBtDuration !== 'undefined') {
+          if (selectedBtDuration === '5m' && dur !== 300) continue;
+          if (selectedBtDuration === '15m' && dur !== 900) continue;
+        }
+        matchedWindows += (mb.windows || 0);
+      }
+    } else {
+      const win = f.windows_count || (f.window_quality ? (f.window_quality.research_windows || f.window_quality.clean_windows || f.window_quality.full_windows || 0) : 0);
+      const tokCount = (typeof selectedBtTokens !== 'undefined') ? selectedBtTokens.size : 5;
+      const durRatio = (typeof selectedBtDuration !== 'undefined')
+        ? (selectedBtDuration === 'both' ? 1.0 : (selectedBtDuration === '5m' ? 0.75 : 0.25))
+        : 1.0;
+      matchedWindows += Math.round(win * durRatio * (tokCount / 5.0));
+    }
+  }
+
+  if (matchedWindows <= 0) {
+    return { windows: 0, seconds: 0, text: '—' };
+  }
+
+  // Linear benchmark: ~1.2s base overhead + ~0.18s per matching window replay
+  const estSec = Math.max(1, Math.round(1.2 + matchedWindows * 0.18));
+  return { windows: matchedWindows, seconds: estSec, text: fmtElapsed(estSec * 1000) };
+}
+
+function updateBtRuntimeEstimate(){
+  const badge = $('btRuntimeEstBadge');
+  if (!badge) return;
+  if (!window.tickManifestFiles && !window.tickManifestData) {
+    badge.textContent = '⏱️ Est: calculating…';
+    badge.title = 'Loading dataset manifest…';
+    return;
+  }
+  const est = calculateBtEstimatedRuntime();
+  if (est.windows <= 0) {
+    badge.textContent = '⏱️ Est: — (0 windows)';
+    badge.title = 'No windows match current dataset and filter selection';
+    badge.style.color = 'var(--dim)';
+    badge.style.borderColor = 'var(--line)';
+  } else {
+    badge.textContent = `⏱️ Est: ~${est.text} (${est.windows.toLocaleString()} win)`;
+    badge.title = `Estimated replay runtime: ~${est.text} for ${est.windows.toLocaleString()} windows based on active file, markets, and duration`;
+    badge.style.color = 'var(--cyan)';
+    badge.style.borderColor = 'var(--line)';
+  }
 }
 
 // One reader for every Backtester control, so "Run Sweep" and "Run Backtest"
@@ -6589,6 +6655,7 @@ function resetBtParams(){
   window.selectedBacktestFile = "";
   window._btFileChosen = true; // Issue #279: Reset picks All Files — a manual-equivalent choice loadManifest must not override
   updateBacktestParamPreview();
+  updateBtRuntimeEstimate();
   runBacktest();
 }
 
@@ -7041,6 +7108,8 @@ async function loadManifest(){
   try{
     const res = await fetch('/api/ticks/manifest');
     const d = await res.json();
+    window.tickManifestData = d;
+    window.tickManifestFiles = d.files || [];
 
     const sel = $('btFileSelect');
     if(sel && d.files){
@@ -7052,7 +7121,10 @@ async function loadManifest(){
       if (d.aggregate) {
         const winRaw = (d.aggregate.total_windows||0).toLocaleString();
         const defWinVal = (d.aggregate.windows_source === 'partial' ? '≥' : '') + winRaw;
+        const allWin = d.aggregate.total_windows || 0;
+        const allEstSec = allWin > 0 ? Math.round(1.2 + allWin * 0.18) : 0;
         defOpt.textContent = `All Files / ${defWinVal} Windows (Default)`;
+        if (allEstSec > 0) defOpt.title = `Estimated baseline runtime: ~${fmtElapsed(allEstSec * 1000)} for ${allWin.toLocaleString()} windows`;
       }
       sel.appendChild(defOpt);
 
@@ -7080,9 +7152,12 @@ async function loadManifest(){
             ? `${n} research windows`
             : `${n} ${tier} windows`;
         }
+        const baseWin = (f.windows_count != null) ? f.windows_count : (f.window_quality ? (f.window_quality.research_windows || f.window_quality.clean_windows || f.window_quality.full_windows || 0) : 0);
+        const baseEstSec = baseWin > 0 ? Math.round(1.2 + baseWin * 0.18) : 0;
         // Issue #279: the healthiest file is ★-marked and pre-selected on the
         // first load only — a stored manual choice (including All Files) wins.
         opt.textContent = `${f.is_preferred ? '★ ' : ''}${f.name} (${detail})`;
+        if (baseEstSec > 0) opt.title = `Estimated baseline runtime: ~${fmtElapsed(baseEstSec * 1000)} for ${baseWin.toLocaleString()} windows`;
         sel.appendChild(opt);
       }
       if(currentVal && Array.from(sel.options).some(o => o.value === currentVal)){
@@ -7094,6 +7169,7 @@ async function loadManifest(){
         sel.value = d.preferred_file;
         window.selectedBacktestFile = d.preferred_file;
       }
+      updateBtRuntimeEstimate();
     }
 
     const wrap = $('manifestTableWrap');
@@ -9771,6 +9847,7 @@ function setupBacktestInputListeners(){
       if (id === 'btFileSelect') {
         window.selectedBacktestFile = el.value;
         window._btFileChosen = true;
+        updateBtRuntimeEstimate();
       }
     });
   });

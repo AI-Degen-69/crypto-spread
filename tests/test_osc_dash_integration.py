@@ -5019,3 +5019,105 @@ def test_jungle_king_render_node():
     assert rendered["missingBaselineMarkers"] == 1
     assert rendered["outsideRangeBaselineChips"] == 18
     assert rendered["outsideRangeBaselineLabels"] == 18
+
+
+def test_backtest_runtime_estimation_badge_present():
+    """Issue #330: dashboard includes dynamic runtime estimation badge and helpers."""
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert 'id="btRuntimeEstBadge"' in html
+    assert 'class="bt-runtime-badge"' in html
+    assert "calculateBtEstimatedRuntime" in html
+    assert "updateBtRuntimeEstimate" in html
+    assert 'onchange="updateBtRuntimeEstimate()"' in html
+
+
+def test_backtest_runtime_estimation_client_calculation():
+    """Issue #330: client-side estimation calculation behaves dynamically based on scope."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is required for client runtime estimation test")
+
+    html = client.get("/").text
+    helpers = re.search(
+        r"function fmtElapsed\(ms\)\s*\{.*?(?=\n// One reader for every Backtester control)",
+        html,
+        re.DOTALL,
+    )
+    assert helpers is not None
+
+    harness = f"""
+    const elements = {{
+      btRuntimeEstBadge: {{ textContent: '', title: '', style: {{}} }},
+      btFileSelect: {{ value: 'ticks_test.jsonl' }}
+    }};
+    const $ = (id) => elements[id] || null;
+    const window = {{
+      tickManifestFiles: [
+        {{
+          name: 'ticks_test.jsonl',
+          windows_count: 500,
+          market_breakdown: [
+            {{ series: 'btc-up-or-down-5m', duration: 300, windows: 50 }},
+            {{ series: 'eth-up-or-down-5m', duration: 300, windows: 50 }},
+            {{ series: 'sol-up-or-down-5m', duration: 300, windows: 50 }},
+            {{ series: 'xrp-up-or-down-5m', duration: 300, windows: 50 }},
+            {{ series: 'bnb-up-or-down-5m', duration: 300, windows: 50 }},
+            {{ series: 'btc-up-or-down-15m', duration: 900, windows: 50 }},
+            {{ series: 'eth-up-or-down-15m', duration: 900, windows: 50 }},
+            {{ series: 'sol-up-or-down-15m', duration: 900, windows: 50 }},
+            {{ series: 'xrp-up-or-down-15m', duration: 900, windows: 50 }},
+            {{ series: 'bnb-up-or-down-15m', duration: 900, windows: 50 }}
+          ]
+        }}
+      ]
+    }};
+
+    {helpers.group(0)}
+
+    // 1. All 5 tokens, both durations -> 500 windows
+    selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    selectedBtDuration = 'both';
+    const estAll = calculateBtEstimatedRuntime('ticks_test.jsonl');
+
+    // 2. Filter to BTC only, both durations -> 100 windows
+    selectedBtTokens = new Set(['BTC']);
+    selectedBtDuration = 'both';
+    const estBtc = calculateBtEstimatedRuntime('ticks_test.jsonl');
+
+    // 3. Filter to BTC only, 5m only -> 50 windows
+    selectedBtTokens = new Set(['BTC']);
+    selectedBtDuration = '5m';
+    const estBtc5m = calculateBtEstimatedRuntime('ticks_test.jsonl');
+
+    // 4. Update badge UI
+    updateBtRuntimeEstimate();
+    const badgeText = elements.btRuntimeEstBadge.textContent;
+
+    // 5. Zero windows filter
+    selectedBtTokens = new Set(['DOGE']);
+    updateBtRuntimeEstimate();
+    const zeroBadgeText = elements.btRuntimeEstBadge.textContent;
+
+    console.log(JSON.stringify({{
+      estAllWindows: estAll.windows,
+      estAllSec: estAll.seconds,
+      estBtcWindows: estBtc.windows,
+      estBtcSec: estBtc.seconds,
+      estBtc5mWindows: estBtc5m.windows,
+      estBtc5mSec: estBtc5m.seconds,
+      badgeText: badgeText,
+      zeroBadgeText: zeroBadgeText
+    }}));
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
+    data = json.loads(result.stdout.strip())
+    assert data["estAllWindows"] == 500
+    assert data["estBtcWindows"] == 100
+    assert data["estBtc5mWindows"] == 50
+    assert data["estAllSec"] > data["estBtcSec"] > data["estBtc5mSec"]
+    assert "50 win" in data["badgeText"]
+    assert "0 windows" in data["zeroBadgeText"]
+
