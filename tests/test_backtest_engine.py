@@ -1914,3 +1914,59 @@ def test_time_gates_read_the_timestamps_not_the_duration_field():
 
     w = _simulate_window(snaps, BacktestParams(dead_zone_val=0.90, dead_zone_unit="pct"))
     assert not w.filled_up and not w.filled_down
+
+
+# --- replay: per_duration aggregate (issue #308) ---------------------------
+
+def _mixed_duration_dataset() -> list[dict]:
+    """Two 5m windows (BTC, ETH) + one 15m window (BTC)."""
+    base = 2_000_000.0
+    out = []
+    for j, (cid, series, dur) in enumerate([
+        ("0xD5A", "btc-up-or-down-5m", 300),
+        ("0xD5B", "eth-up-or-down-5m", 300),
+        ("0xD15", "btc-up-or-down-15m", 900),
+    ]):
+        for i in range(3):
+            s = snap(base + j * 1000 + i, 0.50)
+            s["cid"] = cid
+            s["series"] = series
+            s["duration"] = dur
+            s["start_ts"] = base + j * 1000
+            out.append(s)
+    return out
+
+
+def test_replay_per_duration_matches_per_series_row_shape():
+    """`per_duration` carries the same finalized fields as `per_series`."""
+    out = replay(_mixed_duration_dataset(), BacktestParams())
+    agg = out["aggregate"]
+    assert set(agg["per_duration"]) == {300, 900}
+    assert set(agg["per_duration"][300]) == set(agg["per_series"]["btc-up-or-down-5m"])
+    assert agg["per_duration"][300]["windows"] == 2
+    assert agg["per_duration"][900]["windows"] == 1
+
+
+def test_replay_per_duration_windows_sum_to_overall():
+    """Every window lands in exactly one duration bucket."""
+    out = replay(_mixed_duration_dataset(), BacktestParams())
+    agg = out["aggregate"]
+    assert sum(b["windows"] for b in agg["per_duration"].values()) == agg["overall"]["windows"] == 3
+    assert agg["per_duration"][300]["total_pnl_cents"] + agg["per_duration"][900]["total_pnl_cents"] == \
+        agg["overall"]["total_pnl_cents"]
+
+
+def test_replay_per_duration_empty_on_empty_input():
+    """No windows → empty per_duration map, like per_series."""
+    out = replay([], BacktestParams())
+    assert out["aggregate"]["per_duration"] == {}
+
+
+def test_replay_per_series_and_overall_unchanged_by_per_duration():
+    """The new bucket changes nothing about the existing aggregates."""
+    snaps = _mixed_duration_dataset()
+    out = replay(snaps, BacktestParams())
+    assert out["aggregate"]["overall"]["windows"] == 3
+    assert out["aggregate"]["per_series"]["btc-up-or-down-5m"]["windows"] == 1
+    assert out["aggregate"]["per_series"]["btc-up-or-down-15m"]["windows"] == 1
+    assert out["aggregate"]["per_series"]["eth-up-or-down-5m"]["windows"] == 1

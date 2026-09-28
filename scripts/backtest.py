@@ -24,6 +24,13 @@ from pathlib import Path
 from typing import Iterable
 
 from backtest import BacktestParams, group_by_cid, iter_ticks, replay
+from backtest.selection import (
+    apply_selection,
+    build_coverage,
+    found_pairs_from_windows,
+    parse_durations,
+    parse_series_tokens,
+)
 
 DEFAULT_TICKS = Path(__file__).resolve().parent.parent / "run" / "ticks"
 
@@ -83,6 +90,14 @@ def main(argv: list[str] | None = None):
                     help="inclusive start ISO timestamp, e.g. 2026-08-29T00:00:00Z")
     ap.add_argument("--end", type=str, default=None,
                     help="inclusive end ISO timestamp, e.g. 2026-08-30T23:59:59Z")
+    # Issue #308: market-series and time-frame selection. Repeatable and
+    # comma-separated (`--series btc --series eth,sol`); empty means all.
+    # Unknown tokens / unsupported durations raise ValueError — a typo must
+    # fail loudly, never replay zero windows silently.
+    ap.add_argument("--series", action="append", default=[],
+                    help="series or slug substring, e.g. btc (repeatable, comma-separated; empty = all)")
+    ap.add_argument("--durations", action="append", default=[],
+                    help="window durations in seconds, e.g. 300,900 (repeatable, comma-separated; empty = all)")
     ap.add_argument("--out", type=Path, default=None,
                     help="write full JSON to this path")
     args = ap.parse_args(argv)
@@ -116,8 +131,17 @@ def main(argv: list[str] | None = None):
           f"entry_delay={params.entry_delay_sec}s quote_range={params.quote_range} "
           f"params_hash={params.params_hash()}")
 
+    # Issue #308: selection is a dataset filter — validated here so a typo
+    # raises ValueError (same convention as out-of-range engine knobs).
+    series_tokens = parse_series_tokens(args.series)
+    durations = parse_durations(args.durations)
+
     t0 = time.perf_counter()
     snaps = list(iter_ticks(args.source))
+    n_raw = len(snaps)
+    # `apply_selection` returns the input unchanged when unfiltered, so the
+    # common path materializes exactly one list.
+    snaps = apply_selection(snaps, series_tokens, durations)
     # Optional date-range filter (for midnight-crossing targeted replay)
     if args.start or args.end:
         from datetime import datetime, timezone
@@ -142,12 +166,43 @@ def main(argv: list[str] | None = None):
         snaps = filtered_snaps
     elapsed_load = time.perf_counter() - t0
     if not snaps:
+        if n_raw and (series_tokens or durations):
+            # Valid selection, zero matching ticks: zero windows, not an
+            # error — the coverage report names the missing pairs.
+            coverage = build_coverage(args.source, {}, series_tokens, durations)
+            print(f"selection: series={','.join(series_tokens) or 'all'} "
+                  f"durations={','.join(str(d) for d in durations) or 'all'}  "
+                  f"pairs=0/{coverage['pairs_expected']} "
+                  f"missing={len(coverage['missing_pairs'])} "
+                  f"({coverage['expected_source']})")
+            print("no windows match the selection")
+            if args.out:
+                args.out.write_text(json.dumps({
+                    "selection": coverage["selection"],
+                    "coverage": coverage,
+                    "n_windows": 0,
+                }, indent=2), encoding="utf-8")
+            return 0
         print("no ticks found", file=sys.stderr)
         return 1
 
     t1 = time.perf_counter()
     results = replay(snaps, params)
     elapsed_replay = time.perf_counter() - t1
+
+    # Coverage reads replay's per_window rows — no second grouping pass
+    # over the tick stream. `.get` keeps stubbed replays (tests) working.
+    coverage = build_coverage(
+        args.source, found_pairs_from_windows(results.get("per_window") or []),
+        series_tokens, durations)
+    results["selection"] = coverage["selection"]
+    results["coverage"] = coverage
+    sel_txt = (f"series={','.join(series_tokens) or 'all'} "
+               f"durations={','.join(str(d) for d in durations) or 'all'}")
+    print(f"selection: {sel_txt}  "
+          f"pairs={coverage['pairs_found']}/{coverage['pairs_expected']} "
+          f"missing={len(coverage['missing_pairs'])} "
+          f"({coverage['expected_source']})")
 
     overall = results["aggregate"]["overall"]
     print(f"\nloaded {len(snaps)} snaps in {elapsed_load:.2f}s, "
@@ -164,6 +219,18 @@ def main(argv: list[str] | None = None):
         if a["windows"] == 0:
             continue
         print(f"  {slug:24s}  n={a['windows']:4d}  pair={a['pair_rate']*100:5.1f}%  "
+              f"exit={a['exit_rate']*100:5.1f}%  "
+              f"pnl={a['total_pnl_cents']:+8.2f}c  "
+              f"avg={a['avg_pnl_cents']:+6.2f}c  "
+              f"osc={a['oscillating']} mono={a['monotonic']}")
+
+    print("\nPer duration:")
+    for dur, a in sorted(results["aggregate"].get("per_duration", {}).items(),
+                         key=lambda kv: int(kv[0])):
+        if a["windows"] == 0:
+            continue
+        label = f"{int(dur) // 60}m ({dur}s)"
+        print(f"  {label:24s}  n={a['windows']:4d}  pair={a['pair_rate']*100:5.1f}%  "
               f"exit={a['exit_rate']*100:5.1f}%  "
               f"pnl={a['total_pnl_cents']:+8.2f}c  "
               f"avg={a['avg_pnl_cents']:+6.2f}c  "

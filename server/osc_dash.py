@@ -1419,31 +1419,52 @@ def _run_backtest_simulation_worker(
     limit_windows: int,
     raw_params: dict,
     empty_params: dict,
+    series_sel: str = "",
+    durations_sel: str = "",
 ) -> dict:
     """Top-level worker function executing backtest simulation in an isolated process.
 
     Runs in a dedicated OS process with an independent GIL. Passes only picklable
-    parameters across the process boundary.
+    parameters across the process boundary (`series_sel`/`durations_sel` are
+    plain strings, parsed here with the shared selection module).
     """
     from backtest import BacktestParams, iter_ticks
     from backtest.engine import _simulate_window, group_by_cid
-    from strategy.series import SERIES
+    from backtest.selection import (
+        apply_selection,
+        build_coverage,
+        found_pairs,
+        parse_durations,
+        parse_series_tokens,
+    )
+    from strategy.series import SERIES, supported_durations
 
     params = BacktestParams(**params_dict) if isinstance(params_dict, dict) else params_dict
     series_label_map = {s[0]: s[2] for s in SERIES}
+    # Selection was validated in the endpoint; re-parse here (already-valid
+    # strings, so this cannot raise for values that reached the worker).
+    series_tokens = parse_series_tokens(series_sel)
+    duration_values = parse_durations(durations_sel)
+    cov_source = source_file_str or ticks_dir_str
 
     if source_file_str:
         snaps = list(iter_ticks(Path(source_file_str)))
     else:
         snaps = list(iter_ticks(Path(ticks_dir_str)))
+    # Issue #308: dataset filter — same semantics as the CLI flags. Ticks
+    # sharing one cid share series/duration, so whole windows drop here.
+    snaps = list(apply_selection(snaps, series_tokens, duration_values))
 
     grouped = group_by_cid(snaps)
     if not grouped:
         gp = params.grouped_params()
+        empty_cov = build_coverage(cov_source, {}, series_tokens, duration_values)
         return {
             "params_hash": params.params_hash(),
             "params": empty_params,
             "params_groups": gp,
+            "selection": empty_cov["selection"],
+            "coverage": empty_cov,
             "overall": {
                 "windows": 0,
                 "entered_windows": 0,
@@ -1457,6 +1478,7 @@ def _run_backtest_simulation_worker(
                 "win_rate": 0.0,
             },
             "per_series": {},
+            "per_duration": {},
             "equity_curve": [],
             "trades_sample": [],
             "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
@@ -1507,8 +1529,9 @@ def _run_backtest_simulation_worker(
         })
 
     # Per-series aggregation
-    per_series_raw = defaultdict(
-        lambda: {
+    def _new_outcome_row():
+        """Fresh zeroed outcome row for one per-series/per-duration bucket."""
+        return {
             "windows": 0,
             "pairs": 0,
             "exits": 0,
@@ -1517,7 +1540,10 @@ def _run_backtest_simulation_worker(
             "flat": 0,
             "total_pnl_cents": 0.0,
         }
-    )
+
+    per_series_raw = defaultdict(_new_outcome_row)
+    # Issue #308: per-duration aggregation, same row shape, keyed by seconds.
+    per_duration_raw: dict[int, dict] = defaultdict(_new_outcome_row)
 
     trades_sample = []
     profitable_pairs = 0
@@ -1548,6 +1574,21 @@ def _run_backtest_simulation_worker(
         elif w.class_label == "flat":
             a["flat"] += 1
         a["total_pnl_cents"] += win_pnl
+
+        # Mirror into the duration bucket (pair XOR exit, like the series row).
+        d = per_duration_raw[w.duration]
+        d["windows"] += 1
+        if w.pair_captured:
+            d["pairs"] += 1
+        elif w.exit_taken:
+            d["exits"] += 1
+        if w.class_label == "oscillating":
+            d["oscillating"] += 1
+        elif w.class_label == "monotonic":
+            d["monotonic"] += 1
+        elif w.class_label == "flat":
+            d["flat"] += 1
+        d["total_pnl_cents"] += win_pnl
 
         exit_info = f"exit_{w.exit_side}" if w.exit_taken else ("pair_merged" if w.pair_captured else "-")
         trades_sample.append({
@@ -1631,15 +1672,40 @@ def _run_backtest_simulation_worker(
             "monotonic": a["monotonic"],
         }
 
+    # Issue #308: per-duration breakdown with the worker's row conventions,
+    # keyed by seconds as strings (JSON object keys).
+    per_duration_out = {}
+    for dur in supported_durations():
+        a = per_duration_raw.get(dur, _new_outcome_row())
+        n = a["windows"]
+        per_duration_out[str(dur)] = {
+            "label": f"{dur // 60}m",
+            "windows": n,
+            "pairs": a["pairs"],
+            "pair_rate": round(a["pairs"] / n, 4) if n else 0.0,
+            "exits": a["exits"],
+            "exit_rate": round(a["exits"] / n, 4) if n else 0.0,
+            "total_pnl_cents": round(a["total_pnl_cents"], 2),
+            "avg_pnl_cents": round(a["total_pnl_cents"] / n, 2) if n else 0.0,
+            "oscillating": a["oscillating"],
+            "monotonic": a["monotonic"],
+        }
+
+    coverage = build_coverage(
+        cov_source, found_pairs(grouped), series_tokens, duration_values)
+
     gp = params.grouped_params()
     return {
         "params_hash": params.params_hash(),
         "params": raw_params,
         "params_groups": gp,
+        "selection": coverage["selection"],
+        "coverage": coverage,
         "n_snaps": n_snaps,
         "n_windows": total_windows,
         "overall": overall,
         "per_series": per_series_out,
+        "per_duration": per_duration_out,
         "equity_curve": equity_curve,
         "trades_sample": trades_sample,
         "pnl_histogram": _compute_pnl_histogram(per_window, size),
@@ -1845,9 +1911,21 @@ async def api_backtest(
     min_quote_shares: int = 5,
     enable_leg_chase: bool = False,
     limit_windows: int = 0,
+    series: str = "",
+    durations: str = "",
 ):
     """Run backtest simulation on selected tick file or all files in run/ticks/."""
     from backtest import BacktestParams
+    from backtest.selection import parse_durations, parse_series_tokens
+
+    # Issue #308: market-series / time-frame selection, same semantics as the
+    # CLI flags. A typo must fail loudly (HTTP 400), never replay zero
+    # windows silently.
+    try:
+        series_tokens = parse_series_tokens(series)
+        duration_values = parse_durations(durations)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
 
     exit_thresh = {
         "default_5m": exit_default_5m,
@@ -1979,6 +2057,8 @@ async def api_backtest(
         "entry_delay_sec": params.entry_delay_sec,
         "entry_delay_pct": params.entry_delay_pct,
         "dead_zone_pct": params.dead_zone_val * 100.0 if params.dead_zone_unit == "pct" else None,
+        "series": series,
+        "durations": durations,
     }
 
     raw_params = {
@@ -1997,6 +2077,8 @@ async def api_backtest(
         "entry_delay_sec": entry_delay_sec,
         "entry_delay_pct": entry_delay_pct,
         "dead_zone_pct": dead_zone_pct,
+        "series": series,
+        "durations": durations,
     }
 
     global _BACKTEST_RUNNING
@@ -2032,6 +2114,8 @@ async def api_backtest(
                 limit_windows,
                 raw_params,
                 empty_params,
+                series,
+                durations,
             )
         finally:
             semaphore.release()

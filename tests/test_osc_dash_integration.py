@@ -1366,6 +1366,73 @@ def test_api_backtest_simulation(tmp_path, monkeypatch):
     assert "fill_model" not in res_legacy.json()["params"]
 
 
+def _selection_fixture(tmp_path):
+    """Two windows: BTC 5m + ETH 15m, under a monkeypatched TICKS_DIR."""
+    f = tmp_path / "fake_sel.jsonl"
+    rows = []
+    for i, (cid, series, dur) in enumerate([
+        ("0xSEL_BTC", "btc-up-or-down-5m", 300),
+        ("0xSEL_ETH", "eth-up-or-down-15m", 900),
+    ]):
+        base = 2000.0 + i * 1000
+        for j in range(2):
+            t = _make_fake_tick(base + j, cid, f"{cid}-{j}", series, 0.50)
+            t["duration"] = dur
+            t["start_ts"] = base
+            rows.append(t)
+    f.write_text("\n".join(json.dumps(t) for t in rows) + "\n", encoding="utf-8")
+    return f
+
+
+def test_api_backtest_series_and_durations_selection(tmp_path, monkeypatch):
+    """Issue #308: series/durations params filter exactly like the CLI flags."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _selection_fixture(tmp_path)
+
+    full = client.get("/api/backtest?file=fake_sel.jsonl").json()
+    assert full["n_windows"] == 2
+    assert full["coverage"]["filtered"] is False
+    assert set(full["per_duration"]) == {"300", "900"}
+    assert full["per_duration"]["300"]["windows"] == 1
+    assert full["per_duration"]["900"]["windows"] == 1
+
+    btc = client.get("/api/backtest?file=fake_sel.jsonl&series=btc").json()
+    assert btc["n_windows"] == 1
+    assert btc["coverage"]["filtered"] is True
+    assert btc["coverage"]["selection"] == {"series": ["btc"], "durations": []}
+    assert btc["per_duration"]["300"]["windows"] == 1
+    assert btc["per_duration"]["900"]["windows"] == 0
+
+    m15 = client.get("/api/backtest?file=fake_sel.jsonl&durations=900").json()
+    assert m15["n_windows"] == 1
+    assert m15["overall"]["windows"] == 1
+
+    both = client.get(
+        "/api/backtest?file=fake_sel.jsonl&series=eth&durations=900").json()
+    assert both["n_windows"] == 1
+
+    # CLI/API parity: same totals on the same file as the CLI replay path.
+    from backtest import iter_ticks as _it, replay as _replay
+    from backtest.engine import BacktestParams as _BP
+    snaps = [s for s in _it(tmp_path / "fake_sel.jsonl")
+             if "btc" in s.get("series", "")]
+    cli_out = _replay(snaps, _BP(offset=0.02, queue_gate=0.0))
+    assert btc["n_windows"] == cli_out["n_windows"]
+    assert btc["overall"]["total_pnl_cents"] == round(
+        cli_out["aggregate"]["overall"]["total_pnl_cents"] * 5, 2)
+
+
+def test_api_backtest_bad_selection_is_400_not_silent_zero(tmp_path, monkeypatch):
+    """Issue #308: a typo'd series token fails loudly instead of empty."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _selection_fixture(tmp_path)
+    bad = client.get("/api/backtest?file=fake_sel.jsonl&series=bcc")
+    assert bad.status_code == 400
+    assert "bcc" in bad.json()["error"]
+    bad_dur = client.get("/api/backtest?file=fake_sel.jsonl&durations=60")
+    assert bad_dur.status_code == 400
+
+
 def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
     """Verify the one-axis sweep response, canonical labels, and file validation."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
