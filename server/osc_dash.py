@@ -3670,23 +3670,26 @@ textarea:focus-visible,
               </select>
             </div>
             <div class="form-group">
-              <label>Market</label>
-              <select id="btMarketSelect">
-                <option value="">All Markets</option>
-                <option value="btc">BTC</option>
-                <option value="eth">ETH</option>
-                <option value="bnb">BNB</option>
-                <option value="sol">SOL</option>
-                <option value="xrp">XRP</option>
-              </select>
+              <label>Markets (multi-select)</label>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <div id="btTokenChips" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <button type="button" class="filter-chip active" aria-pressed="true" id="btToken-BTC" onclick="toggleBtToken('BTC')">BTC</button>
+                  <button type="button" class="filter-chip active" aria-pressed="true" id="btToken-ETH" onclick="toggleBtToken('ETH')">ETH</button>
+                  <button type="button" class="filter-chip active" aria-pressed="true" id="btToken-BNB" onclick="toggleBtToken('BNB')">BNB</button>
+                  <button type="button" class="filter-chip active" aria-pressed="true" id="btToken-SOL" onclick="toggleBtToken('SOL')">SOL</button>
+                  <button type="button" class="filter-chip active" aria-pressed="true" id="btToken-XRP" onclick="toggleBtToken('XRP')">XRP</button>
+                </div>
+                <button type="button" id="btTokensAll" class="btn" style="font-size:10px;padding:2px 8px" onclick="setBtTokensAll(true)">All</button>
+                <button type="button" id="btTokensClear" class="btn" style="font-size:10px;padding:2px 8px" onclick="setBtTokensAll(false)">Clear</button>
+              </div>
             </div>
             <div class="form-group">
               <label>Timeframe</label>
-              <select id="btTimeframeSelect">
-                <option value="">Both (5m + 15m)</option>
-                <option value="300">5m only</option>
-                <option value="900">15m only</option>
-              </select>
+              <div style="display:flex;gap:4px;background:var(--panel2);padding:2px;border-radius:8px;border:1px solid var(--line)">
+                <button type="button" id="btDur5m" class="tab-btn" aria-pressed="false" style="font-size:11px;padding:4px 10px" onclick="setBtDuration('5m')">5m</button>
+                <button type="button" id="btDur15m" class="tab-btn" aria-pressed="false" style="font-size:11px;padding:4px 10px" onclick="setBtDuration('15m')">15m</button>
+                <button type="button" id="btDurBoth" class="tab-btn active" aria-pressed="true" style="font-size:11px;padding:4px 10px" onclick="setBtDuration('both')">Both</button>
+              </div>
             </div>
             <div class="form-group">
               <label data-param-label="offset"></label>
@@ -5755,6 +5758,55 @@ function toggleBtSection(btn, bodyId){
   });
 })();
 
+// Backtester market/timeframe chip selection (mirrors the cockpit chips,
+// but never auto-runs: a full replay is expensive, so chips only set state
+// and the operator presses Run).
+let selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+let selectedBtDuration = 'both';
+
+function updateBtFilterUI() {
+  ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'].forEach(tok => {
+    const chip = $(`btToken-${tok}`);
+    if (!chip) return;
+    const on = selectedBtTokens.has(tok);
+    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (on) chip.classList.add('active');
+    else chip.classList.remove('active');
+  });
+  const btDurStates = [['btDur5m', '5m'], ['btDur15m', '15m'], ['btDurBoth', 'both']];
+  btDurStates.forEach(([id, dur]) => {
+    const b = $(id);
+    if (!b) return;
+    const on = selectedBtDuration === dur;
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.className = on ? 'tab-btn active' : 'tab-btn';
+  });
+}
+
+function toggleBtToken(tok) {
+  if (selectedBtTokens.has(tok)) {
+    if (selectedBtTokens.size <= 1) {
+      alert('At least one market must remain selected.');
+      return;
+    }
+    selectedBtTokens.delete(tok);
+  } else {
+    selectedBtTokens.add(tok);
+  }
+  updateBtFilterUI();
+}
+
+function setBtTokensAll(selectAll) {
+  selectedBtTokens = selectAll ? new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']) : new Set(['BTC']);
+  updateBtFilterUI();
+}
+
+function setBtDuration(dur) {
+  if (selectedBtDuration === dur) return;
+  selectedBtDuration = dur;
+  updateBtFilterUI();
+}
+
 async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
@@ -5804,14 +5856,17 @@ async function runBacktest(fileOverride){
     if (fileVal) {
       url += `&file=${encodeURIComponent(fileVal)}`;
     }
-    // Market / timeframe selection (#308 follow-up): empty = all.
-    const marketVal = $('btMarketSelect') ? $('btMarketSelect').value : '';
-    const timeframeVal = $('btTimeframeSelect') ? $('btTimeframeSelect').value : '';
-    if (marketVal) {
-      url += `&series=${encodeURIComponent(marketVal)}`;
+    // Market / timeframe selection (chip multi-select): all tokens or
+    // both frames = omit the param, which the API reads as "all".
+    const btToks = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
+    if (btToks.length > 0 && btToks.length < 5) {
+      url += `&series=${encodeURIComponent(btToks.map(t => t.toLowerCase()).join(','))}`;
     }
-    if (timeframeVal) {
-      url += `&durations=${encodeURIComponent(timeframeVal)}`;
+    const btDur = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
+    if (btDur === '5m') {
+      url += `&durations=300`;
+    } else if (btDur === '15m') {
+      url += `&durations=900`;
     }
     const res = await fetch(url, {signal: ctl.signal});
     const data = await res.json();
