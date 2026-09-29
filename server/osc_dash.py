@@ -7017,7 +7017,7 @@ function btAppendProvisionalPoints(msg){
   }
   if (msg.windows_done !== undefined) {
     const elSub = $('btElapsedSub');
-    if (elSub && elSub.textContent === 'Simulating…') {
+    if (elSub && elSub.textContent.startsWith('Simulating…')) {
       elSub.textContent = `Simulating… ${msg.windows_done} windows · ${((msg.provisional_total_pnl_cents || 0) / 100).toFixed(2)} USD`;
     }
   }
@@ -7040,11 +7040,17 @@ async function consumeBacktestStream(res, ctl, onEvent){
     if (window._btAbort !== ctl) { try { await reader.cancel(); } catch {} return; }
     if (done) break;
     buf += decoder.decode(value, {stream: true});
+    // Minimal SSE parser: split on sse-starlette's CRLF separators and blank
+    // lines. Blocks end either at "\r\n\r\n" (the library's default separator)
+    // or at "\n\n" — handle both so a separator change cannot wedge the curve.
     let idx;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
+    while ((idx = Math.min(
+        buf.indexOf('\r\n\r\n') >= 0 ? buf.indexOf('\r\n\r\n') : Infinity,
+        buf.indexOf('\n\n') >= 0 ? buf.indexOf('\n\n') : Infinity)) < Infinity) {
+      const sepLen = buf.startsWith('\r\n\r\n', idx) ? 4 : 2;
       const block = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      for (const line of block.split('\n')) {
+      buf = buf.slice(idx + sepLen);
+      for (const line of block.split(/\r\n|\n/)) {
         if (line.startsWith('data:')) {
           const payload = line.slice(5).trim();
           if (payload) {
