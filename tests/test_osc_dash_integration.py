@@ -5728,3 +5728,123 @@ def test_backtest_runtime_estimation_client_calculation():
     assert "50 win" in data["badgeText"]
     assert "0 windows" in data["zeroBadgeText"]
 
+
+# --- Issue #331: streaming backtest ------------------------------------------
+
+
+def _fake_queue_factory():
+    """Fresh plain queue per call — tests swap the manager proxy for this."""
+    import queue as _queue
+    return _queue.Queue()
+
+
+def _make_backtest_ticks_file(tmp_path, name="fake_stream.jsonl", windows=4):
+    """Deterministic multi-window ticks fixture, one file, several windows."""
+    fake_file = tmp_path / name
+    ticks = []
+    for i in range(windows):
+        cid = f"0xCID_{i:04d}"
+        slug = f"btc-updown-5m-{i:04d}"
+        base_ts = 1000.0 + i * 500
+        ticks.append(_make_fake_tick(base_ts, cid, slug, "btc-up-or-down-5m", 0.50, tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100}]))
+        ticks.append(_make_fake_tick(base_ts + 1, cid, slug, "btc-up-or-down-5m", 0.48))
+        ticks.append(_make_fake_tick(base_ts + 2, cid, slug, "btc-up-or-down-5m", 0.52, tape=[{"asset": f"{cid}_dn", "price": 0.46, "size": 100}]))
+        ticks.append(_make_fake_tick(base_ts + 3, cid, slug, "btc-up-or-down-5m", 0.50))
+    with open(fake_file, "w", encoding="utf-8") as f:
+        for t in ticks:
+            f.write(json.dumps(t) + "\n")
+    return fake_file
+
+
+def test_worker_progress_emission_matches_final_curve(tmp_path, monkeypatch):
+    """The worker's progress points use the final curve's scaling and the
+    returned dict is unchanged when progress is enabled (Issue #331)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = _make_backtest_ticks_file(tmp_path)
+
+    q = _fake_queue_factory()
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    params_dict = asdict(BacktestParams(offset=0.02))
+
+    # Run WITH progress.
+    with_progress = osc_dash._run_backtest_simulation_worker(
+        str(tmp_path), str(fake_file), params_dict, 5, 0.0, 0, {}, {},
+        "", "", progress_queue=q, progress_batch_windows=1,
+    )
+    # Run WITHOUT progress (current behavior).
+    without_progress = osc_dash._run_backtest_simulation_worker(
+        str(tmp_path), str(fake_file), params_dict, 5, 0.0, 0, {}, {},
+        "", "",
+    )
+
+    assert json.dumps(with_progress, sort_keys=True) == json.dumps(without_progress, sort_keys=True)
+
+    # Collect progress messages: batch=1 → one message per window plus final flush.
+    messages = []
+    while True:
+        try:
+            messages.append(q.get_nowait())
+        except Exception:
+            break
+    assert messages, "no progress messages emitted"
+    points = [p for m in messages for p in m["points"]]
+    assert len(points) == len(with_progress["equity_curve"])
+    # Same scaling as the final curve: cumulative values match the sorted curve.
+    final_curve = with_progress["equity_curve"]
+    assert points[-1]["cumulative_pnl_cents"] == final_curve[-1]["cumulative_pnl_cents"]
+    last_msg = messages[-1]
+    assert last_msg["windows_done"] == len(points)
+    assert last_msg["provisional_total_pnl_cents"] == final_curve[-1]["cumulative_pnl_cents"]
+    # Each point carries pnl_cents + provisional cumulative.
+    for p in points:
+        assert "pnl_cents" in p and "cumulative_pnl_cents" in p
+
+
+def test_worker_progress_queue_failure_does_not_fail_run(tmp_path, monkeypatch):
+    """A queue put failure disables emission without changing the result."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = _make_backtest_ticks_file(tmp_path)
+
+    class ExplodingQueue:
+        def put_nowait(self, msg):
+            raise RuntimeError("queue broken")
+
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    params_dict = asdict(BacktestParams(offset=0.02))
+
+    res = osc_dash._run_backtest_simulation_worker(
+        str(tmp_path), str(fake_file), params_dict, 5, 0.0, 0, {}, {},
+        "", "", progress_queue=ExplodingQueue(), progress_batch_windows=1,
+    )
+    baseline = osc_dash._run_backtest_simulation_worker(
+        str(tmp_path), str(fake_file), params_dict, 5, 0.0, 0, {}, {},
+        "", "",
+    )
+    assert json.dumps(res, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+
+
+def test_backtest_guard_releaser_releases_once():
+    """The per-run release-once helper clears the guards exactly once."""
+    osc_dash._BACKTEST_RUNNING = True
+    sem = osc_dash.get_backtest_semaphore()
+    # Simulate an acquired guard.
+    acquired = sem._value if hasattr(sem, "_value") else 0
+    release = osc_dash._make_backtest_guard_releaser()
+    with osc_dash._BACKTEST_LOCK:
+        osc_dash._BACKTEST_RUNNING = True
+    release()
+    assert not osc_dash._BACKTEST_RUNNING
+    release()  # second call must be a no-op
+    assert not osc_dash._BACKTEST_RUNNING
+
+
+def test_shutdown_backtest_pool_also_shuts_manager():
+    """Issue #331: shutdown_backtest_pool clears the manager singleton too."""
+    mgr = osc_dash._get_backtest_manager()
+    assert mgr is not None
+    osc_dash._new_backtest_progress_queue()
+    osc_dash.shutdown_backtest_pool()
+    assert osc_dash._BACKTEST_MANAGER is None
+

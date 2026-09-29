@@ -1537,10 +1537,97 @@ def get_backtest_semaphore() -> asyncio.Semaphore:
 
 def shutdown_backtest_pool() -> None:
     """Cleanly shut down the persistent backtest process pool."""
-    global _BACKTEST_POOL
+    global _BACKTEST_POOL, _BACKTEST_MANAGER
     if _BACKTEST_POOL is not None:
         _BACKTEST_POOL.shutdown(wait=False, cancel_futures=True)
         _BACKTEST_POOL = None
+    # Issue #331: the progress queues live in the manager process; hanging
+    # cleanup here covers every exit path that already shuts the pool down.
+    if _BACKTEST_MANAGER is not None:
+        try:
+            _BACKTEST_MANAGER.shutdown()
+        except Exception:
+            pass
+        _BACKTEST_MANAGER = None
+
+
+# Issue #331: per-run progress transport. The pool uses the `spawn` context, so
+# workers cannot inherit a queue through fork, and `ProcessPoolExecutor.submit`
+# cannot pickle a plain `multiprocessing.Queue`. A `spawn`-context
+# `multiprocessing.Manager` queue proxy IS picklable and survives pool
+# termination (the queue lives in the manager process), so a fresh proxy per
+# run cannot mix stale messages from a terminated run. Tests monkeypatch
+# `_new_backtest_progress_queue` to return a plain `queue.Queue`.
+_BACKTEST_MANAGER = None
+
+
+def _get_backtest_manager():
+    """Lazy singleton `spawn`-context manager; recreated if its process died."""
+    global _BACKTEST_MANAGER
+    if _BACKTEST_MANAGER is not None:
+        try:
+            if _BACKTEST_MANAGER._process.is_alive():
+                return _BACKTEST_MANAGER
+        except Exception:
+            pass
+        try:
+            _BACKTEST_MANAGER.shutdown()
+        except Exception:
+            pass
+        _BACKTEST_MANAGER = None
+    ctx = multiprocessing.get_context("spawn")
+    _BACKTEST_MANAGER = ctx.Manager()
+    return _BACKTEST_MANAGER
+
+
+def _new_backtest_progress_queue():
+    """Fresh per-run progress queue (manager proxy in prod, queue.Queue in tests)."""
+    return _get_backtest_manager().Queue()
+
+
+def _terminate_backtest_pool() -> None:
+    """Kill the in-flight backtest pool: terminate processes, detach singleton.
+
+    Shared by the blocking endpoints' timeout handlers and the streaming
+    endpoint's disconnect/timeout cleanup. The next `get_backtest_pool()` call
+    rebuilds a fresh pool lazily.
+    """
+    global _BACKTEST_POOL
+    pool = _BACKTEST_POOL
+    _BACKTEST_POOL = None
+    if pool is not None:
+        for proc in list(getattr(pool, "_processes", {}).values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _make_backtest_guard_releaser():
+    """Return a release-once callable for the streaming path's per-run cleanup.
+
+    The streaming endpoint releases the guards from two places (the submitted
+    task's `finally` and the generator's `finally`) so release is eventual even
+    if the generator never starts. First call wins; later calls are no-ops, so
+    a stale task freed by pool termination cannot clear a newer run's guards.
+    """
+    released = {"flag": False}
+
+    def _release() -> None:
+        if released["flag"]:
+            return
+        released["flag"] = True
+        semaphore = get_backtest_semaphore()
+        try:
+            semaphore.release()
+        except ValueError:
+            pass
+        with _BACKTEST_LOCK:
+            global _BACKTEST_RUNNING
+            _BACKTEST_RUNNING = False
+
+    return _release
 
 
 def _run_backtest_simulation_worker(
@@ -1554,6 +1641,9 @@ def _run_backtest_simulation_worker(
     empty_params: dict,
     series_sel: str = "",
     durations_sel: str = "",
+    progress_queue=None,
+    progress_batch_windows: int = 50,
+    progress_batch_interval: float = 0.25,
 ) -> dict:
     """Top-level worker function executing backtest simulation in an isolated process.
 
@@ -1593,6 +1683,38 @@ def _run_backtest_simulation_worker(
     # `group_by_cid` — the equity curve and drawdown are order-dependent.
     results: list[tuple[float, int, Any]] = []
     n_snaps = 0
+
+    # Issue #331: batched progress emission. Preview points mirror the final
+    # curve's size scaling (`pnl_cents * size`), arrive in completion order,
+    # and never change or fail the run — a queue put failure only disables
+    # further emission. Defaults keep the legacy (non-streaming) behavior.
+    emit_progress = progress_queue is not None
+    prog_points: list[dict] = []
+    prog_total = 0.0
+    prog_count = 0
+    prog_last_flush = time.monotonic()
+
+    def _disable_progress() -> None:
+        nonlocal emit_progress
+        emit_progress = False
+
+    def _flush_progress() -> None:
+        nonlocal prog_points, prog_last_flush, prog_count
+        if not prog_points:
+            return
+        msg = {
+            "windows_done": prog_count,
+            "provisional_total_pnl_cents": round(prog_total, 2),
+            "points": prog_points,
+        }
+        prog_points = []
+        prog_last_flush = time.monotonic()
+        try:
+            progress_queue.put_nowait(msg)
+        except Exception:
+            # Emission failures must never fail the run.
+            _disable_progress()
+
     # Push the market selection down into the reader so unselected rows are
     # never parsed at all, not parsed-then-discarded.
     for seq, _cid, g in iter_windows_streaming(source, series_tokens):
@@ -1608,8 +1730,22 @@ def _run_backtest_simulation_worker(
             if delay > max_start_delay:
                 continue
         n_snaps += len(g)
-        results.append((float(g[0].get("ts", 0.0) or 0.0), seq,
-                        _simulate_window(g, params)))
+        win = _simulate_window(g, params)
+        results.append((float(g[0].get("ts", 0.0) or 0.0), seq, win))
+        if emit_progress:
+            # Same scaling the final equity curve applies.
+            win_pnl = win.pnl_cents * size
+            prog_total += win_pnl
+            prog_count += 1
+            prog_points.append({
+                "pnl_cents": round(win_pnl, 2),
+                "cumulative_pnl_cents": round(prog_total, 2),
+            })
+            if (progress_batch_windows and prog_count % progress_batch_windows == 0) or \
+                    (progress_batch_interval and time.monotonic() - prog_last_flush >= progress_batch_interval):
+                _flush_progress()
+    if emit_progress:
+        _flush_progress()
     # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, including the
     # first-seen tie-break for markets that open on the same timestamp. The
     # equity curve and max drawdown are order-dependent, so this must match.
@@ -2432,15 +2568,7 @@ async def api_backtest(
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        pool = _BACKTEST_POOL
-        _BACKTEST_POOL = None
-        if pool is not None:
-            for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            pool.shutdown(wait=False, cancel_futures=True)
+        _terminate_backtest_pool()
         raise HTTPException(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -2587,15 +2715,7 @@ async def api_backtest_sweep(
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        pool = _BACKTEST_POOL
-        _BACKTEST_POOL = None
-        if pool is not None:
-            for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            pool.shutdown(wait=False, cancel_futures=True)
+        _terminate_backtest_pool()
         raise HTTPException(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
