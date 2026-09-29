@@ -6882,17 +6882,22 @@ function toggleBtToken(tok) {
     selectedBtTokens.add(tok);
   }
   updateBtFilterUI();
+  // Issue #355: the sweep card's Markets grid is now selection-driven, so an
+  // idle card must follow the chips. Never starts a run, never touches a sweep.
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
 }
 
 function setBtTokensAll(selectAll) {
   selectedBtTokens = selectAll ? new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']) : new Set(['BTC']);
   updateBtFilterUI();
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
 }
 
 function setBtDuration(dur) {
   if (selectedBtDuration === dur) return;
   selectedBtDuration = dur;
   updateBtFilterUI();
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
 }
 
 // Interactive Backtest Runtime Estimation (Issue #330)
@@ -7821,6 +7826,12 @@ function onSweepAxisChange(){
 async function runSweepVisual(){
   const btn = $('btnRunSweepVisual');
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
+  // Issue #355: the selection is snapshotted HERE, with `v`. Every render of
+  // this run uses it, so editing the chips mid-sweep cannot repaint the grid of
+  // a run that was asked for something else.
+  const sel = btSelection();
+  const selectedSeries = btSelectedSeriesSlugs(sel);
+  window._btSweepSelection = sel;
   // Same reader the backtest uses, so the sweep's base point is exactly the
   // configuration shown on this page. Only `axis` varies; every other knob is
   // held at the operator's value. `size` is pinned to the page value because
@@ -7843,6 +7854,9 @@ async function runSweepVisual(){
         })),
         series_order: ['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'],
         series_labels: {},
+        // Issue #355: the grid shows the selection from this instant, so the
+        // card is never all-grey while the sweep runs.
+        selected_series: selectedSeries,
         pending: true,
       }, '');
     }
@@ -7889,8 +7903,11 @@ async function runSweepVisual(){
     await consumeBacktestStream(res, ctl, (ev) => {
       if (window._btSweepAbort !== ctl) return; // superseded — ignore stale events
       if (ev.type === 'progress') {
-        renderSweepVisual(buildSweepProgressView(axis, v, ev), v, true);
+        renderSweepVisual(buildSweepProgressView(axis, v, ev, selectedSeries), v, true);
       } else if (ev.type === 'final') {
+        // Issue #355: the final payload carries no selection of its own, so the
+        // run-start snapshot is attached here for the authoritative render.
+        ev.result.selected_series = selectedSeries;
         renderSweepVisual(ev.result, v);
       } else if (ev.type === 'error') {
         if(meta){ meta.textContent = ev.error || 'sweep error'; }
@@ -7906,8 +7923,9 @@ async function runSweepVisual(){
 }
 
 // Idle preparation (IIIB feedback): draw the sweep card + charts BEFORE the
-// first run, so the section never looks like an empty rectangle. Markets stay
-// grayed and the title shows a plain "testing …" until a sweep actually runs.
+// first run, so the section never looks like an empty rectangle. Issue #355: the
+// markets show the operator's current selection as `pending` — "selected, not
+// replayed yet" — instead of a fully greyed grid that read as "nothing selected".
 function renderSweepIdle(){
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
   renderSweepVisual({
@@ -7919,9 +7937,18 @@ function renderSweepIdle(){
     })),
     series_order: ['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'],
     series_labels: {},
+    // The idle card has no run to stay stable for, so it reads the live chips.
+    selected_series: btSelectedSeriesSlugs(),
     idle: true,
     pending: true,
   }, btControlValues());
+}
+
+// Issue #355: keep the idle grid aligned with Backtest Scope. Re-rendering never
+// starts a run, and an in-flight sweep keeps its run-start snapshot untouched.
+function refreshSweepIdleCard(){
+  if (window._btSweepAbort || (window._btSweepVisualData && !window._btSweepVisualData.idle)) return;
+  renderSweepIdle();
 }
 
 // "Empty but prepared" idle state for the whole backtest tab: sweep card with
@@ -7941,20 +7968,26 @@ function initBacktestIdle(){
 // running per-point totals, so the live fill reuses the exact final renderer.
 // Best-point selection waits for `final` — running totals would crown a
 // premature winner and flash the gold highlight.
-function buildSweepProgressView(axis, v, ev){
+function buildSweepProgressView(axis, v, ev, selectedSeries){
   return {
     axis: axis,
     points: ev.points || [],
     series_order: (ev.points && ev.points[0] && ev.points[0].per_series)
       ? Object.keys(ev.points[0].per_series) : [],
     series_labels: {},
+    // Issue #355: the run-start selection rides along so the grid keeps saying
+    // what was asked for, not what has happened to be replayed so far.
+    selected_series: selectedSeries,
     best_overall: null,
     best_market: null,
     n_windows: ev.rows_done || 0,
     n_snaps: ev.n_snaps || 0,
     pending: true,
     rows_done: ev.rows_done || 0,
-    rows_total: ev.rows_total || 0,
+    // Issue #355: a live event from the read loop does not know the total yet
+    // (`rows_total: null`). `|| 0` would have turned "unknown" into "zero rows
+    // of zero", so the null is preserved and the card words it accordingly.
+    rows_total: (ev.rows_total === null || ev.rows_total === undefined) ? null : ev.rows_total,
   };
 }
 
@@ -8082,6 +8115,15 @@ function sweepMarketsGridHtml(points, selectedSlugs){
     + BT_ALL_TOKENS.map(t => chip(t, '15m')).join('');
 }
 
+// Issue #355: the card's running-totals phrase. Three states, because
+// `rows_total` is genuinely three-valued now: undefined (nothing has reported
+// yet), null (streaming, total unknown) and a number (the converged pass).
+function sweepProgressText(data){
+  if (data.rows_total === null) return `${data.rows_done || 0} windows replayed…`;
+  if (data.rows_total === undefined) return 'starting…';
+  return `row ${data.rows_done || 0}/${data.rows_total}`;
+}
+
 function sweepCard(v, data, statsHtml){
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
@@ -8136,12 +8178,14 @@ function sweepCard(v, data, statsHtml){
     .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
-  // Idle (pre-first-run) shows the selector + a plain "testing …" with no
-  // numbers, so the card is prepared without pretending a sweep ran.
+  // Issue #344: idle (pre-first-run) shows the selector + a plain "testing …"
+  // with no numbers. Issue #355: a live event carries `rows_total: null` because
+  // the read loop does not know the total yet — reporting that as "row 0/0"
+  // would read as a finished run of nothing, so it says how many are replayed.
   const pendingBadge = data.idle
     ? `<span class="sweep-title-sub">testing …</span>`
     : data.pending
-    ? `<span class="sweep-title-sub">testing ${values} · ${data.rows_total ? `row ${data.rows_done || 0}/${data.rows_total}` : 'starting…'}</span>`
+    ? `<span class="sweep-title-sub">testing ${values} · ${sweepProgressText(data)}</span>`
     : `<span class="sweep-title-sub">testing ${values}</span>`;
   return `<span class="sweep-title">`
     + titleSel
@@ -8193,7 +8237,7 @@ function sweepCardTail(v, data, statsHtml){
   const verdictHtml = (verdict && verdict.verdict && !data.pending)
     ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
     : '';
-  return `<span class="sweep-title-sub">testing ${values}${data.pending ? (data.rows_total ? ` · row ${data.rows_done || 0}/${data.rows_total}` : ' · starting…') : ''}</span>`
+  return `<span class="sweep-title-sub">testing ${values}${data.pending ? ` · ${sweepProgressText(data)}` : ''}</span>`
     + `<span class="sweep-card">`
     + (statsHtml || '')
     + `<span class="sweep-cols">${held}${rules}${markets}</span>`

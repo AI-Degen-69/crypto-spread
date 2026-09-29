@@ -1921,6 +1921,75 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
     assert "btSelection()" in bt_query
 
 
+def test_sweep_selection_snapshot_reaches_every_render_path():
+    """Issue #355: the run-start selection reaches the pending card, the progress
+    views and the final render, and a live `rows_total: null` is worded as
+    "replayed" rather than "row 0/0"."""
+    html = osc_dash.FULL_APP_HTML
+    # Snapshot taken once, at run start, next to `v`.
+    runner = html[html.index("async function runSweepVisual("):]
+    runner = runner[:runner.index("\nasync function") if "\nasync function" in runner[10:] else len(runner)]
+    assert "const selectedSeries = btSelectedSeriesSlugs(sel);" in runner
+    assert "selected_series: selectedSeries," in runner          # pending card
+    assert "buildSweepProgressView(axis, v, ev, selectedSeries)" in runner
+    assert "ev.result.selected_series = selectedSeries;" in runner  # final render
+    # Progress view adapter carries it and preserves an unknown total.
+    view = html[html.index("function buildSweepProgressView("):]
+    view = view[:view.index("\n}")]
+    assert "selected_series: selectedSeries," in view
+    assert "ev.rows_total === null" in view
+    # The idle card reads the live chips instead of a frozen snapshot.
+    idle = html[html.index("function renderSweepIdle("):]
+    idle = idle[:idle.index("\n}")]
+    assert "selected_series: btSelectedSeriesSlugs()," in idle
+    # Both card renderers route the grid through the shared builder.
+    for fname in ("sweepCard", "sweepCardTail"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "sweepMarketsGridHtml(data.points, data.selected_series)" in body, fname
+    # Chip handlers keep an idle card aligned without ever starting a run.
+    assert "function refreshSweepIdleCard(" in html
+    guard = html[html.index("function refreshSweepIdleCard("):]
+    guard = guard[:guard.index("\n}")]
+    assert "window._btSweepAbort" in guard
+    assert "idle" in guard
+    for fname in ("toggleBtToken", "setBtTokensAll", "setBtDuration"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "refreshSweepIdleCard" in body, fname
+        assert "runSweepVisual()" not in body, f"{fname} must not start a run"
+
+
+def test_sweep_progress_text_three_states():
+    """Issue #355: `rows_total` is three-valued — undefined (nothing reported),
+    null (streaming, total unknown) and a number (converged)."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    found = re.search(r"function sweepProgressText\(.*?\n\}", html, re.DOTALL)
+    assert found is not None, "sweepProgressText is no longer a top-level function"
+    test_js = found.group(0) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    assert(sweepProgressText({rows_done: 7, rows_total: null}) === '7 windows replayed…',
+           sweepProgressText({rows_done: 7, rows_total: null}));
+    assert(sweepProgressText({rows_done: 0, rows_total: null}) === '0 windows replayed…');
+    assert(sweepProgressText({rows_done: 0, rows_total: undefined}) === 'starting…');
+    assert(sweepProgressText({rows_done: 40, rows_total: 40}) === 'row 40/40');
+    // A total of zero is a real, finished, empty run — not "unknown".
+    assert(sweepProgressText({rows_done: 0, rows_total: 0}) === 'row 0/0');
+    console.log('SWEEP_PROGRESS_TEXT_TESTS_PASSED');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_PROGRESS_TEXT_TESTS_PASSED" in res.stdout
+
+
 def test_sweep_markets_grid_has_three_states():
     """Issue #355: the Markets grid distinguishes participated / selected-with-no-
     windows / not-selected, and every chip says which it is."""
@@ -2282,9 +2351,10 @@ def test_sweep_override_note_is_wired_into_the_meta_block():
     html = osc_dash.FULL_APP_HTML
     assert "function sweepOverrideNote(" in html
     # Issue #344: the final render call carries the isProgress flag; progress
-    # events route through renderSweepVisual(view, v, true).
+    # events route through renderSweepVisual(view, v, true). Issue #355: the
+    # run-start selection snapshot rides along on that call.
     assert "renderSweepVisual(ev.result, v);" in html
-    assert "renderSweepVisual(buildSweepProgressView(axis, v, ev), v, true);" in html
+    assert "renderSweepVisual(buildSweepProgressView(axis, v, ev, selectedSeries), v, true);" in html
     assert "function renderSweepVisual(data, submitted, isProgress)" in html
     assert "function renderSweepVisual(" in html
     # The card owns the verdict now — it calls the note helper with the same
