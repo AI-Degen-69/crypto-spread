@@ -3520,6 +3520,39 @@ def test_api_live_config_exit_reversal():
         engine.is_running = orig_running
 
 
+def test_api_live_config_ws_book_authority():
+    """Issue #353: the socket-isolation switch is reachable from the dashboard.
+
+    Round-trips through /api/live/config into engine state; a non-coercible
+    value is rejected by the payload model with 422.
+    """
+    engine = osc_dash.get_live_trader_engine()
+    orig_running = engine.is_running
+    engine.is_running = False
+    orig_auth = engine.ws_book_authority
+    orig_mode = engine.mode
+    engine.mode = "paper"
+    try:
+        state = client.get("/api/live/state").json()
+        assert state["params"]["ws_book_authority"] is engine.ws_book_authority
+
+        res = client.post("/api/live/config", json={"ws_book_authority": True})
+        assert res.status_code == 200
+        assert res.json()["params"]["ws_book_authority"] is True
+        assert engine.ws_book_authority is True
+
+        res_off = client.post("/api/live/config", json={"ws_book_authority": False})
+        assert res_off.status_code == 200
+        assert engine.ws_book_authority is False
+
+        assert client.post("/api/live/config", json={"ws_book_authority": [1]}).status_code == 422
+        assert engine.ws_book_authority is False
+    finally:
+        engine.update_config(ws_book_authority=orig_auth)
+        engine.mode = orig_mode
+        engine.is_running = orig_running
+
+
 def test_api_live_config_exit_thresh_naked_deleted():
     """Issue #230: exit_thresh_naked is deleted across both engines and API.
 

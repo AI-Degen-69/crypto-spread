@@ -109,6 +109,12 @@ TAPE_FETCH_TIMEOUT = (3.05, 5.0)
 # received the snapshot, and printing recently enough to be alive.
 WS_TAPE_WARMUP_SEC = 5.0
 WS_TAPE_AUTHORITY_HORIZON_SEC = 90.0
+# Socket BOOK drift guard (issue #353). The book side was never validated —
+# #174 Phase 1 measured ~30% WS/REST divergence with a 0.32 worst case
+# (#350) — so a fresh socket book that disagrees with a full REST book by
+# more than this on best bid or ask loses one reconcile round to REST.
+# Small gaps stay WS microstructure noise and never flip authority.
+WS_BOOK_DRIFT_GUARD_CENTS = 0.02
 # One window's prints at one price level. A cap is needed because the ledger is
 # only trimmed by window rollover, and a hot market can print continuously; the
 # oldest entries are dropped first, which biases toward undercounting rather
@@ -656,6 +662,11 @@ class MarketLiveState:
     ws_asks_down: Dict[float, float] = field(default_factory=dict)
     ws_book_ts_up: Optional[float] = None
     ws_book_ts_down: Optional[float] = None
+    # Per-leg pricing source (issue #353): which pipeline last wrote this
+    # leg's bests — "ws" (socket) or "rest" (reconcile). "" until the first
+    # decision, so the cockpit never shows a source that never priced.
+    book_source_up: str = ""
+    book_source_down: str = ""
     # Pending WS tape prints per window (consumed next tick or instantly)
     pending_ws_trades_up: List[Dict[str, Any]] = field(default_factory=list)
     pending_ws_trades_down: List[Dict[str, Any]] = field(default_factory=list)
@@ -968,7 +979,11 @@ class LiveTraderEngine:
         self.quoting_halted: bool = False
         
         # Unified tick authority
-        self.ws_book_authority: bool = True   # when True, WS is authoritative for best/mid/spread
+        # Issue #353: default False — the socket BOOK was never validated
+        # (#174 Phase 1 measured ~30% WS/REST divergence, 0.32 worst case on
+        # #350), so no operator inherits the unvalidated pricing path by
+        # doing nothing. Deliberate opt-in via update_config/dashboard.
+        self.ws_book_authority: bool = False  # when True, WS is authoritative for best/mid/spread
         self.rest_fallback_enabled: bool = True  # reconcile when WS stale
         # How long a leg's WS book may live before REST overwrites it
         self.ws_book_max_age_sec: float = 2.5
@@ -2042,7 +2057,10 @@ class LiveTraderEngine:
     def on_book_update(self, token_id: str, bids: Dict[float, float], asks: Dict[float, float]) -> None:
         """Handle real-time book updates from CLOB Market WebSocket (issue #166 step 1).
 
-        WS is authoritative for best/mid/spread. Full depth is stored so
+        WS is authoritative for best/mid/spread only while
+        `ws_book_authority` is True (issue #353) — when off, the socket still
+        refreshes ladders and timestamps (kept warm for instant re-enable)
+        but never overwrites REST-priced bests. Full depth is stored so
         `rest_up_queue` etc. use real queue, not REST's stale one. Writes are
         guarded so REST's per-second tick cannot regress the book.
         """
@@ -2064,8 +2082,11 @@ class LiveTraderEngine:
                     m.ws_bids_up = dict(bids)
                     m.ws_asks_up = dict(asks)
                     m.ws_book_ts_up = now
+                    if not self.ws_book_authority:
+                        continue
                     m.up_bid = best_b
                     m.up_ask = best_a
+                    m.book_source_up = "ws"
                     if best_b is not None and 0.0 < best_b <= 1.0:
                         m.last_valid_up_bid = best_b
                     if best_a is not None and 0.0 < best_a <= 1.0:
@@ -2074,8 +2095,11 @@ class LiveTraderEngine:
                     m.ws_bids_down = dict(bids)
                     m.ws_asks_down = dict(asks)
                     m.ws_book_ts_down = now
+                    if not self.ws_book_authority:
+                        continue
                     m.down_bid = best_b
                     m.down_ask = best_a
+                    m.book_source_down = "ws"
                     if best_b is not None and 0.0 < best_b <= 1.0:
                         m.last_valid_down_bid = best_b
                     if best_a is not None and 0.0 < best_a <= 1.0:
@@ -2593,6 +2617,7 @@ class LiveTraderEngine:
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
                 "enable_leg_chase": self.enable_leg_chase,
+                "ws_book_authority": self.ws_book_authority,
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
                 "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
@@ -2637,6 +2662,7 @@ class LiveTraderEngine:
                       naked_leg_at_expiry: Optional[str] = None,
                       exit_reversal: Optional[float] = None,
                       enable_leg_chase: Optional[bool] = None,
+                      ws_book_authority: Optional[bool] = None,
                       max_pair_cost: Optional[float] = None,
                       entry_delay_sec: Optional[float] = None,
                       quote_range: Optional[Sequence[float]] = None,
@@ -2763,6 +2789,8 @@ class LiveTraderEngine:
                     param_changed = True
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
                     param_changed = True
+                if ws_book_authority is not None and bool(ws_book_authority) != self.ws_book_authority:
+                    param_changed = True
                 if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
                     param_changed = True
                 if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
@@ -2886,6 +2914,14 @@ class LiveTraderEngine:
                     self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
                 if enable_leg_chase is not None:
                     self.enable_leg_chase = bool(enable_leg_chase)
+                if ws_book_authority is not None:
+                    # Issue #353: strict bool — a safety switch must never be
+                    # flipped by a truthy string or number smuggled in payload.
+                    if not isinstance(ws_book_authority, bool):
+                        raise ValueError(
+                            f"ws_book_authority must be a bool, got {ws_book_authority!r}"
+                        )
+                    self.ws_book_authority = ws_book_authority
                 if max_pair_cost is not None:
                     self.max_pair_cost = max(0.50, min(1.00, float(max_pair_cost)))
                 if entry_delay_sec is not None:
@@ -3843,8 +3879,10 @@ class LiveTraderEngine:
     def _poll_single_market(self, slug: str) -> Optional[Dict[str, Any]]:
         """Fetch current and next market definition and orderbooks synchronously.
 
-        Issue #166: REST books downgraded to reconciling fallback. When WS is fresh,
-        we skip the REST book fetch entirely (saves ~450ms round latency).
+        Issue #166: REST books downgraded to reconciling fallback. When WS is
+        fresh but authority is off, REST still wins (socket not authoritative).
+        When WS is fresh AND authoritative (issue #353), REST books are still
+        fetched so the drift guard has something to compare against.
         Gamma still resolves because it owns window rotation.
         """
         try:
@@ -3857,17 +3895,14 @@ class LiveTraderEngine:
             if not market_info and not next_market:
                 return None
 
-            # Skip REST books if both WS legs are fresh — they would be discarded anyway.
+            # WS-authoritative path (issue #353): always fetch REST books so the
+            # drift guard in _update_market_strategy has something to compare
+            # a fresh-but-wrong socket book against. Per-leg decisions stay in
+            # the guard — only a divergent leg falls back to REST.
             m = self.markets.get(slug)
             if m and market_info and self.ws_book_authority:
-                up_fresh = self.is_ws_book_fresh(m, "UP")
-                dn_fresh = self.is_ws_book_fresh(m, "DOWN")
-                if up_fresh and dn_fresh:
-                    return {"market": market_info, "next_market": next_market, "up_book": {}, "down_book": {}}
-                need_up = not up_fresh
-                need_down = not dn_fresh
-                ubook = full_book(CLOB_HOST, market_info["up_token"]) if need_up else {}
-                dbook = full_book(CLOB_HOST, market_info["down_token"]) if need_down else {}
+                ubook = full_book(CLOB_HOST, market_info["up_token"])
+                dbook = full_book(CLOB_HOST, market_info["down_token"])
                 return {"market": market_info, "next_market": next_market, "up_book": ubook, "down_book": dbook}
             ubook = full_book(CLOB_HOST, market_info["up_token"]) if market_info else {}
             dbook = full_book(CLOB_HOST, market_info["down_token"]) if market_info else {}
@@ -4044,13 +4079,31 @@ class LiveTraderEngine:
             if leg == "UP":
                 has_ws = (mstate.ws_book_ts_up is not None)
                 fresh = self.is_ws_book_fresh(mstate, "UP")
+                rest_book = ubook
+                ws_b, ws_a = mstate.up_bid, mstate.up_ask
             else:
                 has_ws = (mstate.ws_book_ts_down is not None)
                 fresh = self.is_ws_book_fresh(mstate, "DOWN")
+                rest_book = dbook
+                ws_b, ws_a = mstate.down_bid, mstate.down_ask
             if not has_ws or not fresh:
                 return True
-            # Drift detection: if REST and WS disagree > 2c on best and REST came with full book, trust REST once.
-            # Small gaps are WS microstructure noise and should not flip authority.
+            # Drift guard (issue #353 — implemented; the comment describing it
+            # predates the code since #169): a FRESH socket book still loses
+            # one round to REST when a full REST book disagrees by more than
+            # WS_BOOK_DRIFT_GUARD_CENTS on best bid or ask. Small gaps are WS
+            # microstructure noise and should not flip authority. Missing REST
+            # bests (empty book) mean nothing to compare — keep WS.
+            rb_b = rest_book.get("best_bid") if isinstance(rest_book, dict) else None
+            rb_a = rest_book.get("best_ask") if isinstance(rest_book, dict) else None
+            if rb_b is None or rb_a is None or ws_b is None or ws_a is None:
+                return False
+            try:
+                if (abs(float(rb_b) - float(ws_b)) > WS_BOOK_DRIFT_GUARD_CENTS
+                        or abs(float(rb_a) - float(ws_a)) > WS_BOOK_DRIFT_GUARD_CENTS):
+                    return True
+            except (TypeError, ValueError, OverflowError):
+                return False
             return False
 
         # Decide per-leg whether to apply REST.
@@ -4099,6 +4152,11 @@ class LiveTraderEngine:
                         mstate.ws_book_ts_down = now
                     except (TypeError, ValueError, OverflowError, AttributeError):
                         pass
+        # Per-leg pricing source (issue #353): the reconcile verdict above is
+        # the decision point — a leg REST overwrote reads "rest", a leg WS
+        # kept reads "ws". The cockpit renders these verbatim.
+        mstate.book_source_up = "rest" if apply_up else "ws"
+        mstate.book_source_down = "rest" if apply_down else "ws"
         # Mid/spread always derived from current bests regardless of source.
         # Held under the same lock as the writes above and as on_book_update:
         # reading the bests and writing the mid they imply must be one step, or

@@ -3618,6 +3618,9 @@ class LiveConfigPayload(BaseModel):
     # the pair; `update_config` clamps each end and refuses an inverted pair.
     quote_range: Optional[list[float]] = None
     enable_leg_chase: Optional[bool] = None
+    # Issue #353: socket-book authority switch — the one control that isolates
+    # the socket from pricing. Strict bool in the engine; None leaves it.
+    ws_book_authority: Optional[bool] = None
     max_pair_cost: Optional[float] = Field(default=None, ge=0.50, le=1.00)
 
     @field_validator("offset", mode="before")
@@ -3684,6 +3687,7 @@ def api_live_config(payload: LiveConfigPayload, request: Request):
             naked_leg_at_expiry=payload.naked_leg_at_expiry,
             exit_reversal=payload.exit_reversal,
             enable_leg_chase=payload.enable_leg_chase,
+            ws_book_authority=payload.ws_book_authority,
             max_pair_cost=payload.max_pair_cost,
             entry_delay_sec=payload.entry_delay_sec,
             quote_range=payload.quote_range,
@@ -5165,6 +5169,13 @@ textarea:focus-visible,
           <select id="cockpitLegChase" data-param="enable_leg_chase">
             <option value="true" selected>On — chase the unfilled leg within the cap</option>
             <option value="false">Off — passive quote only</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="cockpitWsAuthority">WS Book Authority</label>
+          <select id="cockpitWsAuthority" data-param="ws_book_authority" title="Issue #353: when off, the socket never prices best/mid/spread — REST does. Default off until the socket book is proven.">
+            <option value="true">On — socket prices best/mid/spread</option>
+            <option value="false" selected>Off — REST prices everything</option>
           </select>
         </div>
         <div class="form-group">
@@ -9432,6 +9443,7 @@ function updateCockpitParamsLockUI(locked) {
     'cockpitQuoteHi',
     'cockpitPairCost',
     'cockpitLegChase',
+    'cockpitWsAuthority',
     'cockpitMode',
     'cockpitDeadZoneVal',
     'cockpitDeadZoneUnit',
@@ -10114,6 +10126,9 @@ async function applyCockpitConfig() {
   }
   const chaseEl = $('cockpitLegChase');
   if (chaseEl) body.enable_leg_chase = chaseEl.value === 'true';
+  // Issue #353: the socket-isolation switch — posted as a real boolean.
+  const wsAuthEl = $('cockpitWsAuthority');
+  if (wsAuthEl) body.ws_book_authority = wsAuthEl.value === 'true';
   // Market selection is immutable while the bot runs; only send filters when stopped
   if (!filtersLocked) {
     if (cockpitExactSelection) {
@@ -10161,6 +10176,12 @@ function setCockpitChartMode(mode) {
   }
 }
 
+// Per-leg pricing source badge (issue #353): the engine reports "ws" or
+// "rest" per leg; anything else (unset) renders as an em dash, never raw.
+function bookSourceLabel(s){
+  return s === 'ws' ? 'WS' : s === 'rest' ? 'REST' : '—';
+}
+
 function renderCockpitUI(st) {
   if (!st) return;
   cockpitState = st;
@@ -10206,6 +10227,7 @@ function renderCockpitUI(st) {
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
       if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
+      if ($('cockpitWsAuthority') && st.params.ws_book_authority != null) $('cockpitWsAuthority').value = String(st.params.ws_book_authority);
       if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
       if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
@@ -10227,6 +10249,7 @@ function renderCockpitUI(st) {
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
       if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
+      if ($('cockpitWsAuthority') && st.params.ws_book_authority != null) $('cockpitWsAuthority').value = String(st.params.ws_book_authority);
       if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
       if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
     }
@@ -10435,7 +10458,8 @@ function renderCockpitUI(st) {
 
             <div class="mono" style="font-size:10px;color:var(--dim);margin-bottom:6px;line-height:1.4">
               UP: ${fmtPrice(m.up_bid)} / ${fmtPrice(m.up_ask)}<br>
-              DN: ${fmtPrice(m.down_bid)} / ${fmtPrice(m.down_ask)}
+              DN: ${fmtPrice(m.down_bid)} / ${fmtPrice(m.down_ask)}<br>
+              Book: ${bookSourceLabel(m.book_source_up)} / ${bookSourceLabel(m.book_source_down)}
             </div>
 
             <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;margin-bottom:8px;background:rgba(255,255,255,0.03);padding:3px 6px;border-radius:4px">
