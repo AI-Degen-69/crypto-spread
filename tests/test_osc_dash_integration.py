@@ -6236,3 +6236,76 @@ def test_backtest_stream_disconnect_releases_guards_immediately(tmp_path, monkey
     assert next_run.status_code == 200
     mock_pool.shutdown(wait=True)
 
+
+def test_real_process_pool_backtest_passes_deterministically(tmp_path, monkeypatch):
+    """Issue #341: a backtest against the REAL spawn ProcessPoolExecutor (no
+    ThreadPoolExecutor monkeypatch) passes deterministically on Windows/pytest.
+    The pool is reset before and after so the singleton never leaks a broken
+    executor into another test."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    osc_dash.shutdown_backtest_pool()  # fresh pool for this test
+    try:
+        res = client.get("/api/backtest", params={"file": "fake_stream.jsonl", "filter_partial": "true"})
+        assert res.status_code == 200, res.text[:500]
+        body = res.json()
+        assert "overall" in body and "n_windows" in body
+    finally:
+        osc_dash.shutdown_backtest_pool()
+
+
+def test_real_process_pool_sweep_stream_passes_deterministically(tmp_path, monkeypatch):
+    """Issue #341: the SSE sweep stream against the REAL spawn pool completes
+    with a final event — the stream path drains its queue by polling, which is
+    the exact code shape that interacted badly with spawned workers before."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    # The REAL manager queue is required here: a plain queue.Queue is not
+    # picklable across the spawn boundary (that pairing only works with the
+    # ThreadPoolExecutor harness). This also exercises the manager lifecycle.
+    osc_dash.shutdown_backtest_pool()
+    try:
+        with client.stream("GET", "/api/backtest/sweep/stream?axis=queue&file=fake_stream.jsonl") as res:
+            assert res.status_code == 200
+            body = "".join(chunk for chunk in res.iter_text())
+        events = _parse_sse_events(body)
+        types = [e["type"] for e in events]
+        assert types.count("final") == 1, types
+        assert "error" not in types, body[:500]
+    finally:
+        osc_dash.shutdown_backtest_pool()
+
+
+def test_broken_pool_diagnostic_mentions_exitcode_and_original_error():
+    """Issue #341: the diagnostic replaces "terminated abruptly" with the
+    worker pid, its exit code and the original exception — and never raises,
+    even when the pool is already torn down."""
+    import concurrent.futures.process as _cfp
+
+    class _FakeProc:
+        pid = 4242
+        exitcode = -9
+        stderr = None
+
+    class _FakePool:
+        _processes = {"w0": _FakeProc()}
+
+    original = osc_dash._BACKTEST_POOL
+    osc_dash._BACKTEST_POOL = _FakePool()
+    try:
+        text = osc_dash._diagnose_broken_pool(_cfp.BrokenProcessPool("terminated abruptly"))
+    finally:
+        osc_dash._BACKTEST_POOL = original
+    assert "pid=4242" in text
+    assert "exitcode=-9" in text
+    assert "terminated abruptly" in text
+
+    # Already-torn-down pool: still a clean string, still no exception.
+    original = osc_dash._BACKTEST_POOL
+    osc_dash._BACKTEST_POOL = None
+    try:
+        text = osc_dash._diagnose_broken_pool(_cfp.BrokenProcessPool("terminated abruptly"))
+    finally:
+        osc_dash._BACKTEST_POOL = original
+    assert "no live worker process found" in text
+

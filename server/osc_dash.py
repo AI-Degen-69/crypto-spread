@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import collections
 from concurrent.futures import ProcessPoolExecutor
+import concurrent.futures.process
 from dataclasses import asdict, is_dataclass, replace as _dc_replace
 import gzip
 import json
@@ -1529,6 +1530,46 @@ def get_backtest_pool() -> ProcessPoolExecutor:
     return _BACKTEST_POOL
 
 
+# Issue #341: `BrokenProcessPool` says only "terminated abruptly" — no stderr,
+# no exit code, nothing. Capturing the executor's internal `_processes` at the
+# moment of failure turns the blanket message into a diagnostic: which PID died,
+# its exitcode (negative = signal, 1 = exception, 3221225477 = 0xC0000005 access
+# violation on Windows), and a bounded tail of the worker's stderr. The pool is
+# then rebuilt on next use (existing `_broken` handling), so the failure is
+# loud, explained, and recoverable.
+def _diagnose_broken_pool(exc: BaseException) -> str:
+    """Best-effort diagnostic string for a `BrokenProcessPool` from our executor.
+
+    Reads the pool's private `_processes` map — the only place the worker's
+    exit code and transport stderr live — and never raises: a diagnostic that
+    crashes would replace the original failure, which is the bug this fixes.
+    """
+    parts = [
+        "backtest worker process died (BrokenProcessPool)",
+        f"original error: {type(exc).__name__}: {exc}",
+    ]
+    try:
+        procs = list(getattr(_BACKTEST_POOL, "_processes", {}).values())
+    except Exception:
+        procs = []
+    if not procs:
+        parts.append("no live worker process found (pool already torn down)")
+    for proc in procs:
+        pid = getattr(proc, "pid", None)
+        exitcode = getattr(proc, "exitcode", None)
+        parts.append(f"worker pid={pid} exitcode={exitcode}")
+        try:
+            err_tail = "".join(
+                getattr(proc, "stderr", None) and proc.stderr._buffer
+                or [],
+            )
+        except Exception:
+            err_tail = ""
+        if err_tail:
+            parts.append("worker stderr tail: " + err_tail[-800:])
+    return " | ".join(parts)
+
+
 def get_backtest_semaphore() -> asyncio.Semaphore:
     """Lazy-initialized asyncio semaphore capping concurrent backtests to 1."""
     global _BACKTEST_SEMAPHORE
@@ -2687,6 +2728,12 @@ async def api_backtest(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
                     "Narrow the dataset, markets or timeframes and try again."))
+    except concurrent.futures.process.BrokenProcessPool as exc:
+        # Issue #341: "terminated abruptly" with zero diagnostics is how a
+        # spawned-worker crash (and every environmental break) surfaces. The
+        # worker's exit code + stderr tail turn it into an actionable error,
+        # and the pool is rebuilt on next use by `get_backtest_pool`.
+        raise HTTPException(status_code=500, detail=_diagnose_broken_pool(exc)) from exc
 
 
 @app.get(
@@ -2844,6 +2891,12 @@ async def api_backtest_stream(
         except asyncio.CancelledError:
             # Client disconnected mid-stream (sse_starlette cancels the generator).
             raise
+        except concurrent.futures.process.BrokenProcessPool as exc:
+            # Issue #341: surface the worker's exit code + stderr tail instead
+            # of the blanket "terminated abruptly" message.
+            completed = True  # diagnostic error event already ends the stream
+            yield {"event": "message", "data": json.dumps(
+                {"type": "error", "error": _diagnose_broken_pool(exc)})}
         except Exception as exc:
             yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
         finally:
@@ -3003,6 +3056,9 @@ async def api_backtest_sweep(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
                     "Narrow the dataset, markets or timeframes and try again."))
+    except concurrent.futures.process.BrokenProcessPool as exc:
+        # Issue #341: same loud diagnostics as the blocking backtest endpoint.
+        raise HTTPException(status_code=500, detail=_diagnose_broken_pool(exc)) from exc
 
 
 @app.get(
@@ -3172,6 +3228,12 @@ async def api_backtest_sweep_stream(
             yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
         except asyncio.CancelledError:
             raise
+        except concurrent.futures.process.BrokenProcessPool as exc:
+            # Issue #341: surface the worker's exit code + stderr tail instead
+            # of the blanket "terminated abruptly" message.
+            completed = True  # diagnostic error event already ends the stream
+            yield {"event": "message", "data": json.dumps(
+                {"type": "error", "error": _diagnose_broken_pool(exc)})}
         except Exception as exc:
             yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
         finally:
