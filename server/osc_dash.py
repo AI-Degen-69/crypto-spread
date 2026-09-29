@@ -7649,6 +7649,13 @@ function sweepAxisValues(axis){
   })[axis] || [];
 }
 
+// Changing the axis mid-run must not race the one-worker guard: abort the
+// in-flight stream first, then start the new sweep on the fresh axis.
+function onSweepAxisChange(){
+  if (window._btSweepAbort) { try { window._btSweepAbort.abort(); } catch {} window._btSweepAbort = null; }
+  runSweepVisual();
+}
+
 async function runSweepVisual(){
   const btn = $('btnRunSweepVisual');
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
@@ -7933,7 +7940,7 @@ function sweepCard(v, data, statsHtml){
   const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev']
     .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor'})[a]}</option>`)
     .join('');
-  const titleSel = `<select id="btSweepAxis" onchange="runSweepVisual()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
+  const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
   // Idle (pre-first-run) shows the selector + a plain "testing …" with no
   // numbers, so the card is prepared without pretending a sweep ran.
   const pendingBadge = data.idle
@@ -8248,7 +8255,12 @@ function renderSweepVisual(data, submitted, isProgress){
       // of meta except the first (the selector) by rebuilding via fragment.
       const keep = existingSel;
       meta.innerHTML = '';
-      meta.appendChild(keep);
+      // Keep the selector inside its .sweep-title flex wrapper — the progress
+      // path rebuilds the tail, but the title row keeps its layout contract.
+      const titleWrap = document.createElement('span');
+      titleWrap.className = 'sweep-title';
+      titleWrap.appendChild(keep);
+      meta.appendChild(titleWrap);
       const rest = document.createElement('span');
       rest.innerHTML = sweepCardTail(submitted, data, statsHtml);
       while (rest.firstChild) meta.appendChild(rest.firstChild);

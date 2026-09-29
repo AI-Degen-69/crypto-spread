@@ -2429,8 +2429,10 @@ def test_sweep_frontend_contract(tmp_path):
     assert "sweepCardTail" in html
     # The immediate card on run click (submitted values before results return).
     assert "meta.innerHTML = sweepCard(v, {" in html
-    # The axis selector now renders inside the card title.
-    assert 'onchange="runSweepVisual()"' in html
+    # The axis selector now renders inside the card title; changing it aborts
+    # any in-flight sweep stream before starting the new axis (review #345).
+    assert 'onchange="onSweepAxisChange()"' in html
+    assert "function onSweepAxisChange()" in html
 
 
 def test_sweep_worker_progress_points_converge(tmp_path, monkeypatch):
