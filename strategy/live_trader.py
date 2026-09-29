@@ -3879,8 +3879,10 @@ class LiveTraderEngine:
     def _poll_single_market(self, slug: str) -> Optional[Dict[str, Any]]:
         """Fetch current and next market definition and orderbooks synchronously.
 
-        Issue #166: REST books downgraded to reconciling fallback. When WS is fresh,
-        we skip the REST book fetch entirely (saves ~450ms round latency).
+        Issue #166: REST books downgraded to reconciling fallback. When WS is
+        fresh but authority is off, REST still wins (socket not authoritative).
+        When WS is fresh AND authoritative (issue #353), REST books are still
+        fetched so the drift guard has something to compare against.
         Gamma still resolves because it owns window rotation.
         """
         try:
@@ -3893,17 +3895,14 @@ class LiveTraderEngine:
             if not market_info and not next_market:
                 return None
 
-            # Skip REST books if both WS legs are fresh — they would be discarded anyway.
+            # WS-authoritative path (issue #353): always fetch REST books so the
+            # drift guard in _update_market_strategy has something to compare
+            # a fresh-but-wrong socket book against. Per-leg decisions stay in
+            # the guard — only a divergent leg falls back to REST.
             m = self.markets.get(slug)
             if m and market_info and self.ws_book_authority:
-                up_fresh = self.is_ws_book_fresh(m, "UP")
-                dn_fresh = self.is_ws_book_fresh(m, "DOWN")
-                if up_fresh and dn_fresh:
-                    return {"market": market_info, "next_market": next_market, "up_book": {}, "down_book": {}}
-                need_up = not up_fresh
-                need_down = not dn_fresh
-                ubook = full_book(CLOB_HOST, market_info["up_token"]) if need_up else {}
-                dbook = full_book(CLOB_HOST, market_info["down_token"]) if need_down else {}
+                ubook = full_book(CLOB_HOST, market_info["up_token"])
+                dbook = full_book(CLOB_HOST, market_info["down_token"])
                 return {"market": market_info, "next_market": next_market, "up_book": ubook, "down_book": dbook}
             ubook = full_book(CLOB_HOST, market_info["up_token"]) if market_info else {}
             dbook = full_book(CLOB_HOST, market_info["down_token"]) if market_info else {}
@@ -4093,9 +4092,8 @@ class LiveTraderEngine:
             # predates the code since #169): a FRESH socket book still loses
             # one round to REST when a full REST book disagrees by more than
             # WS_BOOK_DRIFT_GUARD_CENTS on best bid or ask. Small gaps are WS
-            # microstructure noise and should not flip authority. No REST book
-            # fetched this tick (both legs fresh) means nothing to compare —
-            # keep WS.
+            # microstructure noise and should not flip authority. Missing REST
+            # bests (empty book) mean nothing to compare — keep WS.
             rb_b = rest_book.get("best_bid") if isinstance(rest_book, dict) else None
             rb_a = rest_book.get("best_ask") if isinstance(rest_book, dict) else None
             if rb_b is None or rb_a is None or ws_b is None or ws_a is None:
