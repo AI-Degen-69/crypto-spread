@@ -18,6 +18,8 @@ import json
 import math
 import multiprocessing
 import os
+import queue
+import queue as _pyqueue
 import re
 import shutil
 import subprocess
@@ -1537,10 +1539,98 @@ def get_backtest_semaphore() -> asyncio.Semaphore:
 
 def shutdown_backtest_pool() -> None:
     """Cleanly shut down the persistent backtest process pool."""
-    global _BACKTEST_POOL
+    global _BACKTEST_POOL, _BACKTEST_MANAGER
     if _BACKTEST_POOL is not None:
         _BACKTEST_POOL.shutdown(wait=False, cancel_futures=True)
         _BACKTEST_POOL = None
+    # Issue #331: the progress queues live in the manager process; hanging
+    # cleanup here covers every exit path that already shuts the pool down.
+    if _BACKTEST_MANAGER is not None:
+        try:
+            _BACKTEST_MANAGER.shutdown()
+        except Exception:
+            pass
+        _BACKTEST_MANAGER = None
+
+
+# Issue #331: per-run progress transport. The pool uses the `spawn` context, so
+# workers cannot inherit a queue through fork, and `ProcessPoolExecutor.submit`
+# cannot pickle a plain `multiprocessing.Queue`. A `spawn`-context
+# `multiprocessing.Manager` queue proxy IS picklable and survives pool
+# termination (the queue lives in the manager process), so a fresh proxy per
+# run cannot mix stale messages from a terminated run. Tests monkeypatch
+# `_new_backtest_progress_queue` to return a plain `queue.Queue`.
+_BACKTEST_MANAGER = None
+
+
+def _get_backtest_manager():
+    """Lazy singleton `spawn`-context manager; recreated if its process died."""
+    global _BACKTEST_MANAGER
+    if _BACKTEST_MANAGER is not None:
+        try:
+            if _BACKTEST_MANAGER._process.is_alive():
+                return _BACKTEST_MANAGER
+        except Exception:
+            pass
+        try:
+            _BACKTEST_MANAGER.shutdown()
+        except Exception:
+            pass
+        _BACKTEST_MANAGER = None
+    ctx = multiprocessing.get_context("spawn")
+    _BACKTEST_MANAGER = ctx.Manager()
+    return _BACKTEST_MANAGER
+
+
+def _new_backtest_progress_queue():
+    """Fresh per-run progress queue (manager proxy in prod, queue.Queue in tests)."""
+    return _get_backtest_manager().Queue()
+
+
+def _terminate_backtest_pool() -> None:
+    """Kill the in-flight backtest pool: terminate processes, detach singleton.
+
+    Shared by the blocking endpoints' timeout handlers and the streaming
+    endpoint's disconnect/timeout cleanup. The next `get_backtest_pool()` call
+    rebuilds a fresh pool lazily.
+    """
+    global _BACKTEST_POOL
+    pool = _BACKTEST_POOL
+    _BACKTEST_POOL = None
+    if pool is not None:
+        for proc in list(getattr(pool, "_processes", {}).values()):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _make_backtest_guard_releaser():
+    """Return a release-once callable for the streaming path's per-run cleanup.
+
+    The streaming endpoint releases the guards from two places (the submitted
+    task's `finally` and the generator's `finally`) so release is eventual even
+    if the generator never starts. First call wins; later calls are no-ops, so
+    a stale task freed by pool termination cannot clear a newer run's guards.
+    """
+    released = {"flag": False}
+
+    def _release() -> None:
+        """Release the guards on the first call only; later calls are no-ops."""
+        if released["flag"]:
+            return
+        released["flag"] = True
+        semaphore = get_backtest_semaphore()
+        try:
+            semaphore.release()
+        except ValueError:
+            pass
+        with _BACKTEST_LOCK:
+            global _BACKTEST_RUNNING
+            _BACKTEST_RUNNING = False
+
+    return _release
 
 
 def _run_backtest_simulation_worker(
@@ -1554,6 +1644,9 @@ def _run_backtest_simulation_worker(
     empty_params: dict,
     series_sel: str = "",
     durations_sel: str = "",
+    progress_queue=None,
+    progress_batch_windows: int = 50,
+    progress_batch_interval: float = 0.25,
 ) -> dict:
     """Top-level worker function executing backtest simulation in an isolated process.
 
@@ -1593,6 +1686,40 @@ def _run_backtest_simulation_worker(
     # `group_by_cid` — the equity curve and drawdown are order-dependent.
     results: list[tuple[float, int, Any]] = []
     n_snaps = 0
+
+    # Issue #331: batched progress emission. Preview points mirror the final
+    # curve's size scaling (`pnl_cents * size`), arrive in completion order,
+    # and never change or fail the run — a queue put failure only disables
+    # further emission. Defaults keep the legacy (non-streaming) behavior.
+    emit_progress = progress_queue is not None
+    prog_points: list[dict] = []
+    prog_total = 0.0
+    prog_count = 0
+    prog_last_flush = time.monotonic()
+
+    def _disable_progress() -> None:
+        """Stop emitting progress after a queue failure; the run continues."""
+        nonlocal emit_progress
+        emit_progress = False
+
+    def _flush_progress() -> None:
+        """Push one batched progress message; a failed put disables emission."""
+        nonlocal prog_points, prog_last_flush, prog_count
+        if not prog_points:
+            return
+        msg = {
+            "windows_done": prog_count,
+            "provisional_total_pnl_cents": round(prog_total, 2),
+            "points": prog_points,
+        }
+        prog_points = []
+        prog_last_flush = time.monotonic()
+        try:
+            progress_queue.put_nowait(msg)
+        except Exception:
+            # Emission failures must never fail the run.
+            _disable_progress()
+
     # Push the market selection down into the reader so unselected rows are
     # never parsed at all, not parsed-then-discarded.
     for seq, _cid, g in iter_windows_streaming(source, series_tokens):
@@ -1608,8 +1735,22 @@ def _run_backtest_simulation_worker(
             if delay > max_start_delay:
                 continue
         n_snaps += len(g)
-        results.append((float(g[0].get("ts", 0.0) or 0.0), seq,
-                        _simulate_window(g, params)))
+        win = _simulate_window(g, params)
+        results.append((float(g[0].get("ts", 0.0) or 0.0), seq, win))
+        if emit_progress:
+            # Same scaling the final equity curve applies.
+            win_pnl = win.pnl_cents * size
+            prog_total += win_pnl
+            prog_count += 1
+            prog_points.append({
+                "pnl_cents": round(win_pnl, 2),
+                "cumulative_pnl_cents": round(prog_total, 2),
+            })
+            if (progress_batch_windows and prog_count % progress_batch_windows == 0) or \
+                    (progress_batch_interval and time.monotonic() - prog_last_flush >= progress_batch_interval):
+                _flush_progress()
+    if emit_progress:
+        _flush_progress()
     # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, including the
     # first-seen tie-break for markets that open on the same timestamp. The
     # equity curve and max drawdown are order-dependent, so this must match.
@@ -2235,41 +2376,19 @@ def _build_backtest_params(
 
 
 
-@app.get(
-    "/api/backtest",
-    responses={
-        200: {"description": "Backtest simulation results"},
-        429: {"description": "Backtest simulation already in progress"},
-    },
-)
-async def api_backtest(
-    file: str = "",
-    offset: float = 0.02,
-    queue: float = 0.0,
-    pair_cost: float = 0.99,
-    exit_default_5m: float = 0.05,
-    exit_default_15m: float = 0.05,
-    exit_btc_5m: float = 0.05,
-    exit_sol_5m: float = 0.05,
-    exit_reversal: float = 0.02,
-    size: int = 5,
-    max_start_delay: float = 0.0,
-    filter_partial: bool = False,
-    quote_lo: float = 0.10,
-    quote_hi: float = 0.90,
-    entry_delay_sec: float = 0.0,
-    entry_delay_pct: float | None = None,
-    dead_zone_val: float = 0.10,
-    dead_zone_pct: float | None = None,
-    dead_zone_unit: str = "pct",
-    naked_leg_at_expiry: str = "close",
-    enable_leg_chase: bool = False,
-    limit_windows: int = 0,
-    series: str = "",
-    durations: str = "",
+def _prepare_backtest_request(
+    *, file, offset, queue, pair_cost, exit_default_5m, exit_default_15m,
+    exit_btc_5m, exit_sol_5m, exit_reversal, size, max_start_delay,
+    filter_partial, quote_lo, quote_hi, entry_delay_sec, entry_delay_pct,
+    dead_zone_val, dead_zone_pct, dead_zone_unit, naked_leg_at_expiry,
+    enable_leg_chase, series, durations,
 ):
-    """Run backtest simulation on selected tick file or all files in run/ticks/."""
-    from backtest import BacktestParams
+    """Shared validation + preparation for /api/backtest and /api/backtest/stream.
+
+    Issue #331: both endpoints must return identical validation error shapes
+    before any run starts. Returns (None, error_response) on invalid input or
+    ("ok", ctx) with everything the worker submission needs.
+    """
     from backtest.selection import parse_durations, parse_series_tokens
 
     # Issue #308: market-series / time-frame selection, same semantics as the
@@ -2279,7 +2398,7 @@ async def api_backtest(
         series_tokens = parse_series_tokens(series)
         duration_values = parse_durations(durations)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+        return None, JSONResponse(status_code=400, content={"error": str(exc)})
 
     size = max(5, int(size))
 
@@ -2308,7 +2427,7 @@ async def api_backtest(
     )
 
     if not TICKS_DIR.exists():
-        return {
+        return None, {
             "error": "no ticks dir",
             "params_hash": params.params_hash(),
             "overall": {},
@@ -2326,13 +2445,13 @@ async def api_backtest(
         # the pristine/ subpath while still rejecting traversal.
         status, source = _resolve_tick_file(file)
         if status == "invalid":
-            return {
+            return None, {
                 "error": "invalid file param",
                 "params_hash": params.params_hash(),
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             }
         if status == "not_found":
-            return {
+            return None, {
                 "error": f"file not found: {file}",
                 "params_hash": params.params_hash(),
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
@@ -2385,6 +2504,75 @@ async def api_backtest(
         "durations": durations,
     }
 
+    return "ok", {
+        "params": params,
+        "params_dict": asdict(params) if is_dataclass(params) else dict(params),
+        "size": size,
+        "max_start_delay": max_start_delay,
+        "raw_params": raw_params,
+        "empty_params": empty_params,
+        "series": series,
+        "durations": durations,
+        "source_path_str": source_path_str,
+        "series_tokens": series_tokens,
+        "duration_values": duration_values,
+    }
+
+
+@app.get(
+    "/api/backtest",
+    responses={
+        200: {"description": "Backtest simulation results"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest(
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    limit_windows: int = 0,
+    series: str = "",
+    durations: str = "",
+):
+    """Run backtest simulation on selected tick file or all files in run/ticks/."""
+    status, ctx = _prepare_backtest_request(
+        file=file, offset=offset, queue=queue, pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m, exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m, exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal, size=size, max_start_delay=max_start_delay,
+        filter_partial=filter_partial, quote_lo=quote_lo, quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec, entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val, dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit, naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase, series=series, durations=durations,
+    )
+    if status != "ok":
+        return ctx
+    params = ctx["params"]
+    params_dict = ctx["params_dict"]
+    raw_params = ctx["raw_params"]
+    empty_params = ctx["empty_params"]
+    source_path_str = ctx["source_path_str"]
+    max_start_delay = ctx["max_start_delay"]
+
     global _BACKTEST_RUNNING, _BACKTEST_POOL
     semaphore = get_backtest_semaphore()
     with _BACKTEST_LOCK:
@@ -2406,7 +2594,6 @@ async def api_backtest(
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
-            params_dict = asdict(params) if is_dataclass(params) else dict(params)
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -2432,19 +2619,180 @@ async def api_backtest(
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        pool = _BACKTEST_POOL
-        _BACKTEST_POOL = None
-        if pool is not None:
-            for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            pool.shutdown(wait=False, cancel_futures=True)
+        _terminate_backtest_pool()
         raise HTTPException(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
                     "Narrow the dataset, markets or timeframes and try again."))
+
+
+@app.get(
+    "/api/backtest/stream",
+    responses={
+        200: {"description": "SSE stream: progress events then one final result"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest_stream(
+    request: Request,
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    limit_windows: int = 0,
+    series: str = "",
+    durations: str = "",
+):
+    """Stream backtest progress over SSE, then one authoritative final result.
+
+    Issue #331: same guards, validation shapes and worker as the blocking
+    `/api/backtest`; on client disconnect or timeout the pool is terminated and
+    the guards are released synchronously so the next run can start at once.
+    """
+    _verify_safe_origin(request)
+    status, ctx = _prepare_backtest_request(
+        file=file, offset=offset, queue=queue, pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m, exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m, exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal, size=size, max_start_delay=max_start_delay,
+        filter_partial=filter_partial, quote_lo=quote_lo, quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec, entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val, dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit, naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase, series=series, durations=durations,
+    )
+    if status != "ok":
+        return ctx
+    params = ctx["params"]
+    params_dict = ctx["params_dict"]
+    raw_params = ctx["raw_params"]
+    empty_params = ctx["empty_params"]
+    source_path_str = ctx["source_path_str"]
+
+    semaphore = get_backtest_semaphore()
+    with _BACKTEST_LOCK:
+        global _BACKTEST_RUNNING
+        if _BACKTEST_RUNNING or semaphore.locked():
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "Backtest simulation already in progress. Please retry shortly.",
+                    "params_hash": params.params_hash(),
+                    "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+                },
+            )
+        _BACKTEST_RUNNING = True
+    await semaphore.acquire()
+
+    release_guards = _make_backtest_guard_releaser()
+    # Issue #331 review: create the queue before it can fail the run, and off
+    # the event loop — the first call spawns the manager process. A failure
+    # here must release the guards we already hold, not wedge them at 429
+    # until restart.
+    try:
+        progress_queue = await asyncio.to_thread(_new_backtest_progress_queue)
+    except Exception as exc:
+        release_guards()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": f"Backtest progress channel unavailable: {exc}",
+                "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            },
+        )
+    loop = asyncio.get_running_loop()
+
+    async def _submit():
+        """Submit the worker; eventual guard release even if the stream dies early."""
+        try:
+            pool = get_backtest_pool()
+            return await loop.run_in_executor(
+                pool,
+                _run_backtest_simulation_worker,
+                str(TICKS_DIR),
+                source_path_str,
+                params_dict,
+                ctx["size"],
+                ctx["max_start_delay"],
+                limit_windows,
+                raw_params,
+                empty_params,
+                series,
+                durations,
+                progress_queue,
+                50,     # progress_batch_windows
+                0.25,   # progress_batch_interval (sec)
+            )
+        finally:
+            release_guards()
+
+    worker_task = asyncio.create_task(_submit())
+
+    async def event_generator():
+        """Stream progress envelopes, then one authoritative final event."""
+        completed = False
+        deadline = time.monotonic() + BACKTEST_TIMEOUT_SEC
+        try:
+            while not worker_task.done():
+                if await request.is_disconnected():
+                    return
+                if time.monotonic() > deadline:
+                    yield {"event": "message", "data": json.dumps({
+                        "type": "error",
+                        "error": (f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
+                                  "Narrow the dataset, markets or timeframes and try again."),
+                    })}
+                    return
+                try:
+                    msg = await asyncio.to_thread(progress_queue.get, True, 0.05)
+                    yield {"event": "message", "data": json.dumps(
+                        {"type": "progress", **msg})}
+                except _pyqueue.Empty:
+                    continue
+            # Drain remaining progress before the authoritative final event.
+            while True:
+                try:
+                    msg = progress_queue.get_nowait()
+                    yield {"event": "message", "data": json.dumps(
+                        {"type": "progress", **msg})}
+                except _pyqueue.Empty:
+                    break
+            completed = True
+            result = worker_task.result()
+            yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream (sse_starlette cancels the generator).
+            raise
+        except Exception as exc:
+            yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
+        finally:
+            if not completed:
+                # Disconnect or timeout: kill the worker now, free capacity at
+                # once. The stale task may later fail with a broken-pool error;
+                # its release-once call is then a no-op, so a newer run's
+                # guards are untouched. The next request rebuilds the pool.
+                _terminate_backtest_pool()
+                release_guards()
+
+    return EventSourceResponse(event_generator())
 
 
 @app.get(
@@ -2587,15 +2935,7 @@ async def api_backtest_sweep(
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        pool = _BACKTEST_POOL
-        _BACKTEST_POOL = None
-        if pool is not None:
-            for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            pool.shutdown(wait=False, cancel_futures=True)
+        _terminate_backtest_pool()
         raise HTTPException(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -6304,6 +6644,443 @@ function btControlQuery(v, axis){
   return q;
 }
 
+// Issue #331: the authoritative final render, extracted verbatim from the
+// former success path of runBacktest. `data` is the exact backtest result dict;
+// `fileVal` feeds the hash badge suffix. Any stream transport may call this —
+// the chart and payload rendering must stay identical to the blocking era.
+function renderBacktestResult(data, fileVal){
+  const ov = data.overall || {};
+  const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
+  const tookMs = window._btStartTime ? (performance.now() - window._btStartTime) : 0;
+  const tookStr = fmtElapsed(tookMs);
+  const tookTxt = tookStr ? ` · took ${tookStr}` : '';
+  $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}${tookTxt}`;
+// Persistent "how long did the results take" badge next to the Run Sweep
+// button — the in-button counter resets to "Run Sweep" when the run ends.
+  const lastRun = $('btLastRunTime');
+  if(lastRun && window._btStartTime){
+    lastRun.textContent = `✓ results in ${tookStr}`;
+  }
+  const elTime = $('btElapsedTime');
+  if(elTime){
+    elTime.textContent = tookStr;
+    elTime.style.color = 'var(--cyan)';
+  }
+  const elSub = $('btElapsedSub');
+  if(elSub){
+    elSub.textContent = 'Sweep duration';
+  }
+  $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);  $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
+  $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
+  $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
+  $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs${enteredTxt}`;
+  $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
+  $('btExitsCount').textContent = `${ov.exits||0} exits`;
+  $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
+  $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
+  if ($('btWinsCount')) {
+    $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
+  }
+
+// Equity Curve Chart
+  const eqData = data.equity_curve || [];
+  const labels = eqData.map(e => e.window_idx);
+  const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
+
+// Zero-fill / flatline warning diagnostic (issue #204)
+  const fillsCount = (ov.pairs || 0) + (ov.exits || 0);
+  const hasFills = fillsCount > 0 || (ov.total_pnl_cents || 0) !== 0;
+  if ($('btEquityWarning')) {
+    if (!hasFills) {
+      if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
+        $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry delay).`;
+      } else {
+        $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Check tape data density for this dataset.';
+      }
+      $('btEquityWarning').style.display = 'inline-block';
+    } else {
+      $('btEquityWarning').style.display = 'none';
+    }
+  }
+
+  const minPnl = pnlValues.length ? Math.min(...pnlValues) : 0;
+  const maxPnl = pnlValues.length ? Math.max(...pnlValues) : 0;
+  const pnlSpan = Math.max(Math.abs(maxPnl - minPnl), Math.abs(maxPnl) * 0.15, 0.5);
+  const pnlPad = Math.max(pnlSpan * 0.20, 0.35);
+
+destroyChartInstance('chartEquity');
+  const ctx = $('chartEquity').getContext('2d');
+  const theme = getThemeTokens();
+equityChartInstance = new Chart(ctx, {
+  type: 'line',
+  plugins: [{
+    id: 'equityZeroLine',
+    afterDraw: function(chart) {
+      const yScale = chart.scales.y;
+      if (!yScale) return;
+      const y0 = yScale.getPixelForValue(0);
+      if (y0 >= chart.chartArea.top && y0 <= chart.chartArea.bottom) {
+        const c = chart.ctx;
+        c.save();
+        c.beginPath();
+        c.setLineDash([6, 4]);
+        c.strokeStyle = theme.gold;
+        c.lineWidth = 1.5;
+        c.moveTo(chart.chartArea.left, y0);
+        c.lineTo(chart.chartArea.right, y0);
+        c.stroke();
+        c.restore();
+      }
+    }
+  }],
+  data: {
+    labels: labels,
+    datasets: [{
+      label: 'Cumulative PnL ($)',
+      data: pnlValues,
+      borderColor: (ov.total_pnl_cents||0)>=0 ? theme.up : theme.down,
+      backgroundColor: (ov.total_pnl_cents||0)>=0 ? hexToRgba(theme.up, 0.1) : hexToRgba(theme.down, 0.1),
+      fill: true,
+      tension: 0.1,
+      pointRadius: labels.length > 100 ? 0 : 2,
+    }]
+  },
+  options: {
+    responsive: true,
+    layout: {
+      padding: { left: 8, right: 14, top: 14, bottom: 10 }
+    },
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        offset: true,
+        title: { display: true, text: 'Window', color: theme.dim },
+        ticks: { color: theme.dim, maxTicksLimit: 12 },
+        grid: { color: theme.line }
+      },
+      y: {
+        grace: '18%',
+        suggestedMax: Math.max(0, maxPnl) + pnlPad,
+        suggestedMin: Math.min(0, minPnl) - pnlPad,
+        title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
+        ticks: {
+          color: theme.dim,
+          callback: function(v){ return '$' + Number(v).toFixed(2); }
+        },
+        grid: {
+          color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+          lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+          borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
+        }
+      }
+    }
+  }
+});
+
+// Per-Window P&L Distribution Histogram (Issue #136)
+  const histData = data.pnl_histogram || { buckets: [], n: 0, bucket_width_cents: 1.0, mean_cents: 0.0, median_cents: 0.0 };
+  const histBuckets = histData.buckets || [];
+  const histStatsEl = $('btPnlHistStats');
+  const histWarnEl = $('btPnlHistWarning');
+  if (histStatsEl) {
+    if (histData.n > 0) {
+      const meanStr = fmtUsd(histData.mean_cents || 0, true);
+      const medStr = fmtUsd(histData.median_cents || 0, true);
+      const bwStr = ((histData.bucket_width_cents || 0) / 100).toFixed(2);
+      histStatsEl.textContent = `n=${histData.n} · Δ=$${bwStr} · Mean ${meanStr} · Median ${medStr}`;
+    } else {
+      histStatsEl.textContent = '';
+    }
+  }
+  if (histWarnEl) {
+    histWarnEl.style.display = (!hasFills && histData.n > 0) ? 'inline-block' : 'none';
+  }
+
+destroyChartInstance('chartPnlHist');
+if ($('chartPnlHist')) {
+  const histCtx = $('chartPnlHist').getContext('2d');
+  const minEdge = histBuckets.length ? (histBuckets[0].lo / 100) : 0;
+  const maxEdge = histBuckets.length ? (histBuckets[histBuckets.length - 1].hi / 100) : 1;
+  const dataPoints = histBuckets.map(b => ({
+    x: (b.lo + b.hi) / 200,
+    y: b.count
+  }));
+  const allEdges = [];
+  for (let i = 0; i <= histBuckets.length; i++) {
+    const val = i === histBuckets.length ? histBuckets[i - 1].hi / 100 : histBuckets[i].lo / 100;
+    allEdges.push(Math.round(val * 100) / 100);
+  }
+  const histCounts = histBuckets.map(b => b.count);
+  const histBgColors = histBuckets.map(b => {
+    if (b.hi <= 0) return hexToRgba(theme.down, 0.7);
+    if (b.lo >= 0) return hexToRgba(theme.up, 0.7);
+    return hexToRgba(theme.dim, 0.6);
+  });
+  const histBorderColors = histBuckets.map(b => {
+    if (b.hi <= 0) return theme.down;
+    if (b.lo >= 0) return theme.up;
+    return theme.dim;
+  });
+
+  const maxHistCount = histCounts.length ? Math.max(...histCounts) : 0;
+  const histYPad = Math.max(1, Math.ceil(maxHistCount * 0.25));
+
+  pnlHistChartInstance = new Chart(histCtx, {
+    type: 'bar',
+    plugins: [{
+      id: 'pnlHistZeroLine',
+      afterDraw: function(chart) {
+        const xScale = chart.scales.x;
+        if (!xScale) return;
+        const x0 = xScale.getPixelForValue(0);
+        if (x0 >= chart.chartArea.left && x0 <= chart.chartArea.right) {
+          const c = chart.ctx;
+          c.save();
+          c.beginPath();
+          c.setLineDash([6, 4]);
+          c.strokeStyle = theme.gold;
+          c.lineWidth = 2;
+          c.moveTo(x0, chart.chartArea.top);
+          c.lineTo(x0, chart.chartArea.bottom);
+          c.stroke();
+          c.restore();
+        }
+      }
+    }],
+    data: {
+      datasets: [{
+        label: 'Windows',
+        data: dataPoints,
+        backgroundColor: histBgColors,
+        borderColor: histBorderColors,
+        borderWidth: 1,
+        barPercentage: 1.0,
+        categoryPercentage: 1.0,
+      }]
+    },
+    options: {
+      responsive: true,
+      layout: {
+        padding: { left: 8, right: 14, top: 14, bottom: 8 }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function(items) {
+              if (!items.length) return '';
+              const b = histBuckets[items[0].dataIndex];
+              if (!b) return '';
+              const loSign = b.lo < 0 ? '-$' : '$';
+              const hiSign = b.hi < 0 ? '-$' : '$';
+              const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
+              const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
+              return `P&L Range: ${loStr} to ${hiStr}`;
+            },
+            label: function(item) {
+              const pct = histData.n ? ((item.parsed.y / histData.n) * 100).toFixed(1) : '0.0';
+              return ` ${item.parsed.y} windows (${pct}%)`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          offset: false,
+          min: minEdge,
+          max: maxEdge,
+          afterBuildTicks: function(scale) {
+            let chosen = allEdges;
+            if (allEdges.length > 14) {
+              const stride = Math.ceil(allEdges.length / 10);
+              chosen = allEdges.filter((v, idx) => idx % stride === 0 || Math.abs(v) < 0.001 || idx === allEdges.length - 1);
+            }
+            scale.ticks = chosen.map(v => ({ value: v }));
+          },
+          title: { display: true, text: 'Window P&L ($)', color: theme.dim },
+          ticks: {
+            color: theme.dim,
+            maxRotation: 45,
+            minRotation: 0,
+            autoSkip: false,
+            callback: function(v) {
+              const num = Number(v);
+              return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
+            }
+          },
+          grid: {
+            offset: false,
+            color: function(ctx) {
+              return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? theme.gold : theme.line;
+            },
+            lineWidth: function(ctx) {
+              return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? 2 : 1;
+            },
+            borderDash: function(ctx) {
+              return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? [6, 4] : [];
+            }
+          }
+        },
+        y: {
+          beginAtZero: true,
+          grace: 1,
+          suggestedMax: maxHistCount + histYPad,
+          title: { display: true, text: 'Windows Count', color: theme.dim },
+          ticks: { color: theme.dim, precision: 0 },
+          grid: { color: theme.line }
+        }
+      }
+    }
+  });
+}
+
+// Per series table with tooltips and execution vs oscillation clarity
+let stbl = '<table class="tbl"><thead><tr>'
+  + '<th>Series</th>'
+  + '<th>Windows</th>'
+  + '<th title="Both legs filled & merged for profit. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
+  + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
+  + '<th>Total P&L ($)</th>'
+  + '<th>Avg / Window ($)</th>'
+  + '<th title="Price excursion >= 2c in both directions vs 50c mid. Market oscillation does not guarantee limit order fills.">Oscillating ℹ️</th>'
+  + '<th>Monotonic</th>'
+  + '</tr></thead><tbody>';
+for(const [k,v] of Object.entries(data.per_series||{})){
+  const label = canonicalMarketName(k || v.label);
+  stbl+=`<tr><td style="font-weight:700">${esc(label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
+}
+stbl+='</tbody></table>';
+$('btSeriesTableWrap').innerHTML=stbl;
+
+// Populate Series Filter dropdown for Executed Windows Log
+window.allBacktestTrades = data.trades_sample || [];
+window.btLogCurrentPage = 1;
+if ($('btLogSeriesFilter')) {
+  const currentVal = $('btLogSeriesFilter').value;
+  const seriesLabels = new Map();
+  for (const t of window.allBacktestTrades) {
+    if (t.series) seriesLabels.set(t.series, canonicalMarketName(t.series || t.label));
+  }
+  let opts = '<option value="">All Series</option>';
+  for (const [slug, label] of seriesLabels.entries()) {
+    opts += `<option value="${esc(slug)}"${currentVal === slug ? ' selected' : ''}>${esc(label)}</option>`;
+  }
+  $('btLogSeriesFilter').innerHTML = opts;
+}
+
+renderBacktestTradesPage();
+}
+
+// Backtest failure banner, shared by the HTTP-error and stream-error paths.
+function markBacktestFailed(errMsg){
+  $('btHash').textContent = `Backtest error: ${errMsg}`;
+  const lastRun = $('btLastRunTime');
+  if (lastRun) lastRun.textContent = `✗ error: ${errMsg}`;
+  const elTime = $('btElapsedTime');
+  if (elTime) {
+    elTime.textContent = '--';
+    elTime.style.color = 'var(--down)';
+  }
+  const elSub = $('btElapsedSub');
+  if (elSub) elSub.textContent = 'Failed';
+}
+
+// Provisional live equity chart during a streaming run (issue #331).
+let btProvisionalChart = null;
+
+function btBeginProvisionalChart(){
+  destroyChartInstance('chartEquity');
+  if (btProvisionalChart) { try { btProvisionalChart.destroy(); } catch {} btProvisionalChart = null; }
+  if (!$('chartEquity')) return;
+  const ctx = $('chartEquity').getContext('2d');
+  const theme = getThemeTokens();
+  btProvisionalChart = new Chart(ctx, {
+    type: 'line',
+    plugins: [],
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Cumulative PnL ($) — provisional',
+        data: [],
+        borderColor: theme.cyan || '#4dd0e1',
+        backgroundColor: 'rgba(0,0,0,0)',
+        fill: false,
+        tension: 0.1,
+        pointRadius: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      layout: { padding: { left: 8, right: 14, top: 14, bottom: 10 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { offset: true, title: { display: true, text: 'Window', color: theme.dim },
+             ticks: { color: theme.dim, maxTicksLimit: 12 }, grid: { color: theme.line } },
+        y: { grace: '18%',
+             title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
+             ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } },
+             grid: { color: theme.line } }
+      }
+    }
+  });
+}
+
+function btAppendProvisionalPoints(msg){
+  if (!btProvisionalChart || !msg || !Array.isArray(msg.points)) return;
+  const ds = btProvisionalChart.data.datasets[0];
+  for (const p of msg.points) {
+    btProvisionalChart.data.labels.push(btProvisionalChart.data.labels.length + 1);
+    ds.data.push(((p.cumulative_pnl_cents || 0) / 100).toFixed(2));
+  }
+  if (msg.windows_done !== undefined) {
+    const elSub = $('btElapsedSub');
+    if (elSub && elSub.textContent.startsWith('Simulating…')) {
+      elSub.textContent = `Simulating… ${msg.windows_done} windows · ${((msg.provisional_total_pnl_cents || 0) / 100).toFixed(2)} USD`;
+    }
+  }
+  btProvisionalChart.update('none');
+}
+
+function btDestroyProvisionalChart(){
+  if (btProvisionalChart) { try { btProvisionalChart.destroy(); } catch {} btProvisionalChart = null; }
+}
+
+// Minimal SSE parser over a fetch body reader: split on blank lines, take the
+// `data:` payloads. Used only for /api/backtest/stream — EventSource is not
+// usable here because its automatic reconnect would start duplicate runs.
+async function consumeBacktestStream(res, ctl, onEvent){
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const {done, value} = await reader.read();
+    if (window._btAbort !== ctl) { try { await reader.cancel(); } catch {} return; }
+    if (done) break;
+    buf += decoder.decode(value, {stream: true});
+    // Minimal SSE parser: split on sse-starlette's CRLF separators and blank
+    // lines. Blocks end either at "\r\n\r\n" (the library's default separator)
+    // or at "\n\n" — handle both so a separator change cannot wedge the curve.
+    let idx;
+    while ((idx = Math.min(
+        buf.indexOf('\r\n\r\n') >= 0 ? buf.indexOf('\r\n\r\n') : Infinity,
+        buf.indexOf('\n\n') >= 0 ? buf.indexOf('\n\n') : Infinity)) < Infinity) {
+      const sepLen = buf.startsWith('\r\n\r\n', idx) ? 4 : 2;
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + sepLen);
+      for (const line of block.split(/\r\n|\n/)) {
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim();
+          if (payload) {
+            try { onEvent(JSON.parse(payload)); } catch (e) { console.error('bad SSE payload', e); }
+          }
+        }
+      }
+    }
+  }
+}
+
 async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
@@ -6311,367 +7088,68 @@ async function runBacktest(fileOverride){
   window._btRunning = true;
   setBacktestLoadingState(true);
   startBtTimer();
+  let fileVal = '';
   try {
     const v = btControlValues();
     const size = v.size;
     if ($('btSize')) $('btSize').value = size;
-    const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
+    fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
-    const url = `/api/backtest?${btControlQuery(v)}`;
-    const res = await fetch(url, {signal: ctl.signal});
-    const data = await res.json();
-    if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
+    const url = `/api/backtest/stream?${btControlQuery(v)}`;
 
-    if (!res.ok || (data && data.error)) {
-      const errMsg = (data && data.error) ? data.error : `HTTP ${res.status}`;
-      $('btHash').textContent = `Backtest error: ${errMsg}`;
-      const lastRun = $('btLastRunTime');
-      if (lastRun) lastRun.textContent = `✗ error: ${errMsg}`;
-      const elTime = $('btElapsedTime');
-      if (elTime) {
-        elTime.textContent = '--';
-        elTime.style.color = 'var(--down)';
-      }
-      const elSub = $('btElapsedSub');
-      if (elSub) elSub.textContent = 'Failed';
+    // After an intentional abort of the previous stream, the server needs a
+    // moment to detect the disconnect and release the single-run guard; a
+    // fresh request can 429 briefly. Retry a bounded few times with a short
+    // delay before surfacing the 429.
+    let res = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      res = await fetch(url, {signal: ctl.signal});
+      if (window._btAbort !== ctl) return; // superseded — never render stale results
+      if (res.status !== 429 || window._btAbort === null) break;
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Validation and busy responses arrive as JSON (200/4xx), not SSE —
+    // branch on the content type so their `error` text reaches the operator
+    // instead of ending the run silently with a blank chart.
+    const ctype = (res.headers && res.headers.get('content-type')) || '';
+    if (!res.ok || !ctype.includes('text/event-stream')) {
+      let errMsg = `HTTP ${res.status}`;
+      try { const j = await res.json(); if (j && j.error) errMsg = j.error; } catch {}
+      if (window._btAbort === ctl) markBacktestFailed(errMsg);
       return;
     }
+    if (window._btAbort !== ctl) return;
 
-    const ov = data.overall || {};
-    const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
-    const tookMs = window._btStartTime ? (performance.now() - window._btStartTime) : 0;
-    const tookStr = fmtElapsed(tookMs);
-    const tookTxt = tookStr ? ` · took ${tookStr}` : '';
-    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}${tookTxt}`;
-    // Persistent "how long did the results take" badge next to the Run Sweep
-    // button — the in-button counter resets to "Run Sweep" when the run ends.
-    const lastRun = $('btLastRunTime');
-    if(lastRun && window._btStartTime){
-      lastRun.textContent = `✓ results in ${tookStr}`;
-    }
-    const elTime = $('btElapsedTime');
-    if(elTime){
-      elTime.textContent = tookStr;
-      elTime.style.color = 'var(--cyan)';
-    }
-    const elSub = $('btElapsedSub');
-    if(elSub){
-      elSub.textContent = 'Sweep duration';
-    }
-    $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);
-    $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
-    $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
-    $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
-    $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs${enteredTxt}`;
-    $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
-    $('btExitsCount').textContent = `${ov.exits||0} exits`;
-    $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
-    $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
-    if ($('btWinsCount')) {
-      $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
-    }
+    btBeginProvisionalChart();
 
-    // Equity Curve Chart
-    const eqData = data.equity_curve || [];
-    const labels = eqData.map(e => e.window_idx);
-    const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
-
-    // Zero-fill / flatline warning diagnostic (issue #204)
-    const fillsCount = (ov.pairs || 0) + (ov.exits || 0);
-    const hasFills = fillsCount > 0 || (ov.total_pnl_cents || 0) !== 0;
-    if ($('btEquityWarning')) {
-      if (!hasFills) {
-        if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
-          $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry delay).`;
-        } else {
-          $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Check tape data density for this dataset.';
-        }
-        $('btEquityWarning').style.display = 'inline-block';
-      } else {
-        $('btEquityWarning').style.display = 'none';
-      }
-    }
-
-    const minPnl = pnlValues.length ? Math.min(...pnlValues) : 0;
-    const maxPnl = pnlValues.length ? Math.max(...pnlValues) : 0;
-    const pnlSpan = Math.max(Math.abs(maxPnl - minPnl), Math.abs(maxPnl) * 0.15, 0.5);
-    const pnlPad = Math.max(pnlSpan * 0.20, 0.35);
-
-    destroyChartInstance('chartEquity');
-    const ctx = $('chartEquity').getContext('2d');
-    const theme = getThemeTokens();
-    equityChartInstance = new Chart(ctx, {
-      type: 'line',
-      plugins: [{
-        id: 'equityZeroLine',
-        afterDraw: function(chart) {
-          const yScale = chart.scales.y;
-          if (!yScale) return;
-          const y0 = yScale.getPixelForValue(0);
-          if (y0 >= chart.chartArea.top && y0 <= chart.chartArea.bottom) {
-            const c = chart.ctx;
-            c.save();
-            c.beginPath();
-            c.setLineDash([6, 4]);
-            c.strokeStyle = theme.gold;
-            c.lineWidth = 1.5;
-            c.moveTo(chart.chartArea.left, y0);
-            c.lineTo(chart.chartArea.right, y0);
-            c.stroke();
-            c.restore();
-          }
-        }
-      }],
-      data: {
-        labels: labels,
-        datasets: [{
-          label: 'Cumulative PnL ($)',
-          data: pnlValues,
-          borderColor: (ov.total_pnl_cents||0)>=0 ? theme.up : theme.down,
-          backgroundColor: (ov.total_pnl_cents||0)>=0 ? hexToRgba(theme.up, 0.1) : hexToRgba(theme.down, 0.1),
-          fill: true,
-          tension: 0.1,
-          pointRadius: labels.length > 100 ? 0 : 2,
-        }]
-      },
-      options: {
-        responsive: true,
-        layout: {
-          padding: { left: 8, right: 14, top: 14, bottom: 10 }
-        },
-        plugins: { legend: { display: false } },
-        scales: {
-          x: {
-            offset: true,
-            title: { display: true, text: 'Window', color: theme.dim },
-            ticks: { color: theme.dim, maxTicksLimit: 12 },
-            grid: { color: theme.line }
-          },
-          y: {
-            grace: '18%',
-            suggestedMax: Math.max(0, maxPnl) + pnlPad,
-            suggestedMin: Math.min(0, minPnl) - pnlPad,
-            title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
-            ticks: {
-              color: theme.dim,
-              callback: function(v){ return '$' + Number(v).toFixed(2); }
-            },
-            grid: {
-              color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
-              lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
-              borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
-            }
-          }
-        }
+    await consumeBacktestStream(res, ctl, (ev) => {
+      if (window._btAbort !== ctl) return; // superseded — ignore stale events
+      if (ev.type === 'progress') {
+        btAppendProvisionalPoints(ev);
+      } else if (ev.type === 'final') {
+        btDestroyProvisionalChart();
+        renderBacktestResult(ev.result, fileVal);
+      } else if (ev.type === 'error') {
+        markBacktestFailed(ev.error || 'stream error');
       }
     });
-
-    // Per-Window P&L Distribution Histogram (Issue #136)
-    const histData = data.pnl_histogram || { buckets: [], n: 0, bucket_width_cents: 1.0, mean_cents: 0.0, median_cents: 0.0 };
-    const histBuckets = histData.buckets || [];
-    const histStatsEl = $('btPnlHistStats');
-    const histWarnEl = $('btPnlHistWarning');
-    if (histStatsEl) {
-      if (histData.n > 0) {
-        const meanStr = fmtUsd(histData.mean_cents || 0, true);
-        const medStr = fmtUsd(histData.median_cents || 0, true);
-        const bwStr = ((histData.bucket_width_cents || 0) / 100).toFixed(2);
-        histStatsEl.textContent = `n=${histData.n} · Δ=$${bwStr} · Mean ${meanStr} · Median ${medStr}`;
-      } else {
-        histStatsEl.textContent = '';
-      }
-    }
-    if (histWarnEl) {
-      histWarnEl.style.display = (!hasFills && histData.n > 0) ? 'inline-block' : 'none';
-    }
-
-    destroyChartInstance('chartPnlHist');
-    if ($('chartPnlHist')) {
-      const histCtx = $('chartPnlHist').getContext('2d');
-      const minEdge = histBuckets.length ? (histBuckets[0].lo / 100) : 0;
-      const maxEdge = histBuckets.length ? (histBuckets[histBuckets.length - 1].hi / 100) : 1;
-      const dataPoints = histBuckets.map(b => ({
-        x: (b.lo + b.hi) / 200,
-        y: b.count
-      }));
-      const allEdges = [];
-      for (let i = 0; i <= histBuckets.length; i++) {
-        const val = i === histBuckets.length ? histBuckets[i - 1].hi / 100 : histBuckets[i].lo / 100;
-        allEdges.push(Math.round(val * 100) / 100);
-      }
-      const histCounts = histBuckets.map(b => b.count);
-      const histBgColors = histBuckets.map(b => {
-        if (b.hi <= 0) return hexToRgba(theme.down, 0.7);
-        if (b.lo >= 0) return hexToRgba(theme.up, 0.7);
-        return hexToRgba(theme.dim, 0.6);
-      });
-      const histBorderColors = histBuckets.map(b => {
-        if (b.hi <= 0) return theme.down;
-        if (b.lo >= 0) return theme.up;
-        return theme.dim;
-      });
-
-      const maxHistCount = histCounts.length ? Math.max(...histCounts) : 0;
-      const histYPad = Math.max(1, Math.ceil(maxHistCount * 0.25));
-
-      pnlHistChartInstance = new Chart(histCtx, {
-        type: 'bar',
-        plugins: [{
-          id: 'pnlHistZeroLine',
-          afterDraw: function(chart) {
-            const xScale = chart.scales.x;
-            if (!xScale) return;
-            const x0 = xScale.getPixelForValue(0);
-            if (x0 >= chart.chartArea.left && x0 <= chart.chartArea.right) {
-              const c = chart.ctx;
-              c.save();
-              c.beginPath();
-              c.setLineDash([6, 4]);
-              c.strokeStyle = theme.gold;
-              c.lineWidth = 2;
-              c.moveTo(x0, chart.chartArea.top);
-              c.lineTo(x0, chart.chartArea.bottom);
-              c.stroke();
-              c.restore();
-            }
-          }
-        }],
-        data: {
-          datasets: [{
-            label: 'Windows',
-            data: dataPoints,
-            backgroundColor: histBgColors,
-            borderColor: histBorderColors,
-            borderWidth: 1,
-            barPercentage: 1.0,
-            categoryPercentage: 1.0,
-          }]
-        },
-        options: {
-          responsive: true,
-          layout: {
-            padding: { left: 8, right: 14, top: 14, bottom: 8 }
-          },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                title: function(items) {
-                  if (!items.length) return '';
-                  const b = histBuckets[items[0].dataIndex];
-                  if (!b) return '';
-                  const loSign = b.lo < 0 ? '-$' : '$';
-                  const hiSign = b.hi < 0 ? '-$' : '$';
-                  const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
-                  const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
-                  return `P&L Range: ${loStr} to ${hiStr}`;
-                },
-                label: function(item) {
-                  const pct = histData.n ? ((item.parsed.y / histData.n) * 100).toFixed(1) : '0.0';
-                  return ` ${item.parsed.y} windows (${pct}%)`;
-                }
-              }
-            }
-          },
-          scales: {
-            x: {
-              type: 'linear',
-              offset: false,
-              min: minEdge,
-              max: maxEdge,
-              afterBuildTicks: function(scale) {
-                let chosen = allEdges;
-                if (allEdges.length > 14) {
-                  const stride = Math.ceil(allEdges.length / 10);
-                  chosen = allEdges.filter((v, idx) => idx % stride === 0 || Math.abs(v) < 0.001 || idx === allEdges.length - 1);
-                }
-                scale.ticks = chosen.map(v => ({ value: v }));
-              },
-              title: { display: true, text: 'Window P&L ($)', color: theme.dim },
-              ticks: {
-                color: theme.dim,
-                maxRotation: 45,
-                minRotation: 0,
-                autoSkip: false,
-                callback: function(v) {
-                  const num = Number(v);
-                  return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
-                }
-              },
-              grid: {
-                offset: false,
-                color: function(ctx) {
-                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? theme.gold : theme.line;
-                },
-                lineWidth: function(ctx) {
-                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? 2 : 1;
-                },
-                borderDash: function(ctx) {
-                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? [6, 4] : [];
-                }
-              }
-            },
-            y: {
-              beginAtZero: true,
-              grace: 1,
-              suggestedMax: maxHistCount + histYPad,
-              title: { display: true, text: 'Windows Count', color: theme.dim },
-              ticks: { color: theme.dim, precision: 0 },
-              grid: { color: theme.line }
-            }
-          }
-        }
-      });
-    }
-
-    // Per series table with tooltips and execution vs oscillation clarity
-    let stbl = '<table class="tbl"><thead><tr>'
-      + '<th>Series</th>'
-      + '<th>Windows</th>'
-      + '<th title="Both legs filled & merged for profit. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
-      + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
-      + '<th>Total P&L ($)</th>'
-      + '<th>Avg / Window ($)</th>'
-      + '<th title="Price excursion >= 2c in both directions vs 50c mid. Market oscillation does not guarantee limit order fills.">Oscillating ℹ️</th>'
-      + '<th>Monotonic</th>'
-      + '</tr></thead><tbody>';
-    for(const [k,v] of Object.entries(data.per_series||{})){
-      const label = canonicalMarketName(k || v.label);
-      stbl+=`<tr><td style="font-weight:700">${esc(label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
-    }
-    stbl+='</tbody></table>';
-    $('btSeriesTableWrap').innerHTML=stbl;
-
-    // Populate Series Filter dropdown for Executed Windows Log
-    window.allBacktestTrades = data.trades_sample || [];
-    window.btLogCurrentPage = 1;
-    if ($('btLogSeriesFilter')) {
-      const currentVal = $('btLogSeriesFilter').value;
-      const seriesLabels = new Map();
-      for (const t of window.allBacktestTrades) {
-        if (t.series) seriesLabels.set(t.series, canonicalMarketName(t.series || t.label));
-      }
-      let opts = '<option value="">All Series</option>';
-      for (const [slug, label] of seriesLabels.entries()) {
-        opts += `<option value="${esc(slug)}"${currentVal === slug ? ' selected' : ''}>${esc(label)}</option>`;
-      }
-      $('btLogSeriesFilter').innerHTML = opts;
-    }
-
-    renderBacktestTradesPage();
   } catch(err) {
     if (err && err.name === 'AbortError') return;
     console.error('Error running backtest:', err);
   } finally {
+    // Only the current run may tear down the shared provisional chart — a
+    // superseded run's finally must not destroy the newer run's live curve.
     if (window._btAbort === ctl) {
+      btDestroyProvisionalChart();
       window._btAbort = null;
       window._btRunning = false;
       stopBtTimer();
       setBacktestLoadingState(false);
       const elSub = $('btElapsedSub');
-      if (elSub && elSub.textContent === 'Simulating…') {
+      if (elSub && (elSub.textContent === 'Simulating…' || elSub.textContent.startsWith('Simulating…'))) {
         elSub.textContent = 'Execution time';
       }
     }
