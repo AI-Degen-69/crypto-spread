@@ -106,6 +106,11 @@ def test_generate_sensitivity_grid():
     qr_rows = [(lbl, p) for lbl, p in grid if "quote_range=" in lbl]
     assert qr_rows
     assert all(p.offset == base.offset for _, p in qr_rows)
+    assert any("late_entry=" in label for label in labels)
+    le_rows = [(lbl, p) for lbl, p in grid if "late_entry=" in lbl]
+    assert len(le_rows) == 6
+    assert all(p.offset == base.offset for _, p in le_rows)
+    assert all(p.entry_delay_sec == 0.0 for _, p in le_rows)
 
 
 def test_generate_joint_grid():
@@ -598,6 +603,8 @@ def test_cli_only_new_axes_end_to_end(tmp_path: Path):
                         "entry_delay=60s", "entry_delay=10%", "entry_delay=20%"],
         "leg_chase": ["Baseline", "leg_chase=on"],
         "naked_leg": ["Baseline", "naked_leg=hold"],
+        "late_entry": ["Baseline", "late_entry=5%", "late_entry=10%",
+                       "late_entry=15%", "late_entry=20%", "late_entry=25%", "late_entry=30%"],
     }
     for axis, labels in expectations.items():
         out_json = tmp_path / f"sweep_{axis}.json"
