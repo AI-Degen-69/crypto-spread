@@ -235,6 +235,56 @@ def test_ws_book_kept_when_no_rest_book_fetched():
     assert mstate.book_source_down == "ws"
 
 
+def test_ws_authority_poll_still_fetches_rest_for_drift_guard(monkeypatch):
+    """Issue #353 (CodeRabbit #354): poll must fetch REST even when WS is fresh.
+
+    Both WS legs fresh + authority on: the poll must still return full REST
+    books so the drift guard can compare. A divergent REST leg then wins
+    that leg only via _update_market_strategy.
+    """
+    import strategy.live_trader as lt
+    import strategy.markets as mk
+
+    engine, slug, mstate = _ws_authority_harness()
+    now = time.time()
+    engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
+    engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
+    assert engine.is_ws_book_fresh(mstate, "UP")
+    assert engine.is_ws_book_fresh(mstate, "DOWN")
+
+    market = {"conditionId": "0x353abc", "slug": "btc-up-down-5m",
+              "up_token": "tok_up", "down_token": "tok_dn",
+              "start_ts": now - 10, "end_ts": now + 290}
+    monkeypatch.setattr(lt, "fetch_live_and_upcoming_markets",
+                        lambda series_slug, session=None: {"current": market, "next": None})
+    calls = []
+
+    def _fake_full_book(host, tok):
+        calls.append(tok)
+        if tok == "tok_up":
+            return {"best_bid": 0.28, "best_ask": 0.30,
+                    "bids": {"0.28": 50.0}, "asks": {"0.30": 60.0}}
+        return {"best_bid": 0.355, "best_ask": 0.375,
+                "bids": {"0.355": 40.0}, "asks": {"0.375": 45.0}}
+
+    monkeypatch.setattr(mk, "full_book", _fake_full_book)
+
+    res = engine._poll_single_market(slug)
+    assert res is not None
+    # Both REST books fetched despite both WS legs being fresh.
+    assert set(calls) == {"tok_up", "tok_dn"}
+    assert res["up_book"]["best_bid"] == 0.28
+    assert res["down_book"]["best_bid"] == 0.355
+
+    # End-to-end through the guard: divergent UP leg falls back to REST,
+    # agreeing DOWN leg keeps WS.
+    engine._update_market_strategy(slug, res, now)
+    assert mstate.up_bid == 0.28
+    assert mstate.book_source_up == "rest"
+    assert (mstate.down_bid, mstate.down_ask) == (0.36, 0.38)
+    assert mstate.book_source_down == "ws"
+
+
 def test_ws_book_authority_toggle_off_forces_rest():
     """Issue #353: `update_config(ws_book_authority=False)` isolates the socket.
 
