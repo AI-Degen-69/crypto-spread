@@ -2699,7 +2699,22 @@ async def api_backtest_stream(
     await semaphore.acquire()
 
     release_guards = _make_backtest_guard_releaser()
-    progress_queue = _new_backtest_progress_queue()
+    # Issue #331 review: create the queue before it can fail the run, and off
+    # the event loop — the first call spawns the manager process. A failure
+    # here must release the guards we already hold, not wedge them at 429
+    # until restart.
+    try:
+        progress_queue = await asyncio.to_thread(_new_backtest_progress_queue)
+    except Exception as exc:
+        release_guards()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": f"Backtest progress channel unavailable: {exc}",
+                "params_hash": params.params_hash(),
+                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            },
+        )
     loop = asyncio.get_running_loop()
 
     async def _submit():
@@ -7092,7 +7107,11 @@ async function runBacktest(fileOverride){
       await new Promise(r => setTimeout(r, 300));
     }
 
-    if (!res.ok) {
+    // Validation and busy responses arrive as JSON (200/4xx), not SSE —
+    // branch on the content type so their `error` text reaches the operator
+    // instead of ending the run silently with a blank chart.
+    const ctype = (res.headers && res.headers.get('content-type')) || '';
+    if (!res.ok || !ctype.includes('text/event-stream')) {
       let errMsg = `HTTP ${res.status}`;
       try { const j = await res.json(); if (j && j.error) errMsg = j.error; } catch {}
       if (window._btAbort === ctl) markBacktestFailed(errMsg);
@@ -7117,8 +7136,10 @@ async function runBacktest(fileOverride){
     if (err && err.name === 'AbortError') return;
     console.error('Error running backtest:', err);
   } finally {
-    btDestroyProvisionalChart();
+    // Only the current run may tear down the shared provisional chart — a
+    // superseded run's finally must not destroy the newer run's live curve.
     if (window._btAbort === ctl) {
+      btDestroyProvisionalChart();
       window._btAbort = null;
       window._btRunning = false;
       stopBtTimer();

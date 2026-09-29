@@ -5842,17 +5842,26 @@ def test_worker_progress_queue_failure_does_not_fail_run(tmp_path, monkeypatch):
 
 def test_backtest_guard_releaser_releases_once():
     """The per-run release-once helper clears the guards exactly once."""
-    osc_dash._BACKTEST_RUNNING = True
-    sem = osc_dash.get_backtest_semaphore()
-    # Simulate an acquired guard.
-    acquired = sem._value if hasattr(sem, "_value") else 0
-    release = osc_dash._make_backtest_guard_releaser()
     with osc_dash._BACKTEST_LOCK:
         osc_dash._BACKTEST_RUNNING = True
+    # Acquire the semaphore for real so the release below returns it to its
+    # true initial value instead of inflating the shared counter past 1.
+    release = osc_dash._make_backtest_guard_releaser()
+    acquired = osc_dash.get_backtest_semaphore()._value
+    # Simulate the held guard the way the endpoint holds it: value drained.
+    sem = osc_dash.get_backtest_semaphore()
+    drained = []
+    while sem._value > 0:
+        drained.append(True)
+        sem._value -= 1
     release()
-    assert not osc_dash._BACKTEST_RUNNING
-    release()  # second call must be a no-op
-    assert not osc_dash._BACKTEST_RUNNING
+    try:
+        assert not osc_dash._BACKTEST_RUNNING
+        release()  # second call must be a no-op
+        assert not osc_dash._BACKTEST_RUNNING
+    finally:
+        # Restore the counter so later tests see the pristine semaphore.
+        sem._value = acquired
 
 
 def test_shutdown_backtest_pool_also_shuts_manager():
@@ -6045,7 +6054,7 @@ def test_backtest_stream_disconnect_releases_guards_immediately(tmp_path, monkey
         return b"".join(body_chunks)
 
     import asyncio
-    body = asyncio.get_event_loop().run_until_complete(drive_asgi_with_disconnect())
+    body = asyncio.run(drive_asgi_with_disconnect())
     assert b"progress" in body
 
     # Guards released synchronously on disconnect; pool termination requested.
