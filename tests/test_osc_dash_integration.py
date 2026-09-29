@@ -1896,11 +1896,10 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
                  "entry_delay_pct", "dead_zone_pct", "naked_leg_at_expiry",
                  "enable_leg_chase", "max_start_delay", "series", "durations"):
         assert knob in html, f"{knob} never reaches the request"
-    # Both endpoints consume the shared builder, not a private copy.
-    # Issue #331: the backtest reader consumes /api/backtest/stream; the sweep
-    # stays a blocking call. Both must go through btControlQuery.
-    assert "/api/backtest/stream?${btControlQuery(v)}" in html
-    assert "/api/backtest/sweep?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in html
+    # Both endpoints consume the shared builder, not a private copy.        # Issue #331: the backtest reader consumes /api/backtest/stream; the
+        # sweep now consumes its stream too (#344). Both via btControlQuery.
+        assert "/api/backtest/stream?${btControlQuery(v)}" in html
+        assert "/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in html
     # The sweep reader must not re-read controls behind the helper's back.
     assert "const offset = $('btOffset')" not in html
     assert "const queue = $('btQueue')" not in html
@@ -2095,19 +2094,20 @@ def test_offset_sweep_matches_a_plain_backtest_without_the_queue_memo(
 def test_sweep_axis_select_offers_every_sweep_axis():
     """An axis added to SWEEP_AXES must be reachable from the page.
 
-    The parity tests are parametrised from `SWEEP_AXES` itself, so the axis
-    list cannot go untested — but only if the operator can select it. A new
+    Issue #344: the selector lives inside the sweep card's title (rendered by
+    `sweepCard` from the AXIS_LABELS list), not as a static dropdown row. A new
     axis also needs its Backtester controls in `_AXIS_CONTROLS`, or the parity
     test would silently compare a sweep against a backtest of something else.
     """
     html = osc_dash.FULL_APP_HTML
     select_start = html.index('<select id="btSweepAxis"')
     select = html[select_start:html.index("</select>", select_start)]
+    assert "axisOpts" in select  # options are generated from the axis list
+    # The generator list must cover every axis SWEEP_AXES defines.
+    gen_start = html.index("const axisOpts = ")
+    gen = html[gen_start:html.index("]", gen_start)]
     for axis in osc_dash.SWEEP_AXES:
-        assert f'<option value="{axis}"' in select, f"{axis} is not offered"
-    offered = set(re.findall(r'<option value="([^"]+)"', select))
-    assert offered == set(osc_dash.SWEEP_AXES), \
-        f"the axis dropdown and SWEEP_AXES disagree: {offered ^ set(osc_dash.SWEEP_AXES)}"
+        assert f"'{axis}'" in gen, f"{axis} is not offered in the title selector"
     assert set(_AXIS_CONTROLS) == set(osc_dash.SWEEP_AXES), \
         "the parity tests and the sweep axes have drifted apart"
 
@@ -2122,23 +2122,27 @@ def test_sweep_override_note_is_wired_into_the_meta_block():
     """
     html = osc_dash.FULL_APP_HTML
     assert "function sweepOverrideNote(" in html
-    assert "renderSweepVisual(data, v);" in html
-    assert "function renderSweepVisual(data, submitted)" in html
+    # Issue #344: the final render call carries the isProgress flag; progress
+    # events route through renderSweepVisual(view, v, true).
+    assert "renderSweepVisual(ev.result, v);" in html
+    assert "renderSweepVisual(buildSweepProgressView(axis, v, ev), v, true);" in html
+    assert "function renderSweepVisual(data, submitted, isProgress)" in html
+    assert "function renderSweepVisual(" in html
     # The card owns the verdict now — it calls the note helper with the same
     # pre-request snapshot and the response's point values.
     assert "sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)))" in html
     assert "sweepCard(submitted, data, statsHtml)" in html
     assert "function sweepCard(" in html
     # The renderer must not go behind the snapshot's back and read the page.
-    renderer = html[html.index("function renderSweepVisual(data, submitted)"):]
+    renderer = html[html.index("function renderSweepVisual("):]
     renderer = renderer[:renderer.index("\nfunction ")]
     assert "$('btOffset')" not in renderer
     assert "$('btQueue')" not in renderer
     # The display is the card alone: the grey stat sentence is gone, the
-    # subject is a title above the card, best-overall/best-market fold into
-    # a stat row inside it.
+    # subject is the axis selector inside the card's title (#344),
+    # best-overall/best-market fold into a stat row inside it.
     assert 'class="sweep-card"' in html
-    assert 'sweep-title-main' in html
+    assert '<select id="btSweepAxis"' in html
     assert 'sweep-stats' in html
     assert 'Best overall' in html
     assert 'Best market' in html
@@ -2191,10 +2195,12 @@ def test_sweep_override_note_wording_node():
     };
 
     // Card skeleton: title above the card, then the three labeled columns.
+    // Issue #344: the title IS the axis selector (the selected option carries
+    // the subject label); no separate sweep-title-main span anymore.
     const card = sweepCard(v, data);
     assert(card.includes('sweep-card'), card);
-    assert(card.includes('sweep-title-main'), card);
-    assert(card.includes('Shares Ahead Queue'), card);
+    assert(card.includes('<select id="btSweepAxis"'), card);
+    assert(card.includes('value="queue" selected'), card);
     assert(card.includes('testing 0, 10, 25, 50, 100, 200'), card);
     assert(card.includes('Markets'), card);
     assert(card.includes('sweep-mkt'), card);
@@ -2296,16 +2302,17 @@ def test_sweep_override_note_wording_node():
     assert(solNote.head === 'sweeps the SOL stop — replaces the submitted SOL 5m Stop Loss', solNote.head);
     assert(solNote.verdict.text === 'no bar equals it', solNote.head);
 
-    // Card level: axis titles, subject markers, verdict text.
+    // Card level: the axis selector IS the title (#344) — the selected option
+    // carries the subject label; subject markers, verdict text.
     const stopCard = sweepCard(v, { ...data, axis: 'exit_stop_default' });
-    assert(stopCard.includes('Exit Stop Loss — default'), stopCard);
+    assert(stopCard.includes('value="exit_stop_default" selected'), stopCard);
     assert(stopCard.split('← subject').length - 1 === 2, stopCard);
     assert(stopCard.includes('no bar equals your values'), stopCard);
 
     // BTC/SOL sweeps mark their own submitted stop as the subject — not the
     // Exit Stop 5m row the sweep holds unchanged.
     const btcCard = sweepCard(v, { ...data, axis: 'exit_stop_btc' });
-    assert(btcCard.includes('Exit Stop Loss — BTC'), btcCard);
+    assert(btcCard.includes('value="exit_stop_btc" selected'), btcCard);
     assert(btcCard.includes('>BTC 5m Stop ($) <span class="sweep-tag">← subject</span>'), btcCard);
     assert(btcCard.includes('>0.08<'), btcCard);
     assert(btcCard.split('← subject').length - 1 === 1, btcCard);
@@ -2313,7 +2320,7 @@ def test_sweep_override_note_wording_node():
     assert(btcCard.includes('no bar equals it'), btcCard);
 
     const solCard = sweepCard(v, { ...data, axis: 'exit_stop_sol' });
-    assert(solCard.includes('Exit Stop Loss — SOL'), solCard);
+    assert(solCard.includes('value="exit_stop_sol" selected'), solCard);
     assert(solCard.includes('>SOL 5m Stop ($) <span class="sweep-tag">← subject</span>'), solCard);
     assert(solCard.includes('>0.09<'), solCard);
     assert(solCard.split('← subject').length - 1 === 1, solCard);
@@ -2344,6 +2351,116 @@ def test_sweep_override_note_wording_node():
     )
     assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
     assert "SWEEP_OVERRIDE_NOTE_TESTS_PASSED" in res.stdout
+
+
+def test_sweep_stream_progress_before_final_and_parity(tmp_path, monkeypatch):
+    """Issue #344: the streamed sweep emits progress per settled row, its final
+    event equals the blocking sweep's payload, and running per-point totals
+    converge on the final points."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    mock_pool = _install_stream_test_harness(monkeypatch, tmp_path)
+
+    url = "/api/backtest/sweep/stream?axis=queue&file=fake_stream.jsonl&offset=0.02"
+    with client.stream("GET", url) as res:
+        assert res.status_code == 200
+        body = "".join(chunk for chunk in res.iter_text())
+    events = _parse_sse_events(body)
+    types = [e["type"] for e in events]
+    assert types.count("final") == 1
+    assert "progress" in types
+    final = events[-1]
+    assert final["type"] == "final"
+
+    blocking = client.get(
+        "/api/backtest/sweep?axis=queue&file=fake_stream.jsonl&offset=0.02").json()
+    assert json.dumps(final["result"], sort_keys=True) == json.dumps(blocking, sort_keys=True)
+
+    # Running totals converge: the last progress snapshot per point matches
+    # the final point's overall totals.
+    last_progress = next(e for e in reversed(events) if e["type"] == "progress")
+    assert len(last_progress["points"]) == len(blocking["points"])
+    for lp, fp in zip(last_progress["points"], blocking["points"]):
+        assert lp["value"] == fp["value"]
+        assert lp["overall"]["windows"] == fp["overall"]["windows"]
+        assert lp["overall"]["total_pnl_cents"] == fp["overall"]["total_pnl_cents"]
+
+    mock_pool.shutdown(wait=True)
+
+
+def test_sweep_stream_validation_and_busy(tmp_path, monkeypatch):
+    """Issue #344: unknown axis 400s, and the single-run guard 429s."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    mock_pool = _install_stream_test_harness(monkeypatch, tmp_path)
+
+    bad = client.get("/api/backtest/sweep/stream?axis=not-an-axis")
+    assert bad.status_code == 400
+    assert "unknown axis" in bad.json()["error"]
+
+    import threading
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_worker(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5.0)
+        return {"axis": "queue", "points": [], "series_order": [],
+                "series_labels": {}, "best_overall": None, "best_market": None,
+                "n_snaps": 0, "n_windows": 0}
+
+    monkeypatch.setattr(osc_dash, "_run_sweep_worker", blocking_worker)
+    t = threading.Thread(target=lambda: client.get("/api/backtest/sweep?axis=queue&file=fake_stream.jsonl"))
+    t.start()
+    assert started.wait(timeout=3.0)
+    res = client.get("/api/backtest/sweep/stream?axis=queue&file=fake_stream.jsonl")
+    assert res.status_code == 429
+    release.set()
+    t.join(timeout=5.0)
+    mock_pool.shutdown(wait=True)
+
+
+def test_sweep_frontend_contract(tmp_path):
+    """Issue #344: the SPA consumes the sweep stream, writes the card on run
+    click, and the axis selector lives in the card title — no dropdown row."""
+    html = osc_dash.FULL_APP_HTML
+    assert "/api/backtest/sweep/stream?axis=" in html
+    assert "buildSweepProgressView" in html
+    assert "sweepCardTail" in html
+    # The immediate card on run click (submitted values before results return).
+    assert "meta.innerHTML = sweepCard(v, {" in html
+    # The axis selector now renders inside the card title; changing it aborts
+    # any in-flight sweep stream before starting the new axis (review #345).
+    assert 'onchange="onSweepAxisChange()"' in html
+    assert "function onSweepAxisChange()" in html
+
+
+def test_sweep_worker_progress_points_converge(tmp_path, monkeypatch):
+    """Issue #344: the sweep worker's progress queue carries per-point running
+    totals whose final snapshot equals the returned points."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    q = _fake_queue_factory()
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    result = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        asdict(BacktestParams(offset=0.02)), "queue", 5, 0.0, 0, "", "",
+        progress_queue=q,
+    )
+    messages = []
+    while True:
+        try:
+            messages.append(q.get_nowait())
+        except Exception:
+            break
+    assert messages, "no sweep progress emitted"
+    last = messages[-1]
+    assert last["rows_done"] == last["rows_total"]
+    assert len(last["points"]) == len(result["points"])
+    for lp, fp in zip(last["points"], result["points"]):
+        assert lp["overall"] == fp["overall"]
+        assert lp["per_series"] == fp["per_series"]
 
 
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
