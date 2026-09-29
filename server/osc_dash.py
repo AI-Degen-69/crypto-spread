@@ -4245,6 +4245,9 @@ textarea:focus-visible,
       #btSweepMeta .sweep-row .v{color:var(--tx);font:11px var(--mono);text-align:left}
       #btSweepMeta .sweep-tag{font:700 8px var(--disp);letter-spacing:.6px;text-transform:uppercase;color:var(--gold)}
       #btSweepMeta .sweep-mkt{display:inline-block;font:11px var(--mono);color:var(--tx);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:0 0 4px 4px}
+      #btSweepMeta .sweep-mkt.off{color:var(--faint);background:transparent;border-style:dashed;opacity:.55}
+      #btSweepMeta .sweep-mkt-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+      #btSweepMeta .sweep-mkt-grid .sweep-mkt{display:block;text-align:center;margin:0}
       #btSweepMeta .sweep-stats{display:flex;flex-wrap:wrap;gap:6px 24px;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--line)}
       #btSweepMeta .sweep-stats > span{display:block}
       #btSweepMeta .sweep-stat-v{font:11.5px var(--mono);color:var(--tx)}
@@ -6899,10 +6902,20 @@ function sweepCard(v, data, statsHtml){
     exit_rev: 'Reversal Buffer'
   })[data.axis] || data.axis;
   const values = (data.points || []).map(p => p.label).join(', ');
-  const mkts = (data.series_order || []).map(k => (data.series_labels || {})[k] || k);
-  const mktsHtml = mkts.length
-    ? mkts.map(m => `<span class="sweep-mkt">${m}</span>`).join('')
-    : '<span class="sweep-row"><span class="k">All markets</span></span>';
+  // Markets grid: the full 10-series universe, always visible, in a fixed
+  // 5-column grid — 05m row above 15m row, one column per token. A market
+  // that did not take part in this run (filtered out or no windows) stays
+  // in place, grayed out, so the layout never jumps between runs.
+  const present = new Set();
+  (data.points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
+  const TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+  const mktChip = (token, dur) => {
+    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
+    const active = present.has(slug);
+    return `<span class="sweep-mkt${active ? '' : ' off'}">${dur === '5m' ? '05m' : '15m'} ${token}</span>`;
+  };
+  const mktsHtml = TOKENS.map(t => mktChip(t, '5m')).join('')
+    + TOKENS.map(t => mktChip(t, '15m')).join('');
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
     + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
     + `<span class="v">${val}</span></span>`;
@@ -6927,7 +6940,7 @@ function sweepCard(v, data, statsHtml){
   const markets = `
     <span class="sweep-dl">
       <span class="sweep-lab">Markets</span>
-      ${mktsHtml}
+      <span class="sweep-mkt-grid">${mktsHtml}</span>
     </span>`;
   const verdict = sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)));
   const verdictHtml = (verdict && verdict.verdict)

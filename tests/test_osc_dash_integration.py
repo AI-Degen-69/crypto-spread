@@ -2155,7 +2155,8 @@ def test_sweep_override_note_wording_node():
     const data = {
       axis: 'queue',
       points: [{label:'0', value:0},{label:'10', value:10},{label:'25', value:25},
-               {label:'50', value:50},{label:'100', value:100},{label:'200', value:200}],
+               {label:'50', value:50},{label:'100', value:100},{label:'200', value:200}]
+               .map(p => ({ ...p, series_present: ['eth-up-or-down-5m'] })),
       series_order: ['eth-up-or-down-5m'],
       series_labels: {'eth-up-or-down-5m': '5m ETH'}
     };
@@ -2168,7 +2169,19 @@ def test_sweep_override_note_wording_node():
     assert(card.includes('testing 0, 10, 25, 50, 100, 200'), card);
     assert(card.includes('Markets'), card);
     assert(card.includes('sweep-mkt'), card);
-    assert(card.includes('5m ETH'), card);
+    // The full universe is always shown: 05m row above the 15m row, one
+    // column per token, participants solid and absentees grayed out.
+    const tokens = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+    tokens.forEach(t => {
+      assert(card.includes(`05m ${t}</span>`), card);
+      assert(card.includes(`15m ${t}</span>`), card);
+    });
+    assert(card.includes('sweep-mkt-grid'), card);
+    // eth-up-or-down-5m participated: its chip solid; every 15m absent: dashed.
+    assert(card.includes('>05m ETH<'), card);
+    assert(!card.includes('class="sweep-mkt off">05m ETH<'), card);
+    assert(card.includes('class="sweep-mkt off">15m BTC<'), card);
+    assert(card.includes('sweep-mkt off'), card);
     assert(card.includes('Parameters held'), card);
     assert(card.includes('Designed constraints / rules'), card);
     // Stats fold into the card when the renderer passes them.
@@ -2226,9 +2239,13 @@ def test_sweep_override_note_wording_node():
     assert(!unk.includes('← subject'), unk);
     assert(unk.includes('Parameters held'), unk);
 
-    // Markets fallback when the response narrows nothing.
-    const allMkts = sweepCard(v, { ...data, series_order: [] });
-    assert(allMkts.includes('All markets'), allMkts);
+    // Markets stay permanent even when the response has no points: every
+    // chip grayed out, layout unchanged.
+    const allMkts = sweepCard(v, { ...data, points: [] });
+    tokens.forEach(t => {
+      assert(allMkts.includes(`class="sweep-mkt off">05m ${t}<`), allMkts);
+      assert(allMkts.includes(`class="sweep-mkt off">15m ${t}<`), allMkts);
+    });
 
     console.log('SWEEP_OVERRIDE_NOTE_TESTS_PASSED');
     process.exit(0);
