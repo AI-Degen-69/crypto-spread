@@ -2289,6 +2289,8 @@ def _run_sweep_worker(
     last_emit = 0.0
 
     def _put(msg: dict) -> None:
+        """Enqueue one progress message; a full/broken queue disables progress
+        only — the run and its result are untouched."""
         nonlocal emit_progress
         try:
             progress_queue.put_nowait(msg)
@@ -7823,6 +7825,11 @@ async function runSweepVisual(){
   const sel = btSelection();
   const selectedSeries = btSelectedSeriesSlugs(sel);
   window._btSweepSelection = sel;
+  // CodeRabbit round 1 (#356): explicit in-flight flag. The pending card is
+  // rendered below before `_btSweepAbort` exists, and `finally` never cleared
+  // the abort — so a chip toggle during the wait repainted the pending card,
+  // and a failed run blocked idle refreshes for the session.
+  window._btSweepInFlight = true;
   // Same reader the backtest uses, so the sweep's base point is exactly the
   // configuration shown on this page. Only `axis` varies; every other knob is
   // held at the operator's value. `size` is pinned to the page value because
@@ -7908,6 +7915,7 @@ async function runSweepVisual(){
     if (err && err.name === 'AbortError') return;
     if(meta){ meta.textContent = 'sweep failed: ' + err; }
   }finally{
+    window._btSweepInFlight = false;
     if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
   }
@@ -7937,8 +7945,11 @@ function renderSweepIdle(){
 
 // Issue #355: keep the idle grid aligned with Backtest Scope. Re-rendering never
 // starts a run, and an in-flight sweep keeps its run-start snapshot untouched.
+// CodeRabbit round 1 (#356): guard on the explicit in-flight flag, not the
+// abort controller — the abort only exists after the wait loop, and was never
+// cleared on failure.
 function refreshSweepIdleCard(){
-  if (window._btSweepAbort || (window._btSweepVisualData && !window._btSweepVisualData.idle)) return;
+  if (window._btSweepInFlight || (window._btSweepVisualData && !window._btSweepVisualData.idle)) return;
   renderSweepIdle();
 }
 

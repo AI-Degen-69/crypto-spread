@@ -7,7 +7,8 @@
 
 - **Size tier:** Standard — one file (`server/osc_dash.py`, backend + embedded frontend) plus
   one test file. Two architectural decisions (three-state grid, streaming progress cadence),
-  no new dependency, no API/schema change.
+  no new dependency or persisted schema change; the internal progress message now
+  allows `rows_total: null` for live events.
 - **Task type:** Code (primary) · Debug (the all-grey grid is the reported symptom) ·
   UX (the grid must stop lying about the selection).
 
@@ -53,7 +54,8 @@ one commit. The frontend grid is additive and low-risk.
 - **Change which markets the sweep replays** — rejected: selection semantics are correct and
   covered by `test_sweep_honours_market_and_duration_selection`; this is a display bug.
 - **Add a `phase` field to the progress message** — rejected: `rows_total: null` already
-  expresses "total not yet known" without widening the message contract.
+  expresses "total not yet known" without adding a field; it does widen the internal
+  progress-message contract, so the producer, consumer, and tests must support nullable totals.
 - **Emit every N windows** — rejected: window counts are dataset-dependent and unknown
   mid-stream; a time interval bounds the event count regardless of corpus size.
 

@@ -1948,11 +1948,22 @@ def test_sweep_selection_snapshot_reaches_every_render_path():
         body = body[:body.index("\n}")]
         assert "sweepMarketsGridHtml(data.points, data.selected_series)" in body, fname
     # Chip handlers keep an idle card aligned without ever starting a run.
+    # CodeRabbit round 1 (#356): the guard uses the explicit in-flight flag —
+    # the abort controller only exists after the wait loop and was never
+    # cleared on failure, so it both missed the race and stuck afterwards.
     assert "function refreshSweepIdleCard(" in html
     guard = html[html.index("function refreshSweepIdleCard("):]
     guard = guard[:guard.index("\n}")]
-    assert "window._btSweepAbort" in guard
+    assert "window._btSweepInFlight" in guard
     assert "idle" in guard
+    # The flag is set at run start (next to the selection snapshot) and
+    # cleared in the `finally` block, so idle refreshes resume after success
+    # or failure.
+    runner_head = runner[:runner.index("const v = btControlValues();")]
+    assert "window._btSweepInFlight = true;" in runner_head
+    fin = runner[runner.index("}finally{"):]
+    fin = fin[:fin.index("\n  }")]
+    assert "window._btSweepInFlight = false;" in fin
     for fname in ("toggleBtToken", "setBtTokensAll", "setBtDuration"):
         body = html[html.index(f"function {fname}("):]
         body = body[:body.index("\n}")]
@@ -2121,9 +2132,12 @@ def test_bt_selected_series_slugs_follow_the_chips():
     const snap = { tokens: ['BTC'], duration: '5m' };
     assert(btSelectedSeriesSlugs(snap).join(',') === 'btc-up-or-down-5m');
     """
+    import shutil
     import subprocess
-    import sys
-    proc = subprocess.run(["node", "-e", test_js], capture_output=True, text=True)
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
     assert proc.returncode == 0, proc.stderr
 
 
