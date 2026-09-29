@@ -7824,7 +7824,8 @@ async function runSweepVisual(){
   // a run that was asked for something else.
   const sel = btSelection();
   const selectedSeries = btSelectedSeriesSlugs(sel);
-  window._btSweepSelection = sel;
+  // Station VI (#355 closeout): the run-start snapshot travels in
+  // `selectedSeries`, not on `window` — nothing ever read the old handle.
   // CodeRabbit round 1 (#356): explicit in-flight flag. The pending card is
   // rendered below before `_btSweepAbort` exists, and `finally` never cleared
   // the abort — so a chip toggle during the wait repainted the pending card,
