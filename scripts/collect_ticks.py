@@ -579,12 +579,6 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
     """
     if ws_book is None:
         return  # socket not connected / token not subscribed: no evidence
-    shadow = stats.setdefault("book_shadow", {
-        "comparisons": 0, "divergent": 0,
-        "abs_bb_sum": 0.0, "abs_ba_sum": 0.0, "abs_mid_sum": 0.0,
-        "max_bb": 0.0, "max_ba": 0.0,
-        "per_series": {},
-    })
 
     def _num(v: Any) -> Optional[float]:
         """Parse one quote value to a finite float, or None when unusable."""
@@ -602,16 +596,35 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
     m_ws = book_math.mid(ws_book)
     d_mid = abs(m_rest - m_ws) if (m_rest is not None and m_ws is not None) else None
 
+    # A comparison needs at least one comparable best quote on BOTH books.
+    # A failed REST fetch (`_book_or_err` empty book) or an unpriced WS
+    # snapshot is no evidence of agreement — counting it would report venue
+    # outages as apparent consensus (#174 review).
+    if d_bb is None and d_ba is None:
+        return
+    shadow = stats.setdefault("book_shadow", {
+        "comparisons": 0, "divergent": 0,
+        "abs_bb_sum": 0.0, "abs_ba_sum": 0.0, "abs_mid_sum": 0.0,
+        "max_bb": 0.0, "max_ba": 0.0,
+        "per_series": {},
+    })
     shadow["comparisons"] += 1
     if d_bb is not None:
         shadow["abs_bb_sum"] += d_bb
         shadow["max_bb"] = max(shadow["max_bb"], d_bb)
+        shadow["bb_samples"] = shadow.get("bb_samples", 0) + 1
     if d_ba is not None:
         shadow["abs_ba_sum"] += d_ba
         shadow["max_ba"] = max(shadow["max_ba"], d_ba)
+        shadow["ba_samples"] = shadow.get("ba_samples", 0) + 1
     if d_mid is not None:
         shadow["abs_mid_sum"] += d_mid
-    divergent = any(d is not None and d > BOOK_SHADOW_TOLERANCE for d in (d_bb, d_ba))
+        shadow["mid_samples"] = shadow.get("mid_samples", 0) + 1
+    # Exact-threshold deltas stay within tolerance: 0.501 - 0.50 in float is a
+    # hair above 0.001, and the rule is divergence only when strictly greater.
+    epsilon = BOOK_SHADOW_TOLERANCE * 1e-6
+    divergent = any(d is not None and d > BOOK_SHADOW_TOLERANCE + epsilon
+                    for d in (d_bb, d_ba))
     if divergent:
         shadow["divergent"] += 1
     per_series = shadow["per_series"].setdefault(series_slug, {"comparisons": 0, "divergent": 0})
@@ -620,12 +633,16 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
         per_series["divergent"] += 1
 
     # Derived rates, recomputed each round so manifest.json carries ready-to-read
-    # numbers an operator can compare across runs without a calculator.
+    # numbers an operator can compare across runs without a calculator. Each
+    # mean divides by its own valid-sample count so one-sided books do not
+    # dilute the other fields' denominators.
     n = shadow["comparisons"]
     shadow["divergence_rate"] = round(shadow["divergent"] / n, 4) if n else None
-    shadow["mean_abs_bb_delta"] = round(shadow["abs_bb_sum"] / n, 6) if n else None
-    shadow["mean_abs_ba_delta"] = round(shadow["abs_ba_sum"] / n, 6) if n else None
-    shadow["mean_abs_mid_delta"] = round(shadow["abs_mid_sum"] / n, 6) if n else None
+    bb_n, ba_n, mid_n = (shadow.get("bb_samples", 0), shadow.get("ba_samples", 0),
+                         shadow.get("mid_samples", 0))
+    shadow["mean_abs_bb_delta"] = round(shadow["abs_bb_sum"] / bb_n, 6) if bb_n else None
+    shadow["mean_abs_ba_delta"] = round(shadow["abs_ba_sum"] / ba_n, 6) if ba_n else None
+    shadow["mean_abs_mid_delta"] = round(shadow["abs_mid_sum"] / mid_n, 6) if mid_n else None
     shadow["tolerance"] = BOOK_SHADOW_TOLERANCE
 
 
@@ -941,7 +958,9 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
         # Issue #174 Phase 1: shadow-compare the socket book against the REST
         # book just fetched, per token. Read-only — the REST book below stays
         # the recorded book, and a WS hiccup costs one skipped comparison.
-        if ws_bridge is not None:
+        # A disconnected bridge retains its cached books: comparing them would
+        # measure staleness, not disagreement, so require the live connection.
+        if ws_bridge is not None and getattr(ws_bridge, "is_connected", False):
             for tok, rbook in ((w["up_token"], ub), (w["down_token"], db)):
                 try:
                     shadow_compare_book(stats, series_slug, tok, rbook,

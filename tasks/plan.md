@@ -13,7 +13,7 @@ No provenance switch, no REST removal. Phases 2/3 stay gated on these numbers.
    - Compare against the REST book just fetched: best_bid delta, best_ask delta,
      mid delta, and whether the book diverges at all (delta > tolerance).
    - Accumulate rolling counters in `stats["book_shadow"]`:
-     `{comparisons, divergent, abs_bb_sum, abs_ba_sum, abs_mid_sum, max_bb, max_ba, per_token:{...}}`.
+     `{comparisons, divergent, abs_bb_sum, abs_ba_sum, abs_mid_sum, max_bb, max_ba, per_series:{...}}`.
    - Tolerance: 0.001 (0.1¢) — half a tick-grid step on most markets; below it
      the two books are the same for pricing purposes.
 3. **Publishing**:

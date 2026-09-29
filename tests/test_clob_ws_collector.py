@@ -1335,8 +1335,22 @@ def test_shadow_compare_equal_books_are_not_divergent():
     assert s["mean_abs_mid_delta"] is not None
 
 
+def test_shadow_compare_exact_tolerance_threshold_stays_within_tolerance():
+    """Exact 0.001 tick difference (e.g. 0.501 - 0.50) stays within tolerance."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.501, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    s = stats["book_shadow"]
+    assert s["comparisons"] == 1
+    assert s["divergent"] == 0
+    assert s["divergence_rate"] == 0.0
+
+
 def test_shadow_compare_ignores_missing_ws_snapshot_and_garbage():
-    """No WS snapshot = no evidence, not a divergence; malformed numbers never raise."""
+    """No WS snapshot or garbage quotes = no evidence, not a divergence; malformed numbers never raise."""
     import scripts.collect_ticks as ct
 
     stats = _shadow_stats()
@@ -1345,9 +1359,23 @@ def test_shadow_compare_ignores_missing_ws_snapshot_and_garbage():
     assert "book_shadow" not in stats  # nothing comparable happened
     ws_bad = {"bids": {}, "asks": {}, "best_bid": "not-a-number", "best_ask": None}
     ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws_bad)
+    assert "book_shadow" not in stats  # no comparable quotes: no comparison counted
+
+
+def test_shadow_compare_one_sided_books_track_separate_sample_counts():
+    """One-sided books track sample counts per quote field without skewing denominators."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": None}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.502, "best_ask": None}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
     s = stats["book_shadow"]
-    assert s["comparisons"] == 1  # comparison happened, deltas just absent
-    assert s["divergent"] == 0
+    assert s["comparisons"] == 1
+    assert s["bb_samples"] == 1
+    assert s.get("ba_samples", 0) == 0
+    assert s["mean_abs_bb_delta"] == 0.002
+    assert s["mean_abs_ba_delta"] is None
 
 
 def test_book_shadow_is_public_and_reaches_the_manifest(tmp_path):
