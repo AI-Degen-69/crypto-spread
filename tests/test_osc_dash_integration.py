@@ -5848,3 +5848,200 @@ def test_shutdown_backtest_pool_also_shuts_manager():
     osc_dash.shutdown_backtest_pool()
     assert osc_dash._BACKTEST_MANAGER is None
 
+
+def _parse_sse_events(text: str) -> list[dict]:
+    """Parse a buffered SSE body into its JSON data envelopes."""
+    events = []
+    for block in text.split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload:
+                    events.append(json.loads(payload))
+    return events
+
+
+def _install_stream_test_harness(monkeypatch, tmp_path):
+    """Thread-pool + plain-queue harness so no spawn worker runs in tests."""
+    import concurrent.futures
+    mock_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: mock_pool)
+    monkeypatch.setattr(osc_dash, "_new_backtest_progress_queue", _fake_queue_factory)
+    return mock_pool
+
+
+def test_backtest_stream_progress_before_final_and_curve_equality(tmp_path, monkeypatch):
+    """Issue #331: >=1 progress precedes exactly one final; the final payload
+    equals /api/backtest's (with and without limit_windows); the last
+    provisional cumulative equals the unlimited final total."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    mock_pool = _install_stream_test_harness(monkeypatch, tmp_path)
+
+    url = "/api/backtest/stream?file=fake_stream.jsonl&offset=0.02&size=5"
+    with client.stream("GET", url) as res:
+        assert res.status_code == 200
+        body = "".join(chunk for chunk in res.iter_text())
+    events = _parse_sse_events(body)
+    types = [e["type"] for e in events]
+    assert types.count("final") == 1
+    assert "progress" in types
+    assert types.index("progress") < len(types) - 1  # progress precedes final
+    final = events[-1]
+    assert final["type"] == "final"
+
+    blocking = client.get("/api/backtest?file=fake_stream.jsonl&offset=0.02&size=5").json()
+    assert json.dumps(final["result"], sort_keys=True) == json.dumps(blocking, sort_keys=True)
+
+    # Provisional running total reaches the final unlimited total.
+    progress_points = [p for e in events if e["type"] == "progress" for p in e["points"]]
+    assert progress_points[-1]["cumulative_pnl_cents"] == blocking["equity_curve"][-1]["cumulative_pnl_cents"]
+
+    # limit_windows truncates the final curve identically on both transports.
+    with client.stream("GET", url + "&limit_windows=2") as res:
+        limited_body = "".join(chunk for chunk in res.iter_text())
+    limited_events = _parse_sse_events(limited_body)
+    limited_final = next(e for e in limited_events if e["type"] == "final")
+    limited_blocking = client.get(
+        "/api/backtest?file=fake_stream.jsonl&offset=0.02&size=5&limit_windows=2").json()
+    assert json.dumps(limited_final["result"], sort_keys=True) == json.dumps(limited_blocking, sort_keys=True)
+
+    mock_pool.shutdown(wait=True)
+
+
+def test_backtest_stream_validation_errors_match_blocking(tmp_path, monkeypatch):
+    """Issue #331: bad series/file params fail with the blocking endpoint's shapes."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _install_stream_test_harness(monkeypatch, tmp_path)
+
+    bad_series = client.get("/api/backtest/stream?file=x.jsonl&series=bcc")
+    assert bad_series.status_code == 400
+    # Same shapes as the blocking endpoint: bad series 400, bad file an `error`
+    # payload identical to /api/backtest's (see the traversal-rejection test).
+    bad_file = client.get("/api/backtest/stream?file=../secrets.jsonl")
+    assert bad_file.json()["error"] == "invalid file param"
+    blocking_bad = client.get("/api/backtest?file=../secrets.jsonl")
+    assert bad_file.json() == blocking_bad.json()
+
+
+def test_backtest_stream_429_when_busy(tmp_path, monkeypatch):
+    """Issue #331: the stream endpoint honours the same single-run guard."""
+    import threading
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    mock_pool = _install_stream_test_harness(monkeypatch, tmp_path)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_worker(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5.0)
+        return {"params_hash": "t", "params": {}, "params_groups": {}, "overall": {},
+                "per_series": {}, "equity_curve": [], "trades_sample": [],
+                "pnl_histogram": dict(osc_dash.EMPTY_PNL_HISTOGRAM), "n_snaps": 0, "n_windows": 0}
+
+    monkeypatch.setattr(osc_dash, "_run_backtest_simulation_worker", blocking_worker)
+    t = threading.Thread(target=lambda: client.get("/api/backtest?file=fake_stream.jsonl"))
+    t.start()
+    assert started.wait(timeout=3.0)
+    res = client.get("/api/backtest/stream?file=fake_stream.jsonl")
+    assert res.status_code == 429
+    assert "already in progress" in res.json()["error"].lower()
+    release.set()
+    t.join(timeout=5.0)
+    mock_pool.shutdown(wait=True)
+
+
+def test_backtest_stream_disconnect_releases_guards_immediately(tmp_path, monkeypatch):
+    """Issue #331: a mid-stream ASGI disconnect terminates the pool, releases
+    the guards synchronously, and lets a new run start at once. A stale task
+    freed later must not clear a newer run's guards."""
+    import threading
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+
+    import concurrent.futures
+    mock_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: mock_pool)
+    q = _fake_queue_factory()
+    monkeypatch.setattr(osc_dash, "_new_backtest_progress_queue", lambda: q)
+
+    terminate_calls = {"n": 0}
+    real_terminate = osc_dash._terminate_backtest_pool
+
+    def counting_terminate():
+        terminate_calls["n"] += 1
+        # The pool is a test double; emulate only the singleton detach.
+        osc_dash._BACKTEST_POOL = None
+
+    monkeypatch.setattr(osc_dash, "_terminate_backtest_pool", counting_terminate)
+
+    first_progress_seen = threading.Event()
+    release_worker = threading.Event()
+
+    def blocking_worker(*args, **kwargs):
+        progress_queue = args[10] if len(args) > 10 else kwargs.get("progress_queue")
+        try:
+            progress_queue.put_nowait({
+                "windows_done": 1, "provisional_total_pnl_cents": 1.0,
+                "points": [{"pnl_cents": 1.0, "cumulative_pnl_cents": 1.0}],
+            })
+            first_progress_seen.set()
+            release_worker.wait(timeout=5.0)
+        except Exception:
+            pass
+        return {"params_hash": "t", "params": {}, "params_groups": {}, "overall": {},
+                "per_series": {}, "equity_curve": [], "trades_sample": [],
+                "pnl_histogram": dict(osc_dash.EMPTY_PNL_HISTOGRAM), "n_snaps": 0, "n_windows": 0}
+
+    monkeypatch.setattr(osc_dash, "_run_backtest_simulation_worker", blocking_worker)
+
+    async def drive_asgi_with_disconnect():
+        import asyncio as _aio
+        scope = {
+            "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1", "method": "GET", "scheme": "http",
+            "path": "/api/backtest/stream", "raw_path": b"/api/backtest/stream",
+            "query_string": b"file=fake_stream.jsonl&offset=0.02&size=5",
+            "root_path": "", "headers": [(b"host", b"testserver")],
+            "client": ("testclient", 50000), "server": ("testserver", 80),
+        }
+        body_chunks = []
+        saw_disconnect = {"flag": False}
+        request_sent = {"flag": False}
+
+        async def receive():
+            if not request_sent["flag"]:
+                request_sent["flag"] = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            # Block until the test observed the first progress chunk, then hang up.
+            while not saw_disconnect["flag"]:
+                await _aio.sleep(0.01)
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                body_chunks.append(message.get("body", b""))
+                if b"progress" in message.get("body", b""):
+                    saw_disconnect["flag"] = True
+
+        await osc_dash.app(scope, receive, send)
+        return b"".join(body_chunks)
+
+    import asyncio
+    body = asyncio.get_event_loop().run_until_complete(drive_asgi_with_disconnect())
+    assert b"progress" in body
+
+    # Guards released synchronously on disconnect; pool termination requested.
+    assert not osc_dash._BACKTEST_RUNNING
+    sem = osc_dash.get_backtest_semaphore()
+    assert not sem.locked()
+    assert terminate_calls["n"] >= 1
+
+    # The next request must not be rejected with 429.
+    release_worker.set()
+    next_run = client.get("/api/backtest?file=fake_stream.jsonl&limit_windows=1")
+    assert next_run.status_code == 200
+    mock_pool.shutdown(wait=True)
+

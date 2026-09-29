@@ -18,6 +18,8 @@ import json
 import math
 import multiprocessing
 import os
+import queue
+import queue as _pyqueue
 import re
 import shutil
 import subprocess
@@ -2371,41 +2373,19 @@ def _build_backtest_params(
 
 
 
-@app.get(
-    "/api/backtest",
-    responses={
-        200: {"description": "Backtest simulation results"},
-        429: {"description": "Backtest simulation already in progress"},
-    },
-)
-async def api_backtest(
-    file: str = "",
-    offset: float = 0.02,
-    queue: float = 0.0,
-    pair_cost: float = 0.99,
-    exit_default_5m: float = 0.05,
-    exit_default_15m: float = 0.05,
-    exit_btc_5m: float = 0.05,
-    exit_sol_5m: float = 0.05,
-    exit_reversal: float = 0.02,
-    size: int = 5,
-    max_start_delay: float = 0.0,
-    filter_partial: bool = False,
-    quote_lo: float = 0.10,
-    quote_hi: float = 0.90,
-    entry_delay_sec: float = 0.0,
-    entry_delay_pct: float | None = None,
-    dead_zone_val: float = 0.10,
-    dead_zone_pct: float | None = None,
-    dead_zone_unit: str = "pct",
-    naked_leg_at_expiry: str = "close",
-    enable_leg_chase: bool = False,
-    limit_windows: int = 0,
-    series: str = "",
-    durations: str = "",
+def _prepare_backtest_request(
+    *, file, offset, queue, pair_cost, exit_default_5m, exit_default_15m,
+    exit_btc_5m, exit_sol_5m, exit_reversal, size, max_start_delay,
+    filter_partial, quote_lo, quote_hi, entry_delay_sec, entry_delay_pct,
+    dead_zone_val, dead_zone_pct, dead_zone_unit, naked_leg_at_expiry,
+    enable_leg_chase, series, durations,
 ):
-    """Run backtest simulation on selected tick file or all files in run/ticks/."""
-    from backtest import BacktestParams
+    """Shared validation + preparation for /api/backtest and /api/backtest/stream.
+
+    Issue #331: both endpoints must return identical validation error shapes
+    before any run starts. Returns (None, error_response) on invalid input or
+    ("ok", ctx) with everything the worker submission needs.
+    """
     from backtest.selection import parse_durations, parse_series_tokens
 
     # Issue #308: market-series / time-frame selection, same semantics as the
@@ -2415,7 +2395,7 @@ async def api_backtest(
         series_tokens = parse_series_tokens(series)
         duration_values = parse_durations(durations)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+        return None, JSONResponse(status_code=400, content={"error": str(exc)})
 
     size = max(5, int(size))
 
@@ -2444,7 +2424,7 @@ async def api_backtest(
     )
 
     if not TICKS_DIR.exists():
-        return {
+        return None, {
             "error": "no ticks dir",
             "params_hash": params.params_hash(),
             "overall": {},
@@ -2462,13 +2442,13 @@ async def api_backtest(
         # the pristine/ subpath while still rejecting traversal.
         status, source = _resolve_tick_file(file)
         if status == "invalid":
-            return {
+            return None, {
                 "error": "invalid file param",
                 "params_hash": params.params_hash(),
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             }
         if status == "not_found":
-            return {
+            return None, {
                 "error": f"file not found: {file}",
                 "params_hash": params.params_hash(),
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
@@ -2521,6 +2501,75 @@ async def api_backtest(
         "durations": durations,
     }
 
+    return "ok", {
+        "params": params,
+        "params_dict": asdict(params) if is_dataclass(params) else dict(params),
+        "size": size,
+        "max_start_delay": max_start_delay,
+        "raw_params": raw_params,
+        "empty_params": empty_params,
+        "series": series,
+        "durations": durations,
+        "source_path_str": source_path_str,
+        "series_tokens": series_tokens,
+        "duration_values": duration_values,
+    }
+
+
+@app.get(
+    "/api/backtest",
+    responses={
+        200: {"description": "Backtest simulation results"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest(
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    limit_windows: int = 0,
+    series: str = "",
+    durations: str = "",
+):
+    """Run backtest simulation on selected tick file or all files in run/ticks/."""
+    status, ctx = _prepare_backtest_request(
+        file=file, offset=offset, queue=queue, pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m, exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m, exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal, size=size, max_start_delay=max_start_delay,
+        filter_partial=filter_partial, quote_lo=quote_lo, quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec, entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val, dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit, naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase, series=series, durations=durations,
+    )
+    if status != "ok":
+        return ctx
+    params = ctx["params"]
+    params_dict = ctx["params_dict"]
+    raw_params = ctx["raw_params"]
+    empty_params = ctx["empty_params"]
+    source_path_str = ctx["source_path_str"]
+    max_start_delay = ctx["max_start_delay"]
+
     global _BACKTEST_RUNNING, _BACKTEST_POOL
     semaphore = get_backtest_semaphore()
     with _BACKTEST_LOCK:
@@ -2542,7 +2591,6 @@ async def api_backtest(
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
-            params_dict = asdict(params) if is_dataclass(params) else dict(params)
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -2573,6 +2621,159 @@ async def api_backtest(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
                     "Narrow the dataset, markets or timeframes and try again."))
+
+
+@app.get(
+    "/api/backtest/stream",
+    responses={
+        200: {"description": "SSE stream: progress events then one final result"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest_stream(
+    request: Request,
+    file: str = "",
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    filter_partial: bool = False,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    limit_windows: int = 0,
+    series: str = "",
+    durations: str = "",
+):
+    """Stream backtest progress over SSE, then one authoritative final result.
+
+    Issue #331: same guards, validation shapes and worker as the blocking
+    `/api/backtest`; on client disconnect or timeout the pool is terminated and
+    the guards are released synchronously so the next run can start at once.
+    """
+    _verify_safe_origin(request)
+    status, ctx = _prepare_backtest_request(
+        file=file, offset=offset, queue=queue, pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m, exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m, exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal, size=size, max_start_delay=max_start_delay,
+        filter_partial=filter_partial, quote_lo=quote_lo, quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec, entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val, dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit, naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase, series=series, durations=durations,
+    )
+    if status != "ok":
+        return ctx
+    params = ctx["params"]
+    params_dict = ctx["params_dict"]
+    raw_params = ctx["raw_params"]
+    empty_params = ctx["empty_params"]
+    source_path_str = ctx["source_path_str"]
+
+    semaphore = get_backtest_semaphore()
+    with _BACKTEST_LOCK:
+        global _BACKTEST_RUNNING
+        if _BACKTEST_RUNNING or semaphore.locked():
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "Backtest simulation already in progress. Please retry shortly.",
+                    "params_hash": params.params_hash(),
+                    "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+                },
+            )
+        _BACKTEST_RUNNING = True
+    await semaphore.acquire()
+
+    release_guards = _make_backtest_guard_releaser()
+    progress_queue = _new_backtest_progress_queue()
+    loop = asyncio.get_running_loop()
+
+    async def _submit():
+        """Submit the worker; eventual guard release even if the stream dies early."""
+        try:
+            pool = get_backtest_pool()
+            return await loop.run_in_executor(
+                pool,
+                _run_backtest_simulation_worker,
+                str(TICKS_DIR),
+                source_path_str,
+                params_dict,
+                ctx["size"],
+                ctx["max_start_delay"],
+                limit_windows,
+                raw_params,
+                empty_params,
+                series,
+                durations,
+                progress_queue,
+                50,     # progress_batch_windows
+                0.25,   # progress_batch_interval (sec)
+            )
+        finally:
+            release_guards()
+
+    worker_task = asyncio.create_task(_submit())
+
+    async def event_generator():
+        completed = False
+        deadline = time.monotonic() + BACKTEST_TIMEOUT_SEC
+        try:
+            while not worker_task.done():
+                if await request.is_disconnected():
+                    return
+                if time.monotonic() > deadline:
+                    yield {"event": "message", "data": json.dumps({
+                        "type": "error",
+                        "error": (f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
+                                  "Narrow the dataset, markets or timeframes and try again."),
+                    })}
+                    return
+                try:
+                    msg = await asyncio.to_thread(progress_queue.get, True, 0.05)
+                    yield {"event": "message", "data": json.dumps(
+                        {"type": "progress", **msg})}
+                except _pyqueue.Empty:
+                    continue
+            # Drain remaining progress before the authoritative final event.
+            while True:
+                try:
+                    msg = progress_queue.get_nowait()
+                    yield {"event": "message", "data": json.dumps(
+                        {"type": "progress", **msg})}
+                except _pyqueue.Empty:
+                    break
+            completed = True
+            result = worker_task.result()
+            yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream (sse_starlette cancels the generator).
+            raise
+        except Exception as exc:
+            yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
+        finally:
+            if not completed:
+                # Disconnect or timeout: kill the worker now, free capacity at
+                # once. The stale task may later fail with a broken-pool error;
+                # its release-once call is then a no-op, so a newer run's
+                # guards are untouched. The next request rebuilds the pool.
+                _terminate_backtest_pool()
+                release_guards()
+
+    return EventSourceResponse(event_generator())
 
 
 @app.get(
