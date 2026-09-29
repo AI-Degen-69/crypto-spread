@@ -1199,7 +1199,8 @@ _JUNGLE_KING_BASELINE_OVERRIDES: dict[str, float] = {
 # Group layout mirrors the manifest README's own section order.
 _JUNGLE_KING_GROUPS: list[tuple[str, str, tuple[str, ...]]] = [
     ("trading_knobs", "Trading Tuning Knobs", (
-        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct", "exit_reversal",
+        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct",
+        "enable_leg_chase", "exit_reversal",
     )),
     ("exit_thresholds", "Exit Thresholds per Slug / Duration", tuple(
         f"exit_thresh_by_slug.{s}" for s in (
@@ -1208,12 +1209,22 @@ _JUNGLE_KING_GROUPS: list[tuple[str, str, tuple[str, ...]]] = [
         )
     )),
     ("structural_limits", "Structural Limits", (
-        "max_pair_cost", "quote_range", "dead_zone_val",
+        "max_pair_cost", "quote_range", "naked_leg_at_expiry", "dead_zone_val", "dead_zone_unit",
     )),
     ("execution_assumptions", "Execution Assumptions (held at baseline)", (
         "taker_fee_rate", "merge_gas_usd", "tick_size", "min_quote_shares",
     )),
 ]
+
+# Issue #333: non-numeric manifest candidates. Only these named keys may carry
+# boolean or string candidate values, and only inside their declared domain —
+# type-strict, because Python's `True == 1` would otherwise let a numeric 1
+# pass as a boolean candidate. Every other key stays strictly numeric.
+_JUNGLE_KING_NON_NUMERIC_DOMAINS: dict[str, set] = {
+    "enable_leg_chase": {False, True},
+    "dead_zone_unit": {"pct", "sec"},
+    "naked_leg_at_expiry": {"close", "hold"},
+}
 
 
 def _jk_reg_entry(registry: dict, name: str) -> dict | None:
@@ -1264,7 +1275,16 @@ def _jk_is_finite_number(value: Any) -> bool:
 
 
 def _jk_is_valid_candidate(name: str, value: Any) -> bool:
-    """Validate a scalar candidate or a bounded two-value quote range."""
+    """Validate a scalar candidate or a bounded two-value quote range.
+
+    The #333 allow-list keys accept only a correctly-typed value inside their
+    declared domain — bool keys reject `0`/`1`, string keys reject non-strings
+    and out-of-domain words. Everything else stays finite non-boolean numbers.
+    """
+    domain = _JUNGLE_KING_NON_NUMERIC_DOMAINS.get(name)
+    if domain is not None:
+        return type(value) in ({bool} if name == "enable_leg_chase" else {str}) \
+            and value in domain
     if name != "quote_range":
         return _jk_is_finite_number(value)
     if (
@@ -5653,6 +5673,10 @@ function jkNum(v){
 
 function jkFmt(v){
   if(Array.isArray(v)) return '[' + v.map(jkNum).join(', ') + ']';
+  // Issue #333: booleans render as JSON spells them, strings verbatim — no
+  // number grouping or coercion on the non-numeric knobs.
+  if(typeof v === 'boolean') return v ? 'true' : 'false';
+  if(typeof v === 'string') return v;
   return jkNum(v);
 }
 
