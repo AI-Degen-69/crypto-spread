@@ -52,6 +52,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -560,6 +561,91 @@ def drain_ws_tape(ws_bridge: "CLOBStreamCollectorBridge", w: dict[str, Any],
     return rows
 
 
+# Issue #174 Phase 1: shadow comparison tolerance. Below this, a WS-vs-REST
+# best-quote difference is the same book for pricing purposes (half of the
+# venue's typical tick grid) — counting it as divergence would bury the real
+# signal in exchange jitter.
+BOOK_SHADOW_TOLERANCE = 0.001
+
+
+def shadow_compare_book(stats: dict, series_slug: str, token: str,
+                        rest_book: dict, ws_book: Optional[dict]) -> None:
+    """Record one WS-vs-REST book comparison into `stats["book_shadow"]`.
+
+    Read-only telemetry for Phase 1 of #174: the REST book stays the recorded
+    book, a WS failure counts as "no comparison" and never touches the run.
+    Deltas accumulate as sums so the manifest can derive means without keeping
+    a per-tick buffer.
+    """
+    if ws_book is None:
+        return  # socket not connected / token not subscribed: no evidence
+
+    def _num(v: Any) -> Optional[float]:
+        """Parse one quote value to a finite float, or None when unusable."""
+        try:
+            f = float(v)
+            return f if math.isfinite(f) else None
+        except (TypeError, ValueError):
+            return None
+
+    bb_rest, bb_ws = _num(rest_book.get("best_bid")), _num(ws_book.get("best_bid"))
+    ba_rest, ba_ws = _num(rest_book.get("best_ask")), _num(ws_book.get("best_ask"))
+    d_bb = abs(bb_rest - bb_ws) if (bb_rest is not None and bb_ws is not None) else None
+    d_ba = abs(ba_rest - ba_ws) if (ba_rest is not None and ba_ws is not None) else None
+    m_rest = book_math.mid(rest_book)
+    m_ws = book_math.mid(ws_book)
+    d_mid = abs(m_rest - m_ws) if (m_rest is not None and m_ws is not None) else None
+
+    # A comparison needs at least one comparable best quote on BOTH books.
+    # A failed REST fetch (`_book_or_err` empty book) or an unpriced WS
+    # snapshot is no evidence of agreement — counting it would report venue
+    # outages as apparent consensus (#174 review).
+    if d_bb is None and d_ba is None:
+        return
+    shadow = stats.setdefault("book_shadow", {
+        "comparisons": 0, "divergent": 0,
+        "abs_bb_sum": 0.0, "abs_ba_sum": 0.0, "abs_mid_sum": 0.0,
+        "max_bb": 0.0, "max_ba": 0.0,
+        "per_series": {},
+    })
+    shadow["comparisons"] += 1
+    if d_bb is not None:
+        shadow["abs_bb_sum"] += d_bb
+        shadow["max_bb"] = max(shadow["max_bb"], d_bb)
+        shadow["bb_samples"] = shadow.get("bb_samples", 0) + 1
+    if d_ba is not None:
+        shadow["abs_ba_sum"] += d_ba
+        shadow["max_ba"] = max(shadow["max_ba"], d_ba)
+        shadow["ba_samples"] = shadow.get("ba_samples", 0) + 1
+    if d_mid is not None:
+        shadow["abs_mid_sum"] += d_mid
+        shadow["mid_samples"] = shadow.get("mid_samples", 0) + 1
+    # Exact-threshold deltas stay within tolerance: 0.501 - 0.50 in float is a
+    # hair above 0.001, and the rule is divergence only when strictly greater.
+    epsilon = BOOK_SHADOW_TOLERANCE * 1e-6
+    divergent = any(d is not None and d > BOOK_SHADOW_TOLERANCE + epsilon
+                    for d in (d_bb, d_ba))
+    if divergent:
+        shadow["divergent"] += 1
+    per_series = shadow["per_series"].setdefault(series_slug, {"comparisons": 0, "divergent": 0})
+    per_series["comparisons"] += 1
+    if divergent:
+        per_series["divergent"] += 1
+
+    # Derived rates, recomputed each round so manifest.json carries ready-to-read
+    # numbers an operator can compare across runs without a calculator. Each
+    # mean divides by its own valid-sample count so one-sided books do not
+    # dilute the other fields' denominators.
+    n = shadow["comparisons"]
+    shadow["divergence_rate"] = round(shadow["divergent"] / n, 4) if n else None
+    bb_n, ba_n, mid_n = (shadow.get("bb_samples", 0), shadow.get("ba_samples", 0),
+                         shadow.get("mid_samples", 0))
+    shadow["mean_abs_bb_delta"] = round(shadow["abs_bb_sum"] / bb_n, 6) if bb_n else None
+    shadow["mean_abs_ba_delta"] = round(shadow["abs_ba_sum"] / ba_n, 6) if ba_n else None
+    shadow["mean_abs_mid_delta"] = round(shadow["abs_mid_sum"] / mid_n, 6) if mid_n else None
+    shadow["tolerance"] = BOOK_SHADOW_TOLERANCE
+
+
 def ws_leg_authoritative(w: dict[str, Any], token: str, now: float,
                          ws_connected: bool) -> bool:
     """True when the socket alone can be trusted for this leg's tape this tick.
@@ -868,6 +954,19 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
                         continue  # already printed by the socket
                     tape_list.append({"asset": tok, "price": p, "size": s})
                     stats["tape_captured_rest"] = stats.get("tape_captured_rest", 0) + 1
+
+        # Issue #174 Phase 1: shadow-compare the socket book against the REST
+        # book just fetched, per token. Read-only — the REST book below stays
+        # the recorded book, and a WS hiccup costs one skipped comparison.
+        # A disconnected bridge retains its cached books: comparing them would
+        # measure staleness, not disagreement, so require the live connection.
+        if ws_bridge is not None and getattr(ws_bridge, "is_connected", False):
+            for tok, rbook in ((w["up_token"], ub), (w["down_token"], db)):
+                try:
+                    shadow_compare_book(stats, series_slug, tok, rbook,
+                                        ws_bridge.get_book_for_token(tok))
+                except Exception as e:
+                    errs.append(f"shadow:{series_slug}:{e}")
 
         mid = compute_mid(ub)
         touch_pair = None

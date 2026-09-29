@@ -1293,3 +1293,100 @@ def test_a_frame_with_no_usable_token_anywhere_is_dropped_quietly():
         "price_changes": [{"price": "0.50", "side": "BUY", "size": "25"}],
     }))
     assert client.books == {}
+
+
+# --- Issue #174 Phase 1: WS-vs-REST book shadow comparison -------------------
+
+def _shadow_stats() -> dict:
+    """Fresh stats dict with only the keys poll_once normally carries."""
+    return {}
+
+
+def test_shadow_compare_counts_divergence_and_deltas():
+    """A perturbed WS book counts as divergent with the right accumulated deltas."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.505, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    s = stats["book_shadow"]
+    assert s["comparisons"] == 1
+    assert s["divergent"] == 1  # 0.005 bid delta > tolerance
+    assert round(s["abs_bb_sum"], 6) == 0.005 == round(s["max_bb"], 6)
+    assert s["abs_ba_sum"] == 0.0
+    assert s["per_series"]["btc-up-or-down-5m"]["divergent"] == 1
+    assert s["divergence_rate"] == 1.0
+
+
+def test_shadow_compare_equal_books_are_not_divergent():
+    """Identical books (and sub-tolerance jitter) stay out of the divergence count."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    book = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", book, dict(book))
+    tiny_ws = {"bids": {}, "asks": {}, "best_bid": 0.5005, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", book, tiny_ws)
+    s = stats["book_shadow"]
+    assert s["comparisons"] == 2
+    assert s["divergent"] == 0
+    assert s["divergence_rate"] == 0.0
+    assert s["mean_abs_mid_delta"] is not None
+
+
+def test_shadow_compare_exact_tolerance_threshold_stays_within_tolerance():
+    """Exact 0.001 tick difference (e.g. 0.501 - 0.50) stays within tolerance."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.501, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    s = stats["book_shadow"]
+    assert s["comparisons"] == 1
+    assert s["divergent"] == 0
+    assert s["divergence_rate"] == 0.0
+
+
+def test_shadow_compare_ignores_missing_ws_snapshot_and_garbage():
+    """No WS snapshot or garbage quotes = no evidence, not a divergence; malformed numbers never raise."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, None)
+    assert "book_shadow" not in stats  # nothing comparable happened
+    ws_bad = {"bids": {}, "asks": {}, "best_bid": "not-a-number", "best_ask": None}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws_bad)
+    assert "book_shadow" not in stats  # no comparable quotes: no comparison counted
+
+
+def test_shadow_compare_one_sided_books_track_separate_sample_counts():
+    """One-sided books track sample counts per quote field without skewing denominators."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": None}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.502, "best_ask": None}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    s = stats["book_shadow"]
+    assert s["comparisons"] == 1
+    assert s["bb_samples"] == 1
+    assert s.get("ba_samples", 0) == 0
+    assert s["mean_abs_bb_delta"] == 0.002
+    assert s["mean_abs_ba_delta"] is None
+
+
+def test_book_shadow_is_public_and_reaches_the_manifest(tmp_path):
+    """manifest.json carries the shadow block — the operator reads it there (#174)."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.55, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    ct.update_manifest(tmp_path, stats)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert "book_shadow" in manifest
+    assert manifest["book_shadow"]["divergence_rate"] == 1.0
