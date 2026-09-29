@@ -2120,6 +2120,25 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
+#: Issue #355: the minimum wall-clock gap between sweep progress messages.
+#: Progress used to be emitted once per replayed window, but only AFTER the whole
+#: dataset had been read and replayed — so the dashboard showed a ticking "Sweeping"
+#: over an all-grey card for the whole run. Emission now happens inside the streaming
+#: read loop; the time gate keeps the event count bounded to
+#: (run duration / interval) + 2 regardless of how many windows the corpus holds.
+def _sweep_progress_interval() -> float:
+    """Parse the progress throttle; a bad env value falls back to 0.5s instead
+    of crashing the dashboard at import (review finding, issue #355)."""
+    try:
+        v = float(os.environ.get("SWEEP_PROGRESS_MIN_INTERVAL_SEC", "0.5"))
+    except (TypeError, ValueError):
+        return 0.5
+    return v if v > 0 else 0.5
+
+
+SWEEP_PROGRESS_MIN_INTERVAL_SEC = _sweep_progress_interval()
+
+
 def _select_sweep_bests(
     points: list[dict],
     series_order: list[str],
@@ -2216,8 +2235,67 @@ def _run_sweep_worker(
     # memory at the largest single window and lets the OS reclaim each window as
     # soon as it is simulated.
     variants = [_sweep_params_for_value(base, axis, float(v)) for v in values]
-    acc = [{"pnl": 0.0, "pairs": 0, "exits": 0, "n": 0,
-            "per_series": {}} for _ in variants]
+
+    def _new_acc() -> list[dict]:
+        """One zeroed running-total record per axis point."""
+        return [{"pnl": 0.0, "pairs": 0, "exits": 0, "n": 0,
+                 "per_series": {}} for _ in variants]
+
+    def _accumulate(into: list[dict], ws: list[Any]) -> None:
+        """Fold one window's per-axis results into the running totals.
+
+        Shared by the live (in-loop) pass and the post-loop pass so the two can
+        never drift: a preview is the same arithmetic as the result, only fewer
+        windows behind.
+        """
+        for a, w in zip(into, ws):
+            a["pnl"] += w.pnl_cents * size
+            a["pairs"] += 1 if w.pair_captured else 0
+            a["exits"] += 1 if w.exit_taken else 0
+            a["n"] += 1
+            a["per_series"][w.series] = (
+                a["per_series"].get(w.series, 0.0) + w.pnl_cents * size)
+
+    def _snapshot(totals: list[dict]) -> list[dict]:
+        """Running per-axis-point totals in the final `points` shape."""
+        return [
+            {
+                "label": label,
+                "value": float(value),
+                "overall": {
+                    "windows": a["n"],
+                    "pairs": a["pairs"],
+                    "exits": a["exits"],
+                    "total_pnl_cents": round(a["pnl"], 2),
+                    "avg_pnl_cents": round(a["pnl"] / a["n"], 2) if a["n"] else 0.0,
+                },
+                "per_series": {
+                    slug: round(a["per_series"].get(slug, 0.0), 2)
+                    for slug in series_order
+                },
+                "series_present": sorted(a["per_series"]),
+            }
+            for a, (value, (_params, label)) in zip(totals, zip(values, variants))
+        ]
+
+    # Issue #344: running totals so the UI fills the charts in while the sweep
+    # iterates. Issue #355: emitted from inside the read loop on a time gate, so
+    # the card lights up during the run and the event count stays bounded.
+    # Emission failures only disable progress; the run and its result are
+    # untouched.
+    emit_progress = progress_queue is not None
+    live = _new_acc()
+    rows_live = 0
+    last_emit = 0.0
+
+    def _put(msg: dict) -> None:
+        """Enqueue one progress message; a full/broken queue disables progress
+        only — the run and its result are untouched."""
+        nonlocal emit_progress
+        try:
+            progress_queue.put_nowait(msg)
+        except Exception:
+            emit_progress = False
 
     source = Path(source_file_str) if source_file_str else Path(ticks_dir_str)
     # Simulate each window as it completes and retain only the (small) results —
@@ -2253,86 +2331,50 @@ def _run_sweep_worker(
         # instead of once per axis point.
         reuse = axis != "offset"
         memo: dict = {} if reuse else None
-        rows.append((float(g[0].get("ts", 0.0) or 0.0), seq,
-                     [_simulate_window(g, p, queue_memo=memo) for p, _l in variants]))
+        results = [_simulate_window(g, p, queue_memo=memo) for p, _l in variants]
+        rows.append((float(g[0].get("ts", 0.0) or 0.0), seq, results))
+        # Issue #355: publish from inside the read loop. The first accepted window
+        # always emits, so `series_present` is non-empty and the card is never all
+        # grey for the whole run; later ones are gated on wall-clock so a
+        # multi-GB corpus cannot flood the manager queue with one event per
+        # window. `rows_total` is None because the total is not known yet.
+        if emit_progress:
+            _accumulate(live, results)
+            rows_live += 1
+            now = time.monotonic()
+            if rows_live == 1 or (now - last_emit) >= SWEEP_PROGRESS_MIN_INTERVAL_SEC:
+                last_emit = now
+                _put({
+                    "rows_done": rows_live,
+                    "rows_total": None,
+                    "n_snaps": n_snaps,
+                    "points": _snapshot(live),
+                })
     # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, ties included.
     rows.sort(key=lambda t: (t[0], t[1]))
     if limit_windows and limit_windows > 0:
         rows = rows[:limit_windows]
 
+    # The authoritative pass runs over the SORTED, SLICED rows, so a
+    # `limit_windows` cap and the live previews are reconciled here: the live
+    # accumulator saw every accepted window, this one sees exactly the result.
     n_windows = len(rows)
-    for a in acc:
-        a["n"] = 0
-        a["pnl"] = 0.0
-        a["pairs"] = 0
-        a["exits"] = 0
-        a["per_series"] = {}
-    # Issue #344: after each row, emit per-axis-point running totals so the UI
-    # can fill the charts in while the sweep iterates. Emission failures only
-    # disable progress; the run and its result are untouched.
-    emit_progress = progress_queue is not None
-    def _sweep_progress_snapshot() -> list[dict]:
-        """Running per-axis-point totals in the final `points` shape."""
-        return [
-            {
-                "label": label,
-                "value": float(value),
-                "overall": {
-                    "windows": a["n"],
-                    "pairs": a["pairs"],
-                    "exits": a["exits"],
-                    "total_pnl_cents": round(a["pnl"], 2),
-                    "avg_pnl_cents": round(a["pnl"] / a["n"], 2) if a["n"] else 0.0,
-                },
-                "per_series": {
-                    slug: round(a["per_series"].get(slug, 0.0), 2)
-                    for slug in series_order
-                },
-                "series_present": sorted(a["per_series"]),
-            }
-            for a, (value, (_params, label)) in zip(acc, zip(values, variants))
-        ]
-    for row_idx, (_ts, _seq, ws) in enumerate(rows):
-        for a, w in zip(acc, ws):
-            a["pnl"] += w.pnl_cents * size
-            a["pairs"] += 1 if w.pair_captured else 0
-            a["exits"] += 1 if w.exit_taken else 0
-            a["n"] += 1
-            a["per_series"][w.series] = (
-                a["per_series"].get(w.series, 0.0) + w.pnl_cents * size)
-        if emit_progress:
-            msg = {
-                "rows_done": row_idx + 1,
-                "rows_total": n_windows,
-                "n_snaps": n_snaps,
-                "points": _sweep_progress_snapshot(),
-            }
-            try:
-                progress_queue.put_nowait(msg)
-            except Exception:
-                emit_progress = False
-
-    points = []
-    for a, (value, (_params, label)) in zip(acc, zip(values, variants)):
-        overall_pnl = a["pnl"]
-        n = a["n"]
-        per_series_values = {
-            slug: round(a["per_series"].get(slug, 0.0), 2)
-            for slug in series_order
-        }
-        points.append({
-            "label": label,
-            "value": float(value),
-            "overall": {
-                "windows": n,
-                "pairs": a["pairs"],
-                "exits": a["exits"],
-                "total_pnl_cents": round(overall_pnl, 2),
-                "avg_pnl_cents": round(overall_pnl / n, 2) if n else 0.0,
-            },
-            "per_series": per_series_values,
-            "series_present": sorted(a["per_series"]),
+    acc = _new_acc()
+    for _ts, _seq, ws in rows:
+        _accumulate(acc, ws)
+    # One converged message: identical to the final `points` below, so the last
+    # thing the UI renders before `final` cannot disagree with it.
+    if emit_progress:
+        _put({
+            "rows_done": n_windows,
+            "rows_total": n_windows,
+            "n_snaps": n_snaps,
+            "points": _snapshot(acc),
         })
+
+    # Same builder as the live previews, so the final result can never drift
+    # from what the UI rendered a moment earlier (review finding, issue #355).
+    points = _snapshot(acc)
 
     best_overall, best_market = _select_sweep_bests(
         points, series_order, series_labels
@@ -4927,6 +4969,7 @@ textarea:focus-visible,
       #btSweepMeta .sweep-row .v{color:var(--tx);font:11px var(--mono);text-align:left}
       #btSweepMeta .sweep-tag{font:700 8px var(--disp);letter-spacing:.6px;text-transform:uppercase;color:var(--gold)}
       #btSweepMeta .sweep-mkt{display:inline-block;font:11px var(--mono);color:var(--tx);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:0 0 4px 4px}
+      #btSweepMeta .sweep-mkt.pending{color:var(--tx);background:transparent;border-style:solid;border-color:var(--gold)}
       #btSweepMeta .sweep-mkt.off{color:var(--faint);background:transparent;border-style:dashed;opacity:.55}
       #btSweepMeta .sweep-mkt-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
       #btSweepMeta .sweep-mkt-grid .sweep-mkt{display:block;text-align:center;margin:0}
@@ -6832,17 +6875,22 @@ function toggleBtToken(tok) {
     selectedBtTokens.add(tok);
   }
   updateBtFilterUI();
+  // Issue #355: the sweep card's Markets grid is now selection-driven, so an
+  // idle card must follow the chips. Never starts a run, never touches a sweep.
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
 }
 
 function setBtTokensAll(selectAll) {
   selectedBtTokens = selectAll ? new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']) : new Set(['BTC']);
   updateBtFilterUI();
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
 }
 
 function setBtDuration(dur) {
   if (selectedBtDuration === dur) return;
   selectedBtDuration = dur;
   updateBtFilterUI();
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
 }
 
 // Interactive Backtest Runtime Estimation (Issue #330)
@@ -6941,6 +6989,29 @@ function btControlValues(overrides){
   };
 }
 
+// Issue #355: the ONE reader of the Backtest Scope chips. The request query and
+// the sweep card's Markets grid both come from here, so the grid can never
+// disagree with what the sweep was actually asked to replay.
+const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+
+function btSelection(){
+  const tokens = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
+  const duration = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
+  return { tokens: tokens, duration: duration };
+}
+
+// The selected (token, timeframe) pairs as canonical series slugs — the same
+// `<token>-up-or-down-<dur>` shape the sweep result reports in `series_present`.
+function btSelectedSeriesSlugs(sel){
+  const s = sel || btSelection();
+  const durations = s.duration === '5m' ? ['5m'] : (s.duration === '15m' ? ['15m'] : ['5m', '15m']);
+  const out = [];
+  s.tokens.forEach(tok => {
+    durations.forEach(dur => out.push(`${String(tok).toLowerCase()}-up-or-down-${dur}`));
+  });
+  return out;
+}
+
 // Shared query string for both endpoints: every knob the page exposes, plus
 // the market/timeframe chips when they narrow the universe.
 function btControlQuery(v, axis){
@@ -6957,14 +7028,13 @@ function btControlQuery(v, axis){
   if(fileVal){ q += `&file=${encodeURIComponent(fileVal)}`; }
   // Market / timeframe selection (chip multi-select): all tokens or
   // both frames = omit the param, which the API reads as "all".
-  const btToks = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
-  if (btToks.length > 0 && btToks.length < 5) {
-    q += `&series=${encodeURIComponent(btToks.map(t => t.toLowerCase()).join(','))}`;
+  const sel = btSelection();
+  if (sel.tokens.length > 0 && sel.tokens.length < BT_ALL_TOKENS.length) {
+    q += `&series=${encodeURIComponent(sel.tokens.map(t => t.toLowerCase()).join(','))}`;
   }
-  const btDur = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
-  if (btDur === '5m') {
+  if (sel.duration === '5m') {
     q += `&durations=300`;
-  } else if (btDur === '15m') {
+  } else if (sel.duration === '15m') {
     q += `&durations=900`;
   }
   return q;
@@ -7749,6 +7819,17 @@ function onSweepAxisChange(){
 async function runSweepVisual(){
   const btn = $('btnRunSweepVisual');
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
+  // Issue #355: the selection is snapshotted HERE, with `v`. Every render of
+  // this run uses it, so editing the chips mid-sweep cannot repaint the grid of
+  // a run that was asked for something else.
+  const sel = btSelection();
+  const selectedSeries = btSelectedSeriesSlugs(sel);
+  window._btSweepSelection = sel;
+  // CodeRabbit round 1 (#356): explicit in-flight flag. The pending card is
+  // rendered below before `_btSweepAbort` exists, and `finally` never cleared
+  // the abort — so a chip toggle during the wait repainted the pending card,
+  // and a failed run blocked idle refreshes for the session.
+  window._btSweepInFlight = true;
   // Same reader the backtest uses, so the sweep's base point is exactly the
   // configuration shown on this page. Only `axis` varies; every other knob is
   // held at the operator's value. `size` is pinned to the page value because
@@ -7771,6 +7852,9 @@ async function runSweepVisual(){
         })),
         series_order: ['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'],
         series_labels: {},
+        // Issue #355: the grid shows the selection from this instant, so the
+        // card is never all-grey while the sweep runs.
+        selected_series: selectedSeries,
         pending: true,
       }, '');
     }
@@ -7817,8 +7901,11 @@ async function runSweepVisual(){
     await consumeBacktestStream(res, ctl, (ev) => {
       if (window._btSweepAbort !== ctl) return; // superseded — ignore stale events
       if (ev.type === 'progress') {
-        renderSweepVisual(buildSweepProgressView(axis, v, ev), v, true);
+        renderSweepVisual(buildSweepProgressView(axis, v, ev, selectedSeries), v, true);
       } else if (ev.type === 'final') {
+        // Issue #355: the final payload carries no selection of its own, so the
+        // run-start snapshot is attached here for the authoritative render.
+        ev.result.selected_series = selectedSeries;
         renderSweepVisual(ev.result, v);
       } else if (ev.type === 'error') {
         if(meta){ meta.textContent = ev.error || 'sweep error'; }
@@ -7828,14 +7915,16 @@ async function runSweepVisual(){
     if (err && err.name === 'AbortError') return;
     if(meta){ meta.textContent = 'sweep failed: ' + err; }
   }finally{
+    window._btSweepInFlight = false;
     if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
   }
 }
 
 // Idle preparation (IIIB feedback): draw the sweep card + charts BEFORE the
-// first run, so the section never looks like an empty rectangle. Markets stay
-// grayed and the title shows a plain "testing …" until a sweep actually runs.
+// first run, so the section never looks like an empty rectangle. Issue #355: the
+// markets show the operator's current selection as `pending` — "selected, not
+// replayed yet" — instead of a fully greyed grid that read as "nothing selected".
 function renderSweepIdle(){
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
   renderSweepVisual({
@@ -7847,9 +7936,21 @@ function renderSweepIdle(){
     })),
     series_order: ['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'],
     series_labels: {},
+    // The idle card has no run to stay stable for, so it reads the live chips.
+    selected_series: btSelectedSeriesSlugs(),
     idle: true,
     pending: true,
   }, btControlValues());
+}
+
+// Issue #355: keep the idle grid aligned with Backtest Scope. Re-rendering never
+// starts a run, and an in-flight sweep keeps its run-start snapshot untouched.
+// CodeRabbit round 1 (#356): guard on the explicit in-flight flag, not the
+// abort controller — the abort only exists after the wait loop, and was never
+// cleared on failure.
+function refreshSweepIdleCard(){
+  if (window._btSweepInFlight || (window._btSweepVisualData && !window._btSweepVisualData.idle)) return;
+  renderSweepIdle();
 }
 
 // "Empty but prepared" idle state for the whole backtest tab: sweep card with
@@ -7869,20 +7970,26 @@ function initBacktestIdle(){
 // running per-point totals, so the live fill reuses the exact final renderer.
 // Best-point selection waits for `final` — running totals would crown a
 // premature winner and flash the gold highlight.
-function buildSweepProgressView(axis, v, ev){
+function buildSweepProgressView(axis, v, ev, selectedSeries){
   return {
     axis: axis,
     points: ev.points || [],
     series_order: (ev.points && ev.points[0] && ev.points[0].per_series)
       ? Object.keys(ev.points[0].per_series) : [],
     series_labels: {},
+    // Issue #355: the run-start selection rides along so the grid keeps saying
+    // what was asked for, not what has happened to be replayed so far.
+    selected_series: selectedSeries,
     best_overall: null,
     best_market: null,
     n_windows: ev.rows_done || 0,
     n_snaps: ev.n_snaps || 0,
     pending: true,
     rows_done: ev.rows_done || 0,
-    rows_total: ev.rows_total || 0,
+    // Issue #355: a live event from the read loop does not know the total yet
+    // (`rows_total: null`). `|| 0` would have turned "unknown" into "zero rows
+    // of zero", so the null is preserved and the card words it accordingly.
+    rows_total: (ev.rows_total === null || ev.rows_total === undefined) ? null : ev.rows_total,
   };
 }
 
@@ -7980,6 +8087,45 @@ function sweepOverrideNote(axis, v, pointValues){
 // compact card with three columns — parameters held, designed constraints,
 // participating markets — and the where-am-I verdict at the bottom.
 // `v` is the pre-request snapshot, `data` the sweep response (axis + markets).
+// Issue #355: the one Markets grid. `sweepCard()` and `sweepCardTail()` each
+// built their own copy of this, so both had to be fixed together and could not
+// drift. Three states, because "selected but nothing replayed yet" and "not
+// selected" are different facts and used to look identical:
+//   solid   - the market produced windows in this run
+//   pending - selected, no windows yet (or none at all)
+//   off     - not selected
+// `selectedSlugs` empty/absent = no selection was supplied, so participation
+// alone decides, exactly as before.
+function sweepMarketsGridHtml(points, selectedSlugs){
+  const present = new Set();
+  (points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
+  const selected = (selectedSlugs && selectedSlugs.length) ? new Set(selectedSlugs) : null;
+  const running = (points || []).length > 0;
+  const chip = (token, dur) => {
+    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
+    const label = `${dur === '5m' ? '05m' : '15m'} ${token}`;
+    if (present.has(slug)) {
+      return `<span class="sweep-mkt" title="${label} — replayed in this sweep">${label}</span>`;
+    }
+    if (selected && selected.has(slug)) {
+      const why = running ? 'selected — no windows yet' : 'selected — no windows';
+      return `<span class="sweep-mkt pending" title="${label} — ${why}">${label}</span>`;
+    }
+    return `<span class="sweep-mkt off" title="${label} — not selected">${label}</span>`;
+  };
+  return BT_ALL_TOKENS.map(t => chip(t, '5m')).join('')
+    + BT_ALL_TOKENS.map(t => chip(t, '15m')).join('');
+}
+
+// Issue #355: the card's running-totals phrase. Three states, because
+// `rows_total` is genuinely three-valued now: undefined (nothing has reported
+// yet), null (streaming, total unknown) and a number (the converged pass).
+function sweepProgressText(data){
+  if (data.rows_total === null) return `${data.rows_done || 0} windows replayed…`;
+  if (data.rows_total === undefined) return 'starting…';
+  return `row ${data.rows_done || 0}/${data.rows_total}`;
+}
+
 function sweepCard(v, data, statsHtml){
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
@@ -7994,20 +8140,8 @@ function sweepCard(v, data, statsHtml){
     quote_range: 'Quotable Range',
   })[data.axis] || data.axis;
   const values = (data.points || []).map(p => p.label).join(', ');
-  // Markets grid: the full 10-series universe, always visible, in a fixed
-  // 5-column grid — 05m row above 15m row, one column per token. A market
-  // that did not take part in this run (filtered out or no windows) stays
-  // in place, grayed out, so the layout never jumps between runs.
-  const present = new Set();
-  (data.points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
-  const TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
-  const mktChip = (token, dur) => {
-    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
-    const active = present.has(slug);
-    return `<span class="sweep-mkt${active ? '' : ' off'}">${dur === '5m' ? '05m' : '15m'} ${token}</span>`;
-  };
-  const mktsHtml = TOKENS.map(t => mktChip(t, '5m')).join('')
-    + TOKENS.map(t => mktChip(t, '15m')).join('');
+  // Issue #355: the grid is built in one place (see sweepMarketsGridHtml).
+  const mktsHtml = sweepMarketsGridHtml(data.points, data.selected_series);
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
     + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
     + `<span class="v">${val}</span></span>`;
@@ -8046,12 +8180,14 @@ function sweepCard(v, data, statsHtml){
     .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
-  // Idle (pre-first-run) shows the selector + a plain "testing …" with no
-  // numbers, so the card is prepared without pretending a sweep ran.
+  // Issue #344: idle (pre-first-run) shows the selector + a plain "testing …"
+  // with no numbers. Issue #355: a live event carries `rows_total: null` because
+  // the read loop does not know the total yet — reporting that as "row 0/0"
+  // would read as a finished run of nothing, so it says how many are replayed.
   const pendingBadge = data.idle
     ? `<span class="sweep-title-sub">testing …</span>`
     : data.pending
-    ? `<span class="sweep-title-sub">testing ${values} · ${data.rows_total ? `row ${data.rows_done || 0}/${data.rows_total}` : 'starting…'}</span>`
+    ? `<span class="sweep-title-sub">testing ${values} · ${sweepProgressText(data)}</span>`
     : `<span class="sweep-title-sub">testing ${values}</span>`;
   return `<span class="sweep-title">`
     + titleSel
@@ -8070,16 +8206,7 @@ function sweepCardTail(v, data, statsHtml){
   const values = (data.points || []).map(p => p.label).join(', ');
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
-  const present = new Set();
-  (data.points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
-  const TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
-  const mktChip = (token, dur) => {
-    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
-    const active = present.has(slug);
-    return `<span class="sweep-mkt${active ? '' : ' off'}">${dur === '5m' ? '05m' : '15m'} ${token}</span>`;
-  };
-  const mktsHtml = TOKENS.map(t => mktChip(t, '5m')).join('')
-    + TOKENS.map(t => mktChip(t, '15m')).join('');
+  const mktsHtml = sweepMarketsGridHtml(data.points, data.selected_series);
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
     + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
     + `<span class="v">${val}</span></span>`;
@@ -8112,7 +8239,7 @@ function sweepCardTail(v, data, statsHtml){
   const verdictHtml = (verdict && verdict.verdict && !data.pending)
     ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
     : '';
-  return `<span class="sweep-title-sub">testing ${values}${data.pending ? (data.rows_total ? ` · row ${data.rows_done || 0}/${data.rows_total}` : ' · starting…') : ''}</span>`
+  return `<span class="sweep-title-sub">testing ${values}${data.pending ? ` · ${sweepProgressText(data)}` : ''}</span>`
     + `<span class="sweep-card">`
     + (statsHtml || '')
     + `<span class="sweep-cols">${held}${rules}${markets}</span>`

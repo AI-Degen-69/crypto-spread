@@ -1906,6 +1906,239 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
     # The sweep reader must not re-read controls behind the helper's back.
     assert "const offset = $('btOffset')" not in html
     assert "const queue = $('btQueue')" not in html
+    # Issue #355: the chips have exactly one reader, shared by the request and
+    # the sweep card's Markets grid. Two readers is how the grid came to disagree
+    # with the run.
+    assert "function btSelection(" in html
+    assert "function btSelectedSeriesSlugs(" in html
+    for fname in ("btControlQuery", "btSelectedSeriesSlugs"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "selectedBtTokens" not in body, f"{fname} reads the chips directly"
+        assert "selectedBtDuration" not in body, f"{fname} reads the chips directly"
+    bt_query = html[html.index("function btControlQuery("):]
+    bt_query = bt_query[:bt_query.index("\n}")]
+    assert "btSelection()" in bt_query
+
+
+def test_sweep_selection_snapshot_reaches_every_render_path():
+    """Issue #355: the run-start selection reaches the pending card, the progress
+    views and the final render, and a live `rows_total: null` is worded as
+    "replayed" rather than "row 0/0"."""
+    html = osc_dash.FULL_APP_HTML
+    # Snapshot taken once, at run start, next to `v`.
+    runner = html[html.index("async function runSweepVisual("):]
+    runner = runner[:runner.index("\nasync function") if "\nasync function" in runner[10:] else len(runner)]
+    assert "const selectedSeries = btSelectedSeriesSlugs(sel);" in runner
+    assert "selected_series: selectedSeries," in runner          # pending card
+    assert "buildSweepProgressView(axis, v, ev, selectedSeries)" in runner
+    assert "ev.result.selected_series = selectedSeries;" in runner  # final render
+    # Progress view adapter carries it and preserves an unknown total.
+    view = html[html.index("function buildSweepProgressView("):]
+    view = view[:view.index("\n}")]
+    assert "selected_series: selectedSeries," in view
+    assert "ev.rows_total === null" in view
+    # The idle card reads the live chips instead of a frozen snapshot.
+    idle = html[html.index("function renderSweepIdle("):]
+    idle = idle[:idle.index("\n}")]
+    assert "selected_series: btSelectedSeriesSlugs()," in idle
+    # Both card renderers route the grid through the shared builder.
+    for fname in ("sweepCard", "sweepCardTail"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "sweepMarketsGridHtml(data.points, data.selected_series)" in body, fname
+    # Chip handlers keep an idle card aligned without ever starting a run.
+    # CodeRabbit round 1 (#356): the guard uses the explicit in-flight flag —
+    # the abort controller only exists after the wait loop and was never
+    # cleared on failure, so it both missed the race and stuck afterwards.
+    assert "function refreshSweepIdleCard(" in html
+    guard = html[html.index("function refreshSweepIdleCard("):]
+    guard = guard[:guard.index("\n}")]
+    assert "window._btSweepInFlight" in guard
+    assert "idle" in guard
+    # The flag is set at run start (next to the selection snapshot) and
+    # cleared in the `finally` block, so idle refreshes resume after success
+    # or failure.
+    runner_head = runner[:runner.index("const v = btControlValues();")]
+    assert "window._btSweepInFlight = true;" in runner_head
+    fin = runner[runner.index("}finally{"):]
+    fin = fin[:fin.index("\n  }")]
+    assert "window._btSweepInFlight = false;" in fin
+    for fname in ("toggleBtToken", "setBtTokensAll", "setBtDuration"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "refreshSweepIdleCard" in body, fname
+        assert "runSweepVisual()" not in body, f"{fname} must not start a run"
+
+
+def test_sweep_progress_text_three_states():
+    """Issue #355: `rows_total` is three-valued — undefined (nothing reported),
+    null (streaming, total unknown) and a number (converged)."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    found = re.search(r"function sweepProgressText\(.*?\n\}", html, re.DOTALL)
+    assert found is not None, "sweepProgressText is no longer a top-level function"
+    test_js = found.group(0) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    assert(sweepProgressText({rows_done: 7, rows_total: null}) === '7 windows replayed…',
+           sweepProgressText({rows_done: 7, rows_total: null}));
+    assert(sweepProgressText({rows_done: 0, rows_total: null}) === '0 windows replayed…');
+    assert(sweepProgressText({rows_done: 0, rows_total: undefined}) === 'starting…');
+    assert(sweepProgressText({rows_done: 40, rows_total: 40}) === 'row 40/40');
+    // A total of zero is a real, finished, empty run — not "unknown".
+    assert(sweepProgressText({rows_done: 0, rows_total: 0}) === 'row 0/0');
+    console.log('SWEEP_PROGRESS_TEXT_TESTS_PASSED');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_PROGRESS_TEXT_TESTS_PASSED" in res.stdout
+
+
+def test_sweep_markets_grid_has_three_states():
+    """Issue #355: the Markets grid distinguishes participated / selected-with-no-
+    windows / not-selected, and every chip says which it is."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    parts = []
+    for name in ("sweepMarketsGridHtml",):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
+
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const tokens = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+    const ALL = tokens.flatMap(t => [`${t.toLowerCase()}-up-or-down-5m`,
+                                    `${t.toLowerCase()}-up-or-down-15m`]);
+    const pts = present => [{ label: 'q=0', value: 0, overall: {}, per_series: {},
+                              series_present: present }];
+
+    // 1. The reported bug: everything selected, nothing replayed yet. The grid
+    //    must be all `pending` and contain no `off` chip at all.
+    let html1 = sweepMarketsGridHtml(pts([]), ALL);
+    assert(html1.includes('sweep-mkt pending'), html1);
+    assert(!html1.includes('sweep-mkt off'), html1);
+    assert(html1.includes('title="05m BTC — selected — no windows yet"'), html1);
+    tokens.forEach(t => {
+      assert(html1.includes(`>05m ${t}</span>`), html1);
+      assert(html1.includes(`>15m ${t}</span>`), html1);
+    });
+
+    // 2. Partial selection: the unselected tokens go `off`, the selected stay
+    //    `pending`. This is the case that used to render fully grey.
+    const btcOnly = ['btc-up-or-down-5m', 'btc-up-or-down-15m'];
+    let html2 = sweepMarketsGridHtml(pts([]), btcOnly);
+    assert(html2.includes('sweep-mkt pending" title="05m BTC'), html2);
+    assert(html2.includes('sweep-mkt off" title="05m ETH — not selected'), html2);
+    assert(html2.includes('sweep-mkt off" title="15m XRP — not selected'), html2);
+
+    // 3. A participant wins over `pending` and over `off` — a market that
+    //    replayed is never described as absent, even if not selected.
+    let html3 = sweepMarketsGridHtml(pts(['sol-up-or-down-5m']), btcOnly);
+    assert(html3.includes('class="sweep-mkt" title="05m SOL — replayed in this sweep"'), html3);
+    assert(!html3.includes('05m SOL — not selected'), html3);
+    assert(!html3.includes('05m SOL — selected'), html3);
+    assert(html3.includes('sweep-mkt pending" title="05m BTC'), html3);
+    assert(html3.includes('sweep-mkt pending" title="15m BTC'), html3);
+    assert(html3.includes('sweep-mkt off" title="15m ETH — not selected'), html3);
+
+    // 4. Backward compatibility: no selection supplied = the two-state contract.
+    let html4 = sweepMarketsGridHtml(pts(['eth-up-or-down-5m']), []);
+    assert(html4.includes('>05m ETH<'), html4);
+    assert(!html4.includes('sweep-mkt pending'), html4);
+    assert(html4.includes('sweep-mkt off" title="15m BTC'), html4);
+    // No points at all, no selection: the whole grid is `off` (today's idle
+    // fallback when the caller supplies no selection).
+    let html5 = sweepMarketsGridHtml([], []);
+    assert(!html5.includes('sweep-mkt pending'), html5);
+    tokens.forEach(t => {
+      assert(html5.includes(`sweep-mkt off" title="05m ${t} —`), html5);
+    });
+
+    console.log('SWEEP_MARKETS_GRID_TESTS_PASSED');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_MARKETS_GRID_TESTS_PASSED" in res.stdout
+
+
+def test_sweep_markets_grid_pending_style_uses_theme_tokens():
+    """Issue #355: `pending` is its own style, built from theme variables only —
+    no hardcoded colour (tests/test_theme_tokens.py is the repo's colour gate)."""
+    html = osc_dash.FULL_APP_HTML
+    assert "#btSweepMeta .sweep-mkt.pending{" in html
+    pending_rule = html[html.index("#btSweepMeta .sweep-mkt.pending{"):]
+    pending_rule = pending_rule[:pending_rule.index("}")]
+    assert "var(--" in pending_rule
+    # No hardcoded colour: strip the selector, then no '#' literal may remain.
+    body = pending_rule.split("{", 1)[1]
+    assert "#" not in body, body
+    # It must read differently from both neighbours.
+    assert "border-style:solid" in pending_rule
+    off_rule = html[html.index("#btSweepMeta .sweep-mkt.off{"):]
+    off_rule = off_rule[:off_rule.index("}")]
+    assert off_rule != pending_rule
+
+
+def test_bt_selected_series_slugs_follow_the_chips():
+    """Issue #355: the selected (token, timeframe) pairs expand to exactly the
+    slugs the sweep reports in `series_present`, so a chip toggle lights the
+    matching grid cells and nothing else."""
+    import re as _re
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    for name in ("btSelection", "btSelectedSeriesSlugs"):
+        found = _re.search(rf"function {name}\(.*?\n\}}", html, _re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    let selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    let selectedBtDuration = 'both';
+    // All five tokens + both frames = the whole universe, ten slugs.
+    assert(btSelectedSeriesSlugs().length === 10, btSelectedSeriesSlugs().join(','));
+    assert(btSelectedSeriesSlugs().includes('btc-up-or-down-5m'));
+    assert(btSelectedSeriesSlugs().includes('xrp-up-or-down-15m'));
+    // One token, both frames = exactly its two slugs.
+    selectedBtTokens = new Set(['SOL']);
+    let slugs = btSelectedSeriesSlugs();
+    assert(slugs.length === 2, slugs.join(','));
+    assert(slugs.includes('sol-up-or-down-5m') && slugs.includes('sol-up-or-down-15m'), slugs.join(','));
+    // One timeframe narrows to five slugs.
+    selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    selectedBtDuration = '15m';
+    slugs = btSelectedSeriesSlugs();
+    assert(slugs.length === 5, slugs.join(','));
+    assert(slugs.every(s => s.endsWith('-up-or-down-15m')), slugs.join(','));
+    // The helper defaults to the live chips when no snapshot is passed.
+    assert(btSelection().duration === '15m');
+    assert(btSelection().tokens.length === 5);
+    // An explicit snapshot wins over the live chips (run-start stability).
+    const snap = { tokens: ['BTC'], duration: '5m' };
+    assert(btSelectedSeriesSlugs(snap).join(',') === 'btc-up-or-down-5m');
+    """
+    import shutil
+    import subprocess
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
 
 
 # ── Issue #335: every axis holds the operator's configuration ────────────────
@@ -2132,9 +2365,10 @@ def test_sweep_override_note_is_wired_into_the_meta_block():
     html = osc_dash.FULL_APP_HTML
     assert "function sweepOverrideNote(" in html
     # Issue #344: the final render call carries the isProgress flag; progress
-    # events route through renderSweepVisual(view, v, true).
+    # events route through renderSweepVisual(view, v, true). Issue #355: the
+    # run-start selection snapshot rides along on that call.
     assert "renderSweepVisual(ev.result, v);" in html
-    assert "renderSweepVisual(buildSweepProgressView(axis, v, ev), v, true);" in html
+    assert "renderSweepVisual(buildSweepProgressView(axis, v, ev, selectedSeries), v, true);" in html
     assert "function renderSweepVisual(data, submitted, isProgress)" in html
     assert "function renderSweepVisual(" in html
     # The card owns the verdict now — it calls the note helper with the same
@@ -2180,10 +2414,14 @@ def test_sweep_override_note_wording_node():
     # card builder, so the tests assert on the exact HTML the meta block
     # receives.
     parts = []
-    for name in ("sweepOverrideNote", "sweepCard", "formatSweepTickValue"):
+    # Issue #355: sweepCard delegates the Markets grid to sweepMarketsGridHtml,
+    # so both must be in the harness or the grid renders as `undefined`.
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepCard",
+                 "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
 
     test_js = "\n".join(parts) + """
     const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
@@ -2223,8 +2461,8 @@ def test_sweep_override_note_wording_node():
     assert(card.includes('sweep-mkt-grid'), card);
     // eth-up-or-down-5m participated: its chip solid; every 15m absent: dashed.
     assert(card.includes('>05m ETH<'), card);
-    assert(!card.includes('class="sweep-mkt off">05m ETH<'), card);
-    assert(card.includes('class="sweep-mkt off">15m BTC<'), card);
+    assert(!card.includes('sweep-mkt off" title="05m ETH'), card);
+    assert(card.includes('sweep-mkt off" title="15m BTC'), card);
     assert(card.includes('sweep-mkt off'), card);
     assert(card.includes('Parameters held'), card);
     assert(card.includes('Designed constraints / rules'), card);
@@ -2358,12 +2596,13 @@ def test_sweep_override_note_wording_node():
     assert(!unk.includes('← subject'), unk);
     assert(unk.includes('Parameters held'), unk);
 
-    // Markets stay permanent even when the response has no points: every
-    // chip grayed out, layout unchanged.
+    // Markets stay permanent even when the response has no points: with no
+    // selection supplied the whole grid falls back to the two-state contract,
+    // every chip grayed out, layout unchanged (issue #355).
     const allMkts = sweepCard(v, { ...data, points: [] });
     tokens.forEach(t => {
-      assert(allMkts.includes(`class="sweep-mkt off">05m ${t}<`), allMkts);
-      assert(allMkts.includes(`class="sweep-mkt off">15m ${t}<`), allMkts);
+      assert(allMkts.includes(`sweep-mkt off" title="05m ${t} —`), allMkts);
+      assert(allMkts.includes(`sweep-mkt off" title="15m ${t} —`), allMkts);
     });
 
     console.log('SWEEP_OVERRIDE_NOTE_TESTS_PASSED');
@@ -2465,7 +2704,9 @@ def test_sweep_frontend_contract(tmp_path):
 
 def test_sweep_worker_progress_points_converge(tmp_path, monkeypatch):
     """Issue #344: the sweep worker's progress queue carries per-point running
-    totals whose final snapshot equals the returned points."""
+    totals whose final snapshot equals the returned points. Issue #355: the
+    FIRST message arrives from inside the read loop (unknown total, non-empty
+    `series_present`) and the last one has converged."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _make_backtest_ticks_file(tmp_path)
     q = _fake_queue_factory()
@@ -2483,12 +2724,71 @@ def test_sweep_worker_progress_points_converge(tmp_path, monkeypatch):
         except Exception:
             break
     assert messages, "no sweep progress emitted"
+    # Issue #355: the first event is a live preview from the read loop — the
+    # total is not known yet, and it already names the markets it replayed. That
+    # is what stops the card sitting all-grey for the whole run.
+    first = messages[0]
+    assert first["rows_total"] is None, first
+    assert first["rows_done"] >= 1
+    assert first["points"][0]["series_present"], first
     last = messages[-1]
     assert last["rows_done"] == last["rows_total"]
     assert len(last["points"]) == len(result["points"])
     for lp, fp in zip(last["points"], result["points"]):
         assert lp["overall"] == fp["overall"]
         assert lp["per_series"] == fp["per_series"]
+        assert lp["series_present"] == fp["series_present"]
+
+
+def test_sweep_worker_progress_emission_is_rate_limited(tmp_path, monkeypatch):
+    """Issue #355: progress emission is gated on wall-clock, so the event count
+    is bounded by the run duration and not by the window count. A huge interval
+    leaves exactly the first-window event plus the converged one."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path, windows=8)
+    monkeypatch.setattr(osc_dash, "SWEEP_PROGRESS_MIN_INTERVAL_SEC", 10_000.0)
+    q = _fake_queue_factory()
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    result = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        asdict(BacktestParams(offset=0.02)), "queue", 5, 0.0, 0, "", "",
+        progress_queue=q,
+    )
+    messages = []
+    while True:
+        try:
+            messages.append(q.get_nowait())
+        except Exception:
+            break
+    # 8 windows produced 1 live event + 1 converged event, not 8+1.
+    assert len(messages) == 2, [m["rows_done"] for m in messages]
+    assert messages[0]["rows_total"] is None
+    assert messages[-1]["rows_done"] == result["n_windows"]
+
+
+def test_sweep_worker_progress_failure_does_not_change_result(tmp_path, monkeypatch):
+    """Issue #355: a broken progress queue disables emission only; the returned
+    result is byte-identical to a run with no queue at all."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+
+    class ExplodingQueue:
+        def put_nowait(self, msg):
+            raise RuntimeError("queue broken")
+
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    params_dict = asdict(BacktestParams(offset=0.02))
+    with_queue = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "queue", 5, 0.0, 0, "", "", progress_queue=ExplodingQueue(),
+    )
+    without = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "queue", 5, 0.0, 0, "", "",
+    )
+    assert json.dumps(with_queue, sort_keys=True) == json.dumps(without, sort_keys=True)
 
 
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
