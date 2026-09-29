@@ -2259,9 +2259,9 @@ def test_sweep_override_note_wording_node():
     // verdict; the head/items live on the note helper itself.
     const points6 = [0.06, 0.08, 0.10, 0.12, 0.14, 0.16];
     const defNote = sweepOverrideNote('exit_stop_default', v, points6);
-    assert(defNote.head === 'sweeps the default 5m + 15m stop — replaces the four submitted stop inputs', defNote.head);
+    assert(defNote.head === 'sweeps the default 5m + 15m stop — replaces the two submitted default stops', defNote.head);
     assert(defNote.submittedLabel === 'submitted', defNote.head);
-    assert(defNote.items.length === 4, defNote.head);
+    assert(defNote.items.length === 2, defNote.head);
     assert(defNote.verdict.cls === 'none', defNote.head);
     assert(defNote.verdict.text === 'no bar equals your values', defNote.head);
 
@@ -2269,6 +2269,14 @@ def test_sweep_override_note_wording_node():
     const defYours = sweepOverrideNote('exit_stop_default', v6, points6);
     assert(defYours.verdict.cls === 'yours', defYours.head);
     assert(defYours.verdict.text === 'the bar at 0.1 is your setting', defYours.head);
+
+    // Both defaults on the axis but different from each other: no single bar
+    // carries both submitted values, so the note must refuse the claim —
+    // even though an unrelated BTC/SOL override sits off the axis.
+    const mixed = sweepOverrideNote('exit_stop_default',
+                                    { ...v, exit5m: 0.06, exit15m: 0.08 }, points6);
+    assert(mixed.verdict.cls === 'none', mixed.head);
+    assert(mixed.verdict.text === 'no bar equals your values', mixed.head);
 
     const btcNote = sweepOverrideNote('exit_stop_btc', v, points6);
     assert(btcNote.head === 'sweeps the BTC stop — replaces the submitted BTC 5m Stop Loss', btcNote.head);
@@ -2292,13 +2300,20 @@ def test_sweep_override_note_wording_node():
     assert(stopCard.split('← subject').length - 1 === 2, stopCard);
     assert(stopCard.includes('no bar equals your values'), stopCard);
 
+    // BTC/SOL sweeps mark their own submitted stop as the subject — not the
+    // Exit Stop 5m row the sweep holds unchanged.
     const btcCard = sweepCard(v, { ...data, axis: 'exit_stop_btc' });
     assert(btcCard.includes('Exit Stop Loss — BTC'), btcCard);
+    assert(btcCard.includes('>BTC 5m Stop ($) <span class="sweep-tag">← subject</span>'), btcCard);
+    assert(btcCard.includes('>0.08<'), btcCard);
     assert(btcCard.split('← subject').length - 1 === 1, btcCard);
+    assert(!btcCard.includes('Exit Stop 5m ($) <span class="sweep-tag"'), btcCard);
     assert(btcCard.includes('no bar equals it'), btcCard);
 
     const solCard = sweepCard(v, { ...data, axis: 'exit_stop_sol' });
     assert(solCard.includes('Exit Stop Loss — SOL'), solCard);
+    assert(solCard.includes('>SOL 5m Stop ($) <span class="sweep-tag">← subject</span>'), solCard);
+    assert(solCard.includes('>0.09<'), solCard);
     assert(solCard.split('← subject').length - 1 === 1, solCard);
 
     // Unknown axis: no claim, card still renders the held knobs.

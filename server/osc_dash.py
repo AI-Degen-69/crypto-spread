@@ -6873,15 +6873,17 @@ function sweepOverrideNote(axis, v, pointValues){
 
   const stopAxes = {
     exit_stop_default: () => {
-      const yours = [['5m', v.exit5m], ['15m', v.exit15m],
-                     ['BTC', v.exitBtc], ['SOL', v.exitSol]];
-      const items = yours.map(p => ({ label: p[0], value: exact(p[1]) }));
-      const on = onAxis(v.exit5m) && onAxis(v.exit15m)
-        && onAxis(v.exitBtc) && onAxis(v.exitSol);
+      // This axis writes one value into both default thresholds, so a bar can
+      // only be the operator's setting when their two default inputs agree and
+      // that value is a tested point. The BTC/SOL overrides are untouched by
+      // this axis — they never belong in the match.
+      const items = [['5m', v.exit5m], ['15m', v.exit15m]]
+        .map(p => ({ label: p[0], value: exact(p[1]) }));
+      const on = equals(v.exit5m, v.exit15m) && onAxis(v.exit5m);
       const verdict = on
         ? { cls: 'yours', text: `the bar at ${exact(v.exit5m)} is your setting` }
         : { cls: 'none', text: 'no bar equals your values' };
-      return { head: 'sweeps the default 5m + 15m stop — replaces the four submitted stop inputs',
+      return { head: 'sweeps the default 5m + 15m stop — replaces the two submitted default stops',
                submittedLabel: 'submitted', items, verdict };
     },
     exit_stop_btc: () => ({
@@ -6954,10 +6956,10 @@ function sweepCard(v, data, statsHtml){
       ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
       ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
       ${row('Late Entry (% window)', pct(v.entryDelayPct))}
-      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2),
-            data.axis === 'exit_stop_default' || data.axis === 'exit_stop_btc'
-            || data.axis === 'exit_stop_sol')}
+      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop_default')}
       ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
+      ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
+      ${row('SOL 5m Stop ($)', v.exitSol.toFixed(2), data.axis === 'exit_stop_sol')}
       ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
       ${row('Leg Chase', onoff(v.legChase))}
     </span>`;
