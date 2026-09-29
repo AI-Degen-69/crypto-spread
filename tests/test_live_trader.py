@@ -120,6 +120,9 @@ def test_ws_book_update_not_regressed_by_stale_rest_poll():
 
     # Socket reports itself live -- required for is_ws_book_fresh() to trust it.
     engine.stream_bridge.clob.is_connected = True
+    # Issue #353: the default is now False; this test covers the
+    # WS-authoritative path, so it opts in explicitly.
+    engine.ws_book_authority = True
 
     # 1. WS callback delivers a fresh, newer book: up mid 0.61, down mid 0.37.
     engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
@@ -132,10 +135,13 @@ def test_ws_book_update_not_regressed_by_stale_rest_poll():
     #    stale, lower-mid snapshot -- exactly the race the issue describes.
     #    WS is still fresh (age ~0s, well under ws_book_max_age_sec), so this
     #    REST data must be rejected for both legs.
+    #    Issue #353: the snapshot must agree with WS within the drift guard
+    #    (2c) — a snapshot disagreeing by MORE would (by design) make REST win
+    #    via the guard, which is the opposite scenario this test covers.
     stale_poll = {
         "market": fake_market,
-        "up_book": {"best_bid": 0.44, "best_ask": 0.46},
-        "down_book": {"best_bid": 0.53, "best_ask": 0.55},
+        "up_book": {"best_bid": 0.595, "best_ask": 0.615},
+        "down_book": {"best_bid": 0.355, "best_ask": 0.375},
     }
     engine._update_market_strategy(slug, stale_poll, now)
 
