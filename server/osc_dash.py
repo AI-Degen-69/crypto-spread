@@ -1617,6 +1617,7 @@ def _make_backtest_guard_releaser():
     released = {"flag": False}
 
     def _release() -> None:
+        """Release the guards on the first call only; later calls are no-ops."""
         if released["flag"]:
             return
         released["flag"] = True
@@ -1697,10 +1698,12 @@ def _run_backtest_simulation_worker(
     prog_last_flush = time.monotonic()
 
     def _disable_progress() -> None:
+        """Stop emitting progress after a queue failure; the run continues."""
         nonlocal emit_progress
         emit_progress = False
 
     def _flush_progress() -> None:
+        """Push one batched progress message; a failed put disables emission."""
         nonlocal prog_points, prog_last_flush, prog_count
         if not prog_points:
             return
@@ -2744,6 +2747,7 @@ async def api_backtest_stream(
     worker_task = asyncio.create_task(_submit())
 
     async def event_generator():
+        """Stream progress envelopes, then one authoritative final event."""
         completed = False
         deadline = time.monotonic() + BACKTEST_TIMEOUT_SEC
         try:
