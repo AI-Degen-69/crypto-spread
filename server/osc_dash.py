@@ -7633,6 +7633,19 @@ function resetBtParams(){
 }
 
 // Sweep Visual — one axis X-Y: 1 aggregate chart + 10 per-series charts
+// Issue #344: the tested axis values, mirrored from the server's SWEEP_AXES
+// grid — the immediate card needs them before the first response arrives.
+function sweepAxisValues(axis){
+  return ({
+    queue: [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
+    offset: [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
+    exit_stop_default: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    exit_stop_btc: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    exit_stop_sol: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    exit_rev: [0.010, 0.015, 0.020, 0.025, 0.030],
+  })[axis] || [];
+}
+
 async function runSweepVisual(){
   const btn = $('btnRunSweepVisual');
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
@@ -7651,7 +7664,7 @@ async function runSweepVisual(){
     if(meta){
       meta.innerHTML = sweepCard(v, {
         axis: axis,
-        points: (SWEEP_AXES[axis] || []).map(val => ({
+        points: (sweepAxisValues(axis) || []).map(val => ({
           label: formatSweepTickValue(axis, val),
           value: val,
           overall: {}, per_series: {}, series_present: [],
