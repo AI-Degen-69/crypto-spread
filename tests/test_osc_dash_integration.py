@@ -1897,7 +1897,9 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
                  "enable_leg_chase", "max_start_delay", "series", "durations"):
         assert knob in html, f"{knob} never reaches the request"
     # Both endpoints consume the shared builder, not a private copy.
-    assert "/api/backtest?${btControlQuery(v)}" in html
+    # Issue #331: the backtest reader consumes /api/backtest/stream; the sweep
+    # stays a blocking call. Both must go through btControlQuery.
+    assert "/api/backtest/stream?${btControlQuery(v)}" in html
     assert "/api/backtest/sweep?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in html
     # The sweep reader must not re-read controls behind the helper's back.
     assert "const offset = $('btOffset')" not in html
@@ -2412,6 +2414,19 @@ def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
 
     # Verify that concurrency guards are fully released
     assert not osc_dash._BACKTEST_RUNNING
+
+
+def test_backtest_stream_frontend_contract():
+    """Issue #331: the SPA reads the stream, draws a provisional curve, and
+    renders the final result through the extracted renderBacktestResult."""
+    html = osc_dash.FULL_APP_HTML
+    assert "/api/backtest/stream?${btControlQuery(v)}" in html
+    assert "getReader()" in html
+    assert "Cumulative PnL ($) — provisional" in html
+    assert "function renderBacktestResult(" in html
+    assert "consumeBacktestStream" in html
+    # The old blocking fetch must not drive the backtest run anymore.
+    assert "/api/backtest?${btControlQuery(v)}" not in html
 
 
 def test_shutdown_backtest_pool():

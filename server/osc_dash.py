@@ -6625,6 +6625,437 @@ function btControlQuery(v, axis){
   return q;
 }
 
+// Issue #331: the authoritative final render, extracted verbatim from the
+// former success path of runBacktest. `data` is the exact backtest result dict;
+// `fileVal` feeds the hash badge suffix. Any stream transport may call this —
+// the chart and payload rendering must stay identical to the blocking era.
+function renderBacktestResult(data, fileVal){
+  const ov = data.overall || {};
+  const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
+  const tookMs = window._btStartTime ? (performance.now() - window._btStartTime) : 0;
+  const tookStr = fmtElapsed(tookMs);
+  const tookTxt = tookStr ? ` · took ${tookStr}` : '';
+  $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}${tookTxt}`;
+// Persistent "how long did the results take" badge next to the Run Sweep
+// button — the in-button counter resets to "Run Sweep" when the run ends.
+  const lastRun = $('btLastRunTime');
+  if(lastRun && window._btStartTime){
+    lastRun.textContent = `✓ results in ${tookStr}`;
+  }
+  const elTime = $('btElapsedTime');
+  if(elTime){
+    elTime.textContent = tookStr;
+    elTime.style.color = 'var(--cyan)';
+  }
+  const elSub = $('btElapsedSub');
+  if(elSub){
+    elSub.textContent = 'Sweep duration';
+  }
+  $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);  $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
+  $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
+  $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
+  $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs${enteredTxt}`;
+  $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
+  $('btExitsCount').textContent = `${ov.exits||0} exits`;
+  $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
+  $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
+  if ($('btWinsCount')) {
+    $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
+  }
+
+// Equity Curve Chart
+  const eqData = data.equity_curve || [];
+  const labels = eqData.map(e => e.window_idx);
+  const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
+
+// Zero-fill / flatline warning diagnostic (issue #204)
+  const fillsCount = (ov.pairs || 0) + (ov.exits || 0);
+  const hasFills = fillsCount > 0 || (ov.total_pnl_cents || 0) !== 0;
+  if ($('btEquityWarning')) {
+    if (!hasFills) {
+      if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
+        $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry delay).`;
+      } else {
+        $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Check tape data density for this dataset.';
+      }
+      $('btEquityWarning').style.display = 'inline-block';
+    } else {
+      $('btEquityWarning').style.display = 'none';
+    }
+  }
+
+  const minPnl = pnlValues.length ? Math.min(...pnlValues) : 0;
+  const maxPnl = pnlValues.length ? Math.max(...pnlValues) : 0;
+  const pnlSpan = Math.max(Math.abs(maxPnl - minPnl), Math.abs(maxPnl) * 0.15, 0.5);
+  const pnlPad = Math.max(pnlSpan * 0.20, 0.35);
+
+destroyChartInstance('chartEquity');
+  const ctx = $('chartEquity').getContext('2d');
+  const theme = getThemeTokens();
+equityChartInstance = new Chart(ctx, {
+  type: 'line',
+  plugins: [{
+    id: 'equityZeroLine',
+    afterDraw: function(chart) {
+      const yScale = chart.scales.y;
+      if (!yScale) return;
+      const y0 = yScale.getPixelForValue(0);
+      if (y0 >= chart.chartArea.top && y0 <= chart.chartArea.bottom) {
+        const c = chart.ctx;
+        c.save();
+        c.beginPath();
+        c.setLineDash([6, 4]);
+        c.strokeStyle = theme.gold;
+        c.lineWidth = 1.5;
+        c.moveTo(chart.chartArea.left, y0);
+        c.lineTo(chart.chartArea.right, y0);
+        c.stroke();
+        c.restore();
+      }
+    }
+  }],
+  data: {
+    labels: labels,
+    datasets: [{
+      label: 'Cumulative PnL ($)',
+      data: pnlValues,
+      borderColor: (ov.total_pnl_cents||0)>=0 ? theme.up : theme.down,
+      backgroundColor: (ov.total_pnl_cents||0)>=0 ? hexToRgba(theme.up, 0.1) : hexToRgba(theme.down, 0.1),
+      fill: true,
+      tension: 0.1,
+      pointRadius: labels.length > 100 ? 0 : 2,
+    }]
+  },
+  options: {
+    responsive: true,
+    layout: {
+      padding: { left: 8, right: 14, top: 14, bottom: 10 }
+    },
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        offset: true,
+        title: { display: true, text: 'Window', color: theme.dim },
+        ticks: { color: theme.dim, maxTicksLimit: 12 },
+        grid: { color: theme.line }
+      },
+      y: {
+        grace: '18%',
+        suggestedMax: Math.max(0, maxPnl) + pnlPad,
+        suggestedMin: Math.min(0, minPnl) - pnlPad,
+        title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
+        ticks: {
+          color: theme.dim,
+          callback: function(v){ return '$' + Number(v).toFixed(2); }
+        },
+        grid: {
+          color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+          lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+          borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
+        }
+      }
+    }
+  }
+});
+
+// Per-Window P&L Distribution Histogram (Issue #136)
+  const histData = data.pnl_histogram || { buckets: [], n: 0, bucket_width_cents: 1.0, mean_cents: 0.0, median_cents: 0.0 };
+  const histBuckets = histData.buckets || [];
+  const histStatsEl = $('btPnlHistStats');
+  const histWarnEl = $('btPnlHistWarning');
+  if (histStatsEl) {
+    if (histData.n > 0) {
+      const meanStr = fmtUsd(histData.mean_cents || 0, true);
+      const medStr = fmtUsd(histData.median_cents || 0, true);
+      const bwStr = ((histData.bucket_width_cents || 0) / 100).toFixed(2);
+      histStatsEl.textContent = `n=${histData.n} · Δ=$${bwStr} · Mean ${meanStr} · Median ${medStr}`;
+    } else {
+      histStatsEl.textContent = '';
+    }
+  }
+  if (histWarnEl) {
+    histWarnEl.style.display = (!hasFills && histData.n > 0) ? 'inline-block' : 'none';
+  }
+
+destroyChartInstance('chartPnlHist');
+if ($('chartPnlHist')) {
+  const histCtx = $('chartPnlHist').getContext('2d');
+  const minEdge = histBuckets.length ? (histBuckets[0].lo / 100) : 0;
+  const maxEdge = histBuckets.length ? (histBuckets[histBuckets.length - 1].hi / 100) : 1;
+  const dataPoints = histBuckets.map(b => ({
+    x: (b.lo + b.hi) / 200,
+    y: b.count
+  }));
+  const allEdges = [];
+  for (let i = 0; i <= histBuckets.length; i++) {
+    const val = i === histBuckets.length ? histBuckets[i - 1].hi / 100 : histBuckets[i].lo / 100;
+    allEdges.push(Math.round(val * 100) / 100);
+  }
+  const histCounts = histBuckets.map(b => b.count);
+  const histBgColors = histBuckets.map(b => {
+    if (b.hi <= 0) return hexToRgba(theme.down, 0.7);
+    if (b.lo >= 0) return hexToRgba(theme.up, 0.7);
+    return hexToRgba(theme.dim, 0.6);
+  });
+  const histBorderColors = histBuckets.map(b => {
+    if (b.hi <= 0) return theme.down;
+    if (b.lo >= 0) return theme.up;
+    return theme.dim;
+  });
+
+  const maxHistCount = histCounts.length ? Math.max(...histCounts) : 0;
+  const histYPad = Math.max(1, Math.ceil(maxHistCount * 0.25));
+
+  pnlHistChartInstance = new Chart(histCtx, {
+    type: 'bar',
+    plugins: [{
+      id: 'pnlHistZeroLine',
+      afterDraw: function(chart) {
+        const xScale = chart.scales.x;
+        if (!xScale) return;
+        const x0 = xScale.getPixelForValue(0);
+        if (x0 >= chart.chartArea.left && x0 <= chart.chartArea.right) {
+          const c = chart.ctx;
+          c.save();
+          c.beginPath();
+          c.setLineDash([6, 4]);
+          c.strokeStyle = theme.gold;
+          c.lineWidth = 2;
+          c.moveTo(x0, chart.chartArea.top);
+          c.lineTo(x0, chart.chartArea.bottom);
+          c.stroke();
+          c.restore();
+        }
+      }
+    }],
+    data: {
+      datasets: [{
+        label: 'Windows',
+        data: dataPoints,
+        backgroundColor: histBgColors,
+        borderColor: histBorderColors,
+        borderWidth: 1,
+        barPercentage: 1.0,
+        categoryPercentage: 1.0,
+      }]
+    },
+    options: {
+      responsive: true,
+      layout: {
+        padding: { left: 8, right: 14, top: 14, bottom: 8 }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function(items) {
+              if (!items.length) return '';
+              const b = histBuckets[items[0].dataIndex];
+              if (!b) return '';
+              const loSign = b.lo < 0 ? '-$' : '$';
+              const hiSign = b.hi < 0 ? '-$' : '$';
+              const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
+              const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
+              return `P&L Range: ${loStr} to ${hiStr}`;
+            },
+            label: function(item) {
+              const pct = histData.n ? ((item.parsed.y / histData.n) * 100).toFixed(1) : '0.0';
+              return ` ${item.parsed.y} windows (${pct}%)`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          offset: false,
+          min: minEdge,
+          max: maxEdge,
+          afterBuildTicks: function(scale) {
+            let chosen = allEdges;
+            if (allEdges.length > 14) {
+              const stride = Math.ceil(allEdges.length / 10);
+              chosen = allEdges.filter((v, idx) => idx % stride === 0 || Math.abs(v) < 0.001 || idx === allEdges.length - 1);
+            }
+            scale.ticks = chosen.map(v => ({ value: v }));
+          },
+          title: { display: true, text: 'Window P&L ($)', color: theme.dim },
+          ticks: {
+            color: theme.dim,
+            maxRotation: 45,
+            minRotation: 0,
+            autoSkip: false,
+            callback: function(v) {
+              const num = Number(v);
+              return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
+            }
+          },
+          grid: {
+            offset: false,
+            color: function(ctx) {
+              return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? theme.gold : theme.line;
+            },
+            lineWidth: function(ctx) {
+              return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? 2 : 1;
+            },
+            borderDash: function(ctx) {
+              return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? [6, 4] : [];
+            }
+          }
+        },
+        y: {
+          beginAtZero: true,
+          grace: 1,
+          suggestedMax: maxHistCount + histYPad,
+          title: { display: true, text: 'Windows Count', color: theme.dim },
+          ticks: { color: theme.dim, precision: 0 },
+          grid: { color: theme.line }
+        }
+      }
+    }
+  });
+}
+
+// Per series table with tooltips and execution vs oscillation clarity
+let stbl = '<table class="tbl"><thead><tr>'
+  + '<th>Series</th>'
+  + '<th>Windows</th>'
+  + '<th title="Both legs filled & merged for profit. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
+  + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
+  + '<th>Total P&L ($)</th>'
+  + '<th>Avg / Window ($)</th>'
+  + '<th title="Price excursion >= 2c in both directions vs 50c mid. Market oscillation does not guarantee limit order fills.">Oscillating ℹ️</th>'
+  + '<th>Monotonic</th>'
+  + '</tr></thead><tbody>';
+for(const [k,v] of Object.entries(data.per_series||{})){
+  const label = canonicalMarketName(k || v.label);
+  stbl+=`<tr><td style="font-weight:700">${esc(label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
+}
+stbl+='</tbody></table>';
+$('btSeriesTableWrap').innerHTML=stbl;
+
+// Populate Series Filter dropdown for Executed Windows Log
+window.allBacktestTrades = data.trades_sample || [];
+window.btLogCurrentPage = 1;
+if ($('btLogSeriesFilter')) {
+  const currentVal = $('btLogSeriesFilter').value;
+  const seriesLabels = new Map();
+  for (const t of window.allBacktestTrades) {
+    if (t.series) seriesLabels.set(t.series, canonicalMarketName(t.series || t.label));
+  }
+  let opts = '<option value="">All Series</option>';
+  for (const [slug, label] of seriesLabels.entries()) {
+    opts += `<option value="${esc(slug)}"${currentVal === slug ? ' selected' : ''}>${esc(label)}</option>`;
+  }
+  $('btLogSeriesFilter').innerHTML = opts;
+}
+
+renderBacktestTradesPage();
+}
+
+// Backtest failure banner, shared by the HTTP-error and stream-error paths.
+function markBacktestFailed(errMsg){
+  $('btHash').textContent = `Backtest error: ${errMsg}`;
+  const lastRun = $('btLastRunTime');
+  if (lastRun) lastRun.textContent = `✗ error: ${errMsg}`;
+  const elTime = $('btElapsedTime');
+  if (elTime) {
+    elTime.textContent = '--';
+    elTime.style.color = 'var(--down)';
+  }
+  const elSub = $('btElapsedSub');
+  if (elSub) elSub.textContent = 'Failed';
+}
+
+// Provisional live equity chart during a streaming run (issue #331).
+let btProvisionalChart = null;
+
+function btBeginProvisionalChart(){
+  destroyChartInstance('chartEquity');
+  if (btProvisionalChart) { try { btProvisionalChart.destroy(); } catch {} btProvisionalChart = null; }
+  if (!$('chartEquity')) return;
+  const ctx = $('chartEquity').getContext('2d');
+  const theme = getThemeTokens();
+  btProvisionalChart = new Chart(ctx, {
+    type: 'line',
+    plugins: [],
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Cumulative PnL ($) — provisional',
+        data: [],
+        borderColor: theme.cyan || '#4dd0e1',
+        backgroundColor: 'rgba(0,0,0,0)',
+        fill: false,
+        tension: 0.1,
+        pointRadius: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      layout: { padding: { left: 8, right: 14, top: 14, bottom: 10 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { offset: true, title: { display: true, text: 'Window', color: theme.dim },
+             ticks: { color: theme.dim, maxTicksLimit: 12 }, grid: { color: theme.line } },
+        y: { grace: '18%',
+             title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
+             ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } },
+             grid: { color: theme.line } }
+      }
+    }
+  });
+}
+
+function btAppendProvisionalPoints(msg){
+  if (!btProvisionalChart || !msg || !Array.isArray(msg.points)) return;
+  const ds = btProvisionalChart.data.datasets[0];
+  for (const p of msg.points) {
+    btProvisionalChart.data.labels.push(btProvisionalChart.data.labels.length + 1);
+    ds.data.push(((p.cumulative_pnl_cents || 0) / 100).toFixed(2));
+  }
+  if (msg.windows_done !== undefined) {
+    const elSub = $('btElapsedSub');
+    if (elSub && elSub.textContent === 'Simulating…') {
+      elSub.textContent = `Simulating… ${msg.windows_done} windows · ${((msg.provisional_total_pnl_cents || 0) / 100).toFixed(2)} USD`;
+    }
+  }
+  btProvisionalChart.update('none');
+}
+
+function btDestroyProvisionalChart(){
+  if (btProvisionalChart) { try { btProvisionalChart.destroy(); } catch {} btProvisionalChart = null; }
+}
+
+// Minimal SSE parser over a fetch body reader: split on blank lines, take the
+// `data:` payloads. Used only for /api/backtest/stream — EventSource is not
+// usable here because its automatic reconnect would start duplicate runs.
+async function consumeBacktestStream(res, ctl, onEvent){
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const {done, value} = await reader.read();
+    if (window._btAbort !== ctl) { try { await reader.cancel(); } catch {} return; }
+    if (done) break;
+    buf += decoder.decode(value, {stream: true});
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of block.split('\n')) {
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim();
+          if (payload) {
+            try { onEvent(JSON.parse(payload)); } catch (e) { console.error('bad SSE payload', e); }
+          }
+        }
+      }
+    }
+  }
+}
+
 async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
@@ -6632,367 +7063,62 @@ async function runBacktest(fileOverride){
   window._btRunning = true;
   setBacktestLoadingState(true);
   startBtTimer();
+  let fileVal = '';
   try {
     const v = btControlValues();
     const size = v.size;
     if ($('btSize')) $('btSize').value = size;
-    const fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
+    fileVal = fileOverride !== undefined ? fileOverride : ($('btFileSelect') ? $('btFileSelect').value : (window.selectedBacktestFile || ''));
     if (fileOverride !== undefined && $('btFileSelect')) {
       $('btFileSelect').value = fileOverride;
     }
-    const url = `/api/backtest?${btControlQuery(v)}`;
-    const res = await fetch(url, {signal: ctl.signal});
-    const data = await res.json();
-    if (window._btAbort !== ctl) return; // superseded by a newer run — never render stale results
+    const url = `/api/backtest/stream?${btControlQuery(v)}`;
 
-    if (!res.ok || (data && data.error)) {
-      const errMsg = (data && data.error) ? data.error : `HTTP ${res.status}`;
-      $('btHash').textContent = `Backtest error: ${errMsg}`;
-      const lastRun = $('btLastRunTime');
-      if (lastRun) lastRun.textContent = `✗ error: ${errMsg}`;
-      const elTime = $('btElapsedTime');
-      if (elTime) {
-        elTime.textContent = '--';
-        elTime.style.color = 'var(--down)';
-      }
-      const elSub = $('btElapsedSub');
-      if (elSub) elSub.textContent = 'Failed';
+    // After an intentional abort of the previous stream, the server needs a
+    // moment to detect the disconnect and release the single-run guard; a
+    // fresh request can 429 briefly. Retry a bounded few times with a short
+    // delay before surfacing the 429.
+    let res = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      res = await fetch(url, {signal: ctl.signal});
+      if (window._btAbort !== ctl) return; // superseded — never render stale results
+      if (res.status !== 429 || window._btAbort === null) break;
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    if (!res.ok) {
+      let errMsg = `HTTP ${res.status}`;
+      try { const j = await res.json(); if (j && j.error) errMsg = j.error; } catch {}
+      if (window._btAbort === ctl) markBacktestFailed(errMsg);
       return;
     }
+    if (window._btAbort !== ctl) return;
 
-    const ov = data.overall || {};
-    const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
-    const tookMs = window._btStartTime ? (performance.now() - window._btStartTime) : 0;
-    const tookStr = fmtElapsed(tookMs);
-    const tookTxt = tookStr ? ` · took ${tookStr}` : '';
-    $('btHash').textContent = `Hash: ${data.params_hash} · ${data.n_windows} windows${enteredTxt}${fileVal ? ' · [' + fileVal + ']' : ''}${tookTxt}`;
-    // Persistent "how long did the results take" badge next to the Run Sweep
-    // button — the in-button counter resets to "Run Sweep" when the run ends.
-    const lastRun = $('btLastRunTime');
-    if(lastRun && window._btStartTime){
-      lastRun.textContent = `✓ results in ${tookStr}`;
-    }
-    const elTime = $('btElapsedTime');
-    if(elTime){
-      elTime.textContent = tookStr;
-      elTime.style.color = 'var(--cyan)';
-    }
-    const elSub = $('btElapsedSub');
-    if(elSub){
-      elSub.textContent = 'Sweep duration';
-    }
-    $('btTotalPnl').textContent = fmtUsd(ov.total_pnl_cents||0, true);
-    $('btTotalPnl').style.color = (ov.total_pnl_cents||0)>=0 ? 'var(--up)' : 'var(--down)';
-    $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
-    $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
-    $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs${enteredTxt}`;
-    $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
-    $('btExitsCount').textContent = `${ov.exits||0} exits`;
-    $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
-    $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
-    if ($('btWinsCount')) {
-      $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
-    }
+    btBeginProvisionalChart();
 
-    // Equity Curve Chart
-    const eqData = data.equity_curve || [];
-    const labels = eqData.map(e => e.window_idx);
-    const pnlValues = eqData.map(e => ((e.cumulative_pnl_cents||0)/100).toFixed(2));
-
-    // Zero-fill / flatline warning diagnostic (issue #204)
-    const fillsCount = (ov.pairs || 0) + (ov.exits || 0);
-    const hasFills = fillsCount > 0 || (ov.total_pnl_cents || 0) !== 0;
-    if ($('btEquityWarning')) {
-      if (!hasFills) {
-        if ((ov.entered_windows || 0) === 0 && (ov.windows || 0) > 0) {
-          $('btEquityWarning').textContent = `⚠️ 0 / ${ov.windows} windows entered (all windows skipped by gates, e.g. entry delay).`;
-        } else {
-          $('btEquityWarning').textContent = '⚠️ 0 fills recorded in this run. Check tape data density for this dataset.';
-        }
-        $('btEquityWarning').style.display = 'inline-block';
-      } else {
-        $('btEquityWarning').style.display = 'none';
-      }
-    }
-
-    const minPnl = pnlValues.length ? Math.min(...pnlValues) : 0;
-    const maxPnl = pnlValues.length ? Math.max(...pnlValues) : 0;
-    const pnlSpan = Math.max(Math.abs(maxPnl - minPnl), Math.abs(maxPnl) * 0.15, 0.5);
-    const pnlPad = Math.max(pnlSpan * 0.20, 0.35);
-
-    destroyChartInstance('chartEquity');
-    const ctx = $('chartEquity').getContext('2d');
-    const theme = getThemeTokens();
-    equityChartInstance = new Chart(ctx, {
-      type: 'line',
-      plugins: [{
-        id: 'equityZeroLine',
-        afterDraw: function(chart) {
-          const yScale = chart.scales.y;
-          if (!yScale) return;
-          const y0 = yScale.getPixelForValue(0);
-          if (y0 >= chart.chartArea.top && y0 <= chart.chartArea.bottom) {
-            const c = chart.ctx;
-            c.save();
-            c.beginPath();
-            c.setLineDash([6, 4]);
-            c.strokeStyle = theme.gold;
-            c.lineWidth = 1.5;
-            c.moveTo(chart.chartArea.left, y0);
-            c.lineTo(chart.chartArea.right, y0);
-            c.stroke();
-            c.restore();
-          }
-        }
-      }],
-      data: {
-        labels: labels,
-        datasets: [{
-          label: 'Cumulative PnL ($)',
-          data: pnlValues,
-          borderColor: (ov.total_pnl_cents||0)>=0 ? theme.up : theme.down,
-          backgroundColor: (ov.total_pnl_cents||0)>=0 ? hexToRgba(theme.up, 0.1) : hexToRgba(theme.down, 0.1),
-          fill: true,
-          tension: 0.1,
-          pointRadius: labels.length > 100 ? 0 : 2,
-        }]
-      },
-      options: {
-        responsive: true,
-        layout: {
-          padding: { left: 8, right: 14, top: 14, bottom: 10 }
-        },
-        plugins: { legend: { display: false } },
-        scales: {
-          x: {
-            offset: true,
-            title: { display: true, text: 'Window', color: theme.dim },
-            ticks: { color: theme.dim, maxTicksLimit: 12 },
-            grid: { color: theme.line }
-          },
-          y: {
-            grace: '18%',
-            suggestedMax: Math.max(0, maxPnl) + pnlPad,
-            suggestedMin: Math.min(0, minPnl) - pnlPad,
-            title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
-            ticks: {
-              color: theme.dim,
-              callback: function(v){ return '$' + Number(v).toFixed(2); }
-            },
-            grid: {
-              color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
-              lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
-              borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
-            }
-          }
-        }
+    await consumeBacktestStream(res, ctl, (ev) => {
+      if (window._btAbort !== ctl) return; // superseded — ignore stale events
+      if (ev.type === 'progress') {
+        btAppendProvisionalPoints(ev);
+      } else if (ev.type === 'final') {
+        btDestroyProvisionalChart();
+        renderBacktestResult(ev.result, fileVal);
+      } else if (ev.type === 'error') {
+        markBacktestFailed(ev.error || 'stream error');
       }
     });
-
-    // Per-Window P&L Distribution Histogram (Issue #136)
-    const histData = data.pnl_histogram || { buckets: [], n: 0, bucket_width_cents: 1.0, mean_cents: 0.0, median_cents: 0.0 };
-    const histBuckets = histData.buckets || [];
-    const histStatsEl = $('btPnlHistStats');
-    const histWarnEl = $('btPnlHistWarning');
-    if (histStatsEl) {
-      if (histData.n > 0) {
-        const meanStr = fmtUsd(histData.mean_cents || 0, true);
-        const medStr = fmtUsd(histData.median_cents || 0, true);
-        const bwStr = ((histData.bucket_width_cents || 0) / 100).toFixed(2);
-        histStatsEl.textContent = `n=${histData.n} · Δ=$${bwStr} · Mean ${meanStr} · Median ${medStr}`;
-      } else {
-        histStatsEl.textContent = '';
-      }
-    }
-    if (histWarnEl) {
-      histWarnEl.style.display = (!hasFills && histData.n > 0) ? 'inline-block' : 'none';
-    }
-
-    destroyChartInstance('chartPnlHist');
-    if ($('chartPnlHist')) {
-      const histCtx = $('chartPnlHist').getContext('2d');
-      const minEdge = histBuckets.length ? (histBuckets[0].lo / 100) : 0;
-      const maxEdge = histBuckets.length ? (histBuckets[histBuckets.length - 1].hi / 100) : 1;
-      const dataPoints = histBuckets.map(b => ({
-        x: (b.lo + b.hi) / 200,
-        y: b.count
-      }));
-      const allEdges = [];
-      for (let i = 0; i <= histBuckets.length; i++) {
-        const val = i === histBuckets.length ? histBuckets[i - 1].hi / 100 : histBuckets[i].lo / 100;
-        allEdges.push(Math.round(val * 100) / 100);
-      }
-      const histCounts = histBuckets.map(b => b.count);
-      const histBgColors = histBuckets.map(b => {
-        if (b.hi <= 0) return hexToRgba(theme.down, 0.7);
-        if (b.lo >= 0) return hexToRgba(theme.up, 0.7);
-        return hexToRgba(theme.dim, 0.6);
-      });
-      const histBorderColors = histBuckets.map(b => {
-        if (b.hi <= 0) return theme.down;
-        if (b.lo >= 0) return theme.up;
-        return theme.dim;
-      });
-
-      const maxHistCount = histCounts.length ? Math.max(...histCounts) : 0;
-      const histYPad = Math.max(1, Math.ceil(maxHistCount * 0.25));
-
-      pnlHistChartInstance = new Chart(histCtx, {
-        type: 'bar',
-        plugins: [{
-          id: 'pnlHistZeroLine',
-          afterDraw: function(chart) {
-            const xScale = chart.scales.x;
-            if (!xScale) return;
-            const x0 = xScale.getPixelForValue(0);
-            if (x0 >= chart.chartArea.left && x0 <= chart.chartArea.right) {
-              const c = chart.ctx;
-              c.save();
-              c.beginPath();
-              c.setLineDash([6, 4]);
-              c.strokeStyle = theme.gold;
-              c.lineWidth = 2;
-              c.moveTo(x0, chart.chartArea.top);
-              c.lineTo(x0, chart.chartArea.bottom);
-              c.stroke();
-              c.restore();
-            }
-          }
-        }],
-        data: {
-          datasets: [{
-            label: 'Windows',
-            data: dataPoints,
-            backgroundColor: histBgColors,
-            borderColor: histBorderColors,
-            borderWidth: 1,
-            barPercentage: 1.0,
-            categoryPercentage: 1.0,
-          }]
-        },
-        options: {
-          responsive: true,
-          layout: {
-            padding: { left: 8, right: 14, top: 14, bottom: 8 }
-          },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                title: function(items) {
-                  if (!items.length) return '';
-                  const b = histBuckets[items[0].dataIndex];
-                  if (!b) return '';
-                  const loSign = b.lo < 0 ? '-$' : '$';
-                  const hiSign = b.hi < 0 ? '-$' : '$';
-                  const loStr = loSign + Math.abs(b.lo / 100).toFixed(2);
-                  const hiStr = hiSign + Math.abs(b.hi / 100).toFixed(2);
-                  return `P&L Range: ${loStr} to ${hiStr}`;
-                },
-                label: function(item) {
-                  const pct = histData.n ? ((item.parsed.y / histData.n) * 100).toFixed(1) : '0.0';
-                  return ` ${item.parsed.y} windows (${pct}%)`;
-                }
-              }
-            }
-          },
-          scales: {
-            x: {
-              type: 'linear',
-              offset: false,
-              min: minEdge,
-              max: maxEdge,
-              afterBuildTicks: function(scale) {
-                let chosen = allEdges;
-                if (allEdges.length > 14) {
-                  const stride = Math.ceil(allEdges.length / 10);
-                  chosen = allEdges.filter((v, idx) => idx % stride === 0 || Math.abs(v) < 0.001 || idx === allEdges.length - 1);
-                }
-                scale.ticks = chosen.map(v => ({ value: v }));
-              },
-              title: { display: true, text: 'Window P&L ($)', color: theme.dim },
-              ticks: {
-                color: theme.dim,
-                maxRotation: 45,
-                minRotation: 0,
-                autoSkip: false,
-                callback: function(v) {
-                  const num = Number(v);
-                  return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
-                }
-              },
-              grid: {
-                offset: false,
-                color: function(ctx) {
-                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? theme.gold : theme.line;
-                },
-                lineWidth: function(ctx) {
-                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? 2 : 1;
-                },
-                borderDash: function(ctx) {
-                  return (ctx.tick && Math.abs(ctx.tick.value) < 0.001) ? [6, 4] : [];
-                }
-              }
-            },
-            y: {
-              beginAtZero: true,
-              grace: 1,
-              suggestedMax: maxHistCount + histYPad,
-              title: { display: true, text: 'Windows Count', color: theme.dim },
-              ticks: { color: theme.dim, precision: 0 },
-              grid: { color: theme.line }
-            }
-          }
-        }
-      });
-    }
-
-    // Per series table with tooltips and execution vs oscillation clarity
-    let stbl = '<table class="tbl"><thead><tr>'
-      + '<th>Series</th>'
-      + '<th>Windows</th>'
-      + '<th title="Both legs filled & merged for profit. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
-      + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
-      + '<th>Total P&L ($)</th>'
-      + '<th>Avg / Window ($)</th>'
-      + '<th title="Price excursion >= 2c in both directions vs 50c mid. Market oscillation does not guarantee limit order fills.">Oscillating ℹ️</th>'
-      + '<th>Monotonic</th>'
-      + '</tr></thead><tbody>';
-    for(const [k,v] of Object.entries(data.per_series||{})){
-      const label = canonicalMarketName(k || v.label);
-      stbl+=`<tr><td style="font-weight:700">${esc(label)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.windows}</td><td style="color:var(--up);font-weight:700;font-variant-numeric:tabular-nums">${(v.pair_rate*100).toFixed(1)}% (${v.pairs})</td><td style="color:var(--down);font-variant-numeric:tabular-nums">${(v.exit_rate*100).toFixed(1)}% (${v.exits})</td><td class="mono" style="font-weight:700;font-variant-numeric:tabular-nums;color:${v.total_pnl_cents>=0?'var(--up)':'var(--down)'}">${fmtUsd(v.total_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${fmtUsd(v.avg_pnl_cents,true)}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.oscillating}</td><td class="mono" style="font-variant-numeric:tabular-nums">${v.monotonic}</td></tr>`;
-    }
-    stbl+='</tbody></table>';
-    $('btSeriesTableWrap').innerHTML=stbl;
-
-    // Populate Series Filter dropdown for Executed Windows Log
-    window.allBacktestTrades = data.trades_sample || [];
-    window.btLogCurrentPage = 1;
-    if ($('btLogSeriesFilter')) {
-      const currentVal = $('btLogSeriesFilter').value;
-      const seriesLabels = new Map();
-      for (const t of window.allBacktestTrades) {
-        if (t.series) seriesLabels.set(t.series, canonicalMarketName(t.series || t.label));
-      }
-      let opts = '<option value="">All Series</option>';
-      for (const [slug, label] of seriesLabels.entries()) {
-        opts += `<option value="${esc(slug)}"${currentVal === slug ? ' selected' : ''}>${esc(label)}</option>`;
-      }
-      $('btLogSeriesFilter').innerHTML = opts;
-    }
-
-    renderBacktestTradesPage();
   } catch(err) {
     if (err && err.name === 'AbortError') return;
     console.error('Error running backtest:', err);
   } finally {
+    btDestroyProvisionalChart();
     if (window._btAbort === ctl) {
       window._btAbort = null;
       window._btRunning = false;
       stopBtTimer();
       setBacktestLoadingState(false);
       const elSub = $('btElapsedSub');
-      if (elSub && elSub.textContent === 'Simulating…') {
+      if (elSub && (elSub.textContent === 'Simulating…' || elSub.textContent.startsWith('Simulating…'))) {
         elSub.textContent = 'Execution time';
       }
     }
