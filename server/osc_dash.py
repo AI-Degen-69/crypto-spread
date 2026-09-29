@@ -2120,6 +2120,16 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
+#: Issue #355: the minimum wall-clock gap between sweep progress messages.
+#: Progress used to be emitted once per replayed window, but only AFTER the whole
+#: dataset had been read and replayed — so the dashboard showed a ticking "Sweeping"
+#: over an all-grey card for the whole run. Emission now happens inside the streaming
+#: read loop; the time gate keeps the event count bounded to
+#: (run duration / interval) + 2 regardless of how many windows the corpus holds.
+SWEEP_PROGRESS_MIN_INTERVAL_SEC = float(
+    os.environ.get("SWEEP_PROGRESS_MIN_INTERVAL_SEC", "0.5"))
+
+
 def _select_sweep_bests(
     points: list[dict],
     series_order: list[str],
@@ -2216,8 +2226,65 @@ def _run_sweep_worker(
     # memory at the largest single window and lets the OS reclaim each window as
     # soon as it is simulated.
     variants = [_sweep_params_for_value(base, axis, float(v)) for v in values]
-    acc = [{"pnl": 0.0, "pairs": 0, "exits": 0, "n": 0,
-            "per_series": {}} for _ in variants]
+
+    def _new_acc() -> list[dict]:
+        """One zeroed running-total record per axis point."""
+        return [{"pnl": 0.0, "pairs": 0, "exits": 0, "n": 0,
+                 "per_series": {}} for _ in variants]
+
+    def _accumulate(into: list[dict], ws: list[Any]) -> None:
+        """Fold one window's per-axis results into the running totals.
+
+        Shared by the live (in-loop) pass and the post-loop pass so the two can
+        never drift: a preview is the same arithmetic as the result, only fewer
+        windows behind.
+        """
+        for a, w in zip(into, ws):
+            a["pnl"] += w.pnl_cents * size
+            a["pairs"] += 1 if w.pair_captured else 0
+            a["exits"] += 1 if w.exit_taken else 0
+            a["n"] += 1
+            a["per_series"][w.series] = (
+                a["per_series"].get(w.series, 0.0) + w.pnl_cents * size)
+
+    def _snapshot(totals: list[dict]) -> list[dict]:
+        """Running per-axis-point totals in the final `points` shape."""
+        return [
+            {
+                "label": label,
+                "value": float(value),
+                "overall": {
+                    "windows": a["n"],
+                    "pairs": a["pairs"],
+                    "exits": a["exits"],
+                    "total_pnl_cents": round(a["pnl"], 2),
+                    "avg_pnl_cents": round(a["pnl"] / a["n"], 2) if a["n"] else 0.0,
+                },
+                "per_series": {
+                    slug: round(a["per_series"].get(slug, 0.0), 2)
+                    for slug in series_order
+                },
+                "series_present": sorted(a["per_series"]),
+            }
+            for a, (value, (_params, label)) in zip(totals, zip(values, variants))
+        ]
+
+    # Issue #344: running totals so the UI fills the charts in while the sweep
+    # iterates. Issue #355: emitted from inside the read loop on a time gate, so
+    # the card lights up during the run and the event count stays bounded.
+    # Emission failures only disable progress; the run and its result are
+    # untouched.
+    emit_progress = progress_queue is not None
+    live = _new_acc()
+    rows_live = 0
+    last_emit = 0.0
+
+    def _put(msg: dict) -> None:
+        nonlocal emit_progress
+        try:
+            progress_queue.put_nowait(msg)
+        except Exception:
+            emit_progress = False
 
     source = Path(source_file_str) if source_file_str else Path(ticks_dir_str)
     # Simulate each window as it completes and retain only the (small) results —
@@ -2253,64 +2320,46 @@ def _run_sweep_worker(
         # instead of once per axis point.
         reuse = axis != "offset"
         memo: dict = {} if reuse else None
-        rows.append((float(g[0].get("ts", 0.0) or 0.0), seq,
-                     [_simulate_window(g, p, queue_memo=memo) for p, _l in variants]))
+        results = [_simulate_window(g, p, queue_memo=memo) for p, _l in variants]
+        rows.append((float(g[0].get("ts", 0.0) or 0.0), seq, results))
+        # Issue #355: publish from inside the read loop. The first accepted window
+        # always emits, so `series_present` is non-empty and the card is never all
+        # grey for the whole run; later ones are gated on wall-clock so a
+        # multi-GB corpus cannot flood the manager queue with one event per
+        # window. `rows_total` is None because the total is not known yet.
+        if emit_progress:
+            _accumulate(live, results)
+            rows_live += 1
+            now = time.monotonic()
+            if rows_live == 1 or (now - last_emit) >= SWEEP_PROGRESS_MIN_INTERVAL_SEC:
+                last_emit = now
+                _put({
+                    "rows_done": rows_live,
+                    "rows_total": None,
+                    "n_snaps": n_snaps,
+                    "points": _snapshot(live),
+                })
     # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, ties included.
     rows.sort(key=lambda t: (t[0], t[1]))
     if limit_windows and limit_windows > 0:
         rows = rows[:limit_windows]
 
+    # The authoritative pass runs over the SORTED, SLICED rows, so a
+    # `limit_windows` cap and the live previews are reconciled here: the live
+    # accumulator saw every accepted window, this one sees exactly the result.
     n_windows = len(rows)
-    for a in acc:
-        a["n"] = 0
-        a["pnl"] = 0.0
-        a["pairs"] = 0
-        a["exits"] = 0
-        a["per_series"] = {}
-    # Issue #344: after each row, emit per-axis-point running totals so the UI
-    # can fill the charts in while the sweep iterates. Emission failures only
-    # disable progress; the run and its result are untouched.
-    emit_progress = progress_queue is not None
-    def _sweep_progress_snapshot() -> list[dict]:
-        """Running per-axis-point totals in the final `points` shape."""
-        return [
-            {
-                "label": label,
-                "value": float(value),
-                "overall": {
-                    "windows": a["n"],
-                    "pairs": a["pairs"],
-                    "exits": a["exits"],
-                    "total_pnl_cents": round(a["pnl"], 2),
-                    "avg_pnl_cents": round(a["pnl"] / a["n"], 2) if a["n"] else 0.0,
-                },
-                "per_series": {
-                    slug: round(a["per_series"].get(slug, 0.0), 2)
-                    for slug in series_order
-                },
-                "series_present": sorted(a["per_series"]),
-            }
-            for a, (value, (_params, label)) in zip(acc, zip(values, variants))
-        ]
-    for row_idx, (_ts, _seq, ws) in enumerate(rows):
-        for a, w in zip(acc, ws):
-            a["pnl"] += w.pnl_cents * size
-            a["pairs"] += 1 if w.pair_captured else 0
-            a["exits"] += 1 if w.exit_taken else 0
-            a["n"] += 1
-            a["per_series"][w.series] = (
-                a["per_series"].get(w.series, 0.0) + w.pnl_cents * size)
-        if emit_progress:
-            msg = {
-                "rows_done": row_idx + 1,
-                "rows_total": n_windows,
-                "n_snaps": n_snaps,
-                "points": _sweep_progress_snapshot(),
-            }
-            try:
-                progress_queue.put_nowait(msg)
-            except Exception:
-                emit_progress = False
+    acc = _new_acc()
+    for _ts, _seq, ws in rows:
+        _accumulate(acc, ws)
+    # One converged message: identical to the final `points` below, so the last
+    # thing the UI renders before `final` cannot disagree with it.
+    if emit_progress:
+        _put({
+            "rows_done": n_windows,
+            "rows_total": n_windows,
+            "n_snaps": n_snaps,
+            "points": _snapshot(acc),
+        })
 
     points = []
     for a, (value, (_params, label)) in zip(acc, zip(values, variants)):

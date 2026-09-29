@@ -2465,7 +2465,9 @@ def test_sweep_frontend_contract(tmp_path):
 
 def test_sweep_worker_progress_points_converge(tmp_path, monkeypatch):
     """Issue #344: the sweep worker's progress queue carries per-point running
-    totals whose final snapshot equals the returned points."""
+    totals whose final snapshot equals the returned points. Issue #355: the
+    FIRST message arrives from inside the read loop (unknown total, non-empty
+    `series_present`) and the last one has converged."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     _make_backtest_ticks_file(tmp_path)
     q = _fake_queue_factory()
@@ -2483,12 +2485,71 @@ def test_sweep_worker_progress_points_converge(tmp_path, monkeypatch):
         except Exception:
             break
     assert messages, "no sweep progress emitted"
+    # Issue #355: the first event is a live preview from the read loop — the
+    # total is not known yet, and it already names the markets it replayed. That
+    # is what stops the card sitting all-grey for the whole run.
+    first = messages[0]
+    assert first["rows_total"] is None, first
+    assert first["rows_done"] >= 1
+    assert first["points"][0]["series_present"], first
     last = messages[-1]
     assert last["rows_done"] == last["rows_total"]
     assert len(last["points"]) == len(result["points"])
     for lp, fp in zip(last["points"], result["points"]):
         assert lp["overall"] == fp["overall"]
         assert lp["per_series"] == fp["per_series"]
+        assert lp["series_present"] == fp["series_present"]
+
+
+def test_sweep_worker_progress_emission_is_rate_limited(tmp_path, monkeypatch):
+    """Issue #355: progress emission is gated on wall-clock, so the event count
+    is bounded by the run duration and not by the window count. A huge interval
+    leaves exactly the first-window event plus the converged one."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path, windows=8)
+    monkeypatch.setattr(osc_dash, "SWEEP_PROGRESS_MIN_INTERVAL_SEC", 10_000.0)
+    q = _fake_queue_factory()
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    result = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        asdict(BacktestParams(offset=0.02)), "queue", 5, 0.0, 0, "", "",
+        progress_queue=q,
+    )
+    messages = []
+    while True:
+        try:
+            messages.append(q.get_nowait())
+        except Exception:
+            break
+    # 8 windows produced 1 live event + 1 converged event, not 8+1.
+    assert len(messages) == 2, [m["rows_done"] for m in messages]
+    assert messages[0]["rows_total"] is None
+    assert messages[-1]["rows_done"] == result["n_windows"]
+
+
+def test_sweep_worker_progress_failure_does_not_change_result(tmp_path, monkeypatch):
+    """Issue #355: a broken progress queue disables emission only; the returned
+    result is byte-identical to a run with no queue at all."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+
+    class ExplodingQueue:
+        def put_nowait(self, msg):
+            raise RuntimeError("queue broken")
+
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    params_dict = asdict(BacktestParams(offset=0.02))
+    with_queue = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "queue", 5, 0.0, 0, "", "", progress_queue=ExplodingQueue(),
+    )
+    without = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "queue", 5, 0.0, 0, "", "",
+    )
+    assert json.dumps(with_queue, sort_keys=True) == json.dumps(without, sort_keys=True)
 
 
 def test_api_backtest_concurrency_capping_429(tmp_path, monkeypatch):
