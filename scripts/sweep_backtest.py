@@ -273,6 +273,14 @@ def generate_sensitivity_grid(
             if v != base.naked_leg_at_expiry:
                 grid.append((f"naked_leg={v}", replace(base, naked_leg_at_expiry=v)))
 
+    # 12. Late entry % (issue #348) — TUNING knob, swept by default.
+    late_entry_pcts = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    for lp in late_entry_pcts:
+        cur_pct = base.entry_delay_pct if base.entry_delay_pct is not None else 0.0
+        if lp != cur_pct:
+            p = replace(base, entry_delay_sec=0.0, entry_delay_pct=lp)
+            grid.append((f"late_entry={lp * 100:.0f}%", p))
+
     return grid
 
 
@@ -281,7 +289,7 @@ def generate_sensitivity_grid(
 SENSITIVITY_AXES = (
     "offset", "queue", "exit_5m", "exit_rev", "pair_cost",
     "quote_range", "dead_zone_pct", "dead_zone_sec",
-    "entry_delay", "leg_chase", "naked_leg",
+    "entry_delay", "leg_chase", "naked_leg", "late_entry",
 )
 
 

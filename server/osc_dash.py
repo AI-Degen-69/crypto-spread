@@ -2085,6 +2085,8 @@ SWEEP_AXES: Dict[str, List[float]] = {
     "exit_stop_btc": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_stop_sol": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
+    "late_entry": [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
+    "quote_range": [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
 }
 
 
@@ -2109,6 +2111,12 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
         thresholds["sol-up-or-down-5m"] = float(value)
         thresholds["sol-up-or-down-15m"] = float(value)
         return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop_sol={value:.2f}"
+    if axis == "late_entry":
+        return _dc_replace(base, entry_delay_pct=float(value) / 100.0, entry_delay_sec=0.0), f"late_entry={value:.0f}%"
+    if axis == "quote_range":
+        lo = round(float(value), 2)
+        hi = round(1.0 - lo, 2)
+        return _dc_replace(base, quote_range=(lo, hi)), f"quote_range=[{lo:.2f},{hi:.2f}]"
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
