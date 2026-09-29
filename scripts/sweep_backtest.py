@@ -315,6 +315,24 @@ def filter_sensitivity_grid(
     return [row for row in grid if row[0] == "Baseline" or row[0].startswith(prefix)]
 
 
+def deduplicate_grid(
+    grid: list[tuple[str, BacktestParams]],
+) -> list[tuple[str, BacktestParams]]:
+    """Drop rows duplicating an earlier row's effective params (issue #348).
+
+    The `entry_delay` pct rows and the `late_entry` rows can describe the
+    same `BacktestParams` (sec=0.0 + pct=X); without dedup the default CLI
+    replays those configurations twice. First label wins; `--only` paths
+    are filtered before this runs so their complete axes are untouched.
+    """
+    unique: list[tuple[str, BacktestParams]] = []
+    for row in grid:
+        if any(row[1] == prev[1] for prev in unique):
+            continue
+        unique.append(row)
+    return unique
+
+
 def generate_joint_grid(
     offsets: Sequence[float] = (0.015, 0.020, 0.025, 0.030),
     queues: Sequence[float] = (0.0, 25.0, 50.0, 100.0),
@@ -601,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
                                          include_structural=include_structural)
         if args.only is not None:
             grid = filter_sensitivity_grid(grid, args.only)
+        else:
+            grid = deduplicate_grid(grid)
     elif args.preset == "grid":
         grid = generate_joint_grid(max_start_delay=max_delay, size=size,
                                    include_structural=args.include_structural)

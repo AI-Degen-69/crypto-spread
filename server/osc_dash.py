@@ -7882,7 +7882,9 @@ function sweepAxisLabel(axis){
     exit_stop_default: 'Stop distance — default',
     exit_stop_btc: 'Stop distance — BTC',
     exit_stop_sol: 'Stop distance — SOL',
-    exit_rev: 'Reversal buffer — distance from anchor'
+    exit_rev: 'Reversal buffer — distance from anchor',
+    late_entry: 'Late entry — % of window',
+    quote_range: 'Quotable range — [lo, hi] bounds'
   })[axis] || axis;
 }
 
