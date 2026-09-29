@@ -5164,10 +5164,11 @@ def _jk_baselines():
     text = readme.read_text(encoding="utf-8")
     exit_slugs = ("default_5m", "default_15m", "btc-up-or-down-5m",
                   "sol-up-or-down-5m", "btc-up-or-down-15m", "sol-up-or-down-15m")
-    baselines: dict[str, float] = {}
+    baselines: dict[str, object] = {}
     current = None                      # param name, or "exit:*" for the shared section
     for line in text.splitlines():
-        h4 = re.match(r"^#### .+? `([a-z_]+)`\s*$", line)
+        # The heading wraps the key in parens: `#### Label (`key`)`.
+        h4 = re.match(r"^#### .+? \(`([a-z_]+)`\)\s*$", line)
         if h4:
             current = h4.group(1)
             continue
@@ -5177,14 +5178,32 @@ def _jk_baselines():
         if re.match(r"^### ", line):
             current = None
             continue
-        m = re.match(r'^- \[x\] ([0-9.eE+-]+) .*\*\*Baseline\*\*', line)
+        m = re.match(r'^- \[x\] (.+?) — \*\*Baseline.*$', line)
         if m and current:
-            value = float(m.group(1))
+            # Rows read `- [x] <value>[ (prose)] — **Baseline...**`; the value
+            # token may carry prose, so classify on the token's own shape.
+            token = m.group(1).strip()
             if current == "exit:*":
+                value = float(re.match(r"[0-9.eE+-]+", token).group(0))
                 for slug in exit_slugs:
                     baselines[f"exit_thresh_by_slug.{slug}"] = value
-            else:
-                baselines[current] = value
+                continue
+            if token.startswith(("True", "False")):
+                baselines[current] = token == "True"
+                continue
+            num = re.match(r"^([0-9][0-9.eE+-]*)", token)
+            if num and not token.startswith("["):
+                text_value = num.group(1)
+                # Integer-valued rows stay int so the type-aware parity check
+                # matches the registry's int defaults (e.g. quote_shares 120).
+                baselines[current] = float(text_value) if "." in text_value else int(text_value)
+                continue
+            pair = re.match(r"^\[([0-9.eE+-]+),\s*([0-9.eE+-]+)\]", token)
+            if pair:
+                baselines[current] = [float(pair.group(1)), float(pair.group(2))]
+                continue
+            # Bare word — the first word is the value, e.g. `pct (fraction ...)`.
+            baselines[current] = token.split()[0]
     return baselines
 
 
@@ -5222,9 +5241,13 @@ def test_jungle_king_endpoint_serves_full_manifest():
     assert [p["name"] for p in params] == list(manifest.keys())
     for p in params:
         assert p["values"] == manifest[p["name"]]
-        # quote_range's baseline is the [lo, hi] pair; every other key is scalar.
-        assert isinstance(p["baseline"], (int, float)) or (
-            isinstance(p["baseline"], list) and len(p["baseline"]) == 2
+        # quote_range's baseline is the [lo, hi] pair; the #333 allow-list keys
+        # carry bool/string baselines; every other key is a numeric scalar.
+        assert (
+            isinstance(p["baseline"], (int, float))
+            or isinstance(p["baseline"], bool)
+            or isinstance(p["baseline"], str)
+            or (isinstance(p["baseline"], list) and len(p["baseline"]) == 2)
         )
         assert isinstance(p["baseline_in_values"], bool)
         assert p["param_class"] in ("tuning", "structural", "assumption")
@@ -5240,8 +5263,17 @@ def test_jungle_king_baseline_matches_manifest_checklist():
     assert readme_baselines, "README checklist parsing broke"
     for name, value in readme_baselines.items():
         assert name in by_name, f"{name} missing from endpoint"
-        assert by_name[name]["baseline"] == value, f"{name} baseline drifted from the manifest checklist"
+        # Type-aware: a README `False` row must not match an API `0`, and a
+        # `close` row must not match some numeric value.
+        assert by_name[name]["baseline"] == value, \
+            f"{name} baseline drifted from the manifest checklist"
+        assert type(by_name[name]["baseline"]) is type(value), \
+            f"{name} baseline type drifted from the README checklist"
     assert by_name["offset"]["baseline_in_values"] is True
+    # Every endpoint baseline must have a README `[x]` row, or the checklist
+    # has drifted behind the manifest.
+    missing_rows = sorted(set(by_name) - set(readme_baselines))
+    assert missing_rows == [], f"endpoint baselines without a README [x] row: {missing_rows}"
 
 
 def test_jungle_king_registry_join_and_exit_inheritance():
@@ -5260,26 +5292,39 @@ def test_jungle_king_registry_join_and_exit_inheritance():
     assert exit5["param_class"] == "tuning"
     assert registry["exit_thresh_by_slug.btc-up-or-down-5m"]["param_class"] == "tuning"
     assert "BTC" in exit5["label"] and "5m" in exit5["label"]
-    # Checklist-only knobs (enable_leg_chase, dead_zone_unit,
-    # naked_leg_at_expiry) are README rows, not param_ranges.json keys — the
-    # payload renders exactly the manifest's 19 keys (SPEC-319.md edge case).
-    assert "enable_leg_chase" not in by_name
-    assert "dead_zone_unit" not in by_name
-    assert "naked_leg_at_expiry" not in by_name
+    # Issue #333: the three checklist-only knobs joined the manifest. Each
+    # carries its registry class and the engine default as baseline.
+    for name, cls, baseline in (
+        ("enable_leg_chase", "tuning", False),
+        ("naked_leg_at_expiry", "structural", "close"),
+        ("dead_zone_unit", "structural", "pct"),
+    ):
+        assert by_name[name]["param_class"] == cls
+        assert by_name[name]["baseline"] == baseline
+        assert by_name[name]["baseline_in_values"] is True
+        assert by_name[name]["label"] == registry[name]["label"]
 
 
 def test_jungle_king_group_membership_matches_manifest_sections():
-    """Preserve manifest grouping and cover exactly its 19 keys."""
+    """Preserve manifest grouping and cover exactly its 22 keys.
+
+    Issue #333: `enable_leg_chase` sits before `exit_reversal` (registry
+    order), and `naked_leg_at_expiry` / `dead_zone_unit` join structural
+    limits, the unit directly after the value it qualifies.
+    """
     body = client.get("/api/jungle-king").json()
     groups = {g["key"]: [p["name"] for p in g["params"]] for g in body["groups"]}
     assert groups["trading_knobs"] == [
-        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct", "exit_reversal",
+        "offset", "queue_gate", "quote_shares", "entry_delay_sec", "entry_delay_pct",
+        "enable_leg_chase", "exit_reversal",
     ]
     assert len(groups["exit_thresholds"]) == 6
     assert all(n.startswith("exit_thresh_by_slug.") for n in groups["exit_thresholds"])
-    assert groups["structural_limits"] == ["max_pair_cost", "quote_range", "dead_zone_val"]
+    assert groups["structural_limits"] == [
+        "max_pair_cost", "quote_range", "naked_leg_at_expiry", "dead_zone_val", "dead_zone_unit",
+    ]
     assert groups["execution_assumptions"] == ["taker_fee_rate", "merge_gas_usd", "tick_size", "min_quote_shares"]
-    assert sum(len(g["params"]) for g in body["groups"]) == 19
+    assert sum(len(g["params"]) for g in body["groups"]) == 22
 
 
 _JK_MANIFEST = json.loads(
@@ -5299,9 +5344,22 @@ _JK_MANIFEST = json.loads(
     json.dumps({**_JK_MANIFEST, "quote_range": [[0.1, "bad"]]}),
     json.dumps({**_JK_MANIFEST, "quote_range": [[0.9, 0.1]]}),
     json.dumps({**_JK_MANIFEST, "quote_range": [[-0.1, 0.9]]}),
+    # Issue #333: non-numeric candidates are accepted only for the three named
+    # allow-list keys, only with the correct type, only inside their domain.
+    json.dumps({**_JK_MANIFEST, "enable_leg_chase": [0, 1]}),
+    json.dumps({**_JK_MANIFEST, "enable_leg_chase": [0.0, 1.0]}),
+    json.dumps({**_JK_MANIFEST, "enable_leg_chase": ["true"]}),
+    json.dumps({**_JK_MANIFEST, "enable_leg_chase": [True, "yes"]}),
+    json.dumps({**_JK_MANIFEST, "naked_leg_at_expiry": ["settle", "hold"]}),
+    json.dumps({**_JK_MANIFEST, "naked_leg_at_expiry": [True, False]}),
+    json.dumps({**_JK_MANIFEST, "dead_zone_unit": ["pct", "PCT"]}),
+    json.dumps({**_JK_MANIFEST, "dead_zone_unit": [True, False]}),
+    # A string or bool never validates for a numeric key.
+    json.dumps({**_JK_MANIFEST, "offset": ["0.02"]}),
+    json.dumps({**_JK_MANIFEST, "dead_zone_val": [True]}),
 ])
 def test_jungle_king_malformed_manifest_is_a_clean_error(tmp_path, monkeypatch, contents):
-    """Reject unreadable, incomplete, or non-numeric manifest shapes."""
+    """Reject unreadable, incomplete, or type-confused manifest shapes."""
     from server import osc_dash
     manifest = tmp_path / "param_ranges.json"
     manifest.write_text(contents, encoding="utf-8")
@@ -5500,25 +5558,77 @@ def test_jungle_king_render_node():
     result.missingBaselineMarkers = (elements.jkGroups.innerHTML.match(/jkBaselineMissing/g) || []).length;
     result.outsideRangeBaselineChips = (elements.jkGroups.innerHTML.match(/jkBaselineChip/g) || []).length;
     result.outsideRangeBaselineLabels = (elements.jkGroups.innerHTML.match(/class=\"jk-chip-baseline-tag\"/g) || []).length;
+    renderJungleKing(payload);
+    const chipHtml = elements.jkGroups.innerHTML;
+    result.nonNumericChips = {{
+      falseBaseline: chipHtml.includes('>false<span class="jk-chip-baseline-tag">BASELINE</span>'),
+      pctBaseline: chipHtml.includes('>pct<span class="jk-chip-baseline-tag">BASELINE</span>'),
+      closeBaseline: chipHtml.includes('>close<span class="jk-chip-baseline-tag">BASELINE</span>'),
+      trueChip: chipHtml.includes('>true<'),
+      holdChip: chipHtml.includes('>hold<'),
+      secChip: chipHtml.includes('>sec<')
+    }};
     console.log(JSON.stringify(result));
     """
     result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node script failed: {result.stderr}\\n{result.stdout}"
     rendered = json.loads(result.stdout.strip())
     assert rendered["groupCards"] == 4
-    assert rendered["parameterCards"] == 19
-    assert rendered["baselineChips"] == 19
-    assert rendered["baselineLabels"] == 19
+    assert rendered["parameterCards"] == 22
+    assert rendered["baselineChips"] == 22
+    assert rendered["baselineLabels"] == 22
     assert rendered["tuningBadges"] > 0
     assert rendered["structuralBadges"] > 0
     assert rendered["assumptionBadges"] > 0
     assert rendered["missingBaselineMarkers"] == 1
-    assert rendered["outsideRangeBaselineChips"] == 18
-    assert rendered["outsideRangeBaselineLabels"] == 18
+    assert rendered["outsideRangeBaselineChips"] == 21
+    assert rendered["outsideRangeBaselineLabels"] == 21
+    # Issue #333: the non-numeric cards render their values verbatim — `false`
+    # as JSON spells it, strings as-is — and mark the engine-default chips.
+    chips = rendered["nonNumericChips"]
+    assert all(chips.values()), f"non-numeric chip rendering broke: {chips}"
+
+
+# Registry/manifest drift guard (issue #333): every BacktestParams field must
+# be visible to the OFAT viewer. A new registry key that skips the manifest
+# makes the tab under-report what can be swept — silently, until now.
+# Registry parameters deliberately not swept go in this allow-list, one reason
+# per entry; execution assumptions DO belong in the manifest (held-at-baseline
+# group), so they are covered and never listed here.
+_JK_OUT_OF_SCOPE_ALLOW_LIST: dict[str, str] = {}
+
+
+def test_jungle_king_covers_every_registry_parameter():
+    """No BacktestParams field can go missing from the manifest silently."""
+    manifest_keys = set(_JK_MANIFEST)
+    registry = _flatten_registry()
+    for name in registry:
+        covered = (
+            name in manifest_keys
+            or name.startswith("exit_thresh_by_slug.")
+            or name in _JK_OUT_OF_SCOPE_ALLOW_LIST
+        )
+        assert covered, (
+            f"registry parameter {name!r} is missing from the Jungle King "
+            "manifest and is not declared out of scope"
+        )
+    for name in _JK_OUT_OF_SCOPE_ALLOW_LIST:
+        assert name in registry, f"stale allow-list entry: {name!r} is not a registry key"
+        assert name not in manifest_keys, f"stale allow-list entry: {name!r} is already in the manifest"
+
+
+def test_jungle_king_engine_defaults_sit_inside_their_declared_domains():
+    """The non-numeric domain map and the engine cannot drift apart."""
+    from server import osc_dash
+    registry = _flatten_registry()
+    for name, domain in osc_dash._JUNGLE_KING_NON_NUMERIC_DOMAINS.items():
+        assert name in registry, f"{name!r} is not a registry parameter"
+        default = registry[name]["default"]
+        assert isinstance(default, bool) or default in domain, \
+            f"engine default {default!r} of {name!r} left its declared domain {sorted(domain)!r}"
 
 
 def test_backtest_runtime_estimation_badge_present():
-    """Issue #330: dashboard includes dynamic runtime estimation badge and helpers."""
     response = client.get("/")
     assert response.status_code == 200
     html = response.text

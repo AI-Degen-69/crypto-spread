@@ -1283,8 +1283,8 @@ def _jk_is_valid_candidate(name: str, value: Any) -> bool:
     """
     domain = _JUNGLE_KING_NON_NUMERIC_DOMAINS.get(name)
     if domain is not None:
-        return type(value) in ({bool} if name == "enable_leg_chase" else {str}) \
-            and value in domain
+        expected_type = bool if name == "enable_leg_chase" else str
+        return type(value) is expected_type and value in domain
     if name != "quote_range":
         return _jk_is_finite_number(value)
     if (
