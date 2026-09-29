@@ -1608,14 +1608,30 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
         "btc-up-or-down-5m": 0.05, "btc-up-or-down-15m": 0.07,
         "sol-up-or-down-5m": 0.05, "sol-up-or-down-15m": 0.07,
     })
-    shared, label = osc_dash._sweep_params_for_value(shared_base, "exit_stop", 0.12)
-    assert label == "stop=0.12"
-    assert set(shared.exit_thresh_by_slug.values()) == {0.12}
+    default_stop, label = osc_dash._sweep_params_for_value(
+        shared_base, "exit_stop_default", 0.12)
+    assert label == "stop_default=0.12"
+    assert default_stop.exit_thresh_by_slug["default_5m"] == 0.12
+    assert default_stop.exit_thresh_by_slug["default_15m"] == 0.12
+    btc_stop, label = osc_dash._sweep_params_for_value(shared_base, "exit_stop_btc", 0.12)
+    assert label == "stop_btc=0.12"
+    assert btc_stop.exit_thresh_by_slug["btc-up-or-down-5m"] == 0.12
+    assert btc_stop.exit_thresh_by_slug["btc-up-or-down-15m"] == 0.12
+    assert btc_stop.exit_thresh_by_slug["default_5m"] == 0.05, \
+        "the BTC axis must leave the default thresholds alone"
+    sol_stop, label = osc_dash._sweep_params_for_value(shared_base, "exit_stop_sol", 0.12)
+    assert label == "stop_sol=0.12"
+    assert sol_stop.exit_thresh_by_slug["sol-up-or-down-5m"] == 0.12
+    assert sol_stop.exit_thresh_by_slug["sol-up-or-down-15m"] == 0.12
+    assert sol_stop.exit_thresh_by_slug["default_15m"] == 0.07, \
+        "the SOL axis must leave the default thresholds alone"
 
     unknown = client.get("/api/backtest/sweep?axis=not-an-axis")
     assert unknown.status_code == 400
     assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
-    assert unknown.json()["valid"] == ["exit_rev", "exit_stop", "offset", "queue"]
+    assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
+    assert unknown.json()["valid"] == [
+        "exit_rev", "exit_stop_btc", "exit_stop_default", "exit_stop_sol", "offset", "queue"]
 
     unsafe = client.get("/api/backtest/sweep?file=../secrets.jsonl")
     assert unsafe.status_code == 400
@@ -1626,10 +1642,10 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
 def test_sweep_empty_result_has_neutral_best_metadata(tmp_path, monkeypatch):
     """Verify an empty sweep response does not invent a best result."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
-    response = client.get("/api/backtest/sweep?axis=exit_stop")
+    response = client.get("/api/backtest/sweep?axis=exit_stop_default")
     assert response.status_code == 200
     data = response.json()
-    assert len(data["points"]) == len(osc_dash.SWEEP_AXES["exit_stop"])
+    assert len(data["points"]) == len(osc_dash.SWEEP_AXES["exit_stop_default"])
     assert all(point["overall"]["windows"] == 0 for point in data["points"])
     assert data["best_overall"] is None
     assert data["best_market"] is None
@@ -1701,7 +1717,7 @@ def _sweep_fixture(tmp_path, slugs, name="sweep_base.jsonl"):
 # A second fixture with one genuine 15m series. `_make_fake_tick` pins every
 # window's duration at 300, and the engine keys the stop threshold on that
 # duration (`default_{'5m' if duration == 300 else '15m'}`), so a 5m-only
-# fixture can never exercise the `default_15m` stop the `exit_stop` sweep
+# fixture can never exercise the `default_15m` stop the `exit_stop_default` sweep
 # replaces. `_make_fake_tick_15m` is the same shape with the 15m clock and
 # duration, so the parity tests below prove the sweep and the backtest agree
 # on the 15m thresholds too, not just on `default_5m`.
@@ -1824,11 +1840,14 @@ def test_sweep_axis_moves_only_its_own_parameter():
     expected = {
         "queue": {"queue_gate"},
         "offset": {"offset"},
-        "exit_stop": {"exit_thresh_by_slug"},
+        "exit_stop_default": {"exit_thresh_by_slug"},
+        "exit_stop_btc": {"exit_thresh_by_slug"},
+        "exit_stop_sol": {"exit_thresh_by_slug"},
         "exit_rev": {"exit_reversal"},
     }
     for axis, value in [("queue", 25.0), ("offset", 0.04),
-                        ("exit_stop", 0.15), ("exit_rev", 0.02)]:
+                        ("exit_stop_default", 0.15), ("exit_stop_btc", 0.15),
+                        ("exit_stop_sol", 0.15), ("exit_rev", 0.02)]:
         variant, _label = osc_dash._sweep_params_for_value(params, axis, value)
         before, after = asdict(params), asdict(variant)
         changed = {k for k in before if before[k] != after[k]}
@@ -1891,15 +1910,18 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
 # every axis and every value an operator can actually click, plus the one axis
 # (`offset`) whose numbers come from a different simulation path.
 
-# Which Backtester control each axis replaces. `exit_stop` takes four: the
-# sweep writes all six per-slug thresholds, and `_build_backtest_params`
-# derives those six from these four inputs, so setting all four is the only way
-# a plain backtest can build the same parameter set as the swept point.
+# Which Backtester control each axis replaces. Each stop axis maps to the
+# input(s) whose thresholds it overwrites, so the backtest built from them is
+# the same parameter set the swept point writes: `exit_stop_default` takes the
+# two default inputs (its per-market overrides stay at the submitted values —
+# that is the distinction #338 exists to make), and the BTC/SOL axes replace
+# exactly their one override input, which covers both durations.
 _AXIS_CONTROLS = {
     "queue": ("queue",),
     "offset": ("offset",),
-    "exit_stop": ("exit_default_5m", "exit_default_15m",
-                  "exit_btc_5m", "exit_sol_5m"),
+    "exit_stop_default": ("exit_default_5m", "exit_default_15m"),
+    "exit_stop_btc": ("exit_btc_5m",),
+    "exit_stop_sol": ("exit_sol_5m",),
     "exit_rev": ("exit_reversal",),
 }
 
@@ -1910,6 +1932,11 @@ def _axis_point_query(axis: str, value: float) -> dict:
     Sent verbatim to both endpoints, so the backtest and the sweep point are
     the same request by construction and any difference belongs to the
     endpoint, not to the test.
+
+    The two per-market stop axes are the exception by design: one input covers
+    both durations (`_build_backtest_params` writes `exit_btc_5m` into
+    `btc-up-or-down-5m` *and* `btc-up-or-down-15m`), so setting that one input
+    to the point value already builds the exact parameter set the axis writes.
     """
     query = dict(_NON_DEFAULT)
     for control in _AXIS_CONTROLS[axis]:
@@ -2119,12 +2146,12 @@ def test_sweep_override_note_is_wired_into_the_meta_block():
 
 
 def test_sweep_override_note_wording_node():
-    """The note must name the swept field, and the six for `exit_stop`.
+    """The note must name the swept field, one input per stop axis.
 
-    `exit_stop` is the axis that discards per-market distinctions: it writes the
-    swept value into all six thresholds. The behaviour is deliberate (the
-    comment in `_sweep_params_for_value` says so), but an operator who set BTC
-    and SOL apart and then read the chart was misled about what was measured.
+    The three stop axes each replace exactly the input their name names — the
+    per-market split (issue #338) removed the global axis that forced the
+    mixed/uniform special case, so every axis note is now the single-field
+    shape and can always claim its bar when the operator's input is on it.
     """
     import shutil
     import subprocess
@@ -2227,12 +2254,67 @@ def test_sweep_override_note_wording_node():
     assert(offCard.includes('no bar equals it'), offCard);
     assert(offCard.includes('sweep-verdict none'), offCard);
 
-    // exit_stop subject: one marker, and the mixed-set verdict still refuses
-    // to claim a bar.
-    const stopCard = sweepCard(v, { ...data, axis: 'exit_stop' });
-    assert(stopCard.includes('Exit Stop 5m ($)'), stopCard);
-    assert(stopCard.split('← subject').length - 1 === 1, stopCard);
-    assert(stopCard.includes('no bar is your mixed setting'), stopCard);
+    // Stop-axis subjects: the note names the input it replaces — each axis
+    // is honest about exactly one thing, full stop. The card renders the
+    // verdict; the head/items live on the note helper itself.
+    const points6 = [0.06, 0.08, 0.10, 0.12, 0.14, 0.16];
+    const defNote = sweepOverrideNote('exit_stop_default', v, points6);
+    assert(defNote.head === 'sweeps the default 5m + 15m stop — replaces the two submitted default stops', defNote.head);
+    assert(defNote.submittedLabel === 'submitted', defNote.head);
+    assert(defNote.items.length === 2, defNote.head);
+    assert(defNote.verdict.cls === 'none', defNote.head);
+    assert(defNote.verdict.text === 'no bar equals your values', defNote.head);
+
+    const v6 = { ...v, exit5m: 0.10, exit15m: 0.10, exitBtc: 0.10, exitSol: 0.10 };
+    const defYours = sweepOverrideNote('exit_stop_default', v6, points6);
+    assert(defYours.verdict.cls === 'yours', defYours.head);
+    assert(defYours.verdict.text === 'the bar at 0.1 is your setting', defYours.head);
+
+    // Both defaults on the axis but different from each other: no single bar
+    // carries both submitted values, so the note must refuse the claim —
+    // even though an unrelated BTC/SOL override sits off the axis.
+    const mixed = sweepOverrideNote('exit_stop_default',
+                                    { ...v, exit5m: 0.06, exit15m: 0.08 }, points6);
+    assert(mixed.verdict.cls === 'none', mixed.head);
+    assert(mixed.verdict.text === 'no bar equals your values', mixed.head);
+
+    const btcNote = sweepOverrideNote('exit_stop_btc', v, points6);
+    assert(btcNote.head === 'sweeps the BTC stop — replaces the submitted BTC 5m Stop Loss', btcNote.head);
+    assert(btcNote.items.length === 0, btcNote.head);
+    // v.exitBtc is 0.08, an axis point — the note must claim it, even though
+    // the operator's other stop inputs differ. That is the point of #338.
+    assert(btcNote.verdict.cls === 'yours', btcNote.head);
+    assert(btcNote.verdict.text === 'that bar is your setting', btcNote.head);
+
+    const btcOff = sweepOverrideNote('exit_stop_btc', { ...v, exitBtc: 0.07 }, points6);
+    assert(btcOff.verdict.cls === 'none', btcOff.head);
+    assert(btcOff.verdict.text === 'no bar equals it', btcOff.head);
+
+    const solNote = sweepOverrideNote('exit_stop_sol', v, points6);
+    assert(solNote.head === 'sweeps the SOL stop — replaces the submitted SOL 5m Stop Loss', solNote.head);
+    assert(solNote.verdict.text === 'no bar equals it', solNote.head);
+
+    // Card level: axis titles, subject markers, verdict text.
+    const stopCard = sweepCard(v, { ...data, axis: 'exit_stop_default' });
+    assert(stopCard.includes('Exit Stop Loss — default'), stopCard);
+    assert(stopCard.split('← subject').length - 1 === 2, stopCard);
+    assert(stopCard.includes('no bar equals your values'), stopCard);
+
+    // BTC/SOL sweeps mark their own submitted stop as the subject — not the
+    // Exit Stop 5m row the sweep holds unchanged.
+    const btcCard = sweepCard(v, { ...data, axis: 'exit_stop_btc' });
+    assert(btcCard.includes('Exit Stop Loss — BTC'), btcCard);
+    assert(btcCard.includes('>BTC 5m Stop ($) <span class="sweep-tag">← subject</span>'), btcCard);
+    assert(btcCard.includes('>0.08<'), btcCard);
+    assert(btcCard.split('← subject').length - 1 === 1, btcCard);
+    assert(!btcCard.includes('Exit Stop 5m ($) <span class="sweep-tag"'), btcCard);
+    assert(btcCard.includes('no bar equals it'), btcCard);
+
+    const solCard = sweepCard(v, { ...data, axis: 'exit_stop_sol' });
+    assert(solCard.includes('Exit Stop Loss — SOL'), solCard);
+    assert(solCard.includes('>SOL 5m Stop ($) <span class="sweep-tag">← subject</span>'), solCard);
+    assert(solCard.includes('>0.09<'), solCard);
+    assert(solCard.split('← subject').length - 1 === 1, solCard);
 
     // Unknown axis: no claim, card still renders the held knobs.
     const unk = sweepCard(v, { ...data, axis: 'not-an-axis' });
