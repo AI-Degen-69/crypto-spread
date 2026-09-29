@@ -105,6 +105,10 @@
     0.75,
     1.0
   ],
+  "enable_leg_chase": [
+    false,
+    true
+  ],
   "exit_reversal": [
     0.001,
     0.005,
@@ -297,6 +301,10 @@
     [0.4, 0.6],
     [0.45, 0.55]
   ],
+  "naked_leg_at_expiry": [
+    "close",
+    "hold"
+  ],
   "dead_zone_val": [
     0.0,
     0.01,
@@ -314,6 +322,10 @@
     0.6,
     0.75,
     1.0
+  ],
+  "dead_zone_unit": [
+    "pct",
+    "sec"
   ],
   "taker_fee_rate": [
     0.0,
