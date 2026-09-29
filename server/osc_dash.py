@@ -2124,6 +2124,7 @@ def _run_sweep_worker(
     limit_windows: int,
     series_sel: str = "",
     durations_sel: str = "",
+    progress_queue=None,
 ) -> dict:
     """Load ticks once, replay one param point per axis value.
 
@@ -2218,7 +2219,31 @@ def _run_sweep_worker(
         a["pairs"] = 0
         a["exits"] = 0
         a["per_series"] = {}
-    for _ts, _seq, ws in rows:
+    # Issue #344: after each row, emit per-axis-point running totals so the UI
+    # can fill the charts in while the sweep iterates. Emission failures only
+    # disable progress; the run and its result are untouched.
+    emit_progress = progress_queue is not None
+    def _sweep_progress_snapshot() -> list[dict]:
+        return [
+            {
+                "label": label,
+                "value": float(value),
+                "overall": {
+                    "windows": a["n"],
+                    "pairs": a["pairs"],
+                    "exits": a["exits"],
+                    "total_pnl_cents": round(a["pnl"], 2),
+                    "avg_pnl_cents": round(a["pnl"] / a["n"], 2) if a["n"] else 0.0,
+                },
+                "per_series": {
+                    slug: round(a["per_series"].get(slug, 0.0), 2)
+                    for slug in series_order
+                },
+                "series_present": sorted(a["per_series"]),
+            }
+            for a, (value, (_params, label)) in zip(acc, zip(values, variants))
+        ]
+    for row_idx, (_ts, _seq, ws) in enumerate(rows):
         for a, w in zip(acc, ws):
             a["pnl"] += w.pnl_cents * size
             a["pairs"] += 1 if w.pair_captured else 0
@@ -2226,6 +2251,17 @@ def _run_sweep_worker(
             a["n"] += 1
             a["per_series"][w.series] = (
                 a["per_series"].get(w.series, 0.0) + w.pnl_cents * size)
+        if emit_progress:
+            msg = {
+                "rows_done": row_idx + 1,
+                "rows_total": n_windows,
+                "n_snaps": n_snaps,
+                "points": _sweep_progress_snapshot(),
+            }
+            try:
+                progress_queue.put_nowait(msg)
+            except Exception:
+                emit_progress = False
 
     points = []
     for a, (value, (_params, label)) in zip(acc, zip(values, variants)):
@@ -2966,6 +3002,183 @@ async def api_backtest_sweep(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
                     "Narrow the dataset, markets or timeframes and try again."))
+
+
+@app.get(
+    "/api/backtest/sweep/stream",
+    responses={
+        200: {"description": "SSE stream: per-axis-point progress, then one final result"},
+        429: {"description": "Backtest simulation already in progress"},
+    },
+)
+async def api_backtest_sweep_stream(
+    request: Request,
+    axis: str = "queue",
+    file: str = "",
+    size: int = 5,
+    max_start_delay: float = 0.0,
+    limit_windows: int = 0,
+    filter_partial: bool = False,
+    offset: float = 0.02,
+    queue: float = 0.0,
+    pair_cost: float = 0.99,
+    exit_default_5m: float = 0.05,
+    exit_default_15m: float = 0.05,
+    exit_btc_5m: float = 0.05,
+    exit_sol_5m: float = 0.05,
+    exit_reversal: float = 0.02,
+    quote_lo: float = 0.10,
+    quote_hi: float = 0.90,
+    entry_delay_sec: float = 0.0,
+    entry_delay_pct: float | None = None,
+    dead_zone_val: float = 0.10,
+    dead_zone_pct: float | None = None,
+    dead_zone_unit: str = "pct",
+    naked_leg_at_expiry: str = "close",
+    enable_leg_chase: bool = False,
+    series: str = "",
+    durations: str = "",
+):
+    """Stream sweep progress over SSE, then one authoritative final result.
+
+    Issue #344: same guards, validation shapes and worker as the blocking
+    `/api/backtest/sweep`; per-row progress carries running per-axis-point
+    totals so the UI fills the charts while the sweep iterates. Disconnect or
+    timeout terminates the pool and releases the guards synchronously.
+    """
+    _verify_safe_origin(request)
+    if axis not in SWEEP_AXES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
+        )
+    from backtest.selection import parse_durations, parse_series_tokens
+    try:
+        series_tokens = parse_series_tokens(series)
+        duration_values = parse_durations(durations)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    size = max(5, int(size))
+    if filter_partial and max_start_delay <= 0:
+        max_start_delay = 5.0
+
+    source_path_str: Optional[str] = None
+    if file:
+        status, source = _resolve_tick_file(file)
+        if status == "invalid":
+            return JSONResponse(status_code=400, content={"error": "invalid file param"})
+        if status == "not_found":
+            return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
+        source_path_str = str(source)
+
+    params, _echo = _build_backtest_params(
+        offset=offset,
+        queue=queue,
+        pair_cost=pair_cost,
+        exit_default_5m=exit_default_5m,
+        exit_default_15m=exit_default_15m,
+        exit_btc_5m=exit_btc_5m,
+        exit_sol_5m=exit_sol_5m,
+        exit_reversal=exit_reversal,
+        size=size,
+        quote_lo=quote_lo,
+        quote_hi=quote_hi,
+        entry_delay_sec=entry_delay_sec,
+        entry_delay_pct=entry_delay_pct,
+        dead_zone_val=dead_zone_val,
+        dead_zone_pct=dead_zone_pct,
+        dead_zone_unit=dead_zone_unit,
+        naked_leg_at_expiry=naked_leg_at_expiry,
+        enable_leg_chase=enable_leg_chase,
+    )
+
+    semaphore = get_backtest_semaphore()
+    with _BACKTEST_LOCK:
+        global _BACKTEST_RUNNING
+        if _BACKTEST_RUNNING or semaphore.locked():
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Backtest simulation already in progress. Please retry shortly."},
+            )
+        _BACKTEST_RUNNING = True
+    await semaphore.acquire()
+
+    release_guards = _make_backtest_guard_releaser()
+    try:
+        progress_queue = await asyncio.to_thread(_new_backtest_progress_queue)
+    except Exception as exc:
+        release_guards()
+        return JSONResponse(
+            status_code=503,
+            content={"error": f"Sweep progress channel unavailable: {exc}"},
+        )
+    loop = asyncio.get_running_loop()
+
+    async def _submit():
+        """Submit the sweep worker; eventual guard release even on early death."""
+        try:
+            pool = get_backtest_pool()
+            return await loop.run_in_executor(
+                pool,
+                _run_sweep_worker,
+                str(TICKS_DIR),
+                source_path_str,
+                asdict(params),
+                axis,
+                size,
+                max_start_delay,
+                limit_windows,
+                series,
+                durations,
+                progress_queue,
+            )
+        finally:
+            release_guards()
+
+    worker_task = asyncio.create_task(_submit())
+
+    async def event_generator():
+        """Yield per-row progress, then one authoritative final event."""
+        completed = False
+        deadline = time.monotonic() + BACKTEST_TIMEOUT_SEC
+        try:
+            while not worker_task.done():
+                if await request.is_disconnected():
+                    return
+                if time.monotonic() > deadline:
+                    yield {"event": "message", "data": json.dumps({
+                        "type": "error",
+                        "error": (f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
+                                  "Narrow the dataset, markets or timeframes and try again."),
+                    })}
+                    return
+                try:
+                    msg = await asyncio.to_thread(progress_queue.get, True, 0.05)
+                    yield {"event": "message", "data": json.dumps(
+                        {"type": "progress", **msg})}
+                except _pyqueue.Empty:
+                    continue
+            # Drain remaining progress before the authoritative final event.
+            while True:
+                try:
+                    msg = progress_queue.get_nowait()
+                    yield {"event": "message", "data": json.dumps(
+                        {"type": "progress", **msg})}
+                except _pyqueue.Empty:
+                    break
+            completed = True
+            result = worker_task.result()
+            yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
+        finally:
+            if not completed:
+                _terminate_backtest_pool()
+                release_guards()
+
+    return EventSourceResponse(event_generator())
 
 
 @app.get("/api/analysis")
@@ -4613,14 +4826,9 @@ textarea:focus-visible,
       <div class="card" id="btSweepCard">
       <div style="display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <select id="btSweepAxis" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
-            <option value="queue" selected>Queue depth — shares ahead</option>
-            <option value="offset">Quote offset — distance from anchor</option>
-            <option value="exit_stop_default">Stop distance — default</option>
-            <option value="exit_stop_btc">Stop distance — BTC</option>
-            <option value="exit_stop_sol">Stop distance — SOL</option>
-            <option value="exit_rev">Reversal buffer — distance from anchor</option>
-          </select>
+          <!-- Issue #344: the axis selector lives in the sweep card's title
+               (sweepAxisSelect rendered by sweepCard), not as a separate
+               dropdown row above it. -->
           <button class="btn btn-primary" id="btnRunSweepVisual" onclick="runSweepVisual()">▶ Run Sweep Visual</button>
         </div>
       </div>
@@ -7436,6 +7644,22 @@ async function runSweepVisual(){
   if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
   if(btn){ btn.disabled = true; btn.textContent = '⏳ Waiting…'; }
   try{
+    // Issue #344: write the card immediately from the submitted values — the
+    // operator sees parameters held, constraints, markets and the axis
+    // selector before the first window settles. Charts start empty and fill.
+    if(meta){
+      meta.innerHTML = sweepCard(v, {
+        axis: axis,
+        points: (SWEEP_AXES[axis] || []).map(val => ({
+          label: formatSweepTickValue(axis, val),
+          value: val,
+          overall: {}, per_series: {}, series_present: [],
+        })),
+        series_order: ['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'],
+        series_labels: {},
+        pending: true,
+      }, '');
+    }
     // Both endpoints share the one-worker guard. If an explicit regular
     // backtest is already running, wait for that local run instead of showing
     // a misleading 429 when the operator starts the visual sweep.
@@ -7450,27 +7674,70 @@ async function runSweepVisual(){
     }
     window._btSweepStartTime = performance.now();
     if(btn){ btn.textContent = '⏳ Sweeping 0s…'; }
-    if(meta){ meta.textContent = `sweeping ${axis}… 0s`; }
     window._btSweepTimerId = setInterval(() => {
       const t = fmtElapsed(performance.now() - window._btSweepStartTime);
       if(btn && btn.disabled){ btn.textContent = `⏳ Sweeping ${t}…`; }
-      if(meta && meta.textContent.startsWith('sweeping')){ meta.textContent = `sweeping ${axis}… ${t}`; }
     }, 500);
-    const url = `/api/backtest/sweep?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}`;
-    const res = await fetch(url);
-    if(res.status === 429){
+    const ctl = new AbortController();
+    window._btSweepAbort = ctl;
+    const url = `/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}`;
+    const res = await fetch(url, {signal: ctl.signal});
+    if (window._btSweepAbort !== ctl) return;
+    // Validation and busy responses arrive as JSON, not SSE — surface their
+    // error text immediately instead of silently rendering an empty chart.
+    const ctype = (res.headers && res.headers.get('content-type')) || '';
+    if (res.status === 429) {
       if(meta){ meta.textContent = 'busy — a backtest is already running, retry shortly.'; }
       return;
     }
-    const data = await res.json();
-    if(data.error){ if(meta){ meta.textContent = data.error; } return; }
-    renderSweepVisual(data, v);
+    if (!res.ok || !ctype.includes('text/event-stream')) {
+      let errMsg = `HTTP ${res.status}`;
+      try { const j = await res.json(); if (j && j.error) errMsg = j.error; } catch {}
+      if(meta){ meta.textContent = errMsg; }
+      return;
+    }
+    if (window._btSweepAbort !== ctl) return;
+    // Live fill: every progress event re-renders the card + charts from the
+    // running totals; the final event replaces everything with the exact
+    // authoritative payload (same path as the blocking era).
+    await consumeBacktestStream(res, ctl, (ev) => {
+      if (window._btSweepAbort !== ctl) return; // superseded — ignore stale events
+      if (ev.type === 'progress') {
+        renderSweepVisual(buildSweepProgressView(axis, v, ev), v, true);
+      } else if (ev.type === 'final') {
+        renderSweepVisual(ev.result, v);
+      } else if (ev.type === 'error') {
+        if(meta){ meta.textContent = ev.error || 'sweep error'; }
+      }
+    });
   }catch(err){
+    if (err && err.name === 'AbortError') return;
     if(meta){ meta.textContent = 'sweep failed: ' + err; }
   }finally{
     if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
   }
+}
+
+// Issue #344: build a sweep-response-shaped view from a progress event's
+// running per-point totals, so the live fill reuses the exact final renderer.
+// Best-point selection waits for `final` — running totals would crown a
+// premature winner and flash the gold highlight.
+function buildSweepProgressView(axis, v, ev){
+  return {
+    axis: axis,
+    points: ev.points || [],
+    series_order: (ev.points && ev.points[0] && ev.points[0].per_series)
+      ? Object.keys(ev.points[0].per_series) : [],
+    series_labels: {},
+    best_overall: null,
+    best_market: null,
+    n_windows: ev.rows_done || 0,
+    n_snaps: ev.n_snaps || 0,
+    pending: true,
+    rows_done: ev.rows_done || 0,
+    rows_total: ev.rows_total || 0,
+  };
 }
 
 function sweepAxisLabel(axis){
@@ -7612,10 +7879,75 @@ function sweepCard(v, data, statsHtml){
   const verdictHtml = (verdict && verdict.verdict)
     ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
     : '';
+  // Issue #344: the axis selector IS the title — one control chooses and
+  // displays the sweep subject instead of a dropdown row + duplicate title.
+  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev']
+    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor'})[a]}</option>`)
+    .join('');
+  const titleSel = `<select id="btSweepAxis" onchange="runSweepVisual()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
+  const pendingBadge = data.pending
+    ? `<span class="sweep-title-sub">testing ${values} · ${data.rows_total ? `row ${data.rows_done || 0}/${data.rows_total}` : 'starting…'}</span>`
+    : `<span class="sweep-title-sub">testing ${values}</span>`;
   return `<span class="sweep-title">`
-    + `<span class="sweep-title-main">${axisName}</span>`
-    + `<span class="sweep-title-sub">testing ${values}</span>`
+    + titleSel
+    + pendingBadge
     + `</span>`
+    + `<span class="sweep-card">`
+    + (statsHtml || '')
+    + `<span class="sweep-cols">${held}${rules}${markets}</span>`
+    + verdictHtml
+    + `</span>`;
+}
+
+// Everything after the title selector in the sweep card — the part that
+// re-renders on each progress event without disturbing the axis dropdown.
+function sweepCardTail(v, data, statsHtml){
+  const values = (data.points || []).map(p => p.label).join(', ');
+  const pct = x => x + '%';
+  const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
+  const present = new Set();
+  (data.points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
+  const TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+  const mktChip = (token, dur) => {
+    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
+    const active = present.has(slug);
+    return `<span class="sweep-mkt${active ? '' : ' off'}">${dur === '5m' ? '05m' : '15m'} ${token}</span>`;
+  };
+  const mktsHtml = TOKENS.map(t => mktChip(t, '5m')).join('')
+    + TOKENS.map(t => mktChip(t, '15m')).join('');
+  const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
+    + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
+    + `<span class="v">${val}</span></span>`;
+  const held = `
+    <span class="sweep-dl">
+      <span class="sweep-lab">Parameters held</span>
+      ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
+      ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
+      ${row('Late Entry (% window)', pct(v.entryDelayPct))}
+      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop_default')}
+      ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
+      ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
+      ${row('SOL 5m Stop ($)', v.exitSol.toFixed(2), data.axis === 'exit_stop_sol')}
+      ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
+      ${row('Leg Chase', onoff(v.legChase))}
+    </span>`;
+  const rules = `
+    <span class="sweep-dl">
+      <span class="sweep-lab">Designed constraints / rules</span>
+      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`)}
+      ${row('Dead Zone (% window)', pct(v.deadZonePct))}
+      ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
+    </span>`;
+  const markets = `
+    <span class="sweep-dl">
+      <span class="sweep-lab">Markets</span>
+      <span class="sweep-mkt-grid">${mktsHtml}</span>
+    </span>`;
+  const verdict = sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)));
+  const verdictHtml = (verdict && verdict.verdict && !data.pending)
+    ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
+    : '';
+  return `<span class="sweep-title-sub">testing ${values}${data.pending ? (data.rows_total ? ` · row ${data.rows_done || 0}/${data.rows_total}` : ' · starting…') : ''}</span>`
     + `<span class="sweep-card">`
     + (statsHtml || '')
     + `<span class="sweep-cols">${held}${rules}${markets}</span>`
@@ -7818,7 +8150,7 @@ function setupBtChartDialog(){
   aggregate.addEventListener('keydown', activate);
 }
 
-function renderSweepVisual(data, submitted){
+function renderSweepVisual(data, submitted, isProgress){
   window._btSweepVisualData = data;
   setupBtChartDialog();
   const theme = getThemeTokens();
@@ -7831,18 +8163,43 @@ function renderSweepVisual(data, submitted){
   const bestMarket = data.best_market || null;
   const meta = $('btSweepMeta');
   if(meta){
-    const overallText = bestOverall ? `${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : '—';
-    const marketText = bestMarket ? `${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : '—';
-    const tookTxt = (window._btSweepStartTime) ? fmtElapsed(performance.now() - window._btSweepStartTime) : '';
-    const statsHtml = `<span class="sweep-stats">`
-      + `<span><span class="sweep-lab">Best overall</span><span class="sweep-stat-v">${overallText}</span></span>`
-      + `<span><span class="sweep-lab">Best market</span><span class="sweep-stat-v">${marketText}</span></span>`
-      + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${data.n_windows || 0}</span></span>`
-      + (tookTxt ? `<span><span class="sweep-lab">Took</span><span class="sweep-stat-v">${tookTxt}</span></span>` : '')
-      + `</span>`;
-    // The card is the whole display: title (subject + tested values), stat
-    // row, three columns, verdict. The old grey sentence is gone.
-    meta.innerHTML = sweepCard(submitted, data, statsHtml);
+    // Issue #344: during the run the stat row shows live settled counts
+    // instead of a premature best-point crown (that waits for `final`).
+    let statsHtml;
+    if (isProgress) {
+      const pctDone = data.rows_total ? Math.round((data.rows_done / data.rows_total) * 100) : 0;
+      statsHtml = `<span class="sweep-stats">`
+        + `<span><span class="sweep-lab">Sweeping</span><span class="sweep-stat-v">${data.rows_done || 0}/${data.rows_total || '?'} rows · ${pctDone}%</span></span>`
+        + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${data.n_windows || 0}</span></span>`
+        + `</span>`;
+    } else {
+      const overallText = bestOverall ? `${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : '—';
+      const marketText = bestMarket ? `${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : '—';
+      const tookTxt = (window._btSweepStartTime) ? fmtElapsed(performance.now() - window._btSweepStartTime) : '';
+      statsHtml = `<span class="sweep-stats">`
+        + `<span><span class="sweep-lab">Best overall</span><span class="sweep-stat-v">${overallText}</span></span>`
+        + `<span><span class="sweep-lab">Best market</span><span class="sweep-stat-v">${marketText}</span></span>`
+        + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${data.n_windows || 0}</span></span>`
+        + (tookTxt ? `<span><span class="sweep-lab">Took</span><span class="sweep-stat-v">${tookTxt}</span></span>` : '')
+        + `</span>`;
+    }
+    // The card is the whole display: title (axis selector + tested values),
+    // stat row, three columns, verdict. The old grey sentence is gone.
+    // Preserve the selector's focus/selection across progress re-renders by
+    // patching only the parts around it when the axis is unchanged.
+    const existingSel = $('btSweepAxis');
+    if (isProgress && existingSel && existingSel.value === data.axis) {
+      // Re-render everything after the title element only: replace children
+      // of meta except the first (the selector) by rebuilding via fragment.
+      const keep = existingSel;
+      meta.innerHTML = '';
+      meta.appendChild(keep);
+      const rest = document.createElement('span');
+      rest.innerHTML = sweepCardTail(submitted, data, statsHtml);
+      while (rest.firstChild) meta.appendChild(rest.firstChild);
+    } else {
+      meta.innerHTML = sweepCard(submitted, data, statsHtml);
+    }
   }
   const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
