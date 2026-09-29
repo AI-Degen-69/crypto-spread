@@ -1906,6 +1906,62 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
     # The sweep reader must not re-read controls behind the helper's back.
     assert "const offset = $('btOffset')" not in html
     assert "const queue = $('btQueue')" not in html
+    # Issue #355: the chips have exactly one reader, shared by the request and
+    # the sweep card's Markets grid. Two readers is how the grid came to disagree
+    # with the run.
+    assert "function btSelection(" in html
+    assert "function btSelectedSeriesSlugs(" in html
+    for fname in ("btControlQuery", "btSelectedSeriesSlugs"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "selectedBtTokens" not in body, f"{fname} reads the chips directly"
+        assert "selectedBtDuration" not in body, f"{fname} reads the chips directly"
+    bt_query = html[html.index("function btControlQuery("):]
+    bt_query = bt_query[:bt_query.index("\n}")]
+    assert "btSelection()" in bt_query
+
+
+def test_bt_selected_series_slugs_follow_the_chips():
+    """Issue #355: the selected (token, timeframe) pairs expand to exactly the
+    slugs the sweep reports in `series_present`, so a chip toggle lights the
+    matching grid cells and nothing else."""
+    import re as _re
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    for name in ("btSelection", "btSelectedSeriesSlugs"):
+        found = _re.search(rf"function {name}\(.*?\n\}}", html, _re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    let selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    let selectedBtDuration = 'both';
+    // All five tokens + both frames = the whole universe, ten slugs.
+    assert(btSelectedSeriesSlugs().length === 10, btSelectedSeriesSlugs().join(','));
+    assert(btSelectedSeriesSlugs().includes('btc-up-or-down-5m'));
+    assert(btSelectedSeriesSlugs().includes('xrp-up-or-down-15m'));
+    // One token, both frames = exactly its two slugs.
+    selectedBtTokens = new Set(['SOL']);
+    let slugs = btSelectedSeriesSlugs();
+    assert(slugs.length === 2, slugs.join(','));
+    assert(slugs.includes('sol-up-or-down-5m') && slugs.includes('sol-up-or-down-15m'), slugs.join(','));
+    // One timeframe narrows to five slugs.
+    selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    selectedBtDuration = '15m';
+    slugs = btSelectedSeriesSlugs();
+    assert(slugs.length === 5, slugs.join(','));
+    assert(slugs.every(s => s.endsWith('-up-or-down-15m')), slugs.join(','));
+    // The helper defaults to the live chips when no snapshot is passed.
+    assert(btSelection().duration === '15m');
+    assert(btSelection().tokens.length === 5);
+    // An explicit snapshot wins over the live chips (run-start stability).
+    const snap = { tokens: ['BTC'], duration: '5m' };
+    assert(btSelectedSeriesSlugs(snap).join(',') === 'btc-up-or-down-5m');
+    """
+    import subprocess
+    import sys
+    proc = subprocess.run(["node", "-e", test_js], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 # ── Issue #335: every axis holds the operator's configuration ────────────────

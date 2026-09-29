@@ -6990,6 +6990,29 @@ function btControlValues(overrides){
   };
 }
 
+// Issue #355: the ONE reader of the Backtest Scope chips. The request query and
+// the sweep card's Markets grid both come from here, so the grid can never
+// disagree with what the sweep was actually asked to replay.
+const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+
+function btSelection(){
+  const tokens = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
+  const duration = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
+  return { tokens: tokens, duration: duration };
+}
+
+// The selected (token, timeframe) pairs as canonical series slugs — the same
+// `<token>-up-or-down-<dur>` shape the sweep result reports in `series_present`.
+function btSelectedSeriesSlugs(sel){
+  const s = sel || btSelection();
+  const durations = s.duration === '5m' ? ['5m'] : (s.duration === '15m' ? ['15m'] : ['5m', '15m']);
+  const out = [];
+  s.tokens.forEach(tok => {
+    durations.forEach(dur => out.push(`${String(tok).toLowerCase()}-up-or-down-${dur}`));
+  });
+  return out;
+}
+
 // Shared query string for both endpoints: every knob the page exposes, plus
 // the market/timeframe chips when they narrow the universe.
 function btControlQuery(v, axis){
@@ -7006,14 +7029,13 @@ function btControlQuery(v, axis){
   if(fileVal){ q += `&file=${encodeURIComponent(fileVal)}`; }
   // Market / timeframe selection (chip multi-select): all tokens or
   // both frames = omit the param, which the API reads as "all".
-  const btToks = (typeof selectedBtTokens !== 'undefined') ? [...selectedBtTokens] : [];
-  if (btToks.length > 0 && btToks.length < 5) {
-    q += `&series=${encodeURIComponent(btToks.map(t => t.toLowerCase()).join(','))}`;
+  const sel = btSelection();
+  if (sel.tokens.length > 0 && sel.tokens.length < BT_ALL_TOKENS.length) {
+    q += `&series=${encodeURIComponent(sel.tokens.map(t => t.toLowerCase()).join(','))}`;
   }
-  const btDur = (typeof selectedBtDuration !== 'undefined') ? selectedBtDuration : 'both';
-  if (btDur === '5m') {
+  if (sel.duration === '5m') {
     q += `&durations=300`;
-  } else if (btDur === '15m') {
+  } else if (sel.duration === '15m') {
     q += `&durations=900`;
   }
   return q;
