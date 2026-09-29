@@ -1695,6 +1695,15 @@ def _run_backtest_simulation_worker(
     prog_points: list[dict] = []
     prog_total = 0.0
     prog_count = 0
+    # Issue #331 (IIIB): live counters for the dashboard's metric cards and a
+    # provisional per-window P&L sample for the histogram — the operator sees
+    # every visualization react while the replay iterates its windows.
+    prog_pairs = 0
+    prog_exits = 0
+    prog_wins = 0
+    prog_max_dd = 0.0
+    prog_peak = 0.0
+    prog_pnls: list[float] = []
     prog_last_flush = time.monotonic()
 
     def _disable_progress() -> None:
@@ -1704,15 +1713,23 @@ def _run_backtest_simulation_worker(
 
     def _flush_progress() -> None:
         """Push one batched progress message; a failed put disables emission."""
-        nonlocal prog_points, prog_last_flush, prog_count
+        nonlocal prog_points, prog_pnls, prog_last_flush
         if not prog_points:
             return
         msg = {
             "windows_done": prog_count,
             "provisional_total_pnl_cents": round(prog_total, 2),
             "points": prog_points,
+            # Live card counters (same semantics as the final `overall` block).
+            "pairs": prog_pairs,
+            "exits": prog_exits,
+            "wins": prog_wins,
+            "max_drawdown_cents": round(prog_max_dd, 2),
+            # Provisional histogram sample (scaled pnl values, completion order).
+            "pnl_sample_cents": prog_pnls[-2000:],
         }
         prog_points = []
+        prog_pnls = prog_pnls[-2000:]
         prog_last_flush = time.monotonic()
         try:
             progress_queue.put_nowait(msg)
@@ -1742,6 +1759,15 @@ def _run_backtest_simulation_worker(
             win_pnl = win.pnl_cents * size
             prog_total += win_pnl
             prog_count += 1
+            prog_peak = max(prog_peak, prog_total)
+            prog_max_dd = max(prog_max_dd, prog_peak - prog_total)
+            if win.pair_captured:
+                prog_pairs += 1
+            elif win.exit_taken:
+                prog_exits += 1
+            if win.pnl_cents > 0:
+                prog_wins += 1
+            prog_pnls.append(round(win_pnl, 2))
             prog_points.append({
                 "pnl_cents": round(win_pnl, 2),
                 "cumulative_pnl_cents": round(prog_total, 2),
@@ -6986,8 +7012,10 @@ function markBacktestFailed(errMsg){
   if (elSub) elSub.textContent = 'Failed';
 }
 
-// Provisional live equity chart during a streaming run (issue #331).
+// Provisional live equity chart + provisional histogram during a streaming
+// run (issue #331 + IIIB feedback: every visualization reacts per window).
 let btProvisionalChart = null;
+let btProvisionalHist = null;
 
 function btBeginProvisionalChart(){
   destroyChartInstance('chartEquity');
@@ -7027,12 +7055,113 @@ function btBeginProvisionalChart(){
   });
 }
 
+function btBeginProvisionalHist(){
+  if (!$('chartPnlHist')) return;
+  destroyChartInstance('chartPnlHist');
+  if (btProvisionalHist) { try { btProvisionalHist.destroy(); } catch {} btProvisionalHist = null; }
+  const histCtx = $('chartPnlHist').getContext('2d');
+  const theme = getThemeTokens();
+  btProvisionalHist = new Chart(histCtx, {
+    type: 'bar',
+    plugins: [],
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Windows — provisional',
+        data: [],
+        backgroundColor: theme.dim,
+        borderColor: theme.dim,
+        borderWidth: 1,
+        barPercentage: 1.0,
+        categoryPercentage: 1.0,
+      }]
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      layout: { padding: { left: 8, right: 14, top: 14, bottom: 8 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { type: 'linear', title: { display: true, text: 'Window P&L ($)', color: theme.dim },
+             ticks: { color: theme.dim, callback: function(v){ return (v < 0 ? '-$' : '$') + Math.abs(Number(v)).toFixed(2); } },
+             grid: { color: theme.line } },
+        y: { beginAtZero: true, title: { display: true, text: 'Windows Count', color: theme.dim },
+             ticks: { color: theme.dim, precision: 0 }, grid: { color: theme.line } }
+      }
+    }
+  });
+}
+
+// Mirrors `_choose_bucket_width`'s steps so provisional bins land close to
+// the final histogram's grid.
+function btChooseHistStep(span){
+  const steps = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0];
+  const raw = span / 15.0;
+  for (const s of steps) { if (s >= raw) return s; }
+  return Math.ceil(raw / 500.0) * 500.0;
+}
+
+function btUpdateProvisionalHist(pnls, total){
+  if (!btProvisionalHist || !Array.isArray(pnls)) return;
+  if (!pnls.length) return;
+  const vals = pnls.map(v => Number(v) || 0);
+  const pMin = Math.min(...vals), pMax = Math.max(...vals);
+  if (pMin === pMax) {
+    btProvisionalHist.data.labels = [pMin - 0.5 + 0.5];
+    btProvisionalHist.data.datasets[0].data = [vals.length];
+  } else {
+    const step = btChooseHistStep(pMax - pMin);
+    const loEdge = Math.floor(pMin / step) * step;
+    const hiEdge = Math.ceil(pMax / step) * step;
+    const numBuckets = Math.max(1, Math.round((hiEdge - loEdge) / step));
+    const counts = new Array(numBuckets).fill(0);
+    const centers = [];
+    for (let i = 0; i < numBuckets; i++) {
+      centers.push(loEdge + (i + 0.5) * step);
+    }
+    for (const v of vals) {
+      let idx = Math.floor((v - loEdge) / step);
+      idx = Math.max(0, Math.min(numBuckets - 1, idx));
+      counts[idx] += 1;
+    }
+    btProvisionalHist.data.labels = centers;
+    btProvisionalHist.data.datasets[0].data = counts;
+  }
+  const statsEl = $('btPnlHistStats');
+  if (statsEl && total > 0) {
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    statsEl.textContent = `provisional n=${vals.length} · Mean $${(mean / 100).toFixed(2)}`;
+  }
+  btProvisionalHist.update('none');
+}
+
 function btAppendProvisionalPoints(msg){
   if (!btProvisionalChart || !msg || !Array.isArray(msg.points)) return;
   const ds = btProvisionalChart.data.datasets[0];
   for (const p of msg.points) {
     btProvisionalChart.data.labels.push(btProvisionalChart.data.labels.length + 1);
     ds.data.push(((p.cumulative_pnl_cents || 0) / 100).toFixed(2));
+  }
+  // Metric cards react to every progress batch (same semantics as the final
+  // overall block; entered_windows is only known at the end).
+  const windowsDone = msg.windows_done || 0;
+  const totalPnl = msg.provisional_total_pnl_cents || 0;
+  const pairs = msg.pairs || 0, exits = msg.exits || 0, wins = msg.wins || 0;
+  const den = Math.max(windowsDone, 1);
+  $('btTotalPnl').textContent = fmtUsd(totalPnl, true);
+  $('btTotalPnl').style.color = totalPnl >= 0 ? 'var(--up)' : 'var(--down)';
+  $('btAvgPnl').textContent = fmtUsd(totalPnl / den, true) + ' / window';
+  $('btPairRate').textContent = ((pairs / den) * 100).toFixed(1) + '%';
+  $('btPairsCount').textContent = `${pairs} / ${windowsDone} pairs`;
+  $('btExitRate').textContent = ((exits / den) * 100).toFixed(1) + '%';
+  $('btExitsCount').textContent = `${exits} exits`;
+  $('btMaxDd').textContent = '-' + fmtPrice((msg.max_drawdown_cents || 0) / 100);
+  $('btWinRate').textContent = ((wins / den) * 100).toFixed(1) + '%';
+  if ($('btWinsCount')) {
+    $('btWinsCount').textContent = `${wins} / ${windowsDone} profitable`;
+  }
+  if (Array.isArray(msg.pnl_sample_cents)) {
+    btUpdateProvisionalHist(msg.pnl_sample_cents, windowsDone);
   }
   if (msg.windows_done !== undefined) {
     const elSub = $('btElapsedSub');
@@ -7045,6 +7174,7 @@ function btAppendProvisionalPoints(msg){
 
 function btDestroyProvisionalChart(){
   if (btProvisionalChart) { try { btProvisionalChart.destroy(); } catch {} btProvisionalChart = null; }
+  if (btProvisionalHist) { try { btProvisionalHist.destroy(); } catch {} btProvisionalHist = null; }
 }
 
 // Minimal SSE parser over a fetch body reader: split on blank lines, take the
@@ -7124,6 +7254,7 @@ async function runBacktest(fileOverride){
     if (window._btAbort !== ctl) return;
 
     btBeginProvisionalChart();
+    btBeginProvisionalHist();
 
     await consumeBacktestStream(res, ctl, (ev) => {
       if (window._btAbort !== ctl) return; // superseded — ignore stale events
