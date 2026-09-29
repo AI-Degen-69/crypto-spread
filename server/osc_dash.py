@@ -5341,7 +5341,9 @@ const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>
 const pct=(a,b)=> b?Math.round(a/b*100):0;
 const hms=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`;};
 const getThemeToken = name => {
-  if (typeof document === 'undefined') return '';
+  // Headless node harnesses stub `document` but not `getComputedStyle` —
+  // guard both so theme reads degrade to '' instead of throwing.
+  if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return '';
   const prop = name.startsWith('--') ? name : `--${name}`;
   return getComputedStyle(document.documentElement).getPropertyValue(prop).trim();
 };
@@ -8330,6 +8332,8 @@ function renderSweepVisual(data, submitted, isProgress){
 
 // Statistical Summary Charts
 function destroyChartInstance(canvasId){
+  // Chart.js exists only in the browser; headless harnesses skip cleanly.
+  if (typeof Chart === 'undefined') return;
   const existing = Chart.getChart(canvasId);
   if(existing) existing.destroy();
 }
