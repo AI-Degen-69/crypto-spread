@@ -273,6 +273,14 @@ def generate_sensitivity_grid(
             if v != base.naked_leg_at_expiry:
                 grid.append((f"naked_leg={v}", replace(base, naked_leg_at_expiry=v)))
 
+    # 12. Late entry % (issue #348) — TUNING knob, swept by default.
+    late_entry_pcts = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    for lp in late_entry_pcts:
+        cur_pct = base.entry_delay_pct if base.entry_delay_pct is not None else 0.0
+        if lp != cur_pct:
+            p = replace(base, entry_delay_sec=0.0, entry_delay_pct=lp)
+            grid.append((f"late_entry={lp * 100:.0f}%", p))
+
     return grid
 
 
@@ -281,7 +289,7 @@ def generate_sensitivity_grid(
 SENSITIVITY_AXES = (
     "offset", "queue", "exit_5m", "exit_rev", "pair_cost",
     "quote_range", "dead_zone_pct", "dead_zone_sec",
-    "entry_delay", "leg_chase", "naked_leg",
+    "entry_delay", "leg_chase", "naked_leg", "late_entry",
 )
 
 
@@ -305,6 +313,24 @@ def filter_sensitivity_grid(
                 or row[0].startswith("dead_zone_sec=")]
     prefix = only + "="
     return [row for row in grid if row[0] == "Baseline" or row[0].startswith(prefix)]
+
+
+def deduplicate_grid(
+    grid: list[tuple[str, BacktestParams]],
+) -> list[tuple[str, BacktestParams]]:
+    """Drop rows duplicating an earlier row's effective params (issue #348).
+
+    The `entry_delay` pct rows and the `late_entry` rows can describe the
+    same `BacktestParams` (sec=0.0 + pct=X); without dedup the default CLI
+    replays those configurations twice. First label wins; `--only` paths
+    are filtered before this runs so their complete axes are untouched.
+    """
+    unique: list[tuple[str, BacktestParams]] = []
+    for row in grid:
+        if any(row[1] == prev[1] for prev in unique):
+            continue
+        unique.append(row)
+    return unique
 
 
 def generate_joint_grid(
@@ -593,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
                                          include_structural=include_structural)
         if args.only is not None:
             grid = filter_sensitivity_grid(grid, args.only)
+        else:
+            grid = deduplicate_grid(grid)
     elif args.preset == "grid":
         grid = generate_joint_grid(max_start_delay=max_delay, size=size,
                                    include_structural=args.include_structural)

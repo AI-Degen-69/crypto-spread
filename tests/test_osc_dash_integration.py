@@ -1629,9 +1629,9 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
     unknown = client.get("/api/backtest/sweep?axis=not-an-axis")
     assert unknown.status_code == 400
     assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
-    assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
     assert unknown.json()["valid"] == [
-        "exit_rev", "exit_stop_btc", "exit_stop_default", "exit_stop_sol", "offset", "queue"]
+        "exit_rev", "exit_stop_btc", "exit_stop_default", "exit_stop_sol",
+        "late_entry", "offset", "queue", "quote_range"]
 
     unsafe = client.get("/api/backtest/sweep?file=../secrets.jsonl")
     assert unsafe.status_code == 400
@@ -1844,10 +1844,13 @@ def test_sweep_axis_moves_only_its_own_parameter():
         "exit_stop_btc": {"exit_thresh_by_slug"},
         "exit_stop_sol": {"exit_thresh_by_slug"},
         "exit_rev": {"exit_reversal"},
+        "late_entry": {"entry_delay_pct"},
+        "quote_range": {"quote_range"},
     }
     for axis, value in [("queue", 25.0), ("offset", 0.04),
                         ("exit_stop_default", 0.15), ("exit_stop_btc", 0.15),
-                        ("exit_stop_sol", 0.15), ("exit_rev", 0.02)]:
+                        ("exit_stop_sol", 0.15), ("exit_rev", 0.02),
+                        ("late_entry", 10.0), ("quote_range", 0.15)]:
         variant, _label = osc_dash._sweep_params_for_value(params, axis, value)
         before, after = asdict(params), asdict(variant)
         changed = {k for k in before if before[k] != after[k]}
@@ -1924,6 +1927,8 @@ _AXIS_CONTROLS = {
     "exit_stop_btc": ("exit_btc_5m",),
     "exit_stop_sol": ("exit_sol_5m",),
     "exit_rev": ("exit_reversal",),
+    "late_entry": ("entry_delay_pct",),
+    "quote_range": ("quote_lo", "quote_hi"),
 }
 
 
@@ -1940,8 +1945,12 @@ def _axis_point_query(axis: str, value: float) -> dict:
     to the point value already builds the exact parameter set the axis writes.
     """
     query = dict(_NON_DEFAULT)
-    for control in _AXIS_CONTROLS[axis]:
-        query[control] = value
+    if axis == "quote_range":
+        query["quote_lo"] = value
+        query["quote_hi"] = round(1.0 - value, 2)
+    else:
+        for control in _AXIS_CONTROLS[axis]:
+            query[control] = value
     return query
 
 
@@ -2171,7 +2180,7 @@ def test_sweep_override_note_wording_node():
     # card builder, so the tests assert on the exact HTML the meta block
     # receives.
     parts = []
-    for name in ("sweepOverrideNote", "sweepCard"):
+    for name in ("sweepOverrideNote", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -2324,6 +2333,25 @@ def test_sweep_override_note_wording_node():
     assert(solCard.includes('>SOL 5m Stop ($) <span class="sweep-tag">← subject</span>'), solCard);
     assert(solCard.includes('>0.09<'), solCard);
     assert(solCard.split('← subject').length - 1 === 1, solCard);
+
+    // late_entry and quote_range subjects and formatters
+    const lateCard = sweepCard(v, { ...data, axis: 'late_entry' });
+    assert(lateCard.includes('value="late_entry" selected'), lateCard);
+    assert(lateCard.includes('>Late Entry (% window) <span class="sweep-tag">← subject</span>'), lateCard);
+    assert(lateCard.split('← subject').length - 1 === 1, lateCard);
+
+    const qrCard = sweepCard(v, { ...data, axis: 'quote_range' });
+    assert(qrCard.includes('value="quote_range" selected'), qrCard);
+    assert(qrCard.includes('>Quotable Range ($) <span class="sweep-tag">← subject</span>'), qrCard);
+    assert(qrCard.split('← subject').length - 1 === 1, qrCard);
+
+    const qrPoints = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30];
+    const qrNote = sweepOverrideNote('quote_range', v, qrPoints);
+    assert(qrNote.head.includes('Quotable Range'), qrNote.head);
+    assert(qrNote.verdict.cls === 'yours', qrNote.head);
+
+    assert(formatSweepTickValue('late_entry', 15) === '15%');
+    assert(formatSweepTickValue('quote_range', 0.1) === '[0.10, 0.90]');
 
     // Unknown axis: no claim, card still renders the held knobs.
     const unk = sweepCard(v, { ...data, axis: 'not-an-axis' });

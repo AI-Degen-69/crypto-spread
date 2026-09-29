@@ -2085,6 +2085,8 @@ SWEEP_AXES: Dict[str, List[float]] = {
     "exit_stop_btc": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_stop_sol": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
+    "late_entry": [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
+    "quote_range": [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
 }
 
 
@@ -2109,6 +2111,12 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
         thresholds["sol-up-or-down-5m"] = float(value)
         thresholds["sol-up-or-down-15m"] = float(value)
         return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop_sol={value:.2f}"
+    if axis == "late_entry":
+        return _dc_replace(base, entry_delay_pct=float(value) / 100.0, entry_delay_sec=0.0), f"late_entry={value:.0f}%"
+    if axis == "quote_range":
+        lo = round(float(value), 2)
+        hi = round(1.0 - lo, 2)
+        return _dc_replace(base, quote_range=(lo, hi)), f"quote_range=[{lo:.2f},{hi:.2f}]"
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
@@ -7715,6 +7723,8 @@ function sweepAxisValues(axis){
     exit_stop_btc: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     exit_stop_sol: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     exit_rev: [0.010, 0.015, 0.020, 0.025, 0.030],
+    late_entry: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
+    quote_range: [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
   })[axis] || [];
 }
 
@@ -7872,7 +7882,9 @@ function sweepAxisLabel(axis){
     exit_stop_default: 'Stop distance — default',
     exit_stop_btc: 'Stop distance — BTC',
     exit_stop_sol: 'Stop distance — SOL',
-    exit_rev: 'Reversal buffer — distance from anchor'
+    exit_rev: 'Reversal buffer — distance from anchor',
+    late_entry: 'Late entry — % of window',
+    quote_range: 'Quotable range — [lo, hi] bounds'
   })[axis] || axis;
 }
 
@@ -7925,13 +7937,24 @@ function sweepOverrideNote(axis, v, pointValues){
         ? { cls: 'yours', text: 'that bar is your setting' }
         : { cls: 'none', text: 'no bar equals it' },
     }),
+    quote_range: () => {
+      const isSymmetric = equals(v.quoteLo, 1.0 - v.quoteHi);
+      const on = isSymmetric && onAxis(v.quoteLo);
+      const shown = `[${exact(v.quoteLo)}, ${exact(v.quoteHi)}]`;
+      const verdict = on
+        ? { cls: 'yours', text: 'that bar is your setting' }
+        : { cls: 'none', text: 'no bar equals it' };
+      return { head: `sweeps Quotable Range — replaces the submitted ${shown}`,
+               submittedLabel: '', items: [], verdict };
+    },
   };
   if(stopAxes[axis]) return stopAxes[axis]();
 
   const single = ({
     queue: ['Queue depth', v.queue],
     offset: ['Quote offset', v.offset],
-    exit_rev: ['Reversal buffer', v.exitReversal]
+    exit_rev: ['Reversal buffer', v.exitReversal],
+    late_entry: ['Late Entry', v.entryDelayPct],
   })[axis];
   if(!single) return '';
   const shown = exact(single[1]);
@@ -7955,7 +7978,9 @@ function sweepCard(v, data, statsHtml){
     exit_stop_default: 'Exit Stop Loss — default',
     exit_stop_btc: 'Exit Stop Loss — BTC',
     exit_stop_sol: 'Exit Stop Loss — SOL',
-    exit_rev: 'Reversal Buffer'
+    exit_rev: 'Reversal Buffer',
+    late_entry: 'Late Entry (% window)',
+    quote_range: 'Quotable Range',
   })[data.axis] || data.axis;
   const values = (data.points || []).map(p => p.label).join(', ');
   // Markets grid: the full 10-series universe, always visible, in a fixed
@@ -7980,7 +8005,7 @@ function sweepCard(v, data, statsHtml){
       <span class="sweep-lab">Parameters held</span>
       ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
       ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
-      ${row('Late Entry (% window)', pct(v.entryDelayPct))}
+      ${row('Late Entry (% window)', pct(v.entryDelayPct), data.axis === 'late_entry')}
       ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop_default')}
       ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
       ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
@@ -7991,7 +8016,7 @@ function sweepCard(v, data, statsHtml){
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
-      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`)}
+      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`, data.axis === 'quote_range')}
       ${row('Dead Zone (% window)', pct(v.deadZonePct))}
       ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
     </span>`;
@@ -8006,8 +8031,8 @@ function sweepCard(v, data, statsHtml){
     : '';
   // Issue #344: the axis selector IS the title — one control chooses and
   // displays the sweep subject instead of a dropdown row + duplicate title.
-  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev']
-    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor'})[a]}</option>`)
+  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev','late_entry','quote_range']
+    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
   // Idle (pre-first-run) shows the selector + a plain "testing …" with no
@@ -8052,7 +8077,7 @@ function sweepCardTail(v, data, statsHtml){
       <span class="sweep-lab">Parameters held</span>
       ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
       ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
-      ${row('Late Entry (% window)', pct(v.entryDelayPct))}
+      ${row('Late Entry (% window)', pct(v.entryDelayPct), data.axis === 'late_entry')}
       ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop_default')}
       ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
       ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
@@ -8063,7 +8088,7 @@ function sweepCardTail(v, data, statsHtml){
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
-      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`)}
+      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`, data.axis === 'quote_range')}
       ${row('Dead Zone (% window)', pct(v.deadZonePct))}
       ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
     </span>`;
@@ -8089,6 +8114,14 @@ function formatSweepTickValue(axis, val){
   if (!Number.isFinite(num)) return String(val);
   if (axis === 'queue') {
     return Math.round(num).toString();
+  }
+  if (axis === 'late_entry') {
+    return `${Math.round(num)}%`;
+  }
+  if (axis === 'quote_range') {
+    const lo = num.toFixed(2);
+    const hi = (1.0 - num).toFixed(2);
+    return `[${lo}, ${hi}]`;
   }
   if (axis === 'offset' || axis === 'exit_rev') {
     const cents = num * 100;
