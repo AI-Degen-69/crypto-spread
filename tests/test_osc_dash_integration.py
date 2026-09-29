@@ -2429,6 +2429,56 @@ def test_backtest_stream_frontend_contract():
     assert "/api/backtest?${btControlQuery(v)}" not in html
 
 
+def test_worker_progress_message_carries_card_counters_and_hist_sample(tmp_path, monkeypatch):
+    """IIIB feedback: progress messages carry pairs/exits/wins/max-drawdown and
+    a provisional pnl sample, so every dashboard visualization can react."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = _make_backtest_ticks_file(tmp_path)
+    q = _fake_queue_factory()
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    params_dict = asdict(BacktestParams(offset=0.02))
+    result = osc_dash._run_backtest_simulation_worker(
+        str(tmp_path), str(fake_file), params_dict, 5, 0.0, 0, {}, {},
+        "", "", progress_queue=q, progress_batch_windows=2,
+    )
+    messages = []
+    while True:
+        try:
+            messages.append(q.get_nowait())
+        except Exception:
+            break
+    assert messages
+    last = messages[-1]
+    for key in ("pairs", "exits", "wins", "max_drawdown_cents", "pnl_sample_cents"):
+        assert key in last, f"progress message missing {key}"
+    sample = last["pnl_sample_cents"]
+    assert len(sample) == len(result["equity_curve"])
+    # Same per-window values the final histogram is computed from.
+    final_pnls = [e["pnl_cents"] for e in result["equity_curve"]]
+    assert sorted(sample) == sorted(final_pnls)
+    # Counter semantics match the final overall block.
+    ov = result["overall"]
+    assert last["pairs"] == ov["pairs"]
+    assert last["exits"] == ov["exits"]
+    assert last["wins"] == ov["wins"]
+    assert last["max_drawdown_cents"] == ov["max_drawdown_cents"]
+
+
+def test_backtest_stream_html_has_provisional_cards_and_histogram():
+    """IIIB feedback: the provisional phase updates metric cards and a
+    provisional histogram chart, not just the equity curve."""
+    html = osc_dash.FULL_APP_HTML
+    assert "btBeginProvisionalHist" in html
+    assert "btUpdateProvisionalHist" in html
+    assert "pnl_sample_cents" in html
+    assert "Windows — provisional" in html
+    # The provisional card updates write the same metric fields the final
+    # render writes, so a mid-run glance reads the real numbers.
+    for sel in ("btTotalPnl", "btPairRate", "btExitRate", "btMaxDd", "btWinRate"):
+        assert sel in html
+
+
 def test_shutdown_backtest_pool():
     """Verify shutdown_backtest_pool cleanly terminates pool and resets singleton (Issue #259)."""
     pool = osc_dash.get_backtest_pool()
