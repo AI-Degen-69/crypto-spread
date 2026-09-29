@@ -2617,6 +2617,7 @@ class LiveTraderEngine:
                 "exit_reversal": self.exit_reversal,
                 "shares": self.shares,
                 "enable_leg_chase": self.enable_leg_chase,
+                "ws_book_authority": self.ws_book_authority,
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
                 "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
@@ -2661,6 +2662,7 @@ class LiveTraderEngine:
                       naked_leg_at_expiry: Optional[str] = None,
                       exit_reversal: Optional[float] = None,
                       enable_leg_chase: Optional[bool] = None,
+                      ws_book_authority: Optional[bool] = None,
                       max_pair_cost: Optional[float] = None,
                       entry_delay_sec: Optional[float] = None,
                       quote_range: Optional[Sequence[float]] = None,
@@ -2787,6 +2789,8 @@ class LiveTraderEngine:
                     param_changed = True
                 if enable_leg_chase is not None and bool(enable_leg_chase) != self.enable_leg_chase:
                     param_changed = True
+                if ws_book_authority is not None and bool(ws_book_authority) != self.ws_book_authority:
+                    param_changed = True
                 if max_pair_cost is not None and abs(float(max_pair_cost) - self.max_pair_cost) > 1e-6:
                     param_changed = True
                 if entry_delay_sec is not None and abs(float(entry_delay_sec) - self.entry_delay_sec) > 1e-6:
@@ -2910,6 +2914,14 @@ class LiveTraderEngine:
                     self.exit_reversal = max(0.001, min(0.50, float(exit_reversal)))
                 if enable_leg_chase is not None:
                     self.enable_leg_chase = bool(enable_leg_chase)
+                if ws_book_authority is not None:
+                    # Issue #353: strict bool — a safety switch must never be
+                    # flipped by a truthy string or number smuggled in payload.
+                    if not isinstance(ws_book_authority, bool):
+                        raise ValueError(
+                            f"ws_book_authority must be a bool, got {ws_book_authority!r}"
+                        )
+                    self.ws_book_authority = ws_book_authority
                 if max_pair_cost is not None:
                     self.max_pair_cost = max(0.50, min(1.00, float(max_pair_cost)))
                 if entry_delay_sec is not None:
