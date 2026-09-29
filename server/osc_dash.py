@@ -6180,6 +6180,9 @@ function switchTab(name){
     // Opening the tab is read-only. Backtests start only after the operator
     // clicks Run Sweep (or explicitly presses Enter in a parameter field).
     updateBacktestParamPreview();
+    // IIIB: the tab is never a blank rectangle — idle card + chart axes are
+    // drawn on first open (and on page load for the default tab).
+    initBacktestIdle();
   }
   if(name==='summary') renderSummaryCharts();
   if(name==='ticks') loadManifest();
@@ -7733,6 +7736,38 @@ async function runSweepVisual(){
   }
 }
 
+// Idle preparation (IIIB feedback): draw the sweep card + charts BEFORE the
+// first run, so the section never looks like an empty rectangle. Markets stay
+// grayed and the title shows a plain "testing …" until a sweep actually runs.
+function renderSweepIdle(){
+  const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
+  renderSweepVisual({
+    axis: axis,
+    points: (sweepAxisValues(axis) || []).map(val => ({
+      label: formatSweepTickValue(axis, val),
+      value: val,
+      overall: {}, per_series: {}, series_present: [],
+    })),
+    series_order: ['btc-up-or-down-5m','eth-up-or-down-5m','bnb-up-or-down-5m','sol-up-or-down-5m','xrp-up-or-down-5m','btc-up-or-down-15m','eth-up-or-down-15m','bnb-up-or-down-15m','sol-up-or-down-15m','xrp-up-or-down-15m'],
+    series_labels: {},
+    idle: true,
+    pending: true,
+  }, btControlValues());
+}
+
+// "Empty but prepared" idle state for the whole backtest tab: sweep card with
+// selector + grayed markets + drawn chart axes, and the equity/histogram
+// charts created with visible scales instead of blank canvases. Safe to call
+// repeatedly — it never overwrites a live or finished render.
+function initBacktestIdle(){
+  if (!$('btSweepAxis') && !window._btSweepVisualData) renderSweepIdle();
+  // Chart.js is loaded only in the browser — in headless harnesses skip the
+  // canvas work; the sweep card above is DOM-only and still renders.
+  if (typeof Chart === 'undefined') return;
+  if (!Chart.getChart('chartEquity')) btBeginProvisionalChart();
+  if (!Chart.getChart('chartPnlHist')) btBeginProvisionalHist();
+}
+
 // Issue #344: build a sweep-response-shaped view from a progress event's
 // running per-point totals, so the live fill reuses the exact final renderer.
 // Best-point selection waits for `final` — running totals would crown a
@@ -7890,7 +7925,7 @@ function sweepCard(v, data, statsHtml){
       <span class="sweep-mkt-grid">${mktsHtml}</span>
     </span>`;
   const verdict = sweepOverrideNote(data.axis, v, (data.points || []).map(p => Number(p.value)));
-  const verdictHtml = (verdict && verdict.verdict)
+  const verdictHtml = (verdict && verdict.verdict && !data.pending && !data.idle)
     ? `<span class="sweep-verdict ${verdict.verdict.cls}">${verdict.verdict.text}</span>`
     : '';
   // Issue #344: the axis selector IS the title — one control chooses and
@@ -7899,7 +7934,11 @@ function sweepCard(v, data, statsHtml){
     .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="runSweepVisual()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
-  const pendingBadge = data.pending
+  // Idle (pre-first-run) shows the selector + a plain "testing …" with no
+  // numbers, so the card is prepared without pretending a sweep ran.
+  const pendingBadge = data.idle
+    ? `<span class="sweep-title-sub">testing …</span>`
+    : data.pending
     ? `<span class="sweep-title-sub">testing ${values} · ${data.rows_total ? `row ${data.rows_done || 0}/${data.rows_total}` : 'starting…'}</span>`
     : `<span class="sweep-title-sub">testing ${values}</span>`;
   return `<span class="sweep-title">`
@@ -8180,7 +8219,9 @@ function renderSweepVisual(data, submitted, isProgress){
     // Issue #344: during the run the stat row shows live settled counts
     // instead of a premature best-point crown (that waits for `final`).
     let statsHtml;
-    if (isProgress) {
+    if (data.idle) {
+      statsHtml = '';
+    } else if (isProgress) {
       const pctDone = data.rows_total ? Math.round((data.rows_done / data.rows_total) * 100) : 0;
       statsHtml = `<span class="sweep-stats">`
         + `<span><span class="sweep-lab">Sweeping</span><span class="sweep-stat-v">${data.rows_done || 0}/${data.rows_total || '?'} rows · ${pctDone}%</span></span>`
@@ -11354,6 +11395,7 @@ ensureCockpitPolling();
 tick();
 setInterval(tick, 3000);
 loadManifest();   // tick files tab: load file list + run integrity verify on every dashboard load
+initBacktestIdle(); // IIIB: backtest tab opens pre-drawn (sweep card idle + chart axes)
 </script></body></html>
 """
 
