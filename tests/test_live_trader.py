@@ -155,6 +155,132 @@ def test_ws_book_update_not_regressed_by_stale_rest_poll():
     assert mstate.down_ask == 0.38
 
 
+def _ws_authority_harness():
+    """Issue #353: engine + market wired for WS-book authority tests.
+
+    Authority is opted in explicitly (the default is now False); the socket
+    reports connected so freshness depends only on book age.
+    """
+    engine = LiveTraderEngine()
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+    engine.stream_bridge.clob.is_connected = True
+    engine.ws_book_authority = True
+    return engine, slug, mstate
+
+
+def _ws_authority_market(now):
+    return LiveMarket(
+        condition_id="0x353abc",
+        market_slug="btc-up-down-5m",
+        up_token="tok_up",
+        down_token="tok_dn",
+        start_ts=now - 10,
+        end_ts=now + 290,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+
+def test_ws_drift_guard_prefers_rest_on_large_disagreement():
+    """Issue #353: a fresh-but-wrong socket book must not silently win.
+
+    WS is fresh on both legs, but the REST full book disagrees by 0.32 on
+    the UP leg (the measured #350 worst case) while agreeing on DOWN. REST
+    must win UP only: UP bests land from REST with source "rest", DOWN keeps
+    WS bests with source "ws".
+    """
+    engine, slug, mstate = _ws_authority_harness()
+    now = time.time()
+    engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
+    engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
+
+    poll = {
+        "market": _ws_authority_market(now),
+        "up_book": {"best_bid": 0.28, "best_ask": 0.30,
+                    "bids": {"0.28": 50.0}, "asks": {"0.30": 60.0}},
+        "down_book": {"best_bid": 0.355, "best_ask": 0.375,
+                      "bids": {"0.355": 40.0}, "asks": {"0.375": 45.0}},
+    }
+    engine._update_market_strategy(slug, poll, now)
+
+    assert mstate.up_bid == 0.28
+    assert mstate.up_ask == 0.30
+    assert mstate.book_source_up == "rest"
+    assert mstate.down_bid == 0.36
+    assert mstate.down_ask == 0.38
+    assert mstate.book_source_down == "ws"
+
+
+def test_ws_book_kept_when_no_rest_book_fetched():
+    """Issue #353: with no REST book to compare, the guard cannot fire.
+
+    Both legs fresh and the fetch skipped (empty REST books, the shape
+    returned at the fetch-skip path) → WS bests stand on both legs.
+    """
+    engine, slug, mstate = _ws_authority_harness()
+    now = time.time()
+    engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
+    engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
+
+    poll = {"market": _ws_authority_market(now), "up_book": {}, "down_book": {}}
+    engine._update_market_strategy(slug, poll, now)
+
+    assert (mstate.up_bid, mstate.up_ask) == (0.60, 0.62)
+    assert (mstate.down_bid, mstate.down_ask) == (0.36, 0.38)
+    assert mstate.book_source_up == "ws"
+    assert mstate.book_source_down == "ws"
+
+
+def test_ws_book_authority_toggle_off_forces_rest():
+    """Issue #353: `update_config(ws_book_authority=False)` isolates the socket.
+
+    With authority off, socket updates refresh ladders but never overwrite
+    bests, and reconcile always applies REST. Non-bool values are refused.
+    """
+    engine = LiveTraderEngine()
+    # Scalar knobs cannot change while running — toggle before start.
+    engine.update_config(ws_book_authority=False)
+    assert engine.ws_book_authority is False
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    mstate = engine.markets[slug]
+    mstate.up_token = "tok_up"
+    mstate.down_token = "tok_dn"
+    engine.stream_bridge.clob.is_connected = True
+    now = time.time()
+
+    engine.on_book_update("tok_up", bids={0.60: 10.0}, asks={0.62: 10.0})
+    engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
+    assert mstate.up_bid is None
+    assert mstate.down_bid is None
+    # Ladders still refresh (socket kept warm for instant re-enable).
+    assert mstate.ws_bids_up == {0.60: 10.0}
+
+    poll = {
+        "market": _ws_authority_market(now),
+        "up_book": {"best_bid": 0.48, "best_ask": 0.52,
+                    "bids": {"0.48": 50.0}, "asks": {"0.52": 60.0}},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.51,
+                      "bids": {"0.47": 40.0}, "asks": {"0.51": 45.0}},
+    }
+    engine._update_market_strategy(slug, poll, now)
+    assert (mstate.up_bid, mstate.up_ask) == (0.48, 0.52)
+    assert mstate.book_source_up == "rest"
+
+    # Scalar knobs are locked while running — stop first.
+    engine.stop()
+    with pytest.raises(ValueError):
+        engine.update_config(ws_book_authority="yes")
+    assert engine.ws_book_authority is False
+
+    engine.update_config(ws_book_authority=True)
+    assert engine.ws_book_authority is True
+
+
 def test_rest_mid_recompute_cannot_tear_against_concurrent_ws_update(monkeypatch):
     """Issue #171: mid must stay consistent with the bests it was derived from.
 
