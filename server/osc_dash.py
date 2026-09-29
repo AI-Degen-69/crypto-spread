@@ -1537,19 +1537,27 @@ def get_backtest_pool() -> ProcessPoolExecutor:
 # violation on Windows), and a bounded tail of the worker's stderr. The pool is
 # then rebuilt on next use (existing `_broken` handling), so the failure is
 # loud, explained, and recoverable.
-def _diagnose_broken_pool(exc: BaseException) -> str:
+def _diagnose_broken_pool(exc: BaseException, pool=None) -> str:
     """Best-effort diagnostic string for a `BrokenProcessPool` from our executor.
 
-    Reads the pool's private `_processes` map — the only place the worker's
-    exit code and transport stderr live — and never raises: a diagnostic that
+    Reads the failed request's pool's private `_processes` map — the only
+    place a worker's exit code lives — and never raises: a diagnostic that
     crashes would replace the original failure, which is the bug this fixes.
+    `pool` is the executor the failed request was submitted to; passing it
+    explicitly avoids racing a newer request that already rebuilt the
+    singleton.
+
+    Known limit: multiprocessing `Process` objects expose no worker stderr,
+    so the pid + exitcode (negative = signal, 3221225477 = 0xC0000005 access
+    violation on Windows) are the available evidence; the original spawn
+    bootstrap traceback stays on the worker's own console.
     """
     parts = [
         "backtest worker process died (BrokenProcessPool)",
         f"original error: {type(exc).__name__}: {exc}",
     ]
     try:
-        procs = list(getattr(_BACKTEST_POOL, "_processes", {}).values())
+        procs = list(getattr(pool if pool is not None else _BACKTEST_POOL, "_processes", {}).values())
     except Exception:
         procs = []
     if not procs:
@@ -1558,15 +1566,6 @@ def _diagnose_broken_pool(exc: BaseException) -> str:
         pid = getattr(proc, "pid", None)
         exitcode = getattr(proc, "exitcode", None)
         parts.append(f"worker pid={pid} exitcode={exitcode}")
-        try:
-            err_tail = "".join(
-                getattr(proc, "stderr", None) and proc.stderr._buffer
-                or [],
-            )
-        except Exception:
-            err_tail = ""
-        if err_tail:
-            parts.append("worker stderr tail: " + err_tail[-800:])
     return " | ".join(parts)
 
 
@@ -2698,6 +2697,7 @@ async def api_backtest(
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
+            _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -2731,9 +2731,10 @@ async def api_backtest(
     except concurrent.futures.process.BrokenProcessPool as exc:
         # Issue #341: "terminated abruptly" with zero diagnostics is how a
         # spawned-worker crash (and every environmental break) surfaces. The
-        # worker's exit code + stderr tail turn it into an actionable error,
-        # and the pool is rebuilt on next use by `get_backtest_pool`.
-        raise HTTPException(status_code=500, detail=_diagnose_broken_pool(exc)) from exc
+        # worker's exit code turns it into an actionable error, and the pool
+        # is rebuilt on next use by `get_backtest_pool`.
+        raise HTTPException(status_code=500, detail=_diagnose_broken_pool(
+            exc, getattr(worker_task, "pool", None) or getattr(_run_shielded, "pool", None))) from exc
 
 
 @app.get(
@@ -2834,6 +2835,7 @@ async def api_backtest_stream(
         """Submit the worker; eventual guard release even if the stream dies early."""
         try:
             pool = get_backtest_pool()
+            _submit.pool = pool  # issue #341: diagnose the submitted pool
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -2896,7 +2898,7 @@ async def api_backtest_stream(
             # of the blanket "terminated abruptly" message.
             completed = True  # diagnostic error event already ends the stream
             yield {"event": "message", "data": json.dumps(
-                {"type": "error", "error": _diagnose_broken_pool(exc)})}
+                {"type": "error", "error": _diagnose_broken_pool(exc, getattr(_submit, "pool", None))})}
         except Exception as exc:
             yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
         finally:
@@ -3027,6 +3029,7 @@ async def api_backtest_sweep(
         try:
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
+            _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
             return await loop.run_in_executor(
                 pool,
                 _run_sweep_worker,
@@ -3058,7 +3061,8 @@ async def api_backtest_sweep(
                     "Narrow the dataset, markets or timeframes and try again."))
     except concurrent.futures.process.BrokenProcessPool as exc:
         # Issue #341: same loud diagnostics as the blocking backtest endpoint.
-        raise HTTPException(status_code=500, detail=_diagnose_broken_pool(exc)) from exc
+        raise HTTPException(status_code=500, detail=_diagnose_broken_pool(
+            exc, getattr(_run_shielded, "pool", None))) from exc
 
 
 @app.get(
@@ -3175,6 +3179,7 @@ async def api_backtest_sweep_stream(
         """Submit the sweep worker; eventual guard release even on early death."""
         try:
             pool = get_backtest_pool()
+            _submit.pool = pool  # issue #341: diagnose the submitted pool
             return await loop.run_in_executor(
                 pool,
                 _run_sweep_worker,
@@ -3233,7 +3238,7 @@ async def api_backtest_sweep_stream(
             # of the blanket "terminated abruptly" message.
             completed = True  # diagnostic error event already ends the stream
             yield {"event": "message", "data": json.dumps(
-                {"type": "error", "error": _diagnose_broken_pool(exc)})}
+                {"type": "error", "error": _diagnose_broken_pool(exc, getattr(_submit, "pool", None))})}
         except Exception as exc:
             yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
         finally:

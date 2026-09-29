@@ -6246,10 +6246,12 @@ def test_real_process_pool_backtest_passes_deterministically(tmp_path, monkeypat
     _make_backtest_ticks_file(tmp_path)
     osc_dash.shutdown_backtest_pool()  # fresh pool for this test
     try:
-        res = client.get("/api/backtest", params={"file": "fake_stream.jsonl", "filter_partial": "true"})
+        res = client.get("/api/backtest", params={"file": "fake_stream.jsonl"})
         assert res.status_code == 200, res.text[:500]
         body = res.json()
         assert "overall" in body and "n_windows" in body
+        # Non-vacuous: the spawn worker really simulated fixture windows.
+        assert body["n_windows"] > 0, body.get("overall")
     finally:
         osc_dash.shutdown_backtest_pool()
 
@@ -6294,18 +6296,26 @@ def test_broken_pool_diagnostic_mentions_exitcode_and_original_error():
     osc_dash._BACKTEST_POOL = _FakePool()
     try:
         text = osc_dash._diagnose_broken_pool(_cfp.BrokenProcessPool("terminated abruptly"))
+        # Explicit pool argument wins over the singleton (review #346): the
+        # failed request must report its own pool's pid, not a newer pool's.
+        class _OtherProc:
+            pid = 9999
+            exitcode = 1
+            stderr = None
+
+        class _OtherPool:
+            _processes = {"w0": _OtherProc()}
+
+        text_explicit = osc_dash._diagnose_broken_pool(
+            _cfp.BrokenProcessPool("terminated abruptly"), _OtherPool())
     finally:
         osc_dash._BACKTEST_POOL = original
     assert "pid=4242" in text
     assert "exitcode=-9" in text
     assert "terminated abruptly" in text
+    assert "pid=9999" in text_explicit and "pid=4242" not in text_explicit
 
     # Already-torn-down pool: still a clean string, still no exception.
-    original = osc_dash._BACKTEST_POOL
-    osc_dash._BACKTEST_POOL = None
-    try:
-        text = osc_dash._diagnose_broken_pool(_cfp.BrokenProcessPool("terminated abruptly"))
-    finally:
-        osc_dash._BACKTEST_POOL = original
+    text = osc_dash._diagnose_broken_pool(_cfp.BrokenProcessPool("terminated abruptly"), None)
     assert "no live worker process found" in text
 
