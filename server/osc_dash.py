@@ -2126,8 +2126,17 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
 #: over an all-grey card for the whole run. Emission now happens inside the streaming
 #: read loop; the time gate keeps the event count bounded to
 #: (run duration / interval) + 2 regardless of how many windows the corpus holds.
-SWEEP_PROGRESS_MIN_INTERVAL_SEC = float(
-    os.environ.get("SWEEP_PROGRESS_MIN_INTERVAL_SEC", "0.5"))
+def _sweep_progress_interval() -> float:
+    """Parse the progress throttle; a bad env value falls back to 0.5s instead
+    of crashing the dashboard at import (review finding, issue #355)."""
+    try:
+        v = float(os.environ.get("SWEEP_PROGRESS_MIN_INTERVAL_SEC", "0.5"))
+    except (TypeError, ValueError):
+        return 0.5
+    return v if v > 0 else 0.5
+
+
+SWEEP_PROGRESS_MIN_INTERVAL_SEC = _sweep_progress_interval()
 
 
 def _select_sweep_bests(
@@ -2361,27 +2370,9 @@ def _run_sweep_worker(
             "points": _snapshot(acc),
         })
 
-    points = []
-    for a, (value, (_params, label)) in zip(acc, zip(values, variants)):
-        overall_pnl = a["pnl"]
-        n = a["n"]
-        per_series_values = {
-            slug: round(a["per_series"].get(slug, 0.0), 2)
-            for slug in series_order
-        }
-        points.append({
-            "label": label,
-            "value": float(value),
-            "overall": {
-                "windows": n,
-                "pairs": a["pairs"],
-                "exits": a["exits"],
-                "total_pnl_cents": round(overall_pnl, 2),
-                "avg_pnl_cents": round(overall_pnl / n, 2) if n else 0.0,
-            },
-            "per_series": per_series_values,
-            "series_present": sorted(a["per_series"]),
-        })
+    # Same builder as the live previews, so the final result can never drift
+    # from what the UI rendered a moment earlier (review finding, issue #355).
+    points = _snapshot(acc)
 
     best_overall, best_market = _select_sweep_bests(
         points, series_order, series_labels
