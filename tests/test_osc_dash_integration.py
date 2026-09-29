@@ -1921,6 +1921,100 @@ def test_sweep_button_sends_every_control_to_both_endpoints():
     assert "btSelection()" in bt_query
 
 
+def test_sweep_markets_grid_has_three_states():
+    """Issue #355: the Markets grid distinguishes participated / selected-with-no-
+    windows / not-selected, and every chip says which it is."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    parts = []
+    for name in ("sweepMarketsGridHtml",):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
+
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const tokens = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+    const ALL = tokens.flatMap(t => [`${t.toLowerCase()}-up-or-down-5m`,
+                                    `${t.toLowerCase()}-up-or-down-15m`]);
+    const pts = present => [{ label: 'q=0', value: 0, overall: {}, per_series: {},
+                              series_present: present }];
+
+    // 1. The reported bug: everything selected, nothing replayed yet. The grid
+    //    must be all `pending` and contain no `off` chip at all.
+    let html1 = sweepMarketsGridHtml(pts([]), ALL);
+    assert(html1.includes('sweep-mkt pending'), html1);
+    assert(!html1.includes('sweep-mkt off'), html1);
+    assert(html1.includes('title="05m BTC — selected — no windows yet"'), html1);
+    tokens.forEach(t => {
+      assert(html1.includes(`>05m ${t}</span>`), html1);
+      assert(html1.includes(`>15m ${t}</span>`), html1);
+    });
+
+    // 2. Partial selection: the unselected tokens go `off`, the selected stay
+    //    `pending`. This is the case that used to render fully grey.
+    const btcOnly = ['btc-up-or-down-5m', 'btc-up-or-down-15m'];
+    let html2 = sweepMarketsGridHtml(pts([]), btcOnly);
+    assert(html2.includes('sweep-mkt pending" title="05m BTC'), html2);
+    assert(html2.includes('sweep-mkt off" title="05m ETH — not selected'), html2);
+    assert(html2.includes('sweep-mkt off" title="15m XRP — not selected'), html2);
+
+    // 3. A participant wins over `pending` and over `off` — a market that
+    //    replayed is never described as absent, even if not selected.
+    let html3 = sweepMarketsGridHtml(pts(['sol-up-or-down-5m']), btcOnly);
+    assert(html3.includes('class="sweep-mkt" title="05m SOL — replayed in this sweep"'), html3);
+    assert(!html3.includes('05m SOL — not selected'), html3);
+    assert(!html3.includes('05m SOL — selected'), html3);
+    assert(html3.includes('sweep-mkt pending" title="05m BTC'), html3);
+    assert(html3.includes('sweep-mkt pending" title="15m BTC'), html3);
+    assert(html3.includes('sweep-mkt off" title="15m ETH — not selected'), html3);
+
+    // 4. Backward compatibility: no selection supplied = the two-state contract.
+    let html4 = sweepMarketsGridHtml(pts(['eth-up-or-down-5m']), []);
+    assert(html4.includes('>05m ETH<'), html4);
+    assert(!html4.includes('sweep-mkt pending'), html4);
+    assert(html4.includes('sweep-mkt off" title="15m BTC'), html4);
+    // No points at all, no selection: the whole grid is `off` (today's idle
+    // fallback when the caller supplies no selection).
+    let html5 = sweepMarketsGridHtml([], []);
+    assert(!html5.includes('sweep-mkt pending'), html5);
+    tokens.forEach(t => {
+      assert(html5.includes(`sweep-mkt off" title="05m ${t} —`), html5);
+    });
+
+    console.log('SWEEP_MARKETS_GRID_TESTS_PASSED');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_MARKETS_GRID_TESTS_PASSED" in res.stdout
+
+
+def test_sweep_markets_grid_pending_style_uses_theme_tokens():
+    """Issue #355: `pending` is its own style, built from theme variables only —
+    no hardcoded colour (tests/test_theme_tokens.py is the repo's colour gate)."""
+    html = osc_dash.FULL_APP_HTML
+    assert "#btSweepMeta .sweep-mkt.pending{" in html
+    pending_rule = html[html.index("#btSweepMeta .sweep-mkt.pending{"):]
+    pending_rule = pending_rule[:pending_rule.index("}")]
+    assert "var(--" in pending_rule
+    # No hardcoded colour: strip the selector, then no '#' literal may remain.
+    body = pending_rule.split("{", 1)[1]
+    assert "#" not in body, body
+    # It must read differently from both neighbours.
+    assert "border-style:solid" in pending_rule
+    off_rule = html[html.index("#btSweepMeta .sweep-mkt.off{"):]
+    off_rule = off_rule[:off_rule.index("}")]
+    assert off_rule != pending_rule
+
+
 def test_bt_selected_series_slugs_follow_the_chips():
     """Issue #355: the selected (token, timeframe) pairs expand to exactly the
     slugs the sweep reports in `series_present`, so a chip toggle lights the
@@ -2236,10 +2330,14 @@ def test_sweep_override_note_wording_node():
     # card builder, so the tests assert on the exact HTML the meta block
     # receives.
     parts = []
-    for name in ("sweepOverrideNote", "sweepCard", "formatSweepTickValue"):
+    # Issue #355: sweepCard delegates the Markets grid to sweepMarketsGridHtml,
+    # so both must be in the harness or the grid renders as `undefined`.
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepCard",
+                 "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
 
     test_js = "\n".join(parts) + """
     const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
@@ -2279,8 +2377,8 @@ def test_sweep_override_note_wording_node():
     assert(card.includes('sweep-mkt-grid'), card);
     // eth-up-or-down-5m participated: its chip solid; every 15m absent: dashed.
     assert(card.includes('>05m ETH<'), card);
-    assert(!card.includes('class="sweep-mkt off">05m ETH<'), card);
-    assert(card.includes('class="sweep-mkt off">15m BTC<'), card);
+    assert(!card.includes('sweep-mkt off" title="05m ETH'), card);
+    assert(card.includes('sweep-mkt off" title="15m BTC'), card);
     assert(card.includes('sweep-mkt off'), card);
     assert(card.includes('Parameters held'), card);
     assert(card.includes('Designed constraints / rules'), card);
@@ -2414,12 +2512,13 @@ def test_sweep_override_note_wording_node():
     assert(!unk.includes('← subject'), unk);
     assert(unk.includes('Parameters held'), unk);
 
-    // Markets stay permanent even when the response has no points: every
-    // chip grayed out, layout unchanged.
+    // Markets stay permanent even when the response has no points: with no
+    // selection supplied the whole grid falls back to the two-state contract,
+    // every chip grayed out, layout unchanged (issue #355).
     const allMkts = sweepCard(v, { ...data, points: [] });
     tokens.forEach(t => {
-      assert(allMkts.includes(`class="sweep-mkt off">05m ${t}<`), allMkts);
-      assert(allMkts.includes(`class="sweep-mkt off">15m ${t}<`), allMkts);
+      assert(allMkts.includes(`sweep-mkt off" title="05m ${t} —`), allMkts);
+      assert(allMkts.includes(`sweep-mkt off" title="15m ${t} —`), allMkts);
     });
 
     console.log('SWEEP_OVERRIDE_NOTE_TESTS_PASSED');

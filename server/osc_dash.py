@@ -4976,6 +4976,7 @@ textarea:focus-visible,
       #btSweepMeta .sweep-row .v{color:var(--tx);font:11px var(--mono);text-align:left}
       #btSweepMeta .sweep-tag{font:700 8px var(--disp);letter-spacing:.6px;text-transform:uppercase;color:var(--gold)}
       #btSweepMeta .sweep-mkt{display:inline-block;font:11px var(--mono);color:var(--tx);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:0 0 4px 4px}
+      #btSweepMeta .sweep-mkt.pending{color:var(--tx);background:transparent;border-style:solid;border-color:var(--gold)}
       #btSweepMeta .sweep-mkt.off{color:var(--faint);background:transparent;border-style:dashed;opacity:.55}
       #btSweepMeta .sweep-mkt-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
       #btSweepMeta .sweep-mkt-grid .sweep-mkt{display:block;text-align:center;margin:0}
@@ -8051,6 +8052,36 @@ function sweepOverrideNote(axis, v, pointValues){
 // compact card with three columns — parameters held, designed constraints,
 // participating markets — and the where-am-I verdict at the bottom.
 // `v` is the pre-request snapshot, `data` the sweep response (axis + markets).
+// Issue #355: the one Markets grid. `sweepCard()` and `sweepCardTail()` each
+// built their own copy of this, so both had to be fixed together and could not
+// drift. Three states, because "selected but nothing replayed yet" and "not
+// selected" are different facts and used to look identical:
+//   solid   - the market produced windows in this run
+//   pending - selected, no windows yet (or none at all)
+//   off     - not selected
+// `selectedSlugs` empty/absent = no selection was supplied, so participation
+// alone decides, exactly as before.
+function sweepMarketsGridHtml(points, selectedSlugs){
+  const present = new Set();
+  (points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
+  const selected = (selectedSlugs && selectedSlugs.length) ? new Set(selectedSlugs) : null;
+  const running = (points || []).length > 0;
+  const chip = (token, dur) => {
+    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
+    const label = `${dur === '5m' ? '05m' : '15m'} ${token}`;
+    if (present.has(slug)) {
+      return `<span class="sweep-mkt" title="${label} — replayed in this sweep">${label}</span>`;
+    }
+    if (selected && selected.has(slug)) {
+      const why = running ? 'selected — no windows yet' : 'selected — no windows';
+      return `<span class="sweep-mkt pending" title="${label} — ${why}">${label}</span>`;
+    }
+    return `<span class="sweep-mkt off" title="${label} — not selected">${label}</span>`;
+  };
+  return BT_ALL_TOKENS.map(t => chip(t, '5m')).join('')
+    + BT_ALL_TOKENS.map(t => chip(t, '15m')).join('');
+}
+
 function sweepCard(v, data, statsHtml){
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
@@ -8065,20 +8096,8 @@ function sweepCard(v, data, statsHtml){
     quote_range: 'Quotable Range',
   })[data.axis] || data.axis;
   const values = (data.points || []).map(p => p.label).join(', ');
-  // Markets grid: the full 10-series universe, always visible, in a fixed
-  // 5-column grid — 05m row above 15m row, one column per token. A market
-  // that did not take part in this run (filtered out or no windows) stays
-  // in place, grayed out, so the layout never jumps between runs.
-  const present = new Set();
-  (data.points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
-  const TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
-  const mktChip = (token, dur) => {
-    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
-    const active = present.has(slug);
-    return `<span class="sweep-mkt${active ? '' : ' off'}">${dur === '5m' ? '05m' : '15m'} ${token}</span>`;
-  };
-  const mktsHtml = TOKENS.map(t => mktChip(t, '5m')).join('')
-    + TOKENS.map(t => mktChip(t, '15m')).join('');
+  // Issue #355: the grid is built in one place (see sweepMarketsGridHtml).
+  const mktsHtml = sweepMarketsGridHtml(data.points, data.selected_series);
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
     + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
     + `<span class="v">${val}</span></span>`;
@@ -8141,16 +8160,7 @@ function sweepCardTail(v, data, statsHtml){
   const values = (data.points || []).map(p => p.label).join(', ');
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
-  const present = new Set();
-  (data.points || []).forEach(p => (p.series_present || []).forEach(s => present.add(s)));
-  const TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
-  const mktChip = (token, dur) => {
-    const slug = `${token.toLowerCase()}-up-or-down-${dur}`;
-    const active = present.has(slug);
-    return `<span class="sweep-mkt${active ? '' : ' off'}">${dur === '5m' ? '05m' : '15m'} ${token}</span>`;
-  };
-  const mktsHtml = TOKENS.map(t => mktChip(t, '5m')).join('')
-    + TOKENS.map(t => mktChip(t, '15m')).join('');
+  const mktsHtml = sweepMarketsGridHtml(data.points, data.selected_series);
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
     + `<span class="k">${k}${subject ? ' <span class="sweep-tag">← subject</span>' : ''}</span>`
     + `<span class="v">${val}</span></span>`;
