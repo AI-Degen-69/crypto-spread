@@ -5629,6 +5629,7 @@ def test_jungle_king_engine_defaults_sit_inside_their_declared_domains():
 
 
 def test_backtest_runtime_estimation_badge_present():
+    """Issue #330: dashboard includes dynamic runtime estimation badge and helpers."""
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
