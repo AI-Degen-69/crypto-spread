@@ -2224,6 +2224,7 @@ def _run_sweep_worker(
     # disable progress; the run and its result are untouched.
     emit_progress = progress_queue is not None
     def _sweep_progress_snapshot() -> list[dict]:
+        """Running per-axis-point totals in the final `points` shape."""
         return [
             {
                 "label": label,
