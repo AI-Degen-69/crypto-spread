@@ -1854,7 +1854,9 @@ def _run_backtest_simulation_worker(
 SWEEP_AXES: Dict[str, List[float]] = {
     "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
     "offset": [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
-    "exit_stop": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    "exit_stop_default": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    "exit_stop_btc": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+    "exit_stop_sol": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
 }
 
@@ -1865,17 +1867,21 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
         return _dc_replace(base, queue_gate=float(value)), f"queue={value:.0f}"
     if axis == "offset":
         return _dc_replace(base, offset=float(value)), f"offset={value:.3f}"
-    if axis == "exit_stop":
+    if axis == "exit_stop_default":
         thresholds = dict(base.exit_thresh_by_slug)
-        # This axis is deliberately global across both durations and the
-        # duration-specific BTC/SOL overrides, so 5m and 15m are one experiment.
-        for key in (
-            "default_5m", "default_15m",
-            "btc-up-or-down-5m", "btc-up-or-down-15m",
-            "sol-up-or-down-5m", "sol-up-or-down-15m",
-        ):
-            thresholds[key] = float(value)
-        return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop={value:.2f}"
+        thresholds["default_5m"] = float(value)
+        thresholds["default_15m"] = float(value)
+        return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop_default={value:.2f}"
+    if axis == "exit_stop_btc":
+        thresholds = dict(base.exit_thresh_by_slug)
+        thresholds["btc-up-or-down-5m"] = float(value)
+        thresholds["btc-up-or-down-15m"] = float(value)
+        return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop_btc={value:.2f}"
+    if axis == "exit_stop_sol":
+        thresholds = dict(base.exit_thresh_by_slug)
+        thresholds["sol-up-or-down-5m"] = float(value)
+        thresholds["sol-up-or-down-15m"] = float(value)
+        return _dc_replace(base, exit_thresh_by_slug=thresholds), f"stop_sol={value:.2f}"
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
@@ -4224,7 +4230,9 @@ textarea:focus-visible,
           <select id="btSweepAxis" style="padding:4px 8px;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
             <option value="queue" selected>Queue depth — shares ahead</option>
             <option value="offset">Quote offset — distance from anchor</option>
-            <option value="exit_stop">Stop distance — 5m + 15m markets</option>
+            <option value="exit_stop_default">Stop distance — default</option>
+            <option value="exit_stop_btc">Stop distance — BTC</option>
+            <option value="exit_stop_sol">Stop distance — SOL</option>
             <option value="exit_rev">Reversal buffer — distance from anchor</option>
           </select>
           <button class="btn btn-primary" id="btnRunSweepVisual" onclick="runSweepVisual()">▶ Run Sweep Visual</button>
@@ -6836,16 +6844,19 @@ function sweepAxisLabel(axis){
   return ({
     queue: 'Queue depth — shares ahead',
     offset: 'Quote offset — distance from anchor',
-    exit_stop: 'Stop distance — 5m + 15m markets',
+    exit_stop_default: 'Stop distance — default',
+    exit_stop_btc: 'Stop distance — BTC',
+    exit_stop_sol: 'Stop distance — SOL',
     exit_rev: 'Reversal buffer — distance from anchor'
   })[axis] || axis;
 }
 
 // What the sweep replaces. Every other knob stays at the number typed on the
-// page, but the chart cannot show which one moved, and `exit_stop` is the
-// special case: one control stands for six thresholds inside the engine. The
-// values here are what the page submitted — not a server-confirmed echo of what
-// ran, which is why the note says "your" and not "effective".
+// page, but the chart cannot show which one moved. Each stop axis replaces
+// exactly the thresholds its name names, so the note can always be honest with
+// one sentence. The values here are what the page submitted — not a
+// server-confirmed echo of what ran, which is why the note says "your" and not
+// "effective".
 function sweepOverrideNote(axis, v, pointValues){
   if(!v) return '';
   const points = Array.isArray(pointValues) ? pointValues : [];
@@ -6860,19 +6871,35 @@ function sweepOverrideNote(axis, v, pointValues){
     return Number.isFinite(num) ? String(num) : String(value);
   };
 
-  if(axis === 'exit_stop'){
-    const yours = [['5m', v.exit5m], ['15m', v.exit15m],
-                   ['BTC', v.exitBtc], ['SOL', v.exitSol]];
-    const items = yours.map(p => ({ label: p[0], value: exact(p[1]) }));
-    const uniform = yours.every(p => equals(p[1], yours[0][1]));
-    const verdict = !uniform
-      ? { cls: 'none', text: 'the sweep tests one uniform value, so no bar is your mixed setting' }
-      : onAxis(v.exit5m)
+  const stopAxes = {
+    exit_stop_default: () => {
+      const yours = [['5m', v.exit5m], ['15m', v.exit15m],
+                     ['BTC', v.exitBtc], ['SOL', v.exitSol]];
+      const items = yours.map(p => ({ label: p[0], value: exact(p[1]) }));
+      const on = onAxis(v.exit5m) && onAxis(v.exit15m)
+        && onAxis(v.exitBtc) && onAxis(v.exitSol);
+      const verdict = on
         ? { cls: 'yours', text: `the bar at ${exact(v.exit5m)} is your setting` }
-        : { cls: 'none', text: 'no bar equals your value' };
-    return { head: 'sweeps stop distance — replaces all six stop thresholds with one value',
-             submittedLabel: 'submitted', items, verdict };
-  }
+        : { cls: 'none', text: 'no bar equals your values' };
+      return { head: 'sweeps the default 5m + 15m stop — replaces the four submitted stop inputs',
+               submittedLabel: 'submitted', items, verdict };
+    },
+    exit_stop_btc: () => ({
+      head: 'sweeps the BTC stop — replaces the submitted BTC 5m Stop Loss',
+      submittedLabel: '', items: [],
+      verdict: onAxis(v.exitBtc)
+        ? { cls: 'yours', text: 'that bar is your setting' }
+        : { cls: 'none', text: 'no bar equals it' },
+    }),
+    exit_stop_sol: () => ({
+      head: 'sweeps the SOL stop — replaces the submitted SOL 5m Stop Loss',
+      submittedLabel: '', items: [],
+      verdict: onAxis(v.exitSol)
+        ? { cls: 'yours', text: 'that bar is your setting' }
+        : { cls: 'none', text: 'no bar equals it' },
+    }),
+  };
+  if(stopAxes[axis]) return stopAxes[axis]();
 
   const single = ({
     queue: ['Queue depth', v.queue],
@@ -6898,7 +6925,9 @@ function sweepCard(v, data, statsHtml){
   const axisName = ({
     queue: 'Shares Ahead Queue',
     offset: 'Spread Offset',
-    exit_stop: 'Exit Stop Loss',
+    exit_stop_default: 'Exit Stop Loss — default',
+    exit_stop_btc: 'Exit Stop Loss — BTC',
+    exit_stop_sol: 'Exit Stop Loss — SOL',
     exit_rev: 'Reversal Buffer'
   })[data.axis] || data.axis;
   const values = (data.points || []).map(p => p.label).join(', ');
@@ -6925,8 +6954,10 @@ function sweepCard(v, data, statsHtml){
       ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
       ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
       ${row('Late Entry (% window)', pct(v.entryDelayPct))}
-      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop')}
-      ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2))}
+      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2),
+            data.axis === 'exit_stop_default' || data.axis === 'exit_stop_btc'
+            || data.axis === 'exit_stop_sol')}
+      ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
       ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
       ${row('Leg Chase', onoff(v.legChase))}
     </span>`;
@@ -6968,7 +6999,7 @@ function formatSweepTickValue(axis, val){
     const rounded = Number(cents.toFixed(2));
     return `${rounded}¢`;
   }
-  if (axis === 'exit_stop') {
+  if (axis === 'exit_stop_default' || axis === 'exit_stop_btc' || axis === 'exit_stop_sol') {
     const cents = num * 100;
     const rounded = Number(cents.toFixed(1));
     return `${rounded}¢`;
