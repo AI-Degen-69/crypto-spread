@@ -458,6 +458,88 @@ def test_session_reconnects_when_the_keepalive_dies():
     assert client.reconnect_count >= 1
 
 
+def test_run_direct_empty_tokens_warns_then_connects_when_seeded():
+    """Issue #351 regression: an empty token set must not be a silent dead end.
+
+    `start_ws_bridge()` constructs the client with no tokens; the subscription
+    only arrives later via `update_subscribed_tokens()` from the first poll.
+    While empty, `run_direct()` spins without attempting a connection — which
+    is correct — but it must say so loudly while it waits, and must connect as
+    soon as tokens land. A dashboard-launched collector with `ws_connected
+    =False`, `ws_reconnects=0` and no warning is exactly the silent failure
+    this test forbids.
+    """
+    ws = FakeWS([_trade_frame("tok_up", "0.46", "30")])
+    connector = FakeConnector([ws])
+    client = CLOBMarketWSClient(token_ids=None, connect_factory=connector,
+                                ping_interval=0.01, empty_token_warn_every=0.05)
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        # Give the empty-token spin time to fire at least one warning.
+        await asyncio.sleep(0.2)
+        assert not client.is_connected
+        assert connector.calls == []  # never attempted a connect with no tokens
+        # The dashboard path: tokens arrive only after the loop is running.
+        client.update_tokens(["tok_up"])
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if client.is_connected and client.drain_ready:
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(drive())
+
+    assert client.is_connected or ws.sent  # reached a live session
+    sub = json.loads(ws.sent[0])
+    assert sub["assets_ids"] == ["tok_up"]
+    drained = client.drain_trades("tok_up")
+    assert len(drained) == 1 and drained[0]["price"] == 0.46
+
+
+def test_run_direct_empty_tokens_logs_idle_warning(caplog):
+    """The empty-token spin logs a warning naming the state (#351 loudness)."""
+    client = CLOBMarketWSClient(token_ids=None,
+                                connect_factory=FakeConnector([]),
+                                empty_token_warn_every=0.05)
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        await asyncio.sleep(0.2)
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    with caplog.at_level("WARNING", logger="streaming"):
+        asyncio.run(drive())
+
+    idle = [r for r in caplog.records if "no tokens subscribed" in r.getMessage()]
+    assert idle, "empty-token spin produced no warning; failure would be silent"
+
+
+def test_run_direct_empty_tokens_no_warning_once_seeded(caplog):
+    """Tokens present from the start: the idle warning must never fire."""
+    ws = FakeWS([])
+    connector = FakeConnector([ws])
+    client = CLOBMarketWSClient(token_ids=["tok_a"], connect_factory=connector,
+                                ping_interval=0.01, empty_token_warn_every=0.05)
+
+    async def drive():
+        task = asyncio.create_task(client.run_direct())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if client.is_connected:
+                break
+        client.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    with caplog.at_level("WARNING", logger="streaming"):
+        asyncio.run(drive())
+
+    idle = [r for r in caplog.records if "no tokens subscribed" in r.getMessage()]
+    assert not idle
+
+
 def test_session_reconnects_when_pong_goes_overdue():
     """A venue that answers once, then stops, is a dead feed even if the socket stays open.
 

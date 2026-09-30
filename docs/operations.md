@@ -51,6 +51,20 @@ looser `COLD_TICK_BUDGET_MS` (15000 ms, logged as `slow_first_tick`), so
 `--once` reads `errs=0` on a healthy connection but a wedged cold start is
 still reported.
 
+### Collector started from the dashboard: read the child log first
+
+When the collector is launched from the dashboard (`Start Polling` →
+`/api/collector/start`), its stdout/stderr are appended to
+`run/ticks/collector_child.log` (one file, launch stamps included) instead of
+being discarded (#351). If the manifest shows `ws_connected: false` together
+with `ws_reconnects: 0`, the WS client is *not trying* to connect — most often
+because it is still waiting for its token set — and the first place to look is
+that log: a healthy launch prints `CLOB market WS connected: N tokens` within
+seconds, and a client that never seeded its tokens now warns repeatedly (`CLOB
+market WS idle: no tokens subscribed ...`) instead of spinning silently.
+A `python -m scripts.collect_ticks --once` smoke run also prints
+`ws_bridge_tokens=N`; `N=0` means the bridge was never handed tokens.
+
 ## Run a sweep
 
 CLI:
