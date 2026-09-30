@@ -95,3 +95,29 @@ The cause is cleanly isolated. The follow-up fix issue can safely resolve this b
 1. Using in-frame `best_bid` and `best_ask` to prune phantom levels outside the declared spread; OR
 2. Pruning bids > in-frame `best_bid` and asks < in-frame `best_ask` whenever a `price_change` frame arrives; OR
 3. Resynchronizing on discrepancy.
+
+---
+
+## 5. Post-fix (Issue #362)
+
+The fix took handoff option 2: `apply_price_change` (`strategy/streaming.py`)
+prunes bids strictly above and asks strictly below the venue-declared top of book
+passed in from `_handle_price_change`, under the existing state lock, before the
+single `on_book_update` callback.
+
+```
+python scripts/replay_socket_reconciliation.py tests/fixtures/socket_divergence_smoking_gun.json
+Replaying extracted fixture object from tests\fixtures\socket_divergence_smoking_gun.json (Issue #362)
+Total WS events:            1
+Total divergences recorded: 0
+price_change       | 1        | 0            | 0          | 0         | N/A       | $0.0000
+No divergences detected across the dataset (all books agreed within tolerance).
+```
+
+**Residual class (deliberately unfixed):** the prune cannot invent a level the venue
+declares but the local ladder never received. A frame declaring a best that is absent
+locally still records an in-frame divergence — see
+`test_reconciler_detects_a_level_missing_from_local_depth`. The fix therefore narrows
+the #174 divergence to "lost frames", it does not prove the upstream cause of the
+missing deletions. A fresh #174 `book_shadow` measurement (replay purity aside) is
+still required before any Phase 2 switch.
