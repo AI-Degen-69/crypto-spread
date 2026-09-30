@@ -3051,9 +3051,11 @@ def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monk
     assert "exit_price" in trade
     assert "exit_side" in trade
     assert trade["entry_up"] == 0.48
-    assert trade["entry_down"] == 0.48
+    assert "both_filled" in trade
     assert trade["both_filled"] is True
     assert trade["exit_reason"] == "pair_merged"
+    assert "is_dead_zone" in trade
+    assert "settle_source" in trade
 
     ov = data["overall"]
     assert "pair_rate" in ov
@@ -3061,6 +3063,7 @@ def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monk
     assert "profitable_windows" in ov
     assert "profitable_pairs" in ov
     assert "profitable_exits" in ov
+    assert "pairs_above_settle" in ov
 
 
 def test_backtest_ui_pagination_and_tooltips_elements():

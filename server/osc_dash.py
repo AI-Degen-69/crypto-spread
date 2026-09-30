@@ -1745,6 +1745,8 @@ def _run_backtest_simulation_worker(
     prog_max_dd = 0.0
     prog_peak = 0.0
     prog_pnls: list[float] = []
+    prog_pair_costs: list[float] = []
+    prog_pair_edges: list[float] = []
     prog_last_flush = time.monotonic()
 
     def _disable_progress() -> None:
@@ -1766,6 +1768,15 @@ def _run_backtest_simulation_worker(
             "exits": prog_exits,
             "wins": prog_wins,
             "max_drawdown_cents": round(prog_max_dd, 2),
+            "mean_pair_cost": (
+                round(sum(prog_pair_costs) / len(prog_pair_costs), 4)
+                if prog_pair_costs else None
+            ),
+            "mean_pair_edge_cents": (
+                round(sum(prog_pair_edges) / len(prog_pair_edges), 4)
+                if prog_pair_edges else None
+            ),
+            "pairs_above_settle": sum(1 for c in prog_pair_costs if round(c, 4) > 1.00),
             # Provisional histogram sample (scaled pnl values, completion order).
             "pnl_sample_cents": prog_pnls[-2000:],
         }
@@ -1806,6 +1817,10 @@ def _run_backtest_simulation_worker(
                 prog_pairs += 1
             elif win.exit_taken:
                 prog_exits += 1
+            if win.first_pair_cost is not None:
+                prog_pair_costs.append(win.first_pair_cost)
+            if win.mean_pair_edge_cents is not None:
+                prog_pair_edges.append(win.mean_pair_edge_cents)
             if win.pnl_cents > 0:
                 prog_wins += 1
             prog_pnls.append(round(win_pnl, 2))
@@ -1987,6 +2002,9 @@ def _run_backtest_simulation_worker(
             "exit_price": w.exit_price,
             "exit_side": w.exit_side,
             "settlement_mid": w.settlement_mid,
+            "settled_unmarked": w.settled_unmarked,
+            "settle_source": w.settle_source,
+            "is_dead_zone": bool(w.settle_source or w.settled_unmarked),
             "pnl_cents": round(win_pnl, 2),
             "exit_reason": exit_info,
             "start_delay_sec": w.start_delay_sec,
@@ -2008,6 +2026,7 @@ def _run_backtest_simulation_worker(
     all_first_pair_costs = [w.first_pair_cost for w in per_window if w.first_pair_cost is not None]
     all_mean_pair_edges = [w.mean_pair_edge_cents for w in per_window if w.mean_pair_edge_cents is not None]
     total_pair_pnl = sum(w.pair_pnl_cents * size for w in per_window)
+    pairs_above_settle = sum(1 for c in all_first_pair_costs if round(c, 4) > 1.00)
 
     overall = {
         "windows": total_windows,
@@ -2042,6 +2061,7 @@ def _run_backtest_simulation_worker(
         "mean_pair_edge_cents": round(sum(all_mean_pair_edges) / len(all_mean_pair_edges), 4)
         if all_mean_pair_edges
         else None,
+        "pairs_above_settle": pairs_above_settle,
         "total_pair_pnl_cents": round(total_pair_pnl, 2),
     }
 
@@ -7246,13 +7266,19 @@ function renderBacktestResult(data, fileVal){
     }
   }
   if ($('btPairCostSub')) {
-    if (ov.mean_pair_edge_cents != null) {
+    if (ov.pairs_above_settle > 0) {
+      $('btPairCostSub').textContent = `${ov.pairs_above_settle} above $1.00 settle`;
+      $('btPairCostSub').style.color = 'var(--down)';
+    } else if (ov.mean_pair_edge_cents != null) {
       const edge = Number(ov.mean_pair_edge_cents);
       $('btPairCostSub').textContent = `Avg edge: ${(edge >= 0 ? '+' : '') + edge.toFixed(1)}¢/pr`;
+      $('btPairCostSub').style.color = 'var(--dim)';
     } else if (ov.pairs > 0) {
       $('btPairCostSub').textContent = `${ov.pairs} pairs captured`;
+      $('btPairCostSub').style.color = 'var(--dim)';
     } else {
       $('btPairCostSub').textContent = '0 pairs captured';
+      $('btPairCostSub').style.color = 'var(--dim)';
     }
   }
   $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
@@ -7722,13 +7748,19 @@ function btAppendProvisionalPoints(msg){
     }
   }
   if ($('btPairCostSub')) {
-    if (msg.mean_pair_edge_cents != null) {
+    if (msg.pairs_above_settle > 0) {
+      $('btPairCostSub').textContent = `${msg.pairs_above_settle} above $1.00 settle`;
+      $('btPairCostSub').style.color = 'var(--down)';
+    } else if (msg.mean_pair_edge_cents != null) {
       const edge = Number(msg.mean_pair_edge_cents);
       $('btPairCostSub').textContent = `Avg edge: ${(edge >= 0 ? '+' : '') + edge.toFixed(1)}¢/pr`;
+      $('btPairCostSub').style.color = 'var(--dim)';
     } else if (pairs > 0) {
       $('btPairCostSub').textContent = `${pairs} pairs captured`;
+      $('btPairCostSub').style.color = 'var(--dim)';
     } else {
       $('btPairCostSub').textContent = '0 pairs captured';
+      $('btPairCostSub').style.color = 'var(--dim)';
     }
   }
   $('btExitRate').textContent = ((exits / den) * 100).toFixed(1) + '%';
@@ -7967,7 +7999,9 @@ function renderBacktestTradesPage() {
       const marketLabel = canonicalMarketName(t.series || t.label || '');
       const pnlUsd = fmtUsd(t.pnl_cents, true);
 
-      let invested = size * (t.first_pair_cost ? t.first_pair_cost : ((t.entry_up || 0) + (t.entry_down || 0) || 1.0));
+      let invested = (mergesCount * pairUnitCost * size)
+        + (stopsCount * stopEntryPrice * size)
+        + (isSingleLegSettled ? settleEntryPrice * size : 0);
       if (invested <= 0) invested = size * 1.0;
       const pnlPct = invested > 0 ? ((t.pnl_cents / 100) / invested * 100) : 0;
       const pnlPctStr = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%';
@@ -7975,7 +8009,12 @@ function renderBacktestTradesPage() {
 
       const mergesCount = t.pairs_count != null ? t.pairs_count : (t.both_filled ? 1 : 0);
       const stopsCount = t.stops_count != null ? t.stops_count : (t.exit_triggered ? 1 : 0);
-      const isDeadZone = (t.exit_reason && t.exit_reason.includes('dead_zone')) ? 1 : 0;
+      const isDeadZone = t.is_dead_zone ? 1 : ((t.exit_reason && t.exit_reason.includes('dead_zone')) ? 1 : 0);
+      const isSingleLegSettled = !t.both_filled && !t.exit_triggered && t.settlement_mid != null && (t.up_filled || t.down_filled);
+
+      const pairUnitCost = t.first_pair_cost != null ? t.first_pair_cost : ((t.entry_up || 0.48) + (t.entry_down || 0.48) || 0.96);
+      const stopEntryPrice = (t.exit_side === 'down' ? (t.entry_down || t.entry_up) : (t.entry_up || t.entry_down)) || 0.50;
+      const settleEntryPrice = (t.up_filled ? t.entry_up : t.entry_down) || 0.50;
 
       let resBadge = '<span style="color:var(--dim)">—</span>';
       if (t.settlement_mid != null) {
@@ -8007,12 +8046,6 @@ function renderBacktestTradesPage() {
         const localTime1 = startTs > 1000000000 ? new Date((startTs + delaySec) * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
         const timeStr1 = localTime1 ? `${localTime1} (${elapsed1})` : elapsed1;
 
-        const delaySec2 = delaySec + (t.both_filled ? 33 : 32);
-        const mm2 = Math.floor(delaySec2 / 60); const ss2 = delaySec2 % 60;
-        const elapsed2 = `${mm2}:${ss2 < 10 ? '0' : ''}${ss2}`;
-        const localTime2 = startTs > 1000000000 ? new Date((startTs + delaySec2) * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
-        const timeStr2 = localTime2 ? `${localTime2} (${elapsed2})` : elapsed2;
-
         let subRows = '';
         let tradeIdx = 1;
 
@@ -8021,28 +8054,34 @@ function renderBacktestTradesPage() {
           const pEdge = t.mean_pair_edge_cents != null ? t.mean_pair_edge_cents : ((1.00 - pCost) * 100);
           const edgeStr = (pEdge >= 0 ? '+' : '') + pEdge.toFixed(1) + '¢';
           const pCostStr = `$${pCost.toFixed(3)} (${edgeStr})`;
-          const pPnlUsd = fmtUsd(t.pair_pnl_cents != null && t.pair_pnl_cents !== 0 ? t.pair_pnl_cents : (pEdge * size), true);
+          const eachPairPnl = (t.pair_pnl_cents != null && t.pair_pnl_cents !== 0)
+            ? (t.pair_pnl_cents / Math.max(1, mergesCount))
+            : (pEdge * size);
+          const pPnlUsd = fmtUsd(eachPairPnl, true);
           const pPct = pCost > 0 ? (pEdge / (pCost * 100) * 100).toFixed(1) : '0.0';
           const pPctStr = (pPct >= 0 ? '+' : '') + pPct + '%';
 
           const upPrice = t.entry_up != null ? '$' + Number(t.entry_up).toFixed(3) : '$0.480';
           const dnPrice = t.entry_down != null ? '$' + Number(t.entry_down).toFixed(3) : '$0.480';
 
-          subRows += `<tr style="border-bottom:none">`
-            + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
-            + `<td style="font-weight:700;color:var(--up)">UP</td>`
-            + `<td class="mono" style="font-size:11px">${timeStr1}</td>`
-            + `<td class="mono">${upPrice}</td>`
-            + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);background:rgba(255,255,255,0.01)">${pCostStr}</td>`
-            + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time from first fill to merge completion">33s</td>`
-            + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)"><span class="pill pill-osc" title="First leg filled at ${elapsed1}, second leg at ${elapsed2}. Merged 1:1 on Polymarket CTF.">MERGED</span></td>`
-            + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">${pPnlUsd} (${pPctStr})</td>`
-            + `</tr>`
-            + `<tr style="border-top:none">`
-            + `<td style="font-weight:700;color:var(--down)">DOWN</td>`
-            + `<td class="mono" style="font-size:11px">${timeStr2}</td>`
-            + `<td class="mono">${dnPrice}</td>`
-            + `</tr>`;
+          const nMerges = Math.max(1, mergesCount);
+          for (let m = 0; m < nMerges; m++) {
+            subRows += `<tr style="border-bottom:none">`
+              + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
+              + `<td style="font-weight:700;color:var(--up)">UP</td>`
+              + `<td class="mono" style="font-size:11px">${m === 0 ? timeStr1 : '—'}</td>`
+              + `<td class="mono">${upPrice}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);background:rgba(255,255,255,0.01)">${pCostStr}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time from first fill to merge completion">—</td>`
+              + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)"><span class="pill pill-osc" title="Completed pair merged 1:1 on Polymarket CTF">MERGED</span></td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">${pPnlUsd} (${pPctStr})</td>`
+              + `</tr>`
+              + `<tr style="border-top:none">`
+              + `<td style="font-weight:700;color:var(--down)">DOWN</td>`
+              + `<td class="mono" style="font-size:11px;color:var(--dim)">—</td>`
+              + `<td class="mono">${dnPrice}</td>`
+              + `</tr>`;
+          }
         }
 
         if (stopsCount > 0 || t.exit_triggered) {
@@ -8056,26 +8095,51 @@ function renderBacktestTradesPage() {
           const exPctStr = (exPct >= 0 ? '+' : '') + exPct + '%';
 
           const statusTitle = isDeadZone
-            ? 'Single leg held into last 30s of window. Closed at best bid before expiry.'
+            ? 'Single leg held into last 30s of window. Closed before expiry.'
             : `Adverse drift exceeded exit threshold (${t.exit_side || 'adverse'}). Taker stop exit on book.`;
           const statusPill = isDeadZone
             ? `<span class="pill pill-flat" style="color:var(--gold)" title="${statusTitle}">DEAD_ZONE</span>`
             : `<span class="pill pill-mono" style="color:var(--down)" title="${statusTitle}">STOP_LOSS</span>`;
 
-          subRows += `<tr style="border-bottom:none">`
-            + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
-            + `<td style="font-weight:700;color:${entrySide==='UP'?'var(--up)':'var(--down)'}">${entrySide}</td>`
+          const nStops = Math.max(1, stopsCount);
+          for (let s = 0; s < nStops; s++) {
+            subRows += `<tr style="border-bottom:none">`
+              + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
+              + `<td style="font-weight:700;color:${entrySide==='UP'?'var(--up)':'var(--down)'}">${entrySide}</td>`
+              + `<td class="mono" style="font-size:11px">${mergesCount === 0 && s === 0 ? timeStr1 : '—'}</td>`
+              + `<td class="mono">$${Number(entryPrice).toFixed(3)}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);color:var(--dim)">—</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time in market before stop loss triggered">—</td>`
+              + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)">${statusPill}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--down);background:rgba(239,68,68,0.04)">${exPnlUsd} (${exPctStr})</td>`
+              + `</tr>`
+              + `<tr style="border-top:none">`
+              + `<td style="font-weight:700;color:var(--dim)">EXIT</td>`
+              + `<td class="mono" style="font-size:11px;color:var(--dim)">—</td>`
+              + `<td class="mono">${exPrice}</td>`
+              + `</tr>`;
+          }
+        }
+
+        if (isSingleLegSettled) {
+          const filledSide = t.up_filled ? 'UP' : 'DOWN';
+          const entryPrice = (t.up_filled ? t.entry_up : t.entry_down) || 0.50;
+          const settleMark = t.settlement_mid != null ? Number(t.settlement_mid).toFixed(3) : '—';
+          const pnlUsdSingle = fmtUsd(t.pnl_cents, true);
+          const sInvested = size * entryPrice;
+          const sPct = sInvested > 0 ? ((t.pnl_cents / 100) / sInvested * 100).toFixed(1) : '0.0';
+          const sPctStr = (sPct >= 0 ? '+' : '') + sPct + '%';
+          const sColor = t.pnl_cents >= 0 ? 'var(--up)' : 'var(--down)';
+
+          subRows += `<tr>`
+            + `<td class="mono" style="font-weight:700;text-align:center;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
+            + `<td style="font-weight:700;color:${filledSide === 'UP' ? 'var(--up)' : 'var(--down)'}">${filledSide}</td>`
             + `<td class="mono" style="font-size:11px">${timeStr1}</td>`
             + `<td class="mono">$${Number(entryPrice).toFixed(3)}</td>`
-            + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);color:var(--dim)">—</td>`
-            + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time in market before stop loss triggered">32s</td>`
-            + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)">${statusPill}</td>`
-            + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--down);background:rgba(239,68,68,0.04)">${exPnlUsd} (${exPctStr})</td>`
-            + `</tr>`
-            + `<tr style="border-top:none">`
-            + `<td style="font-weight:700;color:var(--dim)">EXIT</td>`
-            + `<td class="mono" style="font-size:11px">${timeStr2}</td>`
-            + `<td class="mono">${exPrice}</td>`
+            + `<td class="mono" style="color:var(--dim)">—</td>`
+            + `<td class="mono" title="Held through expiry into settlement">Expiry</td>`
+            + `<td><span class="pill pill-flat" style="color:${sColor}" title="Single leg held to settlement mark $${settleMark}">SETTLED</span></td>`
+            + `<td class="mono" style="font-weight:700;color:${sColor}">${pnlUsdSingle} (${sPctStr})</td>`
             + `</tr>`;
         }
 
