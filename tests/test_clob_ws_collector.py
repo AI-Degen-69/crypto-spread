@@ -1472,3 +1472,44 @@ def test_book_shadow_is_public_and_reaches_the_manifest(tmp_path):
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert "book_shadow" in manifest
     assert manifest["book_shadow"]["divergence_rate"] == 1.0
+
+
+def test_socket_divergence_smoking_gun_reconciliation():
+    """Anchor the Issue #359 smoking gun fixture: verifies that replaying the
+    breaking price_change sequence reproduces the exact level-retention defect
+    isolated during the diagnostic reconciliation run.
+    """
+    fixture_path = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "socket_divergence_smoking_gun.json"
+    assert fixture_path.exists(), f"missing fixture: {fixture_path}"
+
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    token = fixture["token"]
+    assert fixture["event_type"] == "price_change"
+
+    client = CLOBMarketWSClient(token_ids=[token])
+
+    # Initialize client book from snapshot before the breaking event
+    b_before = fixture.get("book_snapshot_before") or {}
+    raw_bids = [{"price": p, "size": s} for p, s in b_before.get("bids", {}).items()]
+    raw_asks = [{"price": p, "size": s} for p, s in b_before.get("asks", {}).items()]
+    client.apply_book_snapshot(token, raw_bids, raw_asks)
+
+    # Replay the breaking event
+    client._handle_event(fixture["breaking_event"])
+
+    book = client.book_snapshot(token)
+    assert book is not None
+
+    # The reconstructed book retains phantom level (best_ask=0.43 instead of venue declared 0.44)
+    assert book["best_bid"] == fixture["reference_ground"]["best_bid"]
+    assert book["best_ask"] == fixture["ws_before"]["best_ask"]
+    assert book["best_ask"] != fixture["reference_ground"]["best_ask"]
+
+    # Verify the divergence gap matches the recorded fixture
+    gap = abs(book["best_ask"] - fixture["reference_ground"]["best_ask"])
+    assert round(gap, 4) == fixture["max_gap"]
+
+    # In contrast, client.top_of_book faithfully captured the venue's declared true quote
+    assert client.top_of_book[token]["best_bid"] == fixture["reference_ground"]["best_bid"]
+    assert client.top_of_book[token]["best_ask"] == fixture["reference_ground"]["best_ask"]
+
