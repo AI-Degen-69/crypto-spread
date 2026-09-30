@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>הצגת תוצאות מדידה: מגן בטיחות לפני מעבר ל-Socket (#350)</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #131b2e;
+      --card-border: #1e293b;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.12);
+      --danger-border: rgba(239, 68, 68, 0.35);
+      --success: #10b981;
+      --accent: #38bdf8;
+      --warning: #f59e0b;
+      --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text-main);
+      font-family: var(--font);
+      line-height: 1.6;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .container {
+      max-width: 900px;
+      width: 100%;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      background: var(--danger-bg);
+      color: var(--danger);
+      border: 1px solid var(--danger-border);
+    }
+
+    h1 {
+      font-size: 2.1rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
+      color: #fff;
+    }
+
+    .subtitle {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      max-width: 650px;
+      margin: 0 auto;
+    }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+      background: #0f172a;
+      padding: 0.35rem;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 0.75rem 1rem;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 0.95rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn.active {
+      background: var(--card-bg);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--card-border);
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.75rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .stat-box {
+      background: #0d1424;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 1.25rem;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 2.2rem;
+      font-weight: 800;
+      margin-bottom: 0.25rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat-value.danger { color: var(--danger); }
+    .stat-value.warning { color: var(--warning); }
+    .stat-value.accent { color: var(--accent); }
+
+    .stat-label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* Comparison Bar Chart */
+    .series-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 0.85rem;
+      font-size: 0.9rem;
+    }
+
+    .series-name {
+      width: 140px;
+      font-weight: 600;
+      color: #cbd5e1;
+    }
+
+    .bar-container {
+      flex: 1;
+      height: 22px;
+      background: #0d1424;
+      border-radius: 6px;
+      overflow: hidden;
+      margin: 0 1rem;
+      position: relative;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 6px;
+      background: linear-gradient(90deg, #f59e0b, #ef4444);
+      transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .series-pct {
+      width: 60px;
+      text-align: left;
+      font-weight: 700;
+      color: #fca5a5;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Shield / Verdict Box */
+    .verdict-box {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+      border-radius: 14px;
+      padding: 1.5rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .verdict-icon {
+      font-size: 2.2rem;
+      line-height: 1;
+    }
+
+    .verdict-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #fecaca;
+      margin-bottom: 0.35rem;
+    }
+
+    .verdict-desc {
+      font-size: 0.95rem;
+      color: #cbd5e1;
+    }
+
+    /* Next Steps Flow */
+    .flow-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .flow-step {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem;
+      background: #0d1424;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+    }
+
+    .step-circle {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.85rem;
+      color: var(--accent);
+    }
+
+    .step-circle.done {
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--success);
+    }
+
+    .step-circle.active {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent);
+    }
+
+    .step-circle.blocked {
+      background: rgba(239, 68, 68, 0.2);
+      color: var(--danger);
+    }
+
+    .step-text {
+      flex: 1;
+    }
+
+    .step-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-bottom: 0.15rem;
+    }
+
+    .step-desc {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="badge">החלטת בטיחות אוטומטית: פסק דין NO-GO</div>
+      <h1>מגן בטיחות למסחר: מדידת פאזה 1 (#350)</h1>
+      <p class="subtitle">לפני שמעבירים מסחר בכסף אמיתי לחיבור ישיר (WebSocket), עצרנו לבדוק אם המחירים מדויקים. הממצאים גילו פער של עד 32 סנט — והמעבר נבלם להגנת ההון.</p>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('overview')">📊 תמונת מצב מספרית</button>
+      <button class="tab-btn" onclick="switchTab('series')">📈 פילוח 10 השווקים</button>
+      <button class="tab-btn" onclick="switchTab('safety')">🛡️ מנגנון ההגנה והמשך הדרך</button>
+    </div>
+
+    <!-- Tab 1: Overview -->
+    <div id="tab-overview" class="tab-content active">
+      <div class="card">
+        <div class="verdict-box">
+          <div class="verdict-icon">🛑</div>
+          <div>
+            <div class="verdict-title">פסק דין: NO-GO — בלימת המעבר ל-Socket</div>
+            <div class="verdict-desc">
+              במקום להמר על תקינות החיבור, מדדנו 39,414 דגימות אמיתיות. שיעור הסטייה שנמדד עומד על כמעט 30% עם פער מחיר של עד 32 סנט. הפעלת מנגנון זה כעת הייתה גורמת לבוט לתמחר פקודות לפי ספר שגוי לחלוטין.
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-grid">
+          <div class="stat-box">
+            <div class="stat-value accent">39,414</div>
+            <div class="stat-label">השוואות אמת שנבדקו</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value danger">29.78%</div>
+            <div class="stat-label">שיעור סטייה מהמחיר האמיתי</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value warning">32¢</div>
+            <div class="stat-label">פער הקיצון המרבי שנמדד</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value accent">10 / 10</div>
+            <div class="stat-label">כיסוי מלא של כל הסדרות</div>
+          </div>
+        </div>
+
+        <p style="font-size: 0.95rem; color: #94a3b8; text-align: center;">
+          💡 <strong>מה המשמעות?</strong> חוזה שנסחר בסביבות 50 סנט עם מרווח רגיל של סנט בודד — הציג ב-WebSocket פער של 32 סנט. בלימת המעבר מנעה הפסדים וציטוט פקודות לא ריאליות.
+        </p>
+      </div>
+    </div>
+
+    <!-- Tab 2: Series Breakdown -->
+    <div id="tab-series" class="tab-content">
+      <div class="card">
+        <h2 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 1.25rem; color: #fff;">
+          אחוז הסטייה בכל אחד מ-10 שווקי הקריפטו (5m ו-15m)
+        </h2>
+
+        <div class="series-row">
+          <div class="series-name">SOL (5 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 38.08%;"></div></div>
+          <div class="series-pct">38.08%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">SOL (15 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 37.98%;"></div></div>
+          <div class="series-pct">37.98%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">BNB (5 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 33.91%;"></div></div>
+          <div class="series-pct">33.91%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">XRP (5 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 32.94%;"></div></div>
+          <div class="series-pct">32.94%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">XRP (15 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 30.21%;"></div></div>
+          <div class="series-pct">30.21%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">BNB (15 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 29.90%;"></div></div>
+          <div class="series-pct">29.90%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">ETH (15 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 29.08%;"></div></div>
+          <div class="series-pct">29.08%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">ETH (5 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 28.88%;"></div></div>
+          <div class="series-pct">28.88%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">BTC (5 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 23.69%;"></div></div>
+          <div class="series-pct">23.69%</div>
+        </div>
+        <div class="series-row">
+          <div class="series-name">BTC (15 דק׳)</div>
+          <div class="bar-container"><div class="bar-fill" style="width: 13.31%;"></div></div>
+          <div class="series-pct">13.31%</div>
+        </div>
+
+        <div style="margin-top: 1.25rem; font-size: 0.85rem; color: #94a3b8; border-top: 1px solid var(--card-border); padding-top: 0.75rem;">
+          📌 <strong>מסקנה מרכזית:</strong> הסטייה אינה מקרית או מבודדת למטבע מסוים, אלא מערכתית ורוחבית בכל השווקים, כאשר חלונות קצרים (5 דקות) נוטים לסטות יותר עקב קצב השינויים המהיר.
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Safety & Roadmap -->
+    <div id="tab-safety" class="tab-content">
+      <div class="card">
+        <h2 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 1.25rem; color: #fff;">
+          מפת הדרכים: כיצד שומרים על יציבות המערכת?
+        </h2>
+
+        <div class="flow-steps">
+          <div class="flow-step">
+            <div class="step-circle done">✓</div>
+            <div class="step-text">
+              <div class="step-title">פאזה 1: מדידה והשוואת צל (#174 / #350)</div>
+              <div class="step-desc">הסתיים: איסוף 39,414 דגימות, חשיפת הסטייה וקיבוע פסק דין NO-GO מתועד במאגר.</div>
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-circle active">➜</div>
+            <div class="step-text">
+              <div class="step-title">השלב הבא: מנוע שידור חוזר דיאגנוסטי (#359)</div>
+              <div class="step-desc">שידור אירועי ה-Socket אירוע-אחר-אירוע כדי לבודד בדיוק איזה סוג הודעה גורם לשבירת ספר הפקודות.</div>
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-circle blocked">⏸</div>
+            <div class="step-text">
+              <div class="step-title">פאזה 2: מעבר למסחר ישיר על גבי Socket (#174)</div>
+              <div class="step-desc">חסום כעת: ייפתח רק לאחר שהליקוי יתוקן ושיעור הסטייה יירד לרמות זניחות (באזור 1%).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      נוצר באופן אוטונומי לאחר מיזוג PR #360 (סגירת משימה #350) · crypto-spread
+    </footer>
+  </div>
+
+  <script>
+    function switchTab(name) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+
+      event.target.classList.add('active');
+      document.getElementById('tab-' + name).classList.add('active');
+    }
+  </script>
+</body>
+</html>
