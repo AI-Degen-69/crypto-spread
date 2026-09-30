@@ -1377,6 +1377,151 @@ def test_a_frame_with_no_usable_token_anywhere_is_dropped_quietly():
     assert client.books == {}
 
 
+# --- Issue #362: purge ghost levels the venue removed without a size:0 delta ---
+
+def test_price_change_prunes_bids_above_and_asks_below_declared_quotes():
+    """A frame declaring the venue's top of book purges ghost depth beyond it."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot(
+        "tok",
+        [{"price": "0.45", "size": "10"}, {"price": "0.55", "size": "10"}],
+        [{"price": "0.52", "size": "10"}, {"price": "0.60", "size": "10"}],
+    )
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.46", "side": "BUY", "size": "5",
+                           "best_bid": "0.50", "best_ask": "0.55"}],
+    }))
+    book = client.books["tok"]
+    assert 0.55 not in book["bids"]
+    assert 0.52 not in book["asks"]
+    assert book["bids"] == {0.45: 10.0, 0.46: 5.0}
+    assert book["asks"] == {0.60: 10.0}
+    assert book["best_bid"] == 0.46
+    assert book["best_ask"] == 0.60
+
+
+def test_price_change_keeps_a_level_at_exactly_the_declared_price():
+    """Strict comparison: a level touching the declared quote is real depth."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.50", "size": "10"}],
+                               [{"price": "0.55", "size": "10"}])
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.51", "side": "BUY", "size": "7",
+                           "best_bid": "0.51", "best_ask": "0.55"}],
+    }))
+    book = client.books["tok"]
+    assert book["bids"] == {0.50: 10.0, 0.51: 7.0}
+    assert book["asks"] == {0.55: 10.0}
+
+
+def test_price_change_one_sided_declaration_prunes_only_that_side():
+    """A missing side records None without touching the opposite ladder."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot(
+        "tok",
+        [{"price": "0.45", "size": "10"}, {"price": "0.60", "size": "10"}],
+        [{"price": "0.40", "size": "10"}, {"price": "0.70", "size": "10"}],
+    )
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.44", "side": "BUY", "size": "3",
+                           "best_bid": "0.50", "best_ask": None}],
+    }))
+    book = client.books["tok"]
+    assert 0.60 not in book["bids"]
+    assert book["asks"] == {0.40: 10.0, 0.70: 10.0}
+    assert book["best_ask"] == 0.40
+    assert client.top_of_book["tok"] == {"best_bid": 0.50, "best_ask": None}
+
+
+@pytest.mark.parametrize("key,ghost_side,ghost_price", [
+    ("best_bid", "bids", 0.55),
+    ("best_ask", "asks", 0.40),
+])
+@pytest.mark.parametrize("bad", ["not-a-number", "-1", "1.5", "nan"])
+def test_invalid_declared_quotes_never_prune(key, ghost_side, ghost_price, bad):
+    """An unparseable or out-of-domain declaration is not a top of book."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.55", "size": "10"}],
+                               [{"price": "0.40", "size": "10"}])
+    if key == "best_bid":
+        entry = {"asset_id": "tok", "price": "0.45", "side": "BUY", "size": "5"}
+    else:
+        entry = {"asset_id": "tok", "price": "0.50", "side": "SELL", "size": "5"}
+    entry[key] = bad
+    client.handle_raw_message(json.dumps(
+        {"event_type": "price_change", "price_changes": [entry]}))
+    assert ghost_price in client.books["tok"][ghost_side]
+
+
+def test_a_level_above_the_declared_best_is_pruned():
+    """The prune runs last: even the level this frame brought is dropped."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.60", "side": "BUY", "size": "10",
+                           "best_bid": "0.50", "best_ask": "0.55"}],
+    }))
+    book = client.books["tok"]
+    assert 0.60 not in book["bids"]
+    assert book["best_bid"] is None
+
+
+def test_price_change_without_declared_quotes_retains_ghosts():
+    """Backward compatibility: no venue quotes means only the mutated level moves."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.55", "size": "10"}],
+                               [{"price": "0.40", "size": "10"}])
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.50", "side": "BUY", "size": "5"}],
+    }))
+    book = client.books["tok"]
+    assert book["bids"] == {0.55: 10.0, 0.50: 5.0}
+    assert book["asks"] == {0.40: 10.0}
+
+
+def test_pruned_ladder_is_what_on_book_update_receives():
+    """The collector and dashboard read the callback, not the dict."""
+    seen: list = []
+    client = CLOBMarketWSClient(
+        on_book_update=lambda tok, bids, asks: seen.append((tok, dict(bids), dict(asks))))
+    client.apply_book_snapshot("tok", [{"price": "0.55", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.50", "side": "BUY", "size": "5",
+                           "best_bid": "0.50", "best_ask": "0.55"}],
+    }))
+    tok, bids, asks = seen[-1]
+    assert tok == "tok"
+    assert 0.55 not in bids
+    assert 0.52 not in asks
+    assert max(bids) == 0.50 and asks == {}
+
+
+def test_declared_zero_best_bid_empties_the_bid_side():
+    """On a binary token a declared 0 means 'no bids exist' — the side is ghost."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot(
+        "tok",
+        [{"price": "0.45", "size": "10"}, {"price": "0.55", "size": "10"}],
+        [{"price": "0.40", "size": "10"}],
+    )
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "tok", "price": "0.39", "side": "SELL", "size": "2",
+                           "best_bid": "0", "best_ask": "0.39"}],
+    }))
+    book = client.books["tok"]
+    assert book["bids"] == {}
+    assert book["best_bid"] is None
+    assert book["asks"] == {0.40: 10.0, 0.39: 2.0}
+    assert client.top_of_book["tok"] == {"best_bid": 0.0, "best_ask": 0.39}
+
+
 # --- Issue #174 Phase 1: WS-vs-REST book shadow comparison -------------------
 
 def _shadow_stats() -> dict:
@@ -1475,9 +1620,8 @@ def test_book_shadow_is_public_and_reaches_the_manifest(tmp_path):
 
 
 def test_socket_divergence_smoking_gun_reconciliation():
-    """Anchor the Issue #359 smoking gun fixture: verifies that replaying the
-    breaking price_change sequence reproduces the exact level-retention defect
-    isolated during the diagnostic reconciliation run.
+    """Anchor the Issue #359 smoking gun fixture: replaying the breaking
+    `price_change` frame purges the ghost level (Issue #362).
     """
     fixture_path = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "socket_divergence_smoking_gun.json"
     assert fixture_path.exists(), f"missing fixture: {fixture_path}"
@@ -1500,16 +1644,17 @@ def test_socket_divergence_smoking_gun_reconciliation():
     book = client.book_snapshot(token)
     assert book is not None
 
-    # The reconstructed book retains phantom level (best_ask=0.43 instead of venue declared 0.44)
+    # The prune removes the ghost ask the venue already dropped (0.43): the
+    # reconstructed book now agrees with the venue's declared top of book.
     assert book["best_bid"] == fixture["reference_ground"]["best_bid"]
-    assert book["best_ask"] == fixture["ws_before"]["best_ask"]
-    assert book["best_ask"] != fixture["reference_ground"]["best_ask"]
+    assert book["best_ask"] == fixture["reference_ground"]["best_ask"]
+    assert book["best_ask"] != fixture["ws_before"]["best_ask"]
+    assert 0.43 not in book["asks"]
+    assert book["asks"][0.44] == 5.0
+    assert book["bids"][0.38] == 174.0
+    assert book["bids"][0.42] == 339.13
 
-    # Verify the divergence gap matches the recorded fixture
-    gap = abs(book["best_ask"] - fixture["reference_ground"]["best_ask"])
-    assert round(gap, 4) == fixture["max_gap"]
-
-    # In contrast, client.top_of_book faithfully captured the venue's declared true quote
+    # client.top_of_book faithfully captured the venue's declared true quote
     assert client.top_of_book[token]["best_bid"] == fixture["reference_ground"]["best_bid"]
     assert client.top_of_book[token]["best_ask"] == fixture["reference_ground"]["best_ask"]
 

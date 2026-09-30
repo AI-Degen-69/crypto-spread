@@ -132,9 +132,15 @@ class ReconciliationReport:
 class SocketReconciler:
     """Offline replay engine driving CLOBMarketWSClient from recorded streams."""
 
-    def __init__(self, history_buffer_size: int = 15):
-        """Initialize offline reconciler with local WS client and state cache."""
-        self.client = CLOBMarketWSClient()
+    def __init__(self, history_buffer_size: int = 15,
+                 token_ids: Optional[List[str]] = None):
+        """Initialize offline reconciler with local WS client and state cache.
+
+        `token_ids` scopes the seeded client to one fixture token so sibling legs
+        in the same frame cannot create books (Issue #362).
+        """
+        self.client = CLOBMarketWSClient(
+            token_ids=list(token_ids)) if token_ids else CLOBMarketWSClient()
         self.rest_books: Dict[str, Dict[str, Any]] = {}
         self.rest_snapshots: Dict[str, List[RestSnapshotRecord]] = collections.defaultdict(list)
         self.report = ReconciliationReport()
@@ -342,6 +348,68 @@ def replay_file(file_path: Path, history_buffer_size: int = 15) -> Reconciliatio
     return reconciler.report
 
 
+FIXTURE_MAX_BYTES = 4 * 1024 * 1024  # extracted fixtures are ~16 KB; never slurp a session
+
+
+def _load_fixture_object(path: Path) -> Optional[Dict[str, Any]]:
+    """Return the fixture object stored in `path`, or None for a JSONL session.
+
+    Session files can be hundreds of megabytes, so the check is cheap: the first
+    non-empty line parsing as a JSON object means JSONL. Only otherwise is the
+    whole file parsed — and only under `FIXTURE_MAX_BYTES` — returning the dict
+    when it holds a `breaking_event` (Issue #362).
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        first = ""
+        for line in f:
+            if line.strip():
+                first = line
+                break
+        else:
+            return None
+    try:
+        head = json.loads(first)
+        # A compact single-line fixture parses but must not be mistaken for a
+        # session: return it when it carries the fixture marker (Issue #363).
+        if isinstance(head, dict) and "breaking_event" in head:
+            return head
+        return None
+    except Exception:
+        pass
+    if path.stat().st_size > FIXTURE_MAX_BYTES:
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+    if isinstance(obj, dict) and "breaking_event" in obj:
+        return obj
+    return None
+
+
+def replay_fixture(file_path: Path) -> ReconciliationReport:
+    """Replay one extracted smoking-gun fixture object and return the report.
+
+    Seeds the client book from `book_snapshot_before` (which already encodes the
+    effect of `preceding_events`, so those are never re-dispatched) and runs only
+    `breaking_event` through the existing WS-event path, scoped to the fixture
+    token (Issue #362).
+    """
+    fixture = json.loads(Path(file_path).read_text(encoding="utf-8", errors="replace"))
+    token = str(fixture.get("token") or "")
+    reconciler = SocketReconciler(token_ids=[token] if token else None)
+    before = fixture.get("book_snapshot_before") or {}
+    if token and before:
+        reconciler.client.apply_book_snapshot(
+            token,
+            [{"price": p, "size": s} for p, s in (before.get("bids") or {}).items()],
+            [{"price": p, "size": s} for p, s in (before.get("asks") or {}).items()],
+        )
+    if fixture.get("breaking_event"):
+        reconciler.feed_line(json.dumps(fixture["breaking_event"]))
+    return reconciler.report
+
+
 def print_report_table(report: ReconciliationReport) -> None:
     """Print ASCII table summarizing the per-event attribution."""
     print("=" * 80)
@@ -414,7 +482,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"File not found: {path}")
         return 1
 
-    report = replay_file(path)
+    fixture = _load_fixture_object(path)
+    if fixture is not None:
+        if not fixture.get("breaking_event"):
+            print(f"Fixture object in {path} has no breaking_event to replay")
+            return 2
+        print(f"Replaying extracted fixture object from {path} (Issue #362)")
+        report = replay_fixture(path)
+    else:
+        report = replay_file(path)
     print_report_table(report)
 
     if args.fixture_out:

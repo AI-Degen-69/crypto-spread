@@ -548,22 +548,36 @@ class CLOBMarketWSClient:
                 continue
             if not _valid_quote(price) or not _valid_size(size):
                 continue
-            self.apply_price_change(token_id, str(change.get("side") or "BUY"),
-                                    price, size)
 
             def _opt(key: str) -> Optional[float]:
                 """Parse an optional decimal-string quote carried on the entry."""
                 try:
-                    return float(change.get(key))
+                    quote = float(change.get(key))
                 except (TypeError, ValueError):
                     return None
+                return quote if _valid_quote(quote) else None
+
+            self.apply_price_change(token_id, str(change.get("side") or "BUY"),
+                                    price, size,
+                                    declared_best_bid=_opt("best_bid"),
+                                    declared_best_ask=_opt("best_ask"))
 
             bb, ba = _opt("best_bid"), _opt("best_ask")
             if bb is not None or ba is not None:
                 self.apply_best_bid_ask(token_id, bb, ba)
 
-    def apply_price_change(self, token_id: str, side: str, price: float, size: float) -> None:
-        """Incremental level mutation."""
+    def apply_price_change(self, token_id: str, side: str, price: float, size: float,
+                           *, declared_best_bid: Optional[float] = None,
+                           declared_best_ask: Optional[float] = None) -> None:
+        """Incremental level mutation.
+
+        When the venue declares its own top of book on the frame (`best_bid` /
+        `best_ask`), the local ladder is pruned to it: bids strictly above the
+        declared best bid and asks strictly below the declared best ask cannot
+        exist, so they are ghost depth left by a venue level removal that never
+        arrived as an explicit deletion. Only quotes that pass `_valid_quote`
+        prune; anything else leaves the ladder exactly as before.
+        """
         with self._state_lock:
             book = self.books.setdefault(token_id, {
                 "bids": {},
@@ -578,6 +592,13 @@ class CLOBMarketWSClient:
                 side_dict.pop(price, None)
             else:
                 side_dict[price] = size
+
+            if declared_best_bid is not None and _valid_quote(declared_best_bid):
+                for level in [p for p in book["bids"] if p > declared_best_bid]:
+                    del book["bids"][level]
+            if declared_best_ask is not None and _valid_quote(declared_best_ask):
+                for level in [p for p in book["asks"] if p < declared_best_ask]:
+                    del book["asks"][level]
 
             book["best_bid"] = max(book["bids"].keys()) if book["bids"] else None
             book["best_ask"] = min(book["asks"].keys()) if book["asks"] else None
