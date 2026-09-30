@@ -1270,6 +1270,87 @@ def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
     assert d["tape_alert"] is True
 
 
+def test_api_collector_status_book_shadow(tmp_path, monkeypatch):
+    """Issue #349: /api/collector/status surfaces the #174 Phase 1 book_shadow summary.
+
+    Present block -> flat summary with rate, count and tolerance; absent block or
+    malformed manifest -> null; the response change stays additive either way.
+    """
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+
+    # No manifest at all -> null, endpoint healthy.
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    assert res.json()["book_shadow"] is None
+
+    # Present block -> flat ready-to-read summary; tolerance supplied by server.
+    mf = tmp_path / "manifest.json"
+    mf.write_text(
+        json.dumps({
+            "tape_empty_rate": 0.1,
+            "book_shadow": {
+                "comparisons": 39414,
+                "divergent": 11737,
+                "divergence_rate": 0.2977,
+                "mean_abs_bb_delta": 0.0064,
+                "mean_abs_ba_delta": 0.0064,
+                "max_bb": 0.32,
+                "max_ba": 0.32,
+                "per_series": {
+                    "sol-up-or-down-5m": {"comparisons": 3002, "divergent": 1246},
+                    "btc-up-or-down-15m": {"comparisons": 3065, "divergent": 448},
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    d = res.json()
+    bs = d["book_shadow"]
+    assert bs["comparisons"] == 39414
+    assert bs["divergent"] == 11737
+    assert bs["divergence_rate"] == 0.2977
+    assert bs["tolerance"] == 0.001
+    assert bs["max_bb"] == 0.32
+    # per_series stays in the payload for the badge tooltip.
+    assert bs["per_series"]["sol-up-or-down-5m"]["divergent"] == 1246
+
+    # Malformed manifest -> null, endpoint still answers (same tolerance as tape).
+    mf.write_text("{not json", encoding="utf-8")
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    assert res.json()["book_shadow"] is None
+
+
+def test_shadow_badge_format(tmp_path, monkeypatch):
+    """Issue #349: the badge formats honestly — never a rate without its sample size.
+
+    With comparisons: rate + count together. Zero/absent comparisons: 'not enough
+    data yet', never '0%'. The server renders badge_text into the payload and the
+    UI displays it verbatim — this test owns the format.
+    """
+    assert osc_dash._shadow_badge_text({
+        "comparisons": 39414, "divergent": 11737, "divergence_rate": 0.2977,
+        "tolerance": 0.001, "per_series": {},
+    }) == "Book Δ: 29.8% (39,414)"
+    assert "not enough data" in osc_dash._shadow_badge_text(None).lower()
+    assert "not enough data" in osc_dash._shadow_badge_text({
+        "comparisons": 0, "divergent": 0, "divergence_rate": None,
+        "tolerance": 0.001, "per_series": {},
+    }).lower()
+    # The status payload carries the server-rendered text for the UI.
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "book_shadow": {"comparisons": 100, "divergent": 20,
+                        "divergence_rate": 0.2, "per_series": {}},
+    }), encoding="utf-8")
+    d = client.get("/api/collector/status").json()
+    assert d["book_shadow"]["badge_text"] == "Book Δ: 20.0% (100)"
+
+
 def test_collector_status_large_tick_file_uses_size_estimate(tmp_path, monkeypatch):
     """Issue #200: large today's tick file uses size//950 estimate, not a full scan."""
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
