@@ -3077,11 +3077,15 @@ def test_backtest_ui_pagination_and_tooltips_elements():
     assert "btLogBtnNext" in html
     assert "btLogPageInfo" in html
     assert "Pair Capture Rate ℹ️" in html
+    assert "btCardPairCost" in html
+    assert "Peak to trough from $0.00 start" in html
     assert "Exit Stop Rate ℹ️" in html
     assert "Win Rate ℹ️" in html
     assert "Elapsed Time ℹ️" in html
     assert "btElapsedTime" in html
     assert "renderBacktestTradesPage" in html
+    assert "bt-master-tbl" in html
+    assert "for profit" not in html
 
 
 def test_api_upload_stream_ingest(tmp_path, monkeypatch):
