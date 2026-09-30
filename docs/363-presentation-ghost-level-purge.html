@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order Book Now Shows Real Prices</title>
+<style>
+:root { --ink:#eaf1f6; --muted:#9aabb8; --bg:#0b1117; --panel:#121c25; --panel-2:#172530;
+--line:#29404d; --accent:#f17c78; --accent-ink:#1a0505; --accent-dim:rgba(241,124,120,.18);
+--green:#55d6c2; --green-dim:rgba(85,214,194,.15);
+--shadow:0 20px 55px rgba(0,0,0,.28); }
+* { box-sizing:border-box; margin:0 }
+body { background:var(--bg); color:var(--ink); font:16px/1.65 "Segoe UI",Tahoma,sans-serif }
+main { max-width:900px; margin:auto; padding:40px 20px 70px }
+
+h1 { font-size:clamp(1.6rem,4vw,2.2rem); font-weight:800; letter-spacing:-.02em; margin-bottom:.3rem }
+.subtitle { color:var(--muted); font-size:.95rem; margin-bottom:2rem }
+.subtitle a { color:var(--accent); text-decoration:none }
+.subtitle a:hover { text-decoration:underline }
+
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:18px;
+  padding:26px; margin-top:24px; box-shadow:var(--shadow) }
+.figure { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel-2) }
+.figure-label { font-size:.7rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); padding:.8rem 1rem 0 }
+.figure-controls { display:flex; gap:.5rem; align-items:center; padding:.6rem 1rem; border-top:1px solid var(--line); flex-wrap:wrap }
+.ctrl-btn { font-size:.75rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--line);
+  background:#fff; cursor:pointer; transition:all .15s }
+.ctrl-btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:700 }
+.ctrl-btn:hover { opacity:.85 }
+.figure-caption { font-size:.78rem; color:var(--muted); padding:.6rem 1rem .8rem; border-top:1px solid var(--line) }
+
+.callout { border-left:3px solid var(--accent); background:rgba(255,255,255,.04);
+  padding:1rem 1.2rem; border-radius:0 8px 8px 0; margin:1.2rem 0; font-size:.92rem }
+
+/* Book visualization */
+.book-viz { display:flex; gap:0; padding:1.4rem 1rem; justify-content:center; min-height:260px; align-items:flex-end }
+.book-col { display:flex; flex-direction:column; align-items:center; width:70px; transition:all .4s ease }
+.book-bar { width:48px; border-radius:6px 6px 0 0; transition:all .5s ease; position:relative; min-height:4px }
+.book-bar.bid { background:var(--green) }
+.book-bar.ask { background:var(--accent) }
+.book-bar.ghost { background:repeating-linear-gradient(45deg, var(--accent), var(--accent) 4px, rgba(241,124,120,.4) 4px, rgba(241,124,120,.4) 8px);
+  animation:ghost-pulse 1.2s ease-in-out infinite; border:2px dashed var(--accent) }
+.book-bar.purged { opacity:0; height:0 !important; transition:all .6s ease }
+.book-price { font-size:.72rem; color:var(--muted); margin-top:6px; font-variant-numeric:tabular-nums }
+.book-price.ghost-label { color:var(--accent); font-weight:700 }
+.book-sep { width:2px; background:var(--line); margin:0 14px; align-self:stretch; border-radius:1px }
+.book-mid-label { font-size:.6rem; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+  writing-mode:vertical-lr; text-orientation:mixed }
+
+@keyframes ghost-pulse { 0%,100%{opacity:.7} 50%{opacity:1} }
+
+/* Narration */
+.narration { font-size:.88rem; color:var(--ink); padding:.8rem 1rem; min-height:3rem;
+  display:flex; align-items:center; gap:.6rem; border-top:1px solid var(--line) }
+.narration .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0 }
+.step-count { font-size:.72rem; color:var(--muted); margin-left:auto; white-space:nowrap }
+
+/* Links row */
+.links { display:flex; gap:1rem; flex-wrap:wrap; margin-top:1.6rem; font-size:.82rem }
+.links a { color:var(--accent); text-decoration:none; border:1px solid var(--line); padding:.35rem .8rem; border-radius:8px }
+.links a:hover { background:var(--accent-dim) }
+.badge { display:inline-block; background:var(--green-dim); color:var(--green); font-size:.68rem;
+  padding:2px 8px; border-radius:6px; font-weight:700; letter-spacing:.04em; vertical-align:middle; margin-left:4px }
+
+/* Try-it */
+.try-it { font-size:.88rem; line-height:1.7 }
+.try-it strong { color:var(--green) }
+
+@media(prefers-reduced-motion:reduce){
+  .book-bar,.book-col,.book-bar.purged { transition:none }
+  .book-bar.ghost { animation:none }
+}
+@media(max-width:500px){
+  .book-col { width:52px }
+  .book-bar { width:36px }
+  .book-viz { padding:1rem .5rem }
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Order Book Now Shows Real Prices</h1>
+<p class="subtitle">
+  Ghost price levels used to linger after the venue removed them,
+  making the mid-price look wrong. Now they're cleaned up the moment
+  a price update arrives.
+  <br><a href="https://github.com/AI-Degen-69/crypto-spread/pull/363">Update #363</a> <span class="badge">LIVE</span>
+</p>
+
+<!-- Centerpiece: stepped order book demo -->
+<div class="panel">
+  <div class="figure">
+    <div class="figure-label">Order Book — step through to see the fix</div>
+
+    <div class="book-viz" id="bookViz">
+      <!-- filled by JS -->
+    </div>
+
+    <div class="narration" id="narration">
+      <span class="dot" style="background:var(--muted)"></span>
+      <span id="narr-text">Press <b>Step</b> to walk through what happens.</span>
+      <span class="step-count" id="stepCount"></span>
+    </div>
+
+    <div class="figure-controls">
+      <button class="ctrl-btn primary" id="btnStep">Step</button>
+      <button class="ctrl-btn" id="btnPlay">Play</button>
+      <button class="ctrl-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="figure-caption">
+      Green bars = buy orders (bids). Red bars = sell orders (asks).
+      The dashed striped bar is the ghost — a stale level the venue already removed.
+    </div>
+  </div>
+</div>
+
+<!-- Support: callout -->
+<div class="callout">
+  <strong>What changed:</strong> when a price update says "the best sell price is 0.44",
+  any local sell orders below that (like the old 0.43) are phantoms left behind by a
+  removal that never arrived explicitly. They're now purged on the spot.
+</div>
+
+<!-- Support: try-it -->
+<div class="panel try-it">
+  <strong>Check it yourself:</strong><br>
+  Open the dashboard at <code>http://127.0.0.1:5515</code> and watch the order book
+  on any active pair. Sell-side levels that used to stick around after a price jump
+  are now cleaned instantly — the mid-price stays accurate.
+</div>
+
+<!-- Links -->
+<div class="links">
+  <a href="https://github.com/AI-Degen-69/crypto-spread/issues/362">Problem #362</a>
+  <a href="https://github.com/AI-Degen-69/crypto-spread/pull/363">Update #363 <span class="badge">LIVE</span></a>
+</div>
+
+</main>
+
+<script>
+(function(){
+  // ---- Data model for the stepped demo ----
+  const BIDS = [
+    { price: 0.38, size: 174, height: 80 },
+    { price: 0.42, size: 339, height: 150 },
+  ];
+  const ASKS_CLEAN = [
+    { price: 0.44, size: 5,   height: 30 },
+    { price: 0.47, size: 120, height: 70 },
+    { price: 0.50, size: 200, height: 110 },
+  ];
+  const GHOST = { price: 0.43, size: 87, height: 55 }; // the phantom
+
+  const STEPS = [
+    {
+      narr: "The order book looks normal — bids on the left, asks on the right.",
+      dot: "var(--muted)",
+      bids: BIDS,
+      asks: ASKS_CLEAN,
+      ghost: null,
+    },
+    {
+      narr: "A price update arrives. But the venue removed the 0.43 sell level without telling us — a <b>ghost</b> appears.",
+      dot: "var(--accent)",
+      bids: BIDS,
+      asks: ASKS_CLEAN,
+      ghost: GHOST,
+    },
+    {
+      narr: "The ghost at 0.43 sits <em>below</em> the venue's declared best ask of 0.44 — that's impossible. It skews the mid-price.",
+      dot: "var(--accent)",
+      bids: BIDS,
+      asks: ASKS_CLEAN,
+      ghost: { ...GHOST, highlight: true },
+    },
+    {
+      narr: "Now the fix kicks in: any sell level below the declared best ask is a phantom → <b>purged</b>.",
+      dot: "var(--green)",
+      bids: BIDS,
+      asks: ASKS_CLEAN,
+      ghost: { ...GHOST, purged: true },
+    },
+    {
+      narr: "Clean book. The mid-price is accurate again. ✓",
+      dot: "var(--green)",
+      bids: BIDS,
+      asks: ASKS_CLEAN,
+      ghost: null,
+    },
+  ];
+
+  let current = -1;
+  let playing = false;
+  let playTimer = null;
+
+  const viz = document.getElementById('bookViz');
+  const narrText = document.getElementById('narr-text');
+  const narrDot = document.querySelector('#narration .dot');
+  const stepCount = document.getElementById('stepCount');
+
+  function render(step) {
+    const s = STEPS[step];
+    viz.innerHTML = '';
+
+    // Bids
+    s.bids.forEach(b => {
+      const col = document.createElement('div');
+      col.className = 'book-col';
+      const bar = document.createElement('div');
+      bar.className = 'book-bar bid';
+      bar.style.height = b.height + 'px';
+      const lbl = document.createElement('div');
+      lbl.className = 'book-price';
+      lbl.textContent = '$' + b.price.toFixed(2);
+      col.appendChild(bar);
+      col.appendChild(lbl);
+      viz.appendChild(col);
+    });
+
+    // Separator
+    const sep = document.createElement('div');
+    sep.className = 'book-sep';
+    const midL = document.createElement('div');
+    midL.className = 'book-mid-label';
+    midL.textContent = 'MID';
+    sep.appendChild(midL);
+    viz.appendChild(sep);
+
+    // Ghost (before asks if present and not purged)
+    if (s.ghost && !s.ghost.purged) {
+      const col = document.createElement('div');
+      col.className = 'book-col';
+      const bar = document.createElement('div');
+      bar.className = 'book-bar ask ghost';
+      bar.style.height = s.ghost.height + 'px';
+      if (s.ghost.highlight) bar.style.boxShadow = '0 0 18px var(--accent)';
+      const lbl = document.createElement('div');
+      lbl.className = 'book-price ghost-label';
+      lbl.textContent = '$' + s.ghost.price.toFixed(2) + ' 👻';
+      col.appendChild(bar);
+      col.appendChild(lbl);
+      viz.appendChild(col);
+    }
+    if (s.ghost && s.ghost.purged) {
+      const col = document.createElement('div');
+      col.className = 'book-col';
+      const bar = document.createElement('div');
+      bar.className = 'book-bar ask ghost purged';
+      const lbl = document.createElement('div');
+      lbl.className = 'book-price ghost-label';
+      lbl.style.opacity = '0';
+      lbl.style.transition = 'opacity .5s';
+      lbl.textContent = '$' + s.ghost.price.toFixed(2);
+      col.appendChild(bar);
+      col.appendChild(lbl);
+      viz.appendChild(col);
+    }
+
+    // Asks
+    s.asks.forEach(a => {
+      const col = document.createElement('div');
+      col.className = 'book-col';
+      const bar = document.createElement('div');
+      bar.className = 'book-bar ask';
+      bar.style.height = a.height + 'px';
+      const lbl = document.createElement('div');
+      lbl.className = 'book-price';
+      lbl.textContent = '$' + a.price.toFixed(2);
+      col.appendChild(bar);
+      col.appendChild(lbl);
+      viz.appendChild(col);
+    });
+
+    narrText.innerHTML = s.narr;
+    narrDot.style.background = s.dot;
+    stepCount.textContent = (step + 1) + ' / ' + STEPS.length;
+  }
+
+  function stepForward() {
+    if (current < STEPS.length - 1) {
+      current++;
+      render(current);
+    } else if (playing) {
+      stopPlay();
+    }
+  }
+
+  function reset() {
+    stopPlay();
+    current = -1;
+    viz.innerHTML = '';
+    narrText.innerHTML = 'Press <b>Step</b> to walk through what happens.';
+    narrDot.style.background = 'var(--muted)';
+    stepCount.textContent = '';
+  }
+
+  function startPlay() {
+    if (playing) return;
+    if (current >= STEPS.length - 1) reset();
+    playing = true;
+    document.getElementById('btnPlay').textContent = 'Pause';
+    playTimer = setInterval(() => {
+      if (current >= STEPS.length - 1) { stopPlay(); return; }
+      stepForward();
+    }, 2200);
+    if (current < 0) stepForward();
+  }
+
+  function stopPlay() {
+    playing = false;
+    clearInterval(playTimer);
+    document.getElementById('btnPlay').textContent = 'Play';
+  }
+
+  document.getElementById('btnStep').addEventListener('click', () => { stopPlay(); stepForward(); });
+  document.getElementById('btnPlay').addEventListener('click', () => { playing ? stopPlay() : startPlay(); });
+  document.getElementById('btnReset').addEventListener('click', reset);
+})();
+</script>
+</body>
+</html>
