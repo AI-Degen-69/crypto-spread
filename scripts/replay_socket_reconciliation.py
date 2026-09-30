@@ -368,11 +368,14 @@ def _load_fixture_object(path: Path) -> Optional[Dict[str, Any]]:
         else:
             return None
     try:
-        json.loads(first)
+        head = json.loads(first)
+        # A compact single-line fixture parses but must not be mistaken for a
+        # session: return it when it carries the fixture marker (Issue #363).
+        if isinstance(head, dict) and "breaking_event" in head:
+            return head
+        return None
     except Exception:
         pass
-    else:
-        return None
     if path.stat().st_size > FIXTURE_MAX_BYTES:
         return None
     try:
