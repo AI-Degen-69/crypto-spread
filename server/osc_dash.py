@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
@@ -3415,9 +3416,43 @@ def api_collector_start(request: Request):
                 },
             )
         cmd = [sys.executable, "-m", "scripts.collect_ticks"]
+        # Issue #351: a DEVNULL child made "socket never connected" invisible —
+        # the "CLOB market WS connected" log line (or an exception trace) was
+        # thrown away, and a run whose WS telemetry stays zero looks healthy.
+        # Capture the child's output to run/ticks/collector_child.log so the
+        # operator has evidence instead of a black hole. Append mode: several
+        # launches share one log, each stamped by the collector's own output.
+        try:
+            log_dir = TICKS_DIR
+            log_dir.mkdir(parents=True, exist_ok=True)
+            child_log = open(log_dir / "collector_child.log", "ab", buffering=0)
+            child_log.write(
+                f"\n===== launch {datetime.now(timezone.utc).isoformat()} "
+                f"pid=pending =====\n".encode("utf-8")
+            )
+        except OSError as e:
+            # Log setup failing must never block capture. Keep the two failure
+            # domains separate: only the *log* falls back to DEVNULL here — the
+            # spawn below must still run exactly once (a fallback retry here
+            # could double-spawn two writers onto the same daily tick file).
+            print(f"[collector] child log unavailable ({e}); stdout discarded")
+            child_log = subprocess.DEVNULL
+        # Single spawn point, reached exactly once per launch: the log failure
+        # path above already routed stdout to DEVNULL, so the collector always
+        # gets a writable stream and never starts twice.
         _collector_proc = subprocess.Popen(
-            cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            cmd, cwd=str(ROOT), stdout=child_log, stderr=subprocess.STDOUT,
         )
+        if child_log is not subprocess.DEVNULL:
+            try:
+                child_log.write(
+                    f"===== pid {_collector_proc.pid} =====\n".encode("utf-8")
+                )
+            finally:
+                # With-scoped equivalent: the child inherited its own duplicated
+                # handle at spawn; the parent's copy must close deterministically
+                # (a dashboard process launches collectors for days).
+                child_log.close()
     return {"ok": True, "running": True, "pid": _collector_proc.pid}
 
 
