@@ -1230,6 +1230,11 @@ def main():
         try:
             closed, errs = poll_once(out_dir, args.gzip, stats, ws_bridge=ws_bridge)
             update_manifest(out_dir, stats)
+            # Issue #351 smoke hook: tokens handed to the WS bridge during this
+            # poll. 0 here means the bridge was never seeded — the exact silent
+            # state the dashboard launch path produced.
+            if ws_bridge is not None:
+                print(f"ws_bridge_tokens={len(ws_bridge.client.token_ids)}")
         finally:
             stop_ws_bridge(ws_bridge)
             shutdown_poll_executor()

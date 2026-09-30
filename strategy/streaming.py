@@ -102,6 +102,9 @@ CLOB_WS_JITTER_PCT = 0.25         # de-synchronizes reconnect storms
 # bound on a process that runs for days.
 CLOB_WS_TRADE_BUFFER_MAX = 5000
 CLOB_WS_FAILURE_WARN_EVERY = 10   # escalate a feed that never comes back
+# Issue #351: a client started with no tokens spins silently in run_direct();
+# warn on this cadence until update_tokens() seeds the subscription.
+CLOB_WS_EMPTY_TOKEN_WARN_EVERY = 30.0
 # A socket can stay open while the venue stops answering. `ping_interval=None`
 # disables the library's own heartbeat, so this is the only liveness signal.
 CLOB_WS_PONG_TIMEOUT_FACTOR = 3.0
@@ -432,6 +435,7 @@ class CLOBMarketWSClient:
         recv_timeout: float = CLOB_WS_RECV_TIMEOUT,
         backoff_base: float = CLOB_WS_BACKOFF_BASE,
         backoff_max: float = CLOB_WS_BACKOFF_MAX,
+        empty_token_warn_every: float = CLOB_WS_EMPTY_TOKEN_WARN_EVERY,
         connect_factory: Optional[Callable[..., Any]] = None,
     ):
         """Initialize CLOB Market WebSocket client."""
@@ -445,6 +449,7 @@ class CLOBMarketWSClient:
         self.pong_timeout = self.ping_interval * CLOB_WS_PONG_TIMEOUT_FACTOR
         self.backoff_base = float(backoff_base)
         self.backoff_max = float(backoff_max)
+        self.empty_token_warn_every = float(empty_token_warn_every)
         self._connect_factory = connect_factory
         self.books: Dict[str, Dict[str, Any]] = {}
         self.top_of_book: Dict[str, Dict[str, Optional[float]]] = {}
@@ -828,11 +833,30 @@ class CLOBMarketWSClient:
             connect = websockets.connect
 
         backoff = self.backoff_base
+        # Issue #351: an empty token set spins here forever, silently — no
+        # reconnect counter moves, the run looks healthy, and every WS-dependent
+        # number comes out as a quiet zero. Say so loudly, on a cadence, until
+        # tokens arrive.
+        empty_since: Optional[float] = None
+        empty_warned_at: float = 0.0
         while not self._stop_event.is_set():
             if not self.token_ids:
+                now_ts = time.monotonic()
+                if empty_since is None:
+                    empty_since = now_ts
+                if now_ts - empty_warned_at >= self.empty_token_warn_every:
+                    log.warning(
+                        "CLOB market WS idle: no tokens subscribed for %.0fs "
+                        "(is_connected=%s) — waiting for update_tokens()",
+                        now_ts - empty_since,
+                        self.is_connected,
+                    )
+                    empty_warned_at = now_ts
                 if await self._wait_stop(0.5):
                     break
                 continue
+            empty_since = None
+            empty_warned_at = 0.0
 
             clean = False
             try:
