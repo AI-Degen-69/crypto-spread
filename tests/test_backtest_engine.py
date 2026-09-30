@@ -10,7 +10,9 @@ from typing import Iterable
 
 import pytest
 
+from strategy.book_math import realized_pair_edge_cents
 from backtest.engine import (
+
     BacktestParams,
     WindowResult,
     _classify,
@@ -2050,3 +2052,49 @@ def test_replay_per_series_and_overall_unchanged_by_per_duration():
     assert out["aggregate"]["per_series"]["btc-up-or-down-5m"]["windows"] == 1
     assert out["aggregate"]["per_series"]["btc-up-or-down-15m"]["windows"] == 1
     assert out["aggregate"]["per_series"]["eth-up-or-down-5m"]["windows"] == 1
+
+
+def test_single_merge_window_pnl_equals_realized_pair_edge():
+    """Single-merge window's pnl_cents equals realized_pair_edge_cents exactly."""
+    params = BacktestParams(offset=0.02, enable_leg_chase=False)
+    # Book asking 0.48/0.48 -> resting bids at 0.48/0.48. Fill on tick 100, tick 101 has no prints.
+    snaps_data = [
+        snap(100.0, 0.50, up_ask=0.48, down_ask=0.48),
+        snap(101.0, 0.50, up_ask=0.55, down_ask=0.55),
+    ]
+    res = _simulate_window(snaps_data, params)
+    assert res.pair_captured is True
+    assert res.pairs_count == 1
+    expected_edge = realized_pair_edge_cents(res.entry_price_up, res.entry_price_down, params.merge_gas_usd, params.quote_shares)
+    assert res.pair_pnl_cents == expected_edge
+    assert res.pnl_cents == expected_edge
+    assert res.first_pair_cost == round(res.entry_price_up + res.entry_price_down, 4)
+
+
+def test_replay_trades_sample_and_overall_pair_economics_fields():
+    """replay() output exposes pair cost/edge in trades_sample and aggregate maps."""
+    snaps_data = [
+        snap(100.0, 0.50, up_ask=0.48, down_ask=0.48),
+        snap(101.0, 0.50, up_ask=0.55, down_ask=0.55),
+    ]
+    out = replay(snaps_data, BacktestParams(offset=0.02))
+    trades = out["trades_sample"]
+    assert len(trades) == 1
+    t = trades[0]
+    assert "first_pair_cost" in t
+    assert "mean_pair_edge_cents" in t
+    assert "worst_pair_edge_cents" in t
+    assert "pair_pnl_cents" in t
+    assert t["first_pair_cost"] == 0.96
+    assert t["mean_pair_edge_cents"] == 4.0
+
+    agg = out["aggregate"]["overall"]
+    assert "pair_rate" in agg
+    assert "pair_rate_entered" in agg
+    assert agg["pair_rate"] == 1.0
+    assert agg["pair_rate_entered"] == 1.0
+    assert agg["mean_pair_cost"] == 0.96
+    assert agg["mean_pair_edge_cents"] == 4.0
+    assert agg["total_pair_pnl_cents"] == 4.0
+
+

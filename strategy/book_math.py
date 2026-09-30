@@ -214,6 +214,24 @@ def pair_cost(up: Any, down: Any) -> Optional[float]:
     return round(up_price + down_price, 4)
 
 
+def realized_pair_edge_cents(entry_up: Any, entry_down: Any, merge_gas_usd: float = 0.0, quote_shares: int = 50) -> Optional[float]:
+    """Net realized pair edge in cents per share, deducting amortized merge gas.
+
+    A completed binary pair settles at $1.00. The raw pair edge in cents is:
+        (1.00 - (entry_up + entry_down)) * 100.0
+    Merge gas cost is a fixed per-transaction fee in USD, amortized across shares:
+        (merge_gas_usd * 100.0) / max(1, quote_shares)
+    """
+    up = _as_price(entry_up)
+    down = _as_price(entry_down)
+    if up is None or down is None:
+        return None
+    raw_edge_cents = (1.00 - (up + down)) * 100.0
+    gas_cents_per_share = (float(merge_gas_usd) * 100.0) / max(1, int(quote_shares))
+    return round(raw_edge_cents - gas_cents_per_share, 4)
+
+
+
 def two_sided_mid_with_default(up_book: Optional[Dict[str, Any]],
                                down_book: Optional[Dict[str, Any]],
                                default: float = 0.50) -> float:
