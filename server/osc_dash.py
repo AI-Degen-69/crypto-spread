@@ -3341,18 +3341,17 @@ def api_analysis():
 BOOK_SHADOW_TOLERANCE = 0.001
 
 
-def _shadow_badge_text(st: Any) -> str:
-    """Format the book_shadow badge text from a /api/collector/status payload.
+def _shadow_badge_text(bs: dict) -> str:
+    """Format the book_shadow badge text — the single source of truth for it.
 
-    #349 rules: never a rate without its sample size, and no data / zero
-    comparisons renders "not enough data yet" — never 0%, which would read as
-    a measured clean pass instead of an absent measurement.
+    The server computes it into the /api/collector/status payload and the UI
+    renders it verbatim, so the format lives in exactly one place (and is
+    testable in Python). #349 rules: never a rate without its sample size, and
+    no data / zero comparisons renders "not enough data yet" — never 0%, which
+    would read as a measured clean pass instead of an absent measurement.
     """
-    bs = getattr(st, "book_shadow", None)
-    if not isinstance(bs, dict) or not bs.get("comparisons"):
-        return "Book Δ: not enough data yet"
-    rate = bs.get("divergence_rate")
-    if rate is None:
+    rate = bs.get("divergence_rate") if isinstance(bs, dict) else None
+    if not bs or not bs.get("comparisons") or rate is None:
         return "Book Δ: not enough data yet"
     return f"Book Δ: {rate * 100:.1f}% ({bs['comparisons']:,})"
 
@@ -3416,6 +3415,10 @@ def api_collector_status():
                     "max_ba": bs.get("max_ba"),
                     "per_series": bs.get("per_series", {}),
                 }
+                # The UI renders this verbatim — the badge format lives only
+                # here, not duplicated in JS (locale-dependent toLocaleString
+                # would otherwise diverge from the tested format).
+                book_shadow["badge_text"] = _shadow_badge_text(book_shadow)
         except Exception:
             pass
 
@@ -6665,8 +6668,10 @@ async function refreshCollectorStatus(){
     const sb = $('shadowBadge');
     if(sb){
       const bs = st.book_shadow;
-      if(bs && bs.comparisons > 0 && bs.divergence_rate !== null && bs.divergence_rate !== undefined){
-        sb.textContent = `Book Δ: ${(bs.divergence_rate*100).toFixed(1)}% (${(bs.comparisons||0).toLocaleString()})`;
+      if(bs && bs.comparisons > 0 && bs.badge_text){
+        // badge_text is server-rendered (single source of truth, tested in
+        // Python); the UI only picks the color from the rate.
+        sb.textContent = bs.badge_text;
         if(bs.divergence_rate > bs.tolerance){
           sb.style.color = 'var(--gold)';
           sb.style.borderColor = 'rgba(240,180,41,0.5)';

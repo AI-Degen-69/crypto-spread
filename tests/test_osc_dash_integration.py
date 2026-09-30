@@ -1328,21 +1328,27 @@ def test_shadow_badge_format(tmp_path, monkeypatch):
     """Issue #349: the badge formats honestly — never a rate without its sample size.
 
     With comparisons: rate + count together. Zero/absent comparisons: 'not enough
-    data yet', never '0%'.
+    data yet', never '0%'. The server renders badge_text into the payload and the
+    UI displays it verbatim — this test owns the format.
     """
-    from types import SimpleNamespace
-
-    def _fmt(payload):
-        return osc_dash._shadow_badge_text(SimpleNamespace(**{"book_shadow": payload}))
-
-    assert _fmt({
+    assert osc_dash._shadow_badge_text({
         "comparisons": 39414, "divergent": 11737, "divergence_rate": 0.2977,
         "tolerance": 0.001, "per_series": {},
     }) == "Book Δ: 29.8% (39,414)"
-    assert "not enough data" in _fmt(None).lower()
-    assert "not enough data" in _fmt({"comparisons": 0, "divergent": 0,
-                                      "divergence_rate": None, "tolerance": 0.001,
-                                      "per_series": {}}).lower()
+    assert "not enough data" in osc_dash._shadow_badge_text(None).lower()
+    assert "not enough data" in osc_dash._shadow_badge_text({
+        "comparisons": 0, "divergent": 0, "divergence_rate": None,
+        "tolerance": 0.001, "per_series": {},
+    }).lower()
+    # The status payload carries the server-rendered text for the UI.
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "book_shadow": {"comparisons": 100, "divergent": 20,
+                        "divergence_rate": 0.2, "per_series": {}},
+    }), encoding="utf-8")
+    d = client.get("/api/collector/status").json()
+    assert d["book_shadow"]["badge_text"] == "Book Δ: 20.0% (100)"
 
 
 def test_collector_status_large_tick_file_uses_size_estimate(tmp_path, monkeypatch):
