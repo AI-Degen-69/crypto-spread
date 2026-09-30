@@ -32,6 +32,7 @@ EPSILON = TOLERANCE * 1e-6
 
 
 def _num(v: Any) -> Optional[float]:
+    """Parse numeric value safely to float or None."""
     try:
         f = float(v)
         return f if math.isfinite(f) else None
@@ -41,6 +42,8 @@ def _num(v: Any) -> Optional[float]:
 
 @dataclass
 class DivergenceRecord:
+    """Structured divergence observation comparing WS state to ground truth."""
+
     event_index: int
     event_type: str
     token: str
@@ -59,6 +62,8 @@ class DivergenceRecord:
 
 @dataclass
 class ReconciliationReport:
+    """Aggregated reconciliation results and divergence metrics."""
+
     total_lines: int = 0
     total_ws_events: int = 0
     total_rest_snapshots: int = 0
@@ -71,6 +76,7 @@ class ReconciliationReport:
     all_divergences: List[DivergenceRecord] = field(default_factory=list)
 
     def summary_dict(self) -> Dict[str, Any]:
+        """Generate serializable summary breakdown by event type."""
         types = sorted(set(self.events_by_type.keys()) | set(self.comparisons_by_type.keys()))
         type_stats = {}
         for t in types:
@@ -117,6 +123,7 @@ class SocketReconciler:
     """Offline replay engine driving CLOBMarketWSClient from recorded streams."""
 
     def __init__(self, history_buffer_size: int = 15):
+        """Initialize offline reconciler with local WS client and state cache."""
         self.client = CLOBMarketWSClient()
         self.rest_books: Dict[str, Dict[str, Any]] = {}
         self.report = ReconciliationReport()
@@ -144,6 +151,7 @@ class SocketReconciler:
             self._handle_ws_event({"type": "ws", "ev": record, "rx": 0.0})
 
     def _handle_rest_snapshot(self, record: Dict[str, Any]) -> None:
+        """Store REST snapshot book as ground truth reference."""
         tok = str(record.get("token") or "")
         book = record.get("book") or {}
         if tok and book:
@@ -151,6 +159,7 @@ class SocketReconciler:
             self.report.total_rest_snapshots += 1
 
     def _handle_ws_event(self, record: Dict[str, Any]) -> None:
+        """Process WS message, update local book, and check against references."""
         ev = record.get("ev") or {}
         if not isinstance(ev, dict):
             return
@@ -351,6 +360,7 @@ def extract_fixture(report: ReconciliationReport, out_path: Path) -> bool:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entry point for offline reconciliation replay."""
     parser = argparse.ArgumentParser(description="Offline per-delta socket-book reconciliation replay")
     parser.add_argument("file", type=str, help="Path to raw session JSONL file")
     parser.add_argument("--fixture-out", type=str, default=None, help="Path to write smoking gun fixture")

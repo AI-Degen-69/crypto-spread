@@ -37,6 +37,7 @@ class RawStreamRecorder:
     """Thread-safe append-only sink for raw WS events and concurrent REST books."""
 
     def __init__(self, out_path: Path):
+        """Initialize the recorder and open destination JSONL log."""
         self.out_path = out_path
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -86,10 +87,12 @@ class DiagnosticRawClient(CLOBMarketWSClient):
     """CLOBMarketWSClient capturing every event into the recorder sink before processing."""
 
     def __init__(self, *args, recorder: Optional[RawStreamRecorder] = None, **kwargs):
+        """Initialize diagnostic client wrapping market client with an optional event recorder."""
         super().__init__(*args, **kwargs)
         self._recorder = recorder
 
     def _handle_event(self, ev: Dict[str, Any]) -> None:
+        """Intercept raw event and persist before delegating to base handler."""
         if self._recorder is not None:
             try:
                 self._recorder.write_ws_event(ev)
@@ -186,6 +189,7 @@ def run_session(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entry point for recording raw socket and REST book sessions."""
     parser = argparse.ArgumentParser(description="Capture raw WS events and concurrent REST books")
     parser.add_argument("--seconds", type=float, default=30.0, help="Duration in seconds (0 = infinite)")
     parser.add_argument("--series", nargs="*", default=None, help="Series slugs to track")
