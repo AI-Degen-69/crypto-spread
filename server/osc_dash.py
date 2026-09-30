@@ -3335,6 +3335,28 @@ def api_analysis():
 
 
 # Collector endpoints
+# Issue #349: the #174 Phase 1 divergence threshold (scripts/collect_ticks.py).
+# Kept in sync by name/comment; the collector owns the comparison, the dashboard
+# only displays what it recorded.
+BOOK_SHADOW_TOLERANCE = 0.001
+
+
+def _shadow_badge_text(st: Any) -> str:
+    """Format the book_shadow badge text from a /api/collector/status payload.
+
+    #349 rules: never a rate without its sample size, and no data / zero
+    comparisons renders "not enough data yet" — never 0%, which would read as
+    a measured clean pass instead of an absent measurement.
+    """
+    bs = getattr(st, "book_shadow", None)
+    if not isinstance(bs, dict) or not bs.get("comparisons"):
+        return "Book Δ: not enough data yet"
+    rate = bs.get("divergence_rate")
+    if rate is None:
+        return "Book Δ: not enough data yet"
+    return f"Book Δ: {rate * 100:.1f}% ({bs['comparisons']:,})"
+
+
 @app.get("/api/collector/status")
 def api_collector_status():
     """Return status of the background tick collector, today's ticks, and tape empty-rate health."""
@@ -3361,6 +3383,7 @@ def api_collector_status():
     tape_recent_empty_rate = None
     tape_entries_total = 0
     tape_alert = False
+    book_shadow = None
     mf = TICKS_DIR / "manifest.json"
     if mf.exists():
         try:
@@ -3374,6 +3397,25 @@ def api_collector_status():
                 total_checks = mdata.get("tape_empty_count", 0) + mdata.get("tape_non_empty_count", 0)
                 if total_checks >= 300:
                     tape_alert = True
+            # Issue #349: surface the #174 Phase 1 book_shadow disagreement
+            # summary so the operator reads it in the dashboard, not in a JSON
+            # file. Flat copy of the manifest's ready-to-read fields; the
+            # tolerance is supplied here because the collector keeps it as a
+            # module constant, not a manifest key. Same fault tolerance as the
+            # tape fields above: absent/malformed -> null, never an error.
+            bs = mdata.get("book_shadow")
+            if isinstance(bs, dict) and bs.get("comparisons"):
+                book_shadow = {
+                    "comparisons": bs.get("comparisons"),
+                    "divergent": bs.get("divergent"),
+                    "divergence_rate": bs.get("divergence_rate"),
+                    "tolerance": BOOK_SHADOW_TOLERANCE,
+                    "mean_abs_bb_delta": bs.get("mean_abs_bb_delta"),
+                    "mean_abs_ba_delta": bs.get("mean_abs_ba_delta"),
+                    "max_bb": bs.get("max_bb"),
+                    "max_ba": bs.get("max_ba"),
+                    "per_series": bs.get("per_series", {}),
+                }
         except Exception:
             pass
 
@@ -3390,6 +3432,7 @@ def api_collector_status():
         "tape_recent_empty_rate": tape_recent_empty_rate,
         "tape_entries_total": tape_entries_total,
         "tape_alert": tape_alert,
+        "book_shadow": book_shadow,
     }
 
 
@@ -4725,6 +4768,7 @@ textarea:focus-visible,
   <div style="display:flex;align-items:center;gap:8px">
     <span id="collectorBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Collector: Loading...</span>
     <span id="tapeBadge" class="mono" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Tape: Loading...</span>
+    <span id="shadowBadge" class="mono" title="WS vs REST book disagreement (#174 Phase 1): divergence rate with its comparison count" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)">Book Δ: Loading...</span>
     <span id="globalStreamPill" class="mono" title="Stream health: green = live <1s, yellow = 1s, red = offline/polling" style="font-size:11px;padding:3px 10px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);font-weight:700">● STREAM: CONNECTING...</span>
     <button class="btn" id="btnToggleCollector" onclick="toggleCollector()" title="Capture 1-second live ticks and tape into run/ticks/; closing 5m/15m windows append to the dataset">Start Polling (1s)</button>
     <button class="btn" onclick="pollOnce()">Poll Now (Once)</button>
@@ -6611,6 +6655,42 @@ async function refreshCollectorStatus(){
         }
       } else {
         tb.textContent = 'Tape: -';
+      }
+    }
+
+    // Issue #349: WS-vs-REST book disagreement (#174 Phase 1). Rate and its
+    // sample size always travel together; amber when books diverge beyond the
+    // tolerance, same palette as the tape alert. The tooltip carries the
+    // per-series breakdown so an operator can see which series diverge.
+    const sb = $('shadowBadge');
+    if(sb){
+      const bs = st.book_shadow;
+      if(bs && bs.comparisons > 0 && bs.divergence_rate !== null && bs.divergence_rate !== undefined){
+        sb.textContent = `Book Δ: ${(bs.divergence_rate*100).toFixed(1)}% (${(bs.comparisons||0).toLocaleString()})`;
+        if(bs.divergence_rate > bs.tolerance){
+          sb.style.color = 'var(--gold)';
+          sb.style.borderColor = 'rgba(240,180,41,0.5)';
+          sb.style.background = 'rgba(240,180,41,0.15)';
+        } else {
+          sb.style.color = 'var(--up)';
+          sb.style.borderColor = 'rgba(51,201,181,0.45)';
+          sb.style.background = 'rgba(51,201,181,0.12)';
+        }
+        const ps = bs.per_series || {};
+        const rows = Object.entries(ps)
+          .map(([slug, s]) => {
+            const r = s.comparisons ? (s.divergent / s.comparisons * 100).toFixed(1) : '-';
+            return `${slug}: ${r}% (${s.comparisons})`;
+          })
+          .join('\n');
+        sb.title = `WS vs REST book disagreement (diverged = delta > ${bs.tolerance})` +
+          (rows ? `\n${rows}` : '');
+      } else {
+        sb.textContent = 'Book Δ: not enough data yet';
+        sb.style.color = 'var(--dim)';
+        sb.style.borderColor = 'var(--line)';
+        sb.style.background = 'var(--panel2)';
+        sb.title = 'The collector has not produced a WS-vs-REST book comparison yet (#174 Phase 1).';
       }
     }
   }catch(e){ console.warn('refreshCollectorStatus failed', e); }
