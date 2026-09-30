@@ -1,0 +1,403 @@
+{
+  "description": "Minimal breaking event sequence extracted from recorded session (Issue #359)",
+  "event_type": "price_change",
+  "token": "37405155878908629326136933999342727702461662057689801005175075612557641558269",
+  "source": "in_frame",
+  "ws_before": {
+    "best_bid": 0.42,
+    "best_ask": 0.43
+  },
+  "reference_ground": {
+    "best_bid": 0.42,
+    "best_ask": 0.44
+  },
+  "max_gap": 0.01,
+  "breaking_event": {
+    "market": "0x5a9d17dd9cc451fa0f75b8eb029fe3b6835a305befaefe367bb2c0a40692e590",
+    "price_changes": [
+      {
+        "asset_id": "37405155878908629326136933999342727702461662057689801005175075612557641558269",
+        "price": "0.38",
+        "size": "174",
+        "side": "BUY",
+        "hash": "120c2f925ce2fafba4f4e48cc7c3f7e9b37e49eb",
+        "best_bid": "0.42",
+        "best_ask": "0.44"
+      },
+      {
+        "asset_id": "18878790031232509359468377824088339472997213910163763915111284672153553093846",
+        "price": "0.62",
+        "size": "174",
+        "side": "SELL",
+        "hash": "a0afc79120b5ea71112b055653e5c3851efa547b",
+        "best_bid": "0.56",
+        "best_ask": "0.58"
+      }
+    ],
+    "timestamp": "1790744274443",
+    "event_type": "price_change"
+  },
+  "preceding_events": [
+    {
+      "market": "0x5a9d17dd9cc451fa0f75b8eb029fe3b6835a305befaefe367bb2c0a40692e590",
+      "price_changes": [
+        {
+          "asset_id": "18878790031232509359468377824088339472997213910163763915111284672153553093846",
+          "price": "0.37",
+          "size": "76.2",
+          "side": "BUY",
+          "hash": "f19a42b0434c3585bc5169beca907a8b8de34025",
+          "best_bid": "0.57",
+          "best_ask": "0.58"
+        },
+        {
+          "asset_id": "37405155878908629326136933999342727702461662057689801005175075612557641558269",
+          "price": "0.63",
+          "size": "76.2",
+          "side": "SELL",
+          "hash": "8a10d5135411ebd793074a04ba66b7fb0f5aae75",
+          "best_bid": "0.42",
+          "best_ask": "0.43"
+        }
+      ],
+      "timestamp": "1790744274437",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0xa85602e8184c73b5251463ddfcc44bdacfa67f7492e3e07ac0907926efff3656",
+      "price_changes": [
+        {
+          "asset_id": "34584060464046331462941352777134580869188475409456293734121742445876788948342",
+          "price": "0.96",
+          "size": "9728",
+          "side": "BUY",
+          "hash": "05d06cab1bee2e06d9dfe02796ce32b48ba3e03e",
+          "best_bid": "0.993",
+          "best_ask": "0.999"
+        },
+        {
+          "asset_id": "58220661067712786377491371384806676708446769805130192657932060947144301042365",
+          "price": "0.04",
+          "size": "9728",
+          "side": "SELL",
+          "hash": "41ad38db4a8d735adbb6770c65aa569fb04d0f41",
+          "best_bid": "0.001",
+          "best_ask": "0.007"
+        }
+      ],
+      "timestamp": "1790744274437",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0xf74ee9bc3c94e2fbebca423cf23d8f4d11dbf0c3de0b2b8dc1120b457ad76e6c",
+      "price_changes": [
+        {
+          "asset_id": "10965439622400768615954579297725529660885506966464721474505451621718574777406",
+          "price": "0.37",
+          "size": "82.02",
+          "side": "BUY",
+          "hash": "cd643c8be899a85d2e72be212725167fde905787",
+          "best_bid": "0.56",
+          "best_ask": "0.59"
+        },
+        {
+          "asset_id": "104710922167667676206071745369205753343541105341059988345019383945349567158018",
+          "price": "0.63",
+          "size": "82.02",
+          "side": "SELL",
+          "hash": "5846d576ce1f8cd14c4179c2c9207a8301a13836",
+          "best_bid": "0.41",
+          "best_ask": "0.44"
+        }
+      ],
+      "timestamp": "1790744274437",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x5a9d17dd9cc451fa0f75b8eb029fe3b6835a305befaefe367bb2c0a40692e590",
+      "asset_id": "37405155878908629326136933999342727702461662057689801005175075612557641558269",
+      "price": "0.43",
+      "size": "5",
+      "fee_rate_bps": "0",
+      "side": "BUY",
+      "timestamp": "1790744274437",
+      "event_type": "last_trade_price",
+      "transaction_hash": "0xd9bcf3d7b70fe783714dd199588f6d8824955ed6a5042493de54e3d5d9467867"
+    },
+    {
+      "market": "0x3ff1383da744ad5140ae8ed52f449c0ee6042f3227e9e40a5b8c8731161ea825",
+      "price_changes": [
+        {
+          "asset_id": "93790174091486463447225480045452197173384291739809976405849707004344260971286",
+          "price": "0.95",
+          "size": "562",
+          "side": "BUY",
+          "hash": "2a4a526e0112aa0e804d1c6a4ae3f31669979d00",
+          "best_bid": "0.98",
+          "best_ask": "1"
+        },
+        {
+          "asset_id": "62810221793607776306290804291026157812284526110069457201498663438604585066903",
+          "price": "0.05",
+          "size": "562",
+          "side": "SELL",
+          "hash": "8a43a842fee487911998f51bb7f420623ecb230b",
+          "best_bid": "0",
+          "best_ask": "0.02"
+        }
+      ],
+      "timestamp": "1790744274438",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x5a9d17dd9cc451fa0f75b8eb029fe3b6835a305befaefe367bb2c0a40692e590",
+      "price_changes": [
+        {
+          "asset_id": "18878790031232509359468377824088339472997213910163763915111284672153553093846",
+          "price": "0.39",
+          "size": "81.9",
+          "side": "BUY",
+          "hash": "4579fa09635d4c288c51d021fdeb38bcb78f3c05",
+          "best_bid": "0.57",
+          "best_ask": "0.58"
+        },
+        {
+          "asset_id": "37405155878908629326136933999342727702461662057689801005175075612557641558269",
+          "price": "0.61",
+          "size": "81.9",
+          "side": "SELL",
+          "hash": "6590c2287c0a6416fcfcd4b54f936dad46d96e21",
+          "best_bid": "0.42",
+          "best_ask": "0.43"
+        }
+      ],
+      "timestamp": "1790744274439",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.39",
+          "size": "401.51",
+          "side": "BUY",
+          "hash": "9eb3dea822438bc5ba910f810ecccac32ff6a39c",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        },
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.61",
+          "size": "401.51",
+          "side": "SELL",
+          "hash": "800f9235ee7635a0db0968cf4776c7569150387a",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        }
+      ],
+      "timestamp": "1790744274438",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.51",
+          "size": "140",
+          "side": "BUY",
+          "hash": "9e483e3638e11787382fbde22dd2af53fd542403",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        },
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.49",
+          "size": "140",
+          "side": "SELL",
+          "hash": "62b292999cfd2628c5eeb399101d1ef69f6983fe",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        }
+      ],
+      "timestamp": "1790744274439",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.61",
+          "size": "381.52",
+          "side": "SELL",
+          "hash": "c59db54b170c567db389924a7b55e50e51d81d6a",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        },
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.39",
+          "size": "381.52",
+          "side": "BUY",
+          "hash": "9e5407fe7d501328c77dceef82102bbfec6a56e2",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        }
+      ],
+      "timestamp": "1790744274439",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.01",
+          "size": "8836.7",
+          "side": "BUY",
+          "hash": "79e8e389fb8ac5940b1595961e576c8669d3d774",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        },
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.99",
+          "size": "8836.7",
+          "side": "SELL",
+          "hash": "9c20b64af7f261a66081dd6e23bd3183da914278",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        }
+      ],
+      "timestamp": "1790744274440",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.39",
+          "size": "371.52",
+          "side": "BUY",
+          "hash": "7f1c7ceffa5d192422ed75b457d89f914e189e38",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        },
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.61",
+          "size": "371.52",
+          "side": "SELL",
+          "hash": "49f5242fbead8630a0509b18bdb65b47a0507228",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        }
+      ],
+      "timestamp": "1790744274440",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.57",
+          "size": "195.48",
+          "side": "BUY",
+          "hash": "9e4215ec1f6896ad5083cb32329aea0f5a925f4a",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        },
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.43",
+          "size": "195.48",
+          "side": "SELL",
+          "hash": "8586733743c46a8db02cc22ecafddc8b62b384ed",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        }
+      ],
+      "timestamp": "1790744274441",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x5a9d17dd9cc451fa0f75b8eb029fe3b6835a305befaefe367bb2c0a40692e590",
+      "price_changes": [
+        {
+          "asset_id": "37405155878908629326136933999342727702461662057689801005175075612557641558269",
+          "price": "0.4",
+          "size": "188",
+          "side": "BUY",
+          "hash": "739e4bb4d402544508eff51f5ef50eae80bb6e83",
+          "best_bid": "0.42",
+          "best_ask": "0.43"
+        },
+        {
+          "asset_id": "18878790031232509359468377824088339472997213910163763915111284672153553093846",
+          "price": "0.6",
+          "size": "188",
+          "side": "SELL",
+          "hash": "aa8cf17276b92a4d09a038bbae402548bb0bc6f8",
+          "best_bid": "0.57",
+          "best_ask": "0.58"
+        }
+      ],
+      "timestamp": "1790744274442",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.51",
+          "size": "160",
+          "side": "BUY",
+          "hash": "6e1aff458f569dd6f37848ff15813dadc322ace2",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        },
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.49",
+          "size": "160",
+          "side": "SELL",
+          "hash": "fd20f64f11759cd1817fcf8d7484b6cf13666b52",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        }
+      ],
+      "timestamp": "1790744274441",
+      "event_type": "price_change"
+    },
+    {
+      "market": "0x242982aa4f1175cce7a4b3edfc25ba27290f1096cf8f125e92e9a681c311b71d",
+      "price_changes": [
+        {
+          "asset_id": "16412870299567348562071285979185292248751086845129690548399056841960837731299",
+          "price": "0.47",
+          "size": "142",
+          "side": "BUY",
+          "hash": "f7c1f29bf977bf3fe237c38e0ca19d44270d1a0f",
+          "best_bid": "0.6",
+          "best_ask": "0.61"
+        },
+        {
+          "asset_id": "85699320119506083524141115044651240577829832456738483570792186718617631861381",
+          "price": "0.53",
+          "size": "142",
+          "side": "SELL",
+          "hash": "926a30572fb9ff366c6e9592da4fcc4a515d0194",
+          "best_bid": "0.39",
+          "best_ask": "0.4"
+        }
+      ],
+      "timestamp": "1790744274442",
+      "event_type": "price_change"
+    }
+  ]
+}
