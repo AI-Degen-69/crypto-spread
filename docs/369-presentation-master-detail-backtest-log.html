@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>פרזנטציה: יומן עסקאות Master-Detail בבקטסטר (PR #369 / Issue #365)</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card: #111827;
+      --card-border: #1f293d;
+      --tx: #f8fafc;
+      --dim: #94a3b8;
+      --faint: #64748b;
+      --up: #10b981;
+      --down: #ef4444;
+      --gold: #f59e0b;
+      --cyan: #06b6d4;
+      --purple: #8b5cf6;
+      --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--tx);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.5;
+      padding: 32px 20px;
+      direction: rtl;
+    }
+    .wrap { max-width: 1040px; margin: 0 auto; }
+    header { text-align: center; margin-bottom: 36px; }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--up);
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    h1 { font-size: 32px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 10px; }
+    .subtitle { color: var(--dim); font-size: 17px; max-width: 720px; margin: 0 auto; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
+    @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 24px;
+      position: relative;
+    }
+    .card-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+
+    .toggle-bar {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin: 24px 0 20px;
+    }
+    .tab-btn {
+      padding: 10px 20px;
+      background: #1e293b;
+      border: 1px solid var(--card-border);
+      color: var(--dim);
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      transition: all 0.2s ease;
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+      box-shadow: 0 0 16px rgba(59, 130, 246, 0.4);
+    }
+
+    /* Interactive Table Mockup */
+    .demo-container {
+      background: #0d131f;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 32px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .demo-bar {
+      background: #151d2f;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: var(--dim);
+    }
+    .demo-content { padding: 18px; }
+
+    table.mock-tbl {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: right;
+      font-size: 13px;
+      direction: ltr; /* English table as requested */
+    }
+    table.mock-tbl th {
+      padding: 10px 12px;
+      background: #131b2c;
+      color: var(--dim);
+      font-weight: 600;
+      border-bottom: 1px solid var(--card-border);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    table.mock-tbl td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #1a2336;
+      font-variant-numeric: tabular-nums;
+    }
+    .mock-master {
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .mock-master:hover { background: rgba(255,255,255,0.025); }
+    .exp-indicator {
+      display: inline-block;
+      width: 18px;
+      text-align: center;
+      color: var(--dim);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .pill-up { background: rgba(16, 185, 129, 0.15); color: var(--up); }
+    .pill-down { background: rgba(239, 68, 68, 0.15); color: var(--down); }
+    .pill-gold { background: rgba(245, 158, 11, 0.15); color: var(--gold); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+    /* Subtable styling */
+    .mock-detail-cell {
+      padding: 12px 16px !important;
+      background: rgba(0, 0, 0, 0.25);
+      border-top: 1px dashed var(--card-border);
+    }
+    table.sub-mock-tbl {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 12px;
+    }
+    table.sub-mock-tbl th {
+      background: #172133;
+      padding: 8px 10px;
+      color: var(--faint);
+      font-size: 11px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    table.sub-mock-tbl td {
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .callout {
+      background: rgba(59, 130, 246, 0.08);
+      border-right: 4px solid var(--accent);
+      padding: 14px 18px;
+      border-radius: 6px;
+      margin: 20px 0;
+      font-size: 14px;
+      color: #cbd5e1;
+    }
+
+    .kpi-row {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .kpi-box {
+      flex: 1;
+      background: #131b2c;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 14px 18px;
+    }
+    .kpi-val { font-size: 22px; font-weight: 800; font-family: monospace; }
+    .kpi-lbl { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+    .kpi-sub { font-size: 11px; color: var(--faint); }
+
+    .help-tooltip {
+      border-bottom: 1px dotted var(--dim);
+      cursor: help;
+      position: relative;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="badge">גרסה מוכנה וממוזגת • PR #369</div>
+      <h1>דשבורד בקטסטר: יומן עסקאות שקוף (Master-Detail)</h1>
+      <p class="subtitle">
+        פתרון מלא לחוסר הבהירות לגבי עסקאות מרובות בתוך אותו חלון (PAIR + EXIT), הסרת ניסוחים מטעים, והפרדה נקייה בין סיכום השוק לבין פירוט הפקודות הבודדות.
+      </p>
+    </header>
+
+    <!-- Interactive Toggle -->
+    <div class="toggle-bar">
+      <button class="tab-btn active" onclick="setMode('after')">✨ עכשיו: יומן עסקאות Master-Detail (אינטראקטיבי)</button>
+      <button class="tab-btn" onclick="setMode('before')">⚠️ לפני: טבלה שטוחה ומבלבלת (PAIR + EXIT)</button>
+    </div>
+
+    <!-- Live Interactive Centerpiece Mockup -->
+    <div class="demo-container">
+      <div class="demo-bar">
+        <span><b>תצוגה מקדימה אינטראקטיבית</b> — לחץ על שורת שוק כדי לפתוח/לסגור את פירוט העסקאות</span>
+        <span class="mono" id="demoModeLabel">מצב נוכחי: Master-Detail מודרני</span>
+      </div>
+      <div class="demo-content">
+
+        <!-- Live KPI summary row -->
+        <div class="kpi-row">
+          <div class="kpi-box">
+            <div class="kpi-lbl">Total P&L ($)</div>
+            <div class="kpi-val" style="color:var(--down)">-$754.20</div>
+            <div class="kpi-sub">סך רווח/הפסד כולל</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-lbl">Pair Capture Rate ℹ️</div>
+            <div class="kpi-val" style="color:var(--up)">94.8%</div>
+            <div class="kpi-sub">ללא הביטוי המטעה "for profit"</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-lbl">Pair Cost vs $1.00 Settle</div>
+            <div class="kpi-val" style="color:var(--up)">$0.962</div>
+            <div class="kpi-sub">Avg edge: +3.8¢/pr (0 > $1.00)</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-lbl">Max Drawdown</div>
+            <div class="kpi-val" style="color:var(--down)">-$754.20</div>
+            <div class="kpi-sub">Peak to trough from $0.00 start</div>
+          </div>
+        </div>
+
+        <div id="tableContainer">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- 2 Supporting Explanation Blocks -->
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">
+          <span style="color:var(--gold)">⚡</span>
+          <span>למה חלון עם זוג מוצלח מסיים בהפסד?</span>
+        </div>
+        <p style="color:var(--dim);font-size:14px;margin-bottom:12px;">
+          בחלון של 5 דקות, בוט הציטוטים ממשיך לעבוד גם אחרי שנתפס זוג מוצלח:
+        </p>
+        <ul style="color:#cbd5e1;font-size:13.5px;padding-right:18px;line-height:1.7;">
+          <li><b>עסקה 1 (דקה 0:12):</b> הבוט קונה UP ב-0.48$ ו-DOWN ב-0.48$. הזוג מוזג ב-1.00$. <b style="color:var(--up)">רווח: +0.20$ (+4.2%)</b>.</li>
+          <li><b>איפוס מצב (דקה 0:13):</b> הפוזיציה מתאפסת והבוט מניח ציטוטים חדשים באותו חלון.</li>
+          <li><b>עסקה 2 (דקה 1:40):</b> השוק צולל. רגל אחת מתמלאת, והמחיר ממשיך לרדת עד שמופעל סטופ לוס ב-0.13$. <b style="color:var(--down)">הפסד: -3.50$</b>.</li>
+          <li><b>תוצאה סופית:</b> <b style="color:var(--down)">הפסד של 3.30$- בחלון</b>, למרות שנתפס בו זוג מושלם!</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span style="color:var(--up)">🛡️</span>
+          <span>עקרונות השקיפות שהוטמעו</span>
+        </div>
+        <ul style="color:#cbd5e1;font-size:13.5px;padding-right:18px;line-height:1.7;">
+          <li><b>שורת שוק ברורה:</b> מציגה רווח/הפסד כולל בדולר ובאחוזים על בסיס כל ההון שהושקע, מספר מיזוגים, מספר סטופים, והאם שרד לאזור המוות.</li>
+          <li><b>קיבוץ זוגות ויזואלי:</b> שתי שורות רצופות (UP ו-DOWN) ללא קו מפריד כדי שיהיה ברור מיידית שמדובר בזוג אחד.</li>
+          <li><b>זמנים בסגנון יוטיוב:</b> שעה מקומית וזמן שחלף מתחילת החלון, למשל <span class="mono">13:05:12 (0:12)</span>.</li>
+          <li><b>טבלה באנגלית נקייה:</b> מספרים ונתונים בלבד. ללא טקסטים מסבירים בתאים – כל ההסברים נגישים במעבר עכבר (Hover).</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout">
+      💡 <b>איך לבדוק במערכת החיה:</b> הפעל את הדשבורד (<span class="mono" dir="ltr">python -m uvicorn server.osc_dash:app --port 5515</span>), היכנס לטאב <b>Backtester</b>, טען קובץ נתונים והרץ סימולציה. לחץ על שורת שוק ביומן העסקאות כדי לראות את הפתיחה והסגירה של העסקאות הבודדות.
+    </div>
+  </div>
+
+  <script>
+    let currentMode = 'after';
+    let expandedWindows = new Set(['w1']);
+
+    function toggleRow(id) {
+      if (expandedWindows.has(id)) {
+        expandedWindows.delete(id);
+      } else {
+        expandedWindows.add(id);
+      }
+      render();
+    }
+
+    function setMode(mode) {
+      currentMode = mode;
+      document.querySelectorAll('.tab-btn').forEach((btn, idx) => {
+        btn.classList.toggle('active', (mode === 'after' && idx === 0) || (mode === 'before' && idx === 1));
+      });
+      document.getElementById('demoModeLabel').textContent = mode === 'after' 
+        ? 'מצב נוכחי: Master-Detail מודרני' 
+        : 'מצב קודם: טבלה שטוחה ישנה';
+      render();
+    }
+
+    function render() {
+      const container = document.getElementById('tableContainer');
+      if (currentMode === 'before') {
+        container.innerHTML = `
+          <table class="mock-tbl">
+            <thead>
+              <tr>
+                <th>Window</th>
+                <th>Series</th>
+                <th>Result</th>
+                <th>Entry Up</th>
+                <th>Entry Down</th>
+                <th>Exit Price</th>
+                <th>Exit Type</th>
+                <th>PnL / Window ($)</th>
+                <th>Delay / Partial</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="mono">1741234500</td>
+                <td><b>05m BTC</b></td>
+                <td><span class="pill pill-down">PAIR + EXIT -$3.46</span></td>
+                <td class="mono">$0.480</td>
+                <td class="mono">$0.480</td>
+                <td class="mono">$0.130</td>
+                <td class="mono" style="color:var(--dim)">exit_up</td>
+                <td class="mono" style="color:var(--down);font-weight:700">-$3.46</td>
+                <td class="mono" style="color:var(--dim)">0s</td>
+              </tr>
+              <tr>
+                <td class="mono">1741234800</td>
+                <td><b>05m ETH</b></td>
+                <td><span class="pill pill-up">PAIR CAPTURED +$0.20</span></td>
+                <td class="mono">$0.480</td>
+                <td class="mono">$0.480</td>
+                <td class="mono">—</td>
+                <td class="mono" style="color:var(--dim)">—</td>
+                <td class="mono" style="color:var(--up);font-weight:700">+$0.20</td>
+                <td class="mono" style="color:var(--dim)">0s</td>
+              </tr>
+            </tbody>
+          </table>
+          <div style="margin-top:10px;font-size:12px;color:var(--down)">
+            ❌ בעיות בעבר: לא ברור מאיפה הגיע הפסד של 3.46$- אם כתוב PAIR, אין מידע על זמני הכניסה, ולא ברור האם מחיר היציאה שייך לזוג או לסטופ לוס.
+          </div>
+        `;
+      } else {
+        const isExp1 = expandedWindows.has('w1');
+        const isExp2 = expandedWindows.has('w2');
+
+        container.innerHTML = `
+          <table class="mock-tbl">
+            <thead>
+              <tr>
+                <th style="width:36px;text-align:center"></th>
+                <th>Market</th>
+                <th title="Total net P&L and percentage return on capital invested in this window">Total P&L (% on Invested) ℹ️</th>
+                <th title="Total completed pairs merged in this window">Merges ℹ️</th>
+                <th title="Stop-loss exits triggered on adverse drift in this window">Stop Loss ℹ️</th>
+                <th title="Single leg held into last 30s of window (dead zone)">Dead Zone ℹ️</th>
+                <th title="Final settlement resolution mark for this market window">Resolution ℹ️</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Master Row 1 -->
+              <tr class="mock-master" onclick="toggleRow('w1')" style="background:${isExp1 ? 'rgba(255,255,255,0.03)' : 'transparent'}">
+                <td style="text-align:center"><span class="exp-indicator">${isExp1 ? '▼' : '▶'}</span></td>
+                <td style="font-weight:700">05m BTC</td>
+                <td class="mono" style="font-weight:700;color:var(--down)">-$3.30 (-45.8%)</td>
+                <td class="mono">1</td>
+                <td class="mono" style="color:var(--down)">1</td>
+                <td class="mono" style="color:var(--dim)">0</td>
+                <td><span class="pill pill-down" style="font-weight:700">DOWN</span></td>
+              </tr>
+
+              <!-- Detail Row 1 (Expandable) -->
+              ${isExp1 ? `
+              <tr>
+                <td colspan="7" class="mock-detail-cell">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:11.5px;color:var(--dim)">
+                    <span>Window: <b class="mono" style="color:var(--tx)">btc-updown-5m-1741234500</b> (Start Delay: 0s)</span>
+                    <span>Settlement Mark: <b class="mono" style="color:var(--gold)">$0.120 (DOWN won)</b></span>
+                  </div>
+                  <table class="sub-mock-tbl">
+                    <thead>
+                      <tr>
+                        <th style="width:45px;text-align:center">Trade</th>
+                        <th style="width:55px">Side</th>
+                        <th>Time (Elapsed) ℹ️</th>
+                        <th>Fill Price</th>
+                        <th>Pair Cost (Edge)</th>
+                        <th>Duration ℹ️</th>
+                        <th>Status</th>
+                        <th>Trade P&L (%)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <!-- Trade 1: Grouped Pair (rowspan=2 without middle line) -->
+                      <tr style="border-bottom:none">
+                        <td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--card-border);background:rgba(255,255,255,0.015)">#1</td>
+                        <td style="font-weight:700;color:var(--up)">UP</td>
+                        <td class="mono" style="font-size:11px">13:05:12 (0:12)</td>
+                        <td class="mono">$0.480</td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--card-border);border-right:1px solid var(--card-border)">$0.960 (+4.0¢)</td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--card-border)">—</td>
+                        <td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--card-border)"><span class="pill pill-up">MERGED</span></td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">+$0.20 (+4.2%)</td>
+                      </tr>
+                      <tr style="border-top:none">
+                        <td style="font-weight:700;color:var(--down)">DOWN</td>
+                        <td class="mono" style="font-size:11px;color:var(--dim)">—</td>
+                        <td class="mono">$0.480</td>
+                      </tr>
+
+                      <!-- Trade 2: Stop Loss -->
+                      <tr style="border-bottom:none">
+                        <td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--card-border);background:rgba(255,255,255,0.015)">#2</td>
+                        <td style="font-weight:700;color:var(--up)">UP</td>
+                        <td class="mono" style="font-size:11px">—</td>
+                        <td class="mono">$0.480</td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--card-border);border-right:1px solid var(--card-border);color:var(--dim)">—</td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--card-border)">—</td>
+                        <td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--card-border)"><span class="pill pill-down">STOP_LOSS</span></td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--down);background:rgba(239,68,68,0.04)">-$3.50 (-72.9%)</td>
+                      </tr>
+                      <tr style="border-top:none">
+                        <td style="font-weight:700;color:var(--dim)">EXIT</td>
+                        <td class="mono" style="font-size:11px;color:var(--dim)">—</td>
+                        <td class="mono">$0.130</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </td>
+              </tr>
+              ` : ''}
+
+              <!-- Master Row 2 -->
+              <tr class="mock-master" onclick="toggleRow('w2')" style="background:${isExp2 ? 'rgba(255,255,255,0.03)' : 'transparent'}">
+                <td style="text-align:center"><span class="exp-indicator">${isExp2 ? '▼' : '▶'}</span></td>
+                <td style="font-weight:700">05m ETH</td>
+                <td class="mono" style="font-weight:700;color:var(--up)">+$0.20 (+4.2%)</td>
+                <td class="mono">1</td>
+                <td class="mono" style="color:var(--dim)">0</td>
+                <td class="mono" style="color:var(--dim)">0</td>
+                <td><span class="pill pill-up" style="font-weight:700">UP</span></td>
+              </tr>
+
+              <!-- Detail Row 2 (Expandable) -->
+              ${isExp2 ? `
+              <tr>
+                <td colspan="7" class="mock-detail-cell">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:11.5px;color:var(--dim)">
+                    <span>Window: <b class="mono" style="color:var(--tx)">eth-updown-5m-1741234800</b> (Start Delay: 0s)</span>
+                    <span>Settlement Mark: <b class="mono" style="color:var(--gold)">$0.850 (UP won)</b></span>
+                  </div>
+                  <table class="sub-mock-tbl">
+                    <thead>
+                      <tr>
+                        <th style="width:45px;text-align:center">Trade</th>
+                        <th style="width:55px">Side</th>
+                        <th>Time (Elapsed) ℹ️</th>
+                        <th>Fill Price</th>
+                        <th>Pair Cost (Edge)</th>
+                        <th>Duration ℹ️</th>
+                        <th>Status</th>
+                        <th>Trade P&L (%)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr style="border-bottom:none">
+                        <td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--card-border);background:rgba(255,255,255,0.015)">#1</td>
+                        <td style="font-weight:700;color:var(--up)">UP</td>
+                        <td class="mono" style="font-size:11px">13:10:05 (0:05)</td>
+                        <td class="mono">$0.480</td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--card-border);border-right:1px solid var(--card-border)">$0.960 (+4.0¢)</td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--card-border)">—</td>
+                        <td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--card-border)"><span class="pill pill-up">MERGED</span></td>
+                        <td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">+$0.20 (+4.2%)</td>
+                      </tr>
+                      <tr style="border-top:none">
+                        <td style="font-weight:700;color:var(--down)">DOWN</td>
+                        <td class="mono" style="font-size:11px;color:var(--dim)">—</td>
+                        <td class="mono">$0.480</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </td>
+              </tr>
+              ` : ''}
+            </tbody>
+          </table>
+        `;
+      }
+    }
+
+    render();
+  </script>
+</body>
+</html>
