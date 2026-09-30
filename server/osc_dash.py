@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 import urllib.parse
 from collections import defaultdict
 from pathlib import Path
@@ -3415,9 +3416,35 @@ def api_collector_start(request: Request):
                 },
             )
         cmd = [sys.executable, "-m", "scripts.collect_ticks"]
-        _collector_proc = subprocess.Popen(
-            cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        # Issue #351: a DEVNULL child made "socket never connected" invisible —
+        # the "CLOB market WS connected" log line (or an exception trace) was
+        # thrown away, and a run whose WS telemetry stays zero looks healthy.
+        # Capture the child's output to run/ticks/collector_child.log so the
+        # operator has evidence instead of a black hole. Append mode: several
+        # launches share one log, each stamped by the collector's own output.
+        try:
+            log_dir = TICKS_DIR
+            log_dir.mkdir(parents=True, exist_ok=True)
+            child_log = open(
+                log_dir / "collector_child.log", "ab",
+                buffering=0,
+            )
+            child_log.write(
+                f"\n===== launch {datetime.now(timezone.utc).isoformat()} "
+                f"pid=pending =====\n".encode("utf-8")
+            )
+            _collector_proc = subprocess.Popen(
+                cmd, cwd=str(ROOT), stdout=child_log, stderr=subprocess.STDOUT,
+            )
+            child_log.write(
+                f"===== pid {_collector_proc.pid} =====\n".encode("utf-8")
+            )
+        except OSError as e:
+            # Logging must never block capture: fall back to the old DEVNULL.
+            print(f"[collector] child log unavailable ({e}); stdout discarded")
+            _collector_proc = subprocess.Popen(
+                cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
     return {"ok": True, "running": True, "pid": _collector_proc.pid}
 
 
