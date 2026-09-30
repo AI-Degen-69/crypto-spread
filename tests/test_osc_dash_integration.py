@@ -2960,7 +2960,7 @@ def test_sweep_stream_reader_honors_sweep_controller():
     run by comparing its controller against the regular backtest guard only."""
     html = osc_dash.FULL_APP_HTML
     start = html.index("async function consumeBacktestStream(")
-    body = html[start:start + 1200]
+    body = html[start:start + 2600]  # guard moved past the read await (#371 watchdog)
     # Full guard line: polarity (&&, not ||) and both disjuncts matter — a
     # substring check on the tokens alone would pass an inverted guard.
     assert "if (ctl.signal.aborted || (window._btAbort !== ctl && window._btSweepAbort !== ctl))" in body
@@ -6621,10 +6621,11 @@ def test_backtest_stream_disconnect_releases_guards_immediately(tmp_path, monkey
     terminate_calls = {"n": 0}
     real_terminate = osc_dash._terminate_backtest_pool
 
-    def counting_terminate():
+    def counting_terminate(pool=None):  # #371: cleanup now passes the run's own pool
         terminate_calls["n"] += 1
         # The pool is a test double; emulate only the singleton detach.
-        osc_dash._BACKTEST_POOL = None
+        if pool is None or osc_dash._BACKTEST_POOL is pool:
+            osc_dash._BACKTEST_POOL = None
 
     monkeypatch.setattr(osc_dash, "_terminate_backtest_pool", counting_terminate)
 
@@ -6778,4 +6779,409 @@ def test_broken_pool_diagnostic_mentions_exitcode_and_original_error():
     # Already-torn-down pool: still a clean string, still no exception.
     text = osc_dash._diagnose_broken_pool(_cfp.BrokenProcessPool("terminated abruptly"), None)
     assert "no live worker process found" in text
+
+
+# ===========================================================================
+# Issue #371: Backtest tab lag / freeze / stuck-run regression coverage.
+# ===========================================================================
+
+
+def test_pair_stats_accumulator_matches_builtin_sum_oracle():
+    """Numerical contract (#371): for every prefix, the accumulator's mean
+    equals round(sum(prefix)/len(prefix), 4) exactly — the interpreter's
+    compensated ``sum()`` on 3.12+, plain addition below. Includes 0.0,
+    settle-boundary values (1.00004/1.00006) and rounding-boundary values."""
+    import random
+    rng = random.Random(371)
+    values = [1.00004, 1.00006, 1.0001, 0.0, 1e-8, 1.00005, 1.0, 0.99995]
+    values += [rng.uniform(0.95, 1.05) for _ in range(2200)]
+    values += [1.00004, 1.00006, 0.0, -0.5, 3.25]
+
+    acc = osc_dash._PairStatsAccumulator()
+    prefix: list = []
+    checked = 0
+    for i, v in enumerate(values):
+        acc.add_cost(v)
+        prefix.append(v)
+        if i < 20 or i % 97 == 0:
+            expected = round(sum(prefix) / len(prefix), 4)
+            assert round(acc.cost_mean(), 4) == expected, f"cost mean drift at prefix {i + 1}"
+            checked += 1
+    assert checked >= 20
+
+    # Edge accumulator: same contract on a different denominator.
+    acc2 = osc_dash._PairStatsAccumulator()
+    edges = [0.5, -0.25, 1e-9, 3.5, 0.0]
+    prefix2: list = []
+    for v in edges:
+        acc2.add_edge(v)
+        prefix2.append(v)
+        assert round(acc2.edge_mean(), 4) == round(sum(prefix2) / len(prefix2), 4)
+
+    # Above-settle semantics: only round(c, 4) > 1.00 counts; 0.0 counts as a value.
+    assert acc.above_settle_count() == sum(1 for c in prefix if round(c, 4) > 1.00)
+    # Empty metric -> None.
+    empty = osc_dash._PairStatsAccumulator()
+    assert empty.cost_mean() is None and empty.edge_mean() is None
+    # Bounded retained state regardless of values consumed.
+    assert acc.state_size() == 6
+
+
+def test_worker_progress_pair_stats_match_final_result(tmp_path, monkeypatch):
+    """#371: the last progress envelope's pair mean, edge mean and above-settle
+    count equal the final result's overall block (constant-size accumulators
+    must not change any displayed number)."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    fake_file = _make_backtest_ticks_file(tmp_path)
+    q = _fake_queue_factory()
+    from dataclasses import asdict
+    from backtest import BacktestParams
+    params_dict = asdict(BacktestParams(offset=0.02))
+    result = osc_dash._run_backtest_simulation_worker(
+        str(tmp_path), str(fake_file), params_dict, 5, 0.0, 0, {}, {},
+        "", "", progress_queue=q, progress_batch_windows=1,
+    )
+    messages = []
+    while True:
+        try:
+            messages.append(q.get_nowait())
+        except Exception:
+            break
+    assert messages
+    last = messages[-1]
+    overall = result["overall"]
+    assert last["mean_pair_cost"] == overall["mean_pair_cost"]
+    assert last["mean_pair_edge_cents"] == overall["mean_pair_edge_cents"]
+    assert last["pairs_above_settle"] == overall["pairs_above_settle"]
+    # Envelope key order contract (payload shape unchanged).
+    assert list(last.keys())[-4:] == [
+        "mean_pair_cost", "mean_pair_edge_cents", "pairs_above_settle", "pnl_sample_cents",
+    ]
+
+
+def test_terminate_backtest_pool_binds_to_passed_pool(monkeypatch):
+    """#371: late cleanup of run A must not terminate run B's pool. The global
+    singleton is cleared only when it still refers to the passed pool; the
+    no-argument call keeps the previous global-only behaviour."""
+    class FakePool:
+        def __init__(self, name):
+            self.name = name
+            self._processes = {}
+            self.shutdown_calls = []
+
+        def shutdown(self, wait=False, cancel_futures=True):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    pool_a, pool_b = FakePool("A"), FakePool("B")
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", pool_b)
+
+    # Run A's late cleanup targets pool A: terminated, but B stays the global.
+    osc_dash._terminate_backtest_pool(pool_a)
+    assert pool_a.shutdown_calls, "run A's pool was not terminated"
+    assert osc_dash._BACKTEST_POOL is pool_b, "run B's global pool was stolen by run A's cleanup"
+
+    # Run B's own cleanup: terminates B and clears the global.
+    osc_dash._terminate_backtest_pool(pool_b)
+    assert pool_b.shutdown_calls
+    assert osc_dash._BACKTEST_POOL is None
+
+    # No-argument call: legacy behaviour (terminate + clear whatever is global).
+    pool_c = FakePool("C")
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", pool_c)
+    osc_dash._terminate_backtest_pool()
+    assert pool_c.shutdown_calls and osc_dash._BACKTEST_POOL is None
+
+
+def test_oscillation_poll_guard_suppresses_and_refreshes():
+    """#371: the timer-driven poll is suppressed on the Backtest tab, while the
+    document is hidden, and while a poll is in flight; returning from Backtest
+    with stale data refreshes immediately. Explicit tick() calls stay unguarded."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is not installed")
+    html = client.get("/").text
+    block = re.search(
+        r"let currentActiveTab = 'cockpit';.*?function switchTab\(name\)\{.*?\n\}",
+        html, re.DOTALL)
+    assert block is not None, "polling guard block not found in served HTML"
+    harness = """
+    const document = { hidden: false, querySelectorAll: () => [], addEventListener: () => {} };
+    const window = {};
+    const $ = () => null; // switchTab touches DOM elements; they do not exist here
+    let tickCalls = 0;
+    function tick() {
+      tickCalls += 1;
+      // Resolved on a microtask so pollTick's in-flight guard can still catch
+      // a second synchronous call before `done` runs.
+      return Promise.resolve();
+    }
+    function updateBacktestParamPreview() {}
+    function initBacktestIdle() {}
+    function renderCockpitUI() {}
+    function fetchCockpitState() {}
+    function loadManifest() {}
+    function loadGoldenCard() {}
+    function runVerifyQueue() {}
+    function loadJungleKing() {}
+    function renderSummaryCharts() {}
+""" + block.group(0) + """
+    (async () => {
+      // Backtest tab active. Timer-driven poll is skipped and marks stale.
+      switchTab('backtest');
+      pollTick();
+      await new Promise(r => setTimeout(r, 5));
+      if (tickCalls !== 0) throw new Error('poll fired while Backtest tab active');
+      if (!btOscStale) throw new Error('skipped poll did not mark data stale');
+
+      // Hidden document: skipped too.
+      switchTab('marketdata');
+      if (tickCalls < 1) throw new Error('returning from Backtest did not refresh stale data');
+      const afterReturn = tickCalls;
+      document.hidden = true;
+      pollTick();
+      await new Promise(r => setTimeout(r, 5));
+      if (tickCalls !== afterReturn) throw new Error('poll fired while document hidden');
+      document.hidden = false;
+
+      // In-flight poll: no overlapping fetch starts.
+      pollTick();               // starts one poll
+      const afterFirst = tickCalls;
+      pollTick();               // must be skipped while the first is in flight
+      if (tickCalls !== afterFirst) throw new Error('overlapping poll started while in flight');
+      await new Promise(r => setTimeout(r, 5));
+      if (tickCalls !== afterReturn + 1) throw new Error('timer poll did not run exactly once');
+
+      // Explicit tick() callers are never guarded.
+      switchTab('marketdata');
+      await tick();
+      if (tickCalls < afterReturn + 2) throw new Error('explicit tick() was guarded');
+      const afterExplicit = tickCalls;
+
+      // Staleness refresh on visibility return.
+      btOscStale = true;
+      btOscRefreshIfStale();
+      if (tickCalls !== afterExplicit + 1) throw new Error('stale refresh did not poll exactly once');
+      console.log('POLL_GUARD_OK');
+    })().catch(err => { console.error(err); process.exitCode = 1; });
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
+    assert "POLL_GUARD_OK" in result.stdout
+
+
+def test_backtest_timer_uses_poll_wrapper():
+    """#371: setInterval drives the guarded wrapper, not bare tick."""
+    html = client.get("/").text
+    assert "setInterval(pollTick, 3000)" in html
+    assert "setInterval(tick, 3000)" not in html
+    assert "addEventListener('visibilitychange'" in html
+
+
+def test_consume_backtest_stream_terminal_eof_watchdog_and_comments():
+    """#371: with opt-in options the reader returns after final/error, EOF
+    without a terminal event fails visibly, callback errors are surfaced (not
+    swallowed as bad payloads), comment heartbeats are ignored, and a silent
+    connection trips the inactivity watchdog."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is not installed")
+    html = client.get("/").text
+    fn = re.search(r"async function consumeBacktestStream\(.*?\n\}", html, re.DOTALL)
+    assert fn is not None, "consumeBacktestStream not found"
+    harness = """
+    const window = { _btAbort: null };
+""" + fn.group(0) + """
+    function makeReader(chunks, opts) {
+      opts = opts || {};
+      let cancelled = false;
+      let i = 0;
+      return {
+        get cancelled() { return cancelled; },
+        read() {
+          if (i < chunks.length) {
+            const v = chunks[i++];
+            return Promise.resolve({ done: false, value: new TextEncoder().encode(v) });
+          }
+          if (opts.endAfterChunks) return Promise.resolve({ done: true });
+          return new Promise(() => {}); // never resolves
+        },
+        cancel() { cancelled = true; return Promise.resolve(); },
+      };
+    }
+    const SEP = String.fromCharCode(13, 10, 13, 10);
+    (async () => {
+      // (a) final event ends the read even though the socket would never close.
+      {
+        const events = [];
+        const ctl = { signal: { aborted: false } }; window._btAbort = ctl;
+        const reader = makeReader(['data: ' + JSON.stringify({type:'final', result:{}}) + SEP]);
+        await consumeBacktestStream({ body: { getReader: () => reader } }, ctl, ev => events.push(ev.type),
+          { returnOnTerminal: true });
+        if (events.length !== 1 || events[0] !== 'final') throw new Error('final not delivered');
+        if (!reader.cancelled) throw new Error('reader not cancelled after final');
+      }
+
+      // (b) EOF without a terminal event fails visibly (legacy behaviour: silent success).
+      {
+        let eofFailed = null;
+        const ctl = { signal: { aborted: false } }; window._btAbort = ctl;
+        const reader = makeReader([], { endAfterChunks: true });
+        await consumeBacktestStream({ body: { getReader: () => reader } }, ctl, () => {},
+          { failOnEofWithoutTerminal: true, onEof: () => { eofFailed = 'Stream ended without a result'; } });
+        if (eofFailed === null) throw new Error('EOF without terminal did not fail');
+      }
+
+      // (c) A render callback throwing while handling final is surfaced, not swallowed.
+      {
+        let cbErr = null;
+        const ctl = { signal: { aborted: false } }; window._btAbort = ctl;
+        const reader = makeReader(['data: ' + JSON.stringify({type:'final', result:{}}) + SEP]);
+        await consumeBacktestStream({ body: { getReader: () => reader } }, ctl,
+          () => { throw new Error('render bug'); },
+          { returnOnTerminal: true, onCallbackError: (ev, e) => { cbErr = e.message; } });
+        if (cbErr !== 'render bug') throw new Error('callback error suppressed: ' + cbErr);
+      }
+
+      // (d) SSE comment heartbeats are ignored; data after them still parsed.
+      {
+        const events = [];
+        const ctl = { signal: { aborted: false } }; window._btAbort = ctl;
+        const reader = makeReader([': ping' + SEP, 'data: ' + JSON.stringify({type:'progress'}) + SEP], { endAfterChunks: true });
+        await consumeBacktestStream({ body: { getReader: () => reader } }, ctl, ev => events.push(ev.type), {});
+        if (events.length !== 1 || events[0] !== 'progress') throw new Error('comment line broke parsing');
+      }
+
+      // (e) Inactivity watchdog: a silent reader fails within the timeout.
+      {
+        const ctl = { signal: { aborted: false }, abort() { this.signal.aborted = true; } }; window._btAbort = ctl;
+        let stalled = false;
+        const reader = makeReader([]); // never resolves
+        await consumeBacktestStream({ body: { getReader: () => reader } }, ctl, () => {},
+          { inactivityTimeoutMs: 30, onStall: () => { stalled = true; } });
+        if (!stalled) throw new Error('silent connection did not trip the watchdog');
+        if (!ctl.signal.aborted) throw new Error('watchdog did not abort the controller');
+        if (!reader.cancelled) throw new Error('watchdog did not cancel the reader');
+      }
+      console.log('STREAM_LIFECYCLE_OK');
+    })().catch(err => { console.error(err); process.exitCode = 1; });
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=20)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
+    assert "STREAM_LIFECYCLE_OK" in result.stdout
+
+
+def test_render_coalescing_one_scheduled_render_per_interval():
+    """#371: several progress envelopes within one interval produce exactly one
+    scheduled render, always with the latest envelope, and a superseded/finished
+    run (window._btAbort !== btRenderToken) never renders."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is not installed")
+    html = client.get("/").text
+    block = re.search(
+        r"// #371: render coalescing state.*?function btCancelScheduledRender\(\)\{.*?\n\}",
+        html, re.DOTALL)
+    assert block is not None, "render coalescing block not found"
+    appendFn = re.search(r"function btAppendProvisionalPoints\(msg\)\{.*?\n\}", html, re.DOTALL)
+    assert appendFn is not None
+    harness = """
+    const window = { _btAbort: null };
+    let pendingTimeout = null;
+    let pendingTimeoutFn = null;
+    const setTimeout = (fn, ms) => { pendingTimeoutFn = fn; pendingTimeout = ms; return 1; };
+    const clearTimeout = (id) => { if (id === 1) { pendingTimeoutFn = null; pendingTimeout = null; } };
+    let pendingRaf = null;
+    const requestAnimationFrame = (fn) => { pendingRaf = fn; return 2; };
+    const cancelAnimationFrame = (id) => { if (id === 2) pendingRaf = null; };
+    let renderCount = 0, renderedMsg = null;
+    const btProvisionalChart = { data: { datasets: [{ data: [] }], labels: [] } }; // enough shape for the data push
+    function btRenderProvisional(msg) { renderCount += 1; renderedMsg = msg; }
+""" + block.group(0) + "\n" + appendFn.group(0) + """
+    const env1 = { points: [{ cumulative_pnl_cents: 1 }], windows_done: 1 };
+    const env2 = { points: [{ cumulative_pnl_cents: 2 }], windows_done: 2 };
+    const env3 = { points: [{ cumulative_pnl_cents: 3 }], windows_done: 3 };
+    const ctl = {};
+    window._btAbort = ctl;
+    btRenderToken = ctl;
+    btAppendProvisionalPoints(env1);
+    btAppendProvisionalPoints(env2);
+    btAppendProvisionalPoints(env3);
+    if (renderCount !== 0) throw new Error('rendered before the interval gate');
+    if (pendingTimeoutFn === null) throw new Error('no render was scheduled');
+    if (pendingTimeout > 500) throw new Error('interval gate exceeded ~500ms: ' + pendingTimeout);
+    pendingTimeoutFn();          // timer fires
+    if (typeof pendingRaf !== 'function') throw new Error('raf not requested');
+    pendingRaf();                // frame paints
+    if (renderCount !== 1) throw new Error('expected exactly one coalesced render, got ' + renderCount);
+    if (renderedMsg !== env3) throw new Error('render did not use the latest envelope');
+
+    // Ownership: after the run finishes (token cleared), a late frame never renders.
+    btAppendProvisionalPoints(env1);
+    btRenderToken = null;
+    pendingTimeoutFn();
+    if (typeof pendingRaf !== 'function') throw new Error('late frame was not scheduled');
+    pendingRaf();
+    if (renderCount !== 1) throw new Error('late frame rendered after run finished');
+
+    // Cancel path drops pending work.
+    btRenderToken = ctl;
+    btAppendProvisionalPoints(env2);
+    btCancelScheduledRender();
+    if (pendingTimeoutFn !== null) throw new Error('cancel left a pending timer');
+    console.log('RENDER_COALESCE_OK');
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
+    assert "RENDER_COALESCE_OK" in result.stdout
+
+
+def test_bt_hist_single_pass_min_max():
+    """#371: the provisional histogram finds min/max in one pass — no spread
+    over up to 2000 values four times a second — and keeps the label text."""
+    html = client.get("/").text
+    assert "Math.min(...vals)" not in html, "histogram still spreads vals for min/max"
+    assert "provisional n=" in html, "provisional label text changed"
+
+
+def test_mark_backtest_failed_shows_visible_message():
+    """#371: failures render the message text in a visible Backtest element,
+    not only red '--' and 'Failed'."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is not installed")
+    html = client.get("/").text
+    fn = re.search(r"function markBacktestFailed\(errMsg\)\{.*?\n\}", html, re.DOTALL)
+    assert fn is not None
+    harness = f"""
+    const elements = {{
+      btHash: {{ textContent: '' }},
+      btLastRunTime: {{ textContent: '' }},
+      btElapsedTime: {{ textContent: '', style: {{}} }},
+      btElapsedSub: {{ textContent: 'Simulating…' }},
+      btCardPairCost: {{ textContent: '$0.000', style: {{}} }},
+    }};
+    const $ = (id) => elements[id] || null;
+    {fn.group(0)}
+    markBacktestFailed('Another backtest or sweep is already running on the server.');
+    if (!elements.btCardPairCost.textContent.includes('already running')) throw new Error('message text not shown in a visible element');
+    if (!elements.btHash.textContent.includes('Backtest error:')) throw new Error('hash line lost');
+    if (elements.btElapsedSub.textContent !== 'Failed') throw new Error('failed state lost');
+    console.log('MARK_FAILED_OK');
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
+    assert "MARK_FAILED_OK" in result.stdout
+
+
+def test_backtest_429_visible_message_and_no_final_sleep():
+    """#371: the last 429 attempt surfaces an actionable message instead of a
+    silent give-up, and no sleep runs after the final attempt."""
+    html = client.get("/").text
+    assert "Another backtest or sweep is already running on the server. Wait for it to finish, then press Run again." in html
+    # No sleep after the last attempt: the delay is gated on attempt < 3.
+    assert "if (attempt < 3) await new Promise(r => setTimeout(r, 300));" in html
+    # The old unconditional sleep must be gone.
+    assert "if (res.status !== 429 || window._btAbort === null) break;\n      await new Promise" not in html
+    # The 429 path routes through markBacktestFailed.
+    assert "markBacktestFailed(lastErrorText ||" in html
 

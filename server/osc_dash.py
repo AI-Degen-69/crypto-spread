@@ -29,7 +29,7 @@ import threading
 import time
 from datetime import datetime, timezone
 import urllib.parse
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1628,16 +1628,24 @@ def _new_backtest_progress_queue():
     return _get_backtest_manager().Queue()
 
 
-def _terminate_backtest_pool() -> None:
-    """Kill the in-flight backtest pool: terminate processes, detach singleton.
+def _terminate_backtest_pool(pool=None) -> None:
+    """Kill an in-flight backtest pool: terminate processes, detach singleton.
 
     Shared by the blocking endpoints' timeout handlers and the streaming
     endpoint's disconnect/timeout cleanup. The next `get_backtest_pool()` call
     rebuilds a fresh pool lazily.
+
+    Issue #371: passing `pool` binds the termination to the executor the run
+    actually used. Late cleanup of run A must not terminate run B's pool: the
+    global singleton is cleared only if it still refers to that same pool.
+    Callers that pass no pool keep the previous global-only behaviour.
     """
     global _BACKTEST_POOL
-    pool = _BACKTEST_POOL
-    _BACKTEST_POOL = None
+    if pool is None:
+        pool = _BACKTEST_POOL
+        _BACKTEST_POOL = None
+    elif _BACKTEST_POOL is pool:
+        _BACKTEST_POOL = None
     if pool is not None:
         for proc in list(getattr(pool, "_processes", {}).values()):
             try:
@@ -1672,6 +1680,100 @@ def _make_backtest_guard_releaser():
             _BACKTEST_RUNNING = False
 
     return _release
+
+
+class _PairStatsAccumulator:
+    """Issue #371: constant-size whole-run pair statistics for progress flushes.
+
+    Replaces the unbounded ``prog_pair_costs`` / ``prog_pair_edges`` lists whose
+    ``sum()`` re-computation made every progress flush O(windows-processed).
+    The displayed envelope values must not change, so the running sums reproduce
+    the interpreter's built-in ``sum()`` exactly:
+
+    - Python >= 3.12: built-in ``sum()`` uses Neumaier compensated summation on
+      floats, so the accumulator replays the identical algorithm.
+    - Older interpreters: built-in ``sum()`` is plain left-to-right addition.
+
+    For every prefix of consumed values the invariant is
+    ``round(acc.mean(), 4) == round(sum(prefix) / len(prefix), 4)``.
+    """
+
+    __slots__ = (
+        "_cost_count", "_cost_sum", "_cost_comp",
+        "_edge_count", "_edge_sum", "_edge_comp",
+        "_above_settle",
+    )
+
+    def __init__(self) -> None:
+        self._cost_count = 0
+        self._cost_sum = 0.0
+        self._cost_comp = 0.0
+        self._edge_count = 0
+        self._edge_sum = 0.0
+        self._edge_comp = 0.0
+        self._above_settle = 0
+
+    # -- ingestion ---------------------------------------------------------
+
+    def add_cost(self, c: float) -> None:
+        self._cost_count += 1
+        if _BUILTIN_SUM_COMPENSATED:
+            self._cost_sum, self._cost_comp = _neumaier_add(self._cost_sum, self._cost_comp, float(c))
+        else:
+            self._cost_sum += float(c)
+        if round(float(c), 4) > 1.00:
+            self._above_settle += 1
+
+    def add_edge(self, e: float) -> None:
+        self._edge_count += 1
+        if _BUILTIN_SUM_COMPENSATED:
+            self._edge_sum, self._edge_comp = _neumaier_add(self._edge_sum, self._edge_comp, float(e))
+        else:
+            self._edge_sum += float(e)
+
+    # -- snapshots (O(1)) ---------------------------------------------------
+
+    def cost_count(self) -> int:
+        return self._cost_count
+
+    def edge_count(self) -> int:
+        return self._edge_count
+
+    def cost_mean(self) -> Optional[float]:
+        if not self._cost_count:
+            return None
+        if _BUILTIN_SUM_COMPENSATED:
+            return (self._cost_sum + self._cost_comp) / self._cost_count
+        return self._cost_sum / self._cost_count
+
+    def edge_mean(self) -> Optional[float]:
+        if not self._edge_count:
+            return None
+        if _BUILTIN_SUM_COMPENSATED:
+            return (self._edge_sum + self._edge_comp) / self._edge_count
+        return self._edge_sum / self._edge_count
+
+    def above_settle_count(self) -> int:
+        return self._above_settle
+
+    # -- introspection (tests assert boundedness) ---------------------------
+
+    def state_size(self) -> int:
+        """Number of retained values; constant regardless of windows consumed."""
+        return 6  # counts + sums + compensation terms
+
+
+def _neumaier_add(total: float, comp: float, x: float):
+    """One Neumaier (improved Kahan) step, matching CPython 3.12+ ``sum()``."""
+    s = total + x
+    if abs(total) >= abs(x):
+        t = (total - s) + x
+    else:
+        t = (x - s) + total
+    return s, comp + t
+
+
+_BUILTIN_SUM_COMPENSATED = sys.version_info >= (3, 12)
 
 
 def _run_backtest_simulation_worker(
@@ -1745,9 +1847,12 @@ def _run_backtest_simulation_worker(
     prog_max_dd = 0.0
     prog_peak = 0.0
     prog_pnls: list[float] = []
-    prog_pair_costs: list[float] = []
-    prog_pair_edges: list[float] = []
     prog_last_flush = time.monotonic()
+    # Issue #371: constant-size running statistics for the whole-run pair
+    # metrics (was: ever-growing prog_pair_costs / prog_pair_edges lists that
+    # every flush re-summed, O(n) per flush). The helper reproduces built-in
+    # `sum()` exactly, so every envelope value is unchanged.
+    pair_stats = _PairStatsAccumulator()
 
     def _disable_progress() -> None:
         """Stop emitting progress after a queue failure; the run continues."""
@@ -1769,14 +1874,14 @@ def _run_backtest_simulation_worker(
             "wins": prog_wins,
             "max_drawdown_cents": round(prog_max_dd, 2),
             "mean_pair_cost": (
-                round(sum(prog_pair_costs) / len(prog_pair_costs), 4)
-                if prog_pair_costs else None
+                round(pair_stats.cost_mean(), 4)
+                if pair_stats.cost_count() else None
             ),
             "mean_pair_edge_cents": (
-                round(sum(prog_pair_edges) / len(prog_pair_edges), 4)
-                if prog_pair_edges else None
+                round(pair_stats.edge_mean(), 4)
+                if pair_stats.edge_count() else None
             ),
-            "pairs_above_settle": sum(1 for c in prog_pair_costs if round(c, 4) > 1.00),
+            "pairs_above_settle": pair_stats.above_settle_count(),
             # Provisional histogram sample (scaled pnl values, completion order).
             "pnl_sample_cents": prog_pnls[-2000:],
         }
@@ -1818,9 +1923,9 @@ def _run_backtest_simulation_worker(
             elif win.exit_taken:
                 prog_exits += 1
             if win.first_pair_cost is not None:
-                prog_pair_costs.append(win.first_pair_cost)
+                pair_stats.add_cost(win.first_pair_cost)
             if win.mean_pair_edge_cents is not None:
-                prog_pair_edges.append(win.mean_pair_edge_cents)
+                pair_stats.add_edge(win.mean_pair_edge_cents)
             if win.pnl_cents > 0:
                 prog_wins += 1
             prog_pnls.append(round(win_pnl, 2))
@@ -2973,6 +3078,7 @@ async def api_backtest_stream(
             release_guards()
 
     worker_task = asyncio.create_task(_submit())
+    submitted_pool = getattr(_submit, "pool", None)  # #371: cleanup binds to this run's executor
 
     async def event_generator():
         """Stream progress envelopes, then one authoritative final event."""
@@ -3023,8 +3129,13 @@ async def api_backtest_stream(
                 # once. The stale task may later fail with a broken-pool error;
                 # its release-once call is then a no-op, so a newer run's
                 # guards are untouched. The next request rebuilds the pool.
-                _terminate_backtest_pool()
-                release_guards()
+                # #371: terminate the pool this run submitted to — a run that
+                # started later owns the global by then and must survive.
+                try:
+                    _terminate_backtest_pool(submitted_pool)
+                finally:
+                    # Guard release must survive even a failing shutdown.
+                    release_guards()
 
     return EventSourceResponse(event_generator())
 
@@ -6447,14 +6558,50 @@ function initSidebarState(){
   }catch(e){}
 }
 
+let currentActiveTab = 'cockpit';
+// Issue #371: skip the timer-driven oscillation poll while the Backtest tab is
+// active or the document is hidden — the poll competes with the backtest stream
+// for the same event loop and disk. Explicit tick() callers stay unguarded;
+// stale data triggers one immediate refresh when the operator returns.
+let btOscStale = false;
+let btOscPollInFlight = false;
+function pollTick(){
+  if (typeof document !== 'undefined' && document.hidden) { btOscStale = true; return; }
+  if (currentActiveTab === 'backtest') { btOscStale = true; return; }
+  if (btOscPollInFlight) return; // never overlap timer-driven polls
+  btOscPollInFlight = true;
+  const done = () => { btOscPollInFlight = false; };
+  try {
+    const p = tick();
+    if (p && typeof p.finally === 'function') p.finally(done); else done();
+  } catch (e) { done(); }
+}
+function btOscRefreshIfStale(){
+  if (!btOscStale) return;
+  btOscStale = false;
+  if (currentActiveTab !== 'backtest' && !(typeof document !== 'undefined' && document.hidden)) tick();
+}
 function switchTab(name){
+  const prevTab = currentActiveTab;
+  const leavingBacktest = prevTab === 'backtest' && name !== 'backtest';
+  currentActiveTab = name;
   document.querySelectorAll('.sidebar-tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   const btn = $('tab-btn-'+name);
   const cont = $('tab-'+name);
   if(btn) btn.classList.add('active');
   if(cont) cont.classList.add('active');
-  if(name==='cockpit') fetchCockpitState();
+  if(name==='cockpit'){
+    if(cockpitState) renderCockpitUI(cockpitState);
+    fetchCockpitState();
+  }
+  // #371 IIIB: leaving Backtest with skipped cockpit polls — refresh once.
+  if (leavingBacktest) { btOscStale = false; fetchCockpitState(); }
+  if(name==='marketdata'){
+    // Returning from Backtest with skipped polls: refresh once, immediately.
+    if (prevTab === 'backtest') btOscRefreshIfStale();
+    tick();
+  }
   if(name==='backtest'){
     // Opening the tab is read-only. Backtests start only after the operator
     // clicks Run Sweep (or explicitly presses Enter in a parameter field).
@@ -6464,8 +6611,11 @@ function switchTab(name){
     initBacktestIdle();
   }
   if(name==='summary') renderSummaryCharts();
-  if(name==='ticks') loadManifest();
-  if(name==='ticks') loadGoldenCard();
+  if(name==='ticks'){
+    loadManifest();
+    loadGoldenCard();
+    if(typeof runVerifyQueue === 'function') runVerifyQueue();
+  }
   if(name==='jungleking') loadJungleKing();
 }
 
@@ -6809,9 +6959,13 @@ async function rebuildStats(){
 }
 
 async function tick(){
+  // Issue #371: the tab/visibility guards live in the timer wrapper (pollTick),
+  // NOT here — explicit callers (sampling, rebuild, goal save, upload, the
+  // `await tick()` refresh paths) must always poll.
+  refreshCollectorStatus();
+  if (typeof currentActiveTab !== 'undefined' && currentActiveTab !== 'marketdata') return;
   let data; try{data=await (await fetch('/api/oscillation',{cache:'no-store'})).json();}catch(e){return;}
   const sum=data.summary||{}, per=sum.per_series||{}, live=data.live||{}, wins=data.windows||[];
-  refreshCollectorStatus();
 
   // Goal bar
   (function(){
@@ -7595,12 +7749,26 @@ function markBacktestFailed(errMsg){
   }
   const elSub = $('btElapsedSub');
   if (elSub) elSub.textContent = 'Failed';
+  // #371: red "--" + "Failed" is not enough. Show the message itself in an
+  // always-visible Backtest element so 429 / stall / dead-stream are actionable.
+  const elBanner = $('btCardPairCost'); // #371: visible metric card carries the message text
+  if (elBanner) {
+    elBanner.textContent = `✗ ${errMsg}`;
+    elBanner.style.color = 'var(--down)';
+  }
 }
 
 // Provisional live equity chart + provisional histogram during a streaming
 // run (issue #331 + IIIB feedback: every visualization reacts per window).
 let btProvisionalChart = null;
 let btProvisionalHist = null;
+// #371: render coalescing state — at most one scheduled render per interval.
+let btPendingEnvelope = null;
+let btRenderTimer = null;
+let btRenderRaf = null;
+let btLastRenderAt = 0;
+let btRenderToken = null;
+const BT_RENDER_MIN_INTERVAL_MS = 500;
 
 function btBeginProvisionalChart(){
   destroyChartInstance('chartEquity');
@@ -7690,7 +7858,10 @@ function btUpdateProvisionalHist(pnls, total){
   if (!btProvisionalHist || !Array.isArray(pnls)) return;
   if (!pnls.length) return;
   const vals = pnls.map(v => Number(v) || 0);
-  const pMin = Math.min(...vals), pMax = Math.max(...vals);
+  // #371: single-pass min/max — spreading up to 2000 values four times a
+  // second is wasteful and risks the arg-count limit.
+  let pMin = Infinity, pMax = -Infinity;
+  for (const v of vals) { if (v < pMin) pMin = v; if (v > pMax) pMax = v; }
   if (pMin === pMax) {
     btProvisionalHist.data.labels = [pMin - 0.5 + 0.5];
     btProvisionalHist.data.datasets[0].data = [vals.length];
@@ -7727,7 +7898,40 @@ function btAppendProvisionalPoints(msg){
     btProvisionalChart.data.labels.push(btProvisionalChart.data.labels.length + 1);
     ds.data.push(((p.cumulative_pnl_cents || 0) / 100).toFixed(2));
   }
-  // Metric cards react to every progress batch (same semantics as the final
+  // #371: the per-envelope step stays cheap (data push only). Card writes,
+  // histogram rebuild and chart updates are coalesced below — at most one
+  // scheduled render per ~500 ms, always with the latest envelope.
+  btPendingEnvelope = msg;
+  btScheduleProvisionalRender();
+}
+
+// #371: coalesced render scheduler. setTimeout gates the interval;
+// requestAnimationFrame aligns the paint with the frame when available.
+function btScheduleProvisionalRender(){
+  if (!btPendingEnvelope || btRenderTimer) return;
+  const wait = Math.max(0, btLastRenderAt + BT_RENDER_MIN_INTERVAL_MS - Date.now());
+  btRenderTimer = setTimeout(function(){
+    btRenderTimer = null;
+    const doRender = function(){
+      btRenderRaf = null;
+      btLastRenderAt = Date.now();
+      const msg = btPendingEnvelope;
+      btPendingEnvelope = null;
+      // Same ownership check as the stream loop: a superseded or finished run
+      // (window._btAbort replaced or cleared) must never render.
+      if (msg && btRenderToken === window._btAbort) btRenderProvisional(msg);
+    };
+    if (typeof requestAnimationFrame === 'function') { btRenderRaf = requestAnimationFrame(doRender); } else { doRender(); }
+  }, wait);
+}
+function btCancelScheduledRender(){
+  if (btRenderTimer) { clearTimeout(btRenderTimer); btRenderTimer = null; }
+  if (btRenderRaf) { if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(btRenderRaf); btRenderRaf = null; }
+  btPendingEnvelope = null;
+}
+function btRenderProvisional(msg){
+  if (!btProvisionalChart || !msg) return;
+  // Metric cards react to every rendered batch (same semantics as the final
   // overall block; entered_windows is only known at the end).
   const windowsDone = msg.windows_done || 0;
   const totalPnl = msg.provisional_total_pnl_cents || 0;
@@ -7786,6 +7990,7 @@ function btAppendProvisionalPoints(msg){
 }
 
 function btDestroyProvisionalChart(){
+  btCancelScheduledRender(); // #371: a late frame must not touch a destroyed chart
   if (btProvisionalChart) { try { btProvisionalChart.destroy(); } catch {} btProvisionalChart = null; }
   if (btProvisionalHist) { try { btProvisionalHist.destroy(); } catch {} btProvisionalHist = null; }
 }
@@ -7794,16 +7999,55 @@ function btDestroyProvisionalChart(){
 // `data:` payloads. Shared by /api/backtest/stream and
 // /api/backtest/sweep/stream — EventSource is not usable here because its
 // automatic reconnect would start duplicate runs.
-async function consumeBacktestStream(res, ctl, onEvent){
+async function consumeBacktestStream(res, ctl, onEvent, opts){
+  // #371: opts is opt-in. The sweep caller (no opts) keeps its exact legacy
+  // behaviour: read to EOF, ignore terminal events, no watchdog, silent ends.
+  opts = opts || {};
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let sawTerminal = false;
+  let lastActivity = Date.now();
+  const inactivityTimeoutMs = opts.inactivityTimeoutMs || 0;
+  const readWithWatchdog = function(){
+    if (!inactivityTimeoutMs) return reader.read();
+    return Promise.race([
+      reader.read(),
+      new Promise(function(resolve){
+        setTimeout(function(){
+          if (Date.now() - lastActivity >= inactivityTimeoutMs) resolve({stalled: true});
+          else resolve(null); // not stalled yet — loop and re-race
+        }, inactivityTimeoutMs);
+      }),
+    ]).then(function(r){
+      if (r === null) return readWithWatchdog();
+      return r;
+    });
+  };
+  const finish = async function(){
+    try { await reader.cancel(); } catch {}
+  };
   while (true) {
-    const {done, value} = await reader.read();
+    const {done, value, stalled} = await readWithWatchdog();
     // The sweep passes its own controller (window._btSweepAbort), not the
     // regular backtest one — abort only when NEITHER run owns this reader.
     if (ctl.signal.aborted || (window._btAbort !== ctl && window._btSweepAbort !== ctl)) { try { await reader.cancel(); } catch {} return; }
-    if (done) break;
+    if (stalled) {
+      // No bytes within the timeout: the connection is wedged. Cancel, abort
+      // (the server then tears down the run's pool and releases the guards)
+      // and fail visibly. Well above any healthy heartbeat interval.
+      try { await reader.cancel(); } catch {}
+      try { ctl.abort(new Error('stalled')); } catch {}
+      if (opts.onStall) opts.onStall();
+      return;
+    }
+    if (done) {
+      if (opts.failOnEofWithoutTerminal && !sawTerminal) {
+        if (opts.onEof) opts.onEof();
+      }
+      return;
+    }
+    lastActivity = Date.now();
     buf += decoder.decode(value, {stream: true});
     // Minimal SSE parser: split on sse-starlette's CRLF separators and blank
     // lines. Blocks end either at "\r\n\r\n" (the library's default separator)
@@ -7816,10 +8060,27 @@ async function consumeBacktestStream(res, ctl, onEvent){
       const block = buf.slice(0, idx);
       buf = buf.slice(idx + sepLen);
       for (const line of block.split(/\r\n|\n/)) {
+        // #371: SSE comment lines (`: ping`) are heartbeats, not payloads.
+        if (line.startsWith(':')) continue;
         if (line.startsWith('data:')) {
           const payload = line.slice(5).trim();
           if (payload) {
-            try { onEvent(JSON.parse(payload)); } catch (e) { console.error('bad SSE payload', e); }
+            let ev = null;
+            try { ev = JSON.parse(payload); } catch (e) { console.error('bad SSE payload', e); continue; }
+            // Parse errors and callback errors stay separate (#371): a render
+            // bug while handling `final` must be visible, not swallowed as a
+            // malformed payload.
+            try {
+              onEvent(ev);
+              if (opts.returnOnTerminal && ev && (ev.type === 'final' || ev.type === 'error')) {
+                sawTerminal = true;
+                await finish();
+                return;
+              }
+            } catch (e) {
+              if (opts.onCallbackError) { opts.onCallbackError(ev, e); return; }
+              console.error('bad SSE payload', e);
+            }
           }
         }
       }
@@ -7831,6 +8092,7 @@ async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
   window._btAbort = ctl;
+  btRenderToken = ctl; // #371: ownership token for coalesced renders
   window._btRunning = true;
   setBacktestLoadingState(true);
   startBtTimer();
@@ -7850,11 +8112,22 @@ async function runBacktest(fileOverride){
     // fresh request can 429 briefly. Retry a bounded few times with a short
     // delay before surfacing the 429.
     let res = null;
+    let lastStatus = 0, lastErrorText = '';
     for (let attempt = 0; attempt < 4; attempt++) {
       res = await fetch(url, {signal: ctl.signal});
       if (window._btAbort !== ctl) return; // superseded — never render stale results
       if (res.status !== 429 || window._btAbort === null) break;
-      await new Promise(r => setTimeout(r, 300));
+      lastStatus = res.status;
+      try { const j = await res.json(); if (j && j.error) lastErrorText = j.error; } catch {}
+      if (attempt < 3) await new Promise(r => setTimeout(r, 300)); // #371: no sleep after the last attempt
+    }
+    if (lastStatus === 429) {
+      // #371: retry-then-silence was the "stuck, nothing happens" symptom.
+      // Surface an actionable message instead of giving up quietly.
+      if (window._btAbort === ctl) {
+        markBacktestFailed(lastErrorText || 'Another backtest or sweep is already running on the server. Wait for it to finish, then press Run again.');
+      }
+      return;
     }
 
     // Validation and busy responses arrive as JSON (200/4xx), not SSE —
@@ -7882,6 +8155,15 @@ async function runBacktest(fileOverride){
       } else if (ev.type === 'error') {
         markBacktestFailed(ev.error || 'stream error');
       }
+    }, {
+      // #371 opt-in: terminal events end the read, EOF without a terminal
+      // event fails visibly, silent connections trip the inactivity watchdog.
+      returnOnTerminal: true,
+      failOnEofWithoutTerminal: 'Stream ended without a result',
+      inactivityTimeoutMs: 15000,
+      onStall: () => { if (window._btAbort === ctl) markBacktestFailed('Backtest stream stalled — no data received. The run may have been lost; press Run to retry.'); },
+      onEof: () => { if (window._btAbort === ctl) markBacktestFailed('Stream ended without a result'); },
+      onCallbackError: (ev, err) => { if (window._btAbort === ctl) markBacktestFailed('Render error while handling ' + (ev && ev.type) + ': ' + (err && err.message ? err.message : err)); },
     });
   } catch(err) {
     if (err && err.name === 'AbortError') return;
@@ -7890,6 +8172,7 @@ async function runBacktest(fileOverride){
     // Only the current run may tear down the shared provisional chart — a
     // superseded run's finally must not destroy the newer run's live curve.
     if (window._btAbort === ctl) {
+      btRenderToken = null; // #371: cancel coalesced renders with the run
       btDestroyProvisionalChart();
       window._btAbort = null;
       window._btRunning = false;
@@ -7999,14 +8282,6 @@ function renderBacktestTradesPage() {
       const marketLabel = canonicalMarketName(t.series || t.label || '');
       const pnlUsd = fmtUsd(t.pnl_cents, true);
 
-      let invested = (mergesCount * pairUnitCost * size)
-        + (stopsCount * stopEntryPrice * size)
-        + (isSingleLegSettled ? settleEntryPrice * size : 0);
-      if (invested <= 0) invested = size * 1.0;
-      const pnlPct = invested > 0 ? ((t.pnl_cents / 100) / invested * 100) : 0;
-      const pnlPctStr = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%';
-      const pnlDisplay = `<span style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd} (${pnlPctStr})</span>`;
-
       const mergesCount = t.pairs_count != null ? t.pairs_count : (t.both_filled ? 1 : 0);
       const stopsCount = t.stops_count != null ? t.stops_count : (t.exit_triggered ? 1 : 0);
       const isDeadZone = t.is_dead_zone ? 1 : ((t.exit_reason && t.exit_reason.includes('dead_zone')) ? 1 : 0);
@@ -8015,6 +8290,14 @@ function renderBacktestTradesPage() {
       const pairUnitCost = t.first_pair_cost != null ? t.first_pair_cost : ((t.entry_up || 0.48) + (t.entry_down || 0.48) || 0.96);
       const stopEntryPrice = (t.exit_side === 'down' ? (t.entry_down || t.entry_up) : (t.entry_up || t.entry_down)) || 0.50;
       const settleEntryPrice = (t.up_filled ? t.entry_up : t.entry_down) || 0.50;
+
+      let invested = (mergesCount * pairUnitCost * size)
+        + (stopsCount * stopEntryPrice * size)
+        + (isSingleLegSettled ? settleEntryPrice * size : 0);
+      if (invested <= 0) invested = size * 1.0;
+      const pnlPct = invested > 0 ? ((t.pnl_cents / 100) / invested * 100) : 0;
+      const pnlPctStr = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%';
+      const pnlDisplay = `<span style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd} (${pnlPctStr})</span>`;
 
       let resBadge = '<span style="color:var(--dim)">—</span>';
       if (t.settlement_mid != null) {
@@ -10281,6 +10564,12 @@ function renderQueuePanel(q) {
 }
 
 async function pollCockpit() {
+  // #371 IIIB: the cockpit state fetch + full render (~80-300ms main-thread)
+  // ran every 5s on ALL tabs, visibly freezing the Backtest tab mid-run.
+  // Guard it like the oscillation poll: skip on Backtest / hidden, refresh once
+  // on return. The SSE live stream keeps the cockpit fresh when it is visible.
+  if (typeof document !== 'undefined' && document.hidden) { btOscStale = true; return; }
+  if (typeof currentActiveTab !== 'undefined' && currentActiveTab === 'backtest') { btOscStale = true; return; }
   await fetchCockpitState();
 }
 
@@ -12072,7 +12361,13 @@ fetchCockpitState();
 initLiveCockpitStream();
 ensureCockpitPolling();
 tick();
-setInterval(tick, 3000);
+setInterval(pollTick, 3000); // #371: guarded wrapper, not bare tick
+// #371: returning to a visible document outside Backtest — refresh stale data once.
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden) btOscRefreshIfStale();
+  });
+}
 loadManifest();   // tick files tab: load file list + run integrity verify on every dashboard load
 initBacktestIdle(); // IIIB: backtest tab opens pre-drawn (sweep card idle + chart axes)
 </script></body></html>
