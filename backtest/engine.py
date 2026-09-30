@@ -688,6 +688,11 @@ class WindowResult:
     entered: bool = False
     pairs_count: int = 0
     stops_count: int = 0
+    first_pair_cost: float | None = None
+    mean_pair_edge_cents: float | None = None
+    worst_pair_edge_cents: float | None = None
+    pair_pnl_cents: float = 0.0
+
 
 
 # Issue #170: these used to be local copies that disagreed with the collector
@@ -961,6 +966,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
     fees_cents = 0.0
     err = ""
     window_entered = False
+    first_pair_cost: float | None = None
+    pair_pnl_cents = 0.0
+    pair_edges: list[float] = []
+
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
     naked_since_elapsed: float | None = None
@@ -1297,11 +1306,19 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
         if filled_up and filled_down:
             pairs_count += 1
             pair_captured = True
-            pnl_cents += (1.00 - (resting_up + resting_down)) * 100.0
-            # merge_gas_usd is a per-transaction cost; amortize over the
-            # actual shares in the pair so pnl_cents stays per-share.
-            pnl_cents -= (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
+            cost = round(resting_up + resting_down, 4)
+            if first_pair_cost is None:
+                first_pair_cost = cost
+            edge_cents = book_math.realized_pair_edge_cents(
+                resting_up, resting_down, params.merge_gas_usd, params.quote_shares
+            )
+            if edge_cents is None:
+                edge_cents = (1.00 - (resting_up + resting_down)) * 100.0 - (params.merge_gas_usd * 100.0) / max(1, params.quote_shares)
+            pair_pnl_cents += edge_cents
+            pair_edges.append(edge_cents)
+            pnl_cents += edge_cents
             orders_live = False
+
             resting_up = None
             resting_down = None
             filled_up = False
@@ -1455,6 +1472,9 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                     settlement_mid = mark
                     fees_cents += _taker_fee(mark, params.taker_fee_rate) * 100.0
 
+    mean_pair_edge_cents = round(sum(pair_edges) / len(pair_edges), 4) if pair_edges else None
+    worst_pair_edge_cents = round(min(pair_edges), 4) if pair_edges else None
+
     return WindowResult(
         cid=cid, series=series, slug=slug, duration=duration,
         n_snaps=len(window_snaps),
@@ -1483,7 +1503,13 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
         entered=window_entered,
         pairs_count=pairs_count,
         stops_count=stops_count,
+        first_pair_cost=first_pair_cost,
+        mean_pair_edge_cents=mean_pair_edge_cents,
+        worst_pair_edge_cents=worst_pair_edge_cents,
+        pair_pnl_cents=round(pair_pnl_cents, 4),
     )
+
+
 
 
 def _new_group_acc() -> dict:
@@ -1494,6 +1520,7 @@ def _new_group_acc() -> dict:
         "total_pnl_cents": 0.0, "total_fees_cents": 0.0,
         "wins": 0, "peak_pnl": 0.0, "cum_pnl": 0.0, "max_dd": 0.0,
         "reentry_count": 0, "reentry_pnl_cents": 0.0,
+        "first_pair_costs": [], "mean_pair_edges": [], "total_pair_pnl_cents": 0.0,
     }
 
 
@@ -1510,6 +1537,12 @@ def _accumulate_group(a: dict, w: WindowResult) -> None:
     a["pairs_count"] += w.pairs_count
     a.setdefault("stops_count", 0)
     a["stops_count"] += w.stops_count
+    if w.first_pair_cost is not None:
+        a.setdefault("first_pair_costs", []).append(w.first_pair_cost)
+    if w.mean_pair_edge_cents is not None:
+        a.setdefault("mean_pair_edges", []).append(w.mean_pair_edge_cents)
+    a.setdefault("total_pair_pnl_cents", 0.0)
+    a["total_pair_pnl_cents"] += w.pair_pnl_cents
     if w.filled_up and not w.filled_down:
         a["filled_up_only"] += 1
     if w.filled_down and not w.filled_up:
@@ -1613,6 +1646,12 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "exit_reason": exit_info,
             "start_delay_sec": w.start_delay_sec,
             "is_partial": w.is_partial,
+            "first_pair_cost": w.first_pair_cost,
+            "mean_pair_edge_cents": w.mean_pair_edge_cents,
+            "worst_pair_edge_cents": w.worst_pair_edge_cents,
+            "pair_pnl_cents": round(w.pair_pnl_cents, 2),
+            "pairs_count": w.pairs_count,
+            "stops_count": w.stops_count,
         })
 
         # Per series tracking
@@ -1623,12 +1662,16 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
     def _finalize(d: dict) -> dict:
         """Compute aggregate summary ratios and rates from raw metric counts."""
         n = d.get("windows", 0)
+        ent = d.get("entered", 0)
+        costs = d.get("first_pair_costs", [])
+        edges = d.get("mean_pair_edges", [])
         return {
             "windows": n,
-            "entered": d.get("entered", 0),
-            "entered_windows": d.get("entered", 0),
-            "entered_rate": round(d.get("entered", 0) / n, 4) if n else 0.0,
+            "entered": ent,
+            "entered_windows": ent,
+            "entered_rate": round(ent / n, 4) if n else 0.0,
             "pair_rate": round(d.get("pair", 0) / n, 4) if n else 0.0,
+            "pair_rate_entered": round(d.get("pair", 0) / ent, 4) if ent else 0.0,
             "exit_rate": round(d.get("exit", 0) / n, 4) if n else 0.0,
             "filled_up_only": d.get("filled_up_only", 0),
             "filled_down_only": d.get("filled_down_only", 0),
@@ -1644,7 +1687,16 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "reentry_pnl_cents": round(d.get("reentry_pnl_cents", 0.0), 4),
             "pairs_count": d.get("pairs_count", 0),
             "stops_count": d.get("stops_count", 0),
+            "mean_pair_cost": round(sum(costs) / len(costs), 4) if costs else None,
+            "mean_pair_edge_cents": round(sum(edges) / len(edges), 4) if edges else None,
+            "total_pair_pnl_cents": round(d.get("total_pair_pnl_cents", 0.0), 4),
         }
+
+    all_first_pair_costs = []
+    all_mean_pair_edges = []
+    for s in per_series.values():
+        all_first_pair_costs.extend(s.get("first_pair_costs", []))
+        all_mean_pair_edges.extend(s.get("mean_pair_edges", []))
 
     overall = {
         "windows": sum(s["windows"] for s in per_series.values()),
@@ -1660,7 +1712,11 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
         "max_dd": max_dd,
         "reentry_count": sum(s["reentry_count"] for s in per_series.values()),
         "reentry_pnl_cents": sum(s["reentry_pnl_cents"] for s in per_series.values()),
+        "first_pair_costs": all_first_pair_costs,
+        "mean_pair_edges": all_mean_pair_edges,
+        "total_pair_pnl_cents": sum(s.get("total_pair_pnl_cents", 0.0) for s in per_series.values()),
     }
+
     return {
         "params_hash": params.params_hash(),
         "n_snaps": n_snaps,
