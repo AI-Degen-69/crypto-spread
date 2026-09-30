@@ -2955,6 +2955,16 @@ def test_backtest_stream_frontend_contract():
     assert "/api/backtest?${btControlQuery(v)}" not in html
 
 
+def test_sweep_stream_reader_honors_sweep_controller():
+    """Dead Run Sweep Visual: the shared SSE reader must not cancel a sweep
+    run by comparing its controller against the regular backtest guard only."""
+    html = osc_dash.FULL_APP_HTML
+    start = html.index("async function consumeBacktestStream(")
+    body = html[start:start + 1200]
+    assert "window._btSweepAbort" in body
+    assert "window._btAbort !== ctl && window._btSweepAbort !== ctl" in body
+
+
 def test_worker_progress_message_carries_card_counters_and_hist_sample(tmp_path, monkeypatch):
     """IIIB feedback: progress messages carry pairs/exits/wins/max-drawdown and
     a provisional pnl sample, so every dashboard visualization can react."""

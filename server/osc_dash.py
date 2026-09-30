@@ -7668,15 +7668,18 @@ function btDestroyProvisionalChart(){
 }
 
 // Minimal SSE parser over a fetch body reader: split on blank lines, take the
-// `data:` payloads. Used only for /api/backtest/stream — EventSource is not
-// usable here because its automatic reconnect would start duplicate runs.
+// `data:` payloads. Shared by /api/backtest/stream and
+// /api/backtest/sweep/stream — EventSource is not usable here because its
+// automatic reconnect would start duplicate runs.
 async function consumeBacktestStream(res, ctl, onEvent){
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   while (true) {
     const {done, value} = await reader.read();
-    if (window._btAbort !== ctl) { try { await reader.cancel(); } catch {} return; }
+    // The sweep passes its own controller (window._btSweepAbort), not the
+    // regular backtest one — abort only when NEITHER run owns this reader.
+    if (ctl.signal.aborted || (window._btAbort !== ctl && window._btSweepAbort !== ctl)) { try { await reader.cancel(); } catch {} return; }
     if (done) break;
     buf += decoder.decode(value, {stream: true});
     // Minimal SSE parser: split on sse-starlette's CRLF separators and blank
