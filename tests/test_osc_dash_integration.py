@@ -2961,8 +2961,9 @@ def test_sweep_stream_reader_honors_sweep_controller():
     html = osc_dash.FULL_APP_HTML
     start = html.index("async function consumeBacktestStream(")
     body = html[start:start + 1200]
-    assert "window._btSweepAbort" in body
-    assert "window._btAbort !== ctl && window._btSweepAbort !== ctl" in body
+    # Full guard line: polarity (&&, not ||) and both disjuncts matter — a
+    # substring check on the tokens alone would pass an inverted guard.
+    assert "if (ctl.signal.aborted || (window._btAbort !== ctl && window._btSweepAbort !== ctl))" in body
 
 
 def test_worker_progress_message_carries_card_counters_and_hist_sample(tmp_path, monkeypatch):
