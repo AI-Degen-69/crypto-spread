@@ -566,10 +566,6 @@ class CLOBMarketWSClient:
             if bb is not None or ba is not None:
                 self.apply_best_bid_ask(token_id, bb, ba)
 
-            bb, ba = _opt("best_bid"), _opt("best_ask")
-            if bb is not None or ba is not None:
-                self.apply_best_bid_ask(token_id, bb, ba)
-
     def apply_price_change(self, token_id: str, side: str, price: float, size: float,
                            *, declared_best_bid: Optional[float] = None,
                            declared_best_ask: Optional[float] = None) -> None:
