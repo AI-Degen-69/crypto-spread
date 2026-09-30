@@ -1,50 +1,27 @@
-Branch: i364/expose-pair-cost-merge-edge | Issue: #364
+Branch: i365/make-backtest-results-self-explanatory | Issue: #365
+# Plan: Dashboard: Make backtest results self-explanatory & Master-Detail Execution Log
 
-# Execution Plan — Issue #364: Expose Pair Cost and Merge Edge
+## Task 1: KPI Cards Parity & Honest Wording [Design/UI] [Review mode: unit/integration]
+- [x] In `server/osc_dash.py`:
+  - [x] Remove all occurrences of "for profit" from backtest tooltips and headers.
+  - [x] Correct Pair Capture Rate, Win Rate, and Max Drawdown tooltips and sub-labels ("Peak to trough from $0.00 start").
+  - [x] Add or update the Pair Cost KPI card showing mean pair cost and merges above $1.00.
+  - [x] Unify card rendering between `renderBacktestResult` and `btAppendProvisionalPoints`.
 
-## CodeRabbit Plan Intake
-- Adopted: Standard 4-task vertical decomposition aligned with issue AC.
-- Rejected: N/A (no CodeRabbit response plan comment present on issue).
-- Unverified: N/A.
+## Task 2: Master-Detail Executed Windows Log Table [Design/UI] [Review mode: browser preview + unit/integration]
+- [x] In `server/osc_dash.py` (`renderBacktestTradesPage`):
+  - [x] Refactor table headers and rows to Master-Detail structure:
+    - Master Row: Market, Total P&L ($ and % on capital invested), Merges (`pairs_count`), Stop Loss (`stops_count`), Dead Zone indicator, Resolution.
+    - Click-to-expand disclosure button and state persistence.
+  - [x] Implement expanded Child Table:
+    - Clean English, strict tabular layout without prose.
+    - Visual pair grouping (two consecutive rows without middle border for pairs).
+    - Columns: Trade #, Side (UP / DOWN / EXIT), Time (Local time + YouTube-like elapsed mm:ss), Fill Price, Pair Cost (Edge), Duration in trade, Status (MERGED / STOP_LOSS / DEAD_ZONE), Trade P&L (USD + %).
+    - Tooltips on hover for detailed explanations.
 
-## Task Breakdown
-
-### Task 1: Add Shared Realized Pair Edge Math Helper
-- **Task ID:** T1
-- **Size:** S
-- **Domain Tag:** [Backend/Logic]
-- **Target Files:** `strategy/book_math.py`, `tests/test_backtest_engine.py`
-- **Description:** Implement `realized_pair_edge_cents(entry_up, entry_down, merge_gas_usd=0.0, quote_shares=50)` in `strategy/book_math.py`. Add unit tests asserting it returns exact realized cents per share including amortized gas.
-- **Assigned Helper Skill:** `test-driven-development`
-- **Depends on:** None
-- **Verification:** `python -m pytest tests/test_backtest_engine.py -k "test_realized_pair_edge" -q`
-
-### Task 2: Update Engine WindowResult & Replay Aggregation
-- **Task ID:** T2
-- **Size:** M
-- **Domain Tag:** [Backend/Logic]
-- **Target Files:** `backtest/engine.py`
-- **Description:** Update `WindowResult` to store `first_pair_cost`, `mean_pair_edge_cents`, `worst_pair_edge_cents`, and `pair_pnl_cents`. Use `realized_pair_edge_cents` in `_simulate_window` pair completion block. Expose new fields in `trades_sample` and aggregate summaries (`overall`, `per_series`, `per_duration`), adding `pair_rate_entered`, `mean_pair_cost`, `mean_pair_edge_cents`, `total_pair_pnl_cents`.
-- **Assigned Helper Skill:** `incremental-implementation`
-- **Depends on:** T1
-- **Verification:** `python -m pytest tests/test_backtest_engine.py -q`
-
-### Task 3: Mirror Telemetry in Dashboard Stream Summaries
-- **Task ID:** T3
-- **Size:** M
-- **Domain Tag:** [Backend/Logic]
-- **Target Files:** `server/osc_dash.py`
-- **Description:** Update `/api/backtest` summary building and `trades_sample` rows in `server/osc_dash.py` to calculate and return identical pair-economics fields and keys as `backtest/engine.py`.
-- **Assigned Helper Skill:** `incremental-implementation`
-- **Depends on:** T2
-- **Verification:** `python -m pytest tests/test_osc_dash_integration.py -k "backtest" -q`
-
-### Task 4: Comprehensive Parity & Reconciliation Tests
-- **Task ID:** T4
-- **Size:** S
-- **Domain Tag:** [Debug/Verification]
-- **Target Files:** `tests/test_backtest_engine.py`
-- **Description:** Add unit tests validating: 1) Engine P&L equality on single-merge windows, 2) Row P&L reconcilability on multi-event windows, 3) Strict field and aggregate parity between `backtest/engine.py` and `server/osc_dash.py`.
-- **Assigned Helper Skill:** `test-driven-development`
-- **Depends on:** T3
-- **Verification:** `python -m pytest tests/test_backtest_engine.py -q`
+## Task 3: Integration Tests & Verification [Test] [Review mode: targeted test runner]
+- [x] In `tests/test_osc_dash_integration.py`:
+  - [x] Update literal string assertions to match corrected copy.
+  - [x] Assert zero occurrences of "for profit" in backtest sections.
+  - [x] Verify master-detail markup structure and card parity.
+  - [x] Run targeted test suite: `python -m pytest tests/test_osc_dash_integration.py -q`.

@@ -1745,6 +1745,8 @@ def _run_backtest_simulation_worker(
     prog_max_dd = 0.0
     prog_peak = 0.0
     prog_pnls: list[float] = []
+    prog_pair_costs: list[float] = []
+    prog_pair_edges: list[float] = []
     prog_last_flush = time.monotonic()
 
     def _disable_progress() -> None:
@@ -1766,6 +1768,15 @@ def _run_backtest_simulation_worker(
             "exits": prog_exits,
             "wins": prog_wins,
             "max_drawdown_cents": round(prog_max_dd, 2),
+            "mean_pair_cost": (
+                round(sum(prog_pair_costs) / len(prog_pair_costs), 4)
+                if prog_pair_costs else None
+            ),
+            "mean_pair_edge_cents": (
+                round(sum(prog_pair_edges) / len(prog_pair_edges), 4)
+                if prog_pair_edges else None
+            ),
+            "pairs_above_settle": sum(1 for c in prog_pair_costs if round(c, 4) > 1.00),
             # Provisional histogram sample (scaled pnl values, completion order).
             "pnl_sample_cents": prog_pnls[-2000:],
         }
@@ -1806,6 +1817,10 @@ def _run_backtest_simulation_worker(
                 prog_pairs += 1
             elif win.exit_taken:
                 prog_exits += 1
+            if win.first_pair_cost is not None:
+                prog_pair_costs.append(win.first_pair_cost)
+            if win.mean_pair_edge_cents is not None:
+                prog_pair_edges.append(win.mean_pair_edge_cents)
             if win.pnl_cents > 0:
                 prog_wins += 1
             prog_pnls.append(round(win_pnl, 2))
@@ -1987,6 +2002,9 @@ def _run_backtest_simulation_worker(
             "exit_price": w.exit_price,
             "exit_side": w.exit_side,
             "settlement_mid": w.settlement_mid,
+            "settled_unmarked": w.settled_unmarked,
+            "settle_source": w.settle_source,
+            "is_dead_zone": bool(w.settle_source or w.settled_unmarked),
             "pnl_cents": round(win_pnl, 2),
             "exit_reason": exit_info,
             "start_delay_sec": w.start_delay_sec,
@@ -2008,6 +2026,7 @@ def _run_backtest_simulation_worker(
     all_first_pair_costs = [w.first_pair_cost for w in per_window if w.first_pair_cost is not None]
     all_mean_pair_edges = [w.mean_pair_edge_cents for w in per_window if w.mean_pair_edge_cents is not None]
     total_pair_pnl = sum(w.pair_pnl_cents * size for w in per_window)
+    pairs_above_settle = sum(1 for c in all_first_pair_costs if round(c, 4) > 1.00)
 
     overall = {
         "windows": total_windows,
@@ -2042,6 +2061,7 @@ def _run_backtest_simulation_worker(
         "mean_pair_edge_cents": round(sum(all_mean_pair_edges) / len(all_mean_pair_edges), 4)
         if all_mean_pair_edges
         else None,
+        "pairs_above_settle": pairs_above_settle,
         "total_pair_pnl_cents": round(total_pair_pnl, 2),
     }
 
@@ -5035,10 +5055,11 @@ textarea:focus-visible,
 
       <div class="kpi" id="btKpiRow">
         <div class="box" title="Net cumulative P&L across all executed windows"><div class="lbl">Total P&L</div><div class="val" id="btTotalPnl" style="color:var(--up)">+$0.00</div><div class="sub" id="btAvgPnl">+$0.00 / window</div></div>
-        <div class="box" title="Proportion of windows where both legs filled and merged for profit"><div class="lbl">Pair Capture Rate ℹ️</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 / 0 pairs</div></div>
+        <div class="box" title="Proportion of windows where both legs were captured and merged on CTF"><div class="lbl">Pair Capture Rate ℹ️</div><div class="val" id="btPairRate">0.0%</div><div class="sub" id="btPairsCount">0 / 0 pairs</div></div>
+        <div class="box" id="btCardPairCost" title="Mean pair cost (entry_up + entry_down) and edge vs $1.00 settlement"><div class="lbl">Pair Cost vs $1.00 Settle ℹ️</div><div class="val" id="btMeanPairCost">--</div><div class="sub" id="btPairCostSub">0 pairs captured</div></div>
         <div class="box" title="Proportion of windows where safety stop exit was triggered on adverse drift"><div class="lbl">Exit Stop Rate ℹ️</div><div class="val" id="btExitRate" style="color:var(--down)">0.0%</div><div class="sub" id="btExitsCount">0 exits</div></div>
-        <div class="box" title="Maximum peak-to-trough equity drawdown"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub">Peak to trough</div></div>
-        <div class="box" title="Proportion of windows with net positive P&L (merged pairs + profitable exits)"><div class="lbl">Win Rate ℹ️</div><div class="val" id="btWinRate">0.0%</div><div class="sub" id="btWinsCount">0 / 0 profitable</div></div>
+        <div class="box" title="Maximum peak-to-trough equity drawdown from $0.00 start"><div class="lbl">Max Drawdown</div><div class="val" id="btMaxDd" style="color:var(--gold)">-$0.00</div><div class="sub" id="btMaxDdSub">Peak to trough from $0.00 start</div></div>
+        <div class="box" title="Proportion of windows with net positive P&L after all window events"><div class="lbl">Win Rate ℹ️</div><div class="val" id="btWinRate">0.0%</div><div class="sub" id="btWinsCount">0 / 0 profitable</div></div>
         <div class="box" title="Total wall-clock duration of the last backtest sweep (measured by Run Sweep)"><div class="lbl">Elapsed Time ℹ️</div><div class="val" id="btElapsedTime" style="color:var(--cyan)">--</div><div class="sub" id="btElapsedSub">Sweep duration</div></div>
       </div>
       <style>.bt-charts-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.bt-charts-row>div{margin-top:0 !important}@media (max-width:900px){.bt-charts-row{grid-template-columns:1fr}}</style>
@@ -7235,13 +7256,42 @@ function renderBacktestResult(data, fileVal){
   $('btAvgPnl').textContent = fmtUsd(ov.avg_pnl_cents||0, true) + ' / window';
   $('btPairRate').textContent = ((ov.pair_rate||0)*100).toFixed(1) + '%';
   $('btPairsCount').textContent = `${ov.pairs||0} / ${ov.windows||0} pairs${enteredTxt}`;
+  if ($('btMeanPairCost')) {
+    if (ov.mean_pair_cost != null) {
+      $('btMeanPairCost').textContent = '$' + Number(ov.mean_pair_cost).toFixed(3);
+      $('btMeanPairCost').style.color = ov.mean_pair_cost <= 1.00 ? 'var(--up)' : 'var(--down)';
+    } else {
+      $('btMeanPairCost').textContent = '--';
+      $('btMeanPairCost').style.color = 'var(--dim)';
+    }
+  }
+  if ($('btPairCostSub')) {
+    if (ov.pairs_above_settle > 0) {
+      $('btPairCostSub').textContent = `${ov.pairs_above_settle} above $1.00 settle`;
+      $('btPairCostSub').style.color = 'var(--down)';
+    } else if (ov.mean_pair_edge_cents != null) {
+      const edge = Number(ov.mean_pair_edge_cents);
+      $('btPairCostSub').textContent = `Avg edge: ${(edge >= 0 ? '+' : '') + edge.toFixed(1)}¢/pr`;
+      $('btPairCostSub').style.color = 'var(--dim)';
+    } else if (ov.pairs > 0) {
+      $('btPairCostSub').textContent = `${ov.pairs} pairs captured`;
+      $('btPairCostSub').style.color = 'var(--dim)';
+    } else {
+      $('btPairCostSub').textContent = '0 pairs captured';
+      $('btPairCostSub').style.color = 'var(--dim)';
+    }
+  }
   $('btExitRate').textContent = ((ov.exit_rate||0)*100).toFixed(1) + '%';
   $('btExitsCount').textContent = `${ov.exits||0} exits`;
   $('btMaxDd').textContent = '-' + fmtPrice((ov.max_drawdown_cents||0)/100);
+  if ($('btMaxDdSub')) {
+    $('btMaxDdSub').textContent = 'Peak to trough from $0.00 start';
+  }
   $('btWinRate').textContent = ((ov.win_rate||0)*100).toFixed(1) + '%';
   if ($('btWinsCount')) {
     $('btWinsCount').textContent = `${ov.wins||0} / ${ov.windows||0} profitable`;
   }
+  window.btActiveSize = (data.params && data.params.size) ? data.params.size : 5;
 
 // Equity Curve Chart
   const eqData = data.equity_curve || [];
@@ -7500,7 +7550,7 @@ if ($('chartPnlHist')) {
 let stbl = '<table class="tbl"><thead><tr>'
   + '<th>Series</th>'
   + '<th>Windows</th>'
-  + '<th title="Both legs filled & merged for profit. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
+  + '<th title="Both legs filled and merged on CTF. Note: Oscillating windows may not fill limit orders if price drifted rapidly before quotes rested or opposite leg never touched.">Pair Captured ℹ️</th>'
   + '<th title="One leg filled then adverse drift triggered safety stop exit before opposite leg filled.">Exits ℹ️</th>'
   + '<th>Total P&L ($)</th>'
   + '<th>Avg / Window ($)</th>'
@@ -7688,9 +7738,37 @@ function btAppendProvisionalPoints(msg){
   $('btAvgPnl').textContent = fmtUsd(totalPnl / den, true) + ' / window';
   $('btPairRate').textContent = ((pairs / den) * 100).toFixed(1) + '%';
   $('btPairsCount').textContent = `${pairs} / ${windowsDone} pairs`;
+  if ($('btMeanPairCost')) {
+    if (msg.mean_pair_cost != null) {
+      $('btMeanPairCost').textContent = '$' + Number(msg.mean_pair_cost).toFixed(3);
+      $('btMeanPairCost').style.color = msg.mean_pair_cost <= 1.00 ? 'var(--up)' : 'var(--down)';
+    } else {
+      $('btMeanPairCost').textContent = '--';
+      $('btMeanPairCost').style.color = 'var(--dim)';
+    }
+  }
+  if ($('btPairCostSub')) {
+    if (msg.pairs_above_settle > 0) {
+      $('btPairCostSub').textContent = `${msg.pairs_above_settle} above $1.00 settle`;
+      $('btPairCostSub').style.color = 'var(--down)';
+    } else if (msg.mean_pair_edge_cents != null) {
+      const edge = Number(msg.mean_pair_edge_cents);
+      $('btPairCostSub').textContent = `Avg edge: ${(edge >= 0 ? '+' : '') + edge.toFixed(1)}¢/pr`;
+      $('btPairCostSub').style.color = 'var(--dim)';
+    } else if (pairs > 0) {
+      $('btPairCostSub').textContent = `${pairs} pairs captured`;
+      $('btPairCostSub').style.color = 'var(--dim)';
+    } else {
+      $('btPairCostSub').textContent = '0 pairs captured';
+      $('btPairCostSub').style.color = 'var(--dim)';
+    }
+  }
   $('btExitRate').textContent = ((exits / den) * 100).toFixed(1) + '%';
   $('btExitsCount').textContent = `${exits} exits`;
   $('btMaxDd').textContent = '-' + fmtPrice((msg.max_drawdown_cents || 0) / 100);
+  if ($('btMaxDdSub')) {
+    $('btMaxDdSub').textContent = 'Peak to trough from $0.00 start';
+  }
   $('btWinRate').textContent = ((wins / den) * 100).toFixed(1) + '%';
   if ($('btWinsCount')) {
     $('btWinsCount').textContent = `${wins} / ${windowsDone} profitable`;
@@ -7826,6 +7904,19 @@ async function runBacktest(fileOverride){
 }
 
 // Client-side interactive pagination & filtering for Executed Windows Log
+window.btExpandedSlugs = window.btExpandedSlugs || new Set();
+
+function toggleBtLogDetail(slug, ev) {
+  if (ev) ev.stopPropagation();
+  if (!window.btExpandedSlugs) window.btExpandedSlugs = new Set();
+  if (window.btExpandedSlugs.has(slug)) {
+    window.btExpandedSlugs.delete(slug);
+  } else {
+    window.btExpandedSlugs.add(slug);
+  }
+  renderBacktestTradesPage();
+}
+
 function onBtLogFilterChange() {
   window.btLogCurrentPage = 1;
   renderBacktestTradesPage();
@@ -7887,51 +7978,203 @@ function renderBacktestTradesPage() {
   if ($('btLogBtnPrev')) $('btLogBtnPrev').disabled = (page <= 1);
   if ($('btLogBtnNext')) $('btLogBtnNext').disabled = (page >= maxPage || total === 0);
 
-  let ttbl = '<table class="tbl"><thead><tr>'
-    + '<th>Window</th>'
-    + '<th>Series</th>'
-    + '<th>Result</th>'
-    + '<th>Entry Up</th>'
-    + '<th>Entry Down</th>'
-    + '<th>Exit Price</th>'
-    + '<th>Exit Type</th>'
-    + '<th>PnL / Window ($)</th>'
-    + '<th>Delay / Partial</th>'
+  let ttbl = '<table class="tbl bt-master-tbl"><thead><tr>'
+    + '<th style="width:36px;text-align:center"></th>'
+    + '<th>Market</th>'
+    + '<th title="Total net P&L and percentage return on capital invested in this window">Total P&L (% on Invested) ℹ️</th>'
+    + '<th title="Total completed pairs merged in this window">Merges ℹ️</th>'
+    + '<th title="Stop-loss exits triggered on adverse drift in this window">Stop Loss ℹ️</th>'
+    + '<th title="Single leg held into last 30s of window (dead zone)">Dead Zone ℹ️</th>'
+    + '<th title="Final settlement resolution mark for this market window">Resolution ℹ️</th>'
     + '</tr></thead><tbody>';
 
   if (pageTrades.length === 0) {
-    ttbl += '<tr><td colspan="9" style="text-align:center;padding:18px;color:var(--dim)">No executed windows match the selected criteria.</td></tr>';
+    ttbl += '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--dim)">No executed windows match the selected criteria.</td></tr>';
   } else {
+    const size = window.btActiveSize || 5;
     for (const t of pageTrades) {
+      const slug = t.slug || '';
+      const safeSlug = slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const isExp = window.btExpandedSlugs && window.btExpandedSlugs.has(safeSlug);
+      const marketLabel = canonicalMarketName(t.series || t.label || '');
       const pnlUsd = fmtUsd(t.pnl_cents, true);
-      const resPill = (t.both_filled && t.exit_triggered)
-        ? pill('pill-mono', `PAIR + EXIT ${pnlUsd}`)
-        : t.both_filled
-        ? pill('pill-osc', `PAIR CAPTURED ${pnlUsd}`)
-        : t.exit_triggered
-        ? pill('pill-mono', 'EXIT TRIGGERED')
-        : pill('pill-flat', 'FLAT / UNRESOLVED');
 
-      const entryUpStr = t.entry_up != null ? '$' + Number(t.entry_up).toFixed(3) : '—';
-      const entryDnStr = t.entry_down != null ? '$' + Number(t.entry_down).toFixed(3) : '—';
-      const exitPriceStr = t.exit_price != null ? '$' + Number(t.exit_price).toFixed(3) : '—';
-      const exitTypeStr = t.exit_reason ? esc(t.exit_reason) : '—';
+      let invested = (mergesCount * pairUnitCost * size)
+        + (stopsCount * stopEntryPrice * size)
+        + (isSingleLegSettled ? settleEntryPrice * size : 0);
+      if (invested <= 0) invested = size * 1.0;
+      const pnlPct = invested > 0 ? ((t.pnl_cents / 100) / invested * 100) : 0;
+      const pnlPctStr = (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%';
+      const pnlDisplay = `<span style="font-weight:700;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd} (${pnlPctStr})</span>`;
 
-      const delayTag = t.is_partial
-        ? `<span class="pill pill-mono" style="font-size:11px;color:var(--down)">Half (${t.start_delay_sec}s)</span>`
-        : `<span class="mono" style="font-size:12px;color:var(--dim)">${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}</span>`;
+      const mergesCount = t.pairs_count != null ? t.pairs_count : (t.both_filled ? 1 : 0);
+      const stopsCount = t.stops_count != null ? t.stops_count : (t.exit_triggered ? 1 : 0);
+      const isDeadZone = t.is_dead_zone ? 1 : ((t.exit_reason && t.exit_reason.includes('dead_zone')) ? 1 : 0);
+      const isSingleLegSettled = !t.both_filled && !t.exit_triggered && t.settlement_mid != null && (t.up_filled || t.down_filled);
 
-      ttbl += `<tr>`
-        + `<td class="mono" style="font-size:12px;font-variant-numeric:tabular-nums">${esc(t.slug.slice(-14))}</td>`
-        + `<td style="font-weight:600">${esc(canonicalMarketName(t.series || t.label || ''))}</td>`
-        + `<td>${resPill}</td>`
-        + `<td class="mono" style="font-size:12px">${entryUpStr}</td>`
-        + `<td class="mono" style="font-size:12px">${entryDnStr}</td>`
-        + `<td class="mono" style="font-size:12px">${exitPriceStr}</td>`
-        + `<td class="mono" style="font-size:12px;color:var(--dim)">${exitTypeStr}</td>`
-        + `<td class="mono" style="font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;color:${t.pnl_cents>=0?'var(--up)':'var(--down)'}">${pnlUsd}</td>`
-        + `<td>${delayTag}</td>`
+      const pairUnitCost = t.first_pair_cost != null ? t.first_pair_cost : ((t.entry_up || 0.48) + (t.entry_down || 0.48) || 0.96);
+      const stopEntryPrice = (t.exit_side === 'down' ? (t.entry_down || t.entry_up) : (t.entry_up || t.entry_down)) || 0.50;
+      const settleEntryPrice = (t.up_filled ? t.entry_up : t.entry_down) || 0.50;
+
+      let resBadge = '<span style="color:var(--dim)">—</span>';
+      if (t.settlement_mid != null) {
+        resBadge = t.settlement_mid >= 0.5
+          ? `<span style="color:var(--up);font-weight:700" title="Settlement mark: $${Number(t.settlement_mid).toFixed(3)} (UP won)">UP</span>`
+          : `<span style="color:var(--down);font-weight:700" title="Settlement mark: $${Number(t.settlement_mid).toFixed(3)} (DOWN won)">DOWN</span>`;
+      } else if (t.both_filled) {
+        resBadge = '<span style="color:var(--up);font-weight:600" title="Completed pair captured and merged">UP/DN</span>';
+      } else if (t.exit_triggered) {
+        resBadge = `<span style="color:var(--dim)" title="Exited on stop">${esc((t.exit_side || 'EXIT').toUpperCase())}</span>`;
+      }
+
+      ttbl += `<tr class="bt-master-row" onclick="toggleBtLogDetail('${safeSlug}', event)" style="cursor:pointer;background:${isExp ? 'rgba(255,255,255,0.03)' : 'transparent'}">`
+        + `<td style="text-align:center;color:var(--dim)"><button type="button" class="btn" style="background:none;border:none;color:var(--dim);cursor:pointer;padding:2px 6px;font-size:11px" aria-expanded="${isExp}">${isExp ? '▼' : '▶'}</button></td>`
+        + `<td style="font-weight:600">${esc(marketLabel)}</td>`
+        + `<td class="mono" style="font-variant-numeric:tabular-nums">${pnlDisplay}</td>`
+        + `<td class="mono" style="font-variant-numeric:tabular-nums">${mergesCount}</td>`
+        + `<td class="mono" style="font-variant-numeric:tabular-nums;color:${stopsCount > 0 ? 'var(--down)' : 'var(--dim)'}">${stopsCount}</td>`
+        + `<td class="mono" style="font-variant-numeric:tabular-nums;color:${isDeadZone > 0 ? 'var(--gold)' : 'var(--dim)'}">${isDeadZone}</td>`
+        + `<td>${resBadge}</td>`
         + `</tr>`;
+
+      if (isExp) {
+        const startTsMatch = slug.match(/(\d{10})$/);
+        const startTs = startTsMatch ? parseInt(startTsMatch[1], 10) : 0;
+        const delaySec = Math.round(t.start_delay_sec || 0);
+        const mm1 = Math.floor(delaySec / 60); const ss1 = delaySec % 60;
+        const elapsed1 = `${mm1}:${ss1 < 10 ? '0' : ''}${ss1}`;
+        const localTime1 = startTs > 1000000000 ? new Date((startTs + delaySec) * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
+        const timeStr1 = localTime1 ? `${localTime1} (${elapsed1})` : elapsed1;
+
+        let subRows = '';
+        let tradeIdx = 1;
+
+        if (mergesCount > 0 || t.both_filled) {
+          const pCost = t.first_pair_cost != null ? t.first_pair_cost : ((t.entry_up || 0.48) + (t.entry_down || 0.48));
+          const pEdge = t.mean_pair_edge_cents != null ? t.mean_pair_edge_cents : ((1.00 - pCost) * 100);
+          const edgeStr = (pEdge >= 0 ? '+' : '') + pEdge.toFixed(1) + '¢';
+          const pCostStr = `$${pCost.toFixed(3)} (${edgeStr})`;
+          const eachPairPnl = (t.pair_pnl_cents != null && t.pair_pnl_cents !== 0)
+            ? (t.pair_pnl_cents / Math.max(1, mergesCount))
+            : (pEdge * size);
+          const pPnlUsd = fmtUsd(eachPairPnl, true);
+          const pPct = pCost > 0 ? (pEdge / (pCost * 100) * 100).toFixed(1) : '0.0';
+          const pPctStr = (pPct >= 0 ? '+' : '') + pPct + '%';
+
+          const upPrice = t.entry_up != null ? '$' + Number(t.entry_up).toFixed(3) : '$0.480';
+          const dnPrice = t.entry_down != null ? '$' + Number(t.entry_down).toFixed(3) : '$0.480';
+
+          const nMerges = Math.max(1, mergesCount);
+          for (let m = 0; m < nMerges; m++) {
+            subRows += `<tr style="border-bottom:none">`
+              + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
+              + `<td style="font-weight:700;color:var(--up)">UP</td>`
+              + `<td class="mono" style="font-size:11px">${m === 0 ? timeStr1 : '—'}</td>`
+              + `<td class="mono">${upPrice}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);background:rgba(255,255,255,0.01)">${pCostStr}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time from first fill to merge completion">—</td>`
+              + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)"><span class="pill pill-osc" title="Completed pair merged 1:1 on Polymarket CTF">MERGED</span></td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">${pPnlUsd} (${pPctStr})</td>`
+              + `</tr>`
+              + `<tr style="border-top:none">`
+              + `<td style="font-weight:700;color:var(--down)">DOWN</td>`
+              + `<td class="mono" style="font-size:11px;color:var(--dim)">—</td>`
+              + `<td class="mono">${dnPrice}</td>`
+              + `</tr>`;
+          }
+        }
+
+        if (stopsCount > 0 || t.exit_triggered) {
+          const exPrice = t.exit_price != null ? '$' + Number(t.exit_price).toFixed(3) : '—';
+          const entryPrice = (t.exit_side === 'down' ? (t.entry_down || t.entry_up) : (t.entry_up || t.entry_down)) || 0.50;
+          const entrySide = (t.exit_side === 'down') ? 'DOWN' : 'UP';
+          const exPnlCents = (t.both_filled && t.pair_pnl_cents != null) ? (t.pnl_cents - t.pair_pnl_cents) : t.pnl_cents;
+          const exPnlUsd = fmtUsd(exPnlCents, true);
+          const exInvested = size * entryPrice;
+          const exPct = exInvested > 0 ? ((exPnlCents / 100) / exInvested * 100).toFixed(1) : '0.0';
+          const exPctStr = (exPct >= 0 ? '+' : '') + exPct + '%';
+
+          const statusTitle = isDeadZone
+            ? 'Single leg held into last 30s of window. Closed before expiry.'
+            : `Adverse drift exceeded exit threshold (${t.exit_side || 'adverse'}). Taker stop exit on book.`;
+          const statusPill = isDeadZone
+            ? `<span class="pill pill-flat" style="color:var(--gold)" title="${statusTitle}">DEAD_ZONE</span>`
+            : `<span class="pill pill-mono" style="color:var(--down)" title="${statusTitle}">STOP_LOSS</span>`;
+
+          const nStops = Math.max(1, stopsCount);
+          for (let s = 0; s < nStops; s++) {
+            subRows += `<tr style="border-bottom:none">`
+              + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
+              + `<td style="font-weight:700;color:${entrySide==='UP'?'var(--up)':'var(--down)'}">${entrySide}</td>`
+              + `<td class="mono" style="font-size:11px">${mergesCount === 0 && s === 0 ? timeStr1 : '—'}</td>`
+              + `<td class="mono">$${Number(entryPrice).toFixed(3)}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);color:var(--dim)">—</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time in market before stop loss triggered">—</td>`
+              + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)">${statusPill}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--down);background:rgba(239,68,68,0.04)">${exPnlUsd} (${exPctStr})</td>`
+              + `</tr>`
+              + `<tr style="border-top:none">`
+              + `<td style="font-weight:700;color:var(--dim)">EXIT</td>`
+              + `<td class="mono" style="font-size:11px;color:var(--dim)">—</td>`
+              + `<td class="mono">${exPrice}</td>`
+              + `</tr>`;
+          }
+        }
+
+        if (isSingleLegSettled) {
+          const filledSide = t.up_filled ? 'UP' : 'DOWN';
+          const entryPrice = (t.up_filled ? t.entry_up : t.entry_down) || 0.50;
+          const settleMark = t.settlement_mid != null ? Number(t.settlement_mid).toFixed(3) : '—';
+          const pnlUsdSingle = fmtUsd(t.pnl_cents, true);
+          const sInvested = size * entryPrice;
+          const sPct = sInvested > 0 ? ((t.pnl_cents / 100) / sInvested * 100).toFixed(1) : '0.0';
+          const sPctStr = (sPct >= 0 ? '+' : '') + sPct + '%';
+          const sColor = t.pnl_cents >= 0 ? 'var(--up)' : 'var(--down)';
+
+          subRows += `<tr>`
+            + `<td class="mono" style="font-weight:700;text-align:center;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
+            + `<td style="font-weight:700;color:${filledSide === 'UP' ? 'var(--up)' : 'var(--down)'}">${filledSide}</td>`
+            + `<td class="mono" style="font-size:11px">${timeStr1}</td>`
+            + `<td class="mono">$${Number(entryPrice).toFixed(3)}</td>`
+            + `<td class="mono" style="color:var(--dim)">—</td>`
+            + `<td class="mono" title="Held through expiry into settlement">Expiry</td>`
+            + `<td><span class="pill pill-flat" style="color:${sColor}" title="Single leg held to settlement mark $${settleMark}">SETTLED</span></td>`
+            + `<td class="mono" style="font-weight:700;color:${sColor}">${pnlUsdSingle} (${sPctStr})</td>`
+            + `</tr>`;
+        }
+
+        if (!subRows) {
+          subRows = `<tr>`
+            + `<td class="mono" style="text-align:center">#1</td>`
+            + `<td style="color:var(--dim)">—</td>`
+            + `<td class="mono" style="font-size:11px">${timeStr1}</td>`
+            + `<td class="mono" style="color:var(--dim)">—</td>`
+            + `<td class="mono" style="color:var(--dim)">—</td>`
+            + `<td class="mono" style="color:var(--dim)">0s</td>`
+            + `<td><span class="pill pill-flat" title="Orders rested without fill or window expired flat">UNRESOLVED</span></td>`
+            + `<td class="mono" style="color:var(--dim)">$0.00 (0.0%)</td>`
+            + `</tr>`;
+        }
+
+        ttbl += `<tr id="btDetail_${safeSlug}" class="bt-detail-row">`
+          + `<td colspan="7" style="padding:10px 14px;background:rgba(0,0,0,0.22);border-top:1px dashed var(--line);border-bottom:1px solid var(--line)">`
+          + `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">`
+          + `<span class="mono" style="font-size:11px;color:var(--faint)">Window: <b style="color:var(--tx)">${esc(slug)}</b> (Start Delay: ${t.start_delay_sec ? t.start_delay_sec + 's' : '0s'}${t.is_partial ? ' · Partial' : ''})</span>`
+          + `${t.settlement_mid != null ? `<span class="mono" style="font-size:11px;color:var(--dim)">Settlement Mark: <b style="color:var(--gold)">$` + Number(t.settlement_mid).toFixed(3) + `</b></span>` : ''}`
+          + `</div>`
+          + `<table class="tbl bt-sub-tbl" style="width:100%;font-size:11.5px;margin:2px 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;border-collapse:collapse">`
+          + `<thead><tr style="color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:0.5px">`
+          + `<th style="width:50px;text-align:center">Trade</th>`
+          + `<th style="width:65px">Side</th>`
+          + `<th title="Fill timestamp and elapsed window time">Time (Elapsed) ℹ️</th>`
+          + `<th>Fill Price</th>`
+          + `<th>Pair Cost (Edge)</th>`
+          + `<th title="Time in market with leg exposure before resolution">Duration ℹ️</th>`
+          + `<th>Status</th>`
+          + `<th>Trade P&L (%)</th>`
+          + `</tr></thead><tbody>${subRows}</tbody></table>`
+          + `</td></tr>`;
+      }
     }
   }
   ttbl += '</tbody></table>';
