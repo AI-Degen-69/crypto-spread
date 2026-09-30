@@ -1896,12 +1896,16 @@ def _run_backtest_simulation_worker(
         """Fresh zeroed outcome row for one per-series/per-duration bucket."""
         return {
             "windows": 0,
+            "entered": 0,
             "pairs": 0,
             "exits": 0,
             "oscillating": 0,
             "monotonic": 0,
             "flat": 0,
             "total_pnl_cents": 0.0,
+            "first_pair_costs": [],
+            "mean_pair_edges": [],
+            "total_pair_pnl_cents": 0.0,
         }
 
     per_series_raw = defaultdict(_new_outcome_row)
@@ -1917,6 +1921,14 @@ def _run_backtest_simulation_worker(
         win_pnl = w.pnl_cents * size
         a = per_series_raw[w.series]
         a["windows"] += 1
+        if getattr(w, "entered", False) or w.filled_up or w.filled_down:
+            a["entered"] += 1
+        if w.first_pair_cost is not None:
+            a["first_pair_costs"].append(w.first_pair_cost)
+        if w.mean_pair_edge_cents is not None:
+            a["mean_pair_edges"].append(w.mean_pair_edge_cents)
+        a["total_pair_pnl_cents"] += w.pair_pnl_cents * size
+
         if w.pair_captured:
             a["pairs"] += 1
             if win_pnl > 0:
@@ -1941,6 +1953,14 @@ def _run_backtest_simulation_worker(
         # Mirror into the duration bucket (pair XOR exit, like the series row).
         d = per_duration_raw[w.duration]
         d["windows"] += 1
+        if getattr(w, "entered", False) or w.filled_up or w.filled_down:
+            d["entered"] += 1
+        if w.first_pair_cost is not None:
+            d["first_pair_costs"].append(w.first_pair_cost)
+        if w.mean_pair_edge_cents is not None:
+            d["mean_pair_edges"].append(w.mean_pair_edge_cents)
+        d["total_pair_pnl_cents"] += w.pair_pnl_cents * size
+
         if w.pair_captured:
             d["pairs"] += 1
         elif w.exit_taken:
@@ -1971,6 +1991,10 @@ def _run_backtest_simulation_worker(
             "exit_reason": exit_info,
             "start_delay_sec": w.start_delay_sec,
             "is_partial": w.is_partial,
+            "first_pair_cost": w.first_pair_cost,
+            "mean_pair_edge_cents": w.mean_pair_edge_cents,
+            "worst_pair_edge_cents": w.worst_pair_edge_cents,
+            "pair_pnl_cents": round(w.pair_pnl_cents * size, 2),
             "pairs_count": w.pairs_count,
             "stops_count": w.stops_count,
         })
@@ -1981,12 +2005,19 @@ def _run_backtest_simulation_worker(
     total_pnl = sum(a["total_pnl_cents"] for a in per_series_raw.values())
 
     entered_windows = sum(1 for w in per_window if getattr(w, "entered", False) or w.filled_up or w.filled_down)
+    all_first_pair_costs = [w.first_pair_cost for w in per_window if w.first_pair_cost is not None]
+    all_mean_pair_edges = [w.mean_pair_edge_cents for w in per_window if w.mean_pair_edge_cents is not None]
+    total_pair_pnl = sum(w.pair_pnl_cents * size for w in per_window)
+
     overall = {
         "windows": total_windows,
         "entered_windows": entered_windows,
         "pairs": total_pairs,
         "pair_rate": round(total_pairs / total_windows, 4)
         if total_windows
+        else 0.0,
+        "pair_rate_entered": round(total_pairs / entered_windows, 4)
+        if entered_windows
         else 0.0,
         "exits": total_exits,
         "exit_rate": round(total_exits / total_windows, 4)
@@ -2005,34 +2036,39 @@ def _run_backtest_simulation_worker(
         "profitable_pairs": profitable_pairs,
         "profitable_exits": profitable_exits,
         "unfilled_windows": unfilled_windows,
+        "mean_pair_cost": round(sum(all_first_pair_costs) / len(all_first_pair_costs), 4)
+        if all_first_pair_costs
+        else None,
+        "mean_pair_edge_cents": round(sum(all_mean_pair_edges) / len(all_mean_pair_edges), 4)
+        if all_mean_pair_edges
+        else None,
+        "total_pair_pnl_cents": round(total_pair_pnl, 2),
     }
+
 
     per_series_out = {}
     for s_slug, duration, s_label in SERIES:
-        a = per_series_raw.get(
-            s_slug,
-            {
-                "windows": 0,
-                "pairs": 0,
-                "exits": 0,
-                "oscillating": 0,
-                "monotonic": 0,
-                "flat": 0,
-                "total_pnl_cents": 0.0,
-            },
-        )
+        a = per_series_raw.get(s_slug, _new_outcome_row())
         n = a["windows"]
+        ent = a.get("entered", 0)
+        costs = a.get("first_pair_costs", [])
+        edges = a.get("mean_pair_edges", [])
         per_series_out[s_slug] = {
             "label": s_label,
             "windows": n,
+            "entered_windows": ent,
             "pairs": a["pairs"],
             "pair_rate": round(a["pairs"] / n, 4) if n else 0.0,
+            "pair_rate_entered": round(a["pairs"] / ent, 4) if ent else 0.0,
             "exits": a["exits"],
             "exit_rate": round(a["exits"] / n, 4) if n else 0.0,
             "total_pnl_cents": round(a["total_pnl_cents"], 2),
             "avg_pnl_cents": round(a["total_pnl_cents"] / n, 2) if n else 0.0,
             "oscillating": a["oscillating"],
             "monotonic": a["monotonic"],
+            "mean_pair_cost": round(sum(costs) / len(costs), 4) if costs else None,
+            "mean_pair_edge_cents": round(sum(edges) / len(edges), 4) if edges else None,
+            "total_pair_pnl_cents": round(a.get("total_pair_pnl_cents", 0.0), 2),
         }
 
     # Issue #308: per-duration breakdown with the worker's row conventions,
@@ -2041,18 +2077,27 @@ def _run_backtest_simulation_worker(
     for dur in supported_durations():
         a = per_duration_raw.get(dur, _new_outcome_row())
         n = a["windows"]
+        ent = a.get("entered", 0)
+        costs = a.get("first_pair_costs", [])
+        edges = a.get("mean_pair_edges", [])
         per_duration_out[str(dur)] = {
             "label": f"{dur // 60}m",
             "windows": n,
+            "entered_windows": ent,
             "pairs": a["pairs"],
             "pair_rate": round(a["pairs"] / n, 4) if n else 0.0,
+            "pair_rate_entered": round(a["pairs"] / ent, 4) if ent else 0.0,
             "exits": a["exits"],
             "exit_rate": round(a["exits"] / n, 4) if n else 0.0,
             "total_pnl_cents": round(a["total_pnl_cents"], 2),
             "avg_pnl_cents": round(a["total_pnl_cents"] / n, 2) if n else 0.0,
             "oscillating": a["oscillating"],
             "monotonic": a["monotonic"],
+            "mean_pair_cost": round(sum(costs) / len(costs), 4) if costs else None,
+            "mean_pair_edge_cents": round(sum(edges) / len(edges), 4) if edges else None,
+            "total_pair_pnl_cents": round(a.get("total_pair_pnl_cents", 0.0), 2),
         }
+
 
     coverage = build_coverage(
         cov_source, found_pairs_from_windows(window_rows), series_tokens, duration_values)
