@@ -6,7 +6,7 @@ This document records the empirical measurement results of the `#174 Phase 1` sh
 
 ## Verdict: NO-GO for Phase 2 Switch
 
-The acceptance criterion defined in Issue #174 and Issue #350 for proceeding to Phase 2 (socket-authoritative order books) required disagreement to be **rare and bounded (< ~1%)**.
+Issue #174 requires measured evidence before proceeding to Phase 2. Issue #350 treats common or bursty disagreement as a **NO-GO** condition and defers the numeric threshold to Phase 2 planning.
 
 The observed divergence rate across a full capture session is **29.78% (~30%)** with a maximum gap of **32 cents** on contracts where the spread is 1 cent. Switching quoting or execution to the socket book in this state would risk pricing off stale or corrupted book states.
 
@@ -46,17 +46,17 @@ Full coverage across all 10 series:
 | `bnb-up-or-down-15m` | 3,983 | 1,191 | **29.90%** |
 | `eth-up-or-down-15m` | 3,986 | 1,159 | **29.08%** |
 | `eth-up-or-down-5m` | 3,909 | 1,129 | **28.88%** |
-| `btc-up-or-down-5m` | 3,904 | 925 | **23.70%** |
+| `btc-up-or-down-5m` | 3,904 | 925 | **23.69%** |
 | `btc-up-or-down-15m` | 3,981 | 530 | **13.31%** |
 
 ---
 
 ## Analysis & Diagnostic Findings
 
-1. **Systematic across all series**: Every series shows double-digit divergence rates, ranging from 13.3% on BTC 15m to 38.1% on SOL 5m. Faster-moving 5m windows consistently show higher divergence rates than 15m windows.
-2. **Symmetric error distribution**: `mean_abs_bb_delta` (0.005889) and `mean_abs_ba_delta` (0.005881) are virtually identical. The book does not drift unidirectionally; it desynchronizes in time and state.
+1. **Systematic across all series**: Every series shows double-digit divergence rates, ranging from 13.3% on BTC 15m to 38.1% on SOL 5m. Faster-moving 5m windows generally show higher divergence rates than 15m windows, with ETH as an exception.
+2. **Similar mean absolute deltas**: `mean_abs_bb_delta` (0.005889) and `mean_abs_ba_delta` (0.005881) are virtually identical, indicating that the magnitude of bid and ask discrepancies is comparable across sides.
 3. **Severe worst-case gap (32¢)**: A 32-cent gap on a contract priced between 0.01 and 0.99 indicates that the local book can retain stale or misapplied price levels far away from current market truth.
-4. **Not caused by reconnect flapping**: The reconnect counter remained static while comparison counts grew by thousands, demonstrating that this is a steady-state defect in incremental delta handling or initial synchronization, not an artifact of connection loss.
+4. **No counted unclean reconnects observed**: The reconnect counter remained static while comparison counts grew by thousands. This excludes unclean reconnects recorded by `CLOBMarketWSClient`, but it does not rule out clean token-rotation reconnects or post-reconnect resynchronization as contributors.
 
 ---
 

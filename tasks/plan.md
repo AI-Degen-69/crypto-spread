@@ -10,11 +10,12 @@ Branch: i350/read-174-phase-1-book-shadow-numbers | Issue: #350
 ## 2. Evidence from Ground Truth (`run/ticks/manifest.json`)
 - Comparisons: 39,414 across all 10 series
 - Divergent: 11,737
-- Divergence Rate: 29.78% (0.2978) vs tolerance 0.001
+- Divergence Rate: 29.78% (11,737 of 39,414 comparisons exceeded 0.001)
+- Comparison tolerance: 0.001
 - Max best bid delta: 0.32 (32 cents)
 - Max best ask delta: 0.32 (32 cents)
 - Mean abs bb delta: 0.005889, Mean abs ba delta: 0.005881, Mean abs mid delta: 0.005281
-- Verdict: **NO-GO** for Phase 2 socket switch (far exceeds <1% threshold).
+- Verdict: **NO-GO** for Phase 2 socket switch (divergence is common across all series and reaches 29.78% over 39,414 comparisons).
 
 ## 3. Improvement Proposal (Evidence-based, Adopted by default)
 - Explicitly link from `docs/issue-174-socket-book-disagreement.md` to Issue #359 (`diag(market-data): per-delta socket-book reconciliation replay`), so developers investigating the divergence immediately find the diagnostic replay roadmap without search friction.
