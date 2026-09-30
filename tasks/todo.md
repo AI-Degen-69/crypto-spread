@@ -1,4 +1,0 @@
-- [x] T1: Add Shared Realized Pair Edge Math Helper (`strategy/book_math.py`)
-- [x] T2: Update Engine WindowResult & Replay Aggregation (`backtest/engine.py`)
-- [x] T3: Mirror Telemetry in Dashboard Stream Summaries (`server/osc_dash.py`)
-- [x] T4: Comprehensive Parity & Reconciliation Tests (`tests/test_backtest_engine.py`)
