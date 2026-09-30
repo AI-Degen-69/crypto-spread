@@ -54,6 +54,7 @@ class DivergenceRecord:
     max_gap: float
     event: Dict[str, Any]
     preceding_events: List[Dict[str, Any]]
+    book_snapshot_before: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -164,9 +165,6 @@ class SocketReconciler:
         if len(self._recent_events) > self.history_buffer_size:
             self._recent_events.pop(0)
 
-        # Dispatch event into client
-        self.client._handle_event(ev)
-
         # Tokens affected by this event
         affected_tokens: List[Tuple[str, Optional[float], Optional[float]]] = []
 
@@ -186,6 +184,13 @@ class SocketReconciler:
                 bb = _num(ev.get("best_bid")) if ev_type == "best_bid_ask" else None
                 ba = _num(ev.get("best_ask")) if ev_type == "best_bid_ask" else None
                 affected_tokens.append((t, bb, ba))
+
+        snapshots_before: Dict[str, Optional[Dict[str, Any]]] = {
+            tok: self.client.book_snapshot(tok) for tok, _bb, _ba in affected_tokens
+        }
+
+        # Dispatch event into client
+        self.client._handle_event(ev)
 
         # Reconcile each affected token
         for tok, declared_bb, declared_ba in affected_tokens:
@@ -223,6 +228,7 @@ class SocketReconciler:
                         max_gap=max_d,
                         event=ev,
                         preceding_events=history_copy,
+                        book_snapshot_before=snapshots_before.get(tok),
                     )
                     if not self.report.first_divergence:
                         self.report.first_divergence = div_rec
@@ -268,6 +274,7 @@ class SocketReconciler:
                             max_gap=max_d_rest,
                             event=ev,
                             preceding_events=history_copy,
+                            book_snapshot_before=snapshots_before.get(tok),
                         )
                         if not self.report.first_divergence:
                             self.report.first_divergence = div_rec_rest
@@ -333,6 +340,7 @@ def extract_fixture(report: ReconciliationReport, out_path: Path) -> bool:
         "ws_before": {"best_bid": fd.ws_bb, "best_ask": fd.ws_ba},
         "reference_ground": {"best_bid": fd.ref_bb, "best_ask": fd.ref_ba},
         "max_gap": round(fd.max_gap, 4),
+        "book_snapshot_before": fd.book_snapshot_before,
         "breaking_event": fd.event,
         "preceding_events": fd.preceding_events,
     }
