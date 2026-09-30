@@ -3425,20 +3425,24 @@ def api_collector_start(request: Request):
         try:
             log_dir = TICKS_DIR
             log_dir.mkdir(parents=True, exist_ok=True)
-            child_log = open(
+            # With-scoped: the child inherits its own duplicated handle at
+            # Popen time; the parent's copy must close deterministically (a
+            # dashboard process launches collectors for days) and on any error
+            # path between open and spawn.
+            with open(
                 log_dir / "collector_child.log", "ab",
                 buffering=0,
-            )
-            child_log.write(
-                f"\n===== launch {datetime.now(timezone.utc).isoformat()} "
-                f"pid=pending =====\n".encode("utf-8")
-            )
-            _collector_proc = subprocess.Popen(
-                cmd, cwd=str(ROOT), stdout=child_log, stderr=subprocess.STDOUT,
-            )
-            child_log.write(
-                f"===== pid {_collector_proc.pid} =====\n".encode("utf-8")
-            )
+            ) as child_log:
+                child_log.write(
+                    f"\n===== launch {datetime.now(timezone.utc).isoformat()} "
+                    f"pid=pending =====\n".encode("utf-8")
+                )
+                _collector_proc = subprocess.Popen(
+                    cmd, cwd=str(ROOT), stdout=child_log, stderr=subprocess.STDOUT,
+                )
+                child_log.write(
+                    f"===== pid {_collector_proc.pid} =====\n".encode("utf-8")
+                )
         except OSError as e:
             # Logging must never block capture: fall back to the old DEVNULL.
             print(f"[collector] child log unavailable ({e}); stdout discarded")
