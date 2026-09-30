@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import sys
+import collections
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from strategy.streaming import CLOBMarketWSClient  # noqa: E402
+
+
+@dataclass
+class RestSnapshotRecord:
+    """Recorded REST snapshot with timestamp."""
+
+    rx: float
+    book: Dict[str, Any]
+
 
 TOLERANCE = 0.001
 EPSILON = TOLERANCE * 1e-6
@@ -126,6 +136,7 @@ class SocketReconciler:
         """Initialize offline reconciler with local WS client and state cache."""
         self.client = CLOBMarketWSClient()
         self.rest_books: Dict[str, Dict[str, Any]] = {}
+        self.rest_snapshots: Dict[str, List[RestSnapshotRecord]] = collections.defaultdict(list)
         self.report = ReconciliationReport()
         self.history_buffer_size = history_buffer_size
         self._recent_events: List[Dict[str, Any]] = []
@@ -154,9 +165,40 @@ class SocketReconciler:
         """Store REST snapshot book as ground truth reference."""
         tok = str(record.get("token") or "")
         book = record.get("book") or {}
+        rx = _num(record.get("rx")) or 0.0
         if tok and book:
             self.rest_books[tok] = book
+            self.rest_snapshots[tok].append(RestSnapshotRecord(rx=rx, book=book))
             self.report.total_rest_snapshots += 1
+
+    def _select_rest_book(
+        self,
+        tok: str,
+        ws_rx: float,
+        in_bb: Optional[float] = None,
+        in_ba: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Select a temporally matched REST snapshot for tok at ws_rx."""
+        snapshots = self.rest_snapshots.get(tok)
+        if not snapshots:
+            return self.rest_books.get(tok)
+
+        if ws_rx <= 0.0:
+            candidate = snapshots[-1].book
+        else:
+            best = min(snapshots, key=lambda s: abs(s.rx - ws_rx))
+            candidate = best.book if abs(best.rx - ws_rx) <= 0.5 else None
+
+        if candidate and (in_bb is not None or in_ba is not None):
+            cand_bb = _num(candidate.get("best_bid"))
+            cand_ba = _num(candidate.get("best_ask"))
+            if (
+                (in_bb is not None and cand_bb is not None and abs(in_bb - cand_bb) > TOLERANCE + EPSILON)
+                or (in_ba is not None and cand_ba is not None and abs(in_ba - cand_ba) > TOLERANCE + EPSILON)
+            ):
+                return None
+
+        return candidate
 
     def _handle_ws_event(self, record: Dict[str, Any]) -> None:
         """Process WS message, update local book, and check against references."""
@@ -165,6 +207,7 @@ class SocketReconciler:
             return
 
         self.report.total_ws_events += 1
+        ws_rx = _num(record.get("rx")) or 0.0
         ev_type = str(ev.get("event_type") or ev.get("type") or "unknown").lower()
         self.report.events_by_type[ev_type] = self.report.events_by_type.get(ev_type, 0) + 1
 
@@ -244,7 +287,7 @@ class SocketReconciler:
                     self.report.all_divergences.append(div_rec)
 
             # 2. Concurrent REST reconciliation
-            rest_book = self.rest_books.get(tok)
+            rest_book = self._select_rest_book(tok, ws_rx, declared_bb, declared_ba)
             if rest_book:
                 rest_bb = _num(rest_book.get("best_bid"))
                 rest_ba = _num(rest_book.get("best_ask"))

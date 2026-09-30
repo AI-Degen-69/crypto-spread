@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.collect_ticks import fetch_live_for_series  # noqa: E402
-from strategy.markets import full_book  # noqa: E402
+from strategy.markets import CLOB_HOST, full_book  # noqa: E402
 from strategy.series import SERIES  # noqa: E402
 from strategy.streaming import CLOBMarketWSClient, CLOBStreamCollectorBridge  # noqa: E402
 
@@ -168,11 +168,11 @@ def run_session(
                 for slug, up_tok, dn_tok in markets:
                     for tok in (up_tok, dn_tok):
                         try:
-                            b, _err = full_book(tok)
+                            b = full_book(CLOB_HOST, tok)
                             if b:
                                 recorder.write_rest_snapshot(slug, tok, b)
                         except Exception as e:
-                            log.debug("REST full_book failed for %s: %s", tok, e)
+                            log.warning("REST full_book failed for %s: %s", tok, e)
 
             time.sleep(0.05)
     except KeyboardInterrupt:
