@@ -154,6 +154,8 @@ def test_tick_dom_renders_entry_relative_table():
 
     (async () => {{
       if (typeof tick !== 'function') throw new Error('tick() renderer missing');
+      // #371: tick() only renders on the Market Data tab; select it first.
+      if (typeof currentActiveTab !== 'undefined') currentActiveTab = 'marketdata';
       await tick();
       const tbl = elements['windowsTableWrap'].innerHTML;
       if (!tbl.includes('<th>Result</th>')) throw new Error('missing Result header: ' + tbl.slice(0, 300));
