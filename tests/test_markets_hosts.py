@@ -47,6 +47,16 @@ def test_collector_and_book_layer_agree_on_hosts():
     assert markets.GAMMA_HOST == collect_ticks.GAMMA_HOST
 
 
+def test_all_consumer_modules_agree_on_hosts():
+    """All rewired consumers agree with strategy.markets and canonical constants."""
+    from strategy import markets, live_trader
+    from scripts import collect_ticks, measure_5m_oscillation
+
+    for mod in (live_trader, collect_ticks, measure_5m_oscillation):
+        assert mod.CLOB_HOST == markets.CLOB_HOST == CANONICAL_CLOB_HOST
+        assert mod.GAMMA_HOST == markets.GAMMA_HOST == CANONICAL_GAMMA_HOST
+
+
 def test_socket_session_recorder_imports():
     """The raw socket-session recorder starts (the regression of Issue #373)."""
     module = importlib.import_module("scripts.record_raw_socket_session")

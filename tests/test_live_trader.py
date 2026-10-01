@@ -6,6 +6,13 @@ from strategy.live_trader import LiveTraderEngine, get_live_trader_engine, Marke
 from strategy.markets import LiveMarket
 
 
+def test_live_trader_host_constants_match_markets():
+    """Verify live_trader host constants match canonical markets definitions."""
+    from strategy import live_trader, markets
+    assert live_trader.GAMMA_HOST == markets.GAMMA_HOST == "https://gamma-api.polymarket.com"
+    assert live_trader.CLOB_HOST == markets.CLOB_HOST == "https://clob.polymarket.com"
+
+
 def test_live_trader_engine_init():
     engine = LiveTraderEngine()
     assert not engine.is_running
