@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>לשונית הבדיקות הגב בדיקות מהירה ונכשלת בקול — עדכון 372</title>
+<style>
+:root{
+  --bg:#0d1517; --panel:#14211f; --panel2:#1a2b28; --line:#2a423d;
+  --tx:#eef5f2; --dim:#9db8b0; --faint:#6b857e;
+  --teal:#17a398; --amber:#f2a541; --down:#e05d5d; --up:#3ecf8e;
+  --mono:Consolas,"Courier New",monospace; --disp:system-ui,"Segoe UI",Arial,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:var(--disp);line-height:1.6;padding:24px 16px 64px}
+main{max-width:860px;margin:0 auto}
+h1{font-size:clamp(24px,4.5vw,38px);margin:0 0 6px}
+.sub{color:var(--dim);font-size:17px;margin:0 0 22px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin:0 0 18px}
+.panel h2{margin:0 0 10px;font-size:19px}
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+.tabs button{flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--dim);font:700 15px var(--disp);cursor:pointer}
+.tabs button[aria-pressed="true"]{background:var(--teal);border-color:var(--teal);color:#062723}
+.stage{background:#0a1113;border:1px solid var(--line);border-radius:10px;padding:16px;min-height:250px}
+.bar{height:14px;background:#0a1113;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:10px 0}
+.bar>div{height:100%;width:0;background:var(--teal);transition:width .3s}
+.msg{font:600 14px var(--mono);min-height:24px;color:var(--dim)}
+.msg.bad{color:var(--down)} .msg.good{color:var(--up)}
+canvas#eq{width:100%;height:120px;display:block;background:#0a1113;border:1px solid var(--line);border-radius:8px;margin-top:10px}
+.row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.row button{padding:10px 18px;border-radius:10px;border:1px solid var(--teal);background:var(--teal);color:#062723;font:700 15px var(--disp);cursor:pointer}
+.row button.ghost{background:transparent;color:var(--teal)}
+.row button:disabled{opacity:.45;cursor:default}
+.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+.fact{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center}
+.fact b{display:block;font-size:26px;color:var(--amber)}
+.fact span{font-size:13px;color:var(--dim)}
+ol.try{margin:8px 0 0;padding-inline-start:22px}
+ol.try li{margin:6px 0}
+code{font-family:var(--mono);background:#0a1113;padding:1px 7px;border-radius:6px;border:1px solid var(--line);font-size:13px}
+@media (max-width:560px){.facts{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.bar>div{transition:none}}
+</style>
+</head>
+<body>
+<main>
+  <h1>לשונית הבדיקות לא נתקעת יותר</h1>
+  <p class="sub">לפני: לחצת "הרץ", המסך קפא, וכישלון עבר בשקט. עכשיו: רואים התקדמות חיה, וכישלון מדבר בקול.</p>
+
+  <section class="panel" aria-label="הדגמה">
+    <h2>תרגישו את ההבדל — לחצו "הרץ בדיקה"</h2>
+    <div class="tabs" role="group" aria-label="לפני או אחרי">
+      <button id="tabBefore" aria-pressed="false">לפני העדכון</button>
+      <button id="tabAfter" aria-pressed="true">אחרי העדכון</button>
+    </div>
+    <div class="stage">
+      <div class="msg" id="demoMsg">מוכן.</div>
+      <div class="bar" aria-hidden="true"><div id="demoBar"></div></div>
+      <canvas id="eq" width="600" height="120"></canvas>
+    </div>
+    <div class="row">
+      <button id="runBtn">הרץ בדיקה</button>
+      <button id="failBtn" class="ghost">דמה כישלון (תפוס)</button>
+    </div>
+    <div class="facts">
+      <div class="fact"><b>5 שניות</b><span>פעימת לב מהשרת — החיבור לא נרדם באמצע חלון גדול</span></div>
+      <div class="fact"><b>15 שניות</b><span>בלי מידע? מתריעים מיד במקום לשתוק</span></div>
+      <div class="fact"><b>0</b><span>הודעות שגיאה שקטות — כל כישלון מוצג במילים</span></div>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="נסו בעצמכם">
+    <h2>נסו בעצמכם במערכת האמיתית</h2>
+    <ol class="try">
+      <li>פתחו את לוח הבקרה והיכנסו ללשונית <b>Backtest</b>.</li>
+      <li>לחצו <b>Run Sweep</b> — אמורים לראות אחוזים עולים ועקומה מצטיירת, בלי קפיאה.</li>
+      <li>הריצו שתי בדיקות במקביל — השנייה אמורה להגיד במילים "משהו כבר רץ", לא לשתוק.</li>
+    </ol>
+  </section>
+</main>
+<script>
+(function(){
+  "use strict";
+  var mode = "after", timer = null, p = 0;
+  var bar = document.getElementById("demoBar"),
+      msg = document.getElementById("demoMsg"),
+      cv = document.getElementById("eq"),
+      runBtn = document.getElementById("runBtn"),
+      failBtn = document.getElementById("failBtn"),
+      tabB = document.getElementById("tabBefore"),
+      tabA = document.getElementById("tabAfter");
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function ctx(){ return cv.getContext("2d"); }
+  function drawCurve(frac, color){
+    var c = ctx(), W = cv.width, H = cv.height, i, x, y;
+    c.clearRect(0, 0, W, H);
+    c.strokeStyle = "#2a423d"; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(0, H/2); c.lineTo(W, H/2); c.stroke();
+    c.strokeStyle = color; c.lineWidth = 2; c.beginPath();
+    var n = Math.max(2, Math.floor(60 * frac));
+    for (i = 0; i < n; i++){
+      x = (i / 59) * W;
+      y = H/2 - Math.sin(i / 6) * (H * 0.3) * (i / 59) - (i / 59) * H * 0.1;
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.stroke();
+  }
+  function setTabs(m){
+    mode = m;
+    tabB.setAttribute("aria-pressed", m === "before" ? "true" : "false");
+    tabA.setAttribute("aria-pressed", m === "after" ? "true" : "false");
+    reset();
+  }
+  function reset(){
+    if (timer) { clearInterval(timer); timer = null; }
+    p = 0; bar.style.width = "0";
+    msg.className = "msg"; msg.textContent = "מוכן.";
+    drawCurve(0, "#17a398");
+    runBtn.disabled = false;
+  }
+  function tick(){
+    if (mode === "before"){
+      // הקפאה הישנה: עולה קצת, נתקע, שותק
+      if (p < 12){ p += 4; }
+      bar.style.width = p + "%";
+      msg.textContent = "מריץ… " + p + "%";
+      drawCurve(p / 100, "#6b857e");
+      if (p >= 12){
+        clearInterval(timer); timer = null;
+        msg.textContent = "מריץ… (נתקע כאן. אין התקדמות, אין הסבר.)";
+        runBtn.disabled = false;
+      }
+      return;
+    }
+    p += 4;
+    if (p >= 100){
+      p = 100; clearInterval(timer); timer = null;
+      bar.style.width = "100%";
+      msg.className = "msg good";
+      msg.textContent = "הושלם: 100% — התוצאה מוצגת, הגרף חי.";
+      drawCurve(1, "#3ecf8e");
+      runBtn.disabled = false;
+      return;
+    }
+    bar.style.width = p + "%";
+    msg.textContent = "מריץ… " + p + "% — עדכון חי מהשרת";
+    drawCurve(p / 100, "#17a398");
+  }
+  runBtn.addEventListener("click", function(){
+    reset();
+    runBtn.disabled = true;
+    msg.textContent = "מריץ… 0%";
+    timer = setInterval(tick, reduceMotion ? 60 : 160);
+  });
+  failBtn.addEventListener("click", function(){
+    if (timer) { clearInterval(timer); timer = null; }
+    runBtn.disabled = false;
+    if (mode === "before"){
+      bar.style.width = "12%";
+      msg.className = "msg";
+      msg.textContent = "(נכשל בשקט — המסך נשאר ריק, בלי מילה.)";
+      drawCurve(0.12, "#6b857e");
+    } else {
+      bar.style.width = "0";
+      msg.className = "msg bad";
+      msg.textContent = "שגיאה: משהו אחר כבר רץ על השרת. חכו שיסתיים ולחצו שוב.";
+      drawCurve(0, "#e05d5d");
+    }
+  });
+  tabB.addEventListener("click", function(){ setTabs("before"); });
+  tabA.addEventListener("click", function(){ setTabs("after"); });
+  drawCurve(0, "#17a398");
+})();
+</script>
+</body>
+</html>
