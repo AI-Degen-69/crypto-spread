@@ -692,6 +692,7 @@ class WindowResult:
     mean_pair_edge_cents: float | None = None
     worst_pair_edge_cents: float | None = None
     pair_pnl_cents: float = 0.0
+    pairs: list[dict] = field(default_factory=list)
 
 
 
@@ -969,6 +970,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
     first_pair_cost: float | None = None
     pair_pnl_cents = 0.0
     pair_edges: list[float] = []
+    completed_pairs: list[dict] = []
 
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
@@ -1317,6 +1319,17 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
             pair_pnl_cents += edge_cents
             pair_edges.append(edge_cents)
             pnl_cents += edge_cents
+
+            # The record holds resting prices at which both legs filled (ADR-0002: a resting buy
+            # fills at its own price, no entry fee); if leg chase raised the unfilled leg, the
+            # record holds the chased price; window-level entry_price_* are first-fill-per-side
+            # values and can span cycles.
+            completed_pairs.append({
+                "entry_up": resting_up,
+                "entry_down": resting_down,
+                "pair_cost": cost,
+                "edge_cents": edge_cents,
+            })
             orders_live = False
 
             resting_up = None
@@ -1507,6 +1520,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
         mean_pair_edge_cents=mean_pair_edge_cents,
         worst_pair_edge_cents=worst_pair_edge_cents,
         pair_pnl_cents=round(pair_pnl_cents, 4),
+        pairs=completed_pairs,
     )
 
 
@@ -1652,6 +1666,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "pair_pnl_cents": round(w.pair_pnl_cents, 2),
             "pairs_count": w.pairs_count,
             "stops_count": w.stops_count,
+            "pairs": w.pairs,
         })
 
         # Per series tracking
