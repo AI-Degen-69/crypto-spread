@@ -22,6 +22,15 @@ log = logging.getLogger("markets")
 MARKET_TIMEOUT = (3.05, 5.0)
 EVENTS_TIMEOUT = (3.05, 5.0)
 
+# Venue hosts for the book/tape layer. They belong here because this module is
+# the single source of truth for `full_book` / `recent_trades` -- every call
+# site has to be handed the host it should fetch from, so the host cannot live
+# only in the collectors that call it. Values must stay identical to
+# `scripts/collect_ticks.py` (the canonical pair) so a rewired consumer cannot
+# silently point at a different venue.
+GAMMA_HOST = "https://gamma-api.polymarket.com"
+CLOB_HOST = "https://clob.polymarket.com"
+
 # Pooled keep-alive instead of a fresh TLS handshake per call. No retries -- a
 # failed load is handled by the caller (the market is skipped for this visit)
 # and retrying here would spend the loop's time budget silently.
