@@ -25,6 +25,7 @@ from collections import defaultdict, deque
 import requests
 from strategy import book_math
 from strategy.series import SERIES
+from strategy.markets import CLOB_HOST, GAMMA_HOST
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
@@ -33,9 +34,6 @@ RUN.mkdir(exist_ok=True)
 SNAP_FILE = RUN / "oscillation_snapshots.jsonl"
 WIN_FILE = RUN / "oscillation_windows.jsonl"
 SUMMARY_FILE = RUN / "oscillation_summary.json"
-
-GAMMA_HOST = "https://gamma-api.polymarket.com"
-CLOB_HOST = "https://clob.polymarket.com"
 
 # offset for SPREAD=2 -> 0.02 below mid, pair = 1.00 - 0.04 = 0.96
 SPREAD_OFFSET = 0.02
