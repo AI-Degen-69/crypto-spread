@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -114,6 +114,50 @@ def _iso_to_unix(s: str) -> float:
     return datetime.fromisoformat(s).timestamp()
 
 
+def select_window(events: Any, now: float) -> Optional[tuple[float, float, dict]]:
+    """Select the active trading window market from Gamma events for given timestamp.
+
+    Purity: No I/O, no network calls, and no clock reads.
+    Evaluation interval: half-open interval `start_ts <= now < end_ts`.
+    Tie rule: newest window (greatest `start_ts`) wins; on equal start times, the
+    first encountered row is preserved.
+    Returns (start_ts, end_ts, market_dict) or None if no market is open.
+    """
+    if not isinstance(events, list):
+        return None
+
+    winner: Optional[tuple[float, float, dict]] = None
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        markets = ev.get("markets")
+        if not isinstance(markets, list):
+            continue
+        for m in markets:
+            if not isinstance(m, dict):
+                continue
+            try:
+                raw_tokens = m.get("clobTokenIds")
+                if not raw_tokens:
+                    continue
+                tids = json.loads(raw_tokens) if isinstance(raw_tokens, str) else raw_tokens
+                if not isinstance(tids, list) or len(tids) != 2:
+                    continue
+                start_iso = m.get("eventStartTime")
+                end_iso = m.get("endDate") or m.get("endDateIso")
+                if not start_iso or not end_iso:
+                    continue
+                st = _iso_to_unix(str(start_iso))
+                et = _iso_to_unix(str(end_iso))
+                if st <= now < et:
+                    if winner is None or st > winner[0]:
+                        winner = (st, et, m)
+            except Exception:
+                continue
+
+    return winner
+
+
 _MARKET_CLOCK_OFFSET = 0.0
 _LAST_MARKET_SYNC = 0.0
 
@@ -148,17 +192,10 @@ def fetch_live_market(gamma_host: str, series_slug: str) -> Optional[LiveMarket]
     events = r.json()
 
     now = get_real_utc_time()
-    candidates: list[LiveMarket] = []
-    for ev in events:
-        markets = ev.get("markets") or []
-        for m in markets:
-            lm = _parse_market(m)
-            if lm and lm.start_ts <= now < lm.end_ts:
-                candidates.append(lm)
-    if not candidates:
+    selected = select_window(events, now)
+    if not selected:
         return None
-    candidates.sort(key=lambda m: m.start_ts, reverse=True)
-    return candidates[0]
+    return _parse_market(selected[2])
 
 
 def fetch_pinned_market(condition_id: str,

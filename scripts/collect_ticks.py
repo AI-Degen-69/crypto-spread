@@ -65,7 +65,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import requests
 from strategy import book_math
-from strategy.markets import CLOB_HOST, GAMMA_HOST, full_book, recent_trades
+from strategy.markets import (CLOB_HOST, GAMMA_HOST, full_book, recent_trades,
+                              select_window)
 from strategy.series import SERIES
 from strategy.windows import compute_summary, finalize_window, write_json_atomic
 
@@ -276,24 +277,10 @@ def fetch_live_for_series(series_slug: str):
     except Exception as e:
         return None, f"gamma err {e}"
     now = time.time()
-    candidates = []
-    for ev in events:
-        for m in ev.get("markets") or []:
-            try:
-                raw = m.get("clobTokenIds")
-                tids = json.loads(raw) if isinstance(raw, str) else raw
-                if not tids or len(tids) != 2:
-                    continue
-                st = iso_to_unix(m.get("eventStartTime"))
-                et = iso_to_unix(m.get("endDate") or m.get("endDateIso"))
-                if st <= now < et:
-                    candidates.append((st, et, m))
-            except Exception:
-                continue
-    if not candidates:
+    selected = select_window(events, now)
+    if not selected:
         return None, "no live"
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    st, et, m = candidates[0]
+    st, et, m = selected
     raw = m.get("clobTokenIds")
     tids = json.loads(raw) if isinstance(raw, str) else raw
     return {
