@@ -192,17 +192,10 @@ def fetch_live_market(gamma_host: str, series_slug: str) -> Optional[LiveMarket]
     events = r.json()
 
     now = get_real_utc_time()
-    candidates: list[LiveMarket] = []
-    for ev in events:
-        markets = ev.get("markets") or []
-        for m in markets:
-            lm = _parse_market(m)
-            if lm and lm.start_ts <= now < lm.end_ts:
-                candidates.append(lm)
-    if not candidates:
+    selected = select_window(events, now)
+    if not selected:
         return None
-    candidates.sort(key=lambda m: m.start_ts, reverse=True)
-    return candidates[0]
+    return _parse_market(selected[2])
 
 
 def fetch_pinned_market(condition_id: str,
