@@ -2098,3 +2098,98 @@ def test_replay_trades_sample_and_overall_pair_economics_fields():
     assert agg["total_pair_pnl_cents"] == 4.0
 
 
+def test_stop_exit_then_pair_merge_pairs_list_has_correct_isolated_costs():
+    """Window-level entry_price_up/down span cycles, but pairs list records exact completed pair prices."""
+    t0 = 1788000000.0
+    start_ts = t0
+    end_ts = t0 + 900
+    duration = 900
+    ticks = []
+
+    def _tick(t_sec, m, ub_bid, ub_ask, db_bid, db_ask):
+        return {
+            "ts": t_sec, "cid": "0xstop_then_pair", "series": "btc-up-or-down-15m",
+            "slug": "btc-up-or-down-15m", "start_ts": start_ts, "end_ts": end_ts,
+            "duration": duration, "mid": m,
+            "up_book": {"best_bid": ub_bid, "best_ask": ub_ask,
+                        "bids": {str(ub_bid): 500.0}, "asks": {str(ub_ask): 500.0}},
+            "down_book": {"best_bid": db_bid, "best_ask": db_ask,
+                          "bids": {str(db_bid): 500.0}, "asks": {str(db_ask): 500.0}},
+            "tape_delta": [],
+        }
+
+    # Round 1:
+    ticks.append(_tick(t0 + 10, 0.50, 0.49, 0.51, 0.49, 0.51))
+    ticks.append(_tick(t0 + 11, 0.48, 0.47, 0.479, 0.51, 0.52))
+    ticks.append(_tick(t0 + 12, 0.42, 0.41, 0.43, 0.57, 0.59))
+
+    # Round 2:
+    ticks.append(_tick(t0 + 50, 0.60, 0.59, 0.61, 0.39, 0.41))
+    ticks.append(_tick(t0 + 51, 0.60, 0.57, 0.579, 0.39, 0.41))
+    ticks.append(_tick(t0 + 52, 0.60, 0.59, 0.61, 0.37, 0.379))
+
+    params = BacktestParams(offset=0.02, exit_thresh_by_slug={"default_15m": 0.05}, dead_zone_val=0.10, enable_leg_chase=False)
+    res = _simulate_window(ticks, params)
+
+    assert res.stops_count == 1
+    assert res.pairs_count == 1
+    assert len(res.pairs) == 1
+
+    p = res.pairs[0]
+    assert p["entry_up"] == 0.58
+    assert p["entry_down"] == 0.38
+    assert abs((p["entry_up"] + p["entry_down"]) - p["pair_cost"]) < 0.0005
+    assert p["pair_cost"] == 0.96
+    assert p["edge_cents"] == pytest.approx(4.0)
+
+    assert res.entry_price_up == 0.48
+    assert res.entry_price_down == 0.38
+    assert res.entry_price_up + res.entry_price_down != p["pair_cost"]
+
+
+def test_chased_pair_records_chased_resting_price():
+    """When leg chase raises an unfilled leg, pairs record stores the chased fill price."""
+    w = _simulate_window(_chaseable_window(), _params(enable_leg_chase=True))
+    assert w.pair_captured is True
+    assert w.pairs_count == 1
+    assert len(w.pairs) == 1
+
+    p = w.pairs[0]
+    assert p["entry_up"] == 0.48
+    assert p["entry_down"] == w.chased_resting
+    assert abs((p["entry_up"] + p["entry_down"]) - p["pair_cost"]) < 0.0005
+    assert p["pair_cost"] <= 1.00
+    assert p["edge_cents"] == pytest.approx(realized_pair_edge_cents(p["entry_up"], p["entry_down"], 0.0, 1.0))
+
+
+def test_pairs_record_with_nonzero_merge_gas():
+    """pairs record edge_cents subtracts amortized merge gas correctly."""
+    params = BacktestParams(offset=0.02, enable_leg_chase=False, merge_gas_usd=0.005, quote_shares=50)
+    snaps_data = [
+        snap(100.0, 0.50, up_ask=0.48, down_ask=0.48),
+        snap(101.0, 0.50, up_ask=0.55, down_ask=0.55),
+    ]
+    res = _simulate_window(snaps_data, params)
+    assert len(res.pairs) == 1
+    p = res.pairs[0]
+    expected_edge = (1.00 - p["pair_cost"]) * 100.0 - (params.merge_gas_usd * 100.0) / params.quote_shares
+    assert p["edge_cents"] == pytest.approx(expected_edge)
+
+
+def test_replay_trades_sample_contains_pairs_list():
+    """replay() passes the pairs list through to each trades_sample record."""
+    snaps_data = [
+        snap(100.0, 0.50, up_ask=0.48, down_ask=0.48),
+        snap(101.0, 0.50, up_ask=0.55, down_ask=0.55),
+    ]
+    out = replay(snaps_data, BacktestParams(offset=0.02))
+    trades = out["trades_sample"]
+    assert len(trades) == 1
+    t = trades[0]
+    assert "pairs" in t
+    assert len(t["pairs"]) == t["pairs_count"] == 1
+    assert t["pairs"][0]["pair_cost"] == 0.96
+    assert t["pairs"][0]["edge_cents"] == 4.0
+
+
+
