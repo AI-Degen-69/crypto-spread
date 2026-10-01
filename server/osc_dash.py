@@ -29,7 +29,7 @@ import threading
 import time
 from datetime import datetime, timezone
 import urllib.parse
-from collections import defaultdict, deque
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 

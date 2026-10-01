@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,6 +88,7 @@ def _measure_stream(base: str, file: str, timeout: float,
     final_type: Optional[str] = None
     stop_polling = {"flag": False}
     poll_latencies: List[float] = []
+    poll_errors = {"count": 0}
 
     def poll_loop() -> None:
         while not stop_polling["flag"]:
@@ -96,10 +98,11 @@ def _measure_stream(base: str, file: str, timeout: float,
                              headers={"cache-control": "no-store"})
                 poll_latencies.append((time.perf_counter() - t0) * 1000.0)
             except Exception:
-                pass
+                # A failed poll contributes no sample; count it so the report
+                # cannot silently lose contention evidence.
+                poll_errors["count"] += 1
             time.sleep(3.0)
 
-    import threading
     poller = None
     if concurrent_poll:
         poller = threading.Thread(target=poll_loop, daemon=True)
@@ -149,6 +152,7 @@ def _measure_stream(base: str, file: str, timeout: float,
     if poll_latencies:
         out["poll_p50_ms_during_stream"] = round(statistics.median(poll_latencies), 1)
         out["poll_max_ms_during_stream"] = round(max(poll_latencies), 1)
+    out["poll_errors_during_stream"] = poll_errors["count"]
     return out
 
 
