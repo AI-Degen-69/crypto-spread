@@ -522,6 +522,54 @@ def test_run_monitor_with_bridge_wiring(capsys):
         assert callable(mock_bridge.on_rtds_tick)
 
 
+def test_fetch_clob_books_uses_canonical_hosts():
+    """Verify fetch_clob_books calls discovery with GAMMA_HOST and CLOB with CLOB_HOST."""
+    from unittest.mock import MagicMock, patch
+    from scripts.monitor_stream_latency import fetch_clob_books, _LIVE_MARKET_CACHE
+    from strategy.markets import GAMMA_HOST, CLOB_HOST, LiveMarket
+
+    _LIVE_MARKET_CACHE.clear()
+
+    fake_mkt = LiveMarket(
+        condition_id="0x123",
+        market_slug="btc-up-or-down-5m-test",
+        up_token="token_up_123",
+        down_token="token_down_456",
+        start_ts=time.time() - 100.0,
+        end_ts=time.time() + 300.0,
+        tick_size=0.01,
+        neg_risk=False,
+    )
+
+    mock_sess = MagicMock()
+    mock_resp_up = MagicMock()
+    mock_resp_up.status_code = 200
+    mock_resp_up.json.return_value = {"bids": [{"price": "0.48", "size": "10"}], "asks": [{"price": "0.52", "size": "10"}]}
+
+    mock_resp_dn = MagicMock()
+    mock_resp_dn.status_code = 200
+    mock_resp_dn.json.return_value = {"bids": [{"price": "0.47", "size": "10"}], "asks": [{"price": "0.53", "size": "10"}]}
+
+    mock_sess.get.side_effect = [mock_resp_up, mock_resp_dn]
+
+    with patch("scripts.monitor_stream_latency.fetch_live_market", return_value=fake_mkt) as mock_discovery:
+        up_bid, up_ask, down_bid, down_ask = fetch_clob_books("btc-up-or-down-5m", session=mock_sess)
+
+        mock_discovery.assert_called_once_with(GAMMA_HOST, "btc-up-or-down-5m")
+        assert mock_sess.get.call_count == 2
+
+        calls = mock_sess.get.call_args_list
+        assert calls[0][0][0] == f"{CLOB_HOST}/book?token_id=token_up_123"
+        assert calls[0][1]["timeout"] == (2.0, 3.0)
+        assert calls[1][0][0] == f"{CLOB_HOST}/book?token_id=token_down_456"
+        assert calls[1][1]["timeout"] == (2.0, 3.0)
+
+        assert up_bid == 0.48
+        assert up_ask == 0.52
+        assert down_bid == 0.47
+        assert down_ask == 0.53
+
+
 
 
 

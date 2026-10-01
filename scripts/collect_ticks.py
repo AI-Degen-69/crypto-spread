@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import requests
 from strategy import book_math
-from strategy.markets import full_book, recent_trades
+from strategy.markets import CLOB_HOST, GAMMA_HOST, full_book, recent_trades
 from strategy.series import SERIES
 from strategy.windows import compute_summary, finalize_window, write_json_atomic
 
@@ -86,8 +86,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "run" / "ticks"
 DEFAULT_OUT.mkdir(parents=True, exist_ok=True)
 
-GAMMA_HOST = "https://gamma-api.polymarket.com"
-CLOB_HOST = "https://clob.polymarket.com"
 TRADES_API = "https://data-api.polymarket.com/trades"
 
 POLL_INTERVAL = 1.0

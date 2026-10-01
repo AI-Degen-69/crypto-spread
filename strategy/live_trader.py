@@ -27,9 +27,7 @@ import requests
 from strategy.series import by_duration, SERIES, filter_series, token_for_slug
 from strategy import book_math
 from strategy.streaming import UnifiedStreamBridge, SYMBOL_TO_SERIES, SERIES_TO_SYMBOL, series_for_symbol
-
-GAMMA_HOST = "https://gamma-api.polymarket.com"
-CLOB_HOST = "https://clob.polymarket.com"
+from strategy.markets import CLOB_HOST, GAMMA_HOST
 
 _local = threading.local()
 log = logging.getLogger("live_trader")

@@ -26,7 +26,7 @@ import requests
 
 from strategy.series import SERIES, token_for_slug
 from strategy.streaming import SERIES_TO_SYMBOL, SYMBOL_TO_SERIES, UnifiedStreamBridge
-from strategy.markets import fetch_live_market, parse_book
+from strategy.markets import CLOB_HOST, GAMMA_HOST, fetch_live_market, parse_book
 
 log = logging.getLogger("monitor_stream_latency")
 
@@ -488,7 +488,7 @@ def fetch_clob_books(
         now = time.time()
         live_mkt = _LIVE_MARKET_CACHE.get(series_slug)
         if not live_mkt or now >= (live_mkt.end_ts - 2.0):
-            live_mkt = fetch_live_market("https://gamma-api.polymarket.com", series_slug)
+            live_mkt = fetch_live_market(GAMMA_HOST, series_slug)
             if live_mkt:
                 _LIVE_MARKET_CACHE[series_slug] = live_mkt
 
@@ -499,14 +499,14 @@ def fetch_clob_books(
         down_bid, down_ask = None, None
 
         # Fetch UP book
-        r_up = sess.get(f"https://clob.polymarket.com/book?token_id={live_mkt.up_token}", timeout=(2.0, 3.0))
+        r_up = sess.get(f"{CLOB_HOST}/book?token_id={live_mkt.up_token}", timeout=(2.0, 3.0))
         if r_up.status_code == 200:
             b_up = parse_book(r_up.json(), live_mkt.up_token)
             up_bid = b_up.get("best_bid")
             up_ask = b_up.get("best_ask")
 
         # Fetch DOWN book
-        r_dn = sess.get(f"https://clob.polymarket.com/book?token_id={live_mkt.down_token}", timeout=(2.0, 3.0))
+        r_dn = sess.get(f"{CLOB_HOST}/book?token_id={live_mkt.down_token}", timeout=(2.0, 3.0))
         if r_dn.status_code == 200:
             b_dn = parse_book(r_dn.json(), live_mkt.down_token)
             down_bid = b_dn.get("best_bid")
