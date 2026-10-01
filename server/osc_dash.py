@@ -9220,6 +9220,9 @@ function renderSweepVisual(data, submitted, isProgress){
   if(aggregate) aggregate.setAttribute('aria-label', `Open aggregate Sweep Visual chart detail for ${points.length} tested values`);
   const grid = $('btSweepGrid');
   if(!grid) return;
+  // Issue #371: tear down per-market charts by canvas element while the
+  // canvases are still attached (id lookup fails after detachment).
+  Array.from(grid.querySelectorAll('canvas[id]')).forEach(cv => destroyChart(cv));
   grid.innerHTML = '';
   const order = data.series_order || [];
   order.forEach((seriesKey, idx) => {
@@ -9252,7 +9255,7 @@ function renderSweepVisual(data, submitted, isProgress){
     grid.appendChild(card);
     const y = points.map(p => ((p.per_series || {})[seriesKey] || 0) / 100);
     const colors = chartColors(seriesKey);
-    destroyChartInstance(cvId);
+    destroyChart(cv);
     new Chart(cv.getContext('2d'), {
       type: 'bar',
       plugins: [sweepZeroLinePlugin()],
@@ -9268,6 +9271,14 @@ function destroyChartInstance(canvasId){
   // Chart.js exists only in the browser; headless harnesses skip cleanly.
   if (typeof Chart === 'undefined') return;
   const existing = Chart.getChart(canvasId);
+  if(existing) existing.destroy();
+}
+
+// Issue #371: destroy by canvas element — works even when the canvas has been
+// detached from the DOM, where Chart.getChart(canvasId) lookup fails.
+function destroyChart(canvas){
+  if (typeof Chart === 'undefined' || !canvas) return;
+  const existing = Chart.getChart(canvas);
   if(existing) existing.destroy();
 }
 

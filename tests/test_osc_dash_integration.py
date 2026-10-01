@@ -7185,3 +7185,135 @@ def test_backtest_429_visible_message_and_no_final_sleep():
     # The 429 path routes through markBacktestFailed.
     assert "markBacktestFailed(lastErrorText ||" in html
 
+
+def test_sweep_visual_destroys_detached_chart_instances():
+    """#371: repeated renderSweepVisual calls must destroy the previous sweep
+    charts even though grid.innerHTML='' detaches their canvases before the
+    id-based lookup runs — otherwise Chart.instances grows without bound
+    (1540 dead instances measured) until the main thread freezes."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is not installed")
+    html = client.get("/").text
+    render_fn = re.search(
+        r"function renderSweepVisual\(.*?\n\}\n\n\n// Statistical Summary Charts",
+        html, re.DOTALL)
+    destroy_instance_fn = re.search(r"function destroyChartInstance\(canvasId\)\{.*?\n\}", html, re.DOTALL)
+    destroy_fn = re.search(r"function destroyChart\(canvas\)\{.*?\n\}", html, re.DOTALL)
+    assert render_fn is not None
+    assert destroy_instance_fn is not None
+    assert destroy_fn is not None
+    harness = """
+    // ---- minimal DOM: only what renderSweepVisual touches ----
+    const collectCanvases = node => {
+      const out = [];
+      const walk = n => (n.children || []).forEach(c => { if (c.tagName === 'CANVAS' && c.id) out.push(c); walk(c); });
+      walk(node);
+      return out;
+    };
+    const makeBox = () => {
+      const b = { children: [], style: {} };
+      let htmlVal = '';
+      Object.defineProperty(b, 'innerHTML', { get: () => htmlVal, set: v => { htmlVal = String(v); b.children.length = 0; } });
+      b.appendChild = c => b.children.push(c);
+      return b;
+    };
+    const elements = {
+      btSweepMeta: makeBox(),
+      btSweepAggCard: { setAttribute: () => {} },
+      btSweepGrid: null,
+    };
+    elements.chartSweepAgg = (() => {
+      const cv = { tagName: 'CANVAS', id: 'chartSweepAgg', height: 0, style: {}, children: [] };
+      cv.getContext = () => { if (!cv._ctx) cv._ctx = { canvas: cv }; return cv._ctx; };
+      return cv;
+    })();
+    const grid = makeBox();
+    grid.querySelectorAll = sel => sel === 'canvas[id]' ? collectCanvases(grid) : [];
+    elements.btSweepGrid = grid;
+    const document = {
+      getElementById: id => elements[id] || null,
+      createElement: tag => {
+        const el = { tagName: String(tag).toUpperCase(), children: [], style: {}, className: '', tabIndex: 0, textContent: '' };
+        el.setAttribute = (k, v) => { el.attributes = el.attributes || {}; el.attributes[k] = v; if (k === 'id') el.id = v; };
+        el.addEventListener = () => {};
+        el.appendChild = c => el.children.push(c);
+        if (el.tagName === 'CANVAS') el.getContext = () => { if (!el._ctx) el._ctx = { canvas: el }; return el._ctx; };
+        return el;
+      },
+      addEventListener: () => {},
+      activeElement: null,
+    };
+    // ---- Chart.js mock: getChart(idString) resolves through the live DOM, so
+    // it CANNOT find a chart whose canvas was detached — the real leak path.
+    const chartByCanvas = new Map();
+    function Chart(ctx, config) {
+      const canvas = ctx.canvas;
+      this.canvas = canvas;
+      this.id = 'c' + (++Chart._next);
+      Chart.instances[this.id] = this;
+      chartByCanvas.set(canvas, this);
+    }
+    Chart.instances = {};
+    Chart._next = 0;
+    Chart.getChart = key => {
+      if (typeof key === 'string') {
+        const cv = document.getElementById(key);
+        return cv ? chartByCanvas.get(cv) : undefined;
+      }
+      return chartByCanvas.get(key);
+    };
+    Chart.prototype.destroy = function () {
+      delete Chart.instances[this.id];
+      chartByCanvas.delete(this.canvas);
+    };
+    // ---- stubs for page helpers the extracted code calls ----
+    const window = {};
+    const performance = { now: () => 0 };
+    const $ = id => elements[id] || null;
+    const getThemeTokens = () => ({ gold: 'g', up: 'u', down: 'd', line: 'l', dim: 'm', faint: 'f', proj: 'p' });
+    const fmtElapsed = () => '';
+    const setupBtChartDialog = () => {};
+    const sweepAxisLabel = () => 'axis';
+    const sweepCard = () => '';
+    const sweepCardTail = () => '';
+    const sweepChartOptions = () => ({});
+    const sweepChartColors = () => [];
+    const sweepZeroLinePlugin = () => ({});
+    {DESTROY_INSTANCE_FN}
+    {DESTROY_FN}
+    {RENDER_FN}
+    const data = {
+      axis: 'queue',
+      points: [
+        { value: 10, overall: { total_pnl_cents: -3150 }, per_series: { BTC5m: -2000, ETH5m: -1150 } },
+        { value: 20, overall: { total_pnl_cents: -2100 }, per_series: { BTC5m: -1500, ETH5m: -600 } }
+      ],
+      series_order: ['BTC5m', 'ETH5m'],
+      series_labels: { BTC5m: 'BTC 5m', ETH5m: 'ETH 5m' },
+      best_overall: { label: 'queue=20', total_pnl_cents: -2100 },
+      best_market: { series: 'BTC5m', point_label: 'queue=20', total_pnl_cents: -1500 },
+      n_windows: 1470
+    };
+    // A real sweep re-renders the grid on every progress event.
+    for (let i = 0; i < 12; i++) renderSweepVisual(data, 'golden/ticks.jsonl', false);
+    const liveCount = Object.keys(Chart.instances).length;
+    const attachedCanvases = collectCanvases(grid).concat([elements.chartSweepAgg]);
+    if (liveCount !== attachedCanvases.length) {
+      throw new Error('instance leak: ' + liveCount + ' live charts for ' + attachedCanvases.length + ' canvases (expected 3)');
+    }
+    for (const id of Object.keys(Chart.instances)) {
+      if (!attachedCanvases.includes(Chart.instances[id].canvas)) {
+        throw new Error('chart ' + id + ' survived on a detached canvas');
+      }
+    }
+    console.log('SWEEP_CHART_TEARDOWN_OK');
+    """
+    harness = (harness
+               .replace("{DESTROY_INSTANCE_FN}", destroy_instance_fn.group(0))
+               .replace("{DESTROY_FN}", destroy_fn.group(0))
+               .replace("{RENDER_FN}", render_fn.group(0).replace("\n\n\n// Statistical Summary Charts", "")))
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
+    assert "SWEEP_CHART_TEARDOWN_OK" in result.stdout
+
