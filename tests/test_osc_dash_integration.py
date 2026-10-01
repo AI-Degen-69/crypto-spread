@@ -3056,6 +3056,11 @@ def test_api_backtest_execution_prices_and_disaggregated_win_rate(tmp_path, monk
     assert trade["exit_reason"] == "pair_merged"
     assert "is_dead_zone" in trade
     assert "settle_source" in trade
+    assert "pairs" in trade
+    assert isinstance(trade["pairs"], list)
+    assert len(trade["pairs"]) == trade["pairs_count"]
+    for p in trade["pairs"]:
+        assert abs((p["entry_up"] + p["entry_down"]) - p["pair_cost"]) < 0.0005
 
     ov = data["overall"]
     assert "pair_rate" in ov
@@ -7320,4 +7325,150 @@ def test_sweep_visual_destroys_detached_chart_instances():
     result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=15)
     assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
     assert "SWEEP_CHART_TEARDOWN_OK" in result.stdout
+
+
+def test_render_backtest_trades_page_per_pair_and_missing_fallback():
+    """Issue #376: renderBacktestTradesPage renders each MERGED row from its own pair record.
+    If pairs list is missing or empty, cells show '—' instead of stale window aggregates.
+    """
+    import shutil
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    start = html.find("<script>")
+    end = html.rfind("</script>")
+    assert start != -1 and end != -1
+    script = html[start + len("<script>"):end]
+
+    dom_prelude = """
+    const setInterval = () => 0;
+    const clearInterval = () => {};
+    const setTimeout = () => 0;
+    const clearTimeout = () => {};
+    const fetch = () => Promise.resolve({ ok: true, json: async () => ({}) });
+    const EventSource = class { constructor() {} addEventListener() {} close() {} };
+    const WebSocket = class { constructor() {} addEventListener() {} send() {} close() {} };
+
+    const elements = {};
+    const makeElem = (id = '') => ({
+      id,
+      style: {},
+      textContent: '',
+      innerHTML: '',
+      appendChild: () => {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      addEventListener: () => {},
+      querySelectorAll: () => [],
+      value: '',
+      disabled: false
+    });
+    const getElem = (id) => {
+      if (!elements[id]) elements[id] = makeElem(id);
+      return elements[id];
+    };
+
+    const window = {
+      selectedBacktestFile: '',
+      addEventListener: () => {},
+      location: { search: '' },
+      btExpandedSlugs: new Set(['btc-updown-5m-1789344000', 'missing_pairs_slug']),
+      btActiveSize: 10,
+      btLogCurrentPage: 1,
+    };
+    globalThis.window = window;
+    const document = {
+      getElementById: getElem,
+      querySelectorAll: () => []
+    };
+    globalThis.document = document;
+    globalThis.$ = getElem;
+    globalThis.localStorage = {
+      _data: {},
+      getItem(k) { return this._data[k] || null; },
+      setItem(k, v) { this._data[k] = String(v); }
+    };
+    """
+
+    test_js = """
+    getElem('btLogSearch').value = '';
+    getElem('btLogSeriesFilter').value = '';
+    getElem('btLogResultFilter').value = '';
+    getElem('btLogPageSize').value = 'all';
+
+    const tradeWithPairs = {
+      slug: 'btc-updown-5m-1789344000',
+      series: 'btc-up-or-down-5m',
+      both_filled: true,
+      exit_triggered: true,
+      up_filled: true,
+      down_filled: true,
+      entry_up: 0.460,
+      entry_down: 0.545,
+      exit_price: 0.420,
+      exit_side: 'up',
+      pairs_count: 2,
+      stops_count: 1,
+      first_pair_cost: 0.960,
+      mean_pair_edge_cents: 4.0,
+      pair_pnl_cents: 80.0,
+      pnl_cents: 40.0,
+      pairs: [
+        { entry_up: 0.480, entry_down: 0.480, pair_cost: 0.960, edge_cents: 4.0 },
+        { entry_up: 0.520, entry_down: 0.440, pair_cost: 0.960, edge_cents: 4.0 }
+      ]
+    };
+
+    const tradeMissingPairs = {
+      slug: 'missing_pairs_slug',
+      series: 'eth-up-or-down-5m',
+      both_filled: true,
+      exit_triggered: false,
+      up_filled: true,
+      down_filled: true,
+      entry_up: 0.48,
+      entry_down: 0.48,
+      pairs_count: 1,
+      stops_count: 0,
+      pnl_cents: 40.0,
+      pairs: []
+    };
+
+    window.allBacktestTrades = [tradeWithPairs, tradeMissingPairs];
+    renderBacktestTradesPage();
+
+    const htmlOutput = elements['btTradesTableWrap'].innerHTML;
+
+    if (!htmlOutput.includes('$0.480') || !htmlOutput.includes('$0.960 (+4.0¢)')) {
+      throw new Error('Pair 1 legs or cost missing: ' + htmlOutput);
+    }
+    if (!htmlOutput.includes('$0.520') || !htmlOutput.includes('$0.440')) {
+      throw new Error('Pair 2 legs missing: ' + htmlOutput);
+    }
+    if (htmlOutput.includes('$0.545')) {
+      throw new Error('Stale window entry_down $0.545 leaked into table: ' + htmlOutput);
+    }
+    if (!htmlOutput.includes('STOP_LOSS') || !htmlOutput.includes('$0.420')) {
+      throw new Error('STOP_LOSS row missing or corrupt: ' + htmlOutput);
+    }
+    if (!htmlOutput.includes('missing_pairs_slug')) {
+      throw new Error('missing_pairs_slug window not rendered');
+    }
+
+    console.log('BACKTEST_TRADES_PER_PAIR_RENDER_OK');
+    process.exit(0);
+    """
+
+    res = subprocess.run(
+        [node_bin],
+        input=dom_prelude + "\n" + script + "\n" + test_js,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+    )
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "BACKTEST_TRADES_PER_PAIR_RENDER_OK" in res.stdout
+
 

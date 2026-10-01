@@ -2128,6 +2128,7 @@ def _run_backtest_simulation_worker(
             "pair_pnl_cents": round(w.pair_pnl_cents * size, 2),
             "pairs_count": w.pairs_count,
             "stops_count": w.stops_count,
+            "pairs": w.pairs,
         })
 
     total_windows = len(per_window)
@@ -8355,22 +8356,37 @@ function renderBacktestTradesPage() {
         let tradeIdx = 1;
 
         if (mergesCount > 0 || t.both_filled) {
-          const pCost = t.first_pair_cost != null ? t.first_pair_cost : ((t.entry_up || 0.48) + (t.entry_down || 0.48));
-          const pEdge = t.mean_pair_edge_cents != null ? t.mean_pair_edge_cents : ((1.00 - pCost) * 100);
-          const edgeStr = (pEdge >= 0 ? '+' : '') + pEdge.toFixed(1) + '¢';
-          const pCostStr = `$${pCost.toFixed(3)} (${edgeStr})`;
-          const eachPairPnl = (t.pair_pnl_cents != null && t.pair_pnl_cents !== 0)
-            ? (t.pair_pnl_cents / Math.max(1, mergesCount))
-            : (pEdge * size);
-          const pPnlUsd = fmtUsd(eachPairPnl, true);
-          const pPct = pCost > 0 ? (pEdge / (pCost * 100) * 100).toFixed(1) : '0.0';
-          const pPctStr = (pPct >= 0 ? '+' : '') + pPct + '%';
-
-          const upPrice = t.entry_up != null ? '$' + Number(t.entry_up).toFixed(3) : '$0.480';
-          const dnPrice = t.entry_down != null ? '$' + Number(t.entry_down).toFixed(3) : '$0.480';
-
           const nMerges = Math.max(1, mergesCount);
+          // MERGED rows show per-pair predicted values from the backtest, and
+          // window aggregates are not per-pair values.
           for (let m = 0; m < nMerges; m++) {
+            const pairRec = (t.pairs && t.pairs[m] != null) ? t.pairs[m] : null;
+
+            let upPrice = '—';
+            let dnPrice = '—';
+            let pCostStr = '—';
+            let pnlCell = '—';
+
+            if (pairRec != null) {
+              if (pairRec.entry_up != null) {
+                upPrice = '$' + Number(pairRec.entry_up).toFixed(3);
+              }
+              if (pairRec.entry_down != null) {
+                dnPrice = '$' + Number(pairRec.entry_down).toFixed(3);
+              }
+              if (pairRec.pair_cost != null && pairRec.edge_cents != null) {
+                const pCost = Number(pairRec.pair_cost);
+                const pEdge = Number(pairRec.edge_cents);
+                const edgeStr = (pEdge >= 0 ? '+' : '') + pEdge.toFixed(1) + '¢';
+                pCostStr = `$${pCost.toFixed(3)} (${edgeStr})`;
+                const eachPairPnl = pEdge * size;
+                const pPnlUsd = fmtUsd(eachPairPnl, true);
+                const pPct = pCost > 0 ? (pEdge / (pCost * 100) * 100).toFixed(1) : '0.0';
+                const pPctStr = (pPct >= 0 ? '+' : '') + pPct + '%';
+                pnlCell = `${pPnlUsd} (${pPctStr})`;
+              }
+            }
+
             subRows += `<tr style="border-bottom:none">`
               + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
               + `<td style="font-weight:700;color:var(--up)">UP</td>`
@@ -8379,7 +8395,7 @@ function renderBacktestTradesPage() {
               + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);background:rgba(255,255,255,0.01)">${pCostStr}</td>`
               + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time from first fill to merge completion">—</td>`
               + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)"><span class="pill pill-osc" title="Completed pair merged 1:1 on Polymarket CTF">MERGED</span></td>`
-              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">${pPnlUsd} (${pPctStr})</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">${pnlCell}</td>`
               + `</tr>`
               + `<tr style="border-top:none">`
               + `<td style="font-weight:700;color:var(--down)">DOWN</td>`
