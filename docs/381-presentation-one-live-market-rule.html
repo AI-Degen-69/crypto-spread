@@ -1,0 +1,304 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One rule for "which market are we trading right now?"</title>
+<style>
+  :root{
+    --bg:#0c1020; --panel:#141a30; --panel2:#1b2340; --line:#2b3557;
+    --ink:#eef2ff; --dim:#9aa6d4; --accent:#6ee7ff; --accent2:#a78bfa;
+    --good:#34d399; --warn:#fbbf24;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 700px at 20% -10%,#1a2348 0%,var(--bg) 60%);
+    color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:28px 20px 64px}
+  h1{font-size:clamp(26px,4.6vw,42px);line-height:1.15;margin:8px 0 12px;letter-spacing:-.5px}
+  h1 span{color:var(--accent)}
+  .lede{font-size:18px;color:var(--dim);max-width:70ch;margin:0 0 8px}
+  .hero{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:26px}
+  .tag{display:inline-block;background:rgba(110,231,255,.12);color:var(--accent);
+    border:1px solid rgba(110,231,255,.35);border-radius:999px;padding:4px 12px;font-size:13px}
+  .panel{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+    border-radius:16px;padding:20px;margin-bottom:22px}
+  h2{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:14px;margin:0 0 14px}
+  canvas{width:100%;height:auto;display:block;border-radius:12px;background:#0a0e1c;touch-action:none;cursor:ew-resize}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+  button{background:rgba(167,139,250,.16);border:1px solid rgba(167,139,250,.45);color:var(--ink);
+    border-radius:10px;padding:9px 16px;font-size:15px;cursor:pointer}
+  button:hover{background:rgba(167,139,250,.28)}
+  button.ghost{background:transparent;border-color:var(--line);color:var(--dim)}
+  input[type=range]{flex:1;min-width:180px;accent-color:var(--accent)}
+  .readout{margin-top:14px;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+  .pill{border-radius:12px;padding:10px 14px;font-size:15px;border:1px solid var(--line);background:#0f1530;min-width:200px}
+  .pill b{color:var(--accent)}
+  .pill.none b{color:var(--warn)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .col{border:1px solid var(--line);border-radius:14px;padding:16px;background:#0f1530}
+  .col h3{margin:0 0 8px;font-size:16px}
+  .col.before h3{color:var(--warn)} .col.after h3{color:var(--good)}
+  .col ul{margin:0;padding-left:20px;color:var(--dim);font-size:15px}
+  .col li{margin-bottom:6px}
+  .rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+  .rule{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0f1530}
+  .rule .n{color:var(--accent2);font-weight:700;font-size:13px;letter-spacing:.06em;text-transform:uppercase}
+  .rule p{margin:6px 0 0;color:var(--dim);font-size:14px}
+  footer{color:var(--dim);font-size:13px;border-top:1px solid var(--line);padding-top:14px}
+  @media(max-width:640px){.cols{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <span class="tag">Update #381 &mdash; went live</span>
+    <h1>One rule for <span>&ldquo;which market are we trading right now?&rdquo;</span></h1>
+    <p class="lede"><strong>Before:</strong> the trading screen and the data recorder each carried their own copy of that question &mdash; and the copies disagreed on the edges.</p>
+    <p class="lede"><strong>Now:</strong> both ask the same single helper, so they always answer identically &mdash; and the answer is locked in by 25 automatic checks.</p>
+  </header>
+<section class="panel">
+    <h2>Try it: drag &ldquo;now&rdquo; across the clock</h2>
+    <p class="sub">Seven candidate market windows sit on the timeline. Move the line and watch which one gets picked.</p>
+    <canvas id="scene" width="1000" height="420"></canvas>
+    <div class="bar">
+      <button id="play">&#9654;&nbsp; Play</button>
+      <input type="range" id="now" min="0" max="1000" value="180">
+      <button class="ghost" id="reset">Reset</button>
+    </div>
+    <div class="readout">
+      <div class="pill" id="picked"><b>&mdash;</b></div>
+      <div class="pill" id="state">Answering&hellip;</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>What changed in plain terms</h2>
+    <div class="cols">
+      <div class="col before">
+        <h3>Before</h3>
+        <ul>
+          <li>Two copies of the same &ldquo;pick the live market&rdquo; logic, one per corner of the system.</li>
+          <li>A fix applied to one copy silently missed the other.</li>
+          <li>Broken or malformed market rows could slip through and break a poll.</li>
+          <li>At the exact second a market ends, behaviour was undefined.</li>
+        </ul>
+      </div>
+      <div class="col after">
+        <h3>Now</h3>
+        <ul>
+          <li>One helper answers the question for everyone.</li>
+          <li>Any broken row is quietly skipped instead of breaking the run.</li>
+          <li>A market counts as open from its start second up to, but not including, its end second.</li>
+          <li>25 new checks compare the helper against the old behaviour, edge case by edge case.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>The rule, written out once</h2>
+    <div class="rules">
+      <div class="rule"><div class="n">Rule 1</div><p>Scan every market across every listed event.</p></div>
+      <div class="rule"><div class="n">Rule 2</div><p>Skip anything missing its pair of trading tokens or its start/end times.</p></div>
+      <div class="rule"><div class="n">Rule 3</div><p>Keep only markets whose window contains the current moment.</p></div>
+      <div class="rule"><div class="n">Rule 4</div><p>If several are open, the one that started most recently wins.</p></div>
+      <div class="rule"><div class="n">Rule 5</div><p>If two started in the same second, the first one listed is kept.</p></div>
+      <div class="rule"><div class="n">Rule 6</div><p>If nothing is open, the answer is simply &ldquo;no live market right now&rdquo;.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    Same answer for the trading screen and the data recorder &mdash; every time, at every minute boundary.
+  </footer>
+</div>
+<script>
+(function(){
+  "use strict";
+  var cv = document.getElementById('scene');
+  var ctx = cv.getContext('2d');
+  var slider = document.getElementById('now');
+  var picked = document.getElementById('picked');
+  var state = document.getElementById('state');
+  var playBtn = document.getElementById('play');
+
+  var WINDOWS = [
+    {label:'Hourly round A', start:0,   end:170,  color:'#3b82f6'},
+    {label:'Hourly round B', start:120, end:340,  color:'#a78bfa'},
+    {label:'5m spread',      start:180, end:240,  color:'#34d399'},
+    {label:'Hourly round C', start:300, end:520,  color:'#fbbf24'},
+    {label:'Hourly round D', start:430, end:610,  color:'#fb7185'},
+    {label:'Next hour',      start:600, end:820,  color:'#22d3ee'},
+    {label:'Far future',     start:810, end:1000, color:'#64748b'}
+  ];
+  var PAD = {l:26, r:26, t:56, b:44};
+  var trackW = 0, trackH = 0, rowH = 0;
+
+  function layout(){
+    trackW = cv.width - PAD.l - PAD.r;
+    trackH = cv.height - PAD.t - PAD.b;
+    rowH = trackH / WINDOWS.length;
+  }
+
+  function x(t){
+    return PAD.l + (t/1000)*trackW;
+  }
+
+  function selectWindow(now){
+    var winner = null;
+    for (var i=0;i<WINDOWS.length;i++){
+      var w = WINDOWS[i];
+      if (w.start <= now && now < w.end){
+        if (winner === null || w.start > winner.start) winner = w;
+      }
+    }
+    return winner;
+  }
+
+  function roundRect(a,b,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(a+r,b);
+    ctx.lineTo(a+w-r,b);
+    ctx.quadraticCurveTo(a+w,b,a+w,b+r);
+    ctx.lineTo(a+w,b+h-r);
+    ctx.quadraticCurveTo(a+w,b+h,a+w-r,b+h);
+    ctx.lineTo(a+r,b+h);
+    ctx.quadraticCurveTo(a,b+h,a,b+h-r);
+    ctx.lineTo(a,b+r);
+    ctx.quadraticCurveTo(a,b,a+r,b);
+    ctx.closePath();
+  }
+
+  function draw(){
+    var now = +slider.value;
+    var win = selectWindow(now);
+    var i, t, px, w, y, h, x1, x2, live, isWinner, o, others, nx;
+    ctx.clearRect(0,0,cv.width,cv.height);
+
+    ctx.fillStyle = '#9aa6d4';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (t=0;t<=1000;t+=200){
+      px = x(t);
+      ctx.fillRect(px, PAD.t, 1, trackH);
+      ctx.fillText(t===0 ? 'start' : '+'+t+'m', px, PAD.t-16);
+    }
+
+    for (i=0;i<WINDOWS.length;i++){
+      w = WINDOWS[i];
+      y = PAD.t + i*rowH + rowH*0.2;
+      h = rowH*0.6;
+      x1 = x(w.start);
+      x2 = x(w.end);
+      live = (w.start <= now && now < w.end);
+      isWinner = (win === w);
+      ctx.globalAlpha = isWinner ? 1 : (live ? 0.5 : 0.2);
+      ctx.fillStyle = w.color;
+      roundRect(x1, y, x2-x1, h, 7);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = live ? '#eef2ff' : '#8892b8';
+      ctx.font = (isWinner?'bold ':'') + '13px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      if (x2-x1 > ctx.measureText(w.label).width + 24){
+        ctx.fillText(w.label, (x1+x2)/2, y + h/2 + 4.5);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.fillText(w.label, x2 + 8, y + h/2 + 4.5);
+      }
+
+      if (isWinner){
+        ctx.strokeStyle = '#eef2ff';
+        ctx.lineWidth = 2;
+        roundRect(x1-1.5, y-1.5, x2-x1+3, h+3, 8);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+    }
+
+    nx = x(now);
+    ctx.strokeStyle = '#6ee7ff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(nx, PAD.t - 6);
+    ctx.lineTo(nx, PAD.t + trackH + 6);
+    ctx.stroke();
+    ctx.fillStyle = '#6ee7ff';
+    ctx.beginPath();
+    ctx.moveTo(nx, PAD.t - 8);
+    ctx.lineTo(nx - 8, PAD.t - 22);
+    ctx.lineTo(nx + 8, PAD.t - 22);
+    ctx.closePath();
+    ctx.fill();
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.textAlign = (nx > cv.width - 90) ? 'right' : 'left';
+    ctx.fillText('now', nx + ((nx > cv.width-90) ? -8 : 8), PAD.t - 24);
+
+    others = 0;
+    for (i=0;i<WINDOWS.length;i++){
+      o = WINDOWS[i];
+      if (o !== win && o.start <= now && now < o.end) others++;
+    }
+    if (win){
+      picked.className = 'pill';
+      picked.innerHTML = '<b>Picked:</b> ' + win.label +
+        '<br><span style="color:#9aa6d4;font-size:13px">opens +' + win.start +
+        'm, closes +' + win.end + 'm &middot; newest of the open ones</span>';
+      state.className = 'pill';
+      state.innerHTML = '<b>' + (others+1) + '</b> window' + (others?'s':'') +
+        ' open &mdash; newest start wins';
+    } else {
+      picked.className = 'pill none';
+      picked.innerHTML = '<b>No live market</b><br><span style="color:#9aa6d4;' +
+        'font-size:13px">nothing is inside its window at this moment</span>';
+      state.className = 'pill';
+      state.innerHTML = '<b>0</b> windows open';
+    }
+  }
+
+  function toTime(e){
+    var r = cv.getBoundingClientRect();
+    var px = (e.clientX - r.left) / r.width * cv.width;
+    var t = Math.round((px - PAD.l) / trackW * 1000);
+    slider.value = Math.max(0, Math.min(1000, t));
+    draw();
+  }
+
+  function stop(){
+    if (timer){
+      clearInterval(timer);
+      timer = null;
+      playBtn.innerHTML = '&#9654;&nbsp; Play';
+    }
+  }
+
+  var dragging = false;
+  var timer = null;
+
+  cv.addEventListener('pointerdown', function(e){ dragging = true; toTime(e); });
+  cv.addEventListener('pointermove', function(e){ if (dragging) toTime(e); });
+  cv.addEventListener('pointerup', function(){ dragging = false; });
+  cv.addEventListener('pointercancel', function(){ dragging = false; });
+  slider.addEventListener('input', draw);
+  document.getElementById('reset').addEventListener('click', function(){
+    stop();
+    slider.value = 180;
+    draw();
+  });
+  playBtn.addEventListener('click', function(){
+    if (timer){ stop(); return; }
+    playBtn.innerHTML = '&#10073;&#10073;&nbsp; Pause';
+    timer = setInterval(function(){
+      var v = (+slider.value) + 3;
+      slider.value = v > 1000 ? 0 : v;
+      draw();
+    }, 40);
+  });
+
+  layout();
+  draw();
+})();
+</script>
+</body>
+</html>
