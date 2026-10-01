@@ -91,6 +91,7 @@ def _measure_stream(base: str, file: str, timeout: float,
     poll_errors = {"count": 0}
 
     def poll_loop() -> None:
+        """Poll /api/oscillation every 3s until the stream ends, recording latencies."""
         while not stop_polling["flag"]:
             t0 = time.perf_counter()
             try:
@@ -157,6 +158,7 @@ def _measure_stream(base: str, file: str, timeout: float,
 
 
 def main() -> int:
+    """Run the Backtest-tab cost probe and write the JSON report; return exit code."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default="http://127.0.0.1:5515")
     ap.add_argument("--file", default="", help="tick file name; empty = All Files")

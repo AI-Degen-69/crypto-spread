@@ -1705,6 +1705,7 @@ class _PairStatsAccumulator:
     )
 
     def __init__(self) -> None:
+        """Zero all counters, sums, and compensation terms."""
         self._cost_count = 0
         self._cost_sum = 0.0
         self._cost_comp = 0.0
@@ -1716,6 +1717,7 @@ class _PairStatsAccumulator:
     # -- ingestion ---------------------------------------------------------
 
     def add_cost(self, c: float) -> None:
+        """Ingest one window cost sample; count it above-settle when rounded > 1.00."""
         self._cost_count += 1
         if _BUILTIN_SUM_COMPENSATED:
             self._cost_sum, self._cost_comp = _neumaier_add(self._cost_sum, self._cost_comp, float(c))
@@ -1725,6 +1727,7 @@ class _PairStatsAccumulator:
             self._above_settle += 1
 
     def add_edge(self, e: float) -> None:
+        """Ingest one window edge sample."""
         self._edge_count += 1
         if _BUILTIN_SUM_COMPENSATED:
             self._edge_sum, self._edge_comp = _neumaier_add(self._edge_sum, self._edge_comp, float(e))
@@ -1734,12 +1737,15 @@ class _PairStatsAccumulator:
     # -- snapshots (O(1)) ---------------------------------------------------
 
     def cost_count(self) -> int:
+        """Number of cost samples ingested so far."""
         return self._cost_count
 
     def edge_count(self) -> int:
+        """Number of edge samples ingested so far."""
         return self._edge_count
 
     def cost_mean(self) -> Optional[float]:
+        """Mean cost, or None when no samples have been ingested."""
         if not self._cost_count:
             return None
         if _BUILTIN_SUM_COMPENSATED:
@@ -1747,6 +1753,7 @@ class _PairStatsAccumulator:
         return self._cost_sum / self._cost_count
 
     def edge_mean(self) -> Optional[float]:
+        """Mean edge, or None when no samples have been ingested."""
         if not self._edge_count:
             return None
         if _BUILTIN_SUM_COMPENSATED:
@@ -1754,6 +1761,7 @@ class _PairStatsAccumulator:
         return self._edge_sum / self._edge_count
 
     def above_settle_count(self) -> int:
+        """Number of cost samples rounding above 1.00 (above-settle)."""
         return self._above_settle
 
     # -- introspection (tests assert boundedness) ---------------------------
