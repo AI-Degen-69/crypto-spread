@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Presentation: Rewire Host Strings</title>
+<style>
+:root { --ink:#eaf1f6; --muted:#9aabb8; --bg:#0b1117; --panel:#121c25; --panel-2:#172530;
+--line:#29404d; --accent:#C792EA; --accent-ink:#0b1117; --shadow:0 20px 55px rgba(0,0,0,.28); }
+* { box-sizing:border-box } body { margin:0; color:var(--ink); background:var(--bg); font:16px/1.65 "Segoe UI",Tahoma,sans-serif; text-align:right; }
+main { max-width:1100px; margin:auto; padding:40px 20px 70px }
+h1 { font-size: 2.2rem; margin-bottom: 0.5rem; }
+.subtitle { color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px; margin-top:24px; box-shadow:var(--shadow) }
+.figure { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel-2) }
+.figure-label { font-size:.7rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); padding:.8rem 1rem 0 }
+.split-container { display:flex; gap:20px; flex-wrap:wrap; }
+.split-half { flex:1; min-width:300px; }
+.box { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: rgba(255,255,255,0.02); text-align: left; direction: ltr; }
+.box-title { font-size: 0.85rem; color: var(--muted); margin-bottom: 8px; font-family: monospace; }
+.code-line { font-family: monospace; font-size: 0.9rem; color: var(--accent); }
+.bad-line { color: #f17c78; }
+.arrow { text-align: center; color: var(--muted); margin: 10px 0; font-size: 1.5rem; }
+.callout { border-right:3px solid var(--accent); background:rgba(255,255,255,.04); padding:1rem 1.2rem; border-radius:8px 0 0 8px; margin:1.2rem 0 }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; background: rgba(255,255,255,0.1); border: 1px solid var(--line); margin-right: 8px; }
+.badge.merged { color: #55d6c2; border-color: #55d6c2; }
+</style>
+</head>
+<body>
+<main>
+    <h1>כתובות ה-API מנוהלות עכשיו במקום אחד</h1>
+    <div class="subtitle">לפני כן: הכתובות היו מפוזרות ב-3 קבצים שונים. עכשיו: כולן נשאבות מנקודה מרכזית אחת.</div>
+
+    <div class="split-container">
+        <!-- Before -->
+        <div class="split-half">
+            <div class="figure">
+                <div class="figure-label">לפני (Before)</div>
+                <div style="padding: 20px;">
+                    <div class="box">
+                        <div class="box-title">scripts/collect_ticks.py</div>
+                        <div class="code-line bad-line">GAMMA_HOST = "https://gamma-api..."</div>
+                    </div>
+                    <div class="box">
+                        <div class="box-title">scripts/measure_5m_oscillation.py</div>
+                        <div class="code-line bad-line">GAMMA_HOST = "https://gamma-api..."</div>
+                    </div>
+                    <div class="box">
+                        <div class="box-title">strategy/live_trader.py</div>
+                        <div class="code-line bad-line">GAMMA_HOST = "https://gamma-api..."</div>
+                    </div>
+                </div>
+            </div>
+            <p style="color: var(--muted); font-size: 0.9rem; margin-top: 10px;">אם כתובת השרת משתנה, צריך לזכור לתקן ב-3 מקומות שונים (סכנה לתקלות).</p>
+        </div>
+
+        <!-- After -->
+        <div class="split-half">
+            <div class="figure" style="border-color: var(--accent);">
+                <div class="figure-label" style="color: var(--accent);">אחרי (After)</div>
+                <div style="padding: 20px;">
+                    <div class="box" style="border-color: var(--accent); background: rgba(199, 146, 234, 0.05);">
+                        <div class="box-title" style="color: var(--ink);">strategy/markets.py (המקור היחיד)</div>
+                        <div class="code-line">GAMMA_HOST = "https://gamma-api..."</div>
+                    </div>
+                    
+                    <div class="arrow">↓ שואבים משם ↓</div>
+
+                    <div style="display:flex; gap:10px;">
+                        <div class="box" style="flex:1;">
+                            <div class="box-title">collect_...</div>
+                        </div>
+                        <div class="box" style="flex:1;">
+                            <div class="box-title">measure_...</div>
+                        </div>
+                        <div class="box" style="flex:1;">
+                            <div class="box-title">live_trader</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <p style="color: var(--muted); font-size: 0.9rem; margin-top: 10px;">מקור אמת אחד. עדכון אחד חל על כל המערכת אוטומטית.</p>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h3>מה אפשר לעשות עכשיו שלא יכלנו קודם?</h3>
+        <p>מעכשיו, כשנרצה לשנות סביבה (למשל לעבור לשרת טסטים או להתחבר למקור אחר), צריך לשנות את הכתובת רק בשורה אחת בודדת, ואנחנו בטוחים שזה משתקף בכל המערכת ללא חשש מפספוסים.</p>
+        <div class="callout">
+            <strong>איך לבדוק שזה עובד?</strong> הפעל את איסוף הנתונים הרגיל בטרמינל. אם הוא אוסף נתונים כרגיל מ-Polymarket, הקישור עובד באופן מושלם.<br><code style="direction:ltr; display:inline-block; margin-top:10px;">python -m scripts.collect_ticks --once</code>
+        </div>
+    </div>
+
+    <div style="margin-top: 40px; color: var(--muted); font-size: 0.85rem;">
+        <span>PR #380</span>
+        <span class="badge merged">MERGED</span>
+        <span>Issue #374</span>
+    </div>
+</main>
+</body>
+</html>
