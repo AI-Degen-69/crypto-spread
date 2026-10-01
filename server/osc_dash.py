@@ -3086,7 +3086,6 @@ async def api_backtest_stream(
             release_guards()
 
     worker_task = asyncio.create_task(_submit())
-    submitted_pool = getattr(_submit, "pool", None)  # #371: cleanup binds to this run's executor
 
     async def event_generator():
         """Stream progress envelopes, then one authoritative final event."""
@@ -3139,13 +3138,22 @@ async def api_backtest_stream(
                 # guards are untouched. The next request rebuilds the pool.
                 # #371: terminate the pool this run submitted to — a run that
                 # started later owns the global by then and must survive.
+                # #372: read the binding at cleanup, not at submit — the task
+                # body (and the binding) runs only after its first step. A
+                # never-started task bound no pool, so there is nothing of
+                # ours to terminate; falling back to the global would kill a
+                # newer run's pool for no reason.
+                submit_pool = getattr(_submit, "pool", None)
                 try:
-                    _terminate_backtest_pool(submitted_pool)
+                    if submit_pool is not None:
+                        _terminate_backtest_pool(submit_pool)
                 finally:
                     # Guard release must survive even a failing shutdown.
                     release_guards()
 
-    return EventSourceResponse(event_generator())
+    # #372: heartbeat below the client's 15 s inactivity watchdog — a large
+    # but healthy window can emit no progress for longer than that.
+    return EventSourceResponse(event_generator(), ping=5)
 
 
 @app.get(
@@ -3481,7 +3489,9 @@ async def api_backtest_sweep_stream(
                 _terminate_backtest_pool()
                 release_guards()
 
-    return EventSourceResponse(event_generator())
+    # #372: heartbeat below the client's 15 s inactivity watchdog — a large
+    # but healthy window can emit no progress for longer than that.
+    return EventSourceResponse(event_generator(), ping=5)
 
 
 @app.get("/api/analysis")
@@ -6576,6 +6586,11 @@ let btOscPollInFlight = false;
 function pollTick(){
   if (typeof document !== 'undefined' && document.hidden) { btOscStale = true; return; }
   if (currentActiveTab === 'backtest') { btOscStale = true; return; }
+  // #372: timer-driven oscillation polls serve the Market Data tab only —
+  // the /api/oscillation fetch is disk work, so hidden tabs skip it every
+  // 3 s. Explicit tick() callers (sampling, rebuild, upload, tab switches)
+  // stay unguarded: their fetch runs once, not on a timer.
+  if (typeof currentActiveTab !== 'undefined' && currentActiveTab !== 'marketdata') return;
   if (btOscPollInFlight) return; // never overlap timer-driven polls
   btOscPollInFlight = true;
   const done = () => { btOscPollInFlight = false; };
@@ -6971,7 +6986,6 @@ async function tick(){
   // NOT here — explicit callers (sampling, rebuild, goal save, upload, the
   // `await tick()` refresh paths) must always poll.
   refreshCollectorStatus();
-  if (typeof currentActiveTab !== 'undefined' && currentActiveTab !== 'marketdata') return;
   let data; try{data=await (await fetch('/api/oscillation',{cache:'no-store'})).json();}catch(e){return;}
   const sum=data.summary||{}, per=sum.per_series||{}, live=data.live||{}, wins=data.windows||[];
 
@@ -7759,7 +7773,7 @@ function markBacktestFailed(errMsg){
   if (elSub) elSub.textContent = 'Failed';
   // #371: red "--" + "Failed" is not enough. Show the message itself in an
   // always-visible Backtest element so 429 / stall / dead-stream are actionable.
-  const elBanner = $('btCardPairCost'); // #371: visible metric card carries the message text
+  const elBanner = $('btPairCostSub'); // #371/#372: visible sub-line carries the message; writing to the card container would delete its children
   if (elBanner) {
     elBanner.textContent = `✗ ${errMsg}`;
     elBanner.style.color = 'var(--down)';

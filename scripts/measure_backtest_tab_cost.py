@@ -90,13 +90,19 @@ def _measure_stream(base: str, file: str, timeout: float,
     poll_latencies: List[float] = []
     poll_errors = {"count": 0}
 
+    # #372: contention polls stay bounded so the shutdown join() below cannot
+    # hang on the stream's long timeout; non-2xx polls count as errors, never
+    # as latency samples (matching _measure_poll_latency).
+    poll_timeout = min(timeout, 30.0)
+
     def poll_loop() -> None:
         """Poll /api/oscillation every 3s until the stream ends, recording latencies."""
         while not stop_polling["flag"]:
             t0 = time.perf_counter()
             try:
-                requests.get(f"{base}/api/oscillation", timeout=timeout,
-                             headers={"cache-control": "no-store"})
+                resp = requests.get(f"{base}/api/oscillation", timeout=poll_timeout,
+                                    headers={"cache-control": "no-store"})
+                resp.raise_for_status()
                 poll_latencies.append((time.perf_counter() - t0) * 1000.0)
             except Exception:
                 # A failed poll contributes no sample; count it so the report
@@ -111,32 +117,43 @@ def _measure_stream(base: str, file: str, timeout: float,
 
     t_start = time.perf_counter()
     last_env = t_start
+    stream_status: Optional[int] = None
     try:
         with requests.get(f"{base}/api/backtest/stream", params=params,
                           stream=True, timeout=(3.05, timeout)) as resp:
-            for raw_line in resp.iter_lines(decode_unicode=True):
-                if not raw_line or not str(raw_line).startswith("data:"):
-                    continue
-                payload = str(raw_line)[5:].strip()
-                if not payload:
-                    continue
-                try:
-                    ev = json.loads(payload)
-                except ValueError:
-                    continue
-                now = time.perf_counter()
-                etype = ev.get("type")
-                if etype == "progress":
-                    gaps_ms.append((now - last_env) * 1000.0)
-                    last_env = now
-                    envelope_bytes.append(len(payload))
-                    points_per_envelope.append(len(ev.get("points") or []))
-                elif etype in ("final", "error"):
-                    final_type = etype
-                    break
+            if resp.status_code != 200:
+                # A rejection (e.g. 429 while a run is in progress) carries no
+                # SSE body — report it instead of parsing it as events.
+                final_type = "error"
+                stream_status = resp.status_code
+            else:
+                for raw_line in resp.iter_lines(decode_unicode=True):
+                    if not raw_line or not str(raw_line).startswith("data:"):
+                        continue
+                    payload = str(raw_line)[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        ev = json.loads(payload)
+                    except ValueError:
+                        continue
+                    now = time.perf_counter()
+                    etype = ev.get("type")
+                    if etype == "progress":
+                        gaps_ms.append((now - last_env) * 1000.0)
+                        last_env = now
+                        envelope_bytes.append(len(payload))
+                        points_per_envelope.append(len(ev.get("points") or []))
+                    elif etype in ("final", "error"):
+                        final_type = etype
+                        break
     finally:
         stop_polling["flag"] = True
-    total_s = time.perf_counter() - t_start
+        total_s = time.perf_counter() - t_start
+        # #372: wait for the in-flight poll so its sample or error is counted;
+        # the bounded poll timeout above caps this wait.
+        if poller is not None:
+            poller.join(timeout=poll_timeout + 5.0)
 
     out: Dict[str, Any] = {
         "file": file or "(server default: All Files / run/ticks)",
@@ -146,6 +163,8 @@ def _measure_stream(base: str, file: str, timeout: float,
         "envelopes": len(gaps_ms),
         "points_per_envelope_max": max(points_per_envelope) if points_per_envelope else 0,
     }
+    if stream_status is not None:
+        out["stream_status"] = stream_status
     if gaps_ms:
         out["progress_gap_p50_ms"] = round(statistics.median(gaps_ms), 1)
         out["progress_gap_max_ms"] = round(max(gaps_ms), 1)

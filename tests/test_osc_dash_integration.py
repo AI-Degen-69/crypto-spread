@@ -7152,18 +7152,22 @@ def test_mark_backtest_failed_shows_visible_message():
     html = client.get("/").text
     fn = re.search(r"function markBacktestFailed\(errMsg\)\{.*?\n\}", html, re.DOTALL)
     assert fn is not None
+    # #372: the message must target the btPairCostSub sub-line — writing
+    # textContent to the btCardPairCost container deletes its child elements
+    # and blanks the card until reload.
+    assert "$('btCardPairCost')" not in fn.group(0)
     harness = f"""
     const elements = {{
       btHash: {{ textContent: '' }},
       btLastRunTime: {{ textContent: '' }},
       btElapsedTime: {{ textContent: '', style: {{}} }},
       btElapsedSub: {{ textContent: 'Simulating…' }},
-      btCardPairCost: {{ textContent: '$0.000', style: {{}} }},
+      btPairCostSub: {{ textContent: '0 pairs captured', style: {{}} }},
     }};
     const $ = (id) => elements[id] || null;
     {fn.group(0)}
     markBacktestFailed('Another backtest or sweep is already running on the server.');
-    if (!elements.btCardPairCost.textContent.includes('already running')) throw new Error('message text not shown in a visible element');
+    if (!elements.btPairCostSub.textContent.includes('already running')) throw new Error('message text not shown in a visible element');
     if (!elements.btHash.textContent.includes('Backtest error:')) throw new Error('hash line lost');
     if (elements.btElapsedSub.textContent !== 'Failed') throw new Error('failed state lost');
     console.log('MARK_FAILED_OK');
