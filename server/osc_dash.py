@@ -2292,22 +2292,32 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
         return grid, 0
     mid = len(grid) // 2
     translated = [center + (g - grid[mid]) for g in grid]
-    clamped: list = []
+    # Review finding (Station IV): cosmetic rounding is the axis's own shape,
+    # not clamping — so every branch counts bound hits BEFORE rounding. An
+    # in-bounds anchor must report clamped_count 0 even when rounding moves it.
     if axis == "quote_range":
-        # Sweep moves `lo` only; cap below `hi` and keep `_sweep_params_for_value`
-        # 2-decimal construction so lo < hi always holds.
-        clamped = [round(max(0.0, min(0.49, t)), 2) for t in translated]
+        # Sweep moves `lo` only; cap below `hi`. The 2dp round matches
+        # `_sweep_params_for_value` construction so lo < hi always holds.
+        bounded = [max(0.0, min(0.49, t)) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 2) for v in bounded]
     elif axis == "late_entry":
-        # Registry speaks fraction, the wire speaks percent.
-        clamped = [_clamp_to_spec("entry_delay_pct", t / 100.0) * 100.0 for t in translated]
+        # Registry speaks fraction, the wire speaks percent. Count on fractions
+        # so the /100→*100 float roundtrip never inflates the count.
+        frac = [t / 100.0 for t in translated]
+        bounded_frac = [_clamp_to_spec("entry_delay_pct", f) for f in frac]
+        n_clamped = sum(1 for f, c in zip(frac, bounded_frac) if c != f)
+        rounded = [round(c * 100.0, 6) for c in bounded_frac]
     elif axis in _SWEEP_REGISTRY_AXES:
-        clamped = [_clamp_to_spec(_SWEEP_REGISTRY_AXES[axis], t) for t in translated]
+        bounded = [_clamp_to_spec(_SWEEP_REGISTRY_AXES[axis], t) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 6) for v in bounded]
     else:
         # Stop axes have no scalar registry bounds; the sweep-local 0.001–0.50
         # matches the existing `exit_thresh` API limit.
-        clamped = [max(0.001, min(0.50, t)) for t in translated]
-    rounded = [round(v, 6) if axis != "quote_range" else v for v in clamped]
-    n_clamped = sum(1 for t, c in zip(translated, clamped) if c != t)
+        bounded = [max(0.001, min(0.50, t)) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 6) for v in bounded]
     effective = list(dict.fromkeys(rounded))
     return effective, n_clamped
 
@@ -8625,30 +8635,40 @@ function sweepAxisValues(axis, center){
     return (spec && spec.bounds) ? spec.bounds : null;
   };
   const clampTo = (t, lo, hi) => Math.max(lo, Math.min(hi, t));
-  let clamped;
+  // Cosmetic rounding is the axis's own shape, not clamping — count bound
+  // hits BEFORE rounding, mirroring the server helper.
+  const countHits = (before, after) => {
+    let n = 0;
+    after.forEach((c, i) => { if(c !== before[i]) n++; });
+    return n;
+  };
+  let clamped, n;
   if(axis === 'quote_range'){
-    clamped = translated.map(t => Number(clampTo(t, 0, 0.49).toFixed(2)));
+    const bounded = translated.map(t => clampTo(t, 0, 0.49));
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(2)));
   }else if(axis === 'late_entry'){
     const b = specBounds('entry_delay_pct');
-    clamped = translated.map(t => {
-      const frac = t / 100.0;
-      return (b ? clampTo(frac, b[0], b[1]) : frac) * 100.0;
-    });
+    const frac = translated.map(t => t / 100.0);
+    const boundedFrac = frac.map(f => b ? clampTo(f, b[0], b[1]) : f);
+    n = countHits(frac, boundedFrac);
+    clamped = boundedFrac.map(f => Number((f * 100.0).toFixed(6)));
   }else if(axis === 'offset' || axis === 'queue' || axis === 'exit_rev'){
     const reg = {offset: 'offset', queue: 'queue_gate', exit_rev: 'exit_reversal'}[axis];
     const b = specBounds(reg);
-    clamped = b ? translated.map(t => clampTo(t, b[0], b[1])) : translated.slice();
+    const bounded = b ? translated.map(t => clampTo(t, b[0], b[1])) : translated.slice();
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(6)));
   }else{
     // Stop axes have no scalar registry bounds; the sweep-local 0.001–0.50
     // matches the existing `exit_thresh` API limit.
-    clamped = translated.map(t => clampTo(t, 0.001, 0.50));
+    const bounded = translated.map(t => clampTo(t, 0.001, 0.50));
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(6)));
   }
-  const rounded = (axis === 'quote_range') ? clamped : clamped.map(v => Number(v.toFixed(6)));
-  let n = 0;
-  clamped.forEach((c, i) => { if(c !== translated[i]) n++; });
   const seen = new Set();
   const values = [];
-  rounded.forEach(v => { if(!seen.has(v)){ seen.add(v); values.push(v); } });
+  clamped.forEach(v => { if(!seen.has(v)){ seen.add(v); values.push(v); } });
   return {values: values, clamped: n};
 }
 

@@ -7530,6 +7530,18 @@ def test_sweep_anchor_offset_clamp_dedupes():
     assert clamped == 3
 
 
+def test_sweep_anchor_inbounds_fractional_reports_zero_clamped():
+    """Station IV review: cosmetic rounding is not clamping — an in-bounds
+    anchor reports clamped_count 0 even when rounding moves it."""
+    values, clamped = osc_dash._sweep_axis_values("quote_range", 0.213)
+    assert values == pytest.approx([0.06, 0.11, 0.16, 0.21, 0.26, 0.31, 0.36])
+    assert clamped == 0
+    # The /100→*100 float roundtrip alone must not inflate the count either.
+    values, clamped = osc_dash._sweep_axis_values("late_entry", 15.0)
+    assert values == pytest.approx([0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0])
+    assert clamped == 0
+
+
 def test_sweep_endpoint_anchored_offset(tmp_path, monkeypatch):
     """Issue #378: sweep_center=0.04 recenters the offset axis end to end."""
     import concurrent.futures
@@ -7682,6 +7694,8 @@ def test_sweep_axis_values_node_parity():
         "offset@0.49": ("offset", 0.49),
         "queue@50": ("queue", 50.0),
         "late_entry@200": ("late_entry", 200.0),
+        "late_entry@15": ("late_entry", 15.0),
+        "quote_range@0.213": ("quote_range", 0.213),
     }
     expected = {k: osc_dash._sweep_axis_values(axis, c) for k, (axis, c) in cases.items()}
     test_js = found.group(0) + """
