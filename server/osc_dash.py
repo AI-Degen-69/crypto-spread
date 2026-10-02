@@ -14,6 +14,7 @@ import collections
 from concurrent.futures import ProcessPoolExecutor
 import concurrent.futures.process
 from dataclasses import asdict, is_dataclass, replace as _dc_replace
+import functools
 import gzip
 import json
 import math
@@ -2270,6 +2271,47 @@ SWEEP_AXES: Dict[str, List[float]] = {
 }
 
 
+#: Sweep axes that clamp through the BacktestParams registry (axis → knob name).
+_SWEEP_REGISTRY_AXES = {"offset": "offset", "queue": "queue_gate", "exit_rev": "exit_reversal"}
+
+
+def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
+    """Effective sweep values for one axis with an optional midpoint anchor.
+
+    Issue #378: with `center=None` the literal `SWEEP_AXES` grid is returned
+    unchanged — no rounding, no clamping, so default sweeps are byte-identical
+    to before. Otherwise the grid is translated so index `N // 2` equals the
+    anchor (`anchor + (grid[i] - grid[N // 2])`), which preserves the existing
+    spacing including the irregular `queue` gaps and puts even-length grids on
+    their upper-middle index. Each translated point clamps to its bounds and
+    duplicates collapse (first occurrence wins); the second return value counts
+    how many requested points were clamped, so the card can label what ran.
+    """
+    grid = list(SWEEP_AXES.get(axis, []))
+    if center is None or not grid:
+        return grid, 0
+    mid = len(grid) // 2
+    translated = [center + (g - grid[mid]) for g in grid]
+    clamped: list = []
+    if axis == "quote_range":
+        # Sweep moves `lo` only; cap below `hi` and keep `_sweep_params_for_value`
+        # 2-decimal construction so lo < hi always holds.
+        clamped = [round(max(0.0, min(0.49, t)), 2) for t in translated]
+    elif axis == "late_entry":
+        # Registry speaks fraction, the wire speaks percent.
+        clamped = [_clamp_to_spec("entry_delay_pct", t / 100.0) * 100.0 for t in translated]
+    elif axis in _SWEEP_REGISTRY_AXES:
+        clamped = [_clamp_to_spec(_SWEEP_REGISTRY_AXES[axis], t) for t in translated]
+    else:
+        # Stop axes have no scalar registry bounds; the sweep-local 0.001–0.50
+        # matches the existing `exit_thresh` API limit.
+        clamped = [max(0.001, min(0.50, t)) for t in translated]
+    rounded = [round(v, 6) if axis != "quote_range" else v for v in clamped]
+    n_clamped = sum(1 for t, c in zip(translated, clamped) if c != t)
+    effective = list(dict.fromkeys(rounded))
+    return effective, n_clamped
+
+
 def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, str]:
     """Return an independent parameter copy and readable label for one sweep bar."""
     if axis == "queue":
@@ -2372,6 +2414,7 @@ def _run_sweep_worker(
     series_sel: str = "",
     durations_sel: str = "",
     progress_queue=None,
+    sweep_center: Optional[float] = None,
 ) -> dict:
     """Load ticks once, replay one param point per axis value.
 
@@ -2396,7 +2439,9 @@ def _run_sweep_worker(
     # Validated in the endpoint; already-valid strings, so this cannot raise.
     series_tokens = parse_series_tokens(series_sel)
     duration_values = parse_durations(durations_sel)
-    values = list(SWEEP_AXES.get(axis, []))
+    # Issue #378: the server owns the effective values — an anchor recenters
+    # the grid, None restores the literal defaults.
+    values, clamped_count = _sweep_axis_values(axis, sweep_center)
 
     series_order = [s[0] for s in SERIES]
     series_labels = {
@@ -2529,6 +2574,8 @@ def _run_sweep_worker(
                     "rows_total": None,
                     "n_snaps": n_snaps,
                     "points": _snapshot(live),
+                    "sweep_center": sweep_center,
+                    "clamped_count": clamped_count,
                 })
     # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, ties included.
     rows.sort(key=lambda t: (t[0], t[1]))
@@ -2550,6 +2597,8 @@ def _run_sweep_worker(
             "rows_total": n_windows,
             "n_snaps": n_snaps,
             "points": _snapshot(acc),
+            "sweep_center": sweep_center,
+            "clamped_count": clamped_count,
         })
 
     # Same builder as the live previews, so the final result can never drift
@@ -2568,6 +2617,8 @@ def _run_sweep_worker(
         "best_market": best_market,
         "n_snaps": n_snaps,
         "n_windows": n_windows,
+        "sweep_center": sweep_center,
+        "clamped_count": clamped_count,
     }
 
 
@@ -3190,6 +3241,7 @@ async def api_backtest_sweep(
     enable_leg_chase: bool = False,
     series: str = "",
     durations: str = "",
+    sweep_center: float | None = None,
 ):
     """Replay one sensitivity axis and return X-Y points.
 
@@ -3212,6 +3264,13 @@ async def api_backtest_sweep(
         return JSONResponse(
             status_code=400,
             content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
+        )
+    # Issue #378: fail loud before any busy guard — a malformed anchor must
+    # never hold the single-worker lock.
+    if sweep_center is not None and not math.isfinite(sweep_center):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"sweep_center must be finite, got {sweep_center}"},
         )
     # Same fail-loud rule as the backtest endpoint (issue #308): a typo must
     # 400, never replay zero windows silently.
@@ -3274,9 +3333,10 @@ async def api_backtest_sweep(
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
+            # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
-                _run_sweep_worker,
+                functools.partial(_run_sweep_worker, sweep_center=sweep_center),
                 str(TICKS_DIR),
                 source_path_str,
                 asdict(params),
@@ -3343,6 +3403,7 @@ async def api_backtest_sweep_stream(
     enable_leg_chase: bool = False,
     series: str = "",
     durations: str = "",
+    sweep_center: float | None = None,
 ):
     """Stream sweep progress over SSE, then one authoritative final result.
 
@@ -3356,6 +3417,13 @@ async def api_backtest_sweep_stream(
         return JSONResponse(
             status_code=400,
             content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
+        )
+    # Issue #378: fail loud before any busy guard — a malformed anchor must
+    # never hold the single-worker lock.
+    if sweep_center is not None and not math.isfinite(sweep_center):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"sweep_center must be finite, got {sweep_center}"},
         )
     from backtest.selection import parse_durations, parse_series_tokens
     try:
@@ -3424,9 +3492,10 @@ async def api_backtest_sweep_stream(
         try:
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
+            # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
-                _run_sweep_worker,
+                functools.partial(_run_sweep_worker, sweep_center=sweep_center),
                 str(TICKS_DIR),
                 source_path_str,
                 asdict(params),
