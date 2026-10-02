@@ -13,7 +13,7 @@ import asyncio
 import collections
 from concurrent.futures import ProcessPoolExecutor
 import concurrent.futures.process
-from dataclasses import asdict, dataclass, field, is_dataclass, replace as _dc_replace
+from dataclasses import asdict, dataclass, is_dataclass, replace as _dc_replace
 import functools
 import gzip
 import json
