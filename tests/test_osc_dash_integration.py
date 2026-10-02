@@ -883,14 +883,24 @@ def test_golden_endpoint_stale_policy_is_not_certified(tmp_path, monkeypatch):
 
 
 def _golden_certified_fixture(tmp_path, *, market_breakdown):
-    """Two golden days with strong metrics, current policy, fresh .idx files."""
+    """Two golden days with strong metrics, current policy, fresh .idx files.
+
+    Issue #393: the writes are pinned in time instead of racing the clock. The
+    day file is pinned *before* the fingerprint below is taken (the endpoint only
+    trusts a sidecar whose `size:mtime_ns` still matches the file), and the
+    `.idx` is pinned a full two seconds later — more than one filesystem
+    timestamp tick — so `is_fresh` can never hinge on write timing.
+    """
     from scripts.verify_tick_data import READINESS_POLICY_VERSION
 
     _write_golden_manifest(tmp_path, policy=READINESS_POLICY_VERSION)
+    day_mtime = time.time() - 3.0
+    idx_mtime = day_mtime + 2.0
     for day in ("ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"):
         target = tmp_path / "golden" / day
         target.parent.mkdir(exist_ok=True)
         target.write_text('{"a": 1}\n', encoding="utf-8")
+        os.utime(target, (day_mtime, day_mtime))
         sidecar = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME / "golden" / f"{day}.json"
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps({
@@ -910,7 +920,9 @@ def _golden_certified_fixture(tmp_path, *, market_breakdown):
             "fingerprint": osc_dash._file_fingerprint(target),
             "series_counts": {},
         }), encoding="utf-8")
-        (target.with_name(target.name + ".idx")).write_text("{}", encoding="utf-8")
+        idx = target.with_name(target.name + ".idx")
+        idx.write_text("{}", encoding="utf-8")
+        os.utime(idx, (idx_mtime, idx_mtime))
 
 
 def test_golden_certified_fixture_is_time_deterministic(tmp_path):
