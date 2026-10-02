@@ -6969,6 +6969,31 @@ def test_terminate_backtest_pool_confirmed_escalates_and_reports_death(monkeypat
     assert osc_dash._terminate_backtest_pool_confirmed(None) is True
 
 
+def test_terminate_backtest_pool_tolerates_an_already_shut_down_pool(monkeypatch):
+    """#383 regression, found in the live proof: `ProcessPoolExecutor.shutdown()`
+    sets `_processes` to `None`, and `getattr(pool, "_processes", {})` only
+    substitutes its default when the attribute is absent. Terminating an
+    already-shut-down pool — exactly what a stopped run's late stream cleanup
+    does — raised AttributeError and turned a clean stop into a server error."""
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", None)
+
+    class ShutDownPool:
+        """An executor that has already been shut down: the attribute is present
+        and its value is `None`, which is the case the default did not cover."""
+
+        def __init__(self):
+            self._processes = None
+
+        def shutdown(self, wait=False, cancel_futures=True):
+            pass
+
+    pool = ShutDownPool()
+    osc_dash._terminate_backtest_pool(pool)  # must not raise
+    osc_dash._terminate_backtest_pool(pool)  # and must be idempotent
+    # Nothing is alive, so death is vacuously confirmed.
+    assert osc_dash._terminate_backtest_pool_confirmed(pool) is True
+
+
 def test_backtest_cancel_with_nothing_running_is_a_noop(monkeypatch):
     """D5: cancelling while idle is a 200 no-op, never a 500 and never a state change."""
     monkeypatch.setattr(osc_dash, "_ACTIVE_BACKTEST_RUN", None)
@@ -7267,6 +7292,10 @@ def test_stop_control_exists_and_calls_the_cancel_endpoint():
     # It starts hidden; visibility is driven by the run state, not the markup.
     assert re.search(r'<button[^>]*id="btnStopBacktest"[^>]*\bhidden\b', html), \
         "the Stop control must start hidden"
+    # `.btn{display:inline-flex}` outranks the user-agent's `[hidden]{display:none}`,
+    # so a `hidden` button still renders on first paint. Caught in a live browser
+    # check; without this rule Stop is visible on an idle tab before any JS runs.
+    assert "#btnStopBacktest[hidden]{display:none !important}" in html
     for fname in ("stopBacktestRun", "updateBtStopVisibility",
                   "markBacktestStopped", "markBacktestStopping"):
         assert f"function {fname}(" in html, fname

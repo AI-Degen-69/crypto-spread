@@ -1648,7 +1648,12 @@ def _terminate_backtest_pool(pool=None) -> None:
     elif _BACKTEST_POOL is pool:
         _BACKTEST_POOL = None
     if pool is not None:
-        for proc in list(getattr(pool, "_processes", {}).values()):
+        # Issue #383: `getattr(pool, "_processes", {})` only substitutes the default
+        # when the attribute is ABSENT. `ProcessPoolExecutor.shutdown()` sets it to
+        # `None`, so a second termination of an already-shut-down pool — exactly what
+        # a stopped run's late stream cleanup does — raised `AttributeError` here and
+        # turned a clean stop into a server error. `or {}` treats both as empty.
+        for proc in list((getattr(pool, "_processes", None) or {}).values()):
             try:
                 proc.terminate()
             except Exception:
@@ -1737,7 +1742,7 @@ def _terminate_backtest_pool_confirmed(pool) -> bool:
     if pool is None:
         return True
     try:
-        procs = list(getattr(pool, "_processes", {}).values())
+        procs = list((getattr(pool, "_processes", None) or {}).values())
     except Exception:
         procs = []
     # `_terminate_backtest_pool` owns the signalling and the singleton detach, so
@@ -4978,6 +4983,10 @@ textarea:focus-visible,
 .btn-primary{background:var(--up);color:var(--bg);border:none;font-weight:700;position:relative;transition:all .2s ease}
 .btn-primary:hover{background:var(--up-hi)}
 .btn-primary:disabled{opacity:0.75;cursor:wait}
+/* Issue #383: `.btn` sets `display:inline-flex`, which outranks the user-agent's
+   `[hidden]{display:none}` — so a `hidden` button still renders. The Stop control
+   must stay invisible on first paint, before any script has run. */
+#btnStopBacktest[hidden]{display:none !important}
 /* A locked control is not a broken one: it stays legible, shows a
    not-allowed cursor, and does not invite a hover. Used when a
    standalone collector owns run/ticks/ and Start would spawn a

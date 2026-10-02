@@ -5,7 +5,7 @@
 - [x] T2 — RED frontend tests: Stop button, `updateBtStopVisibility`, `markBacktestStopped`, `stopBacktestRun`, `_btStopRequested` busy-wait exit
 - [x] T2 — GREEN: Stop control + idle reset + stopped notice wired into both run paths
 - [x] T3 — Contract regression: `tests/test_osc_dash_integration.py` + `tests/test_theme_tokens.py` + `tests/test_backtest_engine.py` green
-- [ ] T4 — Live proof in the browser (long sweep → Stop → idle → second Run, no 429)
+- [x] T4 — Live proof in the browser (long sweep → Stop → idle → second Run, no 429)
 - [ ] Station IV gate: reviewers + Spec axis → push branch + open PR
 - [ ] Station V: CodeRabbit resolved, CI green, squash merge, fast-forward `master`
 - [ ] Station VI: close #383, sweep stale #378 per-issue artefacts, clean-exit gate
