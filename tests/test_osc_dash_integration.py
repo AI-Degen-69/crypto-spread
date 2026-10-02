@@ -8113,9 +8113,14 @@ def test_sweep_visual_destroys_detached_chart_instances():
         html, re.DOTALL)
     destroy_instance_fn = re.search(r"function destroyChartInstance\(canvasId\)\{.*?\n\}", html, re.DOTALL)
     destroy_fn = re.search(r"function destroyChart\(canvas\)\{.*?\n\}", html, re.DOTALL)
+    # Issue #388: renderSweepVisual positions its own bars through these two.
+    point_x_fn = re.search(r"function sweepPointX\(axis, p, i\)\{.*?\n\}", html, re.DOTALL)
+    categorical_fn = re.search(r"function sweepAxisIsCategorical\(axis\)\{.*?\n\}", html, re.DOTALL)
     assert render_fn is not None
     assert destroy_instance_fn is not None
     assert destroy_fn is not None
+    assert point_x_fn is not None
+    assert categorical_fn is not None
     harness = """
     // ---- minimal DOM: only what renderSweepVisual touches ----
     const collectCanvases = node => {
@@ -8193,6 +8198,8 @@ def test_sweep_visual_destroys_detached_chart_instances():
     const sweepChartOptions = () => ({});
     const sweepChartColors = () => [];
     const sweepZeroLinePlugin = () => ({});
+    {CATEGORICAL_FN}
+    {POINT_X_FN}
     {DESTROY_INSTANCE_FN}
     {DESTROY_FN}
     {RENDER_FN}
@@ -8223,6 +8230,8 @@ def test_sweep_visual_destroys_detached_chart_instances():
     console.log('SWEEP_CHART_TEARDOWN_OK');
     """
     harness = (harness
+               .replace("{CATEGORICAL_FN}", categorical_fn.group(0))
+               .replace("{POINT_X_FN}", point_x_fn.group(0))
                .replace("{DESTROY_INSTANCE_FN}", destroy_instance_fn.group(0))
                .replace("{DESTROY_FN}", destroy_fn.group(0))
                .replace("{RENDER_FN}", render_fn.group(0).replace("\n\n\n// Statistical Summary Charts", "")))
@@ -8894,8 +8903,11 @@ def _sweep_card_harness() -> str:
     # sweepCard harness above); the rest are extracted from the shipped source.
     parts.append("const getThemeTokens = () => ({ gold: 'g', up: 'u', down: 'd', "
                  "line: 'l', dim: 'm', faint: 'f', proj: 'p' });")
+    # Issue #388: the chart options resolve their x positions and their tick
+    # labels through these two, so the harness carries them too.
     for name in ("sweepLabelWidthPx", "sweepTickStep", "sweepTickIndices",
-                 "formatSweepTickValue", "sweepAxisLabel", "sweepChartOptions"):
+                 "formatSweepTickValue", "sweepAxisLabel", "sweepAxisIsCategorical",
+                 "sweepPointX", "sweepChartOptions"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -9088,5 +9100,168 @@ def test_sweep_card_tick_width_source_static():
     assert "const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));" in html
     assert "options: mkOpts(true)" in html
     assert "options: mkOpts(false)" in html
+
+
+def test_sweep_categorical_points_are_positioned_by_index_static():
+    """Issue #388: a name-valued axis has no number to plot.
+
+    `sweepPointX` returns the point's index on a categorical axis and its value
+    everywhere else. The card chart, the aggregate chart inside
+    `renderSweepVisual` and the detail dialog each position their own bars, so
+    all three must ask that one helper — a bar drawn by index under a scale fed
+    values (or the reverse) would sit off its own label.
+    """
+    html = osc_dash.FULL_APP_HTML
+    assert "function sweepPointX(axis, p, i){" in html
+    assert "return sweepAxisIsCategorical(axis) ? i : Number(p.value);" in html
+    # One position source, used twice for the two chart x axes (the small cards
+    # and the aggregate) plus once for the dialog's own bar data.
+    xvals_line = "const xVals = points.map((p, i) => sweepPointX(data.axis, p, i));"
+    assert html.count(xvals_line) == 2, "the card chart and the meta chart must share the axis"
+    assert "data: points.map((p, i) => ({x: sweepPointX(data.axis, p, i), y: values[i]}))" in html
+    assert "({x:Number(p.value), y:values[i]})" not in html
+
+
+def test_sweep_categorical_axis_rendering_node():
+    """Issue #388: name-valued axes read as names everywhere they are drawn.
+
+    Their x scale is positional, so the card planner, the axis callback and the
+    legacy aggregate/detail branch are all handed indices — each must resolve
+    the index back to the point it stands for, or the axis prints `0`/`1`.
+    """
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    # The tick planner already brings `formatSweepTickValue`, `sweepAxisLabel`,
+    # `sweepAxisIsCategorical`, `sweepPointX` and `sweepChartOptions`.
+    parts = [_sweep_card_harness()]
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+                 "sweepCard"):
+        found = re.search(rf"function {name}\(.*?\n\}}", osc_dash.FULL_APP_HTML, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
+    parts.append("function paramSpecFor(name){ return null; }")
+
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const v = {
+      offset: 0.02, queue: 50, pairCost: 0.95,
+      exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09,
+      exitReversal: 0.03, size: 5, maxStartDelay: 0,
+      quoteLo: 0.20, quoteHi: 0.80, entryDelayPct: 4,
+      deadZonePct: 12, nakedLegAtExpiry: 'hold', legChase: '1'
+    };
+    const shell = { series_order: [], series_labels: {} };
+    const legPoints = [{ label: 'Off', value: false }, { label: 'On', value: true }];
+    const nakedPoints = [{ label: 'Close', value: 'close' }, { label: 'Hold', value: 'hold' }];
+    const legData = { ...shell, axis: 'leg_chase', points: legPoints };
+    const nakedData = { ...shell, axis: 'naked_leg', points: nakedPoints };
+    const dzData = { ...shell, axis: 'dead_zone_pct',
+                     points: [0, 5, 10, 15, 20, 30].map(n => ({ label: n + '%', value: n })) };
+
+    // 1. A value becomes a name; an index is never dressed up as one.
+    assert(formatSweepTickValue('leg_chase', false) === 'Off', 'false must read Off');
+    assert(formatSweepTickValue('leg_chase', true) === 'On', 'true must read On');
+    assert(formatSweepTickValue('leg_chase', '1') === 'On', "'1' must read On");
+    assert(formatSweepTickValue('leg_chase', '0') === 'Off', "'0' must read Off");
+    assert(formatSweepTickValue('naked_leg', 'close') === 'Close', 'close must read Close');
+    assert(formatSweepTickValue('naked_leg', 'hold') === 'Hold', 'hold must read Hold');
+    assert(formatSweepTickValue('naked_leg', 1) === '1', 'an index must not read as a name');
+    assert(formatSweepTickValue('dead_zone_pct', 10) === '10%', 'whole percents keep no decimals');
+    assert(formatSweepTickValue('dead_zone_pct', 12.5) === '12.5%', 'anchored percents keep precision');
+
+    // 2. Bars: the index on a categorical axis, the value everywhere else.
+    assert(sweepPointX('leg_chase', { value: true }, 1) === 1, 'a categorical bar sits at its index');
+    assert(sweepPointX('naked_leg', { value: 'hold' }, 0) === 0, 'a categorical bar sits at its index');
+    assert(sweepPointX('offset', { value: 0.025 }, 4) === 0.025, 'a numeric bar keeps its value');
+
+    // 3. The card planner and the axis callback label by point, not by index.
+    const legOpts = sweepChartOptions(legData, false, false);
+    const cardScale = { chart: { canvas: { clientWidth: 400 } }, width: 300, ticks: [] };
+    legOpts.scales.x.afterBuildTicks(cardScale);
+    assert(cardScale.ticks.length === 2,
+           'both bars must stay labelled: ' + JSON.stringify(cardScale.ticks));
+    assert(cardScale.ticks.map(t => t.label).join('|') === 'Off|On',
+           JSON.stringify(cardScale.ticks));
+    assert(cardScale.ticks.map(t => t.value).join('|') === '0|1', 'bars must sit at their indices');
+    assert(legOpts.scales.x.ticks.callback(0) === 'Off', 'the callback must label point 0');
+    assert(legOpts.scales.x.ticks.callback(1) === 'On', 'the callback must label point 1');
+    assert(legOpts.plugins.tooltip.callbacks.title([{ dataIndex: 1 }]).endsWith(': On'),
+           'the tooltip must name the point');
+    // The aggregate card and the detail dialog take the legacy branch.
+    const nakedOpts = sweepChartOptions(nakedData, true, false);
+    const aggScale = { width: 300, ticks: [] };
+    nakedOpts.scales.x.afterBuildTicks(aggScale);
+    assert(aggScale.ticks.map(t => t.label).join('|') === 'Close|Hold',
+           JSON.stringify(aggScale.ticks));
+    // A numeric axis keeps reading its own value.
+    const numValues = [0.01, 0.02];
+    const numOpts = sweepChartOptions({ ...shell, axis: 'offset',
+        points: numValues.map(n => ({ label: String(n), value: n })) }, false, false);
+    const numScale = { chart: { canvas: { clientWidth: 400 } }, width: 300, ticks: [] };
+    numOpts.scales.x.afterBuildTicks(numScale);
+    assert(JSON.stringify(numScale.ticks.map(t => t.label))
+           === JSON.stringify(numValues.map(n => formatSweepTickValue('offset', n))),
+           'a numeric axis must keep labelling its values: ' + JSON.stringify(numScale.ticks));
+
+    // 4. Exactly one card row is the subject, and the verdict is honest.
+    const legCard = sweepCard(v, legData);
+    assert(legCard.includes('>Leg Chase <span class="sweep-tag">← subject</span>'), legCard);
+    assert(legCard.split('← subject').length - 1 === 1, 'one subject, not two: ' + legCard);
+    assert(legCard.includes('that bar is your setting'),
+           'a categorical sweep always tests the submitted setting');
+    assert(legCard.includes('sweep-verdict yours'), legCard);
+
+    const nakedCard = sweepCard(v, nakedData);
+    assert(nakedCard.includes('>Naked Leg at Expiry <span class="sweep-tag">← subject</span>'),
+           nakedCard);
+    assert(nakedCard.split('← subject').length - 1 === 1, nakedCard);
+
+    const dzCard = sweepCard(v, dzData);
+    assert(dzCard.includes('>Dead Zone (% window) <span class="sweep-tag">← subject</span>'), dzCard);
+    assert(dzCard.split('← subject').length - 1 === 1, dzCard);
+    // v.deadZonePct is 12, off the tested grid — the note must not claim a bar.
+    assert(dzCard.includes('no bar equals it'), dzCard);
+    assert(dzCard.includes('sweep-verdict none'), dzCard);
+    const dzOn = sweepCard({ ...v, deadZonePct: 10 }, dzData);
+    assert(dzOn.includes('that bar is your setting'), dzOn);
+
+    // A numeric sweep marks none of the three new rows.
+    const numericCard = sweepCard(v, { ...shell, axis: 'queue',
+                                       points: [{ label: '50', value: 50 }] });
+    ['Leg Chase', 'Dead Zone (% window)', 'Naked Leg at Expiry'].forEach(k => {
+      assert(!numericCard.includes('>' + k + ' <span class="sweep-tag"'),
+             k + ' must not be the subject of a queue sweep');
+    });
+    assert(numericCard.split('← subject').length - 1 === 1, numericCard);
+
+    // 5. The note itself: the head names the field and the submitted value, and
+    // a categorical axis is deliberately independent of the passed point values
+    // (they are the numeric projection, NaN for names).
+    const legNote = sweepOverrideNote('leg_chase', v, [0, 1]);
+    assert(legNote.head === 'sweeps Leg chase — replaces the submitted On', legNote.head);
+    assert(legNote.verdict.cls === 'yours', legNote.head);
+    assert(legNote.verdict.text === 'that bar is your setting', legNote.head);
+    const legOff = sweepOverrideNote('leg_chase', { ...v, legChase: false }, [NaN, NaN]);
+    assert(legOff.head === 'sweeps Leg chase — replaces the submitted Off', legOff.head);
+    assert(legOff.verdict.cls === 'yours', legOff.head);
+    const nakedNote = sweepOverrideNote('naked_leg', { ...v, nakedLegAtExpiry: 'close' }, [NaN, NaN]);
+    assert(nakedNote.head === 'sweeps Naked leg at expiry — replaces the submitted Close',
+           nakedNote.head);
+    const dzNote = sweepOverrideNote('dead_zone_pct', v, [0, 5, 10, 15, 20, 30]);
+    assert(dzNote.head === 'sweeps Dead zone — replaces the submitted 12', dzNote.head);
+    assert(dzNote.verdict.cls === 'none', dzNote.head);
+
+    console.log('SWEEP_CATEGORICAL_RENDER_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_CATEGORICAL_RENDER_OK" in res.stdout
 
 
