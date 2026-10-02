@@ -5727,7 +5727,7 @@ textarea:focus-visible,
       #btSweepMeta .sweep-mkt-grid .sweep-mkt{display:block;text-align:center;margin:0}
       #btSweepMeta .sweep-stats{display:flex;flex-wrap:wrap;gap:6px 24px;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--line)}
       #btSweepMeta .sweep-stats > span{display:block}
-      #btSweepMeta .sweep-stat-v{font:11.5px var(--mono);color:var(--tx)}
+      #btSweepMeta .sweep-stat-v{font:11.5px var(--mono);color:var(--tx);font-variant-numeric:tabular-nums}
       #btSweepMeta .sweep-verdict{display:block;margin-top:8px;padding-top:6px;border-top:1px solid var(--line);font-size:11.5px}
       #btSweepMeta .sweep-verdict.yours{color:var(--gold)}
       #btSweepMeta .sweep-verdict.none{color:var(--warn)}
@@ -7708,6 +7708,7 @@ async function stopBacktestRun(){
   stopBtTimer();
   setBacktestLoadingState(false);
   if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
+  window._btSweepStartTime = null;
   const sweepBtn = $('btnRunSweepVisual');
   if(sweepBtn){ sweepBtn.disabled = false; sweepBtn.textContent = '▶ Run Sweep Visual'; }
   window._btStopBusy = false;
@@ -9324,10 +9325,12 @@ async function runSweepVisual(){
       return;
     }
     window._btSweepStartTime = performance.now();
-    if(btn){ btn.textContent = '⏳ Sweeping 0s…'; }
+    if(btn){ btn.textContent = '⏳ Sweeping…'; }
     window._btSweepTimerId = setInterval(() => {
-      const t = fmtElapsed(performance.now() - window._btSweepStartTime);
-      if(btn && btn.disabled){ btn.textContent = `⏳ Sweeping ${t}…`; }
+      const el = $('sweepElapsedTime');
+      if (el && window._btSweepStartTime) {
+        el.textContent = fmtElapsed(performance.now() - window._btSweepStartTime);
+      }
     }, 500);
     const ctl = new AbortController();
     window._btSweepAbort = ctl;
@@ -9374,6 +9377,7 @@ async function runSweepVisual(){
   }finally{
     window._btSweepInFlight = false;
     if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
+    window._btSweepStartTime = null;
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
     updateBtStopVisibility();
   }
@@ -9601,13 +9605,21 @@ function sweepMarketsGridHtml(points, selectedSlugs){
     + BT_ALL_TOKENS.map(t => chip(t, '15m')).join('');
 }
 
-// Issue #355: the card's running-totals phrase. Three states, because
+// Issue #401: unified windows counter format. Returns "done/total" (e.g. "1122/4210"
+// or "0/0") when total is a known number, and "done/?" when total is null/undefined.
+function sweepWindowsCounter(done, total){
+  const d = (done !== null && done !== undefined) ? done : 0;
+  if (total === null || total === undefined) return `${d}/?`;
+  return `${d}/${total}`;
+}
+
+// Issue #355 / #401: the card's running-totals phrase. Three states, because
 // `rows_total` is genuinely three-valued now: undefined (nothing has reported
 // yet), null (streaming, total unknown) and a number (the converged pass).
 function sweepProgressText(data){
   if (data.rows_total === null) return `${data.rows_done || 0} windows replayed…`;
   if (data.rows_total === undefined) return 'starting…';
-  return `row ${data.rows_done || 0}/${data.rows_total}`;
+  return `${data.rows_done || 0}/${data.rows_total} windows`;
 }
 
 function sweepCard(v, data, statsHtml){
@@ -10104,10 +10116,10 @@ function renderSweepVisual(data, submitted, isProgress){
     if (data.idle) {
       statsHtml = '';
     } else if (isProgress) {
-      const pctDone = data.rows_total ? Math.round((data.rows_done / data.rows_total) * 100) : 0;
+      const elapsedTxt = (window._btSweepStartTime) ? fmtElapsed(performance.now() - window._btSweepStartTime) : '0s';
       statsHtml = `<span class="sweep-stats">`
-        + `<span><span class="sweep-lab">Sweeping</span><span class="sweep-stat-v">${data.rows_done || 0}/${data.rows_total || '?'} rows · ${pctDone}%</span></span>`
-        + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${data.n_windows || 0}</span></span>`
+        + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${sweepWindowsCounter(data.rows_done, data.rows_total)}</span></span>`
+        + `<span><span class="sweep-lab">Elapsed</span><span class="sweep-stat-v" id="sweepElapsedTime">${elapsedTxt}</span></span>`
         + `</span>`;
     } else {
       const overallText = bestOverall ? `${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : '—';
@@ -10116,7 +10128,7 @@ function renderSweepVisual(data, submitted, isProgress){
       statsHtml = `<span class="sweep-stats">`
         + `<span><span class="sweep-lab">Best overall</span><span class="sweep-stat-v">${overallText}</span></span>`
         + `<span><span class="sweep-lab">Best market</span><span class="sweep-stat-v">${marketText}</span></span>`
-        + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${data.n_windows || 0}</span></span>`
+        + `<span><span class="sweep-lab">Windows</span><span class="sweep-stat-v">${sweepWindowsCounter(data.n_windows, data.n_windows)}</span></span>`
         + (tookTxt ? `<span><span class="sweep-lab">Took</span><span class="sweep-stat-v">${tookTxt}</span></span>` : '')
         + `</span>`;
     }
