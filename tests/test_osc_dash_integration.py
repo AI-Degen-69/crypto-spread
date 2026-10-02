@@ -9332,3 +9332,277 @@ def test_sweep_categorical_axis_rendering_node():
     assert "SWEEP_CATEGORICAL_RENDER_OK" in res.stdout
 
 
+def test_sweep_progress_rerender_keeps_anchor_focus():
+    """Issue #394: progress re-renders of renderSweepVisual must restore focus
+    to btSweepCenter when it was the active element before the rebuild, and must
+    not steal focus when another control (or document.body) was active."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = osc_dash.FULL_APP_HTML
+    render_fn = re.search(
+        r"function renderSweepVisual\(.*?\n\}\n\n\n// Statistical Summary Charts",
+        html, re.DOTALL)
+    destroy_instance_fn = re.search(r"function destroyChartInstance\(canvasId\)\{.*?\n\}", html, re.DOTALL)
+    destroy_fn = re.search(r"function destroyChart\(canvas\)\{.*?\n\}", html, re.DOTALL)
+    point_x_fn = re.search(r"function sweepPointX\(axis, p, i\)\{.*?\n\}", html, re.DOTALL)
+    categorical_fn = re.search(r"function sweepAxisIsCategorical\(axis\)\{.*?\n\}", html, re.DOTALL)
+    format_tick_fn = re.search(r"function formatSweepTickValue\(.*?\n\}", html, re.DOTALL)
+    sweep_axis_label_fn = re.search(r"function sweepAxisLabel\(.*?\n\}", html, re.DOTALL)
+
+    assert render_fn is not None
+    assert destroy_instance_fn is not None
+    assert destroy_fn is not None
+    assert point_x_fn is not None
+    assert categorical_fn is not None
+    assert format_tick_fn is not None
+    assert sweep_axis_label_fn is not None
+
+    harness = """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+    function makeElement(tag, id = '') {
+      const el = {
+        tagName: String(tag).toUpperCase(),
+        id: id,
+        children: [],
+        parentNode: null,
+        style: {},
+        className: '',
+        value: '',
+        tabIndex: 0,
+        textContent: '',
+        _focusCount: 0,
+      };
+
+      const isConnectedToRoot = n => {
+        let cur = n;
+        while (cur) {
+          if (cur === document.body) return true;
+          cur = cur.parentNode;
+        }
+        return false;
+      };
+
+      el.isConnected = () => isConnectedToRoot(el);
+
+      el.appendChild = child => {
+        if (!child) return child;
+        if (child.parentNode) {
+          const idx = child.parentNode.children.indexOf(child);
+          if (idx !== -1) child.parentNode.children.splice(idx, 1);
+        }
+        child.parentNode = el;
+        el.children.push(child);
+        return child;
+      };
+
+      el.removeChild = child => {
+        const idx = el.children.indexOf(child);
+        if (idx !== -1) {
+          el.children.splice(idx, 1);
+          child.parentNode = null;
+        }
+        return child;
+      };
+
+      el.contains = target => {
+        let cur = target;
+        while (cur) {
+          if (cur === el) return true;
+          cur = cur.parentNode;
+        }
+        return false;
+      };
+
+      let htmlVal = '';
+      Object.defineProperty(el, 'innerHTML', {
+        get: () => htmlVal,
+        set: v => {
+          htmlVal = String(v);
+          el.children.forEach(c => {
+            if (c.contains(document.activeElement)) {
+              document.activeElement = document.body;
+            }
+            c.parentNode = null;
+          });
+          el.children.length = 0;
+        }
+      });
+
+      Object.defineProperty(el, 'firstChild', {
+        get: () => el.children[0] || null
+      });
+
+      el.setAttribute = (k, v) => {
+        el.attributes = el.attributes || {};
+        el.attributes[k] = v;
+        if (k === 'id') el.id = v;
+      };
+
+      el.addEventListener = () => {};
+      el.querySelectorAll = sel => {
+        const res = [];
+        const walk = n => {
+          (n.children || []).forEach(c => {
+            if (sel === 'canvas[id]' && c.tagName === 'CANVAS' && c.id) res.push(c);
+            walk(c);
+          });
+        };
+        walk(el);
+        return res;
+      };
+
+      el.focus = (opts) => {
+        if (el.isConnected()) {
+          document.activeElement = el;
+          el._focusCount++;
+        }
+      };
+
+      el.blur = () => {
+        if (document.activeElement === el) {
+          document.activeElement = document.body;
+        }
+      };
+
+      if (el.tagName === 'CANVAS') {
+        el.getContext = () => { if (!el._ctx) el._ctx = { canvas: el }; return el._ctx; };
+      }
+
+      return el;
+    }
+
+    const docBody = makeElement('BODY', 'body');
+    const elementsById = new Map();
+
+    const document = {
+      body: docBody,
+      activeElement: docBody,
+      getElementById: id => {
+        const el = elementsById.get(id);
+        return (el && el.isConnected()) ? el : null;
+      },
+      createElement: tag => makeElement(tag),
+      addEventListener: () => {},
+    };
+
+    function registerEl(el) {
+      if (el.id) elementsById.set(el.id, el);
+      (el.children || []).forEach(registerEl);
+      return el;
+    }
+
+    const $ = id => document.getElementById(id);
+    const window = {};
+    const performance = { now: () => 0 };
+    const getThemeTokens = () => ({ gold: 'g', up: 'u', down: 'd', line: 'l', dim: 'm', faint: 'f', proj: 'p' });
+    const fmtElapsed = () => '1s';
+    const setupBtChartDialog = () => {};
+    const sweepCard = () => '';
+    const sweepCardTail = () => '<span class="tail"></span>';
+    const sweepWindowsCounter = () => '1/10';
+    const sweepChartOptions = () => ({});
+    const sweepChartColors = () => [];
+    const sweepZeroLinePlugin = () => ({});
+
+    function Chart(ctx, config) {
+      this.canvas = ctx.canvas;
+      this.id = 'c' + (++Chart._next);
+      Chart.instances[this.id] = this;
+    }
+    Chart.instances = {};
+    Chart._next = 0;
+    Chart.getChart = key => null;
+    Chart.prototype.destroy = function () {};
+
+    {CATEGORICAL_FN}
+    {POINT_X_FN}
+    {FORMAT_TICK_FN}
+    {SWEEP_AXIS_LABEL_FN}
+    {DESTROY_INSTANCE_FN}
+    {DESTROY_FN}
+    {RENDER_FN}
+
+    const meta = makeElement('DIV', 'btSweepMeta');
+    const aggCard = makeElement('DIV', 'btSweepAggCard');
+    const aggCanvas = makeElement('CANVAS', 'chartSweepAgg');
+    const grid = makeElement('DIV', 'btSweepGrid');
+    const otherInput = makeElement('INPUT', 'otherInput');
+
+    docBody.appendChild(meta);
+    docBody.appendChild(aggCard);
+    docBody.appendChild(aggCanvas);
+    docBody.appendChild(grid);
+    docBody.appendChild(otherInput);
+
+    const initialTitleWrap = makeElement('SPAN');
+    initialTitleWrap.className = 'sweep-title';
+    const selAxis = makeElement('SELECT', 'btSweepAxis');
+    selAxis.value = 'offset';
+    const anchorWrap = makeElement('LABEL', 'btSweepAnchorWrap');
+    const anchorInput = makeElement('INPUT', 'btSweepCenter');
+    anchorInput.value = '0.035';
+    anchorWrap.appendChild(anchorInput);
+    initialTitleWrap.appendChild(selAxis);
+    initialTitleWrap.appendChild(anchorWrap);
+    meta.appendChild(initialTitleWrap);
+
+    registerEl(docBody);
+
+    const progressData = {
+      axis: 'offset',
+      sweep_center: 0.035,
+      points: [
+        { value: 0.02, overall: { total_pnl_cents: 100 }, per_series: {} },
+        { value: 0.03, overall: { total_pnl_cents: 200 }, per_series: {} },
+      ],
+      series_order: [],
+      rows_done: 5,
+      rows_total: 10,
+    };
+
+    // Case 1: anchorInput IS focused before progress tick
+    anchorInput.focus();
+    assert(document.activeElement === anchorInput, 'Initial focus on anchorInput failed');
+    const focusCountBefore1 = anchorInput._focusCount;
+
+    renderSweepVisual(progressData, 'params', true);
+
+    assert(anchorInput.isConnected(), 'anchorInput must still be connected');
+    assert(anchorInput.value === '0.035', 'anchorInput value must be preserved');
+    assert(document.activeElement === anchorInput, 'document.activeElement must be restored to anchorInput after progress re-render');
+    assert(anchorInput._focusCount > focusCountBefore1, 'anchorInput.focus() must have been called during restore');
+
+    // Case 2: otherInput IS focused before progress tick
+    otherInput.focus();
+    assert(document.activeElement === otherInput, 'Focus on otherInput failed');
+    anchorInput._focusCount = 0;
+
+    renderSweepVisual(progressData, 'params', true);
+
+    assert(document.activeElement === otherInput, 'document.activeElement must remain otherInput');
+    assert(anchorInput._focusCount === 0, 'anchorInput.focus() must NOT be called when it was not focused');
+
+    console.log('SWEEP_PROGRESS_FOCUS_PRESERVED_OK');
+    process.exit(0);
+    """
+    harness = (harness
+               .replace("{CATEGORICAL_FN}", categorical_fn.group(0))
+               .replace("{POINT_X_FN}", point_x_fn.group(0))
+               .replace("{FORMAT_TICK_FN}", format_tick_fn.group(0))
+               .replace("{SWEEP_AXIS_LABEL_FN}", sweep_axis_label_fn.group(0))
+               .replace("{DESTROY_INSTANCE_FN}", destroy_instance_fn.group(0))
+               .replace("{DESTROY_FN}", destroy_fn.group(0))
+               .replace("{RENDER_FN}", render_fn.group(0).replace("\n\n\n// Statistical Summary Charts", "")))
+    res = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_PROGRESS_FOCUS_PRESERVED_OK" in res.stdout
+
+
+
