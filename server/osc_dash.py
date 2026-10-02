@@ -5274,6 +5274,10 @@ textarea:focus-visible,
       <div class="mono" id="btHash" style="font-size:11px;color:var(--dim);margin-bottom:8px"></div>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
+        <!-- Issue #383: the server-side stop. Visible exactly while a backtest or
+             sweep is in flight (driven by `updateBtStopVisibility`), so it starts
+             hidden and never appears next to an idle tab. -->
+        <button class="btn" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
         <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
         <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
@@ -7368,6 +7372,11 @@ window._btSweepVisualData = null;
 window._btSweepCenter = null; // Issue #378: sweep-only midpoint anchor, outside the card DOM
 window._btChartDialogTrigger = null;
 window._btRunning = false;
+// Issue #383: bumped by every deliberate stop. A sweep that is waiting for the
+// plain backtest to finish captures it before waiting and gives up when it
+// changes — a transient flag would be missed by a loop that polls too late, and
+// without any signal the wait would fall through and START a fresh run.
+window._btStopSeq = 0;
 
 function setBacktestLoadingState(isLoading){
   const btn = $('btnRunSweep');
@@ -7394,6 +7403,116 @@ function setBacktestLoadingState(isLoading){
     if(icon) icon.textContent = '▶';
     if(text) text.textContent = 'Run Sweep';
   }
+  // Issue #383: one Stop control for both run kinds; it follows the same loading
+  // state the Run button does.
+  updateBtStopVisibility();
+}
+
+// Issue #383: show Stop exactly while `runBacktest` or `runSweepVisual` is in
+// flight. `hidden` alone is not enough — a `.btn { display: ... }` rule beats the
+// user-agent's `[hidden] { display: none }` — so the inline display is set too.
+function updateBtStopVisibility(){
+  const btn = $('btnStopBacktest');
+  if(!btn) return;
+  const busy = !!(window._btRunning || window._btSweepInFlight);
+  btn.hidden = !busy;
+  btn.disabled = !busy;
+  btn.style.display = busy ? '' : 'none';
+}
+
+// Issue #383: a deliberate stop is NOT a failure and NOT a stall, so it gets its
+// own neutral notice. Written outside `#btSweepMeta`, which the idle re-render
+// owns, so re-rendering the sweep card cannot wipe the reason for the stop.
+function markBacktestStopped(){
+  const lastRun = $('btLastRunTime');
+  if (lastRun) lastRun.textContent = '⏹ stopped by operator';
+  const elTime = $('btElapsedTime');
+  if (elTime) {
+    elTime.textContent = '--';
+    elTime.style.color = 'var(--gold)';
+  }
+  const elSub = $('btElapsedSub');
+  if (elSub) elSub.textContent = 'Stopped';
+  const elBanner = $('btPairCostSub');
+  if (elBanner) {
+    elBanner.textContent = '⏹ Stopped by operator — partial results discarded.';
+    elBanner.style.color = 'var(--gold)';
+  }
+}
+
+// Issue #383: the worker did not confirm death, so the run slot is still held.
+// That is not a stop either — it needs its own warning-toned line, or the
+// operator reads a clean idle tab while the next Run is still going to 429.
+function markBacktestStopping(detail){
+  const lastRun = $('btLastRunTime');
+  if (lastRun) lastRun.textContent = '⏹ stopping…';
+  const elTime = $('btElapsedTime');
+  if (elTime) {
+    elTime.textContent = '--';
+    elTime.style.color = 'var(--warn)';
+  }
+  const elSub = $('btElapsedSub');
+  if (elSub) elSub.textContent = 'Stopping…';
+  const elBanner = $('btPairCostSub');
+  if (elBanner) {
+    elBanner.textContent = `⏳ Stop requested — ${detail || 'waiting for the worker to exit.'} The next Run is still held.`;
+    elBanner.style.color = 'var(--warn)';
+  }
+}
+
+// Issue #383: stop the run on the SERVER, then reset the tab.
+//
+// Ordering is the whole point: ownership is detached BEFORE the request. Once
+// `window._btAbort` / `window._btSweepAbort` are null, the stopped run's own
+// `finally` sees it is superseded and skips its teardown, and any in-flight SSE
+// event fails the ownership check and renders nothing. The reset below therefore
+// cannot be undone by the run it is cancelling.
+async function stopBacktestRun(){
+  if (window._btStopBusy) return;
+  window._btStopBusy = true;
+  const stopBtn = $('btnStopBacktest');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = '⏹ Stopping…';
+  }
+  window._btStopSeq = (window._btStopSeq || 0) + 1;
+  if (window._btAbort) { try{ window._btAbort.abort(); }catch{} window._btAbort = null; }
+  if (window._btSweepAbort) { try{ window._btSweepAbort.abort(); }catch{} window._btSweepAbort = null; }
+  window._btRunning = false;
+  window._btSweepInFlight = false;
+
+  let body = null;
+  try {
+    const res = await fetch('/api/backtest/cancel', {method: 'POST'});
+    body = await res.json();
+  } catch(err) {
+    body = {ok: false, detail: 'the stop request failed: ' + err};
+  }
+
+  // Reset the tab either way: the guards are free, or the endpoint says plainly
+  // that the run slot is still held (rendered below). Either way the operator
+  // reads why, and either way nothing from the aborted run is rendered.
+  window._btRunning = false;
+  window._btSweepInFlight = false;
+  window._btAbort = null;
+  window._btSweepAbort = null;
+  btRenderToken = null;
+  btDestroyProvisionalChart();
+  stopBtTimer();
+  setBacktestLoadingState(false);
+  if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
+  const sweepBtn = $('btnRunSweepVisual');
+  if(sweepBtn){ sweepBtn.disabled = false; sweepBtn.textContent = '▶ Run Sweep Visual'; }
+  window._btStopBusy = false;
+  if (stopBtn) stopBtn.textContent = '⏹ Stop';
+
+  if (body && body.stopping) markBacktestStopping(body.detail);
+  else if (body && body.ok === false) markBacktestStopping(body.detail);
+  else markBacktestStopped();
+
+  updateBtStopVisibility();
+  // Re-render the idle sweep card so no pending/progress markers survive the stop.
+  renderSweepIdle();
 }
 
 function fmtElapsed(ms){
@@ -8908,6 +9027,10 @@ async function runSweepVisual(){
   // the abort — so a chip toggle during the wait repainted the pending card,
   // and a failed run blocked idle refreshes for the session.
   window._btSweepInFlight = true;
+  // Issue #383: capture the stop generation before waiting. A deliberate stop
+  // advances it, and this run must give up rather than fall through and start.
+  const stopSeqAtWait = window._btStopSeq || 0;
+  updateBtStopVisibility();
   // Same reader the backtest uses, so the sweep's base point is exactly the
   // configuration shown on this page. Only `axis` varies; every other knob is
   // held at the operator's value. `size` is pinned to the page value because
@@ -8942,8 +9065,18 @@ async function runSweepVisual(){
     // a misleading 429 when the operator starts the visual sweep.
     const waitUntil = Date.now() + 300000;
     while (window._btRunning && Date.now() < waitUntil) {
+      // Issue #383: a stop during the wait is a deliberate cancellation — return
+      // instead of starting the sweep the operator just cancelled.
+      if ((window._btStopSeq || 0) !== stopSeqAtWait) {
+        if(meta){ meta.textContent = 'stopped by operator — sweep not started.'; }
+        return;
+      }
       if(meta){ meta.textContent = 'waiting for the selected-file backtest to finish…'; }
       await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if ((window._btStopSeq || 0) !== stopSeqAtWait) {
+      if(meta){ meta.textContent = 'stopped by operator — sweep not started.'; }
+      return;
     }
     if (window._btRunning) {
       if(meta){ meta.textContent = 'backtest is still running; try the sweep again when it finishes.'; }
@@ -8998,6 +9131,7 @@ async function runSweepVisual(){
     window._btSweepInFlight = false;
     if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
+    updateBtStopVisibility();
   }
 }
 

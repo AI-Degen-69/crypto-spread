@@ -7258,6 +7258,165 @@ def test_sweep_stream_late_cleanup_targets_the_records_own_pool(tmp_path, monkey
     fake_pool.shutdown(wait=True)
 
 
+def test_stop_control_exists_and_calls_the_cancel_endpoint():
+    """Issue #383: a Stop control beside Run, wired to the server-side cancel
+    endpoint — not to the client AbortController alone."""
+    html = client.get("/").text
+    assert 'id="btnStopBacktest"' in html
+    assert 'onclick="stopBacktestRun()"' in html
+    # It starts hidden; visibility is driven by the run state, not the markup.
+    assert re.search(r'<button[^>]*id="btnStopBacktest"[^>]*\bhidden\b', html), \
+        "the Stop control must start hidden"
+    for fname in ("stopBacktestRun", "updateBtStopVisibility",
+                  "markBacktestStopped", "markBacktestStopping"):
+        assert f"function {fname}(" in html, fname
+
+    stop = html[html.index("async function stopBacktestRun("):]
+    stop = stop[:stop.index("\n}")]
+    # The server-side stop, not just closing the stream.
+    assert "'/api/backtest/cancel'" in stop
+    assert "method: 'POST'" in stop
+    # Ownership is detached BEFORE the request, so the stopped run's own `finally`
+    # and its in-flight SSE events cannot repaint over the reset below.
+    assert stop.index("window._btAbort = null") < stop.index("await fetch("), \
+        "ownership must be detached before awaiting the cancel request"
+    assert "window._btSweepAbort = null" in stop
+    # The tab really returns to idle.
+    assert "setBacktestLoadingState(false)" in stop
+    assert "stopBtTimer()" in stop
+    assert "btDestroyProvisionalChart()" in stop
+    assert "clearInterval(window._btSweepTimerId)" in stop
+    assert "renderSweepIdle()" in stop
+    assert "updateBtStopVisibility()" in stop
+    # The stop generation advances so a sweep already waiting to start gives up.
+    assert "window._btStopSeq" in stop
+
+
+def test_stop_visibility_follows_both_run_paths():
+    """Issue #383: Stop is visible exactly while a backtest OR a sweep is in flight."""
+    html = client.get("/").text
+
+    vis = html[html.index("function updateBtStopVisibility("):]
+    vis = vis[:vis.index("\n}")]
+    assert "window._btRunning" in vis
+    assert "window._btSweepInFlight" in vis
+    # `hidden` alone loses to a `.btn { display: ... }` rule, so both are set.
+    assert "btn.hidden" in vis
+    assert "btn.style.display" in vis
+
+    # The plain backtest drives visibility through its single loading-state helper.
+    loader = html[html.index("function setBacktestLoadingState("):]
+    loader = loader[:loader.index("\n}")]
+    assert "updateBtStopVisibility()" in loader
+
+    # The sweep path never calls that helper, so it updates visibility itself — at
+    # the start of the run and in its `finally`.
+    runner = html[html.index("async function runSweepVisual("):]
+    runner = runner[:runner.index("\n}\n")]
+    assert "window._btSweepInFlight = true;" in runner
+    head = runner[:runner.index("const v = btControlValues();")]
+    assert "updateBtStopVisibility()" in head
+    fin = runner[runner.index("}finally{"):]
+    fin = fin[:fin.index("\n  }")]
+    assert "window._btSweepInFlight = false;" in fin
+    assert "updateBtStopVisibility()" in fin
+
+
+def test_stopped_notice_is_neutral_and_distinct_from_a_failure():
+    """Issue #383: a deliberate stop must not look like a failure or a stall."""
+    html = client.get("/").text
+    for fname in ("markBacktestStopped", "markBacktestStopping"):
+        body = html[html.index(f"function {fname}("):]
+        body = body[:body.index("\n}")]
+        assert "markBacktestFailed" not in body, \
+            f"{fname} must not reuse the red failure notice"
+        # Neutral/warning colour, never the failure red.
+        assert "var(--down)" not in body, f"{fname} must not use the failure colour"
+
+    stopped = html[html.index("function markBacktestStopped("):]
+    stopped = stopped[:stopped.index("\n}")]
+    assert "Stopped" in stopped
+    assert "btElapsedSub" in stopped and "btLastRunTime" in stopped
+    # The notice lives outside #btSweepMeta, which the idle re-render owns.
+    assert "btSweepMeta" not in stopped
+
+    stopping = html[html.index("function markBacktestStopping("):]
+    stopping = stopping[:stopping.index("\n}")]
+    assert "Stopping" in stopping
+    assert "var(--warn)" in stopping
+
+
+def test_sweep_waiting_for_the_backtest_gives_up_on_a_stop():
+    """Issue #383: the sweep's busy-wait must not fall through and START a fresh run
+    once a stop has cleared `_btRunning`."""
+    html = client.get("/").text
+    runner = html[html.index("async function runSweepVisual("):]
+    runner = runner[:runner.index("\n}\n")]
+    wait = runner[runner.index("const waitUntil ="):]
+    wait = wait[:wait.index("window._btSweepStartTime")]
+    # The generation is captured once, before waiting, and re-read inside the loop.
+    assert "window._btStopSeq" in runner[:runner.index("const waitUntil =")]
+    assert "window._btStopSeq" in wait
+    assert wait.count("return;") >= 2, "the wait must return early on a stop"
+
+
+def test_stop_visibility_and_stopped_notice_behaviour():
+    """Node harness: the two pure helpers do what the markup promises."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    vis = re.search(r"function updateBtStopVisibility\(.*?\n\}", html, re.DOTALL)
+    assert vis is not None, "updateBtStopVisibility is no longer a top-level function"
+    stopped = re.search(r"function markBacktestStopped\(.*?\n\}", html, re.DOTALL)
+    assert stopped is not None, "markBacktestStopped is no longer a top-level function"
+
+    test_js = vis.group(0) + "\n" + stopped.group(0) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const btn = {hidden: true, style: {}};
+    const els = {};
+    global.$ = (id) => { if (id === 'btnStopBacktest') return btn; return els[id] || (els[id] = {textContent: '', style: {}}); };
+    global.window = {_btRunning: false, _btSweepInFlight: false};
+
+    // Idle: Stop is hidden and disabled.
+    updateBtStopVisibility();
+    assert(btn.hidden === true, 'idle: hidden=' + btn.hidden);
+    assert(btn.style.display === 'none', 'idle: display=' + btn.style.display);
+
+    // A plain backtest in flight.
+    window._btRunning = true;
+    updateBtStopVisibility();
+    assert(btn.hidden === false, 'backtest in flight: hidden=' + btn.hidden);
+    assert(btn.style.display !== 'none', 'backtest in flight: display=' + btn.style.display);
+
+    // A sweep in flight, with no backtest running.
+    window._btRunning = false;
+    window._btSweepInFlight = true;
+    updateBtStopVisibility();
+    assert(btn.hidden === false, 'sweep in flight: hidden=' + btn.hidden);
+
+    // Back to idle.
+    window._btSweepInFlight = false;
+    updateBtStopVisibility();
+    assert(btn.hidden === true, 'back to idle: hidden=' + btn.hidden);
+
+    // The stopped notice is neutral, and never the red failure colour.
+    markBacktestStopped();
+    assert($('btElapsedSub').textContent === 'Stopped', $('btElapsedSub').textContent);
+    assert($('btElapsedTime').style.color === 'var(--gold)', $('btElapsedTime').style.color);
+    assert($('btLastRunTime').textContent.indexOf('stopped') !== -1, $('btLastRunTime').textContent);
+    assert($('btPairCostSub').style.color === 'var(--gold)');
+    assert($('btPairCostSub').textContent.indexOf('discarded') !== -1, $('btPairCostSub').textContent);
+
+    console.log('STOP_HELPERS_TESTS_PASSED');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "STOP_HELPERS_TESTS_PASSED" in res.stdout
+
+
 def test_oscillation_poll_guard_suppresses_and_refreshes():
     """#371: the timer-driven poll is suppressed on the Backtest tab, while the
     document is hidden, and while a poll is in flight; returning from Backtest
