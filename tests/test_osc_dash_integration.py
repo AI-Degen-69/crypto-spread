@@ -2153,15 +2153,52 @@ def test_sweep_progress_text_three_states():
            sweepProgressText({rows_done: 7, rows_total: null}));
     assert(sweepProgressText({rows_done: 0, rows_total: null}) === '0 windows replayed…');
     assert(sweepProgressText({rows_done: 0, rows_total: undefined}) === 'starting…');
-    assert(sweepProgressText({rows_done: 40, rows_total: 40}) === 'row 40/40');
+    assert(sweepProgressText({rows_done: 40, rows_total: 40}) === '40/40 windows');
     // A total of zero is a real, finished, empty run — not "unknown".
-    assert(sweepProgressText({rows_done: 0, rows_total: 0}) === 'row 0/0');
+    assert(sweepProgressText({rows_done: 0, rows_total: 0}) === '0/0 windows');
     console.log('SWEEP_PROGRESS_TEXT_TESTS_PASSED');
     process.exit(0);
     """
     res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
     assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
     assert "SWEEP_PROGRESS_TEXT_TESTS_PASSED" in res.stdout
+
+
+def test_sweep_windows_counter_node():
+    """Issue #401: sweepWindowsCounter returns done/total when total is numeric and done/? when null/undefined."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = client.get("/").text
+    found = re.search(r"function sweepWindowsCounter\(.*?\n\}", html, re.DOTALL)
+    assert found is not None, "sweepWindowsCounter is not defined"
+    test_js = found.group(0) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    assert(sweepWindowsCounter(7, null) === '7/?', sweepWindowsCounter(7, null));
+    assert(sweepWindowsCounter(7, undefined) === '7/?', sweepWindowsCounter(7, undefined));
+    assert(sweepWindowsCounter(0, 0) === '0/0', sweepWindowsCounter(0, 0));
+    assert(sweepWindowsCounter(1122, 4210) === '1122/4210', sweepWindowsCounter(1122, 4210));
+    assert(sweepWindowsCounter(null, null) === '0/?', sweepWindowsCounter(null, null));
+    console.log('SWEEP_WINDOWS_COUNTER_TESTS_PASSED');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_WINDOWS_COUNTER_TESTS_PASSED" in res.stdout
+
+
+def test_sweep_visual_stats_and_timer_static():
+    """Issue #401: static checks verifying sweepElapsedTime in card stats, removal of rows counter, and static button text."""
+    html = client.get("/").text
+    assert 'id="sweepElapsedTime"' in html
+    assert "rows ·" not in html
+    assert "Sweeping 0s…" not in html
+    assert "⏳ Sweeping…" in html
+    assert "sweepWindowsCounter" in html
 
 
 def test_sweep_markets_grid_has_three_states():
@@ -8195,6 +8232,7 @@ def test_sweep_visual_destroys_detached_chart_instances():
     const sweepAxisLabel = () => 'axis';
     const sweepCard = () => '';
     const sweepCardTail = () => '';
+    const sweepWindowsCounter = () => '';
     const sweepChartOptions = () => ({});
     const sweepChartColors = () => [];
     const sweepZeroLinePlugin = () => ({});
