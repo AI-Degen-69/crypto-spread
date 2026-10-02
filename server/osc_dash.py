@@ -9828,6 +9828,53 @@ function formatSweepTickValue(axis, val){
   return Number.isInteger(num) ? String(num) : num.toFixed(3);
 }
 
+function formatSweepMoneyTick(v){
+  const num = Number(v);
+  if (!Number.isFinite(num)) return String(v);
+  if (Math.abs(num) < 1e-9) return '$0';
+  let s = num.toFixed(2);
+  if (s === '-0.00' || s === '0.00') return '$0';
+  if (s.endsWith('.00')) s = s.slice(0, -3);
+  return '$' + s;
+}
+
+function sweepMarketName(slug){
+  if (!slug || typeof slug !== 'string') return String(slug || '');
+  const m = slug.match(/^([a-zA-Z0-9]+)-up-or-down-(\d+)m$/i);
+  if (m) {
+    const token = m[1].toUpperCase();
+    const duration = m[2].padStart(2, '0') + 'm';
+    return `${token} ${duration}`;
+  }
+  const m2 = slug.match(/^([a-zA-Z0-9]+)\s+(\d+)m$/i);
+  if (m2) {
+    const token = m2[1].toUpperCase();
+    const duration = m2[2].padStart(2, '0') + 'm';
+    return `${token} ${duration}`;
+  }
+  const m3 = slug.match(/^(\d+)m\s+([a-zA-Z0-9]+)$/i);
+  if (m3) {
+    const duration = m3[1].padStart(2, '0') + 'm';
+    const token = m3[2].toUpperCase();
+    return `${token} ${duration}`;
+  }
+  return slug;
+}
+
+function sweepTokenColor(slug){
+  if (!slug || typeof slug !== 'string') return '';
+  const list = (typeof ALL_COCKPIT_SERIES !== 'undefined' && Array.isArray(ALL_COCKPIT_SERIES)) ? ALL_COCKPIT_SERIES : [];
+  const normalized = slug.toLowerCase().trim();
+  const tokenMatch = normalized.match(/^([a-z0-9]+)/);
+  const tokenPrefix = tokenMatch ? tokenMatch[1].toUpperCase() : '';
+  for (const s of list) {
+    if (s.slug && s.slug.toLowerCase() === normalized) return s.color;
+    if (s.label && s.label.toLowerCase() === normalized) return s.color;
+    if (s.token && s.token.toUpperCase() === tokenPrefix) return s.color;
+  }
+  return '';
+}
+
 function sweepZeroLinePlugin(){
   return {
     id: 'sweepZeroLine',
@@ -9998,7 +10045,7 @@ function sweepChartOptions(data, detail, isAgg){
         beginAtZero: true,
         grace: '18%',
         title: { display: (!!detail || !!isAgg), text: 'Total P&L ($)', color: theme.dim },
-        ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } },
+        ticks: { color: theme.dim, callback: function(v){ return formatSweepMoneyTick(v); } },
         grid: {
           color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
           lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
@@ -10044,7 +10091,10 @@ function openBtChartDetail(seriesKey, title, trigger){
   const heading = $('btChartDialogTitle');
   if(!data || !dialog || !canvas) return;
   window._btChartDialogTrigger = trigger || document.activeElement;
-  if(heading) heading.textContent = title || 'Sweep chart detail';
+  if(heading){
+    heading.textContent = title || 'Sweep chart detail';
+    heading.style.color = (seriesKey && typeof sweepTokenColor === 'function' ? sweepTokenColor(seriesKey) : '') || '';
+  }
   dialog.hidden = false;
   if(btChartDialogInstance) btChartDialogInstance.destroy();
   const theme = getThemeTokens();
@@ -10123,7 +10173,8 @@ function renderSweepVisual(data, submitted, isProgress){
         + `</span>`;
     } else {
       const overallText = bestOverall ? `${bestOverall.label} (${money(bestOverall.total_pnl_cents)})` : '—';
-      const marketText = bestMarket ? `${bestMarket.label} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : '—';
+      const bestMarketName = bestMarket ? ((typeof sweepMarketName === 'function' ? sweepMarketName(bestMarket.series) : bestMarket.series) || bestMarket.label) : '';
+      const marketText = bestMarket ? `${bestMarketName} at ${bestMarket.point_label} (${money(bestMarket.total_pnl_cents)})` : '—';
       const tookTxt = (window._btSweepStartTime) ? fmtElapsed(performance.now() - window._btSweepStartTime) : '';
       statsHtml = `<span class="sweep-stats">`
         + `<span><span class="sweep-lab">Best overall</span><span class="sweep-stat-v">${overallText}</span></span>`
@@ -10201,22 +10252,25 @@ function renderSweepVisual(data, submitted, isProgress){
   const order = data.series_order || [];
   order.forEach((seriesKey, idx) => {
     const isBestMarket = bestMarket && bestMarket.series === seriesKey;
+    const marketDisplayName = (typeof sweepMarketName === 'function') ? sweepMarketName(seriesKey) : ((data.series_labels || {})[seriesKey] || seriesKey);
+    const tokenColor = (typeof sweepTokenColor === 'function') ? sweepTokenColor(seriesKey) : '';
     const card = document.createElement('div');
     card.className = 'bt-chart-card';
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
-    card.setAttribute('aria-label', `Open ${(data.series_labels || {})[seriesKey] || seriesKey} Sweep Visual chart detail for ${points.length} tested values`);
+    card.setAttribute('aria-label', `Open ${marketDisplayName} Sweep Visual chart detail for ${points.length} tested values`);
     card.style.cssText = `background:var(--panel2);border:1px solid ${isBestMarket ? theme.gold : 'var(--line)'};border-radius:10px;padding:8px 10px`;
     const activate = event => {
       if(event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
       if(event.type === 'keydown') event.preventDefault();
-      openBtChartDetail(seriesKey, (data.series_labels || {})[seriesKey] || seriesKey, card);
+      openBtChartDetail(seriesKey, marketDisplayName, card);
     };
     card.addEventListener('click', activate);
     card.addEventListener('keydown', activate);
     const title = document.createElement('div');
     title.style.cssText = 'font:700 11px var(--disp);color:var(--faint);margin-bottom:4px';
-    title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
+    if(tokenColor) title.style.color = tokenColor;
+    title.textContent = `${marketDisplayName}${isBestMarket ? ' ★ BEST MARKET' : ''}`;
     const cvWrap = document.createElement('div');
     cvWrap.style.cssText = 'position:relative;height:95px';
     const cv = document.createElement('canvas');

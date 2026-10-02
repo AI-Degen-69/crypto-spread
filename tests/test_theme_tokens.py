@@ -130,7 +130,10 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert "Stop distance — SOL" in FULL_APP_HTML
     assert "exit_5m (X = stop distance)" not in FULL_APP_HTML
     assert "Each bar is a separate replay" not in FULL_APP_HTML
-    assert "title.textContent = `${(data.series_labels || {})[seriesKey] || seriesKey}${isBestMarket ? ' ★ BEST MARKET' : ''}`" in FULL_APP_HTML
+    assert "title.textContent = `${marketDisplayName}${isBestMarket ? ' ★ BEST MARKET' : ''}`" in FULL_APP_HTML
+    assert "sweepMarketName" in FULL_APP_HTML
+    assert "sweepTokenColor" in FULL_APP_HTML
+    assert "formatSweepMoneyTick" in FULL_APP_HTML
     assert "window._btRunning = false" in FULL_APP_HTML
     assert "waiting for the selected-file backtest to finish" in FULL_APP_HTML
     assert "exit_default_15m" in FULL_APP_HTML
@@ -269,4 +272,144 @@ def test_sweep_chart_colors_sign_and_gold_precedence():
     res = subprocess.run([NODE_BIN], input=test_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
     assert res.returncode == 0, f"Node test failed: {res.stderr}\n{res.stdout}"
     assert "SWEEP_CHART_COLORS_PASSED" in res.stdout
+
+
+@requires_node
+def test_sweep_market_name_formatting():
+    """Verify sweepMarketName formats slugs to `<TOKEN> <XXm>` with leading zero for 5m."""
+    start = FULL_APP_HTML.find("function sweepMarketName(")
+    assert start != -1, "sweepMarketName function missing from FULL_APP_HTML"
+    idx = FULL_APP_HTML.find("{", start)
+    depth = 0
+    end = idx
+    for i in range(idx, len(FULL_APP_HTML)):
+        if FULL_APP_HTML[i] == "{":
+            depth += 1
+        elif FULL_APP_HTML[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    fn_code = FULL_APP_HTML[start:end]
+
+    test_script = f"""
+    {fn_code}
+    const cases = [
+        ['btc-up-or-down-5m', 'BTC 05m'],
+        ['eth-up-or-down-5m', 'ETH 05m'],
+        ['bnb-up-or-down-5m', 'BNB 05m'],
+        ['sol-up-or-down-5m', 'SOL 05m'],
+        ['xrp-up-or-down-5m', 'XRP 05m'],
+        ['btc-up-or-down-15m', 'BTC 15m'],
+        ['eth-up-or-down-15m', 'ETH 15m'],
+        ['bnb-up-or-down-15m', 'BNB 15m'],
+        ['sol-up-or-down-15m', 'SOL 15m'],
+        ['xrp-up-or-down-15m', 'XRP 15m'],
+        ['custom-slug-abc', 'custom-slug-abc'],
+        ['', ''],
+    ];
+
+    for (const [input, expected] of cases) {{
+        const actual = sweepMarketName(input);
+        if (actual !== expected) {{
+            throw new Error(`sweepMarketName('${{input}}') returned '${{actual}}', expected '${{expected}}'`);
+        }}
+    }}
+    console.log('SWEEP_MARKET_NAME_PASSED');
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert res.returncode == 0, f"Node test failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_MARKET_NAME_PASSED" in res.stdout
+
+
+@requires_node
+def test_sweep_token_color_palette():
+    """Verify sweepTokenColor resolves brand colors from ALL_COCKPIT_SERIES without hardcoded hex."""
+    start_series = FULL_APP_HTML.find("const ALL_COCKPIT_SERIES = [")
+    assert start_series != -1, "ALL_COCKPIT_SERIES missing from FULL_APP_HTML"
+    end_series = FULL_APP_HTML.find("];", start_series) + 2
+    series_code = FULL_APP_HTML[start_series:end_series]
+
+    start = FULL_APP_HTML.find("function sweepTokenColor(")
+    assert start != -1, "sweepTokenColor function missing from FULL_APP_HTML"
+    idx = FULL_APP_HTML.find("{", start)
+    depth = 0
+    end = idx
+    for i in range(idx, len(FULL_APP_HTML)):
+        if FULL_APP_HTML[i] == "{":
+            depth += 1
+        elif FULL_APP_HTML[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    fn_code = FULL_APP_HTML[start:end]
+
+    # Helper body itself must not contain literal '#'
+    assert "#" not in fn_code, f"sweepTokenColor helper body contains hardcoded hex: {fn_code}"
+
+    test_script = f"""
+    {series_code}
+    {fn_code}
+
+    if (sweepTokenColor('btc-up-or-down-5m') !== '#f7931a') throw new Error('BTC color mismatch');
+    if (sweepTokenColor('eth-up-or-down-15m') !== '#627eea') throw new Error('ETH color mismatch');
+    if (sweepTokenColor('sol-up-or-down-5m') !== '#14f195') throw new Error('SOL color mismatch');
+    if (sweepTokenColor('bnb-up-or-down-5m') !== '#f3ba2f') throw new Error('BNB color mismatch');
+    if (sweepTokenColor('xrp-up-or-down-15m') !== '#00aae4') throw new Error('XRP color mismatch');
+    if (sweepTokenColor('unknown-market') !== '') throw new Error('Unknown market must return empty string');
+
+    console.log('SWEEP_TOKEN_COLOR_PASSED');
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert res.returncode == 0, f"Node test failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_TOKEN_COLOR_PASSED" in res.stdout
+
+
+@requires_node
+def test_format_sweep_money_tick():
+    """Verify formatSweepMoneyTick trims .00 on integer amounts and preserves decimal cents."""
+    start = FULL_APP_HTML.find("function formatSweepMoneyTick(")
+    assert start != -1, "formatSweepMoneyTick function missing from FULL_APP_HTML"
+    idx = FULL_APP_HTML.find("{", start)
+    depth = 0
+    end = idx
+    for i in range(idx, len(FULL_APP_HTML)):
+        if FULL_APP_HTML[i] == "{":
+            depth += 1
+        elif FULL_APP_HTML[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    fn_code = FULL_APP_HTML[start:end]
+
+    test_script = f"""
+    {fn_code}
+    const cases = [
+        [-200, '$-200'],
+        [0, '$0'],
+        [-0, '$0'],
+        [-0.00001, '$0'],
+        [12.5, '$12.50'],
+        [12.34, '$12.34'],
+        [12, '$12'],
+        [-50.5, '$-50.50'],
+    ];
+
+    for (const [input, expected] of cases) {{
+        const actual = formatSweepMoneyTick(input);
+        if (actual !== expected) {{
+            throw new Error(`formatSweepMoneyTick(${{input}}) returned '${{actual}}', expected '${{expected}}'`);
+        }}
+    }}
+    console.log('FORMAT_SWEEP_MONEY_TICK_PASSED');
+    """
+
+    res = subprocess.run([NODE_BIN], input=test_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert res.returncode == 0, f"Node test failed: {res.stderr}\n{res.stdout}"
+    assert "FORMAT_SWEEP_MONEY_TICK_PASSED" in res.stdout
+
 
