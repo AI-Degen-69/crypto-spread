@@ -5642,6 +5642,11 @@ textarea:focus-visible,
       #btSweepMeta .sweep-title{display:flex;flex-wrap:wrap;gap:2px 14px;align-items:baseline;margin-bottom:6px}
       #btSweepMeta .sweep-title-main{font:600 15px var(--disp);color:var(--tx)}
       #btSweepMeta .sweep-title-sub{font:11px var(--mono);color:var(--dim)}
+      #btSweepMeta .sweep-anchor-field{display:inline-flex;align-items:baseline;gap:6px;white-space:nowrap}
+      #btSweepMeta .sweep-anchor-label{font:700 9px var(--disp);letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
+      #btSweepMeta .sweep-anchor-unit{font:11px var(--mono);color:var(--dim)}
+      #btSweepMeta .sweep-anchor-field.is-set .sweep-anchor-label,
+      #btSweepMeta .sweep-anchor-field.is-set .sweep-anchor-unit{color:var(--gold)}
       #btSweepMeta .sweep-card{display:block;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;font:12px/1.5 var(--body)}
       #btSweepMeta .sweep-lab{display:block;font:700 9px var(--disp);letter-spacing:1px;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
       #btSweepMeta .sweep-cols{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:8px 18px}
@@ -9060,6 +9065,11 @@ function resetBtParams(){
   window._btFileChosen = true; // Issue #279: Reset picks All Files — a manual-equivalent choice loadManifest must not override
   updateBacktestParamPreview();
   updateBtRuntimeEstimate();
+  // Issue #389: the reset also clears the anchor, so the sweep card repaints
+  // from those defaults — otherwise the labelled field keeps showing a value
+  // (and an is-set state) that is no longer in effect. Guarded like the other
+  // callers: never starts a run, never touches a sweep in flight.
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
   runBacktest();
 }
 
@@ -9539,14 +9549,23 @@ function sweepCard(v, data, statsHtml){
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
   // Issue #378: sweep-only midpoint anchor. `!= null` keeps an explicit 0 (a
-  // valid queue anchor); blank restores the literal defaults. The placeholder
-  // is the default grid's own midpoint, in this axis's units.
+  // valid queue anchor); blank restores the literal defaults.
+  // Issue #389: the field explains itself instead of relying on a hover tooltip
+  // that dies with every re-render — a real <label> gives the input an
+  // accessible name and leaves the `$('btSweepCenter')` lookups working, the
+  // unit is visible text from this same map, and `is-set` makes a held value
+  // look different from an empty one. The empty field reads `default`, never a
+  // number: the placeholder used to be the default grid's own midpoint, so a
+  // blank field displayed something that looked like live data.
   const anchorSet = (data.sweep_center !== undefined && data.sweep_center !== null);
   const anchorVal = anchorSet ? String(data.sweep_center) : '';
-  const anchorGrid = (sweepAxisValues(data.axis).values || []);
-  const anchorPh = anchorGrid.length ? String(anchorGrid[Math.floor(anchorGrid.length / 2)]) : '';
-  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo'})[data.axis] || '';
-  const anchorInput = `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="${anchorPh}" title="Midpoint anchor (${anchorUnit}) — blank restores defaults" onchange="onSweepCenterChange(this.value)" style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`;
+  // `quote_range` shifts the lo half of the [lo, hi] pair — say which half.
+  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo bound'})[data.axis] || '';
+  const anchorField = `<label class="sweep-anchor-field${anchorSet ? ' is-set' : ''}" id="btSweepAnchorWrap" for="btSweepCenter" title="Midpoint anchor (${anchorUnit}) — blank restores defaults">`
+    + `<span class="sweep-anchor-label">Anchor</span>`
+    + `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="default" onchange="onSweepCenterChange(this.value)" style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`
+    + `<span class="sweep-anchor-unit">${anchorUnit}</span>`
+    + `</label>`;
   const anchorLine = anchorSet ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
   const clampLine = (data.clamped_count > 0) ? `<span class="sweep-clamp">${data.clamped_count} points clamped to bounds; bars show the values that ran</span>` : '';
   // Issue #344: idle (pre-first-run) shows the selector + a plain "testing …"
@@ -9560,7 +9579,7 @@ function sweepCard(v, data, statsHtml){
     : `<span class="sweep-title-sub">testing ${values}</span>`;
   return `<span class="sweep-title">`
     + titleSel
-    + anchorInput
+    + anchorField
     + anchorLine
     + clampLine
     + pendingBadge
@@ -9873,10 +9892,15 @@ function renderSweepVisual(data, submitted, isProgress){
       // Re-render everything after the title element only: replace children
       // of meta except the first (the selector) by rebuilding via fragment.
       const keep = existingSel;
-      // Issue #378: the title also owns the anchor input + notices. Keep the
-      // live input (focus and in-progress typing survive the re-render) and
-      // rebuild the notice lines from this event's own metadata.
-      const keepCenter = $('btSweepCenter');
+      // Issue #378: the title also owns the anchor field + notices. Keep the
+      // live field so in-progress typing survives the re-render, and rebuild
+      // the notice lines from this event's own metadata. The value survives
+      // because the node is re-inserted; focus does NOT (`meta.innerHTML = ''`
+      // blurs the removed node) — true both before and after #389.
+      // Issue #389: keep the WRAPPER, not the bare input — the label and the
+      // unit live in it, and preserving the input alone would drop them on the
+      // first progress event.
+      const keepAnchorWrap = $('btSweepAnchorWrap');
       const anchorSetEv = (data.sweep_center !== undefined && data.sweep_center !== null);
       const anchorLineEv = anchorSetEv ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
       const clampLineEv = (data.clamped_count > 0) ? `<span class="sweep-clamp">${data.clamped_count} points clamped to bounds; bars show the values that ran</span>` : '';
@@ -9886,7 +9910,7 @@ function renderSweepVisual(data, submitted, isProgress){
       const titleWrap = document.createElement('span');
       titleWrap.className = 'sweep-title';
       titleWrap.appendChild(keep);
-      if (keepCenter) titleWrap.appendChild(keepCenter);
+      if (keepAnchorWrap) titleWrap.appendChild(keepAnchorWrap);
       const notesEv = document.createElement('span');
       notesEv.innerHTML = anchorLineEv + clampLineEv;
       while (notesEv.firstChild) titleWrap.appendChild(notesEv.firstChild);
