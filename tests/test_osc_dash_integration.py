@@ -913,6 +913,34 @@ def _golden_certified_fixture(tmp_path, *, market_breakdown):
         (target.with_name(target.name + ".idx")).write_text("{}", encoding="utf-8")
 
 
+def test_golden_certified_fixture_is_time_deterministic(tmp_path):
+    """Issue #393: the shared fixture pins its files instead of racing the clock.
+
+    `is_fresh` needs a strictly newer `.idx`, and the golden endpoint only trusts
+    a sidecar whose stored `size:mtime_ns` fingerprint still matches the day file.
+    Three back-to-back writes can land in one timestamp tick, which is what made
+    `test_golden_endpoint_certified_state` flake; this asserts the fixture can no
+    longer do that.
+    """
+    from backtest.index import is_fresh
+
+    _golden_certified_fixture(tmp_path, market_breakdown=[])
+
+    for day in ("ticks_2026-09-13.jsonl", "ticks_2026-09-14.jsonl"):
+        target = tmp_path / "golden" / day
+        idx_path = target.with_name(target.name + ".idx")
+        sidecar = tmp_path / osc_dash._VERIFY_CACHE_DIRNAME / "golden" / f"{day}.json"
+        cached = json.loads(sidecar.read_text(encoding="utf-8"))
+
+        assert is_fresh(target, idx_path), f"{day}: .idx must be fresh"
+        # More than one whole timestamp tick, so freshness cannot hinge on the
+        # filesystem's mtime granularity.
+        assert idx_path.stat().st_mtime - target.stat().st_mtime > 1.0, (
+            f"{day}: .idx must be at least a second newer than the day file")
+        assert cached["fingerprint"] == osc_dash._file_fingerprint(target), (
+            f"{day}: sidecar fingerprint must match the pinned day file")
+
+
 def test_golden_endpoint_certified_state(tmp_path, monkeypatch):
     """Issue #292: full coverage + healthy days + current policy → certified."""
     from strategy.series import SERIES
