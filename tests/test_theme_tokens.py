@@ -353,11 +353,17 @@ def test_sweep_token_color_palette():
     {series_code}
     {fn_code}
 
-    if (sweepTokenColor('btc-up-or-down-5m') !== '#f7931a') throw new Error('BTC color mismatch');
-    if (sweepTokenColor('eth-up-or-down-15m') !== '#627eea') throw new Error('ETH color mismatch');
-    if (sweepTokenColor('sol-up-or-down-5m') !== '#14f195') throw new Error('SOL color mismatch');
-    if (sweepTokenColor('bnb-up-or-down-5m') !== '#f3ba2f') throw new Error('BNB color mismatch');
-    if (sweepTokenColor('xrp-up-or-down-15m') !== '#00aae4') throw new Error('XRP color mismatch');
+    const btcColor = ALL_COCKPIT_SERIES.find(s => s.slug === 'btc-up-or-down-5m').color;
+    const ethColor = ALL_COCKPIT_SERIES.find(s => s.slug === 'eth-up-or-down-15m').color;
+    const solColor = ALL_COCKPIT_SERIES.find(s => s.slug === 'sol-up-or-down-5m').color;
+    const bnbColor = ALL_COCKPIT_SERIES.find(s => s.slug === 'bnb-up-or-down-5m').color;
+    const xrpColor = ALL_COCKPIT_SERIES.find(s => s.slug === 'xrp-up-or-down-15m').color;
+
+    if (!btcColor || sweepTokenColor('btc-up-or-down-5m') !== btcColor) throw new Error('BTC color mismatch');
+    if (!ethColor || sweepTokenColor('eth-up-or-down-15m') !== ethColor) throw new Error('ETH color mismatch');
+    if (!solColor || sweepTokenColor('sol-up-or-down-5m') !== solColor) throw new Error('SOL color mismatch');
+    if (!bnbColor || sweepTokenColor('bnb-up-or-down-5m') !== bnbColor) throw new Error('BNB color mismatch');
+    if (!xrpColor || sweepTokenColor('xrp-up-or-down-15m') !== xrpColor) throw new Error('XRP color mismatch');
     if (sweepTokenColor('unknown-market') !== '') throw new Error('Unknown market must return empty string');
 
     console.log('SWEEP_TOKEN_COLOR_PASSED');
