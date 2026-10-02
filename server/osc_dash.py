@@ -9696,6 +9696,71 @@ function sweepZeroLinePlugin(){
   };
 }
 
+// Issue #390: the ten per-market cards are ~220px wide, and a `quote_range`
+// label (`[0.30, 0.70]`, ~90px) is wider than the gap between two bars. A fixed
+// budget of four labels therefore overlaps no matter which points are chosen,
+// so the cards derive their tick step from the width the plot really has and
+// from the widest label that will actually be drawn.
+const SWEEP_CARD_MIN_PLOT_PX = 126;  // narrowest card (220px) minus its padding and y axis
+const SWEEP_CARD_TICK_GAP_PX = 10;   // blank space demanded between two labels
+const SWEEP_TICK_FONT_PX = 12;       // Chart.js default tick font size
+
+let _sweepMeasureCtx = null;  // one cached 2D context, reused by every card
+
+// Conservative width of one formatted tick label in px. The per-character
+// estimate is always the floor: an unusable font family makes `measureText` fall
+// back to a smaller font silently, and under-estimating is the one error that
+// brings the overlap back. The 0.62 factor is deliberately above this font's
+// real advance (a 12-character `[0.30, 0.70]` draws 60px, i.e. 5px/char), so the
+// floor is an upper bound rather than a second guess at the drawn width. No
+// canvas at all (Node harness): the estimate is all there is.
+function sweepLabelWidthPx(text){
+  const label = String(text);
+  const estimated = Math.ceil(label.length * SWEEP_TICK_FONT_PX * 0.62) + 2;
+  if (typeof document === 'undefined') return estimated;
+  const font = (typeof Chart !== 'undefined' && Chart.defaults && Chart.defaults.font) ? Chart.defaults.font : {};
+  if (!_sweepMeasureCtx) _sweepMeasureCtx = document.createElement('canvas').getContext('2d');
+  _sweepMeasureCtx.font = `${Number(font.size) || SWEEP_TICK_FONT_PX}px ${font.family || 'sans-serif'}`;
+  return Math.max(estimated, Math.ceil(_sweepMeasureCtx.measureText(label).width) + 2);
+}
+
+// Index step between two kept ticks, sized so their labels cannot touch:
+// `plotWidthPx / count` is the slot a single bar should occupy, and each label
+// needs its own width plus a gap. Never below the legacy budget (`ceil(count / 4)`),
+// so a card can only ever lose labels, not gain clutter it never had.
+// Unmeasurable widths (no canvas, hidden layout) fall back to that legacy step.
+//
+// The slot is an estimate, not the drawn geometry: Chart.js can leave dead space
+// beside the bars, so measured on a card (194px plot, 7 points) consecutive bars
+// sat 16.2px apart where this says 27.7px. The margin therefore rests on the
+// width floor above running wide: at the narrowest card (198px canvas, horizontal
+// labels) the two surviving labels measured 60px wide with 66.7-70px between
+// them — 7-10px of clear space, and no colliding pair on any of the ten cards.
+function sweepTickStep(count, plotWidthPx, widestLabelPx, gapPx){
+  const legacy = Math.max(1, Math.ceil(count / 4));
+  const slotPx = plotWidthPx / count;
+  if (!Number.isFinite(slotPx) || slotPx <= 0) return legacy;
+  if (!Number.isFinite(widestLabelPx) || widestLabelPx <= 0) return legacy;
+  const neededPx = widestLabelPx + (Number.isFinite(gapPx) ? gapPx : SWEEP_CARD_TICK_GAP_PX);
+  return Math.max(legacy, Math.ceil(neededPx / slotPx));
+}
+
+// Indices the cards label: every `step`-th tested value, plus the final value
+// only when it clears the previous kept tick by a full step. The legacy
+// expression (`index % step === 0 || index === count - 1`) forced the last value
+// in beside a kept tick at count 6, 8, 11, 14 and 17 — adjacent indices are one
+// bar apart, so those two labels always collided and smeared the card.
+// A dropped final value is deliberate: unreadable text is worse than no text.
+function sweepTickIndices(count, step){
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  const s = Math.max(1, Math.floor(Number(step) || 1));
+  const kept = [];
+  for (let i = 0; i < n; i += s) kept.push(i);
+  const last = n - 1;
+  if (n > 0 && kept[kept.length - 1] !== last && last - kept[kept.length - 1] >= s) kept.push(last);
+  return kept;
+}
+
 function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];
@@ -9728,6 +9793,22 @@ function sweepChartOptions(data, detail, isAgg){
       x: {
         type: 'linear', offset: true,
         afterBuildTicks: function(scale){
+          // Issue #390: only the ten small cards thin. `scale.width` is the plot
+          // the scale was just allotted (canvas minus the y axis), so the step
+          // matches the width being drawn — including after a window resize. A
+          // card in a hidden tab has no width yet and plans for the narrowest
+          // card instead of a wide one it is not. The aggregate card and the
+          // detail dialog keep the legacy expression below, and their labels.
+          if (!detail && !isAgg) {
+            const canvasPx = (scale.chart && scale.chart.canvas) ? scale.chart.canvas.clientWidth : 0;
+            const plotWidthPx = (canvasPx > 0 && Number.isFinite(scale.width) && scale.width > 0)
+              ? scale.width : SWEEP_CARD_MIN_PLOT_PX;
+            const widestPx = xVals.reduce((w, v) => Math.max(w, sweepLabelWidthPx(formatSweepTickValue(data.axis, v))), 0);
+            const step = sweepTickStep(xVals.length, plotWidthPx, widestPx, SWEEP_CARD_TICK_GAP_PX);
+            scale.ticks = sweepTickIndices(xVals.length, step)
+              .map(i => ({ value: xVals[i], label: formatSweepTickValue(data.axis, xVals[i]) }));
+            return;
+          }
           const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));
           scale.ticks = xVals.filter((value, index) => index % step === 0 || index === xVals.length - 1)
             .map((value, index) => ({ value: value, label: formatSweepTickValue(data.axis, value) }));
