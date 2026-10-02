@@ -8729,3 +8729,207 @@ def test_format_sweep_tick_offgrid_node():
     assert "FORMAT_SWEEP_TICK_OFFGRID_OK" in res.stdout
 
 
+def _sweep_card_harness() -> str:
+    """Brace-extract the card tick planner plus the constants it reads.
+
+    The constants are pulled with their shipped values rather than restated, so
+    the harness cannot drift from the dashboard.
+    """
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    for const_name in ("SWEEP_CARD_MIN_PX", "SWEEP_CARD_Y_AXIS_PX",
+                       "SWEEP_CARD_TICK_GAP_PX", "SWEEP_TICK_FONT_PX"):
+        found = re.search(rf"const {const_name} = (\d+);", html)
+        assert found is not None, f"{const_name} is no longer a top-level const"
+        parts.append(f"const {const_name} = {found.group(1)};")
+    assert "let _sweepMeasureCtx = null;" in html, "the cached measure context is gone"
+    parts.append("let _sweepMeasureCtx = null;")
+    # getThemeTokens is an arrow const, so the harness stubs it (same as the
+    # sweepCard harness above); the rest are extracted from the shipped source.
+    parts.append("const getThemeTokens = () => ({ gold: 'g', up: 'u', down: 'd', "
+                 "line: 'l', dim: 'm', faint: 'f', proj: 'p' });")
+    for name in ("sweepLabelWidthPx", "sweepTickStep", "sweepTickIndices",
+                 "formatSweepTickValue", "sweepAxisLabel", "sweepChartOptions"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    return "\n".join(parts)
+
+
+def test_sweep_card_tick_plan_node():
+    """Issue #390: a card labels no two ticks closer than its own label width.
+
+    The old expression kept every `step`-th value *plus* the last one, which put
+    the final label beside a kept tick at exactly 6, 8, 11, 14 and 17 points —
+    adjacent indices are one bar apart, so those two labels always collided.
+    """
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    test_js = _sweep_card_harness() + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+    // Width estimator (Node has no canvas, so this exercises the fallback).
+    assert(sweepLabelWidthPx('50') > 0, 'a label has no width');
+    assert(sweepLabelWidthPx('[0.30, 0.70]') > sweepLabelWidthPx('15%'),
+           'wider text must measure wider');
+
+    // The legacy budget is a floor: a wide plot never gains ticks.
+    assert(sweepTickStep(8, 100000, 5, 10) === 2, 'legacy floor lost');
+    // Unmeasurable inputs fall back to that same legacy step.
+    assert(sweepTickStep(8, 0, 70, 10) === 2, 'zero plot must fall back');
+    assert(sweepTickStep(8, NaN, 70, 10) === 2, 'NaN plot must fall back');
+    assert(sweepTickStep(8, 134, NaN, 10) === 2, 'unmeasured label must fall back');
+    assert(sweepTickStep(8, 134, 0, 10) === 2, 'zero-width label must fall back');
+    assert(sweepTickStep(0, 134, 70, 10) === 1, 'an empty sweep must not throw');
+    assert(sweepTickIndices(0, 1).length === 0, 'no points must mean no ticks');
+
+    const legacyKept = n => {
+      const maxTicks = Math.min(4, n);
+      const step = Math.max(1, Math.ceil(n / Math.max(1, maxTicks)));
+      const out = [];
+      for (let i = 0; i < n; i++) if (i % step === 0 || i === n - 1) out.push(i);
+      return out;
+    };
+    const adjacent = arr => arr.some((v, i) => i > 0 && v - arr[i - 1] <= 1);
+
+    // The exact counts the issue reports: the forced neighbour is gone, and the
+    // only thing dropped is that neighbour.
+    [6, 8, 11, 14, 17].forEach(n => {
+      const step = Math.max(1, Math.ceil(n / 4));
+      const legacy = legacyKept(n);
+      const kept = sweepTickIndices(n, step);
+      assert(adjacent(legacy), 'n=' + n + ' should have collided before: ' + legacy);
+      assert(!adjacent(kept), 'n=' + n + ' still collides: ' + kept);
+      assert(kept.length === legacy.length - 1, 'n=' + n + ' dropped more than the neighbour');
+      assert(kept.every((v, i) => v === legacy[i]), 'n=' + n + ' moved a kept tick');
+    });
+
+    // Property: for every count and every width, two kept labels are always a
+    // full step apart *and* that step is paid for in pixels.
+    const widths = [126, 134, 180, 240, 400, 900];
+    const labelWidths = [20, 40, 60, 90, 130];
+    for (let n = 1; n <= 40; n++) {
+      widths.forEach(w => {
+        labelWidths.forEach(lw => {
+          const step = sweepTickStep(n, w, lw, 10);
+          const kept = sweepTickIndices(n, step);
+          assert(kept[0] === 0, 'n=' + n + ': the first value lost its label');
+          assert(kept[kept.length - 1] < n, 'n=' + n + ': tick past the last value');
+          for (let i = 1; i < kept.length; i++) {
+            const gap = kept[i] - kept[i - 1];
+            assert(gap >= step, 'n=' + n + ': kept ticks closer than the step');
+            assert(gap * (w / n) >= lw + 10,
+                   'n=' + n + ' w=' + w + ' lw=' + lw + ': labels would overlap');
+          }
+          const last = kept[kept.length - 1];
+          if (last !== n - 1) {
+            assert(n - 1 - last < step, 'n=' + n + ': dropped a last tick that fitted');
+          }
+        });
+      });
+    }
+    console.log('SWEEP_CARD_TICK_PLAN_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_CARD_TICK_PLAN_OK" in res.stdout
+
+
+def test_sweep_card_tick_rendering_node():
+    """Issue #390: cards thin by width; the aggregate and the dialog do not move."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    test_js = _sweep_card_harness() + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+    const grids = {
+      queue: [0, 10, 25, 50, 100, 200],
+      offset: [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
+      exit_stop_default: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+      exit_stop_btc: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+      exit_stop_sol: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
+      exit_rev: [0.010, 0.015, 0.020, 0.025, 0.030],
+      late_entry: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
+      quote_range: [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    };
+    const payload = (axis, values) => ({ axis: axis, points: values.map(v => ({ value: v, label: String(v) })) });
+    const ticksFor = (axis, values, detail, isAgg, width) => {
+      const opts = sweepChartOptions(payload(axis, values), detail, isAgg, width);
+      const scale = {};
+      opts.scales.x.afterBuildTicks(scale);
+      return scale.ticks;
+    };
+    const legacyValues = (axis, values, detail, isAgg) => {
+      const n = values.length;
+      const maxTicks = detail ? Math.min(14, n) : Math.min(4, n);
+      const step = Math.max(1, Math.ceil(n / Math.max(1, maxTicks)));
+      return values.filter((v, i) => i % step === 0 || i === n - 1);
+    };
+
+    Object.keys(grids).forEach(axis => {
+      const values = grids[axis];
+      // Aggregate card and detail dialog: byte-identical label sets (issue #390 ac 3).
+      assert(JSON.stringify(ticksFor(axis, values, false, true, null).map(t => t.value))
+             === JSON.stringify(legacyValues(axis, values, false, true)),
+             axis + ': the aggregate changed');
+      assert(JSON.stringify(ticksFor(axis, values, true, false, null).map(t => t.value))
+             === JSON.stringify(legacyValues(axis, values, true, false)),
+             axis + ': the detail dialog changed');
+      // A small card gets the width-derived planner: first value labelled, and
+      // every kept label at least a step from its neighbour.
+      [200, 300, 900].forEach(width => {
+        const ticks = ticksFor(axis, values, false, false, width);
+        assert(ticks.length > 0, axis + ' w=' + width + ': no ticks at all');
+        assert(ticks[0].value === values[0], axis + ' w=' + width + ': first value unlabelled');
+        assert(ticks.every(t => typeof t.label === 'string' && t.label.length > 0),
+               axis + ' w=' + width + ': an unlabelled tick');
+        const idx = ticks.map(t => values.indexOf(t.value));
+        assert(idx.every(i => i >= 0), axis + ' w=' + width + ': tick off the grid');
+        const step = sweepTickStep(values.length,
+          Math.max(40, (width > 0 ? width : SWEEP_CARD_MIN_PX) - 10 - SWEEP_CARD_Y_AXIS_PX),
+          Math.max.apply(null, values.map(v => sweepLabelWidthPx(formatSweepTickValue(axis, v)))),
+          SWEEP_CARD_TICK_GAP_PX);
+        for (let i = 1; i < idx.length; i++) {
+          assert(idx[i] - idx[i - 1] >= step, axis + ' w=' + width + ': labels too close');
+        }
+      });
+    });
+
+    // The reported case: 8 points, the narrowest card. The old rule forced the
+    // 8th label beside the 7th; now both ends stay readable and far apart.
+    const synth = [];
+    for (let i = 0; i < 8; i++) synth.push(i * 0.05);
+    const legacy8 = legacyValues('quote_range', synth, false, false);
+    assert(legacy8.length === 5, 'the legacy 8-point card should keep 5 labels');
+    const card8 = ticksFor('quote_range', synth, false, false, SWEEP_CARD_MIN_PX - 20);
+    const idx8 = card8.map(t => synth.indexOf(t.value));
+    assert(card8.length < legacy8.length, 'the smeared 8-point card kept every label');
+    for (let i = 1; i < idx8.length; i++) {
+      assert(idx8[i] - idx8[i - 1] > 1, 'the 8-point card still labels adjacent bars');
+    }
+    assert(idx8[0] === 0, 'the 8-point card lost its first label');
+    console.log('SWEEP_CARD_TICK_RENDER_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_CARD_TICK_RENDER_OK" in res.stdout
+
+
+def test_sweep_card_tick_width_wiring_static():
+    """Issue #390: the cards hand their measured width to the planner."""
+    html = osc_dash.FULL_APP_HTML
+    assert "const mkOpts = (isAgg, widthPx) => sweepChartOptions(data, false, isAgg, widthPx);" in html
+    assert "const cardWidthPx = cvWrap.clientWidth;" in html
+    assert "options: mkOpts(false, cardWidthPx)" in html
+    # The aggregate still passes no width, so it keeps its legacy ticks.
+    assert "options: mkOpts(true)" in html
+
+
