@@ -1673,6 +1673,9 @@ def _terminate_backtest_pool(pool=None) -> None:
 # - `cancel_requested` / `release_blocked` carry the endpoint's outcome: a
 #   deliberate stop, and the case where a worker would not die and the guards
 #   must therefore stay held.
+# - `procs` are the worker handles captured on the FIRST cancel. They are kept
+#   because `shutdown()` empties the pool's map: a second Stop that re-read it
+#   would find nothing alive and report a clean stop over a live worker.
 @dataclass
 class _ActiveBacktestRun:
     """Per-run record for one in-flight backtest or sweep."""
@@ -1681,6 +1684,7 @@ class _ActiveBacktestRun:
     release: Any = None
     cancel_requested: bool = False
     release_blocked: bool = False
+    procs: Optional[list] = None
 
 
 _ACTIVE_BACKTEST_RUN: Optional[_ActiveBacktestRun] = None
@@ -1705,7 +1709,15 @@ def _publish_active_backtest_run() -> _ActiveBacktestRun:
         The record's lifetime is exactly the guards' lifetime, so no exit path can
         leave a finished run looking active to `/api/backtest/cancel`. A stale run
         whose guards a newer run already owns clears nothing.
+
+        A run whose worker death could not be confirmed keeps its guards even when
+        its own cleanup `finally` fires: otherwise the streaming path frees them a
+        moment later anyway and the "stopping…" verdict lasts only until the
+        BrokenProcessPool surfaces. Only the confirmed-death path clears the block,
+        and it clears it before calling this.
         """
+        if record.release_blocked:
+            return
         base_release()
         _clear_active_backtest_run(record)
 
@@ -1724,7 +1736,20 @@ def _clear_active_backtest_run(record) -> bool:
     return False
 
 
-def _terminate_backtest_pool_confirmed(pool) -> bool:
+def _cancelled_before_start(record) -> bool:
+    """True when a stop arrived while this run was still starting.
+
+    Issue #383: the record is published before the handler's first startup await
+    (the semaphore acquire, the progress-queue spawn), so a cancel can land in
+    that window. The cancel then finds no pool, releases the guards and reports a
+    clean stop — so the handler MUST NOT carry on and submit the worker the
+    operator just cancelled, or a second run could share the one-worker pool with
+    a worker nobody is watching.
+    """
+    return bool(record.cancel_requested)
+
+
+def _terminate_backtest_pool_confirmed(pool, procs=None) -> bool:
     """Kill `pool`'s workers and report whether their death is CONFIRMED.
 
     Issue #383: `_terminate_backtest_pool` requests a shutdown and returns; it
@@ -1738,16 +1763,26 @@ def _terminate_backtest_pool_confirmed(pool) -> bool:
 
     An empty process map (a test double, or a run that never got a worker) is
     vacuously dead. `None` is dead too — there is nothing left to stop.
+
+    `procs` lets a caller pass handles it captured earlier. `shutdown()` empties
+    the pool's map, so a repeat cancel must re-check the ORIGINAL workers rather
+    than find nothing alive and call it a clean stop.
+
+    Blocking by design: it joins with a timeout. Callers on the event loop must
+    offload it with `asyncio.to_thread`, or the dashboard freezes for the duration
+    of the join — including the very streams the stop exists to close.
     """
-    if pool is None:
-        return True
-    try:
-        procs = list((getattr(pool, "_processes", None) or {}).values())
-    except Exception:
-        procs = []
+    if procs is None:
+        if pool is None:
+            return True
+        try:
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+        except Exception:
+            procs = []
     # `_terminate_backtest_pool` owns the signalling and the singleton detach, so
     # workers are terminated exactly once and its #371 binding stays authoritative.
-    _terminate_backtest_pool(pool)
+    if pool is not None:
+        _terminate_backtest_pool(pool)
     for proc in procs:
         try:
             proc.join(timeout=2.0)
@@ -3097,10 +3132,20 @@ async def api_backtest(
         run_record = _publish_active_backtest_run()
 
     await semaphore.acquire()
+    # Issue #383: a stop can land during the acquire above. It already released the
+    # guards, so submitting now would run an unwatched worker next to the next run.
+    if _cancelled_before_start(run_record):
+        run_record.release()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Backtest cancelled before it started."},
+        )
 
     async def _run_shielded():
         """Execute backtest simulation in worker process pool and release concurrency guards."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
@@ -3126,8 +3171,14 @@ async def api_backtest(
 
     worker_task = asyncio.create_task(_run_shielded())
     try:
-        return await asyncio.wait_for(asyncio.shield(worker_task),
-                                      timeout=BACKTEST_TIMEOUT_SEC)
+        result = await asyncio.wait_for(asyncio.shield(worker_task),
+                                        timeout=BACKTEST_TIMEOUT_SEC)
+        if result is None and _cancelled_before_start(run_record):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Backtest cancelled before it started."},
+            )
+        return result
     except asyncio.TimeoutError:
         # Issue #383: terminate the pool THIS run bound. A global-only call would
         # kill the pool of a run that started after this one (#371).
@@ -3240,11 +3291,20 @@ async def api_backtest_stream(
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             },
         )
+    # Issue #383: the queue spawn is the slow startup step a stop lands in.
+    if _cancelled_before_start(run_record):
+        release_guards()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Backtest cancelled before it started."},
+        )
     loop = asyncio.get_running_loop()
 
     async def _submit():
         """Submit the worker; eventual guard release even if the stream dies early."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
             run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
@@ -3301,6 +3361,11 @@ async def api_backtest_stream(
                     break
             completed = True
             result = worker_task.result()
+            # Issue #383: a deliberate stop never produces a result — the worker was
+            # never submitted, or was killed. Emitting a final event here would
+            # render a null result as if a run had finished.
+            if result is None and run_record.cancel_requested:
+                return
             yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
         except asyncio.CancelledError:
             # Client disconnected mid-stream (sse_starlette cancels the generator).
@@ -3461,10 +3526,20 @@ async def api_backtest_sweep(
         run_record = _publish_active_backtest_run()
 
     await semaphore.acquire()
+    # Issue #383: a stop can land during the acquire above. It already released the
+    # guards, so submitting now would run an unwatched worker next to the next run.
+    if _cancelled_before_start(run_record):
+        run_record.release()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Sweep cancelled before it started."},
+        )
 
     async def _run_shielded():
         """Execute the sweep in the worker pool and always release its guards."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
@@ -3490,8 +3565,14 @@ async def api_backtest_sweep(
 
     worker_task = asyncio.create_task(_run_shielded())
     try:
-        return await asyncio.wait_for(asyncio.shield(worker_task),
-                                      timeout=BACKTEST_TIMEOUT_SEC)
+        result = await asyncio.wait_for(asyncio.shield(worker_task),
+                                        timeout=BACKTEST_TIMEOUT_SEC)
+        if result is None and _cancelled_before_start(run_record):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Sweep cancelled before it started."},
+            )
+        return result
     except asyncio.TimeoutError:
         # Issue #383: terminate the pool THIS run bound. A global-only call would
         # kill the pool of a run that started after this one (#371).
@@ -3626,11 +3707,20 @@ async def api_backtest_sweep_stream(
             status_code=503,
             content={"error": f"Sweep progress channel unavailable: {exc}"},
         )
+    # Issue #383: the queue spawn is the slow startup step a stop lands in.
+    if _cancelled_before_start(run_record):
+        release_guards()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Sweep cancelled before it started."},
+        )
     loop = asyncio.get_running_loop()
 
     async def _submit():
         """Submit the sweep worker; eventual guard release even on early death."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
             run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
@@ -3685,6 +3775,10 @@ async def api_backtest_sweep_stream(
                     break
             completed = True
             result = worker_task.result()
+            # Issue #383: a deliberate stop never produces a result — the worker was
+            # never submitted, or was killed.
+            if result is None and run_record.cancel_requested:
+                return
             yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
         except asyncio.CancelledError:
             raise
@@ -3742,7 +3836,15 @@ async def api_backtest_cancel(request: Request):
 
     record.cancel_requested = True
     pool = record.pool
-    if pool is None:
+    # Capture the worker handles on the FIRST cancel and keep them: `shutdown()`
+    # empties the pool's map, so a repeat Stop that re-read it would find nothing
+    # alive and report a clean stop over a worker that never died.
+    if record.procs is None:
+        try:
+            record.procs = list((getattr(pool, "_processes", None) or {}).values())
+        except Exception:
+            record.procs = []
+    if pool is None and not record.procs:
         # Registered but never submitted — nothing is burning CPU yet, so releasing
         # the guards is a complete stop.
         record.release()
@@ -3754,7 +3856,12 @@ async def api_backtest_cancel(request: Request):
             "detail": "Stopped before the worker started.",
         }
 
-    if _terminate_backtest_pool_confirmed(pool):
+    # The kill walk joins workers with a timeout; off the loop, or the dashboard
+    # freezes for its duration.
+    confirmed = await asyncio.to_thread(
+        _terminate_backtest_pool_confirmed, pool, record.procs)
+    if confirmed:
+        record.release_blocked = False  # a confirmed death may release
         record.release()
         return {
             "ok": True,

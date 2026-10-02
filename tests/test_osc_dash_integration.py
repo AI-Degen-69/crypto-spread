@@ -6926,7 +6926,11 @@ class _FakeProc:
 
 
 class _FakeProcPool:
-    """Executor double carrying a private `_processes` map like the real one."""
+    """Executor double carrying a private `_processes` map like the real one.
+
+    `shutdown()` clears the map, exactly as `ProcessPoolExecutor` does — that is
+    what makes a second Stop see an empty map while the original worker lives.
+    """
 
     def __init__(self, procs=()):
         self._processes = {i: p for i, p in enumerate(procs)}
@@ -6934,6 +6938,7 @@ class _FakeProcPool:
 
     def shutdown(self, wait=False, cancel_futures=True):
         self.shutdown_calls.append((wait, cancel_futures))
+        self._processes = None
 
 
 def test_terminate_backtest_pool_confirmed_escalates_and_reports_death(monkeypatch):
@@ -6992,6 +6997,214 @@ def test_terminate_backtest_pool_tolerates_an_already_shut_down_pool(monkeypatch
     osc_dash._terminate_backtest_pool(pool)  # and must be idempotent
     # Nothing is alive, so death is vacuously confirmed.
     assert osc_dash._terminate_backtest_pool_confirmed(pool) is True
+
+
+class _FakeRequest:
+    """Minimal stand-in for a same-origin `Request` (host `127.0.0.1`)."""
+
+    def __init__(self):
+        self.client = type("C", (), {"host": "127.0.0.1"})()
+        self.headers = {}
+        self.url = type("U", (), {"port": 5515})()
+
+
+def test_release_is_refused_while_the_worker_death_is_unconfirmed(monkeypatch):
+    """CodeRabbit on #383: a run whose worker could not be confirmed dead must keep
+    its guards even when its own cleanup finally fires. Without this the streaming
+    path's `finally` frees them a moment later and the "stopping…" state lasts only
+    until the BrokenProcessPool surfaces."""
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", None)
+    sem = osc_dash.get_backtest_semaphore()
+    pristine = sem._value
+    while sem._value > 0:
+        sem._value -= 1
+
+    record = osc_dash._publish_active_backtest_run()
+    try:
+        with osc_dash._BACKTEST_LOCK:
+            osc_dash._BACKTEST_RUNNING = True
+
+        # The cancel endpoint's unconfirmed-death verdict.
+        record.release_blocked = True
+        # Every cleanup path funnels through the same releaser.
+        record.release()
+        assert osc_dash._BACKTEST_RUNNING is True, "a blocked run gave up its guards"
+        assert sem.locked(), "a blocked run freed the single-run guard"
+
+        # Only a confirmed-death path clears the block, and then it releases.
+        record.release_blocked = False
+        record.release()
+        assert osc_dash._BACKTEST_RUNNING is False
+        assert not sem.locked()
+        assert osc_dash._ACTIVE_BACKTEST_RUN is None
+    finally:
+        sem._value = pristine
+
+
+def test_cancel_offloads_the_kill_walk_off_the_event_loop(tmp_path, monkeypatch):
+    """CodeRabbit on #383: confirming death joins workers with a timeout. Run
+    inline on the loop, that freezes the dashboard — including the very streams the
+    stop exists to close."""
+    import asyncio
+    import threading
+    import time
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", None)
+
+    class SlowProc(_FakeProc):
+        def join(self, timeout=None):
+            self.join_calls += 1
+            time.sleep(0.4)  # a real join waits on a real worker
+
+    pool = _FakeProcPool([SlowProc()])
+    sem = osc_dash.get_backtest_semaphore()
+    pristine = sem._value
+    while sem._value > 0:
+        sem._value -= 1
+    record = osc_dash._publish_active_backtest_run()
+    record.pool = pool
+    with osc_dash._BACKTEST_LOCK:
+        osc_dash._BACKTEST_RUNNING = True
+
+    async def drive():
+        ticks = {"n": 0}
+        done = {"flag": False}
+
+        async def heartbeat():
+            while not done["flag"]:
+                await asyncio.sleep(0.01)
+                ticks["n"] += 1
+
+        async def request():
+            return await osc_dash.api_backtest_cancel(_FakeRequest())
+
+        beat = asyncio.create_task(heartbeat())
+        res = await request()
+        done["flag"] = True
+        await beat
+        return res, ticks["n"]
+
+    try:
+        res, ticks = asyncio.run(drive())
+        assert res["stopped"] is True
+        assert ticks >= 5, (
+            f"the event loop was blocked during the kill walk (only {ticks} "
+            "heartbeats ticked while a 0.4s join was outstanding)"
+        )
+    finally:
+        record.release_blocked = False
+        record.release()
+        sem._value = pristine
+
+
+def test_run_cancelled_during_startup_never_submits_the_worker(tmp_path, monkeypatch):
+    """CodeRabbit on #383: the record is published before the first startup await,
+    so a stop can land in that window. The handler must not then submit the worker
+    the operator just cancelled — and the cancel already released the guards, so a
+    second run could share the one-worker pool with it."""
+    import threading
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", None)
+
+    import concurrent.futures
+    mock_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: mock_pool)
+
+    submitted = {"flag": False}
+
+    def spy_worker(*args, **kwargs):
+        submitted["flag"] = True
+        return _stub_backtest_result()
+
+    monkeypatch.setattr(osc_dash, "_run_backtest_simulation_worker", spy_worker)
+
+    # The progress channel spawns a manager process — that is the slow startup step
+    # a stop realistically lands in. Hold it open until the cancel has happened.
+    queue_ready = threading.Event()
+    release_queue = threading.Event()
+
+    def blocking_queue_factory():
+        queue_ready.set()
+        release_queue.wait(timeout=5.0)
+        return _fake_queue_factory()
+
+    monkeypatch.setattr(osc_dash, "_new_backtest_progress_queue", blocking_queue_factory)
+
+    response = {}
+
+    def run_stream():
+        try:
+            response["res"] = client.get("/api/backtest/stream?file=fake_stream.jsonl")
+        except Exception as exc:  # the client aborts nothing here; surface anything
+            response["err"] = exc
+
+    thread = threading.Thread(target=run_stream)
+    thread.start()
+    assert queue_ready.wait(timeout=5.0), "the startup await never reached the queue"
+    assert osc_dash._ACTIVE_BACKTEST_RUN is not None
+
+    # The stop lands while the handler is still starting.
+    res = client.post("/api/backtest/cancel")
+    assert res.status_code == 200
+    assert res.json()["stopped"] is True
+    assert osc_dash._ACTIVE_BACKTEST_RUN is None
+
+    release_queue.set()
+    thread.join(timeout=8.0)
+    try:
+        assert not submitted["flag"], "the cancelled run submitted its worker anyway"
+        assert "err" not in response, response.get("err")
+        assert response["res"].status_code == 409, (
+            "a run cancelled before it started must say so, not emit a result: "
+            f"{response['res'].status_code}"
+        )
+        assert osc_dash._BACKTEST_RUNNING is False
+        assert not osc_dash.get_backtest_semaphore().locked()
+    finally:
+        mock_pool.shutdown(wait=True)
+
+
+def test_repeated_cancel_rechecks_the_original_workers(monkeypatch):
+    """CodeRabbit on #383: `ProcessPoolExecutor.shutdown()` empties `_processes`, so
+    a second Stop that re-read the map would find nothing alive and report a clean
+    stop over a worker that never died. The handles captured on the first cancel
+    are the ones that must be re-checked."""
+    monkeypatch.setattr(osc_dash, "_BACKTEST_POOL", None)
+    sem = osc_dash.get_backtest_semaphore()
+    pristine = sem._value
+    while sem._value > 0:
+        sem._value -= 1
+
+    undead = _FakeProc(dies_on_terminate=False, dies_on_kill=False)
+    pool = _FakeProcPool([undead])
+    record = osc_dash._publish_active_backtest_run()
+    record.pool = pool
+    with osc_dash._BACKTEST_LOCK:
+        osc_dash._BACKTEST_RUNNING = True
+
+    try:
+        first = client.post("/api/backtest/cancel").json()
+        assert first["stopping"] is True
+        assert first["stopped"] is False
+        assert osc_dash._BACKTEST_RUNNING is True
+        assert sem.locked()
+
+        # Second Stop: the pool's process map is gone, the worker never was.
+        second = client.post("/api/backtest/cancel").json()
+        assert second["stopping"] is True, (
+            "a second Stop read the cleared process map and reported a clean stop "
+            "over a worker that never died"
+        )
+        assert second["stopped"] is False
+        assert undead.kill_calls >= 2, "the original worker was not re-checked"
+        assert osc_dash._BACKTEST_RUNNING is True
+        assert sem.locked()
+    finally:
+        record.release_blocked = False
+        record.release()
+        sem._value = pristine
 
 
 def test_backtest_cancel_with_nothing_running_is_a_noop(monkeypatch):
