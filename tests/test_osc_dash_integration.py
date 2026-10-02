@@ -1751,8 +1751,9 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
     assert unknown.status_code == 400
     assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
     assert unknown.json()["valid"] == [
-        "exit_rev", "exit_stop_btc", "exit_stop_default", "exit_stop_sol",
-        "late_entry", "offset", "queue", "quote_range"]
+        "dead_zone_pct", "exit_rev", "exit_stop_btc", "exit_stop_default",
+        "exit_stop_sol", "late_entry", "leg_chase", "naked_leg", "offset",
+        "queue", "quote_range"]
 
     unsafe = client.get("/api/backtest/sweep?file=../secrets.jsonl")
     assert unsafe.status_code == 400
@@ -1984,6 +1985,39 @@ def test_sweep_axis_moves_only_its_own_parameter():
         before, after = asdict(params), asdict(variant)
         changed = {k for k in before if before[k] != after[k]}
         assert changed == expected[axis], f"{axis} changed {sorted(changed)}"
+
+
+def test_sweep_categorical_axes_carry_native_value_types(tmp_path, monkeypatch):
+    """Issue #388: bool/str survive the worker, and an ignored anchor is nulled.
+
+    The blanket `float(...)` casts the pipeline used to apply turned `true`
+    into 1.0 and a naked-leg label into NaN, and a categorical axis that
+    ignores its anchor must not echo one back as if it had applied it.
+    """
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        leg = client.get("/api/backtest/sweep", params={
+            "axis": "leg_chase", "file": "sweep_base.jsonl",
+            "sweep_center": 5.0, **_NON_DEFAULT})
+        assert leg.status_code == 200
+        data = leg.json()
+        assert [p["value"] for p in data["points"]] == [False, True]
+        assert all(isinstance(p["value"], bool) for p in data["points"])
+        # The values above ignored the anchor, so it must not be echoed.
+        assert data["sweep_center"] is None
+        assert data["clamped_count"] == 0
+
+        naked = client.get("/api/backtest/sweep", params={
+            "axis": "naked_leg", "file": "sweep_base.jsonl", **_NON_DEFAULT})
+        assert naked.status_code == 200
+        assert [p["value"] for p in naked.json()["points"]] == ["close", "hold"]
+    finally:
+        pool.shutdown(wait=True)
 
 
 def test_sweep_honours_market_and_duration_selection(tmp_path, monkeypatch):
