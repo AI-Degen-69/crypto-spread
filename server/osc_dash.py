@@ -9701,12 +9701,12 @@ function sweepZeroLinePlugin(){
 // budget of four labels therefore overlaps no matter which points are chosen,
 // so the cards derive their tick step from the width the plot really has and
 // from the widest label that will actually be drawn.
-const SWEEP_CARD_MIN_PX = 220;    // matches minmax(220px,1fr) on the card grid
-const SWEEP_CARD_Y_AXIS_PX = 64;  // y strip: `$-1200.00` at 12px + tick padding
-const SWEEP_CARD_TICK_GAP_PX = 10;  // blank space demanded between two labels
-const SWEEP_TICK_FONT_PX = 12;    // Chart.js default tick font size
+const SWEEP_CARD_MIN_PLOT_PX = 126;  // narrowest card (220px) minus its padding and y axis
+const SWEEP_CARD_TICK_GAP_PX = 10;   // blank space demanded between two labels
+const SWEEP_TICK_FONT_PX = 12;       // Chart.js default tick font size
 
-let _sweepMeasureCtx = null;
+let _sweepMeasureCtx = null;  // one cached 2D context, reused by every card
+
 // Conservative width of one formatted tick label in px. The per-character
 // estimate is always the floor: an unusable font family makes `measureText` fall
 // back to a smaller font silently, and under-estimating is the one error that
@@ -9752,7 +9752,7 @@ function sweepTickIndices(count, step){
   return kept;
 }
 
-function sweepChartOptions(data, detail, isAgg, cardWidthPx){
+function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];
   const labels = points.map(p => p.label);
@@ -9760,20 +9760,6 @@ function sweepChartOptions(data, detail, isAgg, cardWidthPx){
   const axisLabel = sweepAxisLabel(data.axis);
   const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
   const maxTicks = detail ? Math.min(14, xVals.length) : Math.min(4, xVals.length);
-  // Issue #390: only the ten small cards thin by width. The aggregate card is
-  // full-width and the detail dialog is 14 ticks wide, so both keep the legacy
-  // step and their current labels verbatim.
-  const narrow = !detail && !isAgg;
-  let cardStep = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));
-  if (narrow) {
-    // A card rendered in a hidden tab measures 0 — plan for the narrowest a card
-    // can be (the grid's own minimum) instead of falling back to the wide budget.
-    const cardPx = (Number.isFinite(cardWidthPx) && cardWidthPx > 0) ? cardWidthPx : SWEEP_CARD_MIN_PX;
-    const widestPx = xVals.reduce((w, v) => Math.max(w, sweepLabelWidthPx(formatSweepTickValue(data.axis, v))), 0);
-    // `- 10` is this function's own card layout padding (left 4 + right 6, below).
-    const plotWidthPx = Math.max(40, cardPx - 10 - SWEEP_CARD_Y_AXIS_PX);
-    cardStep = sweepTickStep(xVals.length, plotWidthPx, widestPx, SWEEP_CARD_TICK_GAP_PX);
-  }
   return {
     responsive: true,
     maintainAspectRatio: !!detail,
@@ -9798,8 +9784,19 @@ function sweepChartOptions(data, detail, isAgg, cardWidthPx){
       x: {
         type: 'linear', offset: true,
         afterBuildTicks: function(scale){
-          if (narrow) {
-            scale.ticks = sweepTickIndices(xVals.length, cardStep)
+          // Issue #390: only the ten small cards thin. `scale.width` is the plot
+          // the scale was just allotted (canvas minus the y axis), so the step
+          // matches the width being drawn — including after a window resize. A
+          // card in a hidden tab has no width yet and plans for the narrowest
+          // card instead of a wide one it is not. The aggregate card and the
+          // detail dialog keep the legacy expression below, and their labels.
+          if (!detail && !isAgg) {
+            const canvasPx = (scale.chart && scale.chart.canvas) ? scale.chart.canvas.clientWidth : 0;
+            const plotWidthPx = (canvasPx > 0 && Number.isFinite(scale.width) && scale.width > 0)
+              ? scale.width : SWEEP_CARD_MIN_PLOT_PX;
+            const widestPx = xVals.reduce((w, v) => Math.max(w, sweepLabelWidthPx(formatSweepTickValue(data.axis, v))), 0);
+            const step = sweepTickStep(xVals.length, plotWidthPx, widestPx, SWEEP_CARD_TICK_GAP_PX);
+            scale.ticks = sweepTickIndices(xVals.length, step)
               .map(i => ({ value: xVals[i], label: formatSweepTickValue(data.axis, xVals[i]) }));
             return;
           }
@@ -9997,9 +9994,7 @@ function renderSweepVisual(data, submitted, isProgress){
       meta.innerHTML = sweepCard(submitted, data, statsHtml);
     }
   }
-  // Issue #390: cards hand their real drawn width to the tick planner; the
-  // aggregate passes none and keeps its own budget.
-  const mkOpts = (isAgg, widthPx) => sweepChartOptions(data, false, isAgg, widthPx);
+  const mkOpts = isAgg => sweepChartOptions(data, false, isAgg);
   const chartColors = seriesKey => sweepChartColors(data, seriesKey, theme);
   destroyChartInstance('chartSweepAgg');
   const aggCtx = $('chartSweepAgg');
@@ -10052,14 +10047,11 @@ function renderSweepVisual(data, submitted, isProgress){
     const y = points.map(p => ((p.per_series || {})[seriesKey] || 0) / 100);
     const colors = chartColors(seriesKey);
     destroyChart(cv);
-    // The card is already in the grid, so this is the width the chart draws at
-    // (0 while the tab is hidden — the planner then assumes the card minimum).
-    const cardWidthPx = cvWrap.clientWidth;
     new Chart(cv.getContext('2d'), {
       type: 'bar',
       plugins: [sweepZeroLinePlugin()],
       data: { datasets: [{ data: xy(y), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
-      options: mkOpts(false, cardWidthPx)
+      options: mkOpts(false)
     });
   });
 }

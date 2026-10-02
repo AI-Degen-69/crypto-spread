@@ -8737,8 +8737,8 @@ def _sweep_card_harness() -> str:
     """
     html = osc_dash.FULL_APP_HTML
     parts = []
-    for const_name in ("SWEEP_CARD_MIN_PX", "SWEEP_CARD_Y_AXIS_PX",
-                       "SWEEP_CARD_TICK_GAP_PX", "SWEEP_TICK_FONT_PX"):
+    for const_name in ("SWEEP_CARD_MIN_PLOT_PX", "SWEEP_CARD_TICK_GAP_PX",
+                       "SWEEP_TICK_FONT_PX"):
         found = re.search(rf"const {const_name} = (\d+);", html)
         assert found is not None, f"{const_name} is no longer a top-level const"
         parts.append(f"const {const_name} = {found.group(1)};")
@@ -8859,12 +8859,18 @@ def test_sweep_card_tick_rendering_node():
       quote_range: [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     };
     const payload = (axis, values) => ({ axis: axis, points: values.map(v => ({ value: v, label: String(v) })) });
-    const ticksFor = (axis, values, detail, isAgg, width) => {
-      const opts = sweepChartOptions(payload(axis, values), detail, isAgg, width);
-      const scale = {};
-      opts.scales.x.afterBuildTicks(scale);
-      return scale.ticks;
+    const ticksFor = (axis, values, detail, isAgg, scale) => {
+      const opts = sweepChartOptions(payload(axis, values), detail, isAgg);
+      const target = scale || {};
+      opts.scales.x.afterBuildTicks(target);
+      return target.ticks;
     };
+    // The card reads its own plot width from the scale; an empty scale is the
+    // hidden-tab case, which must fall back to the narrowest card instead of a
+    // wide budget the card cannot afford.
+    const live = w => ({ chart: { canvas: { clientWidth: w + 65 } }, width: w });
+    const cardScales = [{ plot: SWEEP_CARD_MIN_PLOT_PX, scale: {} }, { plot: 234, scale: live(234) },
+                        { plot: 145, scale: live(145) }];
     const legacyValues = (axis, values, detail, isAgg) => {
       const n = values.length;
       const maxTicks = detail ? Math.min(14, n) : Math.min(4, n);
@@ -8875,28 +8881,28 @@ def test_sweep_card_tick_rendering_node():
     Object.keys(grids).forEach(axis => {
       const values = grids[axis];
       // Aggregate card and detail dialog: byte-identical label sets (issue #390 ac 3).
-      assert(JSON.stringify(ticksFor(axis, values, false, true, null).map(t => t.value))
+      assert(JSON.stringify(ticksFor(axis, values, false, true, {}).map(t => t.value))
              === JSON.stringify(legacyValues(axis, values, false, true)),
              axis + ': the aggregate changed');
-      assert(JSON.stringify(ticksFor(axis, values, true, false, null).map(t => t.value))
+      assert(JSON.stringify(ticksFor(axis, values, true, false, {}).map(t => t.value))
              === JSON.stringify(legacyValues(axis, values, true, false)),
              axis + ': the detail dialog changed');
       // A small card gets the width-derived planner: first value labelled, and
-      // every kept label at least a step from its neighbour.
-      [200, 300, 900].forEach(width => {
-        const ticks = ticksFor(axis, values, false, false, width);
-        assert(ticks.length > 0, axis + ' w=' + width + ': no ticks at all');
-        assert(ticks[0].value === values[0], axis + ' w=' + width + ': first value unlabelled');
+      // every kept label at least a step from its neighbour for the plot the
+      // scale actually reported.
+      cardScales.forEach(cs => {
+        const ticks = ticksFor(axis, values, false, false, cs.scale);
+        assert(ticks.length > 0, axis + ' plot=' + cs.plot + ': no ticks at all');
+        assert(ticks[0].value === values[0], axis + ' plot=' + cs.plot + ': first value unlabelled');
         assert(ticks.every(t => typeof t.label === 'string' && t.label.length > 0),
-               axis + ' w=' + width + ': an unlabelled tick');
+               axis + ' plot=' + cs.plot + ': an unlabelled tick');
         const idx = ticks.map(t => values.indexOf(t.value));
-        assert(idx.every(i => i >= 0), axis + ' w=' + width + ': tick off the grid');
-        const step = sweepTickStep(values.length,
-          Math.max(40, (width > 0 ? width : SWEEP_CARD_MIN_PX) - 10 - SWEEP_CARD_Y_AXIS_PX),
+        assert(idx.every(i => i >= 0), axis + ' plot=' + cs.plot + ': tick off the grid');
+        const step = sweepTickStep(values.length, cs.plot,
           Math.max.apply(null, values.map(v => sweepLabelWidthPx(formatSweepTickValue(axis, v)))),
           SWEEP_CARD_TICK_GAP_PX);
         for (let i = 1; i < idx.length; i++) {
-          assert(idx[i] - idx[i - 1] >= step, axis + ' w=' + width + ': labels too close');
+          assert(idx[i] - idx[i - 1] >= step, axis + ' plot=' + cs.plot + ': labels too close');
         }
       });
     });
@@ -8907,7 +8913,7 @@ def test_sweep_card_tick_rendering_node():
     for (let i = 0; i < 8; i++) synth.push(i * 0.05);
     const legacy8 = legacyValues('quote_range', synth, false, false);
     assert(legacy8.length === 5, 'the legacy 8-point card should keep 5 labels');
-    const card8 = ticksFor('quote_range', synth, false, false, SWEEP_CARD_MIN_PX - 20);
+    const card8 = ticksFor('quote_range', synth, false, false, {});
     const idx8 = card8.map(t => synth.indexOf(t.value));
     assert(card8.length < legacy8.length, 'the smeared 8-point card kept every label');
     for (let i = 1; i < idx8.length; i++) {
@@ -8923,13 +8929,14 @@ def test_sweep_card_tick_rendering_node():
     assert "SWEEP_CARD_TICK_RENDER_OK" in res.stdout
 
 
-def test_sweep_card_tick_width_wiring_static():
-    """Issue #390: the cards hand their measured width to the planner."""
+def test_sweep_card_tick_width_source_static():
+    """Issue #390: only the small cards thin, and they thin by their own width."""
     html = osc_dash.FULL_APP_HTML
-    assert "const mkOpts = (isAgg, widthPx) => sweepChartOptions(data, false, isAgg, widthPx);" in html
-    assert "const cardWidthPx = cvWrap.clientWidth;" in html
-    assert "options: mkOpts(false, cardWidthPx)" in html
-    # The aggregate still passes no width, so it keeps its legacy ticks.
+    assert "const canvasPx = (scale.chart && scale.chart.canvas) ? scale.chart.canvas.clientWidth : 0;" in html
+    assert "? scale.width : SWEEP_CARD_MIN_PLOT_PX;" in html
+    # The aggregate and the detail dialog still share the legacy expression.
+    assert "const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));" in html
     assert "options: mkOpts(true)" in html
+    assert "options: mkOpts(false)" in html
 
 
