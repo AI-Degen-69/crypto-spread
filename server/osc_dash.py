@@ -14,6 +14,7 @@ import collections
 from concurrent.futures import ProcessPoolExecutor
 import concurrent.futures.process
 from dataclasses import asdict, is_dataclass, replace as _dc_replace
+import functools
 import gzip
 import json
 import math
@@ -2270,6 +2271,57 @@ SWEEP_AXES: Dict[str, List[float]] = {
 }
 
 
+#: Sweep axes that clamp through the BacktestParams registry (axis → knob name).
+_SWEEP_REGISTRY_AXES = {"offset": "offset", "queue": "queue_gate", "exit_rev": "exit_reversal"}
+
+
+def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
+    """Effective sweep values for one axis with an optional midpoint anchor.
+
+    Issue #378: with `center=None` the literal `SWEEP_AXES` grid is returned
+    unchanged — no rounding, no clamping, so default sweeps are byte-identical
+    to before. Otherwise the grid is translated so index `N // 2` equals the
+    anchor (`anchor + (grid[i] - grid[N // 2])`), which preserves the existing
+    spacing including the irregular `queue` gaps and puts even-length grids on
+    their upper-middle index. Each translated point clamps to its bounds and
+    duplicates collapse (first occurrence wins); the second return value counts
+    how many requested points were clamped, so the card can label what ran.
+    """
+    grid = list(SWEEP_AXES.get(axis, []))
+    if center is None or not grid:
+        return grid, 0
+    mid = len(grid) // 2
+    translated = [center + (g - grid[mid]) for g in grid]
+    # Review finding (Station IV): cosmetic rounding is the axis's own shape,
+    # not clamping — so every branch counts bound hits BEFORE rounding. An
+    # in-bounds anchor must report clamped_count 0 even when rounding moves it.
+    if axis == "quote_range":
+        # Sweep moves `lo` only; cap below `hi`. The 2dp round matches
+        # `_sweep_params_for_value` construction so lo < hi always holds.
+        bounded = [max(0.0, min(0.49, t)) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 2) for v in bounded]
+    elif axis == "late_entry":
+        # Registry speaks fraction, the wire speaks percent. Count on fractions
+        # so the /100→*100 float roundtrip never inflates the count.
+        frac = [t / 100.0 for t in translated]
+        bounded_frac = [_clamp_to_spec("entry_delay_pct", f) for f in frac]
+        n_clamped = sum(1 for f, c in zip(frac, bounded_frac) if c != f)
+        rounded = [round(c * 100.0, 6) for c in bounded_frac]
+    elif axis in _SWEEP_REGISTRY_AXES:
+        bounded = [_clamp_to_spec(_SWEEP_REGISTRY_AXES[axis], t) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 6) for v in bounded]
+    else:
+        # Stop axes have no scalar registry bounds; the sweep-local 0.001–0.50
+        # matches the existing `exit_thresh` API limit.
+        bounded = [max(0.001, min(0.50, t)) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 6) for v in bounded]
+    effective = list(dict.fromkeys(rounded))
+    return effective, n_clamped
+
+
 def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, str]:
     """Return an independent parameter copy and readable label for one sweep bar."""
     if axis == "queue":
@@ -2372,6 +2424,7 @@ def _run_sweep_worker(
     series_sel: str = "",
     durations_sel: str = "",
     progress_queue=None,
+    sweep_center: Optional[float] = None,
 ) -> dict:
     """Load ticks once, replay one param point per axis value.
 
@@ -2396,7 +2449,9 @@ def _run_sweep_worker(
     # Validated in the endpoint; already-valid strings, so this cannot raise.
     series_tokens = parse_series_tokens(series_sel)
     duration_values = parse_durations(durations_sel)
-    values = list(SWEEP_AXES.get(axis, []))
+    # Issue #378: the server owns the effective values — an anchor recenters
+    # the grid, None restores the literal defaults.
+    values, clamped_count = _sweep_axis_values(axis, sweep_center)
 
     series_order = [s[0] for s in SERIES]
     series_labels = {
@@ -2529,6 +2584,8 @@ def _run_sweep_worker(
                     "rows_total": None,
                     "n_snaps": n_snaps,
                     "points": _snapshot(live),
+                    "sweep_center": sweep_center,
+                    "clamped_count": clamped_count,
                 })
     # `(ts, seq)` reproduces `group_by_cid`'s ordering exactly, ties included.
     rows.sort(key=lambda t: (t[0], t[1]))
@@ -2550,6 +2607,8 @@ def _run_sweep_worker(
             "rows_total": n_windows,
             "n_snaps": n_snaps,
             "points": _snapshot(acc),
+            "sweep_center": sweep_center,
+            "clamped_count": clamped_count,
         })
 
     # Same builder as the live previews, so the final result can never drift
@@ -2568,6 +2627,8 @@ def _run_sweep_worker(
         "best_market": best_market,
         "n_snaps": n_snaps,
         "n_windows": n_windows,
+        "sweep_center": sweep_center,
+        "clamped_count": clamped_count,
     }
 
 
@@ -3190,6 +3251,7 @@ async def api_backtest_sweep(
     enable_leg_chase: bool = False,
     series: str = "",
     durations: str = "",
+    sweep_center: float | None = None,
 ):
     """Replay one sensitivity axis and return X-Y points.
 
@@ -3212,6 +3274,13 @@ async def api_backtest_sweep(
         return JSONResponse(
             status_code=400,
             content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
+        )
+    # Issue #378: fail loud before any busy guard — a malformed anchor must
+    # never hold the single-worker lock.
+    if sweep_center is not None and not math.isfinite(sweep_center):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"sweep_center must be finite, got {sweep_center}"},
         )
     # Same fail-loud rule as the backtest endpoint (issue #308): a typo must
     # 400, never replay zero windows silently.
@@ -3274,9 +3343,10 @@ async def api_backtest_sweep(
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
+            # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
-                _run_sweep_worker,
+                functools.partial(_run_sweep_worker, sweep_center=sweep_center),
                 str(TICKS_DIR),
                 source_path_str,
                 asdict(params),
@@ -3343,6 +3413,7 @@ async def api_backtest_sweep_stream(
     enable_leg_chase: bool = False,
     series: str = "",
     durations: str = "",
+    sweep_center: float | None = None,
 ):
     """Stream sweep progress over SSE, then one authoritative final result.
 
@@ -3356,6 +3427,13 @@ async def api_backtest_sweep_stream(
         return JSONResponse(
             status_code=400,
             content={"error": f"unknown axis: {axis}", "valid": sorted(SWEEP_AXES)},
+        )
+    # Issue #378: fail loud before any busy guard — a malformed anchor must
+    # never hold the single-worker lock.
+    if sweep_center is not None and not math.isfinite(sweep_center):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"sweep_center must be finite, got {sweep_center}"},
         )
     from backtest.selection import parse_durations, parse_series_tokens
     try:
@@ -3424,9 +3502,10 @@ async def api_backtest_sweep_stream(
         try:
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
+            # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
-                _run_sweep_worker,
+                functools.partial(_run_sweep_worker, sweep_center=sweep_center),
                 str(TICKS_DIR),
                 source_path_str,
                 asdict(params),
@@ -7087,6 +7166,7 @@ let btChartDialogInstance = null;
 window.selectedBacktestFile = "";
 window._btFileChosen = false; // Issue #279: flips on any manual dataset pick
 window._btSweepVisualData = null;
+window._btSweepCenter = null; // Issue #378: sweep-only midpoint anchor, outside the card DOM
 window._btChartDialogTrigger = null;
 window._btRunning = false;
 
@@ -8503,6 +8583,8 @@ function renderBacktestTradesPage() {
 }
 
 function resetBtParams(){
+  // Issue #378: reset restores the literal sweep defaults (never in the input-ID list).
+  window._btSweepCenter = null;
   $('btOffset').value = "0.02";
   $('btQueue').value = "0";
   $('btPairCost').value = "0.99";
@@ -8528,8 +8610,8 @@ function resetBtParams(){
 // Sweep Visual — one axis X-Y: 1 aggregate chart + 10 per-series charts
 // Issue #344: the tested axis values, mirrored from the server's SWEEP_AXES
 // grid — the immediate card needs them before the first response arrives.
-function sweepAxisValues(axis){
-  return ({
+function sweepAxisValues(axis, center){
+  const grids = {
     queue: [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
     offset: [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
     exit_stop_default: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
@@ -8538,12 +8620,72 @@ function sweepAxisValues(axis){
     exit_rev: [0.010, 0.015, 0.020, 0.025, 0.030],
     late_entry: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
     quote_range: [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
-  })[axis] || [];
+  };
+  const grid = grids[axis] || [];
+  // No anchor: the literal defaults, so idle and unanchored cards never drift.
+  if(center === undefined || center === null || !Number.isFinite(center) || !grid.length){
+    return {values: grid.slice(), clamped: 0};
+  }
+  // Issue #378: mirror of the server `_sweep_axis_values` — translate so index
+  // N // 2 equals the anchor, clamp, round, drop duplicates, count clamped.
+  const mid = Math.floor(grid.length / 2);
+  const translated = grid.map(g => center + (g - grid[mid]));
+  const specBounds = name => {
+    const spec = (typeof paramSpecFor === 'function') ? paramSpecFor(name) : null;
+    return (spec && spec.bounds) ? spec.bounds : null;
+  };
+  const clampTo = (t, lo, hi) => Math.max(lo, Math.min(hi, t));
+  // Cosmetic rounding is the axis's own shape, not clamping — count bound
+  // hits BEFORE rounding, mirroring the server helper.
+  const countHits = (before, after) => {
+    let n = 0;
+    after.forEach((c, i) => { if(c !== before[i]) n++; });
+    return n;
+  };
+  let clamped, n;
+  if(axis === 'quote_range'){
+    const bounded = translated.map(t => clampTo(t, 0, 0.49));
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(2)));
+  }else if(axis === 'late_entry'){
+    const b = specBounds('entry_delay_pct');
+    const frac = translated.map(t => t / 100.0);
+    const boundedFrac = frac.map(f => b ? clampTo(f, b[0], b[1]) : f);
+    n = countHits(frac, boundedFrac);
+    clamped = boundedFrac.map(f => Number((f * 100.0).toFixed(6)));
+  }else if(axis === 'offset' || axis === 'queue' || axis === 'exit_rev'){
+    const reg = {offset: 'offset', queue: 'queue_gate', exit_rev: 'exit_reversal'}[axis];
+    const b = specBounds(reg);
+    const bounded = b ? translated.map(t => clampTo(t, b[0], b[1])) : translated.slice();
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(6)));
+  }else{
+    // Stop axes have no scalar registry bounds; the sweep-local 0.001–0.50
+    // matches the existing `exit_thresh` API limit.
+    const bounded = translated.map(t => clampTo(t, 0.001, 0.50));
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(6)));
+  }
+  const seen = new Set();
+  const values = [];
+  clamped.forEach(v => { if(!seen.has(v)){ seen.add(v); values.push(v); } });
+  return {values: values, clamped: n};
 }
 
 // Changing the axis mid-run must not race the one-worker guard: abort the
 // in-flight stream first, then start the new sweep on the fresh axis.
 function onSweepAxisChange(){
+  window._btSweepCenter = null; // Issue #378: units differ per axis — never carry an anchor across.
+  if (window._btSweepAbort) { try { window._btSweepAbort.abort(); } catch {} window._btSweepAbort = null; }
+  runSweepVisual();
+}
+
+// Issue #378: sweep-only anchor input. Blank/non-finite clears back to the
+// literal defaults; an explicit 0 stays 0. Bound to `onchange` only — typing
+// must not restart the one-worker sweep on every keystroke.
+function onSweepCenterChange(raw){
+  const num = (raw === '' || raw === null || raw === undefined) ? NaN : Number(raw);
+  window._btSweepCenter = Number.isFinite(num) ? num : null;
   if (window._btSweepAbort) { try { window._btSweepAbort.abort(); } catch {} window._btSweepAbort = null; }
   runSweepVisual();
 }
@@ -8555,6 +8697,10 @@ async function runSweepVisual(){
   // this run uses it, so editing the chips mid-sweep cannot repaint the grid of
   // a run that was asked for something else.
   const sel = btSelection();
+  // Issue #378: snapshot the anchor with the selection — every render of this
+  // run (pending card, progress, request) uses it, so editing the input
+  // mid-sweep cannot repaint a run that was asked for something else.
+  const center = (window._btSweepCenter != null) ? window._btSweepCenter : null;
   const selectedSeries = btSelectedSeriesSlugs(sel);
   // Station VI (#355 closeout): the run-start snapshot travels in
   // `selectedSeries`, not on `window` — nothing ever read the old handle.
@@ -8578,7 +8724,8 @@ async function runSweepVisual(){
     if(meta){
       meta.innerHTML = sweepCard(v, {
         axis: axis,
-        points: (sweepAxisValues(axis) || []).map(val => ({
+        sweep_center: center,
+        points: (sweepAxisValues(axis, center).values || []).map(val => ({
           label: formatSweepTickValue(axis, val),
           value: val,
           overall: {}, per_series: {}, series_present: [],
@@ -8611,7 +8758,8 @@ async function runSweepVisual(){
     }, 500);
     const ctl = new AbortController();
     window._btSweepAbort = ctl;
-    const url = `/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}`;
+    const centerSuffix = (center != null && Number.isFinite(center)) ? `&sweep_center=${encodeURIComponent(center)}` : '';
+    const url = `/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}${centerSuffix}`;
     const res = await fetch(url, {signal: ctl.signal});
     if (window._btSweepAbort !== ctl) return;
     // Validation and busy responses arrive as JSON, not SSE — surface their
@@ -8660,9 +8808,12 @@ async function runSweepVisual(){
 // replayed yet" — instead of a fully greyed grid that read as "nothing selected".
 function renderSweepIdle(){
   const axis = $('btSweepAxis') ? $('btSweepAxis').value : 'queue';
+  // Issue #378: the idle card previews the live anchor, like the pending card.
+  const liveCenter = (window._btSweepCenter != null) ? window._btSweepCenter : null;
   renderSweepVisual({
     axis: axis,
-    points: (sweepAxisValues(axis) || []).map(val => ({
+    sweep_center: liveCenter,
+    points: (sweepAxisValues(axis, liveCenter).values || []).map(val => ({
       label: formatSweepTickValue(axis, val),
       value: val,
       overall: {}, per_series: {}, series_present: [],
@@ -8723,6 +8874,9 @@ function buildSweepProgressView(axis, v, ev, selectedSeries){
     // (`rows_total: null`). `|| 0` would have turned "unknown" into "zero rows
     // of zero", so the null is preserved and the card words it accordingly.
     rows_total: (ev.rows_total === null || ev.rows_total === undefined) ? null : ev.rows_total,
+    // Issue #378: the worker reports what runs — `!= null` keeps an explicit 0.
+    sweep_center: (ev.sweep_center != null ? ev.sweep_center : null),
+    clamped_count: ev.clamped_count || 0,
   };
 }
 
@@ -8913,6 +9067,17 @@ function sweepCard(v, data, statsHtml){
     .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
+  // Issue #378: sweep-only midpoint anchor. `!= null` keeps an explicit 0 (a
+  // valid queue anchor); blank restores the literal defaults. The placeholder
+  // is the default grid's own midpoint, in this axis's units.
+  const anchorSet = (data.sweep_center !== undefined && data.sweep_center !== null);
+  const anchorVal = anchorSet ? String(data.sweep_center) : '';
+  const anchorGrid = (sweepAxisValues(data.axis).values || []);
+  const anchorPh = anchorGrid.length ? String(anchorGrid[Math.floor(anchorGrid.length / 2)]) : '';
+  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo'})[data.axis] || '';
+  const anchorInput = `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="${anchorPh}" title="Midpoint anchor (${anchorUnit}) — blank restores defaults" onchange="onSweepCenterChange(this.value)" style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`;
+  const anchorLine = anchorSet ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
+  const clampLine = (data.clamped_count > 0) ? `<span class="sweep-clamp">${data.clamped_count} points clamped to bounds; bars show the values that ran</span>` : '';
   // Issue #344: idle (pre-first-run) shows the selector + a plain "testing …"
   // with no numbers. Issue #355: a live event carries `rows_total: null` because
   // the read loop does not know the total yet — reporting that as "row 0/0"
@@ -8924,6 +9089,9 @@ function sweepCard(v, data, statsHtml){
     : `<span class="sweep-title-sub">testing ${values}</span>`;
   return `<span class="sweep-title">`
     + titleSel
+    + anchorInput
+    + anchorLine
+    + clampLine
     + pendingBadge
     + `</span>`
     + `<span class="sweep-card">`
@@ -8984,10 +9152,13 @@ function formatSweepTickValue(axis, val){
   const num = Number(val);
   if (!Number.isFinite(num)) return String(val);
   if (axis === 'queue') {
-    return Math.round(num).toString();
+    // Issue #378: anchored grids can land between shares — keep the fraction.
+    if (Number.isInteger(num)) return String(num);
+    return String(Number(num.toFixed(6)));
   }
   if (axis === 'late_entry') {
-    return `${Math.round(num)}%`;
+    if (Number.isInteger(num)) return `${num}%`;
+    return `${Number(num.toFixed(6))}%`;
   }
   if (axis === 'quote_range') {
     const lo = num.toFixed(2);
@@ -8997,12 +9168,16 @@ function formatSweepTickValue(axis, val){
   if (axis === 'offset' || axis === 'exit_rev') {
     const cents = num * 100;
     const rounded = Number(cents.toFixed(2));
-    return `${rounded}¢`;
+    // Issue #378: keep the fixed format when it represents the value (1e-9);
+    // off-grid anchored values fall through to more decimals instead.
+    if (Math.abs(rounded - cents) < 1e-9) return `${rounded}¢`;
+    return `${Number(cents.toFixed(4))}¢`;
   }
   if (axis === 'exit_stop_default' || axis === 'exit_stop_btc' || axis === 'exit_stop_sol') {
     const cents = num * 100;
     const rounded = Number(cents.toFixed(1));
-    return `${rounded}¢`;
+    if (Math.abs(rounded - cents) < 1e-9) return `${rounded}¢`;
+    return `${Number(cents.toFixed(2))}¢`;
   }
   return Number.isInteger(num) ? String(num) : num.toFixed(3);
 }
@@ -9227,12 +9402,23 @@ function renderSweepVisual(data, submitted, isProgress){
       // Re-render everything after the title element only: replace children
       // of meta except the first (the selector) by rebuilding via fragment.
       const keep = existingSel;
+      // Issue #378: the title also owns the anchor input + notices. Keep the
+      // live input (focus and in-progress typing survive the re-render) and
+      // rebuild the notice lines from this event's own metadata.
+      const keepCenter = $('btSweepCenter');
+      const anchorSetEv = (data.sweep_center !== undefined && data.sweep_center !== null);
+      const anchorLineEv = anchorSetEv ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
+      const clampLineEv = (data.clamped_count > 0) ? `<span class="sweep-clamp">${data.clamped_count} points clamped to bounds; bars show the values that ran</span>` : '';
       meta.innerHTML = '';
       // Keep the selector inside its .sweep-title flex wrapper — the progress
       // path rebuilds the tail, but the title row keeps its layout contract.
       const titleWrap = document.createElement('span');
       titleWrap.className = 'sweep-title';
       titleWrap.appendChild(keep);
+      if (keepCenter) titleWrap.appendChild(keepCenter);
+      const notesEv = document.createElement('span');
+      notesEv.innerHTML = anchorLineEv + clampLineEv;
+      while (notesEv.firstChild) titleWrap.appendChild(notesEv.firstChild);
       meta.appendChild(titleWrap);
       const rest = document.createElement('span');
       rest.innerHTML = sweepCardTail(submitted, data, statsHtml);

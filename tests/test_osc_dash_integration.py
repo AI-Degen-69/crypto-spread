@@ -2497,8 +2497,8 @@ def test_sweep_override_note_wording_node():
     parts = []
     # Issue #355: sweepCard delegates the Markets grid to sweepMarketsGridHtml,
     # so both must be in the harness or the grid renders as `undefined`.
-    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepCard",
-                 "formatSweepTickValue"):
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+                 "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -7470,5 +7470,366 @@ def test_render_backtest_trades_page_per_pair_and_missing_fallback():
     )
     assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
     assert "BACKTEST_TRADES_PER_PAIR_RENDER_OK" in res.stdout
+
+
+# Issue #378: manual midpoint anchor for the Sweep Visual. The helper returns
+# (effective_values, clamped_count); None restores the literal grids.
+def test_sweep_anchor_unanchored_returns_literal_grids():
+    """No anchor means today's hardcoded grids, untouched by rounding/clamping."""
+    for axis, grid in osc_dash.SWEEP_AXES.items():
+        values, clamped = osc_dash._sweep_axis_values(axis, None)
+        assert values == grid, axis
+        assert clamped == 0, axis
+
+
+def test_sweep_anchor_offset_center():
+    """Anchor 0.04 on offset recenters 7 points at 0.005 steps, anchor at index 3."""
+    values, clamped = osc_dash._sweep_axis_values("offset", 0.04)
+    assert values == pytest.approx([0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+    assert values[3] == pytest.approx(0.04)
+    assert clamped == 0
+
+
+def test_sweep_anchor_queue_keeps_irregular_gaps():
+    """The queue grid has no uniform step — anchoring translates, never rebuilds."""
+    grid = osc_dash.SWEEP_AXES["queue"]
+    values, clamped = osc_dash._sweep_axis_values("queue", 50.0)
+    assert values[3] == pytest.approx(50.0)
+    gaps = [b - a for a, b in zip(values, values[1:])]
+    expected_gaps = [b - a for a, b in zip(grid, grid[1:])]
+    assert gaps == pytest.approx(expected_gaps)
+    assert clamped == 0
+
+
+def test_sweep_anchor_even_grid_uses_upper_middle():
+    """A 6-point stop grid has no true middle — the anchor lands at index 3."""
+    values, clamped = osc_dash._sweep_axis_values("exit_stop_default", 0.11)
+    assert values[3] == pytest.approx(0.11)
+    assert values == pytest.approx([0.05, 0.07, 0.09, 0.11, 0.13, 0.15])
+    assert clamped == 0
+
+
+def test_sweep_anchor_late_entry_clamps_to_percent():
+    """late_entry speaks percent on the wire, fraction in the registry."""
+    values, clamped = osc_dash._sweep_axis_values("late_entry", 200.0)
+    assert values == pytest.approx([100.0])
+    assert clamped == 7
+
+
+def test_sweep_anchor_quote_range_caps_lo():
+    """quote_range sweeps lo only — it can never reach or pass hi."""
+    values, clamped = osc_dash._sweep_axis_values("quote_range", 0.9)
+    assert values == pytest.approx([0.49])
+    assert clamped == 7
+
+
+def test_sweep_anchor_offset_clamp_dedupes():
+    """Clamped points collapse to duplicates — first occurrence wins, count reported."""
+    values, clamped = osc_dash._sweep_axis_values("offset", 0.49)
+    assert values == pytest.approx([0.475, 0.480, 0.485, 0.490])
+    assert clamped == 3
+
+
+def test_sweep_anchor_inbounds_fractional_reports_zero_clamped():
+    """Station IV review: cosmetic rounding is not clamping — an in-bounds
+    anchor reports clamped_count 0 even when rounding moves it."""
+    values, clamped = osc_dash._sweep_axis_values("quote_range", 0.213)
+    assert values == pytest.approx([0.06, 0.11, 0.16, 0.21, 0.26, 0.31, 0.36])
+    assert clamped == 0
+    # The /100→*100 float roundtrip alone must not inflate the count either.
+    values, clamped = osc_dash._sweep_axis_values("late_entry", 15.0)
+    assert values == pytest.approx([0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0])
+    assert clamped == 0
+
+
+def test_sweep_endpoint_anchored_offset(tmp_path, monkeypatch):
+    """Issue #378: sweep_center=0.04 recenters the offset axis end to end."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                              "bnb-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        res = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl", "sweep_center": 0.04})
+        assert res.status_code == 200, res.text
+        data = res.json()
+        assert [p["value"] for p in data["points"]] == pytest.approx(
+            [0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+        assert data["sweep_center"] == pytest.approx(0.04)
+        assert data["clamped_count"] == 0
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_endpoint_rejects_nonfinite_anchor_without_guard(tmp_path, monkeypatch):
+    """A NaN anchor 400s before any busy guard — the next sweep still runs."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        bad = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl", "sweep_center": "nan"})
+        assert bad.status_code == 400, bad.text
+        ok = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl"})
+        assert ok.status_code == 200, ok.text
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_endpoint_absent_anchor_keeps_defaults(tmp_path, monkeypatch):
+    """No sweep_center: default point counts and null center metadata."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        res = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl"})
+        assert res.status_code == 200, res.text
+        data = res.json()
+        assert len(data["points"]) == len(osc_dash.SWEEP_AXES["offset"])
+        assert data["sweep_center"] is None
+        assert data["clamped_count"] == 0
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_worker_positional_and_keyword_anchor(tmp_path, monkeypatch):
+    """The worker keeps its 9-positional-arg form and accepts sweep_center by keyword."""
+    from dataclasses import asdict
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    params_dict = asdict(BacktestParams(offset=0.02))
+    plain = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "queue", 5, 0.0, 0, "", "",
+    )
+    assert len(plain["points"]) == len(osc_dash.SWEEP_AXES["queue"])
+    assert plain["sweep_center"] is None
+    assert plain["clamped_count"] == 0
+    anchored = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "offset", 5, 0.0, 0, "", "", sweep_center=0.04,
+    )
+    assert [p["value"] for p in anchored["points"]] == pytest.approx(
+        [0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+    assert anchored["sweep_center"] == pytest.approx(0.04)
+    assert anchored["clamped_count"] == 0
+
+
+def test_sweep_stream_anchored_final_matches_blocking(tmp_path, monkeypatch):
+    """The SSE route carries the anchor to the same effective values as blocking."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    mock_pool = _install_stream_test_harness(monkeypatch, tmp_path)
+
+    url = ("/api/backtest/sweep/stream?axis=offset&file=fake_stream.jsonl"
+           "&offset=0.02&sweep_center=0.04")
+    with client.stream("GET", url) as res:
+        assert res.status_code == 200
+        body = "".join(chunk for chunk in res.iter_text())
+    events = _parse_sse_events(body)
+    assert events[-1]["type"] == "final"
+    final = events[-1]["result"]
+    assert [p["value"] for p in final["points"]] == pytest.approx(
+        [0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+    assert final["sweep_center"] == pytest.approx(0.04)
+    last_progress = next(e for e in reversed(events) if e["type"] == "progress")
+    assert [p["value"] for p in last_progress["points"]] == pytest.approx(
+        [p["value"] for p in final["points"]])
+
+    mock_pool.shutdown(wait=True)
+
+
+def test_sweep_anchor_request_plumbing_strings():
+    """Issue #378: the anchor is sweep-only — never in the plain backtest query."""
+    html = osc_dash.FULL_APP_HTML
+
+    def _body(name):
+        chunk = html[html.index(f"function {name}("):]
+        return chunk[:chunk.index("\n}")]
+
+    query = _body("btControlQuery")
+    assert "sweep_center" not in query
+    runner = html[html.index("async function runSweepVisual("):]
+    runner = runner[:runner.index("\n}")]
+    # The asserted request prefix is untouched; the anchor rides a suffix.
+    assert "/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in runner
+    assert "&sweep_center=" in runner
+    assert "window._btSweepCenter" in runner
+    assert "function onSweepCenterChange(" in html
+    assert "window._btSweepCenter = null" in html
+    assert "window._btSweepCenter = null" in _body("onSweepAxisChange")
+    assert "window._btSweepCenter = null" in _body("resetBtParams")
+    card = _body("sweepCard")
+    assert "btSweepCenter" in card
+    assert "onSweepCenterChange(this.value)" in card
+    # Progress re-renders keep the live anchor input and rebuild the notices
+    # from the event instead of wiping the title row.
+    assert "const keepCenter = $('btSweepCenter');" in html
+    assert "titleWrap.appendChild(keepCenter)" in html
+
+
+def test_sweep_axis_values_node_parity():
+    """Issue #378: the JS grid mirror matches the backend helper, clamp for clamp."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = osc_dash.FULL_APP_HTML
+    found = re.search(r"function sweepAxisValues\(.*?\n\}", html, re.DOTALL)
+    assert found is not None, "sweepAxisValues is no longer a top-level function"
+    cases = {
+        "offset@0.04": ("offset", 0.04),
+        "offset@0.49": ("offset", 0.49),
+        "queue@50": ("queue", 50.0),
+        "late_entry@200": ("late_entry", 200.0),
+        "late_entry@15": ("late_entry", 15.0),
+        "quote_range@0.213": ("quote_range", 0.213),
+    }
+    expected = {k: osc_dash._sweep_axis_values(axis, c) for k, (axis, c) in cases.items()}
+    test_js = found.group(0) + """
+    // Registry stub with the production bounds (no PARAM_SPEC in the harness).
+    function paramSpecFor(name){
+      const bounds = {offset: [0.001, 0.49], queue_gate: [0.0, 100000.0],
+        exit_reversal: [0.001, 0.50], entry_delay_pct: [0.0, 1.0],
+        quote_range: [0.0, 1.0]};
+      if(!(name in bounds)) return null;
+      return {bounds: bounds[name]};
+    }
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const cases = %s;
+    for(const [key, [axis, center]] of Object.entries(cases)){
+      const res = sweepAxisValues(axis, center);
+      const exp = EXPECTED[key];
+      assert(res.values.length === exp[0].length,
+        key + ' length ' + res.values.length + ' vs ' + exp[0].length);
+      res.values.forEach((val, i) => {
+        assert(Math.abs(val - exp[0][i]) < 1e-9, key + ' value ' + val + ' vs ' + exp[0][i]);
+      });
+      assert(res.clamped === exp[1], key + ' clamped ' + res.clamped + ' vs ' + exp[1]);
+    }
+    // No center: the literal default grids, same reference shape as the backend.
+    assert(JSON.stringify(sweepAxisValues('offset').values) === JSON.stringify(%s));
+    console.log('SWEEP_AXIS_VALUES_PARITY_OK');
+    process.exit(0);
+    """ % (json.dumps(cases),
+           json.dumps(osc_dash._sweep_axis_values("offset", None)[0]))
+    test_js = test_js.replace("EXPECTED", json.dumps(
+        {k: (list(v[0]), v[1]) for k, v in expected.items()}))
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8")
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_AXIS_VALUES_PARITY_OK" in res.stdout
+
+
+def test_sweep_card_anchor_and_clamp_notices_node():
+    """Issue #378: the card shows the anchor line and the clamp notice, or neither."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+                 "sweepCard", "formatSweepTickValue"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
+    parts.append("function paramSpecFor(name){ return null; }")
+
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const v = {
+      offset: 0.02, queue: 50, pairCost: 0.95,
+      exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09,
+      exitReversal: 0.03, size: 5, maxStartDelay: 0,
+      quoteLo: 0.20, quoteHi: 0.80, entryDelayPct: 4,
+      deadZonePct: 12, nakedLegAtExpiry: 'hold', legChase: '1'
+    };
+    const base = {
+      axis: 'offset',
+      points: [{label: '2.5\\u00a2', value: 0.025, overall: {}, per_series: {},
+                series_present: []}],
+      series_order: [], series_labels: {}
+    };
+    // Anchored, nothing clamped: input carries the anchor, anchor line shows.
+    const anchored = sweepCard(v, { ...base, sweep_center: 0.04, clamped_count: 0 });
+    assert(anchored.includes('id="btSweepCenter"'), anchored);
+    assert(anchored.includes('value="0.04"'), anchored);
+    assert(anchored.includes('sweep-anchor'), anchored);
+    assert(!anchored.includes('sweep-clamp'), anchored);
+    // Clamped: the notice names what ran.
+    const clamped = sweepCard(v, { ...base, sweep_center: 0.49, clamped_count: 3 });
+    assert(clamped.includes('sweep-anchor'), clamped);
+    assert(clamped.includes('sweep-clamp'), clamped);
+    assert(clamped.includes('3 points clamped to bounds'), clamped);
+    // No metadata (old payloads, busy-guard fakes): today's output, blank input.
+    const plain = sweepCard(v, base);
+    assert(plain.includes('id="btSweepCenter"'), plain);
+    assert(!plain.includes('sweep-anchor'), plain);
+    assert(!plain.includes('sweep-clamp'), plain);
+    // Explicit zero anchor survives (falsy but valid, e.g. queue).
+    const zero = sweepCard(v, { ...base, axis: 'queue', sweep_center: 0 });
+    assert(zero.includes('value="0"'), zero);
+    assert(zero.includes('sweep-anchor'), zero);
+    console.log('SWEEP_CARD_ANCHOR_NOTICES_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8")
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_CARD_ANCHOR_NOTICES_OK" in res.stdout
+
+
+def test_format_sweep_tick_offgrid_node():
+    """Issue #378: off-grid anchored ticks keep precision; defaults are untouched."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = osc_dash.FULL_APP_HTML
+    found = re.search(r"function formatSweepTickValue\(.*?\n\}", html, re.DOTALL)
+    assert found is not None, "formatSweepTickValue is no longer a top-level function"
+    test_js = found.group(0) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    // Defaults pinned.
+    assert(formatSweepTickValue('offset', 0.025) === '2.5\\u00a2');
+    assert(formatSweepTickValue('queue', 50) === '50');
+    assert(formatSweepTickValue('late_entry', 15) === '15%');
+    assert(formatSweepTickValue('exit_stop_default', 0.10) === '10\\u00a2');
+    // Off-grid anchored values keep their precision.
+    assert(formatSweepTickValue('offset', 0.0125) === '1.25\\u00a2');
+    assert(formatSweepTickValue('queue', 5.5) === '5.5');
+    assert(formatSweepTickValue('late_entry', 12.5) === '12.5%');
+    assert(formatSweepTickValue('exit_stop_default', 0.0555) === '5.55\\u00a2');
+    console.log('FORMAT_SWEEP_TICK_OFFGRID_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8")
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "FORMAT_SWEEP_TICK_OFFGRID_OK" in res.stdout
 
 
