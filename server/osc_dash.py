@@ -5090,10 +5090,10 @@ textarea:focus-visible,
 .btn-primary{background:var(--up);color:var(--bg);border:none;font-weight:700;position:relative;transition:all .2s ease}
 .btn-primary:hover{background:var(--up-hi)}
 .btn-primary:disabled{opacity:0.75;cursor:wait}
-/* Issue #383: `.btn` sets `display:inline-flex`, which outranks the user-agent's
-   `[hidden]{display:none}` — so a `hidden` button still renders. The Stop control
-   must stay invisible on first paint, before any script has run. */
-#btnStopBacktest[hidden]{display:none !important}
+/* Issue #383/#386: `.btn` sets `display:inline-flex`, which outranks the
+   user-agent's `[hidden]{display:none}` — so a `hidden` button still renders. The
+   Stop controls must stay invisible on first paint, before any script has run. */
+.bt-stop[hidden]{display:none !important}
 /* A locked control is not a broken one: it stays legible, shows a
    not-allowed cursor, and does not invite a hover. Used when a
    standalone collector owns run/ticks/ and Start would spawn a
@@ -5393,7 +5393,7 @@ textarea:focus-visible,
         <!-- Issue #383: the server-side stop. Visible exactly while a backtest or
              sweep is in flight (driven by `updateBtStopVisibility`), so it starts
              hidden and never appears next to an idle tab. -->
-        <button class="btn" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
+        <button class="btn bt-stop" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
         <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
         <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
@@ -5628,6 +5628,13 @@ textarea:focus-visible,
                (sweepAxisSelect rendered by sweepCard), not as a separate
                dropdown row above it. -->
           <button class="btn btn-primary" id="btnRunSweepVisual" onclick="runSweepVisual()">▶ Run Sweep Visual</button>
+          <!-- Issue #386: the Sweep Visual card gets its own Stop. The operator
+               starts this run from HERE and watches it HERE, so the control has to
+               be in this card — the one beside the Setup & Run button was scrolled
+               out of reach in every screenshot of a running sweep. Both controls
+               call the same handler and the same endpoint; the server holds one
+               active run, so whichever is on screen is the one to press. -->
+          <button class="btn bt-stop" id="btnStopSweepVisual" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
         </div>
       </div>
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
@@ -7524,16 +7531,29 @@ function setBacktestLoadingState(isLoading){
   updateBtStopVisibility();
 }
 
-// Issue #383: show Stop exactly while `runBacktest` or `runSweepVisual` is in
-// flight. `hidden` alone is not enough — a `.btn { display: ... }` rule beats the
-// user-agent's `[hidden] { display: none }` — so the inline display is set too.
+// Issue #383/#386: show a Stop control while a run is in flight, and show it
+// WHERE that run was started. `hidden` alone is not enough — a
+// `.btn { display: ... }` rule beats the user-agent's `[hidden] { display: none }`
+// — so the inline display is set too.
+//
+// Each control answers to its OWN run kind. One shared control shown for both
+// would put two identical "Stop" buttons on screen at once, which is worse than
+// either placement on its own.
 function updateBtStopVisibility(){
-  const btn = $('btnStopBacktest');
-  if(!btn) return;
-  const busy = !!(window._btRunning || window._btSweepInFlight);
-  btn.hidden = !busy;
-  btn.disabled = !busy;
-  btn.style.display = busy ? '' : 'none';
+  const btBtn = $('btnStopBacktest');
+  if(btBtn){
+    const busy = !!window._btRunning;
+    btBtn.hidden = !busy;
+    btBtn.disabled = !busy;
+    btBtn.style.display = busy ? '' : 'none';
+  }
+  const svBtn = $('btnStopSweepVisual');
+  if(svBtn){
+    const busy = !!window._btSweepInFlight;
+    svBtn.hidden = !busy;
+    svBtn.disabled = !busy;
+    svBtn.style.display = busy ? '' : 'none';
+  }
 }
 
 // Issue #383: a deliberate stop is NOT a failure and NOT a stall, so it gets its
@@ -7586,10 +7606,12 @@ function markBacktestStopping(detail){
 async function stopBacktestRun(){
   if (window._btStopBusy) return;
   window._btStopBusy = true;
-  const stopBtn = $('btnStopBacktest');
-  if (stopBtn) {
-    stopBtn.disabled = true;
-    stopBtn.textContent = '⏹ Stopping…';
+  // Issue #386: both controls, through the shared class — whichever one the
+  // operator pressed must show the same pending state.
+  const stopBtns = document.querySelectorAll('.bt-stop');
+  for (const b of stopBtns) {
+    b.disabled = true;
+    b.textContent = '⏹ Stopping…';
   }
   window._btStopSeq = (window._btStopSeq || 0) + 1;
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} window._btAbort = null; }
@@ -7620,7 +7642,7 @@ async function stopBacktestRun(){
   const sweepBtn = $('btnRunSweepVisual');
   if(sweepBtn){ sweepBtn.disabled = false; sweepBtn.textContent = '▶ Run Sweep Visual'; }
   window._btStopBusy = false;
-  if (stopBtn) stopBtn.textContent = '⏹ Stop';
+  for (const b of document.querySelectorAll('.bt-stop')) b.textContent = '⏹ Stop';
 
   if (body && body.stopping) markBacktestStopping(body.detail);
   else if (body && body.ok === false) markBacktestStopping(body.detail);

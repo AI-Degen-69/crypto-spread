@@ -7497,18 +7497,32 @@ def test_sweep_stream_late_cleanup_targets_the_records_own_pool(tmp_path, monkey
 
 
 def test_stop_control_exists_and_calls_the_cancel_endpoint():
-    """Issue #383: a Stop control beside Run, wired to the server-side cancel
-    endpoint — not to the client AbortController alone."""
+    """Issue #383: Stop controls wired to the server-side cancel endpoint — not to
+    the client AbortController alone. #386: one beside EACH Run button, because the
+    two runs live in different sections and a single control was unreachable from
+    the card the operator was watching."""
     html = client.get("/").text
     assert 'id="btnStopBacktest"' in html
-    assert 'onclick="stopBacktestRun()"' in html
-    # It starts hidden; visibility is driven by the run state, not the markup.
-    assert re.search(r'<button[^>]*id="btnStopBacktest"[^>]*\bhidden\b', html), \
-        "the Stop control must start hidden"
+    assert 'id="btnStopSweepVisual"' in html, (
+        "the Sweep Visual card has its own Run button and must have its own Stop — "
+        "#383 put Stop only beside the plain backtest's Run, out of reach of the card"
+    )
+    # Each Stop sits in the same section as the Run button it stops.
+    params = html[html.index('id="btSecParameters"'):html.index('id="btSecSweep"')]
+    sweep = html[html.index('id="btSecSweep"'):]
+    assert 'id="btnRunSweep"' in params and 'id="btnStopBacktest"' in params
+    assert 'id="btnRunSweepVisual"' in sweep and 'id="btnStopSweepVisual"' in sweep
+    # Both call the same handler — the server holds one active run.
+    for bid in ("btnStopBacktest", "btnStopSweepVisual"):
+        assert re.search(
+            rf'<button[^>]*id="{bid}"[^>]*onclick="stopBacktestRun\(\)"', html), bid
+    # They start hidden; visibility is driven by the run state, not the markup.
+    for bid in ("btnStopBacktest", "btnStopSweepVisual"):
+        assert re.search(rf'<button[^>]*id="{bid}"[^>]*\bhidden\b', html), bid
     # `.btn{display:inline-flex}` outranks the user-agent's `[hidden]{display:none}`,
     # so a `hidden` button still renders on first paint. Caught in a live browser
     # check; without this rule Stop is visible on an idle tab before any JS runs.
-    assert "#btnStopBacktest[hidden]{display:none !important}" in html
+    assert ".bt-stop[hidden]{display:none !important}" in html
     for fname in ("stopBacktestRun", "updateBtStopVisibility",
                   "markBacktestStopped", "markBacktestStopping"):
         assert f"function {fname}(" in html, fname
@@ -7532,19 +7546,33 @@ def test_stop_control_exists_and_calls_the_cancel_endpoint():
     assert "updateBtStopVisibility()" in stop
     # The stop generation advances so a sweep already waiting to start gives up.
     assert "window._btStopSeq" in stop
+    # #386: the "Stopping…" / "⏹ Stop" label is handled through the shared class, so
+    # both controls stay in step whatever is on screen.
+    assert ".bt-stop" in stop
+    assert "btStopSweepVisual" not in stop, \
+        "the reset must drive both controls through the shared class, not one id"
 
 
 def test_stop_visibility_follows_both_run_paths():
-    """Issue #383: Stop is visible exactly while a backtest OR a sweep is in flight."""
+    """Issue #383: Stop is visible while its run is in flight. #386: each control
+    follows its OWN run kind — showing both at once would put two identical Stops
+    on screen."""
     html = client.get("/").text
 
     vis = html[html.index("function updateBtStopVisibility("):]
     vis = vis[:vis.index("\n}")]
-    assert "window._btRunning" in vis
-    assert "window._btSweepInFlight" in vis
+    assert "btnStopBacktest" in vis
+    assert "btnStopSweepVisual" in vis
+    # The Setup & Run control answers to the plain backtest, the card's to the sweep.
+    bt_part = vis[:vis.index("btnStopSweepVisual")]
+    sv_part = vis[vis.index("btnStopSweepVisual"):]
+    assert "window._btRunning" in bt_part
+    assert "window._btSweepInFlight" not in bt_part, \
+        "the Setup & Run Stop must not answer to the sweep"
+    assert "window._btSweepInFlight" in sv_part
     # `hidden` alone loses to a `.btn { display: ... }` rule, so both are set.
-    assert "btn.hidden" in vis
-    assert "btn.style.display" in vis
+    assert ".hidden" in vis
+    assert ".style.display" in vis
 
     # The plain backtest drives visibility through its single loading-state helper.
     loader = html[html.index("function setBacktestLoadingState("):]
@@ -7616,32 +7644,49 @@ def test_stop_visibility_and_stopped_notice_behaviour():
 
     test_js = vis.group(0) + "\n" + stopped.group(0) + """
     const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
-    const btn = {hidden: true, style: {}};
+    const btBtn = {hidden: true, style: {}, textContent: '⏹ Stop'};
+    const svBtn = {hidden: true, style: {}, textContent: '⏹ Stop'};
     const els = {};
-    global.$ = (id) => { if (id === 'btnStopBacktest') return btn; return els[id] || (els[id] = {textContent: '', style: {}}); };
+    global.$ = (id) => {
+      if (id === 'btnStopBacktest') return btBtn;
+      if (id === 'btnStopSweepVisual') return svBtn;
+      return els[id] || (els[id] = {textContent: '', style: {}});
+    };
     global.window = {_btRunning: false, _btSweepInFlight: false};
 
-    // Idle: Stop is hidden and disabled.
+    // Idle: both controls are hidden and disabled.
     updateBtStopVisibility();
-    assert(btn.hidden === true, 'idle: hidden=' + btn.hidden);
-    assert(btn.style.display === 'none', 'idle: display=' + btn.style.display);
+    assert(btBtn.hidden === true, 'idle bt: hidden=' + btBtn.hidden);
+    assert(btBtn.style.display === 'none', 'idle bt: display=' + btBtn.style.display);
+    assert(svBtn.hidden === true, 'idle sv: hidden=' + svBtn.hidden);
+    assert(svBtn.style.display === 'none', 'idle sv: display=' + svBtn.style.display);
 
-    // A plain backtest in flight.
+    // A plain backtest in flight: only the Setup & Run control appears (#386).
     window._btRunning = true;
     updateBtStopVisibility();
-    assert(btn.hidden === false, 'backtest in flight: hidden=' + btn.hidden);
-    assert(btn.style.display !== 'none', 'backtest in flight: display=' + btn.style.display);
+    assert(btBtn.hidden === false, 'backtest: bt hidden=' + btBtn.hidden);
+    assert(btBtn.style.display !== 'none', 'backtest: bt display=' + btBtn.style.display);
+    assert(svBtn.hidden === true, 'backtest: the sweep Stop must stay hidden');
 
-    // A sweep in flight, with no backtest running.
+    // A sweep in flight, with no backtest running: only the card's control.
     window._btRunning = false;
     window._btSweepInFlight = true;
     updateBtStopVisibility();
-    assert(btn.hidden === false, 'sweep in flight: hidden=' + btn.hidden);
+    assert(svBtn.hidden === false, 'sweep: sv hidden=' + svBtn.hidden);
+    assert(svBtn.style.display !== 'none', 'sweep: sv display=' + svBtn.style.display);
+    assert(btBtn.hidden === true, 'sweep: the Setup & Run Stop must stay hidden');
+
+    // Both at once (a sweep waiting on a running backtest): still one each.
+    window._btRunning = true;
+    updateBtStopVisibility();
+    assert(btBtn.hidden === false && svBtn.hidden === false, 'both in flight');
 
     // Back to idle.
     window._btSweepInFlight = false;
+    window._btRunning = false;
     updateBtStopVisibility();
-    assert(btn.hidden === true, 'back to idle: hidden=' + btn.hidden);
+    assert(btBtn.hidden === true, 'back to idle: bt hidden=' + btBtn.hidden);
+    assert(svBtn.hidden === true, 'back to idle: sv hidden=' + svBtn.hidden);
 
     // The stopped notice is neutral, and never the red failure colour.
     markBacktestStopped();
