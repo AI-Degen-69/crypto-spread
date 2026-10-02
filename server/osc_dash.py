@@ -10144,12 +10144,15 @@ function renderSweepVisual(data, submitted, isProgress){
       // Issue #378: the title also owns the anchor field + notices. Keep the
       // live field so in-progress typing survives the re-render, and rebuild
       // the notice lines from this event's own metadata. The value survives
-      // because the node is re-inserted; focus does NOT (`meta.innerHTML = ''`
-      // blurs the removed node) — true both before and after #389.
+      // because the node is re-inserted; focus is captured before clearing and
+      // restored after reattachment (Issue #394) if the anchor input was active.
+      // Note: caret position is not restored as type="number" inputs do not support selection APIs.
       // Issue #389: keep the WRAPPER, not the bare input — the label and the
       // unit live in it, and preserving the input alone would drop them on the
       // first progress event.
       const keepAnchorWrap = $('btSweepAnchorWrap');
+      const anchorInput = $('btSweepCenter');
+      const anchorWasFocused = !!(keepAnchorWrap && anchorInput && document.activeElement === anchorInput);
       const anchorSetEv = (data.sweep_center !== undefined && data.sweep_center !== null);
       const anchorLineEv = anchorSetEv ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
       const clampLineEv = (data.clamped_count > 0) ? `<span class="sweep-clamp">${data.clamped_count} points clamped to bounds; bars show the values that ran</span>` : '';
@@ -10167,6 +10170,9 @@ function renderSweepVisual(data, submitted, isProgress){
       const rest = document.createElement('span');
       rest.innerHTML = sweepCardTail(submitted, data, statsHtml);
       while (rest.firstChild) meta.appendChild(rest.firstChild);
+      if (anchorWasFocused && anchorInput && typeof anchorInput.focus === 'function') {
+        anchorInput.focus({ preventScroll: true });
+      }
     } else {
       meta.innerHTML = sweepCard(submitted, data, statsHtml);
     }
