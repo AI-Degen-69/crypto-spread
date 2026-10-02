@@ -8870,7 +8870,11 @@ def test_sweep_card_tick_rendering_node():
     // wide budget the card cannot afford.
     const live = w => ({ chart: { canvas: { clientWidth: w + 65 } }, width: w });
     const cardScales = [{ plot: SWEEP_CARD_MIN_PLOT_PX, scale: {} }, { plot: 234, scale: live(234) },
-                        { plot: 145, scale: live(145) }];
+                        { plot: 145, scale: live(145) },
+                        // Hidden tab: the scale still reports a width from the last
+                        // layout, but the canvas is 0 wide — the plan must fall back
+                        // to the narrowest card, not to the stale wide one.
+                        { plot: SWEEP_CARD_MIN_PLOT_PX, scale: { chart: { canvas: { clientWidth: 0 } }, width: 234 } }];
     const legacyValues = (axis, values, detail, isAgg) => {
       const n = values.length;
       const maxTicks = detail ? Math.min(14, n) : Math.min(4, n);

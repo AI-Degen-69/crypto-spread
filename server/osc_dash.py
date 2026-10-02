@@ -9710,8 +9710,10 @@ let _sweepMeasureCtx = null;  // one cached 2D context, reused by every card
 // Conservative width of one formatted tick label in px. The per-character
 // estimate is always the floor: an unusable font family makes `measureText` fall
 // back to a smaller font silently, and under-estimating is the one error that
-// brings the overlap back. No canvas at all (Node harness): the estimate is all
-// there is, which keeps the harness on the same numbers the browser floors on.
+// brings the overlap back. The 0.62 factor is deliberately above this font's
+// real advance (a 12-character `[0.30, 0.70]` draws 60px, i.e. 5px/char), so the
+// floor is an upper bound rather than a second guess at the drawn width. No
+// canvas at all (Node harness): the estimate is all there is.
 function sweepLabelWidthPx(text){
   const label = String(text);
   const estimated = Math.ceil(label.length * SWEEP_TICK_FONT_PX * 0.62) + 2;
@@ -9722,11 +9724,18 @@ function sweepLabelWidthPx(text){
   return Math.max(estimated, Math.ceil(_sweepMeasureCtx.measureText(label).width) + 2);
 }
 
-// Index step between two kept ticks, wide enough that their labels cannot touch:
-// `plotWidthPx / count` is the slot a single bar occupies, and each label needs
-// its own width plus a gap. Never below the legacy budget (`ceil(count / 4)`), so
-// a card can only ever lose labels, not gain clutter it never had.
+// Index step between two kept ticks, sized so their labels cannot touch:
+// `plotWidthPx / count` is the slot a single bar should occupy, and each label
+// needs its own width plus a gap. Never below the legacy budget (`ceil(count / 4)`),
+// so a card can only ever lose labels, not gain clutter it never had.
 // Unmeasurable widths (no canvas, hidden layout) fall back to that legacy step.
+//
+// The slot is an estimate, not the drawn geometry: Chart.js can leave dead space
+// beside the bars, so measured on a card (194px plot, 7 points) consecutive bars
+// sat 16.2px apart where this says 27.7px. The margin therefore rests on the
+// width floor above running wide: at the narrowest card (198px canvas, horizontal
+// labels) the two surviving labels measured 60px wide with 66.7-70px between
+// them — 7-10px of clear space, and no colliding pair on any of the ten cards.
 function sweepTickStep(count, plotWidthPx, widestLabelPx, gapPx){
   const legacy = Math.max(1, Math.ceil(count / 4));
   const slotPx = plotWidthPx / count;
