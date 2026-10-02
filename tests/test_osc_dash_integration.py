@@ -1967,11 +1967,19 @@ def test_sweep_axis_moves_only_its_own_parameter():
         "exit_rev": {"exit_reversal"},
         "late_entry": {"entry_delay_pct"},
         "quote_range": {"quote_range"},
+        # Issue #388: the base carries dead_zone_pct=5.0 (unit pct), so a
+        # dead-zone point moves the value alone — the unit it forces already
+        # matches the base.
+        "leg_chase": {"enable_leg_chase"},
+        "naked_leg": {"naked_leg_at_expiry"},
+        "dead_zone_pct": {"dead_zone_val"},
     }
     for axis, value in [("queue", 25.0), ("offset", 0.04),
                         ("exit_stop_default", 0.15), ("exit_stop_btc", 0.15),
                         ("exit_stop_sol", 0.15), ("exit_rev", 0.02),
-                        ("late_entry", 10.0), ("quote_range", 0.15)]:
+                        ("late_entry", 10.0), ("quote_range", 0.15),
+                        ("leg_chase", False), ("naked_leg", "close"),
+                        ("dead_zone_pct", 10.0)]:
         variant, _label = osc_dash._sweep_params_for_value(params, axis, value)
         before, after = asdict(params), asdict(variant)
         changed = {k for k in before if before[k] != after[k]}
@@ -2283,6 +2291,9 @@ _AXIS_CONTROLS = {
     "exit_rev": ("exit_reversal",),
     "late_entry": ("entry_delay_pct",),
     "quote_range": ("quote_lo", "quote_hi"),
+    "leg_chase": ("enable_leg_chase",),
+    "naked_leg": ("naked_leg_at_expiry",),
+    "dead_zone_pct": ("dead_zone_pct",),
 }
 
 
@@ -2304,14 +2315,26 @@ def _axis_point_query(axis: str, value: float) -> dict:
         query["quote_hi"] = round(1.0 - value, 2)
     else:
         for control in _AXIS_CONTROLS[axis]:
-            query[control] = value
+            # Issue #388: booleans ride the wire explicitly as true/false —
+            # never Python's str(True); strings and percents pass through.
+            query[control] = "true" if value is True else "false" if value is False else value
     return query
+
+
+def _sweep_value_matches(actual, expected) -> bool:
+    """Issue #388: native equality for categorical values, tolerance for numbers."""
+    if isinstance(expected, bool) or isinstance(expected, str):
+        return actual == expected
+    try:
+        return abs(float(actual) - float(expected)) < 1e-9
+    except (TypeError, ValueError):
+        return actual == expected
 
 
 def _sweep_point_at(data: dict, value: float) -> dict:
     """The single sweep point tested at `value`, or a failing assertion."""
     matches = [p for p in data["points"]
-               if abs(float(p["value"]) - float(value)) < 1e-9]
+               if _sweep_value_matches(p["value"], value)]
     assert len(matches) == 1, f"expected one point at {value}, got {len(matches)}"
     return matches[0]
 
@@ -8327,6 +8350,31 @@ def test_sweep_anchor_unanchored_returns_literal_grids():
         values, clamped = osc_dash._sweep_axis_values(axis, None)
         assert values == grid, axis
         assert clamped == 0, axis
+
+
+def test_sweep_anchor_is_a_noop_for_categorical_axes():
+    """Issue #388: names have no midpoint — an anchor never moves these grids.
+
+    The frontend `sweepAxisValues` mirror is proven equal by the Node parity
+    harness; this pins the server half and the zero clamp count that keeps the
+    card's "points clamped" notice honest.
+    """
+    for axis in ("leg_chase", "naked_leg"):
+        grid = osc_dash.SWEEP_AXES[axis]
+        for center in (0.0, 5.0, 50.0, -3.0):
+            values, clamped = osc_dash._sweep_axis_values(axis, center)
+            assert values == grid, f"{axis}@{center} must stay literal"
+            assert clamped == 0, f"{axis}@{center} clamped {clamped}"
+
+
+def test_sweep_dead_zone_axis_clamps_to_percent_domain():
+    """Issue #388: dead_zone_pct clamps to [0, 100], never the stop axes' bounds."""
+    values, clamped = osc_dash._sweep_axis_values("dead_zone_pct", 95.0)
+    assert values == [80.0, 85.0, 90.0, 95.0, 100.0]
+    assert clamped == 1
+    values, clamped = osc_dash._sweep_axis_values("dead_zone_pct", 200.0)
+    assert values == [100.0]
+    assert clamped == 6
 
 
 def test_sweep_anchor_offset_center():

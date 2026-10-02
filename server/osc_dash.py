@@ -2405,7 +2405,7 @@ def _run_backtest_simulation_worker(
 # Values mirror scripts/sweep_backtest.py sensitivity axes so the chart shows
 # the same points the CLI sweeps. The worker loads ticks once and replays each
 # point in-process: N runs share one load instead of paying it N times.
-SWEEP_AXES: Dict[str, List[float]] = {
+SWEEP_AXES: Dict[str, List[float] | List[bool] | List[str]] = {
     "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
     "offset": [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
     "exit_stop_default": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
@@ -2414,6 +2414,24 @@ SWEEP_AXES: Dict[str, List[float]] = {
     "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
     "late_entry": [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
     "quote_range": [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
+    # Issue #388: the three engine knobs the Backtester and cockpit already
+    # expose, so a sweep can answer what they do to PnL. Values mirror
+    # `scripts/sweep_backtest.py`'s sensitivity grids (leg chase on/off, naked
+    # leg close/hold); dead zone is the exception — the CLI speaks fractions
+    # while the page control and the `dead_zone_pct` query parameter speak
+    # percent, so this grid is percent and lists the 10% default as a bar.
+    "leg_chase": [False, True],
+    "naked_leg": ["close", "hold"],
+    "dead_zone_pct": [0.0, 5.0, 10.0, 15.0, 20.0, 30.0],
+}
+
+#: Issue #388: axes whose values are names, not numbers — anchor translation is
+#: a no-op for them. Derived from the grids' own value types so a future
+#: categorical axis cannot be half-wired by forgetting a second hand-written
+#: list; the frontend mirrors this set and the Node parity test covers it.
+_SWEEP_CATEGORICAL_AXES = {
+    name for name, grid in SWEEP_AXES.items()
+    if any(not isinstance(v, float) for v in grid)
 }
 
 
@@ -2436,6 +2454,11 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
     grid = list(SWEEP_AXES.get(axis, []))
     if center is None or not grid:
         return grid, 0
+    if axis in _SWEEP_CATEGORICAL_AXES:
+        # Issue #388: categorical axes ignore `sweep_center` and always use the
+        # literal value list — there is no midpoint between "off" and "on".
+        # The frontend `sweepAxisValues` mirror must match this behaviour.
+        return grid, 0
     mid = len(grid) // 2
     translated = [center + (g - grid[mid]) for g in grid]
     # Review finding (Station IV): cosmetic rounding is the axis's own shape,
@@ -2454,6 +2477,12 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
         bounded_frac = [_clamp_to_spec("entry_delay_pct", f) for f in frac]
         n_clamped = sum(1 for f, c in zip(frac, bounded_frac) if c != f)
         rounded = [round(c * 100.0, 6) for c in bounded_frac]
+    elif axis == "dead_zone_pct":
+        # Issue #388: percent of window — the Backtester control's domain. Never
+        # the stop axes' 0.001–0.50 clamp, which would flatten this axis.
+        bounded = [max(0.0, min(100.0, t)) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 6) for v in bounded]
     elif axis in _SWEEP_REGISTRY_AXES:
         bounded = [_clamp_to_spec(_SWEEP_REGISTRY_AXES[axis], t) for t in translated]
         n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
@@ -2468,7 +2497,7 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
     return effective, n_clamped
 
 
-def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, str]:
+def _sweep_params_for_value(base: Any, axis: str, value: float | bool | str) -> tuple[Any, str]:
     """Return an independent parameter copy and readable label for one sweep bar."""
     if axis == "queue":
         return _dc_replace(base, queue_gate=float(value)), f"queue={value:.0f}"
@@ -2495,7 +2524,31 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
         lo = round(float(value), 2)
         hi = round(1.0 - lo, 2)
         return _dc_replace(base, quote_range=(lo, hi)), f"quote_range=[{lo:.2f},{hi:.2f}]"
+    if axis == "leg_chase":
+        return _dc_replace(base, enable_leg_chase=bool(value)), \
+            f"leg_chase={'on' if bool(value) else 'off'}"
+    if axis == "naked_leg":
+        return _dc_replace(base, naked_leg_at_expiry=str(value)), f"naked_leg={value}"
+    if axis == "dead_zone_pct":
+        return _dc_replace(base, dead_zone_val=float(value) / 100.0, dead_zone_unit="pct"), \
+            f"dead_zone={float(value):.0f}%"
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
+
+
+def _sweep_point_value(axis: str, value: Any) -> float | bool | str:
+    """Issue #388: coerce one sweep point to the type its axis speaks.
+
+    Categorical axes keep their native type end to end — bool for `leg_chase`,
+    str for `naked_leg` — and every numeric axis stays a float. The blanket
+    `float(...)` casts this replaces corrupted categorical values into NaN
+    (JSON `true` → 1.0, a label string → NaN), which broke both the wire
+    contract and the chart's strict-equality best-point match.
+    """
+    if axis == "leg_chase":
+        return bool(value)
+    if axis == "naked_leg":
+        return str(value)
+    return float(value)
 
 
 #: Issue #355: the minimum wall-clock gap between sweep progress messages.
@@ -2598,6 +2651,10 @@ def _run_sweep_worker(
     # Issue #378: the server owns the effective values — an anchor recenters
     # the grid, None restores the literal defaults.
     values, clamped_count = _sweep_axis_values(axis, sweep_center)
+    if axis in _SWEEP_CATEGORICAL_AXES:
+        # Issue #388: the values above ignored the anchor, so echoing one would
+        # claim an anchoring that never applied.
+        sweep_center = None
 
     series_order = [s[0] for s in SERIES]
     series_labels = {
@@ -2615,7 +2672,8 @@ def _run_sweep_worker(
     # later run with "already in progress". Streaming one window at a time caps
     # memory at the largest single window and lets the OS reclaim each window as
     # soon as it is simulated.
-    variants = [_sweep_params_for_value(base, axis, float(v)) for v in values]
+    variants = [_sweep_params_for_value(base, axis, _sweep_point_value(axis, v))
+                for v in values]
 
     def _new_acc() -> list[dict]:
         """One zeroed running-total record per axis point."""
@@ -2642,7 +2700,7 @@ def _run_sweep_worker(
         return [
             {
                 "label": label,
-                "value": float(value),
+                "value": _sweep_point_value(axis, value),
                 "overall": {
                     "windows": a["n"],
                     "pairs": a["pairs"],
@@ -9370,7 +9428,10 @@ function sweepAxisLabel(axis){
     exit_stop_sol: 'Stop distance — SOL',
     exit_rev: 'Reversal buffer — distance from anchor',
     late_entry: 'Late entry — % of window',
-    quote_range: 'Quotable range — [lo, hi] bounds'
+    quote_range: 'Quotable range — [lo, hi] bounds',
+    leg_chase: 'Leg chase — off vs on',
+    naked_leg: 'Naked leg at expiry — close vs hold',
+    dead_zone_pct: 'Dead zone — % of window'
   })[axis] || axis;
 }
 
@@ -9544,8 +9605,8 @@ function sweepCard(v, data, statsHtml){
     : '';
   // Issue #344: the axis selector IS the title — one control chooses and
   // displays the sweep subject instead of a dropdown row + duplicate title.
-  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev','late_entry','quote_range']
-    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds'})[a]}</option>`)
+  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev','late_entry','quote_range','leg_chase','naked_leg','dead_zone_pct']
+    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds',leg_chase:'Leg chase — off vs on',naked_leg:'Naked leg at expiry — close vs hold',dead_zone_pct:'Dead zone — % of window'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
   // Issue #378: sweep-only midpoint anchor. `!= null` keeps an explicit 0 (a
