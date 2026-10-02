@@ -1751,8 +1751,9 @@ def test_api_backtest_sweep_contract_and_validation(tmp_path, monkeypatch):
     assert unknown.status_code == 400
     assert unknown.json()["valid"] == sorted(osc_dash.SWEEP_AXES)
     assert unknown.json()["valid"] == [
-        "exit_rev", "exit_stop_btc", "exit_stop_default", "exit_stop_sol",
-        "late_entry", "offset", "queue", "quote_range"]
+        "dead_zone_pct", "exit_rev", "exit_stop_btc", "exit_stop_default",
+        "exit_stop_sol", "late_entry", "leg_chase", "naked_leg", "offset",
+        "queue", "quote_range"]
 
     unsafe = client.get("/api/backtest/sweep?file=../secrets.jsonl")
     assert unsafe.status_code == 400
@@ -1967,15 +1968,56 @@ def test_sweep_axis_moves_only_its_own_parameter():
         "exit_rev": {"exit_reversal"},
         "late_entry": {"entry_delay_pct"},
         "quote_range": {"quote_range"},
+        # Issue #388: the base carries dead_zone_pct=5.0 (unit pct), so a
+        # dead-zone point moves the value alone — the unit it forces already
+        # matches the base.
+        "leg_chase": {"enable_leg_chase"},
+        "naked_leg": {"naked_leg_at_expiry"},
+        "dead_zone_pct": {"dead_zone_val"},
     }
     for axis, value in [("queue", 25.0), ("offset", 0.04),
                         ("exit_stop_default", 0.15), ("exit_stop_btc", 0.15),
                         ("exit_stop_sol", 0.15), ("exit_rev", 0.02),
-                        ("late_entry", 10.0), ("quote_range", 0.15)]:
+                        ("late_entry", 10.0), ("quote_range", 0.15),
+                        ("leg_chase", False), ("naked_leg", "close"),
+                        ("dead_zone_pct", 10.0)]:
         variant, _label = osc_dash._sweep_params_for_value(params, axis, value)
         before, after = asdict(params), asdict(variant)
         changed = {k for k in before if before[k] != after[k]}
         assert changed == expected[axis], f"{axis} changed {sorted(changed)}"
+
+
+def test_sweep_categorical_axes_carry_native_value_types(tmp_path, monkeypatch):
+    """Issue #388: bool/str survive the worker, and an ignored anchor is nulled.
+
+    The blanket `float(...)` casts the pipeline used to apply turned `true`
+    into 1.0 and a naked-leg label into NaN, and a categorical axis that
+    ignores its anchor must not echo one back as if it had applied it.
+    """
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        leg = client.get("/api/backtest/sweep", params={
+            "axis": "leg_chase", "file": "sweep_base.jsonl",
+            "sweep_center": 5.0, **_NON_DEFAULT})
+        assert leg.status_code == 200
+        data = leg.json()
+        assert [p["value"] for p in data["points"]] == [False, True]
+        assert all(isinstance(p["value"], bool) for p in data["points"])
+        # The values above ignored the anchor, so it must not be echoed.
+        assert data["sweep_center"] is None
+        assert data["clamped_count"] == 0
+
+        naked = client.get("/api/backtest/sweep", params={
+            "axis": "naked_leg", "file": "sweep_base.jsonl", **_NON_DEFAULT})
+        assert naked.status_code == 200
+        assert [p["value"] for p in naked.json()["points"]] == ["close", "hold"]
+    finally:
+        pool.shutdown(wait=True)
 
 
 def test_sweep_honours_market_and_duration_selection(tmp_path, monkeypatch):
@@ -2283,6 +2325,9 @@ _AXIS_CONTROLS = {
     "exit_rev": ("exit_reversal",),
     "late_entry": ("entry_delay_pct",),
     "quote_range": ("quote_lo", "quote_hi"),
+    "leg_chase": ("enable_leg_chase",),
+    "naked_leg": ("naked_leg_at_expiry",),
+    "dead_zone_pct": ("dead_zone_pct",),
 }
 
 
@@ -2304,14 +2349,26 @@ def _axis_point_query(axis: str, value: float) -> dict:
         query["quote_hi"] = round(1.0 - value, 2)
     else:
         for control in _AXIS_CONTROLS[axis]:
-            query[control] = value
+            # Issue #388: booleans ride the wire explicitly as true/false —
+            # never Python's str(True); strings and percents pass through.
+            query[control] = "true" if value is True else "false" if value is False else value
     return query
+
+
+def _sweep_value_matches(actual, expected) -> bool:
+    """Issue #388: native equality for categorical values, tolerance for numbers."""
+    if isinstance(expected, bool) or isinstance(expected, str):
+        return actual == expected
+    try:
+        return abs(float(actual) - float(expected)) < 1e-9
+    except (TypeError, ValueError):
+        return actual == expected
 
 
 def _sweep_point_at(data: dict, value: float) -> dict:
     """The single sweep point tested at `value`, or a failing assertion."""
     matches = [p for p in data["points"]
-               if abs(float(p["value"]) - float(value)) < 1e-9]
+               if _sweep_value_matches(p["value"], value)]
     assert len(matches) == 1, f"expected one point at {value}, got {len(matches)}"
     return matches[0]
 
@@ -2538,7 +2595,7 @@ def test_sweep_override_note_wording_node():
     # Issue #355: sweepCard delegates the Markets grid to sweepMarketsGridHtml,
     # so both must be in the harness or the grid renders as `undefined`.
     for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
-                 "sweepCard", "formatSweepTickValue"):
+                 "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8056,9 +8113,14 @@ def test_sweep_visual_destroys_detached_chart_instances():
         html, re.DOTALL)
     destroy_instance_fn = re.search(r"function destroyChartInstance\(canvasId\)\{.*?\n\}", html, re.DOTALL)
     destroy_fn = re.search(r"function destroyChart\(canvas\)\{.*?\n\}", html, re.DOTALL)
+    # Issue #388: renderSweepVisual positions its own bars through these two.
+    point_x_fn = re.search(r"function sweepPointX\(axis, p, i\)\{.*?\n\}", html, re.DOTALL)
+    categorical_fn = re.search(r"function sweepAxisIsCategorical\(axis\)\{.*?\n\}", html, re.DOTALL)
     assert render_fn is not None
     assert destroy_instance_fn is not None
     assert destroy_fn is not None
+    assert point_x_fn is not None
+    assert categorical_fn is not None
     harness = """
     // ---- minimal DOM: only what renderSweepVisual touches ----
     const collectCanvases = node => {
@@ -8136,6 +8198,8 @@ def test_sweep_visual_destroys_detached_chart_instances():
     const sweepChartOptions = () => ({});
     const sweepChartColors = () => [];
     const sweepZeroLinePlugin = () => ({});
+    {CATEGORICAL_FN}
+    {POINT_X_FN}
     {DESTROY_INSTANCE_FN}
     {DESTROY_FN}
     {RENDER_FN}
@@ -8166,6 +8230,8 @@ def test_sweep_visual_destroys_detached_chart_instances():
     console.log('SWEEP_CHART_TEARDOWN_OK');
     """
     harness = (harness
+               .replace("{CATEGORICAL_FN}", categorical_fn.group(0))
+               .replace("{POINT_X_FN}", point_x_fn.group(0))
                .replace("{DESTROY_INSTANCE_FN}", destroy_instance_fn.group(0))
                .replace("{DESTROY_FN}", destroy_fn.group(0))
                .replace("{RENDER_FN}", render_fn.group(0).replace("\n\n\n// Statistical Summary Charts", "")))
@@ -8327,6 +8393,31 @@ def test_sweep_anchor_unanchored_returns_literal_grids():
         values, clamped = osc_dash._sweep_axis_values(axis, None)
         assert values == grid, axis
         assert clamped == 0, axis
+
+
+def test_sweep_anchor_is_a_noop_for_categorical_axes():
+    """Issue #388: names have no midpoint — an anchor never moves these grids.
+
+    The frontend `sweepAxisValues` mirror is proven equal by the Node parity
+    harness; this pins the server half and the zero clamp count that keeps the
+    card's "points clamped" notice honest.
+    """
+    for axis in ("leg_chase", "naked_leg"):
+        grid = osc_dash.SWEEP_AXES[axis]
+        for center in (0.0, 5.0, 50.0, -3.0):
+            values, clamped = osc_dash._sweep_axis_values(axis, center)
+            assert values == grid, f"{axis}@{center} must stay literal"
+            assert clamped == 0, f"{axis}@{center} clamped {clamped}"
+
+
+def test_sweep_dead_zone_axis_clamps_to_percent_domain():
+    """Issue #388: dead_zone_pct clamps to [0, 100], never the stop axes' bounds."""
+    values, clamped = osc_dash._sweep_axis_values("dead_zone_pct", 95.0)
+    assert values == [80.0, 85.0, 90.0, 95.0, 100.0]
+    assert clamped == 1
+    values, clamped = osc_dash._sweep_axis_values("dead_zone_pct", 200.0)
+    assert values == [100.0]
+    assert clamped == 6
 
 
 def test_sweep_anchor_offset_center():
@@ -8515,6 +8606,8 @@ def test_sweep_anchor_request_plumbing_strings():
     assert "/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in runner
     assert "&sweep_center=" in runner
     assert "window._btSweepCenter" in runner
+    # Issue #388: categorical axes never carry an anchor — the suffix is gated.
+    assert "!sweepAxisIsCategorical(axis)" in runner
     assert "function onSweepCenterChange(" in html
     assert "window._btSweepCenter = null" in html
     assert "window._btSweepCenter = null" in _body("onSweepAxisChange")
@@ -8546,6 +8639,8 @@ def test_sweep_axis_values_node_parity():
     html = osc_dash.FULL_APP_HTML
     found = re.search(r"function sweepAxisValues\(.*?\n\}", html, re.DOTALL)
     assert found is not None, "sweepAxisValues is no longer a top-level function"
+    helper = re.search(r"function sweepAxisIsCategorical\(.*?\n\}", html, re.DOTALL)
+    assert helper is not None, "sweepAxisIsCategorical is no longer a top-level function"
     cases = {
         "offset@0.04": ("offset", 0.04),
         "offset@0.49": ("offset", 0.49),
@@ -8553,9 +8648,15 @@ def test_sweep_axis_values_node_parity():
         "late_entry@200": ("late_entry", 200.0),
         "late_entry@15": ("late_entry", 15.0),
         "quote_range@0.213": ("quote_range", 0.213),
+        # Issue #388: categorical axes ignore the anchor entirely; dead zone
+        # clamps inside its own [0, 100] domain, not the stop axes'.
+        "leg_chase@5": ("leg_chase", 5.0),
+        "naked_leg@5": ("naked_leg", 5.0),
+        "dead_zone_pct@10": ("dead_zone_pct", 10.0),
+        "dead_zone_pct@95": ("dead_zone_pct", 95.0),
     }
     expected = {k: osc_dash._sweep_axis_values(axis, c) for k, (axis, c) in cases.items()}
-    test_js = found.group(0) + """
+    test_js = helper.group(0) + "\n" + found.group(0) + """
     // Registry stub with the production bounds (no PARAM_SPEC in the harness).
     function paramSpecFor(name){
       const bounds = {offset: [0.001, 0.49], queue_gate: [0.0, 100000.0],
@@ -8572,7 +8673,12 @@ def test_sweep_axis_values_node_parity():
       assert(res.values.length === exp[0].length,
         key + ' length ' + res.values.length + ' vs ' + exp[0].length);
       res.values.forEach((val, i) => {
-        assert(Math.abs(val - exp[0][i]) < 1e-9, key + ' value ' + val + ' vs ' + exp[0][i]);
+        const expv = exp[0][i];
+        if(typeof expv === 'string' || typeof expv === 'boolean'){
+          assert(val === expv, key + ' value ' + JSON.stringify(val) + ' vs ' + JSON.stringify(expv));
+        }else{
+          assert(Math.abs(val - expv) < 1e-9, key + ' value ' + val + ' vs ' + expv);
+        }
       });
       assert(res.clamped === exp[1], key + ' clamped ' + res.clamped + ' vs ' + exp[1]);
     }
@@ -8602,7 +8708,7 @@ def test_sweep_card_anchor_and_clamp_notices_node():
     html = osc_dash.FULL_APP_HTML
     parts = []
     for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
-                 "sweepCard", "formatSweepTickValue"):
+                 "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8669,7 +8775,7 @@ def test_sweep_anchor_field_is_labelled_node():
     html = osc_dash.FULL_APP_HTML
     parts = []
     for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
-                 "sweepCard", "formatSweepTickValue"):
+                 "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8692,15 +8798,24 @@ def test_sweep_anchor_field_is_labelled_node():
       series_order: [], series_labels: {}
     };
     const AXES = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol',
-                  'exit_rev','late_entry','quote_range'];
+                  'exit_rev','late_entry','quote_range','leg_chase','naked_leg','dead_zone_pct'];
+    const CATEGORICAL = ['leg_chase','naked_leg'];
 
-    // Every axis labels its field and names its unit: a missing entry in the
-    // unit map renders an empty span, so this pins the map to SWEEP_AXES.
+    // Every axis labels its field: a missing entry in the unit map renders an
+    // empty span, so this pins the map to SWEEP_AXES — and issue #388 says the
+    // categorical axes are the one deliberate exception: no unit, and a
+    // disabled input, because there is no midpoint between names.
     AXES.forEach(a => {
       const c = sweepCard(v, { ...base, axis: a });
       assert(c.includes('<span class="sweep-anchor-label">Anchor</span>'), a + ': ' + c);
       const unit = /<span class="sweep-anchor-unit">([^<]*)<\/span>/.exec(c);
-      assert(unit && unit[1].trim().length > 0, a + ' has no unit: ' + c);
+      if(CATEGORICAL.includes(a)){
+        assert(unit && unit[1].trim() === '', a + ' must have no unit: ' + c);
+        assert(/id="btSweepCenter"[^>]*disabled/.test(c), a + ' anchor must be disabled: ' + c);
+      }else{
+        assert(unit && unit[1].trim().length > 0, a + ' has no unit: ' + c);
+        assert(!/id="btSweepCenter"[^>]*disabled/.test(c), a + ' anchor must stay editable: ' + c);
+      }
     });
     // quote_range translates the whole [lo, hi] pair, so it shifts the lo bound.
     const qr = sweepCard(v, { ...base, axis: 'quote_range' });
@@ -8788,8 +8903,11 @@ def _sweep_card_harness() -> str:
     # sweepCard harness above); the rest are extracted from the shipped source.
     parts.append("const getThemeTokens = () => ({ gold: 'g', up: 'u', down: 'd', "
                  "line: 'l', dim: 'm', faint: 'f', proj: 'p' });")
+    # Issue #388: the chart options resolve their x positions and their tick
+    # labels through these two, so the harness carries them too.
     for name in ("sweepLabelWidthPx", "sweepTickStep", "sweepTickIndices",
-                 "formatSweepTickValue", "sweepAxisLabel", "sweepChartOptions"):
+                 "formatSweepTickValue", "sweepAxisLabel", "sweepAxisIsCategorical",
+                 "sweepPointX", "sweepChartOptions"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8982,5 +9100,197 @@ def test_sweep_card_tick_width_source_static():
     assert "const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));" in html
     assert "options: mkOpts(true)" in html
     assert "options: mkOpts(false)" in html
+
+
+def test_sweep_categorical_axis_set_matches_the_server_derivation():
+    """Issue #388: the two categorical sets are one contract, not two guesses.
+
+    The server derives its set from the grids' value types; the frontend names
+    them in `sweepAxisIsCategorical`. A future categorical axis added on one
+    side only would leave the other translating names as if they were numbers
+    (`'hold' - 'close'` is NaN), so the two must agree or this test fails.
+    """
+    html = osc_dash.FULL_APP_HTML
+    found = re.search(r"function sweepAxisIsCategorical\(axis\)\{\s*return (.*?);\s*\n\}",
+                      html, re.DOTALL)
+    assert found is not None, "sweepAxisIsCategorical is no longer a top-level function"
+    js_names = set(re.findall(r"axis === '([a-z_]+)'", found.group(1)))
+    assert js_names, "the frontend categorical set must not be empty"
+    assert js_names == osc_dash._SWEEP_CATEGORICAL_AXES, (
+        f"frontend {sorted(js_names)} != server {sorted(osc_dash._SWEEP_CATEGORICAL_AXES)}"
+    )
+    assert js_names == {"leg_chase", "naked_leg"}, "the issue names exactly these two"
+    # The derivation must be numeric, not `float`-only: an int grid is a numeric
+    # axis and may never be swept as if its values were names.
+    assert not osc_dash._SWEEP_CATEGORICAL_AXES & {"queue", "offset", "exit_stop_default",
+                                                    "exit_stop_btc", "exit_stop_sol", "exit_rev",
+                                                    "late_entry", "quote_range", "dead_zone_pct"}
+
+
+def test_sweep_categorical_points_are_positioned_by_index_static():
+    """Issue #388: a name-valued axis has no number to plot.
+
+    `sweepPointX` returns the point's index on a categorical axis and its value
+    everywhere else. The card chart, the aggregate chart inside
+    `renderSweepVisual` and the detail dialog each position their own bars, so
+    all three must ask that one helper — a bar drawn by index under a scale fed
+    values (or the reverse) would sit off its own label.
+    """
+    html = osc_dash.FULL_APP_HTML
+    assert "function sweepPointX(axis, p, i){" in html
+    assert "return sweepAxisIsCategorical(axis) ? i : Number(p.value);" in html
+    # One position source, used twice for the two chart x axes (the small cards
+    # and the aggregate) plus once for the dialog's own bar data.
+    xvals_line = "const xVals = points.map((p, i) => sweepPointX(data.axis, p, i));"
+    assert html.count(xvals_line) == 2, "the card chart and the meta chart must share the axis"
+    assert "data: points.map((p, i) => ({x: sweepPointX(data.axis, p, i), y: values[i]}))" in html
+    assert "({x:Number(p.value), y:values[i]})" not in html
+
+
+def test_sweep_categorical_axis_rendering_node():
+    """Issue #388: name-valued axes read as names everywhere they are drawn.
+
+    Their x scale is positional, so the card planner, the axis callback and the
+    legacy aggregate/detail branch are all handed indices — each must resolve
+    the index back to the point it stands for, or the axis prints `0`/`1`.
+    """
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    # The tick planner already brings `formatSweepTickValue`, `sweepAxisLabel`,
+    # `sweepAxisIsCategorical`, `sweepPointX` and `sweepChartOptions`.
+    parts = [_sweep_card_harness()]
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+                 "sweepCard"):
+        found = re.search(rf"function {name}\(.*?\n\}}", osc_dash.FULL_APP_HTML, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
+    parts.append("function paramSpecFor(name){ return null; }")
+
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const v = {
+      offset: 0.02, queue: 50, pairCost: 0.95,
+      exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09,
+      exitReversal: 0.03, size: 5, maxStartDelay: 0,
+      quoteLo: 0.20, quoteHi: 0.80, entryDelayPct: 4,
+      deadZonePct: 12, nakedLegAtExpiry: 'hold', legChase: '1'
+    };
+    const shell = { series_order: [], series_labels: {} };
+    const legPoints = [{ label: 'Off', value: false }, { label: 'On', value: true }];
+    const nakedPoints = [{ label: 'Close', value: 'close' }, { label: 'Hold', value: 'hold' }];
+    const legData = { ...shell, axis: 'leg_chase', points: legPoints };
+    const nakedData = { ...shell, axis: 'naked_leg', points: nakedPoints };
+    const dzData = { ...shell, axis: 'dead_zone_pct',
+                     points: [0, 5, 10, 15, 20, 30].map(n => ({ label: n + '%', value: n })) };
+
+    // 1. A value becomes a name; an index is never dressed up as one.
+    assert(formatSweepTickValue('leg_chase', false) === 'Off', 'false must read Off');
+    assert(formatSweepTickValue('leg_chase', true) === 'On', 'true must read On');
+    assert(formatSweepTickValue('leg_chase', '1') === 'On', "'1' must read On");
+    assert(formatSweepTickValue('leg_chase', '0') === 'Off', "'0' must read Off");
+    assert(formatSweepTickValue('naked_leg', 'close') === 'Close', 'close must read Close');
+    assert(formatSweepTickValue('naked_leg', 'hold') === 'Hold', 'hold must read Hold');
+    assert(formatSweepTickValue('naked_leg', 1) === '1', 'an index must not read as a name');
+    assert(formatSweepTickValue('dead_zone_pct', 10) === '10%', 'whole percents keep no decimals');
+    assert(formatSweepTickValue('dead_zone_pct', 12.5) === '12.5%', 'anchored percents keep precision');
+
+    // 2. Bars: the index on a categorical axis, the value everywhere else.
+    assert(sweepPointX('leg_chase', { value: true }, 1) === 1, 'a categorical bar sits at its index');
+    assert(sweepPointX('naked_leg', { value: 'hold' }, 0) === 0, 'a categorical bar sits at its index');
+    assert(sweepPointX('offset', { value: 0.025 }, 4) === 0.025, 'a numeric bar keeps its value');
+
+    // 3. The card planner and the axis callback label by point, not by index.
+    const legOpts = sweepChartOptions(legData, false, false);
+    const cardScale = { chart: { canvas: { clientWidth: 400 } }, width: 300, ticks: [] };
+    legOpts.scales.x.afterBuildTicks(cardScale);
+    assert(cardScale.ticks.length === 2,
+           'both bars must stay labelled: ' + JSON.stringify(cardScale.ticks));
+    assert(cardScale.ticks.map(t => t.label).join('|') === 'Off|On',
+           JSON.stringify(cardScale.ticks));
+    assert(cardScale.ticks.map(t => t.value).join('|') === '0|1', 'bars must sit at their indices');
+    assert(legOpts.scales.x.ticks.callback(0) === 'Off', 'the callback must label point 0');
+    assert(legOpts.scales.x.ticks.callback(1) === 'On', 'the callback must label point 1');
+    // Review fix (Station IV): an index with no point behind it prints the
+    // index, never a blank label — a silent empty tick is how a scale that
+    // disagrees with its points stays invisible.
+    assert(legOpts.scales.x.ticks.callback(9) === '9', 'an unresolved index must not go blank');
+    assert(legOpts.plugins.tooltip.callbacks.title([{ dataIndex: 1 }]).endsWith(': On'),
+           'the tooltip must name the point');
+    // The aggregate card and the detail dialog take the legacy branch.
+    const nakedOpts = sweepChartOptions(nakedData, true, false);
+    const aggScale = { width: 300, ticks: [] };
+    nakedOpts.scales.x.afterBuildTicks(aggScale);
+    assert(aggScale.ticks.map(t => t.label).join('|') === 'Close|Hold',
+           JSON.stringify(aggScale.ticks));
+    // A numeric axis keeps reading its own value.
+    const numValues = [0.01, 0.02];
+    const numOpts = sweepChartOptions({ ...shell, axis: 'offset',
+        points: numValues.map(n => ({ label: String(n), value: n })) }, false, false);
+    const numScale = { chart: { canvas: { clientWidth: 400 } }, width: 300, ticks: [] };
+    numOpts.scales.x.afterBuildTicks(numScale);
+    assert(JSON.stringify(numScale.ticks.map(t => t.label))
+           === JSON.stringify(numValues.map(n => formatSweepTickValue('offset', n))),
+           'a numeric axis must keep labelling its values: ' + JSON.stringify(numScale.ticks));
+
+    // 4. Exactly one card row is the subject, and the verdict is honest.
+    const legCard = sweepCard(v, legData);
+    assert(legCard.includes('>Leg Chase <span class="sweep-tag">← subject</span>'), legCard);
+    assert(legCard.split('← subject').length - 1 === 1, 'one subject, not two: ' + legCard);
+    assert(legCard.includes('that bar is your setting'),
+           'a categorical sweep always tests the submitted setting');
+    assert(legCard.includes('sweep-verdict yours'), legCard);
+
+    const nakedCard = sweepCard(v, nakedData);
+    assert(nakedCard.includes('>Naked Leg at Expiry <span class="sweep-tag">← subject</span>'),
+           nakedCard);
+    assert(nakedCard.split('← subject').length - 1 === 1, nakedCard);
+
+    const dzCard = sweepCard(v, dzData);
+    assert(dzCard.includes('>Dead Zone (% window) <span class="sweep-tag">← subject</span>'), dzCard);
+    assert(dzCard.split('← subject').length - 1 === 1, dzCard);
+    // v.deadZonePct is 12, off the tested grid — the note must not claim a bar.
+    assert(dzCard.includes('no bar equals it'), dzCard);
+    assert(dzCard.includes('sweep-verdict none'), dzCard);
+    const dzOn = sweepCard({ ...v, deadZonePct: 10 }, dzData);
+    assert(dzOn.includes('that bar is your setting'), dzOn);
+
+    // A numeric sweep marks none of the three new rows.
+    const numericCard = sweepCard(v, { ...shell, axis: 'queue',
+                                       points: [{ label: '50', value: 50 }] });
+    ['Leg Chase', 'Dead Zone (% window)', 'Naked Leg at Expiry'].forEach(k => {
+      assert(!numericCard.includes('>' + k + ' <span class="sweep-tag"'),
+             k + ' must not be the subject of a queue sweep');
+    });
+    assert(numericCard.split('← subject').length - 1 === 1, numericCard);
+
+    // 5. The note itself: the head names the field and the submitted value, and
+    // a categorical axis is deliberately independent of the passed point values
+    // (they are the numeric projection, NaN for names).
+    const legNote = sweepOverrideNote('leg_chase', v, [0, 1]);
+    assert(legNote.head === 'sweeps Leg chase — replaces the submitted On', legNote.head);
+    assert(legNote.verdict.cls === 'yours', legNote.head);
+    assert(legNote.verdict.text === 'that bar is your setting', legNote.head);
+    const legOff = sweepOverrideNote('leg_chase', { ...v, legChase: false }, [NaN, NaN]);
+    assert(legOff.head === 'sweeps Leg chase — replaces the submitted Off', legOff.head);
+    assert(legOff.verdict.cls === 'yours', legOff.head);
+    const nakedNote = sweepOverrideNote('naked_leg', { ...v, nakedLegAtExpiry: 'close' }, [NaN, NaN]);
+    assert(nakedNote.head === 'sweeps Naked leg at expiry — replaces the submitted Close',
+           nakedNote.head);
+    const dzNote = sweepOverrideNote('dead_zone_pct', v, [0, 5, 10, 15, 20, 30]);
+    assert(dzNote.head === 'sweeps Dead zone — replaces the submitted 12', dzNote.head);
+    assert(dzNote.verdict.cls === 'none', dzNote.head);
+
+    console.log('SWEEP_CATEGORICAL_RENDER_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_CATEGORICAL_RENDER_OK" in res.stdout
 
 

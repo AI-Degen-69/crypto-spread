@@ -2405,7 +2405,7 @@ def _run_backtest_simulation_worker(
 # Values mirror scripts/sweep_backtest.py sensitivity axes so the chart shows
 # the same points the CLI sweeps. The worker loads ticks once and replays each
 # point in-process: N runs share one load instead of paying it N times.
-SWEEP_AXES: Dict[str, List[float]] = {
+SWEEP_AXES: Dict[str, List[float] | List[bool] | List[str]] = {
     "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
     "offset": [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
     "exit_stop_default": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
@@ -2414,6 +2414,27 @@ SWEEP_AXES: Dict[str, List[float]] = {
     "exit_rev": [0.010, 0.015, 0.020, 0.025, 0.030],
     "late_entry": [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
     "quote_range": [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
+    # Issue #388: the three engine knobs the Backtester and cockpit already
+    # expose, so a sweep can answer what they do to PnL. Values mirror
+    # `scripts/sweep_backtest.py`'s sensitivity grids (leg chase on/off, naked
+    # leg close/hold); dead zone is the exception — the CLI speaks fractions
+    # while the page control and the `dead_zone_pct` query parameter speak
+    # percent, so this grid is percent and lists the 10% default as a bar.
+    "leg_chase": [False, True],
+    "naked_leg": ["close", "hold"],
+    "dead_zone_pct": [0.0, 5.0, 10.0, 15.0, 20.0, 30.0],
+}
+
+#: Issue #388: axes whose values are names, not numbers — anchor translation is
+#: a no-op for them. Derived from the grids' own value types so a future
+#: categorical axis cannot be half-wired by forgetting a second hand-written
+#: list; the frontend mirrors this set and the Node parity test covers it.
+_SWEEP_CATEGORICAL_AXES = {
+    name for name, grid in SWEEP_AXES.items()
+    # Review fix (Station IV): numeric, not `float` — an int grid (`[0, 10, 25]`)
+    # is numeric too and must not be misread as name-valued. `bool` subclasses
+    # `int`, so it is excluded first instead of being caught by the int branch.
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in grid)
 }
 
 
@@ -2436,6 +2457,11 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
     grid = list(SWEEP_AXES.get(axis, []))
     if center is None or not grid:
         return grid, 0
+    if axis in _SWEEP_CATEGORICAL_AXES:
+        # Issue #388: categorical axes ignore `sweep_center` and always use the
+        # literal value list — there is no midpoint between "off" and "on".
+        # The frontend `sweepAxisValues` mirror must match this behaviour.
+        return grid, 0
     mid = len(grid) // 2
     translated = [center + (g - grid[mid]) for g in grid]
     # Review finding (Station IV): cosmetic rounding is the axis's own shape,
@@ -2454,6 +2480,12 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
         bounded_frac = [_clamp_to_spec("entry_delay_pct", f) for f in frac]
         n_clamped = sum(1 for f, c in zip(frac, bounded_frac) if c != f)
         rounded = [round(c * 100.0, 6) for c in bounded_frac]
+    elif axis == "dead_zone_pct":
+        # Issue #388: percent of window — the Backtester control's domain. Never
+        # the stop axes' 0.001–0.50 clamp, which would flatten this axis.
+        bounded = [max(0.0, min(100.0, t)) for t in translated]
+        n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
+        rounded = [round(v, 6) for v in bounded]
     elif axis in _SWEEP_REGISTRY_AXES:
         bounded = [_clamp_to_spec(_SWEEP_REGISTRY_AXES[axis], t) for t in translated]
         n_clamped = sum(1 for t, c in zip(translated, bounded) if c != t)
@@ -2468,7 +2500,7 @@ def _sweep_axis_values(axis: str, center: Optional[float]) -> tuple[list, int]:
     return effective, n_clamped
 
 
-def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, str]:
+def _sweep_params_for_value(base: Any, axis: str, value: float | bool | str) -> tuple[Any, str]:
     """Return an independent parameter copy and readable label for one sweep bar."""
     if axis == "queue":
         return _dc_replace(base, queue_gate=float(value)), f"queue={value:.0f}"
@@ -2495,7 +2527,34 @@ def _sweep_params_for_value(base: Any, axis: str, value: float) -> tuple[Any, st
         lo = round(float(value), 2)
         hi = round(1.0 - lo, 2)
         return _dc_replace(base, quote_range=(lo, hi)), f"quote_range=[{lo:.2f},{hi:.2f}]"
+    if axis == "leg_chase":
+        return _dc_replace(base, enable_leg_chase=bool(value)), \
+            f"leg_chase={'on' if bool(value) else 'off'}"
+    if axis == "naked_leg":
+        return _dc_replace(base, naked_leg_at_expiry=str(value)), f"naked_leg={value}"
+    if axis == "dead_zone_pct":
+        # Review fix (Station IV): `:g`, not `:.0f` — an anchored grid can land on
+        # a fractional percent (12 → 12.5 at anchor 12.5), and the bar's label
+        # must read the value that ran, not a rounded neighbour of it.
+        return _dc_replace(base, dead_zone_val=float(value) / 100.0, dead_zone_unit="pct"), \
+            f"dead_zone={float(value):g}%"
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
+
+
+def _sweep_point_value(axis: str, value: Any) -> float | bool | str:
+    """Issue #388: coerce one sweep point to the type its axis speaks.
+
+    Categorical axes keep their native type end to end — bool for `leg_chase`,
+    str for `naked_leg` — and every numeric axis stays a float. The blanket
+    `float(...)` casts this replaces corrupted categorical values into NaN
+    (JSON `true` → 1.0, a label string → NaN), which broke both the wire
+    contract and the chart's strict-equality best-point match.
+    """
+    if axis == "leg_chase":
+        return bool(value)
+    if axis == "naked_leg":
+        return str(value)
+    return float(value)
 
 
 #: Issue #355: the minimum wall-clock gap between sweep progress messages.
@@ -2598,6 +2657,10 @@ def _run_sweep_worker(
     # Issue #378: the server owns the effective values — an anchor recenters
     # the grid, None restores the literal defaults.
     values, clamped_count = _sweep_axis_values(axis, sweep_center)
+    if axis in _SWEEP_CATEGORICAL_AXES:
+        # Issue #388: the values above ignored the anchor, so echoing one would
+        # claim an anchoring that never applied.
+        sweep_center = None
 
     series_order = [s[0] for s in SERIES]
     series_labels = {
@@ -2615,7 +2678,8 @@ def _run_sweep_worker(
     # later run with "already in progress". Streaming one window at a time caps
     # memory at the largest single window and lets the OS reclaim each window as
     # soon as it is simulated.
-    variants = [_sweep_params_for_value(base, axis, float(v)) for v in values]
+    variants = [_sweep_params_for_value(base, axis, _sweep_point_value(axis, v))
+                for v in values]
 
     def _new_acc() -> list[dict]:
         """One zeroed running-total record per axis point."""
@@ -2642,7 +2706,7 @@ def _run_sweep_worker(
         return [
             {
                 "label": label,
-                "value": float(value),
+                "value": _sweep_point_value(axis, value),
                 "overall": {
                     "windows": a["n"],
                     "pairs": a["pairs"],
@@ -9076,6 +9140,21 @@ function resetBtParams(){
 // Sweep Visual — one axis X-Y: 1 aggregate chart + 10 per-series charts
 // Issue #344: the tested axis values, mirrored from the server's SWEEP_AXES
 // grid — the immediate card needs them before the first response arrives.
+// Issue #388: axes whose values are names, not numbers. Single frontend source
+// for the categorical behaviours; the server derives the same set from
+// `SWEEP_AXES` and the Node parity harness keeps the two in step.
+function sweepAxisIsCategorical(axis){
+  return axis === 'leg_chase' || axis === 'naked_leg';
+}
+
+// Issue #388: where a bar sits on the x axis. Categorical axes have no number
+// to plot, so their bars sit at their index and every tick value on that axis
+// IS an index — the label resolver below turns it back into the point it
+// stands for. Numeric axes keep plotting their value, exactly as before.
+function sweepPointX(axis, p, i){
+  return sweepAxisIsCategorical(axis) ? i : Number(p.value);
+}
+
 function sweepAxisValues(axis, center){
   const grids = {
     queue: [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
@@ -9086,8 +9165,16 @@ function sweepAxisValues(axis, center){
     exit_rev: [0.010, 0.015, 0.020, 0.025, 0.030],
     late_entry: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
     quote_range: [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
+    leg_chase: [false, true],
+    naked_leg: ['close', 'hold'],
+    dead_zone_pct: [0.0, 5.0, 10.0, 15.0, 20.0, 30.0],
   };
   const grid = grids[axis] || [];
+  // Issue #388: categorical axes always use the literal value list — there is
+  // no midpoint between names — mirroring the server `_sweep_axis_values`.
+  if(sweepAxisIsCategorical(axis)){
+    return {values: grid.slice(), clamped: 0};
+  }
   // No anchor: the literal defaults, so idle and unanchored cards never drift.
   if(center === undefined || center === null || !Number.isFinite(center) || !grid.length){
     return {values: grid.slice(), clamped: 0};
@@ -9119,6 +9206,12 @@ function sweepAxisValues(axis, center){
     const boundedFrac = frac.map(f => b ? clampTo(f, b[0], b[1]) : f);
     n = countHits(frac, boundedFrac);
     clamped = boundedFrac.map(f => Number((f * 100.0).toFixed(6)));
+  }else if(axis === 'dead_zone_pct'){
+    // Issue #388: percent of window — never the stop axes' 0.001–0.50 clamp,
+    // which would flatten this axis.
+    const bounded = translated.map(t => clampTo(t, 0, 100));
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(6)));
   }else if(axis === 'offset' || axis === 'queue' || axis === 'exit_rev'){
     const reg = {offset: 'offset', queue: 'queue_gate', exit_rev: 'exit_reversal'}[axis];
     const b = specBounds(reg);
@@ -9238,7 +9331,10 @@ async function runSweepVisual(){
     }, 500);
     const ctl = new AbortController();
     window._btSweepAbort = ctl;
-    const centerSuffix = (center != null && Number.isFinite(center)) ? `&sweep_center=${encodeURIComponent(center)}` : '';
+    // Issue #388: categorical axes have no midpoint — never send an anchor for
+    // them, even if a stale value is still held in window._btSweepCenter.
+    const centerSuffix = (center != null && Number.isFinite(center) && !sweepAxisIsCategorical(axis))
+      ? `&sweep_center=${encodeURIComponent(center)}` : '';
     const url = `/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}${centerSuffix}`;
     const res = await fetch(url, {signal: ctl.signal});
     if (window._btSweepAbort !== ctl) return;
@@ -9370,7 +9466,10 @@ function sweepAxisLabel(axis){
     exit_stop_sol: 'Stop distance — SOL',
     exit_rev: 'Reversal buffer — distance from anchor',
     late_entry: 'Late entry — % of window',
-    quote_range: 'Quotable range — [lo, hi] bounds'
+    quote_range: 'Quotable range — [lo, hi] bounds',
+    leg_chase: 'Leg chase — off vs on',
+    naked_leg: 'Naked leg at expiry — close vs hold',
+    dead_zone_pct: 'Dead zone — % of window'
   })[axis] || axis;
 }
 
@@ -9436,11 +9535,28 @@ function sweepOverrideNote(axis, v, pointValues){
   };
   if(stopAxes[axis]) return stopAxes[axis]();
 
+  // Issue #388: a categorical axis tests its whole universe — two values, both
+  // always in the grid — so the submitted setting is one of the bars by
+  // construction and the note can claim it without comparing numbers. The
+  // `pointValues` argument is the numeric projection of the response points and
+  // is meaningless here (`Number('hold')` is NaN), which is why this branch
+  // reads the submission and not the points.
+  if(sweepAxisIsCategorical(axis)){
+    const categorical = ({
+      leg_chase: ['Leg chase', (v.legChase === true || v.legChase === '1' || v.legChase === 'true') ? 'On' : 'Off'],
+      naked_leg: ['Naked leg at expiry', String(v.nakedLegAtExpiry) === 'hold' ? 'Hold' : 'Close'],
+    })[axis];
+    return { head: `sweeps ${categorical[0]} — replaces the submitted ${categorical[1]}`,
+             submittedLabel: '', items: [],
+             verdict: { cls: 'yours', text: 'that bar is your setting' } };
+  }
+
   const single = ({
     queue: ['Queue depth', v.queue],
     offset: ['Quote offset', v.offset],
     exit_rev: ['Reversal buffer', v.exitReversal],
     late_entry: ['Late Entry', v.entryDelayPct],
+    dead_zone_pct: ['Dead zone', v.deadZonePct],
   })[axis];
   if(!single) return '';
   const shown = exact(single[1]);
@@ -9524,14 +9640,14 @@ function sweepCard(v, data, statsHtml){
       ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
       ${row('SOL 5m Stop ($)', v.exitSol.toFixed(2), data.axis === 'exit_stop_sol')}
       ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
-      ${row('Leg Chase', onoff(v.legChase))}
+      ${row('Leg Chase', onoff(v.legChase), data.axis === 'leg_chase')}
     </span>`;
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
       ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`, data.axis === 'quote_range')}
-      ${row('Dead Zone (% window)', pct(v.deadZonePct))}
-      ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
+      ${row('Dead Zone (% window)', pct(v.deadZonePct), data.axis === 'dead_zone_pct')}
+      ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close', data.axis === 'naked_leg')}
     </span>`;
   const markets = `
     <span class="sweep-dl">
@@ -9544,8 +9660,8 @@ function sweepCard(v, data, statsHtml){
     : '';
   // Issue #344: the axis selector IS the title — one control chooses and
   // displays the sweep subject instead of a dropdown row + duplicate title.
-  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev','late_entry','quote_range']
-    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds'})[a]}</option>`)
+  const axisOpts = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol','exit_rev','late_entry','quote_range','leg_chase','naked_leg','dead_zone_pct']
+    .map(a => `<option value="${a}"${a === data.axis ? ' selected' : ''}>${({queue:'Queue depth — shares ahead',offset:'Quote offset — distance from anchor',exit_stop_default:'Stop distance — default',exit_stop_btc:'Stop distance — BTC',exit_stop_sol:'Stop distance — SOL',exit_rev:'Reversal buffer — distance from anchor',late_entry:'Late entry — % of window',quote_range:'Quotable range — [lo, hi] bounds',leg_chase:'Leg chase — off vs on',naked_leg:'Naked leg at expiry — close vs hold',dead_zone_pct:'Dead zone — % of window'})[a]}</option>`)
     .join('');
   const titleSel = `<select id="btSweepAxis" onchange="onSweepAxisChange()" style="padding:4px 8px;font-size:14px;font-weight:600;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx)">${axisOpts}</select>`;
   // Issue #378: sweep-only midpoint anchor. `!= null` keeps an explicit 0 (a
@@ -9560,10 +9676,17 @@ function sweepCard(v, data, statsHtml){
   const anchorSet = (data.sweep_center !== undefined && data.sweep_center !== null);
   const anchorVal = anchorSet ? String(data.sweep_center) : '';
   // `quote_range` shifts the lo half of the [lo, hi] pair — say which half.
-  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo bound'})[data.axis] || '';
-  const anchorField = `<label class="sweep-anchor-field${anchorSet ? ' is-set' : ''}" id="btSweepAnchorWrap" for="btSweepCenter" title="Midpoint anchor (${anchorUnit}) — blank restores defaults">`
+  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo bound', leg_chase: '', naked_leg: '', dead_zone_pct: '%'})[data.axis] || '';
+  // Issue #388: categorical axes have no midpoint — the field is shown but
+  // disabled (the grid is always the literal value list), with an empty unit
+  // and a title that says why instead of inviting a number.
+  const anchorDisabled = sweepAxisIsCategorical(data.axis);
+  const anchorTitle = anchorDisabled
+    ? 'Categorical axis — its values are names, so there is no midpoint to anchor'
+    : `Midpoint anchor (${anchorUnit}) — blank restores defaults`;
+  const anchorField = `<label class="sweep-anchor-field${anchorSet ? ' is-set' : ''}" id="btSweepAnchorWrap" for="btSweepCenter" title="${anchorTitle}">`
     + `<span class="sweep-anchor-label">Anchor</span>`
-    + `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="default" onchange="onSweepCenterChange(this.value)" style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`
+    + `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="default" onchange="onSweepCenterChange(this.value)"${anchorDisabled ? ' disabled' : ''} style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`
     + `<span class="sweep-anchor-unit">${anchorUnit}</span>`
     + `</label>`;
   const anchorLine = anchorSet ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
@@ -9612,14 +9735,14 @@ function sweepCardTail(v, data, statsHtml){
       ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
       ${row('SOL 5m Stop ($)', v.exitSol.toFixed(2), data.axis === 'exit_stop_sol')}
       ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
-      ${row('Leg Chase', onoff(v.legChase))}
+      ${row('Leg Chase', onoff(v.legChase), data.axis === 'leg_chase')}
     </span>`;
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
       ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`, data.axis === 'quote_range')}
-      ${row('Dead Zone (% window)', pct(v.deadZonePct))}
-      ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close')}
+      ${row('Dead Zone (% window)', pct(v.deadZonePct), data.axis === 'dead_zone_pct')}
+      ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close', data.axis === 'naked_leg')}
     </span>`;
   const markets = `
     <span class="sweep-dl">
@@ -9639,6 +9762,21 @@ function sweepCardTail(v, data, statsHtml){
 }
 
 function formatSweepTickValue(axis, val){
+  // Issue #388: the name-valued axes are decided by value, before any numeric
+  // coercion — `Number('hold')` is NaN, and a bar index is not a value, so an
+  // unrecognised input is printed as itself instead of being dressed up as a
+  // name it may not be. The chart resolves indices to points before calling
+  // here (see the tick label resolver in `sweepChartOptions`).
+  if (axis === 'leg_chase') {
+    if (val === true || val === '1' || val === 'true') return 'On';
+    if (val === false || val === '0' || val === 'false') return 'Off';
+    return String(val);
+  }
+  if (axis === 'naked_leg') {
+    if (val === 'hold') return 'Hold';
+    if (val === 'close') return 'Close';
+    return String(val);
+  }
   const num = Number(val);
   if (!Number.isFinite(num)) return String(val);
   if (axis === 'queue') {
@@ -9647,6 +9785,12 @@ function formatSweepTickValue(axis, val){
     return String(Number(num.toFixed(6)));
   }
   if (axis === 'late_entry') {
+    if (Number.isInteger(num)) return `${num}%`;
+    return `${Number(num.toFixed(6))}%`;
+  }
+  if (axis === 'dead_zone_pct') {
+    // Issue #388: percent of window — the same precision rule as Late Entry,
+    // because an anchored grid can land between whole percents.
     if (Number.isInteger(num)) return `${num}%`;
     return `${Number(num.toFixed(6))}%`;
   }
@@ -9765,10 +9909,22 @@ function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];
   const labels = points.map(p => p.label);
-  const xVals = points.map(p => Number(p.value));
+  const xVals = points.map((p, i) => sweepPointX(data.axis, p, i));
   const axisLabel = sweepAxisLabel(data.axis);
   const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
   const maxTicks = detail ? Math.min(14, xVals.length) : Math.min(4, xVals.length);
+  // Issue #388: on a categorical axis a tick value is a bar index, so every
+  // label site (the width-measuring planner, the tick list both branches build
+  // and the axis callback) resolves it back to the point it stands for. The
+  // other axes have value === position and take the plain formatter.
+  const xTickLabel = value => {
+    if (!sweepAxisIsCategorical(data.axis)) return formatSweepTickValue(data.axis, Number(value));
+    const p = points[Math.round(Number(value))];
+    // Review fix (Station IV): an unresolved index falls back to the index
+    // itself, never to a blank label — the formatter prints whatever it was
+    // given, so a scale that disagrees with its points is visible, not silent.
+    return formatSweepTickValue(data.axis, p ? p.value : value);
+  };
   return {
     responsive: true,
     maintainAspectRatio: !!detail,
@@ -9803,15 +9959,15 @@ function sweepChartOptions(data, detail, isAgg){
             const canvasPx = (scale.chart && scale.chart.canvas) ? scale.chart.canvas.clientWidth : 0;
             const plotWidthPx = (canvasPx > 0 && Number.isFinite(scale.width) && scale.width > 0)
               ? scale.width : SWEEP_CARD_MIN_PLOT_PX;
-            const widestPx = xVals.reduce((w, v) => Math.max(w, sweepLabelWidthPx(formatSweepTickValue(data.axis, v))), 0);
+            const widestPx = xVals.reduce((w, v) => Math.max(w, sweepLabelWidthPx(xTickLabel(v))), 0);
             const step = sweepTickStep(xVals.length, plotWidthPx, widestPx, SWEEP_CARD_TICK_GAP_PX);
             scale.ticks = sweepTickIndices(xVals.length, step)
-              .map(i => ({ value: xVals[i], label: formatSweepTickValue(data.axis, xVals[i]) }));
+              .map(i => ({ value: xVals[i], label: xTickLabel(xVals[i]) }));
             return;
           }
           const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));
           scale.ticks = xVals.filter((value, index) => index % step === 0 || index === xVals.length - 1)
-            .map((value, index) => ({ value: value, label: formatSweepTickValue(data.axis, value) }));
+            .map(value => ({ value: value, label: xTickLabel(value) }));
         },
         title: { display: !!detail, text: axisLabel, color: theme.dim },
         ticks: {
@@ -9821,7 +9977,7 @@ function sweepChartOptions(data, detail, isAgg){
           maxRotation: detail ? 0 : 35,
           minRotation: 0,
           callback: function(v){
-            return formatSweepTickValue(data.axis, Number(v));
+            return xTickLabel(v);
           }
         },
         grid: { color: theme.line }
@@ -9886,7 +10042,7 @@ function openBtChartDetail(seriesKey, title, trigger){
   btChartDialogInstance = new Chart(canvas.getContext('2d'), {
     type: 'bar',
     plugins: [sweepZeroLinePlugin()],
-    data: { datasets: [{ label: 'Total P&L ($)', data: points.map((p, i) => ({x:Number(p.value), y:values[i]})), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
+    data: { datasets: [{ label: 'Total P&L ($)', data: points.map((p, i) => ({x: sweepPointX(data.axis, p, i), y: values[i]})), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
     options: sweepChartOptions(data, true)
   });
   const close = $('btChartDialogClose');
@@ -9934,7 +10090,7 @@ function renderSweepVisual(data, submitted, isProgress){
   setupBtChartDialog();
   const theme = getThemeTokens();
   const points = data.points || [];
-  const xVals = points.map(p => Number(p.value));
+  const xVals = points.map((p, i) => sweepPointX(data.axis, p, i));
   const axisLabel = sweepAxisLabel(data.axis);
   const xy = y => points.map((p, i) => ({ x: xVals[i], y: y[i] }));
   const money = cents => `${cents >= 0 ? '+' : '-'}$${Math.abs(cents / 100).toFixed(2)}`;
