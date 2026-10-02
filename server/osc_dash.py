@@ -13,7 +13,7 @@ import asyncio
 import collections
 from concurrent.futures import ProcessPoolExecutor
 import concurrent.futures.process
-from dataclasses import asdict, is_dataclass, replace as _dc_replace
+from dataclasses import asdict, dataclass, field, is_dataclass, replace as _dc_replace
 import functools
 import gzip
 import json
@@ -1656,6 +1656,112 @@ def _terminate_backtest_pool(pool=None) -> None:
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+# Issue #383: the one backtest/sweep run the dashboard currently owns. Every
+# cleanup path and the cancel endpoint act on THIS record instead of on
+# module-level state that a later run would have overwritten:
+#
+# - `pool` is the executor this run actually submitted to. #371 forbids late
+#   cleanup from reaching for the global singleton, which by then belongs to a
+#   newer run.
+# - `release` is the release-once callable below, so a stopped run's stale
+#   cleanup cannot free a newer run's guards.
+# - `cancel_requested` / `release_blocked` carry the endpoint's outcome: a
+#   deliberate stop, and the case where a worker would not die and the guards
+#   must therefore stay held.
+@dataclass
+class _ActiveBacktestRun:
+    """Per-run record for one in-flight backtest or sweep."""
+
+    pool: Optional[Any] = None
+    release: Any = None
+    cancel_requested: bool = False
+    release_blocked: bool = False
+
+
+_ACTIVE_BACKTEST_RUN: Optional[_ActiveBacktestRun] = None
+
+
+def _publish_active_backtest_run() -> _ActiveBacktestRun:
+    """Register the run that just took the guards and return its record.
+
+    Called inside the same `_BACKTEST_LOCK` block that sets
+    `_BACKTEST_RUNNING = True`, i.e. before the handler's first startup `await`
+    (the semaphore acquire and the progress-queue spawn). A cancel that arrives
+    while a run is still starting therefore finds the record instead of
+    concluding that nothing is running.
+    """
+    global _ACTIVE_BACKTEST_RUN
+    record = _ActiveBacktestRun()
+    base_release = _make_backtest_guard_releaser()
+
+    def _release_and_clear() -> None:
+        """Release this run's guards once, then drop the record if it is still ours.
+
+        The record's lifetime is exactly the guards' lifetime, so no exit path can
+        leave a finished run looking active to `/api/backtest/cancel`. A stale run
+        whose guards a newer run already owns clears nothing.
+        """
+        base_release()
+        _clear_active_backtest_run(record)
+
+    record.release = _release_and_clear
+    _ACTIVE_BACKTEST_RUN = record
+    return record
+
+
+def _clear_active_backtest_run(record) -> bool:
+    """Drop `record` from the module slot, but only while it is still the current
+    run. Returns whether it was cleared."""
+    global _ACTIVE_BACKTEST_RUN
+    if _ACTIVE_BACKTEST_RUN is record:
+        _ACTIVE_BACKTEST_RUN = None
+        return True
+    return False
+
+
+def _terminate_backtest_pool_confirmed(pool) -> bool:
+    """Kill `pool`'s workers and report whether their death is CONFIRMED.
+
+    Issue #383: `_terminate_backtest_pool` requests a shutdown and returns; it
+    never looks back, so a caller acting on it would happily free the one-worker
+    guard while the old worker is still burning CPU. This sibling escalates and
+    then verifies:
+
+    `terminate()` each worker -> `join(timeout)` -> `kill()` + `join(timeout)`
+    the survivors -> `shutdown()` the pool -> report `True` only when every
+    worker process reports `exitcode is not None`.
+
+    An empty process map (a test double, or a run that never got a worker) is
+    vacuously dead. `None` is dead too — there is nothing left to stop.
+    """
+    if pool is None:
+        return True
+    try:
+        procs = list(getattr(pool, "_processes", {}).values())
+    except Exception:
+        procs = []
+    # `_terminate_backtest_pool` owns the signalling and the singleton detach, so
+    # workers are terminated exactly once and its #371 binding stays authoritative.
+    _terminate_backtest_pool(pool)
+    for proc in procs:
+        try:
+            proc.join(timeout=2.0)
+        except Exception:
+            pass
+    for proc in procs:
+        # Still alive after SIGTERM: escalate. Reported death is never assumed.
+        if getattr(proc, "exitcode", None) is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.join(timeout=2.0)
+            except Exception:
+                pass
+    return all(getattr(proc, "exitcode", None) is not None for proc in procs)
+
+
 def _make_backtest_guard_releaser():
     """Return a release-once callable for the streaming path's per-run cleanup.
 
@@ -2980,6 +3086,10 @@ async def api_backtest(
                 },
             )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
 
     await semaphore.acquire()
 
@@ -2989,6 +3099,7 @@ async def api_backtest(
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -3004,17 +3115,18 @@ async def api_backtest(
                 durations,
             )
         finally:
-            semaphore.release()
-            with _BACKTEST_LOCK:
-                global _BACKTEST_RUNNING
-                _BACKTEST_RUNNING = False
+            # Issue #383: release-once + drop-the-record, so the cancel endpoint and
+            # the late timeout cleanup can both act on this run safely.
+            run_record.release()
 
     worker_task = asyncio.create_task(_run_shielded())
     try:
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        _terminate_backtest_pool()
+        # Issue #383: terminate the pool THIS run bound. A global-only call would
+        # kill the pool of a run that started after this one (#371).
+        _terminate_backtest_pool(run_record.pool)
         raise HTTPException(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -3096,14 +3208,17 @@ async def api_backtest_stream(
                 status_code=429,
                 content={
                     "error": "Backtest simulation already in progress. Please retry shortly.",
-                    "params_hash": params.params_hash(),
-                    "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-                },
-            )
+                    "params_hash": params.params_hash(),                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            },
+        )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
     await semaphore.acquire()
 
-    release_guards = _make_backtest_guard_releaser()
+    release_guards = run_record.release
     # Issue #331 review: create the queue before it can fail the run, and off
     # the event loop — the first call spawns the manager process. A failure
     # here must release the guards we already hold, not wedge them at 429
@@ -3127,6 +3242,7 @@ async def api_backtest_stream(
         try:
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -3334,6 +3450,10 @@ async def api_backtest_sweep(
                 content={"error": "Backtest simulation already in progress. Please retry shortly."},
             )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
 
     await semaphore.acquire()
 
@@ -3343,6 +3463,7 @@ async def api_backtest_sweep(
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
@@ -3358,17 +3479,18 @@ async def api_backtest_sweep(
                 durations,
             )
         finally:
-            semaphore.release()
-            with _BACKTEST_LOCK:
-                global _BACKTEST_RUNNING
-                _BACKTEST_RUNNING = False
+            # Issue #383: release-once + drop-the-record, so the cancel endpoint and
+            # the late timeout cleanup can both act on this run safely.
+            run_record.release()
 
     worker_task = asyncio.create_task(_run_shielded())
     try:
         return await asyncio.wait_for(asyncio.shield(worker_task),
                                       timeout=BACKTEST_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        _terminate_backtest_pool()
+        # Issue #383: terminate the pool THIS run bound. A global-only call would
+        # kill the pool of a run that started after this one (#371).
+        _terminate_backtest_pool(run_record.pool)
         raise HTTPException(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -3484,9 +3606,13 @@ async def api_backtest_sweep_stream(
                 content={"error": "Backtest simulation already in progress. Please retry shortly."},
             )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
     await semaphore.acquire()
 
-    release_guards = _make_backtest_guard_releaser()
+    release_guards = run_record.release
     try:
         progress_queue = await asyncio.to_thread(_new_backtest_progress_queue)
     except Exception as exc:
@@ -3502,6 +3628,7 @@ async def api_backtest_sweep_stream(
         try:
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
@@ -3566,12 +3693,84 @@ async def api_backtest_sweep_stream(
             yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
         finally:
             if not completed:
-                _terminate_backtest_pool()
-                release_guards()
+                # Issue #383: terminate the pool THIS run bound. A global-only call
+                # would kill the pool of a run that started after this one (#371) —
+                # which a cancel makes likely: the operator presses Stop and starts
+                # the next run immediately.
+                submit_pool = run_record.pool
+                try:
+                    if submit_pool is not None:
+                        _terminate_backtest_pool(submit_pool)
+                finally:
+                    # Guard release must survive even a failing shutdown.
+                    release_guards()
 
     # #372: heartbeat below the client's 15 s inactivity watchdog — a large
     # but healthy window can emit no progress for longer than that.
     return EventSourceResponse(event_generator(), ping=5)
+
+
+@app.post(
+    "/api/backtest/cancel",
+    responses={200: {"description": "Stop request outcome for the in-flight run"}},
+)
+async def api_backtest_cancel(request: Request):
+    """Issue #383: stop the in-flight backtest/sweep and free the single-run guards.
+
+    Aborting on the client only closes the SSE stream: the worker keeps burning CPU
+    until it finishes or the wall-clock timeout kills it, and the guards stay held,
+    so the operator's next Run is answered with 429. This is the server-side stop
+    the Backtest tab's Stop control calls.
+    """
+    _verify_safe_origin(request)
+    with _BACKTEST_LOCK:
+        record = _ACTIVE_BACKTEST_RUN
+    if record is None:
+        # Idle is a normal, quiet state: a 200 no-op that changes nothing. Never a 500.
+        return {
+            "ok": True,
+            "running": False,
+            "stopped": False,
+            "stopping": False,
+            "detail": "No backtest or sweep is running.",
+        }
+
+    record.cancel_requested = True
+    pool = record.pool
+    if pool is None:
+        # Registered but never submitted — nothing is burning CPU yet, so releasing
+        # the guards is a complete stop.
+        record.release()
+        return {
+            "ok": True,
+            "running": False,
+            "stopped": True,
+            "stopping": False,
+            "detail": "Stopped before the worker started.",
+        }
+
+    if _terminate_backtest_pool_confirmed(pool):
+        record.release()
+        return {
+            "ok": True,
+            "running": False,
+            "stopped": True,
+            "stopping": False,
+            "detail": "Stopped. The worker is gone and the next Run can start now.",
+        }
+
+    # Death unconfirmed: the guards stay held. A visible "stopping…" is safer than a
+    # clean-looking stop that lets a second run share one worker pool with a live
+    # worker. Release-once semantics keep a late cleanup from clearing this later.
+    record.release_blocked = True
+    return {
+        "ok": False,
+        "running": True,
+        "stopped": False,
+        "stopping": True,
+        "detail": ("The worker did not confirm death. The run slot stays held until "
+                   "it does — press Stop again, or restart the server."),
+    }
 
 
 @app.get("/api/analysis")
