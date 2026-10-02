@@ -7472,3 +7472,171 @@ def test_render_backtest_trades_page_per_pair_and_missing_fallback():
     assert "BACKTEST_TRADES_PER_PAIR_RENDER_OK" in res.stdout
 
 
+# Issue #378: manual midpoint anchor for the Sweep Visual. The helper returns
+# (effective_values, clamped_count); None restores the literal grids.
+def test_sweep_anchor_unanchored_returns_literal_grids():
+    """No anchor means today's hardcoded grids, untouched by rounding/clamping."""
+    for axis, grid in osc_dash.SWEEP_AXES.items():
+        values, clamped = osc_dash._sweep_axis_values(axis, None)
+        assert values == grid, axis
+        assert clamped == 0, axis
+
+
+def test_sweep_anchor_offset_center():
+    """Anchor 0.04 on offset recenters 7 points at 0.005 steps, anchor at index 3."""
+    values, clamped = osc_dash._sweep_axis_values("offset", 0.04)
+    assert values == pytest.approx([0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+    assert values[3] == pytest.approx(0.04)
+    assert clamped == 0
+
+
+def test_sweep_anchor_queue_keeps_irregular_gaps():
+    """The queue grid has no uniform step — anchoring translates, never rebuilds."""
+    grid = osc_dash.SWEEP_AXES["queue"]
+    values, clamped = osc_dash._sweep_axis_values("queue", 50.0)
+    assert values[3] == pytest.approx(50.0)
+    gaps = [b - a for a, b in zip(values, values[1:])]
+    expected_gaps = [b - a for a, b in zip(grid, grid[1:])]
+    assert gaps == pytest.approx(expected_gaps)
+    assert clamped == 0
+
+
+def test_sweep_anchor_even_grid_uses_upper_middle():
+    """A 6-point stop grid has no true middle — the anchor lands at index 3."""
+    values, clamped = osc_dash._sweep_axis_values("exit_stop_default", 0.11)
+    assert values[3] == pytest.approx(0.11)
+    assert values == pytest.approx([0.05, 0.07, 0.09, 0.11, 0.13, 0.15])
+    assert clamped == 0
+
+
+def test_sweep_anchor_late_entry_clamps_to_percent():
+    """late_entry speaks percent on the wire, fraction in the registry."""
+    values, clamped = osc_dash._sweep_axis_values("late_entry", 200.0)
+    assert values == pytest.approx([100.0])
+    assert clamped == 7
+
+
+def test_sweep_anchor_quote_range_caps_lo():
+    """quote_range sweeps lo only — it can never reach or pass hi."""
+    values, clamped = osc_dash._sweep_axis_values("quote_range", 0.9)
+    assert values == pytest.approx([0.49])
+    assert clamped == 7
+
+
+def test_sweep_anchor_offset_clamp_dedupes():
+    """Clamped points collapse to duplicates — first occurrence wins, count reported."""
+    values, clamped = osc_dash._sweep_axis_values("offset", 0.49)
+    assert values == pytest.approx([0.475, 0.480, 0.485, 0.490])
+    assert clamped == 3
+
+
+def test_sweep_endpoint_anchored_offset(tmp_path, monkeypatch):
+    """Issue #378: sweep_center=0.04 recenters the offset axis end to end."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m", "eth-up-or-down-5m",
+                              "sol-up-or-down-5m", "xrp-up-or-down-5m",
+                              "bnb-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        res = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl", "sweep_center": 0.04})
+        assert res.status_code == 200, res.text
+        data = res.json()
+        assert [p["value"] for p in data["points"]] == pytest.approx(
+            [0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+        assert data["sweep_center"] == pytest.approx(0.04)
+        assert data["clamped_count"] == 0
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_endpoint_rejects_nonfinite_anchor_without_guard(tmp_path, monkeypatch):
+    """A NaN anchor 400s before any busy guard — the next sweep still runs."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        bad = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl", "sweep_center": "nan"})
+        assert bad.status_code == 400, bad.text
+        ok = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl"})
+        assert ok.status_code == 200, ok.text
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_endpoint_absent_anchor_keeps_defaults(tmp_path, monkeypatch):
+    """No sweep_center: default point counts and null center metadata."""
+    import concurrent.futures
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _sweep_fixture(tmp_path, ["btc-up-or-down-5m"])
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(osc_dash, "get_backtest_pool", lambda: pool)
+    try:
+        res = client.get("/api/backtest/sweep", params={
+            "axis": "offset", "file": "sweep_base.jsonl"})
+        assert res.status_code == 200, res.text
+        data = res.json()
+        assert len(data["points"]) == len(osc_dash.SWEEP_AXES["offset"])
+        assert data["sweep_center"] is None
+        assert data["clamped_count"] == 0
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_sweep_worker_positional_and_keyword_anchor(tmp_path, monkeypatch):
+    """The worker keeps its 9-positional-arg form and accepts sweep_center by keyword."""
+    from dataclasses import asdict
+
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    params_dict = asdict(BacktestParams(offset=0.02))
+    plain = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "queue", 5, 0.0, 0, "", "",
+    )
+    assert len(plain["points"]) == len(osc_dash.SWEEP_AXES["queue"])
+    assert plain["sweep_center"] is None
+    assert plain["clamped_count"] == 0
+    anchored = osc_dash._run_sweep_worker(
+        str(tmp_path), str(tmp_path / "fake_stream.jsonl"),
+        params_dict, "offset", 5, 0.0, 0, "", "", sweep_center=0.04,
+    )
+    assert [p["value"] for p in anchored["points"]] == pytest.approx(
+        [0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+    assert anchored["sweep_center"] == pytest.approx(0.04)
+    assert anchored["clamped_count"] == 0
+
+
+def test_sweep_stream_anchored_final_matches_blocking(tmp_path, monkeypatch):
+    """The SSE route carries the anchor to the same effective values as blocking."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    _make_backtest_ticks_file(tmp_path)
+    mock_pool = _install_stream_test_harness(monkeypatch, tmp_path)
+
+    url = ("/api/backtest/sweep/stream?axis=offset&file=fake_stream.jsonl"
+           "&offset=0.02&sweep_center=0.04")
+    with client.stream("GET", url) as res:
+        assert res.status_code == 200
+        body = "".join(chunk for chunk in res.iter_text())
+    events = _parse_sse_events(body)
+    assert events[-1]["type"] == "final"
+    final = events[-1]["result"]
+    assert [p["value"] for p in final["points"]] == pytest.approx(
+        [0.025, 0.030, 0.035, 0.040, 0.045, 0.050, 0.055])
+    assert final["sweep_center"] == pytest.approx(0.04)
+    last_progress = next(e for e in reversed(events) if e["type"] == "progress")
+    assert [p["value"] for p in last_progress["points"]] == pytest.approx(
+        [p["value"] for p in final["points"]])
+
+    mock_pool.shutdown(wait=True)
+
+
