@@ -2431,7 +2431,10 @@ SWEEP_AXES: Dict[str, List[float] | List[bool] | List[str]] = {
 #: list; the frontend mirrors this set and the Node parity test covers it.
 _SWEEP_CATEGORICAL_AXES = {
     name for name, grid in SWEEP_AXES.items()
-    if any(not isinstance(v, float) for v in grid)
+    # Review fix (Station IV): numeric, not `float` — an int grid (`[0, 10, 25]`)
+    # is numeric too and must not be misread as name-valued. `bool` subclasses
+    # `int`, so it is excluded first instead of being caught by the int branch.
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in grid)
 }
 
 
@@ -2530,8 +2533,11 @@ def _sweep_params_for_value(base: Any, axis: str, value: float | bool | str) -> 
     if axis == "naked_leg":
         return _dc_replace(base, naked_leg_at_expiry=str(value)), f"naked_leg={value}"
     if axis == "dead_zone_pct":
+        # Review fix (Station IV): `:g`, not `:.0f` — an anchored grid can land on
+        # a fractional percent (12 → 12.5 at anchor 12.5), and the bar's label
+        # must read the value that ran, not a rounded neighbour of it.
         return _dc_replace(base, dead_zone_val=float(value) / 100.0, dead_zone_unit="pct"), \
-            f"dead_zone={float(value):.0f}%"
+            f"dead_zone={float(value):g}%"
     return _dc_replace(base, exit_reversal=float(value)), f"exit_rev={value:.3f}"
 
 
@@ -9914,7 +9920,10 @@ function sweepChartOptions(data, detail, isAgg){
   const xTickLabel = value => {
     if (!sweepAxisIsCategorical(data.axis)) return formatSweepTickValue(data.axis, Number(value));
     const p = points[Math.round(Number(value))];
-    return p ? formatSweepTickValue(data.axis, p.value) : '';
+    // Review fix (Station IV): an unresolved index falls back to the index
+    // itself, never to a blank label — the formatter prints whatever it was
+    // given, so a scale that disagrees with its points is visible, not silent.
+    return formatSweepTickValue(data.axis, p ? p.value : value);
   };
   return {
     responsive: true,

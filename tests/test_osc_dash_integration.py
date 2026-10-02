@@ -9102,6 +9102,31 @@ def test_sweep_card_tick_width_source_static():
     assert "options: mkOpts(false)" in html
 
 
+def test_sweep_categorical_axis_set_matches_the_server_derivation():
+    """Issue #388: the two categorical sets are one contract, not two guesses.
+
+    The server derives its set from the grids' value types; the frontend names
+    them in `sweepAxisIsCategorical`. A future categorical axis added on one
+    side only would leave the other translating names as if they were numbers
+    (`'hold' - 'close'` is NaN), so the two must agree or this test fails.
+    """
+    html = osc_dash.FULL_APP_HTML
+    found = re.search(r"function sweepAxisIsCategorical\(axis\)\{\s*return (.*?);\s*\n\}",
+                      html, re.DOTALL)
+    assert found is not None, "sweepAxisIsCategorical is no longer a top-level function"
+    js_names = set(re.findall(r"axis === '([a-z_]+)'", found.group(1)))
+    assert js_names, "the frontend categorical set must not be empty"
+    assert js_names == osc_dash._SWEEP_CATEGORICAL_AXES, (
+        f"frontend {sorted(js_names)} != server {sorted(osc_dash._SWEEP_CATEGORICAL_AXES)}"
+    )
+    assert js_names == {"leg_chase", "naked_leg"}, "the issue names exactly these two"
+    # The derivation must be numeric, not `float`-only: an int grid is a numeric
+    # axis and may never be swept as if its values were names.
+    assert not osc_dash._SWEEP_CATEGORICAL_AXES & {"queue", "offset", "exit_stop_default",
+                                                    "exit_stop_btc", "exit_stop_sol", "exit_rev",
+                                                    "late_entry", "quote_range", "dead_zone_pct"}
+
+
 def test_sweep_categorical_points_are_positioned_by_index_static():
     """Issue #388: a name-valued axis has no number to plot.
 
@@ -9190,6 +9215,10 @@ def test_sweep_categorical_axis_rendering_node():
     assert(cardScale.ticks.map(t => t.value).join('|') === '0|1', 'bars must sit at their indices');
     assert(legOpts.scales.x.ticks.callback(0) === 'Off', 'the callback must label point 0');
     assert(legOpts.scales.x.ticks.callback(1) === 'On', 'the callback must label point 1');
+    // Review fix (Station IV): an index with no point behind it prints the
+    // index, never a blank label — a silent empty tick is how a scale that
+    // disagrees with its points stays invisible.
+    assert(legOpts.scales.x.ticks.callback(9) === '9', 'an unresolved index must not go blank');
     assert(legOpts.plugins.tooltip.callbacks.title([{ dataIndex: 1 }]).endsWith(': On'),
            'the tooltip must name the point');
     // The aggregate card and the detail dialog take the legacy branch.
