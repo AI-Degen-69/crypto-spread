@@ -2595,7 +2595,7 @@ def test_sweep_override_note_wording_node():
     # Issue #355: sweepCard delegates the Markets grid to sweepMarketsGridHtml,
     # so both must be in the harness or the grid renders as `undefined`.
     for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
-                 "sweepCard", "formatSweepTickValue"):
+                 "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8597,6 +8597,8 @@ def test_sweep_anchor_request_plumbing_strings():
     assert "/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}" in runner
     assert "&sweep_center=" in runner
     assert "window._btSweepCenter" in runner
+    # Issue #388: categorical axes never carry an anchor — the suffix is gated.
+    assert "!sweepAxisIsCategorical(axis)" in runner
     assert "function onSweepCenterChange(" in html
     assert "window._btSweepCenter = null" in html
     assert "window._btSweepCenter = null" in _body("onSweepAxisChange")
@@ -8628,6 +8630,8 @@ def test_sweep_axis_values_node_parity():
     html = osc_dash.FULL_APP_HTML
     found = re.search(r"function sweepAxisValues\(.*?\n\}", html, re.DOTALL)
     assert found is not None, "sweepAxisValues is no longer a top-level function"
+    helper = re.search(r"function sweepAxisIsCategorical\(.*?\n\}", html, re.DOTALL)
+    assert helper is not None, "sweepAxisIsCategorical is no longer a top-level function"
     cases = {
         "offset@0.04": ("offset", 0.04),
         "offset@0.49": ("offset", 0.49),
@@ -8635,9 +8639,15 @@ def test_sweep_axis_values_node_parity():
         "late_entry@200": ("late_entry", 200.0),
         "late_entry@15": ("late_entry", 15.0),
         "quote_range@0.213": ("quote_range", 0.213),
+        # Issue #388: categorical axes ignore the anchor entirely; dead zone
+        # clamps inside its own [0, 100] domain, not the stop axes'.
+        "leg_chase@5": ("leg_chase", 5.0),
+        "naked_leg@5": ("naked_leg", 5.0),
+        "dead_zone_pct@10": ("dead_zone_pct", 10.0),
+        "dead_zone_pct@95": ("dead_zone_pct", 95.0),
     }
     expected = {k: osc_dash._sweep_axis_values(axis, c) for k, (axis, c) in cases.items()}
-    test_js = found.group(0) + """
+    test_js = helper.group(0) + "\n" + found.group(0) + """
     // Registry stub with the production bounds (no PARAM_SPEC in the harness).
     function paramSpecFor(name){
       const bounds = {offset: [0.001, 0.49], queue_gate: [0.0, 100000.0],
@@ -8654,7 +8664,12 @@ def test_sweep_axis_values_node_parity():
       assert(res.values.length === exp[0].length,
         key + ' length ' + res.values.length + ' vs ' + exp[0].length);
       res.values.forEach((val, i) => {
-        assert(Math.abs(val - exp[0][i]) < 1e-9, key + ' value ' + val + ' vs ' + exp[0][i]);
+        const expv = exp[0][i];
+        if(typeof expv === 'string' || typeof expv === 'boolean'){
+          assert(val === expv, key + ' value ' + JSON.stringify(val) + ' vs ' + JSON.stringify(expv));
+        }else{
+          assert(Math.abs(val - expv) < 1e-9, key + ' value ' + val + ' vs ' + expv);
+        }
       });
       assert(res.clamped === exp[1], key + ' clamped ' + res.clamped + ' vs ' + exp[1]);
     }
@@ -8684,7 +8699,7 @@ def test_sweep_card_anchor_and_clamp_notices_node():
     html = osc_dash.FULL_APP_HTML
     parts = []
     for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
-                 "sweepCard", "formatSweepTickValue"):
+                 "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8751,7 +8766,7 @@ def test_sweep_anchor_field_is_labelled_node():
     html = osc_dash.FULL_APP_HTML
     parts = []
     for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
-                 "sweepCard", "formatSweepTickValue"):
+                 "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
         parts.append(found.group(0))
@@ -8774,15 +8789,24 @@ def test_sweep_anchor_field_is_labelled_node():
       series_order: [], series_labels: {}
     };
     const AXES = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol',
-                  'exit_rev','late_entry','quote_range'];
+                  'exit_rev','late_entry','quote_range','leg_chase','naked_leg','dead_zone_pct'];
+    const CATEGORICAL = ['leg_chase','naked_leg'];
 
-    // Every axis labels its field and names its unit: a missing entry in the
-    // unit map renders an empty span, so this pins the map to SWEEP_AXES.
+    // Every axis labels its field: a missing entry in the unit map renders an
+    // empty span, so this pins the map to SWEEP_AXES — and issue #388 says the
+    // categorical axes are the one deliberate exception: no unit, and a
+    // disabled input, because there is no midpoint between names.
     AXES.forEach(a => {
       const c = sweepCard(v, { ...base, axis: a });
       assert(c.includes('<span class="sweep-anchor-label">Anchor</span>'), a + ': ' + c);
       const unit = /<span class="sweep-anchor-unit">([^<]*)<\/span>/.exec(c);
-      assert(unit && unit[1].trim().length > 0, a + ' has no unit: ' + c);
+      if(CATEGORICAL.includes(a)){
+        assert(unit && unit[1].trim() === '', a + ' must have no unit: ' + c);
+        assert(/id="btSweepCenter"[^>]*disabled/.test(c), a + ' anchor must be disabled: ' + c);
+      }else{
+        assert(unit && unit[1].trim().length > 0, a + ' has no unit: ' + c);
+        assert(!/id="btSweepCenter"[^>]*disabled/.test(c), a + ' anchor must stay editable: ' + c);
+      }
     });
     // quote_range translates the whole [lo, hi] pair, so it shifts the lo bound.
     const qr = sweepCard(v, { ...base, axis: 'quote_range' });

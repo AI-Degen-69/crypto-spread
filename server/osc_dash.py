@@ -9134,6 +9134,13 @@ function resetBtParams(){
 // Sweep Visual — one axis X-Y: 1 aggregate chart + 10 per-series charts
 // Issue #344: the tested axis values, mirrored from the server's SWEEP_AXES
 // grid — the immediate card needs them before the first response arrives.
+// Issue #388: axes whose values are names, not numbers. Single frontend source
+// for the categorical behaviours; the server derives the same set from
+// `SWEEP_AXES` and the Node parity harness keeps the two in step.
+function sweepAxisIsCategorical(axis){
+  return axis === 'leg_chase' || axis === 'naked_leg';
+}
+
 function sweepAxisValues(axis, center){
   const grids = {
     queue: [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
@@ -9144,8 +9151,16 @@ function sweepAxisValues(axis, center){
     exit_rev: [0.010, 0.015, 0.020, 0.025, 0.030],
     late_entry: [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0],
     quote_range: [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
+    leg_chase: [false, true],
+    naked_leg: ['close', 'hold'],
+    dead_zone_pct: [0.0, 5.0, 10.0, 15.0, 20.0, 30.0],
   };
   const grid = grids[axis] || [];
+  // Issue #388: categorical axes always use the literal value list — there is
+  // no midpoint between names — mirroring the server `_sweep_axis_values`.
+  if(sweepAxisIsCategorical(axis)){
+    return {values: grid.slice(), clamped: 0};
+  }
   // No anchor: the literal defaults, so idle and unanchored cards never drift.
   if(center === undefined || center === null || !Number.isFinite(center) || !grid.length){
     return {values: grid.slice(), clamped: 0};
@@ -9177,6 +9192,12 @@ function sweepAxisValues(axis, center){
     const boundedFrac = frac.map(f => b ? clampTo(f, b[0], b[1]) : f);
     n = countHits(frac, boundedFrac);
     clamped = boundedFrac.map(f => Number((f * 100.0).toFixed(6)));
+  }else if(axis === 'dead_zone_pct'){
+    // Issue #388: percent of window — never the stop axes' 0.001–0.50 clamp,
+    // which would flatten this axis.
+    const bounded = translated.map(t => clampTo(t, 0, 100));
+    n = countHits(translated, bounded);
+    clamped = bounded.map(v => Number(v.toFixed(6)));
   }else if(axis === 'offset' || axis === 'queue' || axis === 'exit_rev'){
     const reg = {offset: 'offset', queue: 'queue_gate', exit_rev: 'exit_reversal'}[axis];
     const b = specBounds(reg);
@@ -9296,7 +9317,10 @@ async function runSweepVisual(){
     }, 500);
     const ctl = new AbortController();
     window._btSweepAbort = ctl;
-    const centerSuffix = (center != null && Number.isFinite(center)) ? `&sweep_center=${encodeURIComponent(center)}` : '';
+    // Issue #388: categorical axes have no midpoint — never send an anchor for
+    // them, even if a stale value is still held in window._btSweepCenter.
+    const centerSuffix = (center != null && Number.isFinite(center) && !sweepAxisIsCategorical(axis))
+      ? `&sweep_center=${encodeURIComponent(center)}` : '';
     const url = `/api/backtest/sweep/stream?axis=${encodeURIComponent(axis)}&${btControlQuery(v)}${centerSuffix}`;
     const res = await fetch(url, {signal: ctl.signal});
     if (window._btSweepAbort !== ctl) return;
@@ -9621,10 +9645,17 @@ function sweepCard(v, data, statsHtml){
   const anchorSet = (data.sweep_center !== undefined && data.sweep_center !== null);
   const anchorVal = anchorSet ? String(data.sweep_center) : '';
   // `quote_range` shifts the lo half of the [lo, hi] pair — say which half.
-  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo bound'})[data.axis] || '';
-  const anchorField = `<label class="sweep-anchor-field${anchorSet ? ' is-set' : ''}" id="btSweepAnchorWrap" for="btSweepCenter" title="Midpoint anchor (${anchorUnit}) — blank restores defaults">`
+  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo bound', leg_chase: '', naked_leg: '', dead_zone_pct: '%'})[data.axis] || '';
+  // Issue #388: categorical axes have no midpoint — the field is shown but
+  // disabled (the grid is always the literal value list), with an empty unit
+  // and a title that says why instead of inviting a number.
+  const anchorDisabled = sweepAxisIsCategorical(data.axis);
+  const anchorTitle = anchorDisabled
+    ? 'Categorical axis — its values are names, so there is no midpoint to anchor'
+    : `Midpoint anchor (${anchorUnit}) — blank restores defaults`;
+  const anchorField = `<label class="sweep-anchor-field${anchorSet ? ' is-set' : ''}" id="btSweepAnchorWrap" for="btSweepCenter" title="${anchorTitle}">`
     + `<span class="sweep-anchor-label">Anchor</span>`
-    + `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="default" onchange="onSweepCenterChange(this.value)" style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`
+    + `<input type="number" step="any" id="btSweepCenter" value="${anchorVal}" placeholder="default" onchange="onSweepCenterChange(this.value)"${anchorDisabled ? ' disabled' : ''} style="padding:4px 8px;font-size:14px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--tx);width:7em">`
     + `<span class="sweep-anchor-unit">${anchorUnit}</span>`
     + `</label>`;
   const anchorLine = anchorSet ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
