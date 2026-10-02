@@ -7675,6 +7675,10 @@ def test_sweep_anchor_request_plumbing_strings():
     card = _body("sweepCard")
     assert "btSweepCenter" in card
     assert "onSweepCenterChange(this.value)" in card
+    # Progress re-renders keep the live anchor input and rebuild the notices
+    # from the event instead of wiping the title row.
+    assert "const keepCenter = $('btSweepCenter');" in html
+    assert "titleWrap.appendChild(keepCenter)" in html
 
 
 def test_sweep_axis_values_node_parity():

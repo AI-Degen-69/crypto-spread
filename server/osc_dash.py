@@ -9402,12 +9402,23 @@ function renderSweepVisual(data, submitted, isProgress){
       // Re-render everything after the title element only: replace children
       // of meta except the first (the selector) by rebuilding via fragment.
       const keep = existingSel;
+      // Issue #378: the title also owns the anchor input + notices. Keep the
+      // live input (focus and in-progress typing survive the re-render) and
+      // rebuild the notice lines from this event's own metadata.
+      const keepCenter = $('btSweepCenter');
+      const anchorSetEv = (data.sweep_center !== undefined && data.sweep_center !== null);
+      const anchorLineEv = anchorSetEv ? `<span class="sweep-anchor">anchored at ${formatSweepTickValue(data.axis, data.sweep_center)}</span>` : '';
+      const clampLineEv = (data.clamped_count > 0) ? `<span class="sweep-clamp">${data.clamped_count} points clamped to bounds; bars show the values that ran</span>` : '';
       meta.innerHTML = '';
       // Keep the selector inside its .sweep-title flex wrapper — the progress
       // path rebuilds the tail, but the title row keeps its layout contract.
       const titleWrap = document.createElement('span');
       titleWrap.className = 'sweep-title';
       titleWrap.appendChild(keep);
+      if (keepCenter) titleWrap.appendChild(keepCenter);
+      const notesEv = document.createElement('span');
+      notesEv.innerHTML = anchorLineEv + clampLineEv;
+      while (notesEv.firstChild) titleWrap.appendChild(notesEv.firstChild);
       meta.appendChild(titleWrap);
       const rest = document.createElement('span');
       rest.innerHTML = sweepCardTail(submitted, data, statsHtml);
