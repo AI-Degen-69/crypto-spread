@@ -8479,6 +8479,10 @@ def test_sweep_anchor_request_plumbing_strings():
     assert "window._btSweepCenter = null" in html
     assert "window._btSweepCenter = null" in _body("onSweepAxisChange")
     assert "window._btSweepCenter = null" in _body("resetBtParams")
+    # Issue #389 (review): reset clears the anchor, so it must also repaint the
+    # card — otherwise the labelled field keeps showing a value (and an is-set
+    # state) that is no longer in effect.
+    assert "refreshSweepIdleCard()" in _body("resetBtParams")
     card = _body("sweepCard")
     assert "btSweepCenter" in card
     assert "onSweepCenterChange(this.value)" in card

@@ -9065,6 +9065,11 @@ function resetBtParams(){
   window._btFileChosen = true; // Issue #279: Reset picks All Files — a manual-equivalent choice loadManifest must not override
   updateBacktestParamPreview();
   updateBtRuntimeEstimate();
+  // Issue #389: the reset also clears the anchor, so the sweep card repaints
+  // from those defaults — otherwise the labelled field keeps showing a value
+  // (and an is-set state) that is no longer in effect. Guarded like the other
+  // callers: never starts a run, never touches a sweep in flight.
+  if (typeof refreshSweepIdleCard === 'function') refreshSweepIdleCard();
   runBacktest();
 }
 
