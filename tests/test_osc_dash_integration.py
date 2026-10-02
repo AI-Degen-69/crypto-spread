@@ -8482,10 +8482,12 @@ def test_sweep_anchor_request_plumbing_strings():
     card = _body("sweepCard")
     assert "btSweepCenter" in card
     assert "onSweepCenterChange(this.value)" in card
-    # Progress re-renders keep the live anchor input and rebuild the notices
-    # from the event instead of wiping the title row.
-    assert "const keepCenter = $('btSweepCenter');" in html
-    assert "titleWrap.appendChild(keepCenter)" in html
+    # Progress re-renders keep the live anchor FIELD and rebuild the notices
+    # from the event instead of wiping the title row. Issue #389: the preserved
+    # node is the wrapper — keeping the bare input would drop the label and the
+    # unit on the first progress event.
+    assert "const keepAnchorWrap = $('btSweepAnchorWrap');" in html
+    assert "titleWrap.appendChild(keepAnchorWrap)" in html
 
 
 def test_sweep_axis_values_node_parity():
@@ -8582,22 +8584,25 @@ def test_sweep_card_anchor_and_clamp_notices_node():
     const anchored = sweepCard(v, { ...base, sweep_center: 0.04, clamped_count: 0 });
     assert(anchored.includes('id="btSweepCenter"'), anchored);
     assert(anchored.includes('value="0.04"'), anchored);
-    assert(anchored.includes('sweep-anchor'), anchored);
+    // Issue #389: probe the notice's own class — `sweep-anchor-field` shares
+    // the prefix, so the loose substring check would pass on a card whose
+    // anchor notice never rendered.
+    assert(anchored.includes('class="sweep-anchor"'), anchored);
     assert(!anchored.includes('sweep-clamp'), anchored);
     // Clamped: the notice names what ran.
     const clamped = sweepCard(v, { ...base, sweep_center: 0.49, clamped_count: 3 });
-    assert(clamped.includes('sweep-anchor'), clamped);
+    assert(clamped.includes('class="sweep-anchor"'), clamped);
     assert(clamped.includes('sweep-clamp'), clamped);
     assert(clamped.includes('3 points clamped to bounds'), clamped);
     // No metadata (old payloads, busy-guard fakes): today's output, blank input.
     const plain = sweepCard(v, base);
     assert(plain.includes('id="btSweepCenter"'), plain);
-    assert(!plain.includes('sweep-anchor'), plain);
+    assert(!plain.includes('class="sweep-anchor"'), plain);
     assert(!plain.includes('sweep-clamp'), plain);
     // Explicit zero anchor survives (falsy but valid, e.g. queue).
     const zero = sweepCard(v, { ...base, axis: 'queue', sweep_center: 0 });
     assert(zero.includes('value="0"'), zero);
-    assert(zero.includes('sweep-anchor'), zero);
+    assert(zero.includes('class="sweep-anchor"'), zero);
     console.log('SWEEP_CARD_ANCHOR_NOTICES_OK');
     process.exit(0);
     """
@@ -8605,6 +8610,86 @@ def test_sweep_card_anchor_and_clamp_notices_node():
                          encoding="utf-8")
     assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
     assert "SWEEP_CARD_ANCHOR_NOTICES_OK" in res.stdout
+
+
+def test_sweep_anchor_field_is_labelled_node():
+    """Issue #389: the anchor field names itself, shows its unit, and reads
+    empty vs set at a glance — nothing depends on hovering the number box."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+                 "sweepCard", "formatSweepTickValue"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    parts.append("const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];")
+    parts.append("function paramSpecFor(name){ return null; }")
+
+    test_js = "\n".join(parts) + r"""
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const v = {
+      offset: 0.02, queue: 50, pairCost: 0.95,
+      exit5m: 0.06, exit15m: 0.07, exitBtc: 0.08, exitSol: 0.09,
+      exitReversal: 0.03, size: 5, maxStartDelay: 0,
+      quoteLo: 0.20, quoteHi: 0.80, entryDelayPct: 4,
+      deadZonePct: 12, nakedLegAtExpiry: 'hold', legChase: '1'
+    };
+    const base = {
+      axis: 'offset',
+      points: [{label: '2.5', value: 0.025, overall: {}, per_series: {},
+                series_present: []}],
+      series_order: [], series_labels: {}
+    };
+    const AXES = ['queue','offset','exit_stop_default','exit_stop_btc','exit_stop_sol',
+                  'exit_rev','late_entry','quote_range'];
+
+    // Every axis labels its field and names its unit: a missing entry in the
+    // unit map renders an empty span, so this pins the map to SWEEP_AXES.
+    AXES.forEach(a => {
+      const c = sweepCard(v, { ...base, axis: a });
+      assert(c.includes('<span class="sweep-anchor-label">Anchor</span>'), a + ': ' + c);
+      const unit = /<span class="sweep-anchor-unit">([^<]*)<\/span>/.exec(c);
+      assert(unit && unit[1].trim().length > 0, a + ' has no unit: ' + c);
+    });
+    // quote_range translates the whole [lo, hi] pair, so it shifts the lo bound.
+    const qr = sweepCard(v, { ...base, axis: 'quote_range' });
+    const qrUnit = /<span class="sweep-anchor-unit">([^<]*)<\/span>/.exec(qr);
+    assert(qrUnit[1] === 'lo bound', 'quote_range unit: ' + qrUnit[1]);
+
+    // Empty: a hint, never a number that reads as live data.
+    const empty = sweepCard(v, base);
+    assert(empty.includes('id="btSweepAnchorWrap"'), empty);
+    assert(empty.includes('for="btSweepCenter"'), empty);
+    const open = empty.indexOf('id="btSweepAnchorWrap"');
+    const inputAt = empty.indexOf('id="btSweepCenter"', open);
+    const close = empty.indexOf('</label>', open);
+    assert(open !== -1 && inputAt > open && inputAt < close, empty);
+    assert(empty.includes('placeholder="default"'), empty);
+    assert(!/placeholder="[0-9-]/.test(empty), empty);
+    assert(empty.includes('onchange="onSweepCenterChange(this.value)"'), empty);
+    assert(empty.includes('class="sweep-anchor-field"'), empty);
+
+    // Set: the field itself says so — including an explicit 0 (falsy but valid).
+    const set = sweepCard(v, { ...base, sweep_center: 0.04 });
+    assert(set.includes('class="sweep-anchor-field is-set"'), set);
+    assert(set.includes('value="0.04"'), set);
+    const zero = sweepCard(v, { ...base, axis: 'queue', sweep_center: 0 });
+    assert(zero.includes('class="sweep-anchor-field is-set"'), zero);
+    assert(zero.includes('value="0"'), zero);
+    console.log('SWEEP_ANCHOR_FIELD_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8")
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_ANCHOR_FIELD_OK" in res.stdout
 
 
 def test_format_sweep_tick_offgrid_node():
