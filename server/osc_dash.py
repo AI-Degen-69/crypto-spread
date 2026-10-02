@@ -13,7 +13,7 @@ import asyncio
 import collections
 from concurrent.futures import ProcessPoolExecutor
 import concurrent.futures.process
-from dataclasses import asdict, is_dataclass, replace as _dc_replace
+from dataclasses import asdict, dataclass, is_dataclass, replace as _dc_replace
 import functools
 import gzip
 import json
@@ -1648,12 +1648,158 @@ def _terminate_backtest_pool(pool=None) -> None:
     elif _BACKTEST_POOL is pool:
         _BACKTEST_POOL = None
     if pool is not None:
-        for proc in list(getattr(pool, "_processes", {}).values()):
+        # Issue #383: `getattr(pool, "_processes", {})` only substitutes the default
+        # when the attribute is ABSENT. `ProcessPoolExecutor.shutdown()` sets it to
+        # `None`, so a second termination of an already-shut-down pool — exactly what
+        # a stopped run's late stream cleanup does — raised `AttributeError` here and
+        # turned a clean stop into a server error. `or {}` treats both as empty.
+        for proc in list((getattr(pool, "_processes", None) or {}).values()):
             try:
                 proc.terminate()
             except Exception:
                 pass
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+# Issue #383: the one backtest/sweep run the dashboard currently owns. Every
+# cleanup path and the cancel endpoint act on THIS record instead of on
+# module-level state that a later run would have overwritten:
+#
+# - `pool` is the executor this run actually submitted to. #371 forbids late
+#   cleanup from reaching for the global singleton, which by then belongs to a
+#   newer run.
+# - `release` is the release-once callable below, so a stopped run's stale
+#   cleanup cannot free a newer run's guards.
+# - `cancel_requested` / `release_blocked` carry the endpoint's outcome: a
+#   deliberate stop, and the case where a worker would not die and the guards
+#   must therefore stay held.
+# - `procs` are the worker handles captured on the FIRST cancel. They are kept
+#   because `shutdown()` empties the pool's map: a second Stop that re-read it
+#   would find nothing alive and report a clean stop over a live worker.
+@dataclass
+class _ActiveBacktestRun:
+    """Per-run record for one in-flight backtest or sweep."""
+
+    pool: Optional[Any] = None
+    release: Any = None
+    cancel_requested: bool = False
+    release_blocked: bool = False
+    procs: Optional[list] = None
+
+
+_ACTIVE_BACKTEST_RUN: Optional[_ActiveBacktestRun] = None
+
+
+def _publish_active_backtest_run() -> _ActiveBacktestRun:
+    """Register the run that just took the guards and return its record.
+
+    Called inside the same `_BACKTEST_LOCK` block that sets
+    `_BACKTEST_RUNNING = True`, i.e. before the handler's first startup `await`
+    (the semaphore acquire and the progress-queue spawn). A cancel that arrives
+    while a run is still starting therefore finds the record instead of
+    concluding that nothing is running.
+    """
+    global _ACTIVE_BACKTEST_RUN
+    record = _ActiveBacktestRun()
+    base_release = _make_backtest_guard_releaser()
+
+    def _release_and_clear() -> None:
+        """Release this run's guards once, then drop the record if it is still ours.
+
+        The record's lifetime is exactly the guards' lifetime, so no exit path can
+        leave a finished run looking active to `/api/backtest/cancel`. A stale run
+        whose guards a newer run already owns clears nothing.
+
+        A run whose worker death could not be confirmed keeps its guards even when
+        its own cleanup `finally` fires: otherwise the streaming path frees them a
+        moment later anyway and the "stopping…" verdict lasts only until the
+        BrokenProcessPool surfaces. Only the confirmed-death path clears the block,
+        and it clears it before calling this.
+        """
+        if record.release_blocked:
+            return
+        base_release()
+        _clear_active_backtest_run(record)
+
+    record.release = _release_and_clear
+    _ACTIVE_BACKTEST_RUN = record
+    return record
+
+
+def _clear_active_backtest_run(record) -> bool:
+    """Drop `record` from the module slot, but only while it is still the current
+    run. Returns whether it was cleared."""
+    global _ACTIVE_BACKTEST_RUN
+    if _ACTIVE_BACKTEST_RUN is record:
+        _ACTIVE_BACKTEST_RUN = None
+        return True
+    return False
+
+
+def _cancelled_before_start(record) -> bool:
+    """True when a stop arrived while this run was still starting.
+
+    Issue #383: the record is published before the handler's first startup await
+    (the semaphore acquire, the progress-queue spawn), so a cancel can land in
+    that window. The cancel then finds no pool, releases the guards and reports a
+    clean stop — so the handler MUST NOT carry on and submit the worker the
+    operator just cancelled, or a second run could share the one-worker pool with
+    a worker nobody is watching.
+    """
+    return bool(record.cancel_requested)
+
+
+def _terminate_backtest_pool_confirmed(pool, procs=None) -> bool:
+    """Kill `pool`'s workers and report whether their death is CONFIRMED.
+
+    Issue #383: `_terminate_backtest_pool` requests a shutdown and returns; it
+    never looks back, so a caller acting on it would happily free the one-worker
+    guard while the old worker is still burning CPU. This sibling escalates and
+    then verifies:
+
+    `terminate()` each worker -> `join(timeout)` -> `kill()` + `join(timeout)`
+    the survivors -> `shutdown()` the pool -> report `True` only when every
+    worker process reports `exitcode is not None`.
+
+    An empty process map (a test double, or a run that never got a worker) is
+    vacuously dead. `None` is dead too — there is nothing left to stop.
+
+    `procs` lets a caller pass handles it captured earlier. `shutdown()` empties
+    the pool's map, so a repeat cancel must re-check the ORIGINAL workers rather
+    than find nothing alive and call it a clean stop.
+
+    Blocking by design: it joins with a timeout. Callers on the event loop must
+    offload it with `asyncio.to_thread`, or the dashboard freezes for the duration
+    of the join — including the very streams the stop exists to close.
+    """
+    if procs is None:
+        if pool is None:
+            return True
+        try:
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+        except Exception:
+            procs = []
+    # `_terminate_backtest_pool` owns the signalling and the singleton detach, so
+    # workers are terminated exactly once and its #371 binding stays authoritative.
+    if pool is not None:
+        _terminate_backtest_pool(pool)
+    for proc in procs:
+        try:
+            proc.join(timeout=2.0)
+        except Exception:
+            pass
+    for proc in procs:
+        # Still alive after SIGTERM: escalate. Reported death is never assumed.
+        if getattr(proc, "exitcode", None) is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.join(timeout=2.0)
+            except Exception:
+                pass
+    return all(getattr(proc, "exitcode", None) is not None for proc in procs)
 
 
 def _make_backtest_guard_releaser():
@@ -2980,15 +3126,30 @@ async def api_backtest(
                 },
             )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
 
     await semaphore.acquire()
+    # Issue #383: a stop can land during the acquire above. It already released the
+    # guards, so submitting now would run an unwatched worker next to the next run.
+    if _cancelled_before_start(run_record):
+        run_record.release()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Backtest cancelled before it started."},
+        )
 
     async def _run_shielded():
         """Execute backtest simulation in worker process pool and release concurrency guards."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -3004,17 +3165,24 @@ async def api_backtest(
                 durations,
             )
         finally:
-            semaphore.release()
-            with _BACKTEST_LOCK:
-                global _BACKTEST_RUNNING
-                _BACKTEST_RUNNING = False
+            # Issue #383: release-once + drop-the-record, so the cancel endpoint and
+            # the late timeout cleanup can both act on this run safely.
+            run_record.release()
 
     worker_task = asyncio.create_task(_run_shielded())
     try:
-        return await asyncio.wait_for(asyncio.shield(worker_task),
-                                      timeout=BACKTEST_TIMEOUT_SEC)
+        result = await asyncio.wait_for(asyncio.shield(worker_task),
+                                        timeout=BACKTEST_TIMEOUT_SEC)
+        if result is None and _cancelled_before_start(run_record):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Backtest cancelled before it started."},
+            )
+        return result
     except asyncio.TimeoutError:
-        _terminate_backtest_pool()
+        # Issue #383: terminate the pool THIS run bound. A global-only call would
+        # kill the pool of a run that started after this one (#371).
+        _terminate_backtest_pool(run_record.pool)
         raise HTTPException(
             status_code=504,
             detail=(f"Backtest exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -3096,14 +3264,17 @@ async def api_backtest_stream(
                 status_code=429,
                 content={
                     "error": "Backtest simulation already in progress. Please retry shortly.",
-                    "params_hash": params.params_hash(),
-                    "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
-                },
-            )
+                    "params_hash": params.params_hash(),                "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
+            },
+        )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
     await semaphore.acquire()
 
-    release_guards = _make_backtest_guard_releaser()
+    release_guards = run_record.release
     # Issue #331 review: create the queue before it can fail the run, and off
     # the event loop — the first call spawns the manager process. A failure
     # here must release the guards we already hold, not wedge them at 429
@@ -3120,13 +3291,23 @@ async def api_backtest_stream(
                 "pnl_histogram": dict(EMPTY_PNL_HISTOGRAM),
             },
         )
+    # Issue #383: the queue spawn is the slow startup step a stop lands in.
+    if _cancelled_before_start(run_record):
+        release_guards()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Backtest cancelled before it started."},
+        )
     loop = asyncio.get_running_loop()
 
     async def _submit():
         """Submit the worker; eventual guard release even if the stream dies early."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             return await loop.run_in_executor(
                 pool,
                 _run_backtest_simulation_worker,
@@ -3180,6 +3361,11 @@ async def api_backtest_stream(
                     break
             completed = True
             result = worker_task.result()
+            # Issue #383: a deliberate stop never produces a result — the worker was
+            # never submitted, or was killed. Emitting a final event here would
+            # render a null result as if a run had finished.
+            if result is None and run_record.cancel_requested:
+                return
             yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
         except asyncio.CancelledError:
             # Client disconnected mid-stream (sse_starlette cancels the generator).
@@ -3334,15 +3520,30 @@ async def api_backtest_sweep(
                 content={"error": "Backtest simulation already in progress. Please retry shortly."},
             )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
 
     await semaphore.acquire()
+    # Issue #383: a stop can land during the acquire above. It already released the
+    # guards, so submitting now would run an unwatched worker next to the next run.
+    if _cancelled_before_start(run_record):
+        run_record.release()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Sweep cancelled before it started."},
+        )
 
     async def _run_shielded():
         """Execute the sweep in the worker pool and always release its guards."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             loop = asyncio.get_running_loop()
             pool = get_backtest_pool()
             _run_shielded.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
@@ -3358,17 +3559,24 @@ async def api_backtest_sweep(
                 durations,
             )
         finally:
-            semaphore.release()
-            with _BACKTEST_LOCK:
-                global _BACKTEST_RUNNING
-                _BACKTEST_RUNNING = False
+            # Issue #383: release-once + drop-the-record, so the cancel endpoint and
+            # the late timeout cleanup can both act on this run safely.
+            run_record.release()
 
     worker_task = asyncio.create_task(_run_shielded())
     try:
-        return await asyncio.wait_for(asyncio.shield(worker_task),
-                                      timeout=BACKTEST_TIMEOUT_SEC)
+        result = await asyncio.wait_for(asyncio.shield(worker_task),
+                                        timeout=BACKTEST_TIMEOUT_SEC)
+        if result is None and _cancelled_before_start(run_record):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Sweep cancelled before it started."},
+            )
+        return result
     except asyncio.TimeoutError:
-        _terminate_backtest_pool()
+        # Issue #383: terminate the pool THIS run bound. A global-only call would
+        # kill the pool of a run that started after this one (#371).
+        _terminate_backtest_pool(run_record.pool)
         raise HTTPException(
             status_code=504,
             detail=(f"Sweep exceeded {BACKTEST_TIMEOUT_SEC:.0f}s and was abandoned. "
@@ -3484,9 +3692,13 @@ async def api_backtest_sweep_stream(
                 content={"error": "Backtest simulation already in progress. Please retry shortly."},
             )
         _BACKTEST_RUNNING = True
+        # Issue #383: publish the run record here — inside the guard block, before
+        # this handler's first startup `await` — so a cancel that lands while the
+        # run is still starting still finds it.
+        run_record = _publish_active_backtest_run()
     await semaphore.acquire()
 
-    release_guards = _make_backtest_guard_releaser()
+    release_guards = run_record.release
     try:
         progress_queue = await asyncio.to_thread(_new_backtest_progress_queue)
     except Exception as exc:
@@ -3495,13 +3707,23 @@ async def api_backtest_sweep_stream(
             status_code=503,
             content={"error": f"Sweep progress channel unavailable: {exc}"},
         )
+    # Issue #383: the queue spawn is the slow startup step a stop lands in.
+    if _cancelled_before_start(run_record):
+        release_guards()
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Sweep cancelled before it started."},
+        )
     loop = asyncio.get_running_loop()
 
     async def _submit():
         """Submit the sweep worker; eventual guard release even on early death."""
         try:
+            if _cancelled_before_start(run_record):
+                return None
             pool = get_backtest_pool()
             _submit.pool = pool  # issue #341: diagnose the submitted pool
+            run_record.pool = pool  # issue #383: bind cleanup + cancel to THIS pool
             # `run_in_executor` takes no kwargs — the anchor rides a partial.
             return await loop.run_in_executor(
                 pool,
@@ -3553,6 +3775,10 @@ async def api_backtest_sweep_stream(
                     break
             completed = True
             result = worker_task.result()
+            # Issue #383: a deliberate stop never produces a result — the worker was
+            # never submitted, or was killed.
+            if result is None and run_record.cancel_requested:
+                return
             yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
         except asyncio.CancelledError:
             raise
@@ -3566,12 +3792,97 @@ async def api_backtest_sweep_stream(
             yield {"event": "message", "data": json.dumps({"type": "error", "error": str(exc)})}
         finally:
             if not completed:
-                _terminate_backtest_pool()
-                release_guards()
+                # Issue #383: terminate the pool THIS run bound. A global-only call
+                # would kill the pool of a run that started after this one (#371) —
+                # which a cancel makes likely: the operator presses Stop and starts
+                # the next run immediately.
+                submit_pool = run_record.pool
+                try:
+                    if submit_pool is not None:
+                        _terminate_backtest_pool(submit_pool)
+                finally:
+                    # Guard release must survive even a failing shutdown.
+                    release_guards()
 
     # #372: heartbeat below the client's 15 s inactivity watchdog — a large
     # but healthy window can emit no progress for longer than that.
     return EventSourceResponse(event_generator(), ping=5)
+
+
+@app.post(
+    "/api/backtest/cancel",
+    responses={200: {"description": "Stop request outcome for the in-flight run"}},
+)
+async def api_backtest_cancel(request: Request):
+    """Issue #383: stop the in-flight backtest/sweep and free the single-run guards.
+
+    Aborting on the client only closes the SSE stream: the worker keeps burning CPU
+    until it finishes or the wall-clock timeout kills it, and the guards stay held,
+    so the operator's next Run is answered with 429. This is the server-side stop
+    the Backtest tab's Stop control calls.
+    """
+    _verify_safe_origin(request)
+    with _BACKTEST_LOCK:
+        record = _ACTIVE_BACKTEST_RUN
+    if record is None:
+        # Idle is a normal, quiet state: a 200 no-op that changes nothing. Never a 500.
+        return {
+            "ok": True,
+            "running": False,
+            "stopped": False,
+            "stopping": False,
+            "detail": "No backtest or sweep is running.",
+        }
+
+    record.cancel_requested = True
+    pool = record.pool
+    # Capture the worker handles on the FIRST cancel and keep them: `shutdown()`
+    # empties the pool's map, so a repeat Stop that re-read it would find nothing
+    # alive and report a clean stop over a worker that never died.
+    if record.procs is None:
+        try:
+            record.procs = list((getattr(pool, "_processes", None) or {}).values())
+        except Exception:
+            record.procs = []
+    if pool is None and not record.procs:
+        # Registered but never submitted — nothing is burning CPU yet, so releasing
+        # the guards is a complete stop.
+        record.release()
+        return {
+            "ok": True,
+            "running": False,
+            "stopped": True,
+            "stopping": False,
+            "detail": "Stopped before the worker started.",
+        }
+
+    # The kill walk joins workers with a timeout; off the loop, or the dashboard
+    # freezes for its duration.
+    confirmed = await asyncio.to_thread(
+        _terminate_backtest_pool_confirmed, pool, record.procs)
+    if confirmed:
+        record.release_blocked = False  # a confirmed death may release
+        record.release()
+        return {
+            "ok": True,
+            "running": False,
+            "stopped": True,
+            "stopping": False,
+            "detail": "Stopped. The worker is gone and the next Run can start now.",
+        }
+
+    # Death unconfirmed: the guards stay held. A visible "stopping…" is safer than a
+    # clean-looking stop that lets a second run share one worker pool with a live
+    # worker. Release-once semantics keep a late cleanup from clearing this later.
+    record.release_blocked = True
+    return {
+        "ok": False,
+        "running": True,
+        "stopped": False,
+        "stopping": True,
+        "detail": ("The worker did not confirm death. The run slot stays held until "
+                   "it does — press Stop again, or restart the server."),
+    }
 
 
 @app.get("/api/analysis")
@@ -4779,6 +5090,10 @@ textarea:focus-visible,
 .btn-primary{background:var(--up);color:var(--bg);border:none;font-weight:700;position:relative;transition:all .2s ease}
 .btn-primary:hover{background:var(--up-hi)}
 .btn-primary:disabled{opacity:0.75;cursor:wait}
+/* Issue #383: `.btn` sets `display:inline-flex`, which outranks the user-agent's
+   `[hidden]{display:none}` — so a `hidden` button still renders. The Stop control
+   must stay invisible on first paint, before any script has run. */
+#btnStopBacktest[hidden]{display:none !important}
 /* A locked control is not a broken one: it stays legible, shows a
    not-allowed cursor, and does not invite a hover. Used when a
    standalone collector owns run/ticks/ and Start would spawn a
@@ -5075,6 +5390,10 @@ textarea:focus-visible,
       <div class="mono" id="btHash" style="font-size:11px;color:var(--dim);margin-bottom:8px"></div>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
         <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
+        <!-- Issue #383: the server-side stop. Visible exactly while a backtest or
+             sweep is in flight (driven by `updateBtStopVisibility`), so it starts
+             hidden and never appears next to an idle tab. -->
+        <button class="btn" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
         <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
         <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
@@ -7169,6 +7488,11 @@ window._btSweepVisualData = null;
 window._btSweepCenter = null; // Issue #378: sweep-only midpoint anchor, outside the card DOM
 window._btChartDialogTrigger = null;
 window._btRunning = false;
+// Issue #383: bumped by every deliberate stop. A sweep that is waiting for the
+// plain backtest to finish captures it before waiting and gives up when it
+// changes — a transient flag would be missed by a loop that polls too late, and
+// without any signal the wait would fall through and START a fresh run.
+window._btStopSeq = 0;
 
 function setBacktestLoadingState(isLoading){
   const btn = $('btnRunSweep');
@@ -7195,6 +7519,116 @@ function setBacktestLoadingState(isLoading){
     if(icon) icon.textContent = '▶';
     if(text) text.textContent = 'Run Sweep';
   }
+  // Issue #383: one Stop control for both run kinds; it follows the same loading
+  // state the Run button does.
+  updateBtStopVisibility();
+}
+
+// Issue #383: show Stop exactly while `runBacktest` or `runSweepVisual` is in
+// flight. `hidden` alone is not enough — a `.btn { display: ... }` rule beats the
+// user-agent's `[hidden] { display: none }` — so the inline display is set too.
+function updateBtStopVisibility(){
+  const btn = $('btnStopBacktest');
+  if(!btn) return;
+  const busy = !!(window._btRunning || window._btSweepInFlight);
+  btn.hidden = !busy;
+  btn.disabled = !busy;
+  btn.style.display = busy ? '' : 'none';
+}
+
+// Issue #383: a deliberate stop is NOT a failure and NOT a stall, so it gets its
+// own neutral notice. Written outside `#btSweepMeta`, which the idle re-render
+// owns, so re-rendering the sweep card cannot wipe the reason for the stop.
+function markBacktestStopped(){
+  const lastRun = $('btLastRunTime');
+  if (lastRun) lastRun.textContent = '⏹ stopped by operator';
+  const elTime = $('btElapsedTime');
+  if (elTime) {
+    elTime.textContent = '--';
+    elTime.style.color = 'var(--gold)';
+  }
+  const elSub = $('btElapsedSub');
+  if (elSub) elSub.textContent = 'Stopped';
+  const elBanner = $('btPairCostSub');
+  if (elBanner) {
+    elBanner.textContent = '⏹ Stopped by operator — partial results discarded.';
+    elBanner.style.color = 'var(--gold)';
+  }
+}
+
+// Issue #383: the worker did not confirm death, so the run slot is still held.
+// That is not a stop either — it needs its own warning-toned line, or the
+// operator reads a clean idle tab while the next Run is still going to 429.
+function markBacktestStopping(detail){
+  const lastRun = $('btLastRunTime');
+  if (lastRun) lastRun.textContent = '⏹ stopping…';
+  const elTime = $('btElapsedTime');
+  if (elTime) {
+    elTime.textContent = '--';
+    elTime.style.color = 'var(--warn)';
+  }
+  const elSub = $('btElapsedSub');
+  if (elSub) elSub.textContent = 'Stopping…';
+  const elBanner = $('btPairCostSub');
+  if (elBanner) {
+    elBanner.textContent = `⏳ Stop requested — ${detail || 'waiting for the worker to exit.'} The next Run is still held.`;
+    elBanner.style.color = 'var(--warn)';
+  }
+}
+
+// Issue #383: stop the run on the SERVER, then reset the tab.
+//
+// Ordering is the whole point: ownership is detached BEFORE the request. Once
+// `window._btAbort` / `window._btSweepAbort` are null, the stopped run's own
+// `finally` sees it is superseded and skips its teardown, and any in-flight SSE
+// event fails the ownership check and renders nothing. The reset below therefore
+// cannot be undone by the run it is cancelling.
+async function stopBacktestRun(){
+  if (window._btStopBusy) return;
+  window._btStopBusy = true;
+  const stopBtn = $('btnStopBacktest');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = '⏹ Stopping…';
+  }
+  window._btStopSeq = (window._btStopSeq || 0) + 1;
+  if (window._btAbort) { try{ window._btAbort.abort(); }catch{} window._btAbort = null; }
+  if (window._btSweepAbort) { try{ window._btSweepAbort.abort(); }catch{} window._btSweepAbort = null; }
+  window._btRunning = false;
+  window._btSweepInFlight = false;
+
+  let body = null;
+  try {
+    const res = await fetch('/api/backtest/cancel', {method: 'POST'});
+    body = await res.json();
+  } catch(err) {
+    body = {ok: false, detail: 'the stop request failed: ' + err};
+  }
+
+  // Reset the tab either way: the guards are free, or the endpoint says plainly
+  // that the run slot is still held (rendered below). Either way the operator
+  // reads why, and either way nothing from the aborted run is rendered.
+  window._btRunning = false;
+  window._btSweepInFlight = false;
+  window._btAbort = null;
+  window._btSweepAbort = null;
+  btRenderToken = null;
+  btDestroyProvisionalChart();
+  stopBtTimer();
+  setBacktestLoadingState(false);
+  if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
+  const sweepBtn = $('btnRunSweepVisual');
+  if(sweepBtn){ sweepBtn.disabled = false; sweepBtn.textContent = '▶ Run Sweep Visual'; }
+  window._btStopBusy = false;
+  if (stopBtn) stopBtn.textContent = '⏹ Stop';
+
+  if (body && body.stopping) markBacktestStopping(body.detail);
+  else if (body && body.ok === false) markBacktestStopping(body.detail);
+  else markBacktestStopped();
+
+  updateBtStopVisibility();
+  // Re-render the idle sweep card so no pending/progress markers survive the stop.
+  renderSweepIdle();
 }
 
 function fmtElapsed(ms){
@@ -8709,6 +9143,10 @@ async function runSweepVisual(){
   // the abort — so a chip toggle during the wait repainted the pending card,
   // and a failed run blocked idle refreshes for the session.
   window._btSweepInFlight = true;
+  // Issue #383: capture the stop generation before waiting. A deliberate stop
+  // advances it, and this run must give up rather than fall through and start.
+  const stopSeqAtWait = window._btStopSeq || 0;
+  updateBtStopVisibility();
   // Same reader the backtest uses, so the sweep's base point is exactly the
   // configuration shown on this page. Only `axis` varies; every other knob is
   // held at the operator's value. `size` is pinned to the page value because
@@ -8743,8 +9181,18 @@ async function runSweepVisual(){
     // a misleading 429 when the operator starts the visual sweep.
     const waitUntil = Date.now() + 300000;
     while (window._btRunning && Date.now() < waitUntil) {
+      // Issue #383: a stop during the wait is a deliberate cancellation — return
+      // instead of starting the sweep the operator just cancelled.
+      if ((window._btStopSeq || 0) !== stopSeqAtWait) {
+        if(meta){ meta.textContent = 'stopped by operator — sweep not started.'; }
+        return;
+      }
       if(meta){ meta.textContent = 'waiting for the selected-file backtest to finish…'; }
       await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if ((window._btStopSeq || 0) !== stopSeqAtWait) {
+      if(meta){ meta.textContent = 'stopped by operator — sweep not started.'; }
+      return;
     }
     if (window._btRunning) {
       if(meta){ meta.textContent = 'backtest is still running; try the sweep again when it finishes.'; }
@@ -8799,6 +9247,7 @@ async function runSweepVisual(){
     window._btSweepInFlight = false;
     if(window._btSweepTimerId){ clearInterval(window._btSweepTimerId); window._btSweepTimerId = null; }
     if(btn){ btn.disabled = false; btn.textContent = '▶ Run Sweep Visual'; }
+    updateBtStopVisibility();
   }
 }
 
