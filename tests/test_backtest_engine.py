@@ -2192,4 +2192,111 @@ def test_replay_trades_sample_contains_pairs_list():
     assert t["pairs"][0]["edge_cents"] == 4.0
 
 
+def _timing_tick(t_sec, m, ub_bid, ub_ask, db_bid, db_ask, t0, end_ts, duration):
+    return {
+        "ts": t_sec, "cid": "0xpair_timing", "series": "btc-up-or-down-15m",
+        "slug": "btc-up-or-down-15m", "start_ts": t0, "end_ts": end_ts,
+        "duration": duration, "mid": m,
+        "up_book": {"best_bid": ub_bid, "best_ask": ub_ask,
+                    "bids": {str(ub_bid): 500.0}, "asks": {str(ub_ask): 500.0}},
+        "down_book": {"best_bid": db_bid, "best_ask": db_ask,
+                      "bids": {str(db_bid): 500.0}, "asks": {str(db_ask): 500.0}},
+        "tape_delta": [],
+    }
+
+
+def _two_pair_window():
+    """Two staggered-fill merge rounds: UP fills one tick before DOWN each time."""
+    t0 = 1788000000.0
+    end_ts = t0 + 900
+    ticks = [
+        # Round 1 (mid 0.60 -> resting 0.58 / 0.38)
+        _timing_tick(t0 + 50, 0.60, 0.59, 0.61, 0.39, 0.41, t0, end_ts, 900),
+        _timing_tick(t0 + 51, 0.60, 0.57, 0.579, 0.39, 0.41, t0, end_ts, 900),
+        _timing_tick(t0 + 52, 0.60, 0.59, 0.61, 0.37, 0.379, t0, end_ts, 900),
+        # Round 2 (mid 0.55 -> resting 0.53 / 0.43)
+        _timing_tick(t0 + 60, 0.55, 0.54, 0.56, 0.44, 0.46, t0, end_ts, 900),
+        _timing_tick(t0 + 61, 0.55, 0.52, 0.529, 0.44, 0.46, t0, end_ts, 900),
+        _timing_tick(t0 + 62, 0.55, 0.54, 0.56, 0.42, 0.429, t0, end_ts, 900),
+    ]
+    params = BacktestParams(offset=0.02, exit_thresh_by_slug={"default_15m": 0.05}, dead_zone_val=0.10, enable_leg_chase=False)
+    return ticks, params, t0
+
+
+def test_pairs_records_carry_per_leg_fill_times_and_duration():
+    """Issue #377: each pair record carries its own leg-fill times and duration."""
+    ticks, params, t0 = _two_pair_window()
+    res = _simulate_window(ticks, params)
+    assert res.pairs_count == 2
+    assert len(res.pairs) == 2
+
+    p1, p2 = res.pairs
+    assert p1["fill_ts_up"] == t0 + 51
+    assert p1["fill_elapsed_up"] == pytest.approx(51.0)
+    assert p1["fill_ts_down"] == t0 + 52
+    assert p1["fill_elapsed_down"] == pytest.approx(52.0)
+    assert p1["resolve_elapsed"] == pytest.approx(52.0)
+    assert p1["duration_sec"] == pytest.approx(1.0)
+
+    assert p2["fill_ts_up"] == t0 + 61
+    assert p2["fill_ts_down"] == t0 + 62
+    assert p2["resolve_elapsed"] == pytest.approx(62.0)
+    assert p2["duration_sec"] == pytest.approx(1.0)
+
+    # Economics unchanged: same costs/edges as before the timing fields existed.
+    for p in (p1, p2):
+        assert p["pair_cost"] == 0.96
+        assert p["edge_cents"] == pytest.approx(4.0)
+
+
+def test_stop_record_carries_entry_to_exit_timing():
+    """Issue #377: stop rows expose entry-fill time and entry-to-exit duration."""
+    t0 = 1788000000.0
+    end_ts = t0 + 900
+    ticks = [
+        _timing_tick(t0 + 10, 0.50, 0.49, 0.51, 0.49, 0.51, t0, end_ts, 900),
+        _timing_tick(t0 + 11, 0.48, 0.47, 0.479, 0.51, 0.52, t0, end_ts, 900),
+        _timing_tick(t0 + 12, 0.42, 0.41, 0.43, 0.57, 0.59, t0, end_ts, 900),
+    ]
+    params = BacktestParams(offset=0.02, exit_thresh_by_slug={"default_15m": 0.05}, dead_zone_val=0.10, enable_leg_chase=False)
+    res = _simulate_window(ticks, params)
+    assert res.stops_count == 1
+    assert len(res.stops) == 1
+
+    s = res.stops[0]
+    assert s["kind"] == "stop"
+    assert s["side"] == "up"
+    assert s["entry_price"] == 0.48
+    assert s["entry_elapsed"] == pytest.approx(11.0)
+    assert s["exit_price"] == 0.41
+    assert s["exit_elapsed"] == pytest.approx(12.0)
+    assert s["duration_sec"] == pytest.approx(1.0)
+    # Economics unchanged: booked exit minus resting entry, plus taker fee.
+    assert res.exit_price == 0.41
+
+
+def test_settle_record_for_surviving_leg():
+    """Issue #377: a leg held to window close gets a settle record with timing."""
+    t0 = 1788000000.0
+    end_ts = t0 + 900
+    ticks = [
+        _timing_tick(t0 + 10, 0.50, 0.49, 0.51, 0.49, 0.51, t0, end_ts, 900),
+        _timing_tick(t0 + 11, 0.50, 0.47, 0.479, 0.51, 0.60, t0, end_ts, 900),
+        _timing_tick(t0 + 12, 0.50, 0.47, 0.49, 0.51, 0.60, t0, end_ts, 900),
+        _timing_tick(t0 + 50, 0.50, 0.47, 0.49, 0.51, 0.60, t0, end_ts, 900),
+    ]
+    params = BacktestParams(offset=0.02, exit_thresh_by_slug={"default_15m": 0.05}, dead_zone_val=0.10, enable_leg_chase=False)
+    res = _simulate_window(ticks, params)
+    assert res.filled_up is True
+    assert res.pair_captured is False
+    assert len(res.stops) == 1
+
+    s = res.stops[0]
+    assert s["kind"] == "settle"
+    assert s["side"] == "up"
+    assert s["entry_price"] == 0.48
+    assert s["entry_elapsed"] == pytest.approx(11.0)
+    assert s["duration_sec"] == pytest.approx(s["exit_elapsed"] - s["entry_elapsed"])
+
+
 
