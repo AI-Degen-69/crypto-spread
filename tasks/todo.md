@@ -1,5 +1,5 @@
-# Todo: Issue #399
+# Todo: Issue #411
 
-- [x] Task 1 (S): [Design/UI] Unify chart money-axis tick callbacks to use clean whole-dollar formatting in `server/osc_dash.py`
-- [x] Task 2 (S): [Testing] Add regression test coverage for clean whole-dollar tick formatting in `tests/test_theme_tokens.py`
-- [x] Task 3 (XS): [Verify] Verify targeted tests and dashboard syntax
+- [x] Task 1 (S): [Design/UI] Add failing tests for the new backtest tab layout in `tests/test_osc_dash_integration.py`
+- [x] Task 2 (S): [Design/UI] Move the action row and rebuild the stop-loss row in `server/osc_dash.py`
+- [x] Task 3 (XS): [Verify] Run the targeted dashboard suites green

@@ -5178,12 +5178,13 @@ textarea:focus-visible,
 .btn-danger:hover{background:rgba(240,104,77,.3)}
 .form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
-/* Issue #201, carried through #229: the four backtest thresholds are one group
-   in the markup but must stay direct children of .form-grid, or the wrapper
-   collapses into a single grid cell. display:contents keeps the layout
-   identical; the [hidden] rule is required because the id selector would
-   otherwise outrank the UA one. */
-#btStopLossFields{display:contents}
+/* Issue #201, carried through #229 and #411: the four backtest thresholds are one
+   group owning their own full-width row in .form-grid via grid-column:1/-1 with a
+   repeat(4,1fr) inner grid. display:contents was removed in issue #411 because it
+   smeared the group across adjacent rows. The [hidden] rule is required because
+   the id selector would otherwise outrank the UA one. */
+#btStopLossFields{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:900px){#btStopLossFields{grid-template-columns:repeat(2,1fr)}}
 #btStopLossFields[hidden]{display:none}
 .form-group{display:flex;flex-direction:column;gap:4px}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
@@ -5292,6 +5293,7 @@ textarea:focus-visible,
 .param-structural{border-left:2px solid var(--down) !important;padding-left:8px;border-radius:2px}
 .bt-section-dot-amber{background:var(--gold)}
 .bt-section-dot-blue{background:var(--proj)}
+#btSetupActions{display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:8px;margin-top:14px}
 .bt-peer-layout{display:flex;flex-direction:column;gap:14px}
 .bt-peer-section{margin:0!important;padding:12px 14px!important;background:var(--panel)!important;border-top:2px solid var(--up)!important}
 .bt-peer-section .bt-section-body{padding-top:10px}
@@ -5452,16 +5454,6 @@ textarea:focus-visible,
       </button>
       <div class="bt-section-body" id="btSecParametersBody">
       <div class="mono" id="btHash" style="font-size:11px;color:var(--dim);margin-bottom:8px"></div>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
-        <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
-        <!-- Issue #383: the server-side stop. Visible exactly while a backtest or
-             sweep is in flight (driven by `updateBtStopVisibility`), so it starts
-             hidden and never appears next to an idle tab. -->
-        <button class="btn bt-stop" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
-        <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
-        <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
-        <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
-      </div>
       <div class="bt-accordion" style="margin-top:12px">
         <!-- ── 0. BACKTEST SCOPE (universe: dataset, markets, timeframe, windows) -->
         <div class="bt-section" id="btSecScope">
@@ -5533,6 +5525,10 @@ textarea:focus-visible,
               <label data-param-label="entry_delay_pct"></label>
               <input type="number" min="0" max="100" step="1" id="btEntryDelay" data-param="entry_delay_pct" value="0">
             </div>
+            <div class="form-group">
+              <label data-param-label="quote_shares"></label>
+              <input type="number" min="5" step="1" id="btSize" data-param="quote_shares" value="5">
+            </div>
             <div id="btStopLossFields">
               <div class="form-group">
                 <label>Exit Stop Loss 5m ($)</label>
@@ -5550,10 +5546,6 @@ textarea:focus-visible,
                 <label>SOL 5m Stop Loss ($)</label>
                 <input type="number" step="0.01" id="btExitSol" value="0.05">
               </div>
-            </div>
-            <div class="form-group">
-              <label data-param-label="quote_shares"></label>
-              <input type="number" min="5" step="1" id="btSize" data-param="quote_shares" value="5">
             </div>
             <div class="form-group">
               <label data-param-label="exit_reversal"></label>
@@ -5632,6 +5624,16 @@ textarea:focus-visible,
 
         </div>
         </div>
+      </div>
+      <div id="btSetupActions">
+        <button class="btn btn-primary" id="btnRunSweep" onclick="runBacktest()"><span id="btnRunSweepIcon">▶</span> <span id="btnRunSweepText">Run Sweep</span></button>
+        <!-- Issue #383: the server-side stop. Visible exactly while a backtest or
+             sweep is in flight (driven by `updateBtStopVisibility`), so it starts
+             hidden and never appears next to an idle tab. -->
+        <button class="btn bt-stop" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
+        <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
+        <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
       </div>
       </div>
     </div>

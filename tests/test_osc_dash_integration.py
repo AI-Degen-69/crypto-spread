@@ -8,11 +8,54 @@ import time
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
+from html.parser import HTMLParser
 import server.osc_dash as osc_dash
 from backtest.engine import BacktestParams
 from server.osc_dash import app
 
 client = TestClient(app)
+
+
+class _IdCollector(HTMLParser):
+    _void_tags = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.ids = []
+        self.ancestors = {}
+        self._stack = []
+
+    def handle_starttag(self, tag, attrs):
+        element_id = dict(attrs).get("id")
+        if element_id:
+            self.ids.append(element_id)
+            self.ancestors[element_id] = {
+                ancestor_id for _, ancestor_id in self._stack if ancestor_id
+            }
+        if tag not in self._void_tags:
+            self._stack.append((tag, element_id))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                del self._stack[index:]
+                break
+
+
+def _extract_ids(html_str: str) -> list[str]:
+    collector = _IdCollector()
+    collector.feed(html_str)
+    return collector.ids
+
+
+def _extract_css_rule(html_str: str, selector: str) -> str:
+    """Extract the rule block content for a CSS selector from an HTML string."""
+    pattern = re.escape(selector) + r"\s*\{([^}]+)\}"
+    m = re.search(pattern, html_str)
+    return m.group(1).strip() if m else ""
 
 
 def _make_fake_tick(ts: float, cid: str, slug: str, series: str, mid: float, tape: list | None = None) -> dict:
@@ -4959,15 +5002,30 @@ def test_backtest_scope_holds_universe_controls():
 
 
 def test_backtest_run_buttons_sit_at_setup_top_level():
-    """Run Sweep / Reset live directly under Setup, not inside Geometry."""
+    """Issue #411: Run Sweep / Reset / Stop / Est live at the bottom-right of Setup, after the accordion."""
     html = client.get("/").text
-    params = html.index('id="btSecParametersBody"')
-    accordion = html.index('class="bt-accordion"')
-    geo = html.index('id="btSecGeometry"')
-    for frag in ('id="btnRunSweep"', 'id="btnResetParams"', 'id="btLastRunTime"'):
-        pos = html.index(frag)
-        assert params < pos < accordion, f"{frag} not at setup top level"
-        assert pos < geo, f"{frag} still inside Geometry"
+    params_idx = html.index('id="btSecParametersBody"')
+    geo_idx = html.index('id="btSecGeometry"')
+    actions_idx = html.index('id="btSetupActions"')
+    overall_idx = html.index('id="btSecOverall"')
+
+    # #btSetupActions is inside #btSecParametersBody, after #btSecGeometry, before #btSecOverall
+    assert params_idx < actions_idx < overall_idx, "action row not inside btSecParametersBody or after accordion"
+    collector = _IdCollector()
+    collector.feed(html)
+    assert "btSecParametersBody" in collector.ancestors.get("btSetupActions", set()), (
+        "#btSetupActions must be a descendant of #btSecParametersBody"
+    )
+    assert actions_idx > geo_idx, "action row must appear after the accordion sections"
+
+    actions_html = html[actions_idx:overall_idx]
+    for frag in ('id="btnRunSweep"', 'id="btnStopBacktest"', 'id="btnResetParams"', 'id="btRuntimeEstBadge"', 'id="btLastRunTime"'):
+        assert frag in actions_html, f"{frag} not in #btSetupActions footer"
+
+    # Ensure none of the action buttons are inside #btSecGeometry
+    geo_html = html[geo_idx:actions_idx]
+    for frag in ('id="btnRunSweep"', 'id="btnStopBacktest"', 'id="btnResetParams"'):
+        assert frag not in geo_html, f"{frag} inside Geometry section"
 
 
 def test_issue_270_backtest_peer_sections_and_accessible_chart_dialog():
@@ -5361,33 +5419,61 @@ def test_summary_hero_announces_async_updates():
     assert 'aria-atomic="true"' in card, "the sentence should be announced whole, not word by word"
 
 
-# --- Issue #201, carried through #229: backtest stop-loss thresholds stay one
-# --- grid group; the on/off switch itself is gone (naked_leg_at_expiry, #229).
+# --- Issue #201, carried through #229 and #411: backtest stop-loss thresholds
+# --- occupy their own full-width row with a 4-col inner grid and 900px fallback.
 
 def test_stop_loss_thresholds_live_inside_one_grid_group():
-    """All four thresholds must sit inside the wrapper that keeps them together."""
+    """Issue #411: All four thresholds sit inside #btStopLossFields; btSize precedes them."""
     html = client.get("/").text
-    start = html.index('<div id="btStopLossFields">')
-    end = html.index('data-param-label="quote_shares"', start)
-    group = html[start:end]
-    for el_id in ("btExit5m", "btExit15m", "btExitBtc", "btExitSol"):
-        assert f'id="{el_id}"' in group, (
-            f"{el_id} is outside btStopLossFields, so the group reads as four "
-            "unrelated inputs")
+    op_start = html.index('id="btSecOperatorBody"')
+    op_end = html.index('id="btSecStructural"', op_start)
+    op_section = html[op_start:op_end]
+
+    size_idx = op_section.index('id="btSize"')
+    sl_idx = op_section.index('id="btStopLossFields"')
+    assert size_idx < sl_idx, "Share Size (btSize) must precede #btStopLossFields in Quote Placement"
+
+    start = op_section.index('<div id="btStopLossFields">')
+    end = op_section.index('id="btExitReversal"', start)
+    group = op_section[start:end]
+    collector = _IdCollector()
+    collector.feed(group)
+    threshold_ids = ["btExit5m", "btExit15m", "btExitBtc", "btExitSol"]
+    extracted = [
+        i for i in collector.ids
+        if i in threshold_ids
+        and "btStopLossFields" in collector.ancestors.get(i, set())
+    ]
+    assert extracted == threshold_ids, (
+        f"Expected stop loss IDs in order {threshold_ids} inside #btStopLossFields, got {extracted}"
+    )
 
 
 def test_stop_loss_group_survives_the_form_grid():
-    """The wrapper must not collapse the four fields into one grid cell.
+    """Issue #411: The wrapper owns a full-width row with its own 4-col grid and 900px fallback.
 
-    `.form-grid` is `repeat(4,1fr)`, so a plain wrapper becomes a single item.
-    `display:contents` keeps them as direct grid children, and the `[hidden]`
-    override is mandatory: the id selector outranks the UA `[hidden]` rule.
+    `.form-grid` is `repeat(4,1fr)`. #btStopLossFields spans full width (grid-column: 1 / -1)
+    and has its own repeat(4, 1fr) inner grid + 2-col fallback at 900px.
     """
     html = client.get("/").text
-    assert "#btStopLossFields{display:contents}" in html
+    assert "#btStopLossFields{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}" in html
+    assert "@media(max-width:900px){#btStopLossFields{grid-template-columns:repeat(2,1fr)}}" in html
     assert "#btStopLossFields[hidden]{display:none}" in html
+    rule = _extract_css_rule(html, "#btStopLossFields")
+    assert "display:contents" not in rule, "display:contents must not be present on #btStopLossFields"
     assert "cockpitStopLossFields" not in html, (
         "Issue #229: the Cockpit mirror of the group went with the toggle")
+
+
+def test_backtest_setup_actions_toolbar_and_alignment():
+    """Issue #411: #btSetupActions exists and carries right-aligned wrapping flex layout."""
+    html = client.get("/").text
+    assert '<div id="btSetupActions">' in html
+    rule = _extract_css_rule(html, "#btSetupActions")
+    assert "justify-content:flex-end" in rule
+    assert "display:flex" in rule
+    assert "flex-wrap:wrap" in rule
+    assert "#btSetupActions{display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:8px;margin-top:14px}" in html
 
 
 def test_both_tabs_render_the_dead_zone_and_expiry_switches():
@@ -5416,7 +5502,7 @@ def test_the_deleted_knobs_have_no_inputs_left_on_either_tab():
 
 
 def test_reset_restores_the_stop_loss_group_defaults():
-    """resetBtParams must restore the four thresholds without a toggle left."""
+    """resetBtParams must restore the four thresholds and size without a toggle left."""
     html = client.get("/").text
     fn_start = html.index("function resetBtParams()")
     fn = html[fn_start:html.index("\n}", fn_start)]
@@ -5424,6 +5510,8 @@ def test_reset_restores_the_stop_loss_group_defaults():
         "Issue #229: the toggle function is deleted, nothing may call it")
     assert "$('btQuoteLo').value = \"0.10\";" in fn
     assert "$('btQuoteHi').value = \"0.90\";" in fn
+    for el_id, val in [("btExit5m", "0.05"), ("btExit15m", "0.05"), ("btExitBtc", "0.05"), ("btExitSol", "0.05"), ("btSize", "5")]:
+        assert f"$('{el_id}').value = \"{val}\";" in fn, f"resetBtParams missing reset for {el_id}"
 
 
 def test_cockpit_payload_sends_the_dead_zone_trio():
