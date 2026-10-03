@@ -1,5 +1,21 @@
-# Todo: Issue #411
+# Tasks: Issue #413 — Add Save-as-Template to the Backtest tab
 
-- [x] Task 1 (S): [Design/UI] Add failing tests for the new backtest tab layout in `tests/test_osc_dash_integration.py`
-- [x] Task 2 (S): [Design/UI] Move the action row and rebuild the stop-loss row in `server/osc_dash.py`
-- [x] Task 3 (XS): [Verify] Run the targeted dashboard suites green
+- [ ] **Task 1: Store Module & Documentation** (`backtest/templates.py`, `docs/run-conventions.md`, `docs/glossary.md`)
+  - Implement `normalize_name`, `template_path`, `validate_record`, `save_template`, `read_template`, `list_templates`, `delete_template`.
+  - Update `docs/run-conventions.md` and `docs/glossary.md`.
+  - Unit tests in `tests/test_backtest_templates.py`.
+
+- [x] **Task 2: Server Endpoints & Run Registry** (`server/osc_dash.py`, `tests/test_backtest_templates.py`)
+  - Add `BACKTEST_TEMPLATES_DIR` and `_COMPLETED_RUNS` registry (bounded to 32 items).
+  - Include `run_id` in `/api/backtest` and `/api/backtest/stream` responses.
+  - Implement POST/GET/DELETE `/api/backtest/templates` endpoints with origin checks and stale hash validation (409).
+  - Add endpoint test suite in `tests/test_backtest_templates.py`.
+
+- [ ] **Task 3: UI Controls & Tab Integration** (`server/osc_dash.py`, `tests/test_osc_dash_integration.py`)
+  - Add `btnSaveTemplate` button and `#btSecTemplates` list card in Backtest tab.
+  - Wire `_btSaveableRunId`, `saveBacktestTemplate()`, `loadBacktestTemplateList()`, `loadBacktestTemplate()`, `applyBacktestTemplate()`, `deleteBacktestTemplate()`.
+  - Add JS/HTML integration tests in `tests/test_osc_dash_integration.py`.
+
+- [ ] **Final Verification Gate**
+  - Run `python -m pytest tests/test_backtest_templates.py -q`.
+  - Run `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`.
