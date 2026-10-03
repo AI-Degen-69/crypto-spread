@@ -96,14 +96,14 @@ recorded so it does not resurface.
 T1 (hydration lines — the defect) → T2 (source pin reads the lines) →
 T3 (helper + endpoint contract + ledger, depends on T1 and T2).
 
-- [ ] T1 `[Design/UI]` **XS** — `server/osc_dash.py`: add the guarded assignment
+- [x] T1 `[Design/UI]` **XS** — `server/osc_dash.py`: add the guarded assignment
   in the running branch (next to the `cockpitExitReversal` line, `:12840`) and the
   identical line in the first-init branch (next to `:12862`). Copy the
   `cockpitOffset` guard shape verbatim. No other line changes.
   **Verify:** `python -m pytest tests/test_osc_dash_integration.py -q -k cockpit`
   **Depends on:** none.
 
-- [ ] T2 `[Code/Logic]` **S** — `tests/test_osc_dash_integration.py`: new test
+- [x] T2 `[Code/Logic]` **S** — `tests/test_osc_dash_integration.py`: new test
   that fetches the served page and slices both hydration blocks (anchors: the
   `st.is_running` comment at `:12834` → `}` before `:12854`; the
   `!hasInitializedCockpitFilters && st.selected_series` block at `:12856` →
@@ -115,7 +115,7 @@ T3 (helper + endpoint contract + ledger, depends on T1 and T2).
   **Verify:** the new test, plus the existing `test_cents_helpers_convert_exactly_at_the_ui_edge_node`.
   **Depends on:** T1.
 
-- [ ] T3 `[Code/Logic]` **S** — extend
+- [x] T3 `[Code/Logic]` **S** — extend
   `test_cents_helpers_convert_exactly_at_the_ui_edge_node`
   (`tests/test_osc_dash_integration.py:10206`) with `dollarsToCents(0.995) === 99.5`
   and `centsToDollars(99.5) === 0.995`; add a stopped-engine endpoint contract

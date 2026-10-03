@@ -3585,6 +3585,38 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         client.post("/api/live/control", json={"action": "reset_pnl"})
 
 
+def test_stopped_engine_echoes_the_configured_pair_cost(monkeypatch):
+    """Issue #421: the cockpit hydrates pair cost from the engine, so a stopped
+    engine must really hold the configured value.
+
+    0.995 is the boundary worth pinning: it is neither a whole cent nor
+    roundable to one without losing the value, so it survives the helper and
+    the engine clamp [0.50, 1.00] unchanged. Isolated engine — the endpoint
+    resolves the process-global singleton, which this test never touches.
+    """
+    from strategy.live_trader import LiveTraderEngine
+
+    engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(osc_dash, "get_live_trader_engine", lambda: engine)
+
+    # The fresh trading engine starts at 0.99 — MakerConfig's 0.995 is a
+    # different object and never reaches this one. The cockpit now shows
+    # whatever the trading engine holds, so pin what "fresh" means.
+    assert engine.max_pair_cost == 0.99
+
+    res_cfg = client.post("/api/live/config", json={"max_pair_cost": 0.995})
+    assert res_cfg.status_code == 200
+
+    d_state = client.get("/api/live/state").json()
+    assert d_state["is_running"] is False
+    assert d_state["params"]["max_pair_cost"] == 0.995
+
+    # The clamp is the engine's, not the API's: below the floor the payload
+    # field rejects, above it the engine clamps down.
+    assert client.post("/api/live/config", json={"max_pair_cost": 1.01}).status_code == 422
+    assert engine.update_config(max_pair_cost=1.0)["params"]["max_pair_cost"] == 1.0
+
+
 def test_reset_pnl_endpoint_refuses_while_live_running(monkeypatch):
     """Issue #93: reset_pnl on a live running engine → 409 + Stop-first message."""
     from unittest.mock import MagicMock
@@ -10224,6 +10256,10 @@ def test_cents_helpers_convert_exactly_at_the_ui_edge_node():
     assert(dollarsToCents(0.001) === 0.1, dollarsToCents(0.001));
     assert(dollarsToCents(0.99) === 99, dollarsToCents(0.99));
     assert(dollarsToCents(0.50) === 50, dollarsToCents(0.50));
+    // Issue #421: the pair-cost structural limit is settable at one decimal of
+    // a cent, so the cockpit field and the helper must agree on 0.995 -> 99.5.
+    assert(dollarsToCents(0.995) === 99.5, dollarsToCents(0.995));
+    assert(centsToDollars(99.5) === 0.995, centsToDollars(99.5));
     assert(formatCents(0.05) === '5c', formatCents(0.05));
     assert(formatCents(0.105) === '10.5c', formatCents(0.105));
     assert(formatCents(0.90) === '90c', formatCents(0.90));
