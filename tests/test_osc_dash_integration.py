@@ -8469,8 +8469,8 @@ def test_sweep_anchor_offset_center():
 def test_sweep_anchor_queue_keeps_irregular_gaps():
     """The queue grid has no uniform step — anchoring translates, never rebuilds."""
     grid = osc_dash.SWEEP_AXES["queue"]
-    values, clamped = osc_dash._sweep_axis_values("queue", 50.0)
-    assert values[3] == pytest.approx(50.0)
+    values, clamped = osc_dash._sweep_axis_values("queue", 100.0)
+    assert values[4] == pytest.approx(100.0)
     gaps = [b - a for a, b in zip(values, values[1:])]
     expected_gaps = [b - a for a, b in zip(grid, grid[1:])]
     assert gaps == pytest.approx(expected_gaps)

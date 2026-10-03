@@ -677,3 +677,53 @@ def test_cli_only_rejected_with_non_sensitivity_preset(tmp_path: Path):
         with pytest.raises(SystemExit) as exc:
             main([str(dummy_tick_file), "--preset", preset, "--only", "exit_rev"])
         assert exc.value.code == 2
+
+
+def test_sensitivity_grid_includes_high_depth_queue_values():
+    """Issue #403: Queue sensitivity axis includes high-depth points (500, 1000, 2000) for BTC/ETH."""
+    grid = generate_sensitivity_grid(BacktestParams())
+    labels = [lbl for lbl, _ in grid]
+    for q_val in (500, 1000, 2000):
+        assert any(f"queue={q_val}" in lbl for lbl in labels)
+
+
+def test_sweep_queue_gate_high_depth_market():
+    """Issue #403: High-depth markets (depth > 200) are blocked at queue=200 but capture pairs at queue=1000."""
+    up_tok = "0xbtc_up"
+    dn_tok = "0xbtc_dn"
+    # Book with 600 shares ahead on resting price 0.48
+    snaps = [
+        {
+            "cid": "0xbtc_deep",
+            "series": "btc-up-or-down-5m",
+            "slug": "btc-up-or-down-5m",
+            "duration": 300,
+            "ts": 100.0,
+            "start_ts": 100.0,
+            "end_ts": 400.0,
+            "up_token": up_tok,
+            "down_token": dn_tok,
+            "up_book": {"token_id": up_tok, "best_bid": 0.48, "best_ask": 0.52, "bids": {"0.48": 600.0}},
+            "down_book": {"token_id": dn_tok, "best_bid": 0.48, "best_ask": 0.52, "bids": {"0.48": 600.0}},
+            "tape_delta": [
+                {"asset": up_tok, "price": 0.48, "size": 10.0},
+                {"asset": dn_tok, "price": 0.48, "size": 10.0},
+            ],
+            "mid": 0.50,
+        }
+    ]
+    grouped = [("0xbtc_deep", snaps)]
+    grid = [
+        ("q_200", BacktestParams(offset=0.02, queue_gate=200.0)),
+        ("q_1000", BacktestParams(offset=0.02, queue_gate=1000.0)),
+    ]
+    results = run_sweep(grouped, grid)
+    assert len(results) == 2
+    # At queue=200, depth (600) exceeds gate -> blocked, zero pairs
+    assert results[0].pair_rate == 0.0
+    assert results[0].total_pnl_cents == 0.0
+
+    # At queue=1000, depth (600) passes gate -> pair captured, positive PnL
+    assert results[1].pair_rate == 1.0
+    assert results[1].total_pnl_cents > 0.0
+

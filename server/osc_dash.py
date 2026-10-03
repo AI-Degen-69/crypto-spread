@@ -2406,7 +2406,7 @@ def _run_backtest_simulation_worker(
 # the same points the CLI sweeps. The worker loads ticks once and replays each
 # point in-process: N runs share one load instead of paying it N times.
 SWEEP_AXES: Dict[str, List[float] | List[bool] | List[str]] = {
-    "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
+    "queue": [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0],
     "offset": [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
     "exit_stop_default": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     "exit_stop_btc": [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
@@ -9158,7 +9158,7 @@ function sweepPointX(axis, p, i){
 
 function sweepAxisValues(axis, center){
   const grids = {
-    queue: [0.0, 10.0, 25.0, 50.0, 100.0, 200.0],
+    queue: [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0],
     offset: [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040],
     exit_stop_default: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
     exit_stop_btc: [0.06, 0.08, 0.10, 0.12, 0.14, 0.16],
