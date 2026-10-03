@@ -693,6 +693,11 @@ class WindowResult:
     worst_pair_edge_cents: float | None = None
     pair_pnl_cents: float = 0.0
     pairs: list[dict] = field(default_factory=list)
+    # Issue #377: per-round exit ledger for the window-detail table. Merge
+    # rounds live in `pairs`; single-leg exits (dead-zone close, adverse
+    # stops) and terminal settlement live here. Telemetry only — never read
+    # by any decision, aggregate, or parity surface.
+    stops: list[dict] = field(default_factory=list)
 
 
 
@@ -971,6 +976,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
     pair_pnl_cents = 0.0
     pair_edges: list[float] = []
     completed_pairs: list[dict] = []
+    stop_records: list[dict] = []
+    # Issue #377: per-leg fill clock for the window-detail table. Latched
+    # under the same condition as entry_price_* so each pair row can show
+    # its own leg-fill times (first-fill-to-merge duration included).
+    fill_ts_up: float | None = None
+    fill_elapsed_up: float | None = None
+    fill_ts_down: float | None = None
+    fill_elapsed_down: float | None = None
 
 
     exit_thr = params.exit_thresh(slug, duration, series=series)
@@ -1297,10 +1310,14 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
         # computed against (issue #164).
         if filled_up and entry_price_up is None:
             entry_price_up = resting_up
+            fill_ts_up = cur_ts
+            fill_elapsed_up = elapsed
             if first_entry_price_up is None:
                 first_entry_price_up = resting_up
         if filled_down and entry_price_down is None:
             entry_price_down = resting_down
+            fill_ts_down = cur_ts
+            fill_elapsed_down = elapsed
             if first_entry_price_down is None:
                 first_entry_price_down = resting_down
 
@@ -1324,11 +1341,22 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
             # fills at its own price, no entry fee); if leg chase raised the unfilled leg, the
             # record holds the chased price; window-level entry_price_* are first-fill-per-side
             # values and can span cycles.
+            _first_fill_elapsed = None
+            if fill_elapsed_up is not None and fill_elapsed_down is not None:
+                _first_fill_elapsed = min(fill_elapsed_up, fill_elapsed_down)
             completed_pairs.append({
                 "entry_up": resting_up,
                 "entry_down": resting_down,
                 "pair_cost": cost,
                 "edge_cents": edge_cents,
+                "fill_ts_up": fill_ts_up,
+                "fill_elapsed_up": fill_elapsed_up,
+                "fill_ts_down": fill_ts_down,
+                "fill_elapsed_down": fill_elapsed_down,
+                "resolve_ts": cur_ts,
+                "resolve_elapsed": elapsed,
+                "duration_sec": (elapsed - _first_fill_elapsed)
+                if _first_fill_elapsed is not None else None,
             })
             orders_live = False
 
@@ -1338,6 +1366,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
             filled_down = False
             entry_price_up = None
             entry_price_down = None
+            fill_ts_up = None
+            fill_elapsed_up = None
+            fill_ts_down = None
+            fill_elapsed_down = None
             chased_leg = ""
             original_resting_up = None
             original_resting_down = None
@@ -1374,8 +1406,26 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                     exit_price = _bb
                     last_exit_price = _bb
                     _rest = resting_up if filled_up else resting_down
-                    pnl_cents += (_bb - _rest) * 100.0
-                    fees_cents += _taker_fee(_bb, params.taker_fee_rate) * 100.0
+                    _stop_pnl = (_bb - _rest) * 100.0
+                    _stop_fee = _taker_fee(_bb, params.taker_fee_rate) * 100.0
+                    pnl_cents += _stop_pnl
+                    fees_cents += _stop_fee
+                    # Issue #377: exit ledger for the window-detail table.
+                    _stop_entry_elapsed = fill_elapsed_up if filled_up else fill_elapsed_down
+                    stop_records.append({
+                        "kind": "dead_zone_close",
+                        "side": exit_side,
+                        "entry_price": _rest,
+                        "entry_ts": fill_ts_up if filled_up else fill_ts_down,
+                        "entry_elapsed": _stop_entry_elapsed,
+                        "exit_price": _bb,
+                        "exit_ts": cur_ts,
+                        "exit_elapsed": elapsed,
+                        "duration_sec": (elapsed - _stop_entry_elapsed)
+                        if _stop_entry_elapsed is not None else None,
+                        "fees_cents": _stop_fee,
+                        "pnl_cents": _stop_pnl,
+                    })
                     orders_live = False
                     resting_up = None
                     resting_down = None
@@ -1383,6 +1433,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                     filled_down = False
                     entry_price_up = None
                     entry_price_down = None
+                    fill_ts_up = None
+                    fill_elapsed_up = None
+                    fill_ts_down = None
+                    fill_elapsed_down = None
                     chased_leg = ""
                     original_resting_up = None
                     original_resting_down = None
@@ -1407,8 +1461,25 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 exit_side = "up"
                 exit_price = bb_up
                 last_exit_price = bb_up
-                pnl_cents += (bb_up - resting_up) * 100.0
-                fees_cents += _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+                _stop_pnl = (bb_up - resting_up) * 100.0
+                _stop_fee = _taker_fee(bb_up, params.taker_fee_rate) * 100.0
+                pnl_cents += _stop_pnl
+                fees_cents += _stop_fee
+                # Issue #377: exit ledger for the window-detail table.
+                stop_records.append({
+                    "kind": "stop",
+                    "side": "up",
+                    "entry_price": resting_up,
+                    "entry_ts": fill_ts_up,
+                    "entry_elapsed": fill_elapsed_up,
+                    "exit_price": bb_up,
+                    "exit_ts": cur_ts,
+                    "exit_elapsed": elapsed,
+                    "duration_sec": (elapsed - fill_elapsed_up)
+                    if fill_elapsed_up is not None else None,
+                    "fees_cents": _stop_fee,
+                    "pnl_cents": _stop_pnl,
+                })
                 orders_live = False
                 resting_up = None
                 resting_down = None
@@ -1416,6 +1487,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 filled_down = False
                 entry_price_up = None
                 entry_price_down = None
+                fill_ts_up = None
+                fill_elapsed_up = None
+                fill_ts_down = None
+                fill_elapsed_down = None
                 chased_leg = ""
                 original_resting_up = None
                 original_resting_down = None
@@ -1434,8 +1509,25 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 exit_side = "down"
                 exit_price = bb_dn
                 last_exit_price = bb_dn
-                pnl_cents += (bb_dn - resting_down) * 100.0
-                fees_cents += _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
+                _stop_pnl = (bb_dn - resting_down) * 100.0
+                _stop_fee = _taker_fee(bb_dn, params.taker_fee_rate) * 100.0
+                pnl_cents += _stop_pnl
+                fees_cents += _stop_fee
+                # Issue #377: exit ledger for the window-detail table.
+                stop_records.append({
+                    "kind": "stop",
+                    "side": "down",
+                    "entry_price": resting_down,
+                    "entry_ts": fill_ts_down,
+                    "entry_elapsed": fill_elapsed_down,
+                    "exit_price": bb_dn,
+                    "exit_ts": cur_ts,
+                    "exit_elapsed": elapsed,
+                    "duration_sec": (elapsed - fill_elapsed_down)
+                    if fill_elapsed_down is not None else None,
+                    "fees_cents": _stop_fee,
+                    "pnl_cents": _stop_pnl,
+                })
                 orders_live = False
                 resting_up = None
                 resting_down = None
@@ -1443,6 +1535,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 filled_down = False
                 entry_price_up = None
                 entry_price_down = None
+                fill_ts_up = None
+                fill_elapsed_up = None
+                fill_ts_down = None
+                fill_elapsed_down = None
                 chased_leg = ""
                 original_resting_up = None
                 original_resting_down = None
@@ -1484,6 +1580,23 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                     exit_price = mark
                     settlement_mid = mark
                     fees_cents += _taker_fee(mark, params.taker_fee_rate) * 100.0
+                # Issue #377: terminal settlement ledger for the table.
+                _settle_fee = _taker_fee(mark, params.taker_fee_rate) * 100.0 if mark is not None else 0.0
+                _settle_entry_elapsed = fill_elapsed_up if filled_up else fill_elapsed_down
+                stop_records.append({
+                    "kind": "settle",
+                    "side": "up" if filled_up else "down",
+                    "entry_price": _resting,
+                    "entry_ts": fill_ts_up if filled_up else fill_ts_down,
+                    "entry_elapsed": _settle_entry_elapsed,
+                    "exit_price": mark,
+                    "exit_ts": cur_ts,
+                    "exit_elapsed": elapsed,
+                    "duration_sec": (elapsed - _settle_entry_elapsed)
+                    if _settle_entry_elapsed is not None else None,
+                    "fees_cents": _settle_fee,
+                    "pnl_cents": delta if src != "unresolved" else 0.0,
+                })
 
     mean_pair_edge_cents = round(sum(pair_edges) / len(pair_edges), 4) if pair_edges else None
     worst_pair_edge_cents = round(min(pair_edges), 4) if pair_edges else None
@@ -1521,6 +1634,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
         worst_pair_edge_cents=worst_pair_edge_cents,
         pair_pnl_cents=round(pair_pnl_cents, 4),
         pairs=completed_pairs,
+        stops=stop_records,
     )
 
 
@@ -1667,6 +1781,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "pairs_count": w.pairs_count,
             "stops_count": w.stops_count,
             "pairs": w.pairs,
+            "stops": w.stops,
         })
 
         # Per series tracking

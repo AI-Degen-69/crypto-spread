@@ -8426,7 +8426,7 @@ def test_render_backtest_trades_page_per_pair_and_missing_fallback():
       selectedBacktestFile: '',
       addEventListener: () => {},
       location: { search: '' },
-      btExpandedSlugs: new Set(['btc-updown-5m-1789344000', 'missing_pairs_slug']),
+      btExpandedSlugs: new Set(['btc-updown-5m-1789344000', 'missing_pairs_slug', 'timed-window-1789344000']),
       btActiveSize: 10,
       btLogCurrentPage: 1,
     };
@@ -8488,7 +8488,38 @@ def test_render_backtest_trades_page_per_pair_and_missing_fallback():
       pairs: []
     };
 
-    window.allBacktestTrades = [tradeWithPairs, tradeMissingPairs];
+    const tradeWithTiming = {
+      slug: 'timed-window-1789344000',
+      series: 'btc-up-or-down-5m',
+      both_filled: true,
+      exit_triggered: true,
+      up_filled: true,
+      down_filled: true,
+      entry_up: 0.460,
+      entry_down: 0.545,
+      exit_price: 0.420,
+      exit_side: 'up',
+      pairs_count: 1,
+      stops_count: 1,
+      first_pair_cost: 0.960,
+      mean_pair_edge_cents: 4.0,
+      pair_pnl_cents: 40.0,
+      pnl_cents: -30.0,
+      start_delay_sec: 0,
+      pairs: [
+        { entry_up: 0.480, entry_down: 0.480, pair_cost: 0.960, edge_cents: 4.0,
+          fill_ts_up: 1789344051, fill_elapsed_up: 51, fill_ts_down: 1789344052,
+          fill_elapsed_down: 52, resolve_ts: 1789344052, resolve_elapsed: 52,
+          duration_sec: 1.0 }
+      ],
+      stops: [
+        { kind: 'stop', side: 'up', entry_price: 0.480, entry_ts: 1789344011,
+          entry_elapsed: 11, exit_price: 0.410, exit_ts: 1789344012,
+          exit_elapsed: 12, duration_sec: 1.0, fees_cents: 1.0, pnl_cents: -700.0 }
+      ]
+    };
+
+    window.allBacktestTrades = [tradeWithPairs, tradeMissingPairs, tradeWithTiming];
     renderBacktestTradesPage();
 
     const htmlOutput = elements['btTradesTableWrap'].innerHTML;
@@ -8507,6 +8538,15 @@ def test_render_backtest_trades_page_per_pair_and_missing_fallback():
     }
     if (!htmlOutput.includes('missing_pairs_slug')) {
       throw new Error('missing_pairs_slug window not rendered');
+    }
+    if (!htmlOutput.includes('(0:51)') || !htmlOutput.includes('(0:52)')) {
+      throw new Error('per-leg pair fill times missing: ' + htmlOutput);
+    }
+    if (!htmlOutput.includes('(0:11)')) {
+      throw new Error('stop entry time missing: ' + htmlOutput);
+    }
+    if (!htmlOutput.includes('0:01')) {
+      throw new Error('Duration cells still placeholder: ' + htmlOutput);
     }
 
     console.log('BACKTEST_TRADES_PER_PAIR_RENDER_OK');
