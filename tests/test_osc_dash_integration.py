@@ -10436,3 +10436,56 @@ def test_converted_inputs_ship_cents_attributes_and_no_dollar_labels():
     for helper in ("centsToDollars", "dollarsToCents", "formatCents",
                    "validateCentsInput", "validateBacktestInputs"):
         assert f"function {helper}(" in html, f"{helper} missing from the page"
+
+
+def test_cockpit_hydrates_every_engine_param_in_both_branches():
+    """Issue #421: no cockpit input may be hydrated in only one branch.
+
+    `cockpitPairCost` shipped with no hydration at all, so it displayed the
+    hardcoded `99` and wrote it back over the trading engine's own value on
+    Apply. A whole-file search for the id would not catch that: the id lives in
+    the HTML attribute, the lock list and the validator. Each branch is sliced
+    out on its own anchors and checked separately.
+    """
+    import re
+    html = client.get("/").text
+    run_at = html.index("// Sync strategy parameter fields from engine state while running.")
+    init_at = html.index("if (!hasInitializedCockpitFilters && st.selected_series) {")
+    branches = {
+        "running": html[run_at:init_at],
+        "first-init": html[init_at:html.index("else if (st.is_running && st.selected_series)", init_at)],
+    }
+
+    hydrated = {}
+    for name, block in branches.items():
+        # Every hydrated input reads `st.params.<key>` behind a guard — never a
+        # literal, which is the shape this whole ticket is about.
+        keys = re.findall(r"\$\('(cockpit\w+)'\) && st\.params\.(\w+) != null", block)
+        assert keys, f"{name}: no params hydration found in the branch"
+        assert all(not re.search(rf"\$\('{el}'\)\.value = ['\"]?\d", block)
+                   for el, _ in keys), f"{name}: a cockpit input is set to a literal"
+        assert dict(keys)["cockpitPairCost"] == "max_pair_cost", (
+            f"{name}: pair cost is not hydrated from the engine's max_pair_cost")
+        hydrated[name] = keys
+
+    # Same fields, same order, in both branches: a field that quietly drops out
+    # of one of them is stale on that path and no single-branch check would see it.
+    assert hydrated["running"] == hydrated["first-init"], (
+        f"the two branches hydrate different fields: "
+        f"{hydrated['running']} vs {hydrated['first-init']}")
+    assert hydrated["running"] == [
+        ("cockpitOffset", "offset"),
+        ("cockpitExit", "exit_thresh"),
+        ("cockpitExitReversal", "exit_reversal"),
+        ("cockpitPairCost", "max_pair_cost"),
+        ("cockpitShares", "shares"),
+        ("cockpitDeadZoneVal", "dead_zone_val"),
+        ("cockpitDeadZoneUnit", "dead_zone_unit"),
+        ("cockpitNakedLegAtExpiry", "naked_leg_at_expiry"),
+        ("cockpitWsAuthority", "ws_book_authority"),
+        ("cockpitQuoteLo", "quote_range"),
+        ("cockpitQuoteHi", "quote_range"),
+    ], "the hydrated cockpit field list changed — update this pin deliberately"
+    # The engine-state value has to reach the field through the cents helper,
+    # not by raw float assignment.
+    assert "$('cockpitPairCost').value = dollarsToCents(st.params.max_pair_cost);" in html
