@@ -5784,7 +5784,7 @@ textarea:focus-visible,
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
               <label data-param-label="offset"></label>
-              <input type="number" step="0.005" id="btOffset" data-param="offset" value="0.02">
+              <input type="number" min="0.1" max="49" step="0.1" id="btOffset" data-param="offset" value="2">
             </div>
             <div class="form-group">
               <label data-param-label="queue_gate"></label>
@@ -5800,25 +5800,25 @@ textarea:focus-visible,
             </div>
             <div id="btStopLossFields">
               <div class="form-group">
-                <label>Exit Stop Loss 5m ($)</label>
-                <input type="number" step="0.01" id="btExit5m" value="0.05">
+                <label>Exit Stop Loss 5m <span data-param-unit="exit_thresh_by_slug"></span></label>
+                <input type="number" min="0.1" max="50" step="0.1" id="btExit5m" data-param="exit_thresh_by_slug" value="5">
               </div>
               <div class="form-group">
-                <label>Exit Stop Loss 15m ($)</label>
-                <input type="number" step="0.01" id="btExit15m" value="0.05">
+                <label>Exit Stop Loss 15m <span data-param-unit="exit_thresh_by_slug"></span></label>
+                <input type="number" min="0.1" max="50" step="0.1" id="btExit15m" data-param="exit_thresh_by_slug" value="5">
               </div>
               <div class="form-group">
-                <label>BTC 5m Stop Loss ($)</label>
-                <input type="number" step="0.01" id="btExitBtc" value="0.05">
+                <label>BTC 5m Stop Loss <span data-param-unit="exit_thresh_by_slug"></span></label>
+                <input type="number" min="0.1" max="50" step="0.1" id="btExitBtc" data-param="exit_thresh_by_slug" value="5">
               </div>
               <div class="form-group">
-                <label>SOL 5m Stop Loss ($)</label>
-                <input type="number" step="0.01" id="btExitSol" value="0.05">
+                <label>SOL 5m Stop Loss <span data-param-unit="exit_thresh_by_slug"></span></label>
+                <input type="number" min="0.1" max="50" step="0.1" id="btExitSol" data-param="exit_thresh_by_slug" value="5">
               </div>
             </div>
             <div class="form-group">
               <label data-param-label="exit_reversal"></label>
-              <input type="number" min="0" max="0.5" step="0.005" id="btExitReversal" data-param="exit_reversal" value="0.02">
+              <input type="number" min="0.1" max="50" step="0.1" id="btExitReversal" data-param="exit_reversal" value="2">
             </div>
             <div class="form-group">
               <label data-param-label="enable_leg_chase"></label>
@@ -5841,16 +5841,16 @@ textarea:focus-visible,
           <div class="bt-section-body" id="btSecStructuralBody">
           <div class="form-grid" style="margin-top:6px">
             <div class="form-group">
-              <label for="btQuoteLo">Quotable Range Lo</label>
-              <input type="number" min="0" max="1" step="0.05" id="btQuoteLo" data-param="quote_range" value="0.10">
+              <label for="btQuoteLo">Quotable Range Lo <span data-param-unit="quote_range"></span></label>
+              <input type="number" min="0" max="100" step="0.1" id="btQuoteLo" data-param="quote_range" value="10">
             </div>
             <div class="form-group">
-              <label for="btQuoteHi">Quotable Range Hi</label>
-              <input type="number" min="0" max="1" step="0.05" id="btQuoteHi" data-param="quote_range" value="0.90">
+              <label for="btQuoteHi">Quotable Range Hi <span data-param-unit="quote_range"></span></label>
+              <input type="number" min="0" max="100" step="0.1" id="btQuoteHi" data-param="quote_range" value="90">
             </div>
             <div class="form-group">
               <label for="btPairCost" data-param-label="max_pair_cost"></label>
-              <input type="number" min="0.5" max="1" step="0.005" id="btPairCost" data-param="max_pair_cost" value="0.99">
+              <input type="number" min="50" max="100" step="0.1" id="btPairCost" data-param="max_pair_cost" value="99">
             </div>
             <div class="form-group">
               <label>Dead Zone (% of window)</label>
@@ -6232,15 +6232,15 @@ textarea:focus-visible,
       <div class="form-grid" style="margin-top:10px">
         <div class="form-group">
           <label data-param-label="offset"></label>
-          <input type="number" step="0.005" min="0.001" max="0.490" id="cockpitOffset" data-param="offset" value="0.02" oninput="validateCockpitInputs()">
+          <input type="number" step="0.1" min="0.1" max="49" id="cockpitOffset" data-param="offset" value="2" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="exit_thresh_by_slug"></label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExit" data-param="exit_thresh_by_slug" value="0.05" oninput="validateCockpitInputs()">
+          <input type="number" step="0.1" min="0.1" max="50" id="cockpitExit" data-param="exit_thresh_by_slug" value="5" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="exit_reversal"></label>
-          <input type="number" step="0.005" min="0.001" max="0.500" id="cockpitExitReversal" data-param="exit_reversal" value="0.02" oninput="validateCockpitInputs()">
+          <input type="number" step="0.1" min="0.1" max="50" id="cockpitExitReversal" data-param="exit_reversal" value="2" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="quote_shares"></label>
@@ -6289,15 +6289,15 @@ textarea:focus-visible,
         </div>
         <div class="form-group">
           <label for="cockpitQuoteLo">Quotable Range Lo</label>
-          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteLo" data-param="quote_range" value="0.10" oninput="validateCockpitInputs()">
+          <input type="number" min="0" max="100" step="0.1" id="cockpitQuoteLo" data-param="quote_range" value="10" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label for="cockpitQuoteHi">Quotable Range Hi</label>
-          <input type="number" min="0" max="1" step="0.05" id="cockpitQuoteHi" data-param="quote_range" value="0.90" oninput="validateCockpitInputs()">
+          <input type="number" min="0" max="100" step="0.1" id="cockpitQuoteHi" data-param="quote_range" value="90" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="max_pair_cost"></label>
-          <input type="number" min="0.5" max="1" step="0.005" id="cockpitPairCost" data-param="max_pair_cost" value="0.99" placeholder="max pair cost" oninput="validateCockpitInputs()">
+          <input type="number" min="50" max="100" step="0.1" id="cockpitPairCost" data-param="max_pair_cost" value="99" placeholder="max pair cost" oninput="validateCockpitInputs()">
         </div>
         <div class="form-group">
           <label data-param-label="dead_zone_val"></label>
@@ -7584,6 +7584,13 @@ async function applyParamSpec(root){
     const spec = paramSpecFor(el.getAttribute('data-param-label'));
     if(spec) el.textContent = spec.label;
   });
+  // Issue #419: unit placeholders inside hand-written labels (the four exit
+  // inputs, the quote-range ends) render the registry's display unit, so no
+  // hard-coded ($) survives for a converted knob.
+  scope.querySelectorAll('[data-param-unit]').forEach(el => {
+    const spec = paramSpecFor(el.getAttribute('data-param-unit'));
+    if(spec && spec.display) el.textContent = `(${spec.display.unit})`;
+  });
   // Bounds and tooltips on the controls themselves.
   scope.querySelectorAll('[data-param]').forEach(el => {
     const spec = paramSpecFor(el.getAttribute('data-param'));
@@ -7601,7 +7608,20 @@ async function applyParamSpec(root){
                   : el.id.startsWith('bt') ? 'backtest' : '';
     const b = (spec.bounds_by_surface && spec.bounds_by_surface[surface])
               || spec.bounds;
-    if(Array.isArray(b) && el.tagName === 'INPUT' && el.type === 'number'){
+    // Issue #419: converted knobs render cents bounds (dollars x scale) and
+    // the display step; the exit inputs take entry_bounds where the
+    // canonical bounds is None. Fields without display keep today's behavior.
+    if(spec.display && el.tagName === 'INPUT' && el.type === 'number'){
+      const scale = spec.display.scale || 100;
+      const eb = spec.display.entry_bounds;
+      const cb = Array.isArray(b) ? b
+        : (Array.isArray(eb) ? eb : null);
+      if(cb){
+        el.min = String(cb[0] * scale);
+        el.max = String(cb[1] * scale);
+      }
+      if(spec.display.step != null) el.step = String(spec.display.step);
+    }else if(Array.isArray(b) && el.tagName === 'INPUT' && el.type === 'number'){
       el.min = String(b[0]);
       el.max = String(b[1]);
     }
@@ -8213,6 +8233,66 @@ function updateBtRuntimeEstimate(){
   }
 }
 
+// Issue #419: one cents convention at the dashboard edge. The engine, the
+// API and the CLI stay in dollar floats; price inputs display whole-number
+// cents (scale x100, step 0.1c = venue tick 0.001). Every input writer and
+// every input reader below routes through these three helpers, so a value
+// converts exactly once at each UI boundary. Top-level on purpose: the node
+// parity harness extracts them by name straight from the served page.
+function centsToDollars(c){
+  const num = Number(c);
+  if(!Number.isFinite(num)) return NaN;
+  return Number((num / 100).toFixed(3));
+}
+function dollarsToCents(d){
+  const num = Number(d);
+  if(!Number.isFinite(num)) return NaN;
+  const c = num * 100;
+  // One decimal of a cent only when it represents the value (1e-9); anything
+  // finer keeps up to 3 decimals so no value ever changes silently.
+  const r1 = Number(c.toFixed(1));
+  if(Math.abs(r1 - c) < 1e-9) return r1;
+  return Number(c.toFixed(3));
+}
+function formatCents(d){
+  const num = Number(d);
+  if(!Number.isFinite(num)) return String(d);
+  return `${dollarsToCents(num)}c`;
+}
+// One cents-input validator for both tabs. Rejects empty, non-finite,
+// out-of-[min,max] and more-than-one-decimal input; toggles input-invalid.
+function validateCentsInput(el){
+  if(!el) return true;
+  const raw = String(el.value).trim();
+  let ok = raw !== '' && Number.isFinite(Number(raw)) && /^-?\d+(\.\d)?$/.test(raw);
+  if(ok && el.min !== '' && el.min != null) ok = Number(raw) >= Number(el.min);
+  if(ok && el.max !== '' && el.max != null) ok = Number(raw) <= Number(el.max);
+  el.classList.toggle('input-invalid', !ok);
+  return ok;
+}
+// Backtest-tab twin of validateCockpitInputs: the nine price inputs plus the
+// strict lo < hi ordering (both ends marked when it fails).
+function validateBacktestInputs(){
+  let ok = true;
+  ['btOffset', 'btPairCost', 'btExit5m', 'btExit15m', 'btExitBtc', 'btExitSol',
+   'btExitReversal', 'btQuoteLo', 'btQuoteHi'].forEach(id => {
+    const el = $(id);
+    if(el && !validateCentsInput(el)) ok = false;
+  });
+  const loEl = $('btQuoteLo');
+  const hiEl = $('btQuoteHi');
+  if(loEl && hiEl){
+    const lo = centsToDollars(String(loEl.value).trim());
+    const hi = centsToDollars(String(hiEl.value).trim());
+    if(!(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi)){
+      loEl.classList.add('input-invalid');
+      hiEl.classList.add('input-invalid');
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 // One reader for every Backtester control, so "Run Sweep" and "Run Backtest"
 // cannot disagree about what the page is set to. The sweep varies only the
 // chosen axis; every other knob is exactly the number typed above.
@@ -8224,20 +8304,28 @@ function btControlValues(overrides){
     const v = String(el.value).trim();
     return (v !== '' && Number.isFinite(Number(v))) ? Number(v) : def;
   };
+  // Issue #419: price inputs hold cents; the request stays in dollars.
+  const getCents = (id, def) => {
+    const el = $(id);
+    if (!el) return def;
+    const raw = String(el.value).trim();
+    if (raw === '' || !Number.isFinite(Number(raw))) return def;
+    return centsToDollars(raw);
+  };
   const size = Math.max(5, Math.round(getVal('btSize', 5)));
   return {
-    offset: getVal('btOffset', 0.02),
+    offset: getCents('btOffset', 0.02),
     queue: getVal('btQueue', 50),
-    pairCost: getVal('btPairCost', 0.99),
-    exit5m: getVal('btExit5m', 0.05),
-    exit15m: getVal('btExit15m', 0.05),
-    exitBtc: getVal('btExitBtc', 0.05),
-    exitSol: getVal('btExitSol', 0.05),
-    exitReversal: getVal('btExitReversal', 0.02),
+    pairCost: getCents('btPairCost', 0.99),
+    exit5m: getCents('btExit5m', 0.05),
+    exit15m: getCents('btExit15m', 0.05),
+    exitBtc: getCents('btExitBtc', 0.05),
+    exitSol: getCents('btExitSol', 0.05),
+    exitReversal: getCents('btExitReversal', 0.02),
     size: (o.size !== undefined) ? o.size : size,
     maxStartDelay: getVal('btMaxStartDelay', 0.0),
-    quoteLo: getVal('btQuoteLo', 0.10),
-    quoteHi: getVal('btQuoteHi', 0.90),
+    quoteLo: getCents('btQuoteLo', 0.10),
+    quoteHi: getCents('btQuoteHi', 0.90),
     entryDelayPct: Math.max(0, Math.min(100, getVal('btEntryDelay', 0.0))),
     // Issue #164: knobs the live engine has always had, now simulated too.
     deadZonePct: Math.max(0, Math.min(100, getVal('btDeadZoneVal', 10.0))),
@@ -9100,17 +9188,23 @@ function applyBacktestTemplate(t){
     const el = $(id);
     if (el) el.value = String(v);
   };
-  setVal('btOffset', a.offset);
+  // Issue #419: template args are dollars; price inputs display cents.
+  const setCents = function(id, v){
+    if (v === undefined || v === null) return;
+    const el = $(id);
+    if (el) el.value = String(dollarsToCents(v));
+  };
+  setCents('btOffset', a.offset);
   setVal('btQueue', a.queue);
-  setVal('btPairCost', a.pair_cost);
-  setVal('btExit5m', a.exit_default_5m);
-  setVal('btExit15m', a.exit_default_15m);
-  setVal('btExitBtc', a.exit_btc_5m);
-  setVal('btExitSol', a.exit_sol_5m);
+  setCents('btPairCost', a.pair_cost);
+  setCents('btExit5m', a.exit_default_5m);
+  setCents('btExit15m', a.exit_default_15m);
+  setCents('btExitBtc', a.exit_btc_5m);
+  setCents('btExitSol', a.exit_sol_5m);
   setVal('btSize', a.size);
-  setVal('btQuoteLo', a.quote_lo);
-  setVal('btQuoteHi', a.quote_hi);
-  setVal('btExitReversal', a.exit_reversal);
+  setCents('btQuoteLo', a.quote_lo);
+  setCents('btQuoteHi', a.quote_hi);
+  setCents('btExitReversal', a.exit_reversal);
   if (a.entry_delay_pct !== undefined && a.entry_delay_pct !== null) setVal('btEntryDelay', a.entry_delay_pct);
   else if (a.entry_delay_sec) note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
   if (a.dead_zone_pct !== undefined && a.dead_zone_pct !== null) setVal('btDeadZoneVal', a.dead_zone_pct);
@@ -9183,6 +9277,8 @@ async function deleteBacktestTemplate(encName){
 }
 
 async function runBacktest(fileOverride){
+  // Issue #419: bad cents input blocks the request instead of replaying it.
+  if(!validateBacktestInputs()) return;
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
   window._btAbort = ctl;
@@ -9622,19 +9718,19 @@ function renderBacktestTradesPage() {
 function resetBtParams(){
   // Issue #378: reset restores the literal sweep defaults (never in the input-ID list).
   window._btSweepCenter = null;
-  $('btOffset').value = "0.02";
+  $('btOffset').value = "2";
   $('btQueue').value = "0";
-  $('btPairCost').value = "0.99";
-  $('btExit5m').value = "0.05";
-  $('btExit15m').value = "0.05";
-  $('btExitBtc').value = "0.05";
-  $('btExitSol').value = "0.05";
+  $('btPairCost').value = "99";
+  $('btExit5m').value = "5";
+  $('btExit15m').value = "5";
+  $('btExitBtc').value = "5";
+  $('btExitSol').value = "5";
   $('btSize').value = "5";
   if ($('btMaxStartDelay')) $('btMaxStartDelay').value = "0";
-  if ($('btQuoteLo')) $('btQuoteLo').value = "0.10";
-  if ($('btQuoteHi')) $('btQuoteHi').value = "0.90";
+  if ($('btQuoteLo')) $('btQuoteLo').value = "10";
+  if ($('btQuoteHi')) $('btQuoteHi').value = "90";
   if ($('btEntryDelay')) $('btEntryDelay').value = "0";
-  if ($('btExitReversal')) $('btExitReversal').value = "0.02";
+  if ($('btExitReversal')) $('btExitReversal').value = "2";
   if ($('btDeadZoneVal')) $('btDeadZoneVal').value = "10";
   if ($('btFileSelect')) $('btFileSelect').value = "";
   window.selectedBacktestFile = "";
@@ -9772,6 +9868,8 @@ async function runSweepVisual(){
   // run (pending card, progress, request) uses it, so editing the input
   // mid-sweep cannot repaint a run that was asked for something else.
   const center = (window._btSweepCenter != null) ? window._btSweepCenter : null;
+  // Issue #419: bad cents input blocks the request instead of replaying it.
+  if(!validateBacktestInputs()) return;
   const selectedSeries = btSelectedSeriesSlugs(sel);
   // Station VI (#355 closeout): the run-start snapshot travels in
   // `selectedSeries`, not on `window` — nothing ever read the old handle.
@@ -12482,43 +12580,11 @@ async function onCockpitModeChange(autoApply = true) {
 function validateCockpitInputs() {
   let allValid = true;
 
-  // 1. Offset: 0.001 to 0.490
-  const offsetEl = $('cockpitOffset');
-  if (offsetEl) {
-    const raw = offsetEl.value.trim();
-    const val = parseFloat(raw);
-    if (raw === '' || isNaN(val) || val < 0.001 || val > 0.490) {
-      offsetEl.classList.add('input-invalid');
-      allValid = false;
-    } else {
-      offsetEl.classList.remove('input-invalid');
-    }
-  }
-
-  // 2. Exit Threshold: 0.001 to 0.500
-  const exitEl = $('cockpitExit');
-  if (exitEl) {
-    const raw = exitEl.value.trim();
-    const val = parseFloat(raw);
-    if (raw === '' || isNaN(val) || val < 0.001 || val > 0.500) {
-      exitEl.classList.add('input-invalid');
-      allValid = false;
-    } else {
-      exitEl.classList.remove('input-invalid');
-    }
-  }
-
-  // 2b. Exit Reversal: 0.001 to 0.500 (same range as exit threshold)
-  const exitRevEl = $('cockpitExitReversal');
-  if (exitRevEl) {
-    const raw = exitRevEl.value.trim();
-    const val = parseFloat(raw);
-    if (raw === '' || isNaN(val) || val < 0.001 || val > 0.500) {
-      exitRevEl.classList.add('input-invalid');
-      allValid = false;
-    } else {
-      exitRevEl.classList.remove('input-invalid');
-    }
+  // 1-2b. Price knobs (issue #419): cents inputs sharing one validator —
+  // offset 0.1-49c, exits and reversal 0.1-50c, pair cost 50-100c.
+  for (const id of ['cockpitOffset', 'cockpitExit', 'cockpitExitReversal', 'cockpitPairCost']) {
+    const el = $(id);
+    if (el && !validateCentsInput(el)) allValid = false;
   }
 
   // 3. Shares: 5 to 10000
@@ -12563,16 +12629,20 @@ function validateCockpitInputs() {
     }
   }
 
-  // 6. Quotable Range: each end in [0, 1] and lo < hi (issue #228).
+  // 6. Quotable Range: each end in [0, 100]c and lo < hi (issue #228, cents
+  // per issue #419). Each end keeps its cents validity; the ordering marks
+  // both ends but never clears a cents failure.
   const quoteLoEl = $('cockpitQuoteLo');
   const quoteHiEl = $('cockpitQuoteHi');
+  if (quoteLoEl && !validateCentsInput(quoteLoEl)) allValid = false;
+  if (quoteHiEl && !validateCentsInput(quoteHiEl)) allValid = false;
   if (quoteLoEl && quoteHiEl) {
     const loRaw = quoteLoEl.value.trim();
     const hiRaw = quoteHiEl.value.trim();
     const lo = parseFloat(loRaw);
     const hi = parseFloat(hiRaw);
     const ok = loRaw !== '' && hiRaw !== '' && !isNaN(lo) && !isNaN(hi)
-      && lo >= 0 && lo <= 1 && hi >= 0 && hi <= 1 && lo < hi;
+      && lo >= 0 && lo <= 100 && hi >= 0 && hi <= 100 && lo < hi;
     for (const el of [quoteLoEl, quoteHiEl]) {
       if (ok) {
         el.classList.remove('input-invalid');
@@ -12601,38 +12671,18 @@ async function applyCockpitConfig() {
   const filtersLocked = areCockpitFiltersLocked();
   if (isApplyingCockpitConfig) return;
 
-  // Auto-convert whole numbers entered as cents (e.g. 2 -> 0.02, 5 -> 0.05)
-  const offsetEl = $('cockpitOffset');
-  if (offsetEl) {
-    let ov = parseFloat(offsetEl.value);
-    if (!isNaN(ov) && Number.isInteger(ov) && ov >= 1.0 && ov <= 49.0) {
-      offsetEl.value = (ov / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
-    }
-  }
-  const exitEl = $('cockpitExit');
-  if (exitEl) {
-    let ev = parseFloat(exitEl.value);
-    if (!isNaN(ev) && Number.isInteger(ev) && ev >= 1.0 && ev <= 50.0) {
-      exitEl.value = (ev / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
-    }
-  }
-  const exitRevEl = $('cockpitExitReversal');
-  if (exitRevEl) {
-    let rv = parseFloat(exitRevEl.value);
-    if (!isNaN(rv) && Number.isInteger(rv) && rv >= 1.0 && rv <= 50.0) {
-      exitRevEl.value = (rv / 100.0).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
-    }
-  }
-
+  // Issue #419: inputs always hold cents now, so the client converts once
+  // with centsToDollars below — the old whole-number heuristic would divide
+  // twice and is gone. Server normalize_* validators stay untouched.
   if (!validateCockpitInputs()) {
     alert('Please correct the invalid parameters highlighted with a red border before applying.');
     return;
   }
 
   isApplyingCockpitConfig = true;
-  const offset = parseFloat($('cockpitOffset').value) || 0.02;
-  const exit_thresh = parseFloat($('cockpitExit').value) || 0.05;
-  const exit_reversal = parseFloat($('cockpitExitReversal').value) || 0.02;
+  const offset = centsToDollars($('cockpitOffset').value) || 0.02;
+  const exit_thresh = centsToDollars($('cockpitExit').value) || 0.05;
+  const exit_reversal = centsToDollars($('cockpitExitReversal').value) || 0.02;
   const shares = parseInt($('cockpitShares').value, 10) || 5;
   const mode = $('cockpitMode').value || 'paper';
   const wallet = $('cockpitWallet').value.trim();
@@ -12665,19 +12715,18 @@ async function applyCockpitConfig() {
   if (quoteLoEl && quoteHiEl
       && quoteLoEl.value !== '' && quoteHiEl.value !== ''
       && !isNaN(parseFloat(quoteLoEl.value)) && !isNaN(parseFloat(quoteHiEl.value))) {
-    body.quote_range = [parseFloat(quoteLoEl.value), parseFloat(quoteHiEl.value)];
+    body.quote_range = [centsToDollars(quoteLoEl.value), centsToDollars(quoteHiEl.value)];
   }
   // Issue #164: knobs the live engine has always accepted but the Cockpit
-  // never offered — entry_delay_sec among them.
-  const numeric = {
-    entry_delay_sec: 'cockpitEntryDelay',
-    max_pair_cost: 'cockpitPairCost',
-  };
-  for (const [field, elId] of Object.entries(numeric)) {
-    const el = $(elId);
-    if (el && el.value !== '' && !isNaN(parseFloat(el.value))) {
-      body[field] = parseFloat(el.value);
-    }
+  // never offered — entry_delay_sec among them. Pair cost is a cents input
+  // (issue #419); the delay stays seconds.
+  const pairCostEl = $('cockpitPairCost');
+  if (pairCostEl && pairCostEl.value !== '' && !isNaN(parseFloat(pairCostEl.value))) {
+    body.max_pair_cost = centsToDollars(pairCostEl.value);
+  }
+  const delayEl = $('cockpitEntryDelay');
+  if (delayEl && delayEl.value !== '' && !isNaN(parseFloat(delayEl.value))) {
+    body.entry_delay_sec = parseFloat(delayEl.value);
   }
   const chaseEl = $('cockpitLegChase');
   if (chaseEl) body.enable_leg_chase = chaseEl.value === 'true';
@@ -12772,19 +12821,20 @@ function renderCockpitUI(st) {
     $('cockpitWallet').value = st.wallet_address;
   }
 
-  // Sync strategy parameter fields from engine state while running
+  // Sync strategy parameter fields from engine state while running.
+  // Issue #419: engine dollars render as cents via dollarsToCents.
   if (st.is_running) {
     if (st.params) {
-      if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
-      if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
-      if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
+      if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = dollarsToCents(st.params.offset);
+      if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = dollarsToCents(st.params.exit_thresh);
+      if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = dollarsToCents(st.params.exit_reversal);
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
       if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
       if ($('cockpitWsAuthority') && st.params.ws_book_authority != null) $('cockpitWsAuthority').value = String(st.params.ws_book_authority);
-      if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
-      if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
+      if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = dollarsToCents(st.params.quote_range[0]);
+      if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = dollarsToCents(st.params.quote_range[1]);
     }
     if ($('cockpitWallet') && st.wallet_address != null) {
       $('cockpitWallet').value = st.wallet_address;
@@ -12797,16 +12847,16 @@ function renderCockpitUI(st) {
     hasInitializedCockpitFilters = true;
     syncCockpitFiltersFromState(st);
     if (st.params) {
-      if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = st.params.offset;
-      if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = st.params.exit_thresh;
-      if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = st.params.exit_reversal;
+      if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = dollarsToCents(st.params.offset);
+      if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = dollarsToCents(st.params.exit_thresh);
+      if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = dollarsToCents(st.params.exit_reversal);
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
       if ($('cockpitNakedLegAtExpiry') && st.params.naked_leg_at_expiry != null) $('cockpitNakedLegAtExpiry').value = st.params.naked_leg_at_expiry;
       if ($('cockpitWsAuthority') && st.params.ws_book_authority != null) $('cockpitWsAuthority').value = String(st.params.ws_book_authority);
-      if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = st.params.quote_range[0];
-      if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = st.params.quote_range[1];
+      if ($('cockpitQuoteLo') && st.params.quote_range != null) $('cockpitQuoteLo').value = dollarsToCents(st.params.quote_range[0]);
+      if ($('cockpitQuoteHi') && st.params.quote_range != null) $('cockpitQuoteHi').value = dollarsToCents(st.params.quote_range[1]);
     }
   } else if (st.is_running && st.selected_series) {
     syncCockpitFiltersFromState(st);
@@ -13752,13 +13802,21 @@ function updateBacktestParamPreview(){
     const value = Number(raw);
     return Number.isFinite(value) ? value : fallback;
   };
+  // Issue #419: price inputs hold cents — the same reader btControlValues
+  // uses, so the preview cannot diverge from the request.
+  const readCents = (id, fallback) => {
+    const raw = $(id)?.value;
+    if(raw == null || String(raw).trim() === '') return fallback;
+    const value = centsToDollars(raw);
+    return Number.isFinite(value) ? value : fallback;
+  };
 
-  const offset = Math.max(0, readFinite('btOffset', 0.02));
-  const exitStop = Math.max(0, readFinite('btExit5m', 0.05));
-  const exitReversal = Math.max(0, readFinite('btExitReversal', 0.02));
+  const offset = Math.max(0, readCents('btOffset', 0.02));
+  const exitStop = Math.max(0, readCents('btExit5m', 0.05));
+  const exitReversal = Math.max(0, readCents('btExitReversal', 0.02));
   const entryDelayPct = Math.max(0, Math.min(100, readFinite('btEntryDelay', 0)));
-  const quoteLo = Math.max(0, Math.min(1.0, readFinite('btQuoteLo', 0.10)));
-  const quoteHi = Math.max(0, Math.min(1.0, readFinite('btQuoteHi', 0.90)));
+  const quoteLo = Math.max(0, Math.min(1.0, readCents('btQuoteLo', 0.10)));
+  const quoteHi = Math.max(0, Math.min(1.0, readCents('btQuoteHi', 0.90)));
   const deadZonePct = Math.max(0, Math.min(100, readFinite('btDeadZoneVal', 10)));
 
   // Geometry is normalized: the same controls apply to 5m and 15m windows.
@@ -13951,10 +14009,12 @@ function setupBacktestInputListeners(){
     });
 
     el.addEventListener('input', () => {
+      validateBacktestInputs();
       updateBacktestParamPreview();
     });
 
     el.addEventListener('change', () => {
+      validateBacktestInputs();
       updateBacktestParamPreview();
       // Parameter and dataset changes are deliberately staged. The operator
       // may change several knobs before explicitly starting the run.

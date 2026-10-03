@@ -77,7 +77,7 @@ each other, both pure/convert-then-render) → T4 (test lock-in). T2 is the larg
   `(c)`; `server/osc_dash.py`: `_jk_label()` prefers `display.canonical_label`.
   Verify: `tests/test_param_registry.py -q` + spec-endpoint tests.
   Depends on: none.
-- [ ] T2 [Design/UI] L — `server/osc_dash.py`: shared helpers + validator;
+- [x] T2 [Design/UI] L — `server/osc_dash.py`: shared helpers + validator;
   backtest HTML (~5776-5842) + cockpit HTML (~6224-6289) cents values/steps/
   min-max (offset `0.1–49`, exits/reversal `0.1–50`, quote `0–100`, pair
   `50–100`); `applyParamSpec()` display wiring + exit `entry_bounds` +
