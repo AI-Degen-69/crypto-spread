@@ -10601,6 +10601,7 @@ function sweepChartOptions(data, detail, isAgg){
     responsive: true,
     maintainAspectRatio: !!detail,
     parsing: false,
+    sweepXVals: xVals,  // Issue #410: x values for the bar-width plugin.
     layout: {
       padding: { left: detail ? 8 : (isAgg ? 6 : 4), right: detail ? 12 : (isAgg ? 8 : 6), top: 12, bottom: 8 }
     },
@@ -10732,7 +10733,7 @@ function openBtChartDetail(seriesKey, title, trigger){
   const colors = sweepChartColors(data, seriesKey, theme);
   btChartDialogInstance = new Chart(canvas.getContext('2d'), {
     type: 'bar',
-    plugins: [sweepZeroLinePlugin()],
+    plugins: [sweepZeroLinePlugin(), sweepBarWidthPlugin],
     data: { datasets: [{ label: 'Total P&L ($)', data: points.map((p, i) => ({x: sweepPointX(data.axis, p, i), y: values[i]})), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
     options: sweepChartOptions(data, true)
   });
@@ -10865,7 +10866,7 @@ function renderSweepVisual(data, submitted, isProgress){
     const aggregateColors = chartColors(null);
     new Chart(aggCtx.getContext('2d'), {
       type: 'bar',
-      plugins: [sweepZeroLinePlugin()],
+      plugins: [sweepZeroLinePlugin(), sweepBarWidthPlugin],
       data: { datasets: [{ label: 'Total P&L ($)', data: xy(points.map(p => (p.overall.total_pnl_cents || 0) / 100)), backgroundColor: aggregateColors, borderColor: aggregateColors, borderWidth: 1 }] },
       options: mkOpts(true)
     });
@@ -10915,7 +10916,7 @@ function renderSweepVisual(data, submitted, isProgress){
     destroyChart(cv);
     new Chart(cv.getContext('2d'), {
       type: 'bar',
-      plugins: [sweepZeroLinePlugin()],
+      plugins: [sweepZeroLinePlugin(), sweepBarWidthPlugin],
       data: { datasets: [{ data: xy(y), backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
       options: mkOpts(false)
     });

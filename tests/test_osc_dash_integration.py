@@ -8338,6 +8338,7 @@ def test_sweep_visual_destroys_detached_chart_instances():
     const sweepChartOptions = () => ({});
     const sweepChartColors = () => [];
     const sweepZeroLinePlugin = () => ({});
+    const sweepBarWidthPlugin = { id: 'sweepBarWidth410' };
     {CATEGORICAL_FN}
     {POINT_X_FN}
     {DESTROY_INSTANCE_FN}
@@ -9300,6 +9301,14 @@ def test_sweep_card_tick_width_source_static():
     assert "options: mkOpts(false)" in html
 
 
+def test_sweep_bar_width_plugin_wired_static():
+    """Issue #410: all three sweep charts register the width plugin with values."""
+    html = osc_dash.FULL_APP_HTML
+    assert html.count("plugins: [sweepZeroLinePlugin(), sweepBarWidthPlugin]") == 3, \
+        "detail, aggregate and card charts must all register the plugin"
+    assert "sweepXVals: xVals" in html, "options must carry x values for the plugin"
+
+
 def test_sweep_pixel_ticks_node():
     """Issue #410: non-uniform axes thin by pixel distance, uniform axes stand still."""
     node_bin = shutil.which("node")
@@ -9771,6 +9780,7 @@ def test_sweep_progress_rerender_keeps_anchor_focus():
     const sweepChartOptions = () => ({});
     const sweepChartColors = () => [];
     const sweepZeroLinePlugin = () => ({});
+    const sweepBarWidthPlugin = { id: 'sweepBarWidth410' };
 
     function Chart(ctx, config) {
       this.canvas = ctx.canvas;
