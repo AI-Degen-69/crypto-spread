@@ -5984,7 +5984,6 @@ textarea:focus-visible,
       <div id="btSweepMeta" class="mono" style="font-size:11px;color:var(--dim)"></div>
       <style>#btSweepMeta:empty{display:none}#btSweepMeta:not(:empty){margin-top:6px;margin-bottom:6px}
       #btSweepMeta .sweep-title{display:flex;flex-wrap:wrap;gap:2px 14px;align-items:baseline;margin-bottom:6px}
-      #btSweepMeta .sweep-title-main{font:600 15px var(--disp);color:var(--tx)}
       #btSweepMeta .sweep-title-sub{font:11px var(--mono);color:var(--dim)}
       #btSweepMeta .sweep-anchor-field{display:inline-flex;align-items:baseline;gap:6px;white-space:nowrap}
       #btSweepMeta .sweep-anchor-label{font:700 9px var(--disp);letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
