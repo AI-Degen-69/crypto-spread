@@ -1,6 +1,6 @@
 # Tasks: Issue #413 — Add Save-as-Template to the Backtest tab
 
-- [ ] **Task 1: Store Module & Documentation** (`backtest/templates.py`, `docs/run-conventions.md`, `docs/glossary.md`)
+- [x] **Task 1: Store Module & Documentation** (`backtest/templates.py`, `docs/run-conventions.md`, `docs/glossary.md`)
   - Implement `normalize_name`, `template_path`, `validate_record`, `save_template`, `read_template`, `list_templates`, `delete_template`.
   - Update `docs/run-conventions.md` and `docs/glossary.md`.
   - Unit tests in `tests/test_backtest_templates.py`.
@@ -19,5 +19,3 @@
 - [x] **Final Verification Gate**
   - `tests/test_backtest_templates.py`: 18 passed.
   - `tests/test_osc_dash_integration.py` + `tests/test_theme_tokens.py`: 348 passed, 1 pre-existing env failure (`test_sweep_categorical_axis_rendering_node` — Windows `node -e` length limit, fails identically on base `7b914a9`).
-  - Run `python -m pytest tests/test_backtest_templates.py -q`.
-  - Run `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`.

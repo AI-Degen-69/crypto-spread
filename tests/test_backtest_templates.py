@@ -456,6 +456,20 @@ def test_api_template_delete_invalid_name(template_client):
     assert resp.status_code in (400, 404)
 
 
+def test_api_template_endpoints_reject_evil_origin(template_client):
+    """State-modifying template endpoints reject cross-origin requests."""
+    _inject_completed_run("run-evil-1")
+    evil = {"Origin": "https://evil.example"}
+    resp = template_client.post(
+        "/api/backtest/templates",
+        json={"name": "x", "run_id": "run-evil-1"},
+        headers=evil,
+    )
+    assert resp.status_code == 403
+    resp2 = template_client.delete("/api/backtest/templates/x", headers=evil)
+    assert resp2.status_code == 403
+
+
 def test_completed_runs_fifo_eviction():
     """_COMPLETED_RUNS evicts oldest entries when exceeding max."""
     import server.osc_dash as mod
