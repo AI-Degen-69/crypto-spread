@@ -5,7 +5,7 @@ stations only append `open` rows.
 
 | ID | Candidate | Discovering station | Evidence | Status | Resolution |
 |---|---|---|---|---|---|
-| N1 | `strategy/config.py:MakerConfig` carries a full second set of live-looking defaults (`max_pair_cost = 0.995`, offset, exit thresholds, dead zone) that nothing consumes — `load()` is the only reader, and neither the trading engine nor the backtest engine constructs it. Its `0.995` is what misled #421's own issue body into citing a "live default" that does not exist | III | `strategy/config.py:17,649,776,832` (definition + defaults + sole `load()` caller); zero importers outside the module | open | — |
+| N1 | `strategy/config.py:MakerConfig` carries a full second set of live-looking defaults (`max_pair_cost = 0.995`, offset, exit thresholds, dead zone) that nothing consumes — `load()` is the only reader, and neither the trading engine nor the backtest engine constructs it. Its `0.995` is what misled #421's own issue body into citing a "live default" that does not exist | III | `strategy/config.py:17,649,776,832` (definition + defaults + sole `load()` caller); zero importers outside the module | published | #426 |
 
 ## Candidates considered and kept without a row
 
