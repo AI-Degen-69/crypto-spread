@@ -12655,14 +12655,12 @@ function validateCockpitInputs() {
     const hi = parseFloat(hiRaw);
     const ok = loRaw !== '' && hiRaw !== '' && !isNaN(lo) && !isNaN(hi)
       && lo >= 0 && lo <= 100 && hi >= 0 && hi <= 100 && lo < hi;
-    for (const el of [quoteLoEl, quoteHiEl]) {
-      if (ok) {
-        el.classList.remove('input-invalid');
-      } else {
-        el.classList.add('input-invalid');
-      }
+    // Add-only: the cents validator above owns removal. Clearing here would
+    // erase a cents hint (e.g. 10.55) whenever the ordering itself passes.
+    if (!ok) {
+      for (const el of [quoteLoEl, quoteHiEl]) el.classList.add('input-invalid');
+      allValid = false;
     }
-    if (!ok) allValid = false;
   }
 
   const applyBtn = $('btnApplyParams');

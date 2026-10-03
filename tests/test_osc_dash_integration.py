@@ -10346,6 +10346,54 @@ def test_cents_validator_rejects_bad_input_node():
     assert "CENTS_VALIDATOR_OK" in proc.stdout
 
 
+def test_cockpit_ordering_never_clears_a_cents_hint_node():
+    """CodeRabbit round 1 (#420): the quote-range ordering block must not
+    erase the cents validator's mark when the ordering itself passes."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    html = osc_dash.FULL_APP_HTML
+    parts = [_extract_cents_helpers(html)]
+    for name in ("validateCentsInput", "validateCockpitInputs"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const _els = {};
+    function mkEl(value, min, max){
+      const cls = new Set();
+      return { value: value, min: min, max: max,
+        classList: { add(c){ cls.add(c); }, remove(c){ cls.delete(c); },
+                     toggle(c, f){ f ? cls.add(c) : cls.delete(c); },
+                     contains(c){ return cls.has(c); } } };
+    }
+    function $(id){ return _els[id] || null; }
+    _els['cockpitOffset'] = mkEl('2', '0.1', '49');
+    _els['cockpitExit'] = mkEl('5', '0.1', '50');
+    _els['cockpitExitReversal'] = mkEl('2', '0.1', '50');
+    _els['cockpitPairCost'] = mkEl('99', '50', '100');
+    _els['cockpitQuoteLo'] = mkEl('10.55', '0', '100');
+    _els['cockpitQuoteHi'] = mkEl('90', '0', '100');
+    assert(validateCockpitInputs() === false, 'two-decimal lo must fail');
+    assert(_els['cockpitQuoteLo'].classList.contains('input-invalid'),
+           'the ordering pass must not clear the cents hint');
+    // Fully valid input stays clean.
+    _els['cockpitQuoteLo'].value = '10';
+    assert(validateCockpitInputs() === true, 'valid input must pass');
+    assert(!_els['cockpitQuoteLo'].classList.contains('input-invalid'),
+           'fixed input must clear');
+    console.log('COCKPIT_ORDERING_HINT_OK');
+    process.exit(0);
+    """
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
+    assert "COCKPIT_ORDERING_HINT_OK" in proc.stdout
+
+
 def test_converted_inputs_ship_cents_attributes_and_no_dollar_labels():
     """Issue #419: every converted input ships cents value/step/min/max."""
     import re
