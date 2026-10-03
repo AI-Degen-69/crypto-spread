@@ -1,108 +1,87 @@
-# Plan — Issue #377: Backtest window detail repeats fill prices, empty Time/Duration
+# Plan — Issue #410: Widen sweep-visual bars, space queue ticks by pixel
 
-Branch: i377/backtest-window-detail-repeats-fill-prices-and-lea | Issue: #377
-Stack: Python 3.12 · FastAPI dashboard (`server/osc_dash.py`, JS renderer embedded) · pure backtest engine (`backtest/engine.py`) · pytest
-Size: **Small** — 2 source files + tests; the end-to-end pipe (`completed_pairs` → `pairs` → `trades_sample` → `pairRec` reader) already exists, work is extending record shape + rendering.
-Task type: **Code, Debug** (user-facing correctness/telemetry bug, no new feature)
+Branch: i410/widen-sweep-visual-bars-and-space-queue-depth-tick | Issue: #410
+Stack: Python dashboard serving embedded Chart.js 4.4.0 UI (`server/osc_dash.py`) · Node-harness tests (`tests/test_osc_dash_integration.py`)
+Size: **Small** — one source file; mechanism de-risked by the CodeRabbit plan + the #390 planner precedent to reuse.
+Task type: **Code, Design/UI** (algorithm + visual rendering)
 
 ## Issue in one line
-The expanded window-detail trade table shows copy-paste fill prices, a timestamp
-only on the first row, and `—` in every Duration cell, so per-trade timing cannot
-be verified. Scope is telemetry-only; #376 owns the cost arithmetic.
+On geometric sweep axes (queue depth) every bar is a 1–2px hairline and tick
+labels pile onto the low end, because thickness follows the smallest gap and
+ticks are chosen by index, not pixel distance.
 
-## Embedded spec (Small — no SPEC.md ceremony)
-- Goal: every pair row shows its own UP/DOWN fill prices (already works via
-  `pairRec`), its own leg-fill timestamps, and a real Duration; every
-  STOP/EXIT row shows entry-fill time + entry-to-exit duration.
-- Acceptance: the issue's 4 checkboxes (per-pair prices/times/durations, stop
-  times/durations, `trades_sample` plumbing + two-pair regression test, both
-  suites green).
-- Edge cases: single-pair windows render unchanged except real values; legacy
-  payloads without timing keys fall back to today's rendering; unresolved
-  settlement shows `—` for exit time; dead-zone close vs adverse-drift exits
-  keep their distinct pill labels; stop-then-pair chronology keeps one running
-  `tradeIdx`.
-- Out of scope: #376 arithmetic, any engine decision-logic change, live trader,
-  sim2, sweep visuals (#410).
+## Embedded spec
+- Goal: bars visibly wider than hairlines, never overlapping; adjacent tick
+  labels ≥ `SWEEP_CARD_TICK_GAP_PX` apart on aggregate card + detail dialog.
+- Acceptance: the issue's 6 checkboxes (wider capped bars, gap-separated ticks,
+  maxTicks budget kept, uniform axes unchanged, 3 new test cases, both suites).
+- Edge cases: 2-point axes, categorical axes (index coordinates — legacy path),
+  single-value/empty sweeps, hidden-tab zero-width canvases (legacy fallback),
+  window resize (planner runs in `afterBuildTicks`, so it re-plans for free).
+- Out of scope: y axis, theme, sweep engine/maths, data, small-card planner.
 
 ## CodeRabbit intake (read once; echo ignored)
-- Adopted: 3-phase skeleton (engine ledger → serializer → renderer + tests);
-  per-leg fill times; executed-exit time for stops (engine only books an exit
-  when an executable bid exists, so the booked tick IS the exit); absolute tick
-  `ts` as wall-clock source; economics-unchanged regression.
-- Rejected: a new `trade_log` field on `WindowResult` — the pipe already exists
-  (`engine.py:1327` record → `engine.py:1523` `pairs=` → `osc_dash.py:2283`
-  `"pairs": w.pairs` → renderer `pairRec` at `osc_dash.py:9426`). Extending the
-  existing record is ~30 lines instead of a new field + two serializers.
-- Recorded deviation: pair Duration = **first-fill-to-merge** (naked-leg
-  exposure), NOT the ticket default second-fill-to-merge — the engine merges on
-  the second-fill tick so the default is always 0s. Matches the existing
-  tooltip ("Time from first fill to merge completion", `osc_dash.py:9457`) and
-  the column header ("Time in market with leg exposure before resolution").
-- Verified seams (spot-checked, `[UNVERIFIED]` count: 0): `WindowResult` +
-  `pairs` field (`engine.py:647/700`), locals (`engine.py:972-973`), fill latch
-  (`engine.py:1295-1303`), merge branch (`engine.py:1305-1350`), naked clock
-  (`engine.py:1355-1359`), dead-zone close (`engine.py:1366-1396`), exits
-  (`engine.py:1404/1428`), settlement (`engine.py:1470-1486`), construction
-  (`engine.py:1491-1524`), `trades_sample` (`osc_dash.py:2254-2283`), merge-row
-  loop + placeholders (`osc_dash.py:9420-9467`), stop rows
-  (`osc_dash.py:9469-9505`). Issue line numbers drifted (file grew); structures
-  confirmed. No missing-persona skip: `code-explorer` not needed (2-file scope,
-  seams verified by direct read).
+- Adopted: per-bar widths (target `0.72 × median` adjacent gap, cap each bar at
+  `0.72 × nearest-neighbor` gap — non-overlap by construction, identical output
+  on uniform axes); public `beforeDatasetsDraw` plugin hook (no private
+  overrides); pixel planner only for non-uniform axes (uniform keeps legacy);
+  linear value→pixel estimate with conservative span at `afterBuildTicks`;
+  width plugin on all three charts, tick change on agg + detail only.
+- Rejected: anything inventing new files/abstractions — all helpers live next
+  to `sweepTickStep`/`sweepTickIndices`; dataset-level `barThickness` and
+  `barThickness: 'flex'` (both overlap or shift centers on uneven gaps).
+- Verified seams (`[UNVERIFIED]`: 0): `sweepChartOptions`/`afterBuildTicks`
+  (`osc_dash.py:10467-10544`), legacy branch (`10527-10529`), planner
+  (`10442-10464`), grids (`sweepAxisValues`, queue geometric), 3 chart
+  constructions (detail `10604`, agg `10737`, cards `10787`), node tests
+  (`test_osc_dash_integration.py:9075-9250`).
 
-## Resolved open questions (from code, not asked)
-- Q1 (per-leg timestamps + duration definition): yes — UP row shows UP-leg fill
-  time, DOWN row shows DOWN-leg fill time; Duration = first-fill-to-merge (see
-  deviation above). No new clock needed: `cur_ts`/`elapsed` are in scope at
-  every site.
-- Q2 (stop rows entry time + entry-to-exit): yes — new `stops` records carry
-  entry + exit timing; renderer iterates them.
+## Resolved open questions (from code/plan, not asked)
+- Bar width: median-gap rule above (deviation from nothing — issue proposed it).
+- Every axis: same rule everywhere; uniform detection makes it a no-op where
+  gaps are equal — no per-axis special-casing.
+- Tick budget: `maxTicks` untouched; only *which* ticks change.
 
 ## Improvement proposal (adopted by default — simplification)
-Extend `completed_pairs` instead of adding `trade_log`. Evidence, verbatim:
-`completed_pairs.append({ "entry_up": resting_up, ... })` (`engine.py:1327`),
-`pairs=completed_pairs` (`engine.py:1523`), `"pairs": w.pairs`
-(`osc_dash.py:2283`), `const pairRec = (t.pairs && t.pairs[m] != null) ?
-t.pairs[m] : null` (`osc_dash.py:9426`). No evidence for a second parallel list;
-a new field would duplicate the existing per-pair pipe. Adopted.
+Reuse `sweepTickStep`/`sweepTickIndices` + `sweepLabelWidthPx` for the agg/detail
+pixel branch instead of a second planner. Evidence, verbatim:
+`const step = sweepTickStep(xVals.length, plotWidthPx, widestPx, SWEEP_CARD_TICK_GAP_PX);`
+(`osc_dash.py:10522`) and
+`scale.ticks = sweepTickIndices(xVals.length, step)` (`osc_dash.py:10524`).
+The small-card path already proves the idiom; the agg branch needs only a wider
+plot width and a non-uniform site selector. Adopted.
 
-## Interfaces (locked before build)
-`completed_pairs` record (additive — existing 4 keys untouched):
-`{entry_up, entry_down, pair_cost, edge_cents, fill_ts_up, fill_elapsed_up,
-fill_ts_down, fill_elapsed_down, resolve_ts, resolve_elapsed, duration_sec}`
-New `WindowResult.stops: list[dict] = field(default_factory=list)` (direct
-constructors keep working; `SURFACE_KEYS` untouched):
-`{kind: dead_zone_close|stop|settle, side, entry_price, entry_ts,
-entry_elapsed, exit_price, exit_ts, exit_elapsed, duration_sec, fees_cents,
-pnl_cents}` — deltas captured from the expressions each branch already
-evaluates, never recomputed.
-`trades_sample` row gains `"stops": w.stops` (`pairs` already passed through).
-Renderer: merge rows read `pairRec.fill_*`/`duration_sec` with fallback to
-`timeStr1`/`—`; stop rows iterate `t.stops` with fallback to the legacy
-single-exit rendering when absent.
+## Interfaces (locked)
+- `sweepIsUniformAxis(xVals)` → bool (all adjacent gaps equal within 1e-9;
+  categorical axes count as uniform — index coordinates).
+- `sweepPixelTickIndices(xVals, plotWidthPx, labels, maxTicks, gapPx)` → kept
+  indices: value→pixel via linear map on conservative span, greedy
+  widest-separation pick within `maxTicks`, first+last anchored when they clear
+  by a full gap (mirrors `sweepTickIndices` last-value rule).
+- `sweepBarWidthsPx(xVals, plotWidthPx)` → per-bar px widths (median target,
+  neighbor cap, `0.72` fill).
+- `sweepBarWidthPlugin` (`beforeDatasetsDraw`): assigns `element.width` from
+  precomputed widths; registered on detail + agg + card charts.
 
 ## Dependency graph & tasks
-T1 (engine records) → T2 (serializer) → T3 (renderer). Risk-first: T1 carries
-the only shape decision, so it runs first.
+T1 (widths, riskiest Chart.js mechanics) → T2 (ticks) → T3 (wiring + proof).
+T1/T2 independent of each other; both pure + node-tested before any wiring.
 
-- [x] T1 [Backend/Logic] M — `backtest/engine.py`: latch per-leg
-  `fill_ts/elapsed` beside the entry-price latch; extend the merge record;
-  append `stops` records at dead-zone close + both adverse exits + terminal
-  settlement; add `WindowResult.stops` defaulted field. Verify: new unit tests
-  (two-pair window timing, stop timing, economics-unchanged) + `pytest
-  tests/test_backtest_engine.py -q`. Depends on: none.
-- [x] T2 [Backend/Logic] S — `server/osc_dash.py` serializer: pass `stops`
-  through `trades_sample`. Verify: integration assertion on row shape +
-  targeted `pytest tests/test_osc_dash_integration.py -q -k "trades_sample"`.
-  Depends on: T1.
-- [x] T3 [Design/UI] M — `server/osc_dash.py` renderer: per-leg Time +
-  Duration on merge rows; `t.stops` iteration on stop rows; legacy fallback.
-  Verify: embedded renderer tests + live browser check of one expanded window
-  (Time/Duration cells populated). Depends on: T2.
+- [x] T1 [Code/Logic] M — `server/osc_dash.py`: `sweepBarWidthsPx` helper +
+  `sweepBarWidthPlugin`; uniform-axis output equals today's fit width.
+  Verify: node-harness tests (geometric queue widths widen + capped,
+  uniform axis unchanged). Depends on: none.
+- [ ] T2 [Code/Logic] M — `server/osc_dash.py`: uniformity detector +
+  pixel tick selector; agg/detail `afterBuildTicks` takes the pixel branch
+  only for non-uniform axes. Verify: node tests (non-uniform selection,
+  budget honored, uniform/categorical byte-identical). Depends on: none.
+- [x] T3 [Design/UI] S — wire plugin into the 3 chart constructions; live
+  browser proof (queue sweep: bars + spaced labels). Verify: full
+  `test_osc_dash_integration.py -q` + `test_theme_tokens.py -q` + gate
+  screenshot. Depends on: T1, T2.
 
-Checkpoint after T1: engine records + unit tests green (one-line progress note,
-not an approval pause — Mode A).
+Checkpoint after T2: pure logic + node tests green.
 
 ## Files NOT to modify
-`tests/test_engine_parity.py`, `strategy/live_trader.py`, `research/sweeps/*`,
-`backtest/index.py`, `docs/*`, `SPEC-319.md`.
+`backtest/*`, `strategy/*`, `research/sweeps/*`, small-card planner body,
+theme tokens, `tests/test_engine_parity.py`.
