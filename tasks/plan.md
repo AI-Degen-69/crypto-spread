@@ -1,34 +1,56 @@
-# Plan: Issue #403 — Investigate and fix empty sweeper results under queue_gate
+# Plan: Issue #398 — Fix inconsistent zero line styling across oscillation charts
 
-Branch: `i403/empty-results-sweeper-queue-gate` | Issue: `#403`
+Branch: `i398/fix-inconsistent-zero-line-styling-across-osc` | Issue: `#398`
 
-## Summary & Findings
-- **Investigation / Root Cause**: Real order-book queue depths for BTC/ETH on Polymarket range from 180 to 1600+ shares (BTC 5m average ~847 shares, max ~1563). The parameter sweeper and dashboard sweep visual only swept queue gate values up to 200 shares (`[0, 10, 25, 50, 100, 200]`). Because `queue_gate` strictly requires resting depth on both legs `q <= queue_gate`, 100% of BTC/ETH ticks were filtered out at every non-zero gate point, yielding empty tables ($0 PnL, 0 pairs captured).
-- **Solution**: Widen the queue sensitivity sweep axis to `[0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]` across `scripts/sweep_backtest.py` and `server/osc_dash.py:SWEEP_AXES`, and include corresponding high-depth sampling in random/joint grids. Add regression tests verifying deep-book windows produce active trades at high queue gate thresholds.
+## Classification & Routing
+- **Size tier**: Small (single file UI styling in `server/osc_dash.py` + tests)
+- **Task type**: Design / UI (`frontend-ui-engineering`, `frontend-design`, `test-driven-development`)
+
+## Summary & Problem Analysis
+- **Problem**: In the oscillation summary tab (`renderSummaryCharts` in `server/osc_dash.py`), charts have inconsistent zero line styling. The sweep visual charts use `sweepZeroLinePlugin()` and custom dashed gold zero-line scale grid configuration, while `cPerAsset`, `cHist`, `cStart`, and `cPair` rely on default Chart.js gridlines without zero-line highlights.
+- **Solution**:
+  1. Add `plugins: [sweepZeroLinePlugin()]` to all oscillation tab charts (`cPerAsset`, `cHist`, `cStart`, `cPair`). Note that for `cStart` (doughnut chart), `sweepZeroLinePlugin` safely guards against missing `chart.scales.y` and gracefully no-ops.
+  2. Apply consistent y-axis zero-line grid styling (gold color, width 2, borderDash `[6, 4]`) across the Cartesian bar charts (`cPerAsset`, `cHist`, `cPair`) matching the sweep charts standard.
+  3. Add regression integration tests in `tests/test_osc_dash_integration.py` ensuring all oscillation tab chart initializations register the plugin and consistent styling.
+
+## CodeRabbit Intake Note
+- Adopted: N/A (no CodeRabbit comment on issue #398).
+- Rejected: N/A.
+- Unverified: N/A.
+
+## Improvement Proposal (Adopted by Default)
+- **Proposal**: Standardize both plugin registration (`plugins: [sweepZeroLinePlugin()]`) and y-scale zero-line grid callbacks across `cPerAsset`, `cHist`, and `cPair` so whether canvas post-drawing or Chart.js grid rendering is evaluated, zero-line styling remains identical in appearance and behavior.
+- **Evidence**: `server/osc_dash.py:10049-10053` sets gold dashed grid at y=0 for sweep charts, and `server/osc_dash.py:9878-9900` defines `sweepZeroLinePlugin`.
 
 ## Tasks
 
-- [x] **Task 1 (S)**: `[Quant/Sweeper]` Widen queue gate axis in `scripts/sweep_backtest.py`
-  - Target files: `scripts/sweep_backtest.py`
-  - Details:
-    - Update `generate_sensitivity_grid()`: set `queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]`.
-    - Update `generate_random_grid()`: preserve legacy stream draws while supporting high queue depth variations.
-    - Update `generate_joint_grid()` default queues to include representative high queue depth (`(0.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0)`).
-  - Depends on: None
-  - Verification: `python -m pytest tests/test_sweep_backtest.py -q`
-
-- [x] **Task 2 (S)**: `[Dashboard/Backend]` Widen queue axis in dashboard sweep visual
+- [x] **Task 1 (S)**: `[Design/UI]` Standardize zero line plugin & grid styling in oscillation tab charts
   - Target files: `server/osc_dash.py`
   - Details:
-    - Update `SWEEP_AXES["queue"] = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]`.
-  - Depends on: Task 1
-  - Verification: `python -m pytest tests/test_osc_dash_integration.py -k "sweep" -q`
+    - In `renderSummaryCharts()`, update `cPerAsset`, `cHist`, `cStart`, and `cPair` Chart initializations:
+      - Add `plugins: [sweepZeroLinePlugin()]` to all 4 charts.
+      - Add unified zero-line `grid` styling to `scales.y` for `cPerAsset`, `cHist`, and `cPair`:
+        - `color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; }`
+        - `lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; }`
+        - `borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }`
+  - Depends on: None
+  - Verification: Targeted browser inspection / node script check
 
-- [x] **Task 3 (S)**: `[Testing]` Add regression unit tests for widened queue sensitivity & high-depth window simulation
-  - Target files: `tests/test_sweep_backtest.py`, `tests/test_osc_dash_integration.py`
+- [x] **Task 2 (S)**: `[Testing]` Add regression integration tests for oscillation charts zero line styling
+  - Target files: `tests/test_osc_dash_integration.py`
   - Details:
-    - Add test verifying `generate_sensitivity_grid` outputs queue labels up to `queue=2000`.
-    - Add test simulating a high-depth window (e.g. depth=600) showing it is blocked at `queue_gate=200` but trades successfully and captures pairs at `queue_gate=1000`.
-    - Verify dashboard `/api/analysis` sweep endpoint returns valid curve data for all widened queue axis points.
+    - Add test checking that `server/osc_dash.py` contains `sweepZeroLinePlugin()` in `cPerAsset`, `cHist`, `cStart`, `cPair` chart configurations.
+    - Verify y-axis grid color/dash styling is present on Cartesian oscillation charts.
+  - Depends on: Task 1
+  - Verification: `python -m pytest tests/test_osc_dash_integration.py -k "oscillation or zero_line" -q`
+
+- [x] **Task 3 (XS)**: `[Verify]` Verify dashboard integration and syntax
+  - Target files: `server/osc_dash.py`
+  - Details:
+    - Run targeted test suite to confirm zero regressions.
   - Depends on: Task 1, Task 2
-  - Verification: `python -m pytest tests/test_sweep_backtest.py -q` && `python -m pytest tests/test_osc_dash_integration.py -k "sweep" -q`
+  - Verification: `python -m pytest tests/test_osc_dash_integration.py -k "summary or oscillation" -q`
+
+## Checkpoints
+- Checkpoint 1 (after Task 1): Oscillation charts in `server/osc_dash.py` configure `sweepZeroLinePlugin` and gold dashed zero line.
+- Checkpoint 2 (after Task 2 & 3): Targeted tests pass with zero regressions.

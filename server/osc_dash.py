@@ -10331,6 +10331,7 @@ async function renderSummaryCharts(){
     destroyChartInstance('cPerAsset');
     new Chart(canvasAsset,{
       type:'bar',
+      plugins:[sweepZeroLinePlugin()],
       data:{
         labels:order,
         datasets:[
@@ -10344,7 +10345,16 @@ async function renderSummaryCharts(){
         plugins:{legend:{position:'bottom',labels:{color:theme.dim}}},
         scales:{
           x:{offset:true,ticks:{color:theme.dim},grid:{color:theme.line}},
-          y:{beginAtZero:true,grace:'15%',ticks:{color:theme.dim},grid:{color:theme.line}}
+          y:{
+            beginAtZero:true,
+            grace:'15%',
+            ticks:{color:theme.dim},
+            grid:{
+              color:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+              lineWidth:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+              borderDash:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
+            }
+          }
         }
       }
     });
@@ -10374,8 +10384,26 @@ async function renderSummaryCharts(){
     destroyChartInstance('cHist');
     new Chart(canvasHist,{
       type:'bar',
+      plugins:[sweepZeroLinePlugin()],
       data:{labels:bLabels,datasets:[{label:'Windows',data:bCounts,backgroundColor:theme.gold}]},
-      options:{responsive:true,layout:{padding:{left:6,right:10,top:12,bottom:6}},plugins:{legend:{display:false}},scales:{x:{offset:true,ticks:{color:theme.dim}},y:{beginAtZero:true,grace:'15%',ticks:{color:theme.dim},grid:{color:theme.line}}}}
+      options:{
+        responsive:true,
+        layout:{padding:{left:6,right:10,top:12,bottom:6}},
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{offset:true,ticks:{color:theme.dim}},
+          y:{
+            beginAtZero:true,
+            grace:'15%',
+            ticks:{color:theme.dim},
+            grid:{
+              color:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+              lineWidth:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+              borderDash:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
+            }
+          }
+        }
+      }
     });
   }
 
@@ -10402,6 +10430,7 @@ async function renderSummaryCharts(){
     destroyChartInstance('cStart');
     new Chart(canvasStart,{
       type:'doughnut',
+      plugins:[sweepZeroLinePlugin()],
       data:{labels:sBuckets,datasets:[{data:sCounts,backgroundColor:[theme.up,theme.proj,theme.gold,theme.down,theme.faint]}]},
       options:{responsive:true,plugins:{legend:{position:'bottom',labels:{color:theme.dim}}}}
     });
@@ -10420,8 +10449,26 @@ async function renderSummaryCharts(){
     destroyChartInstance('cPair');
     new Chart(canvasPair,{
       type:'bar',
+      plugins:[sweepZeroLinePlugin()],
       data:{labels:pBuckets,datasets:[{data:pCounts,backgroundColor:theme.proj}]},
-      options:{responsive:true,layout:{padding:{left:6,right:10,top:12,bottom:6}},plugins:{legend:{display:false}},scales:{x:{offset:true,ticks:{color:theme.dim}},y:{beginAtZero:true,grace:'15%',ticks:{color:theme.dim},grid:{color:theme.line}}}}
+      options:{
+        responsive:true,
+        layout:{padding:{left:6,right:10,top:12,bottom:6}},
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{offset:true,ticks:{color:theme.dim}},
+          y:{
+            beginAtZero:true,
+            grace:'15%',
+            ticks:{color:theme.dim},
+            grid:{
+              color:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
+              lineWidth:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; },
+              borderDash:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }
+            }
+          }
+        }
+      }
     });
   }
 }

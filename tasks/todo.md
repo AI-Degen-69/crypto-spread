@@ -1,5 +1,5 @@
-# Tasks for Issue #403
+# Todo: Issue #398
 
-- [x] Task 1: Widen queue gate axis in `scripts/sweep_backtest.py`
-- [x] Task 2: Widen queue axis in dashboard sweep visual `server/osc_dash.py`
-- [x] Task 3: Add regression unit tests for widened queue sensitivity & high-depth window simulation
+- [x] Task 1 (S): `[Design/UI]` Standardize zero line plugin & grid styling in oscillation tab charts (`server/osc_dash.py`)
+- [x] Task 2 (S): `[Testing]` Add regression integration tests for oscillation charts zero line styling (`tests/test_osc_dash_integration.py`)
+- [x] Task 3 (XS): `[Verify]` Verify dashboard integration and syntax
