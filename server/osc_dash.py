@@ -10519,6 +10519,64 @@ const sweepBarWidthPlugin = {
   }
 };
 
+// Issue #410: uniformity probe for the wide surfaces. Two points or fewer are
+// trivially uniform; a non-finite step disqualifies immediately.
+function sweepIsUniformX(xVals){
+  const n = (xVals || []).length;
+  if (n < 3) return true;
+  const gaps = [];
+  for (let i = 1; i < n; i++) {
+    const g = Number(xVals[i]) - Number(xVals[i - 1]);
+    if (!Number.isFinite(g)) return false;
+    gaps.push(g);
+  }
+  const tol = 1e-9 * Math.max(1, Math.abs(gaps[0]));
+  return gaps.every(g => Math.abs(g - gaps[0]) <= tol);
+}
+
+// Issue #410: pixel-distance tick picker for non-uniform value axes. Positions
+// use the same linear value→pixel map (conservative span) as the widths, so a
+// kept pair is separated on the axis, not just in the index list. Greedy
+// widest-separation within `maxTicks`, first value anchored, last value kept
+// only when it clears by a full need (the sweepTickIndices rule, in pixels).
+// Returns null when the geometry is unmeasurable — the caller keeps legacy.
+function sweepPixelTickIndices(xVals, plotWidthPx, labelW, maxTicks, gapPx){
+  const n = (xVals || []).length;
+  const budget = Math.max(0, Math.floor(Number(maxTicks) || 0));
+  if (n === 0 || budget === 0) return [];
+  const plot = Number(plotWidthPx);
+  if (!Number.isFinite(plot) || plot <= 0) return null;
+  const lo = Math.min.apply(null, xVals);
+  const hi = Math.max.apply(null, xVals);
+  if (!(hi > lo)) return null;
+  const widths = (labelW || []).map(Number).filter(Number.isFinite);
+  const gap = Number.isFinite(Number(gapPx)) ? Number(gapPx) : 0;
+  const need = (widths.length ? Math.max.apply(null, widths) : 0) + gap;
+  if (!Number.isFinite(need) || need <= 0) return null;
+  const span = plot * (n - 1) / n;
+  const pos = xVals.map(v => (Number(v) - lo) / (hi - lo) * span);
+  const cap = Math.min(budget, n);
+  const kept = [0];
+  while (kept.length < cap) {
+    let best = -1;
+    let bestD = -1;
+    for (let i = 0; i < n; i++) {
+      if (kept.indexOf(i) !== -1) continue;
+      let d = Infinity;
+      for (const k of kept) d = Math.min(d, Math.abs(pos[i] - pos[k]));
+      if (d >= need && d > bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) break;
+    kept.push(best);
+  }
+  const last = n - 1;
+  if (kept.indexOf(last) === -1 && kept.length < cap) {
+    const prev = Math.max.apply(null, kept);
+    if (pos[last] - pos[prev] >= need) kept.push(last);
+  }
+  return kept.sort((a, b) => a - b);
+}
+
 function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];
@@ -10578,6 +10636,22 @@ function sweepChartOptions(data, detail, isAgg){
             scale.ticks = sweepTickIndices(xVals.length, step)
               .map(i => ({ value: xVals[i], label: xTickLabel(xVals[i]) }));
             return;
+          }
+          // Issue #410: the aggregate card and the detail dialog thin by pixel
+          // distance on non-uniform axes. Uniform and categorical axes keep the
+          // legacy expression below, byte-identical; an unmeasurable plot falls
+          // back to it rather than a thin budget the chart cannot afford.
+          if (!sweepAxisIsCategorical(data.axis) && !sweepIsUniformX(xVals)) {
+            const canvasPx410 = (scale.chart && scale.chart.canvas) ? scale.chart.canvas.clientWidth : 0;
+            const plotWidthPx410 = (canvasPx410 > 0 && Number.isFinite(scale.width) && scale.width > 0) ? scale.width : 0;
+            if (plotWidthPx410 > 0) {
+              const labelW410 = xVals.map(v => sweepLabelWidthPx(xTickLabel(v)));
+              const kept410 = sweepPixelTickIndices(xVals, plotWidthPx410, labelW410, maxTicks, SWEEP_CARD_TICK_GAP_PX);
+              if (kept410) {
+                scale.ticks = kept410.map(i => ({ value: xVals[i], label: xTickLabel(xVals[i]) }));
+                return;
+              }
+            }
           }
           const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));
           scale.ticks = xVals.filter((value, index) => index % step === 0 || index === xVals.length - 1)

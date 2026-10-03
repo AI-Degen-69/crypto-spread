@@ -9086,6 +9086,7 @@ def _sweep_card_harness() -> str:
     # Issue #388: the chart options resolve their x positions and their tick
     # labels through these two, so the harness carries them too.
     for name in ("sweepLabelWidthPx", "sweepTickStep", "sweepTickIndices",
+                 "sweepIsUniformX", "sweepPixelTickIndices",
                  "formatSweepTickValue", "sweepAxisLabel", "sweepAxisIsCategorical",
                  "sweepPointX", "sweepChartOptions"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
@@ -9249,6 +9250,23 @@ def test_sweep_card_tick_rendering_node():
       });
     });
 
+    // Issue #410: on a non-uniform axis with a measurable plot, the aggregate
+    // card and the detail dialog thin by pixel distance, not by index.
+    const wideQueue = [0, 50, 100, 200, 500, 1000];
+    [['agg', false, true], ['detail', true, false]].forEach(([name, detail, isAgg]) => {
+      const ticks = ticksFor('queue', wideQueue, detail, isAgg, live(600));
+      const budget = detail ? Math.min(14, wideQueue.length) : Math.min(4, wideQueue.length);
+      assert(ticks.length > 0 && ticks.length <= budget, name + ': budget broken: ' + ticks.length);
+      assert(ticks[0].value === 0, name + ': first value unlabelled');
+      const span = 600 * (wideQueue.length - 1) / wideQueue.length;
+      const pos = v => (v - wideQueue[0]) / (wideQueue[wideQueue.length - 1] - wideQueue[0]) * span;
+      const need = Math.max.apply(null, wideQueue.map(v => sweepLabelWidthPx(String(v))))
+        + SWEEP_CARD_TICK_GAP_PX;
+      for (let i = 1; i < ticks.length; i++) {
+        assert(pos(ticks[i].value) - pos(ticks[i - 1].value) >= need,
+               name + ': labels touch at ' + ticks[i - 1].value + ' and ' + ticks[i].value);
+      }
+    });
     // The reported case: 8 points, the narrowest card. The old rule forced the
     // 8th label beside the 7th; now both ends stay readable and far apart.
     const synth = [];
@@ -9280,6 +9298,50 @@ def test_sweep_card_tick_width_source_static():
     assert "const step = Math.max(1, Math.ceil(xVals.length / Math.max(1, maxTicks)));" in html
     assert "options: mkOpts(true)" in html
     assert "options: mkOpts(false)" in html
+
+
+def test_sweep_pixel_ticks_node():
+    """Issue #410: non-uniform axes thin by pixel distance, uniform axes stand still."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    test_js = _sweep_card_harness() + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const queue = [0, 50, 100, 200, 500, 1000];
+    const offset = [0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040];
+    assert(sweepIsUniformX(offset) === true, 'even axis misread');
+    assert(sweepIsUniformX(queue) === false, 'geometric axis misread');
+    assert(sweepIsUniformX([]) === true, 'empty must not throw');
+    assert(sweepIsUniformX([5]) === true, 'a single value is trivially uniform');
+    // Pixel selection on the crowded axis: budget honored, labels separated.
+    const plot = 600;
+    const labels = queue.map(v => sweepLabelWidthPx(String(v)));
+    const kept = sweepPixelTickIndices(queue, plot, labels, 4, SWEEP_CARD_TICK_GAP_PX);
+    assert(kept.length > 0 && kept.length <= 4, 'budget broken: ' + kept);
+    assert(kept[0] === 0, 'first value lost its label');
+    const span = plot * (queue.length - 1) / queue.length;
+    const pos = i => (queue[i] - queue[0]) / (queue[queue.length - 1] - queue[0]) * span;
+    const need = Math.max.apply(null, labels) + SWEEP_CARD_TICK_GAP_PX;
+    for (let i = 1; i < kept.length; i++) {
+      assert(pos(kept[i]) - pos(kept[i - 1]) >= need,
+             'labels touch at ' + kept[i - 1] + ' and ' + kept[i]);
+    }
+    // The low-end pile-up is gone: kept values are not the first four indices.
+    assert(JSON.stringify(kept) !== JSON.stringify([0, 1, 2, 3]),
+           'still index-thinning: ' + kept);
+    // Unmeasurable geometry punts to the legacy branch (null = fall back).
+    assert(sweepPixelTickIndices(queue, 0, labels, 4, SWEEP_CARD_TICK_GAP_PX) === null,
+           'zero plot must fall back');
+    assert(sweepPixelTickIndices([], plot, [], 4, SWEEP_CARD_TICK_GAP_PX).length === 0,
+           'empty must mean no ticks');
+    console.log('SWEEP_PIXEL_TICKS_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_PIXEL_TICKS_OK" in res.stdout
 
 
 def _sweep_width_harness():
