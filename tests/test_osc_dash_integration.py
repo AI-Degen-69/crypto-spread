@@ -5456,8 +5456,8 @@ def test_stop_loss_group_survives_the_form_grid():
     and has its own repeat(4, 1fr) inner grid + 2-col fallback at 900px.
     """
     html = client.get("/").text
-    assert "#btStopLossFields{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}" in html
-    assert "@media(max-width:900px){#btStopLossFields{grid-template-columns:repeat(2,1fr)}}" in html
+    assert "#btStopLossFields{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}" in html
+    assert "@media(max-width:900px){#btStopLossFields{grid-template-columns:repeat(2,minmax(0,1fr))}}" in html
     assert "#btStopLossFields[hidden]{display:none}" in html
     rule = _extract_css_rule(html, "#btStopLossFields")
     assert "display:contents" not in rule, "display:contents must not be present on #btStopLossFields"
