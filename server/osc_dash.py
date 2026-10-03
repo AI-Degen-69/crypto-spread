@@ -1155,8 +1155,16 @@ def api_params_spec():
         review). No knob declares a per-surface override today — the one that
         did, `pair_cost_gate`, was unified with live by issue #227.
         """
+        # Issue #419: `display.entry_bounds` is a tuple in the registry;
+        # normalize to a JSON list so every consumer reads one shape.
+        display = v.get("display")
+        if display is not None:
+            display = dict(display)
+            if isinstance(display.get("entry_bounds"), tuple):
+                display["entry_bounds"] = list(display["entry_bounds"])
         return {
             **v,
+            "display": display,
             "surfaces": list(v["surfaces"]),
             "bounds_by_surface": {
                 s: list(BacktestParams.bounds_for(name, s))
@@ -1254,7 +1262,10 @@ def _jk_label(name: str, entry: dict | None) -> str:
         if m:
             return f"Exit Stop Loss — {m.group(1).upper()} {m.group(2)}"
         return f"Exit Stop Loss — {slug}"
-    return entry["label"]
+    # Issue #419: Jungle King shows dollar manifest values, so converted
+    # knobs keep their canonical dollar label, not the (c) operator label.
+    display = entry.get("display") or {}
+    return display.get("canonical_label", entry["label"])
 
 
 def _jk_baseline(name: str, entry: dict | None) -> Any:

@@ -339,9 +339,31 @@ class BacktestParams:
     # drifted — different labels for one knob, and each missing knobs the other
     # had — because both hand-rolled their own copies. A label, unit, default or
     # bound written anywhere else in the dashboard is a defect.
+    #
+    # Issue #419: cents presentation metadata. Dollars stay the canonical
+    # contract (engine fields, API clamp, hashes, templates); the dashboard
+    # renders these five price knobs in whole-number cents. `display` is the
+    # only place the cents convention lives: `unit` (operator-facing "c"),
+    # `scale` (x100 at the UI edge), `step` (0.1c = venue tick 0.001), and
+    # `canonical_label` (the dollar label Jungle King still shows next to
+    # dollar values). `entry_bounds` (dollars) gives the exit inputs a range
+    # where the canonical `bounds` is None. Venue constants are excluded.
+    _CENTS_DISPLAY: ClassVar[dict[str, dict[str, Any]]] = {
+        "offset": {"unit": "c", "scale": 100, "step": 0.1,
+                   "canonical_label": "Spread Offset ($)"},
+        "max_pair_cost": {"unit": "c", "scale": 100, "step": 0.1,
+                          "canonical_label": "Max Pair Cost ($)"},
+        "quote_range": {"unit": "c", "scale": 100, "step": 0.1,
+                        "canonical_label": "Quotable Range (mid lo/hi)"},
+        "exit_thresh_by_slug": {"unit": "c", "scale": 100, "step": 0.1,
+                                "canonical_label": "Exit Stop Loss ($)",
+                                "entry_bounds": (0.001, 0.50)},
+        "exit_reversal": {"unit": "c", "scale": 100, "step": 0.1,
+                          "canonical_label": "Reversal Buffer ($)"},
+    }
     _PARAM_GROUPS: ClassVar[dict[str, list[tuple]]] = {
         "trading_knobs": [
-            ("offset", "Spread Offset ($)", "You set this live on the book",
+            ("offset", "Spread Offset (c)", "You set this live on the book",
              "$", (0.001, 0.49), ("backtest", "cockpit"), "tuning"),
             ("queue_gate", "Queue Depth Filter (shares)", "You choose how many orders ahead to clear through",
              "shares", (0.0, 100000.0), ("backtest",), "tuning"),
@@ -349,7 +371,7 @@ class BacktestParams:
             # the chase may do at all rather than tuning how it performs. One
             # range on both surfaces — issue #227 deleted the entry-side block
             # whose disabling was the only reason the Backtest wanted 2.0.
-            ("max_pair_cost", "Max Pair Cost ($)", "The most the chase may pay to complete a pair",
+            ("max_pair_cost", "Max Pair Cost (c)", "The most the chase may pay to complete a pair",
              "$", (0.50, 1.00), ("backtest", "cockpit"), "structural"),
             ("quote_shares", "Share Size per Leg", "Your sizing decision",
              "shares", (5, 10000), ("backtest", "cockpit"), "tuning"),
@@ -360,16 +382,16 @@ class BacktestParams:
             # Issue #228: structural limit (ADR-0003) replacing the band and
             # the adverse-open gate. Bounds are the price domain itself; the
             # dashboard renders two inputs (lo/hi), not one knob.
-            ("quote_range", "Quotable Range (mid lo/hi)", "You quote only while the two-sided mid is inside this range",
+            ("quote_range", "Quotable Range (c, mid lo/hi)", "You quote only while the two-sided mid is inside this range",
              "$", (0.0, 1.0), ("backtest", "cockpit"), "structural"),
-            ("exit_thresh_by_slug", "Exit Stop Loss ($)", "Your stop placement — per series / duration",
+            ("exit_thresh_by_slug", "Exit Stop Loss (c)", "Your stop placement — per series / duration",
              "$", None, ("backtest", "cockpit"), "tuning"),
             # Issue #229 / rule §14: what happens to an unpaired leg in the dead zone.
             ("naked_leg_at_expiry", "Naked Leg at Expiry", "close at book (default) or hold to settlement",
              "str", None, ("backtest", "cockpit"), "structural"),
             ("enable_leg_chase", "Leg Chase Enabled", "After one leg fills, re-anchor the other toward its ask within the pair-cost cap",
              "bool", None, ("backtest", "cockpit"), "tuning"),
-            ("exit_reversal", "Reversal Buffer ($)", "How far back toward 0.50 cancels a stop you were about to take",
+            ("exit_reversal", "Reversal Buffer (c)", "How far back toward 0.50 cancels a stop you were about to take",
              "$", (0.001, 0.50), ("backtest", "cockpit"), "tuning"),
         ],
         "execution_assumptions": [
@@ -496,6 +518,11 @@ class BacktestParams:
                     "default": defaults[fname], "bounds": bounds,
                     "surfaces": tuple(surfaces),
                     "param_class": param_class,
+                    # Issue #419: cents presentation for the five price
+                    # knobs, or None. Tuple length, unit, bounds, default
+                    # and bounds_for() stay on the dollar contract.
+                    "display": copy.deepcopy(cls._CENTS_DISPLAY[fname])
+                    if fname in cls._CENTS_DISPLAY else None,
                 }
             out[group_name] = grp
         return out
