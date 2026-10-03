@@ -10464,6 +10464,61 @@ function sweepTickIndices(count, step){
   return kept;
 }
 
+// Issue #410: per-bar widths for non-uniform value axes. Chart.js sizes every
+// bar from the *smallest* adjacent gap, so a geometric axis (queue depth)
+// throttles all bars to the crowded low end. The target is FILL × the median
+// adjacent gap and each bar is capped at FILL × its own nearest-neighbour gap,
+// so neighbours provably never overlap ((w_i + w_j)/2 ≤ FILL·gap < gap) while
+// uniform axes get exactly the Chart.js fit width. Positions use the same
+// linear value→pixel map (conservative span) the tick planner assumes.
+const SWEEP_BAR_FILL = 0.72;  // Chart.js categoryPercentage 0.8 × barPercentage 0.9
+function sweepBarWidthsPx(xVals, plotWidthPx){
+  const vals = Array.isArray(xVals) ? xVals.map(Number) : [];
+  const n = vals.length;
+  const out = new Array(n).fill(0);
+  const plot = Number(plotWidthPx);
+  if (n === 0 || !Number.isFinite(plot) || plot <= 0) return out;
+  const lo = Math.min.apply(null, vals);
+  const hi = Math.max.apply(null, vals);
+  if (!(hi > lo)) {
+    for (let i = 0; i < n; i++) out[i] = SWEEP_BAR_FILL * plot / n;
+    return out;
+  }
+  const span = plot * (n - 1) / n;
+  const px = v => (v - lo) / (hi - lo) * span;
+  const gaps = [];
+  for (let i = 1; i < n; i++) gaps.push(Math.max(0, px(vals[i]) - px(vals[i - 1])));
+  const ordered = gaps.slice().sort((a, b) => a - b);
+  const target = SWEEP_BAR_FILL * ordered[Math.floor(ordered.length / 2)];
+  for (let i = 0; i < n; i++) {
+    const left = i > 0 ? gaps[i - 1] : Infinity;
+    const right = i < n - 1 ? gaps[i] : Infinity;
+    out[i] = Math.max(0, Math.min(target, SWEEP_BAR_FILL * Math.min(left, right)));
+  }
+  return out;
+}
+
+// Issue #410: public-hook width applier (no private controller overrides).
+// The chart's x values ride on `options.sweepXVals`; the plugin derives widths
+// from the just-laid-out scale on every draw, so resizes re-plan for free.
+const sweepBarWidthPlugin = {
+  id: 'sweepBarWidth410',
+  beforeDatasetsDraw(chart){
+    const opts = (chart.config && chart.config.options) || {};
+    const xVals = opts.sweepXVals;
+    if (!xVals || !xVals.length) return;
+    const scale = chart.scales ? chart.scales.x : null;
+    const plot = (scale && Number.isFinite(scale.width) && scale.width > 0) ? scale.width : 0;
+    if (!plot) return;
+    const widths = sweepBarWidthsPx(xVals, plot);
+    const meta = chart.getDatasetMeta ? chart.getDatasetMeta(0) : null;
+    const data = (meta && meta.data) ? meta.data : [];
+    for (let i = 0; i < data.length && i < widths.length; i++) {
+      if (data[i] && widths[i] > 0) data[i].width = widths[i];
+    }
+  }
+};
+
 function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];

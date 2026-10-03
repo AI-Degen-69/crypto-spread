@@ -9282,6 +9282,64 @@ def test_sweep_card_tick_width_source_static():
     assert "options: mkOpts(false)" in html
 
 
+def _sweep_width_harness():
+    """Extract the issue-#410 bar-width helpers from the shipped page."""
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    found_fill = re.search(r"const SWEEP_BAR_FILL = ([\d.]+);", html)
+    assert found_fill is not None, "SWEEP_BAR_FILL is no longer a top-level const"
+    parts.append(f"const SWEEP_BAR_FILL = {found_fill.group(1)};")
+    for name in ("sweepBarWidthsPx", "sweepBarWidthPlugin"):
+        found = re.search(rf"(function {name}\(.*?\n\}}|const {name} = .*?\n\}};)", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level declaration"
+        parts.append(found.group(0))
+    return "\n".join(parts)
+
+
+def test_sweep_bar_widths_node():
+    """Issue #410: bars size from the median gap, capped by each neighbour."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+
+    test_js = _sweep_width_harness() + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const FILL = 0.72;
+    // Geometric queue axis: the crowded low end must not throttle every bar.
+    const queue = [0, 50, 100, 200, 500, 1000];
+    const plot = 600;
+    const widths = sweepBarWidthsPx(queue, plot);
+    assert(widths.length === queue.length, 'one width per bar');
+    assert(widths.every(w => Number.isFinite(w) && w > 0), 'widths must be positive');
+    const span = plot * (queue.length - 1) / queue.length;
+    const px = v => (v - queue[0]) / (queue[queue.length - 1] - queue[0]) * span;
+    // Proven non-overlap: two neighbours never wider than their gap.
+    for (let i = 1; i < queue.length; i++) {
+      const gap = px(queue[i]) - px(queue[i - 1]);
+      assert((widths[i - 1] + widths[i]) / 2 <= gap + 1e-9,
+             'bars ' + (i - 1) + ' and ' + i + ' overlap');
+    }
+    // Wider than the hairline the minimum gap would dictate.
+    const minGapPx = Math.min.apply(null, queue.slice(1).map((v, i) => px(v) - px(queue[i])));
+    assert(Math.max.apply(null, widths) > FILL * minGapPx + 1,
+           'no bar escaped the minimum-gap hairline');
+    // Uniform axis: identical widths, exactly the Chart.js fit width.
+    const uni = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04];
+    const uw = sweepBarWidthsPx(uni, plot);
+    const ugap = plot * (uni.length - 1) / uni.length / (uni.length - 1);
+    assert(uw.every(w => Math.abs(w - FILL * ugap) < 1e-9), 'uniform widths moved: ' + uw);
+    // Plugin shape: a public hook the charts can register.
+    assert(sweepBarWidthPlugin && sweepBarWidthPlugin.beforeDatasetsDraw instanceof Function,
+           'the plugin exposes no beforeDatasetsDraw hook');
+    console.log('SWEEP_BAR_WIDTHS_OK');
+    process.exit(0);
+    """
+    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
+                         encoding="utf-8", timeout=15)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "SWEEP_BAR_WIDTHS_OK" in res.stdout
+
+
 def test_sweep_categorical_axis_set_matches_the_server_derivation():
     """Issue #388: the two categorical sets are one contract, not two guesses.
 
