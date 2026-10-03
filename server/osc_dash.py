@@ -9416,6 +9416,21 @@ function renderBacktestTradesPage() {
 
         let subRows = '';
         let tradeIdx = 1;
+        // Issue #377: per-round timing from the engine ledger. Records may be
+        // absent (legacy payloads) or lack timing keys — every read falls back
+        // to the window-level rendering used before.
+        const fmtElapsed377 = (sec) => {
+          const e = Math.round(Number(sec) || 0);
+          const mm = Math.floor(e / 60); const ss = e % 60;
+          return `${mm}:${ss < 10 ? '0' : ''}${ss}`;
+        };
+        const fmtFillTime377 = (ts, el) => {
+          if (ts == null && el == null) return null;
+          const eStr = fmtElapsed377(el || 0);
+          const lt = (ts != null && Number(ts) > 1000000000)
+            ? new Date(Number(ts) * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
+          return lt ? `${lt} (${eStr})` : eStr;
+        };
 
         if (mergesCount > 0 || t.both_filled) {
           const nMerges = Math.max(1, mergesCount);
@@ -9449,19 +9464,23 @@ function renderBacktestTradesPage() {
               }
             }
 
+            const upTime377 = (pairRec != null ? fmtFillTime377(pairRec.fill_ts_up, pairRec.fill_elapsed_up) : null) || (m === 0 ? timeStr1 : '—');
+            const dnTime377 = (pairRec != null ? fmtFillTime377(pairRec.fill_ts_down, pairRec.fill_elapsed_down) : null) || '—';
+            const durStr377 = (pairRec != null && pairRec.duration_sec != null) ? fmtElapsed377(pairRec.duration_sec) : '—';
+
             subRows += `<tr style="border-bottom:none">`
               + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
               + `<td style="font-weight:700;color:var(--up)">UP</td>`
-              + `<td class="mono" style="font-size:11px">${m === 0 ? timeStr1 : '—'}</td>`
+              + `<td class="mono" style="font-size:11px">${upTime377}</td>`
               + `<td class="mono">${upPrice}</td>`
               + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);background:rgba(255,255,255,0.01)">${pCostStr}</td>`
-              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time from first fill to merge completion">—</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time from first fill to merge completion">${durStr377}</td>`
               + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)"><span class="pill pill-osc" title="Completed pair merged 1:1 on Polymarket CTF">MERGED</span></td>`
               + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--up);background:rgba(16,185,129,0.04)">${pnlCell}</td>`
               + `</tr>`
               + `<tr style="border-top:none">`
               + `<td style="font-weight:700;color:var(--down)">DOWN</td>`
-              + `<td class="mono" style="font-size:11px;color:var(--dim)">—</td>`
+              + `<td class="mono" style="font-size:11px;color:var(--dim)">${dnTime377}</td>`
               + `<td class="mono">${dnPrice}</td>`
               + `</tr>`;
           }
@@ -9484,22 +9503,44 @@ function renderBacktestTradesPage() {
             ? `<span class="pill pill-flat" style="color:var(--gold)" title="${statusTitle}">DEAD_ZONE</span>`
             : `<span class="pill pill-mono" style="color:var(--down)" title="${statusTitle}">STOP_LOSS</span>`;
 
-          const nStops = Math.max(1, stopsCount);
+          // Issue #377: one row per stop record when the ledger is present;
+          // legacy single-exit aggregates otherwise (old payloads unchanged).
+          const stopRecs377 = (t.stops && t.stops.length)
+            ? t.stops.filter(r => r && (r.kind === 'stop' || r.kind === 'dead_zone_close')) : null;
+          const nStops = stopRecs377 ? stopRecs377.length : Math.max(1, stopsCount);
           for (let s = 0; s < nStops; s++) {
+            const rec377 = stopRecs377 ? stopRecs377[s] : null;
+            const entryPrice377 = (rec377 && rec377.entry_price != null) ? Number(rec377.entry_price) : entryPrice;
+            const entrySide377 = (rec377 && rec377.side) ? String(rec377.side).toUpperCase() : entrySide;
+            const exPrice377 = (rec377 && rec377.exit_price != null) ? '$' + Number(rec377.exit_price).toFixed(3) : exPrice;
+            const stopTime377 = (rec377 ? fmtFillTime377(rec377.entry_ts, rec377.entry_elapsed) : null) || (mergesCount === 0 && s === 0 ? timeStr1 : '—');
+            const stopDur377 = (rec377 && rec377.duration_sec != null) ? fmtElapsed377(rec377.duration_sec) : '—';
+            let stopPnlHtml377 = `${exPnlUsd} (${exPctStr})`;
+            if (rec377 && rec377.pnl_cents != null) {
+              const rPnl = Number(rec377.pnl_cents) * size;
+              const rInv = size * entryPrice377;
+              const rPct = rInv > 0 ? ((rPnl / 100) / rInv * 100).toFixed(1) : '0.0';
+              stopPnlHtml377 = `${fmtUsd(rPnl, true)} (${(rPct >= 0 ? '+' : '') + rPct}%)`;
+            }
+            const pill377 = rec377
+              ? (rec377.kind === 'dead_zone_close'
+                ? `<span class="pill pill-flat" style="color:var(--gold)" title="${statusTitle}">DEAD_ZONE</span>`
+                : `<span class="pill pill-mono" style="color:var(--down)" title="${statusTitle}">STOP_LOSS</span>`)
+              : statusPill;
             subRows += `<tr style="border-bottom:none">`
               + `<td rowspan="2" class="mono" style="font-weight:700;text-align:center;vertical-align:middle;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
-              + `<td style="font-weight:700;color:${entrySide==='UP'?'var(--up)':'var(--down)'}">${entrySide}</td>`
-              + `<td class="mono" style="font-size:11px">${mergesCount === 0 && s === 0 ? timeStr1 : '—'}</td>`
-              + `<td class="mono">$${Number(entryPrice).toFixed(3)}</td>`
+              + `<td style="font-weight:700;color:${entrySide377==='UP'?'var(--up)':'var(--down)'}">${entrySide377}</td>`
+              + `<td class="mono" style="font-size:11px">${stopTime377}</td>`
+              + `<td class="mono">$${Number(entryPrice377).toFixed(3)}</td>`
               + `<td rowspan="2" class="mono" style="vertical-align:middle;border-left:1px solid var(--line);border-right:1px solid var(--line);color:var(--dim)">—</td>`
-              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time in market before stop loss triggered">—</td>`
-              + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)">${statusPill}</td>`
-              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--down);background:rgba(239,68,68,0.04)">${exPnlUsd} (${exPctStr})</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;border-right:1px solid var(--line)" title="Time in market before stop loss triggered">${stopDur377}</td>`
+              + `<td rowspan="2" style="vertical-align:middle;border-right:1px solid var(--line)">${pill377}</td>`
+              + `<td rowspan="2" class="mono" style="vertical-align:middle;font-weight:700;color:var(--down);background:rgba(239,68,68,0.04)">${stopPnlHtml377}</td>`
               + `</tr>`
               + `<tr style="border-top:none">`
               + `<td style="font-weight:700;color:var(--dim)">EXIT</td>`
               + `<td class="mono" style="font-size:11px;color:var(--dim)">—</td>`
-              + `<td class="mono">${exPrice}</td>`
+              + `<td class="mono">${exPrice377}</td>`
               + `</tr>`;
           }
         }
@@ -9507,6 +9548,9 @@ function renderBacktestTradesPage() {
         if (isSingleLegSettled) {
           const filledSide = t.up_filled ? 'UP' : 'DOWN';
           const entryPrice = (t.up_filled ? t.entry_up : t.entry_down) || 0.50;
+          // Issue #377: entry-fill time from the settle record when present.
+          const settleRec377 = ((t.stops || []).find(r => r && r.kind === 'settle')) || null;
+          const settleTime377 = (settleRec377 ? fmtFillTime377(settleRec377.entry_ts, settleRec377.entry_elapsed) : null) || timeStr1;
           const settleMark = t.settlement_mid != null ? Number(t.settlement_mid).toFixed(3) : '—';
           const pnlUsdSingle = fmtUsd(t.pnl_cents, true);
           const sInvested = size * entryPrice;
@@ -9517,7 +9561,7 @@ function renderBacktestTradesPage() {
           subRows += `<tr>`
             + `<td class="mono" style="font-weight:700;text-align:center;border-right:1px solid var(--line);background:rgba(255,255,255,0.015)">#${tradeIdx++}</td>`
             + `<td style="font-weight:700;color:${filledSide === 'UP' ? 'var(--up)' : 'var(--down)'}">${filledSide}</td>`
-            + `<td class="mono" style="font-size:11px">${timeStr1}</td>`
+            + `<td class="mono" style="font-size:11px">${settleTime377}</td>`
             + `<td class="mono">$${Number(entryPrice).toFixed(3)}</td>`
             + `<td class="mono" style="color:var(--dim)">—</td>`
             + `<td class="mono" title="Held through expiry into settlement">Expiry</td>`
