@@ -9605,4 +9605,98 @@ def test_sweep_progress_rerender_keeps_anchor_focus():
     assert "SWEEP_PROGRESS_FOCUS_PRESERVED_OK" in res.stdout
 
 
+def test_oscillation_charts_zero_line_styling():
+    """Verify that all oscillation tab charts configure consistent zero line plugin and styling."""
+    from server import osc_dash
+    import re
+    import shutil
+    import subprocess
+
+    html_content = osc_dash.FULL_APP_HTML
+    assert "async function renderSummaryCharts()" in html_content
+
+    # Extract renderSummaryCharts body
+    render_match = re.search(r"async function renderSummaryCharts\(\)\s*\{([\s\S]*?)\n\}\n\n// Tick Files Manifest", html_content)
+    assert render_match, "renderSummaryCharts function must be present"
+    body = render_match.group(1)
+
+    # Check that all 4 oscillation charts register sweepZeroLinePlugin()
+    assert body.count("sweepZeroLinePlugin()") >= 4, "All 4 oscillation charts must register sweepZeroLinePlugin()"
+
+    # Check y-scale grid callbacks for Cartesian bar charts
+    assert "borderDash:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }" in body or \
+           "borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }" in body
+    assert "lineWidth:function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; }" in body or \
+           "lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; }" in body
+
+    # Run execution test in node if available
+    node_bin = shutil.which("node")
+    if not node_bin:
+        return
+
+    node_script = """
+    const theme = { gold: '#ffd700', up: '#33c9b5', down: '#f0684d', line: '#222', dim: '#888', proj: '#4fa' };
+    const getThemeTokens = () => theme;
+    const renderOscillationHero = () => {};
+    const destroyChartInstance = () => {};
+    const sweepZeroLinePlugin = () => ({ id: 'sweepZeroLine' });
+
+    const createdCharts = {};
+    function Chart(canvas, config) {
+      createdCharts[canvas.id] = config;
+    }
+
+    const elements = {
+      cPerAsset: { id: 'cPerAsset' },
+      cHist: { id: 'cHist' },
+      cStart: { id: 'cStart' },
+      cPair: { id: 'cPair' }
+    };
+    const $ = id => elements[id] || null;
+
+    global.fetch = async (url) => ({
+      json: async () => {
+        if (url.includes('oscillation')) {
+          return { summary: { per_series: { 'btc-5m': { label: 'BTC 5m', oscillating: 10, monotonic: 2 } } } };
+        }
+        return { hist_max: { 0: 5 }, hist_start: { 0: 3 }, rows: [{ max_up: 0.1, max_down: 0.05, start_mid: 0.51, touch_pair_median: 1.01 }] };
+      }
+    });
+
+    async function renderSummaryCharts() {
+    """ + body + """
+    }
+
+    (async () => {
+      await renderSummaryCharts();
+      const ids = ['cPerAsset', 'cHist', 'cStart', 'cPair'];
+      for (const id of ids) {
+        if (!createdCharts[id]) throw new Error('Missing chart for ' + id);
+        const plugins = createdCharts[id].plugins || [];
+        if (!plugins.some(p => p.id === 'sweepZeroLine')) {
+          throw new Error('Missing sweepZeroLine plugin on ' + id);
+        }
+      }
+      // Check grid styling on all Cartesian oscillation charts
+      const cartesianIds = ['cPerAsset', 'cHist', 'cPair'];
+      for (const cid of cartesianIds) {
+        const yGrid = createdCharts[cid].options.scales.y.grid;
+        if (!yGrid) throw new Error('Missing y.grid on ' + cid);
+        if (yGrid.color({ tick: { value: 0 } }) !== theme.gold) throw new Error('yGrid zero color mismatch on ' + cid);
+        if (yGrid.lineWidth({ tick: { value: 0 } }) !== 2) throw new Error('yGrid zero lineWidth mismatch on ' + cid);
+        const dash = yGrid.borderDash({ tick: { value: 0 } });
+        if (!dash || dash[0] !== 6 || dash[1] !== 4) throw new Error('yGrid zero borderDash mismatch on ' + cid);
+      }
+
+      console.log('OSCILLATION_CHARTS_ZERO_LINE_OK');
+    })();
+    """
+
+    res = subprocess.run([node_bin, "-"], input=node_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
+    assert "OSCILLATION_CHARTS_ZERO_LINE_OK" in res.stdout
+
+
+
+
 
