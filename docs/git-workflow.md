@@ -53,7 +53,7 @@ that *produces* the work is documented in `docs/issue-workflow.md`; the older
   `<type>(<scope>): <imperative summary> (#<issue>)` (set automatically by
   `iv-review-build-and-pr`). Enforced by `.coderabbit.yaml` at `mode: error`;
   a mismatched title blocks merge.
-  - Worked example: `feat(backtest): a Stop control for backtest and sweep runs (#383)`
+  - Worked example: `feat(backtest): add a Stop control for backtest and sweep runs (#383)`
 - **Merge:** squash-merge; the squash commit title keeps the conventional
   format but references the *PR* number, `feat(scope): summary (#PR)` —
   matching `git log` history. Don't "fix" either number into the other.
