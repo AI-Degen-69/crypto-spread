@@ -3585,6 +3585,38 @@ def test_api_live_cockpit_endpoints(monkeypatch):
         client.post("/api/live/control", json={"action": "reset_pnl"})
 
 
+def test_stopped_engine_echoes_the_configured_pair_cost(monkeypatch):
+    """Issue #421: the cockpit hydrates pair cost from the engine, so a stopped
+    engine must really hold the configured value.
+
+    0.995 is the boundary worth pinning: it is neither a whole cent nor
+    roundable to one without losing the value, so it survives the helper and
+    the engine clamp [0.50, 1.00] unchanged. Isolated engine — the endpoint
+    resolves the process-global singleton, which this test never touches.
+    """
+    from strategy.live_trader import LiveTraderEngine
+
+    engine = LiveTraderEngine(load_persisted=False)
+    monkeypatch.setattr(osc_dash, "get_live_trader_engine", lambda: engine)
+
+    # The fresh trading engine starts at 0.99 — MakerConfig's 0.995 is a
+    # different object and never reaches this one. The cockpit now shows
+    # whatever the trading engine holds, so pin what "fresh" means.
+    assert engine.max_pair_cost == 0.99
+
+    res_cfg = client.post("/api/live/config", json={"max_pair_cost": 0.995})
+    assert res_cfg.status_code == 200
+
+    d_state = client.get("/api/live/state").json()
+    assert d_state["is_running"] is False
+    assert d_state["params"]["max_pair_cost"] == 0.995
+
+    # The clamp is the engine's, not the API's: below the floor the payload
+    # field rejects, above it the engine clamps down.
+    assert client.post("/api/live/config", json={"max_pair_cost": 1.01}).status_code == 422
+    assert engine.update_config(max_pair_cost=1.0)["params"]["max_pair_cost"] == 1.0
+
+
 def test_reset_pnl_endpoint_refuses_while_live_running(monkeypatch):
     """Issue #93: reset_pnl on a live running engine → 409 + Stop-first message."""
     from unittest.mock import MagicMock
@@ -10224,6 +10256,10 @@ def test_cents_helpers_convert_exactly_at_the_ui_edge_node():
     assert(dollarsToCents(0.001) === 0.1, dollarsToCents(0.001));
     assert(dollarsToCents(0.99) === 99, dollarsToCents(0.99));
     assert(dollarsToCents(0.50) === 50, dollarsToCents(0.50));
+    // Issue #421: the pair-cost structural limit is settable at one decimal of
+    // a cent, so the cockpit field and the helper must agree on 0.995 -> 99.5.
+    assert(dollarsToCents(0.995) === 99.5, dollarsToCents(0.995));
+    assert(centsToDollars(99.5) === 0.995, centsToDollars(99.5));
     assert(formatCents(0.05) === '5c', formatCents(0.05));
     assert(formatCents(0.105) === '10.5c', formatCents(0.105));
     assert(formatCents(0.90) === '90c', formatCents(0.90));
@@ -10436,3 +10472,59 @@ def test_converted_inputs_ship_cents_attributes_and_no_dollar_labels():
     for helper in ("centsToDollars", "dollarsToCents", "formatCents",
                    "validateCentsInput", "validateBacktestInputs"):
         assert f"function {helper}(" in html, f"{helper} missing from the page"
+
+
+def test_cockpit_hydrates_every_engine_param_in_both_branches():
+    """Issue #421: no cockpit input may be hydrated in only one branch.
+
+    `cockpitPairCost` shipped with no hydration at all, so it displayed the
+    hardcoded `99` and wrote it back over the trading engine's own value on
+    Apply. A whole-file search for the id would not catch that: the id lives in
+    the HTML attribute, the lock list and the validator. Each branch is sliced
+    out on its own anchors and checked separately.
+    """
+    import re
+    html = client.get("/").text
+    run_at = html.index("// Sync strategy parameter fields from engine state while running.")
+    init_at = html.index("if (!hasInitializedCockpitFilters && st.selected_series) {")
+    branches = {
+        "running": html[run_at:init_at],
+        "first-init": html[init_at:html.index("else if (st.is_running && st.selected_series)", init_at)],
+    }
+    converted = "$('cockpitPairCost').value = dollarsToCents(st.params.max_pair_cost);"
+
+    hydrated = {}
+    for name, block in branches.items():
+        # Every hydrated input reads `st.params.<key>` behind a guard — never a
+        # literal, which is the shape this whole ticket is about.
+        keys = re.findall(r"\$\('(cockpit\w+)'\) && st\.params\.(\w+) != null", block)
+        assert keys, f"{name}: no params hydration found in the branch"
+        assert all(not re.search(rf"\$\('{el}'\)\.value = ['\"]?\d", block)
+                   for el, _ in keys), f"{name}: a cockpit input is set to a literal"
+        assert dict(keys)["cockpitPairCost"] == "max_pair_cost", (
+            f"{name}: pair cost is not hydrated from the engine's max_pair_cost")
+        # Checked per branch, not page-wide: a page-wide match is satisfied by
+        # the *other* branch, so one of them could regress to a raw float
+        # assignment and the field would render 0.995 into a cents input.
+        assert converted in block, (
+            f"{name}: pair cost does not go through dollarsToCents in this branch")
+        hydrated[name] = keys
+
+    # Same fields, same order, in both branches: a field that quietly drops out
+    # of one of them is stale on that path and no single-branch check would see it.
+    assert hydrated["running"] == hydrated["first-init"], (
+        f"the two branches hydrate different fields: "
+        f"{hydrated['running']} vs {hydrated['first-init']}")
+    assert hydrated["running"] == [
+        ("cockpitOffset", "offset"),
+        ("cockpitExit", "exit_thresh"),
+        ("cockpitExitReversal", "exit_reversal"),
+        ("cockpitPairCost", "max_pair_cost"),
+        ("cockpitShares", "shares"),
+        ("cockpitDeadZoneVal", "dead_zone_val"),
+        ("cockpitDeadZoneUnit", "dead_zone_unit"),
+        ("cockpitNakedLegAtExpiry", "naked_leg_at_expiry"),
+        ("cockpitWsAuthority", "ws_book_authority"),
+        ("cockpitQuoteLo", "quote_range"),
+        ("cockpitQuoteHi", "quote_range"),
+    ], "the hydrated cockpit field list changed — update this pin deliberately"

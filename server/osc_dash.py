@@ -12838,6 +12838,11 @@ function renderCockpitUI(st) {
       if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = dollarsToCents(st.params.offset);
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = dollarsToCents(st.params.exit_thresh);
       if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = dollarsToCents(st.params.exit_reversal);
+      // Issue #421: max_pair_cost is a structural limit the trading engine
+      // enforces; a field that never reads it back both displays a stale number
+      // and writes that stale number over the engine's on Apply. Same guard as
+      // its siblings.
+      if ($('cockpitPairCost') && st.params.max_pair_cost != null) $('cockpitPairCost').value = dollarsToCents(st.params.max_pair_cost);
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
@@ -12860,6 +12865,9 @@ function renderCockpitUI(st) {
       if ($('cockpitOffset') && st.params.offset != null) $('cockpitOffset').value = dollarsToCents(st.params.offset);
       if ($('cockpitExit') && st.params.exit_thresh != null) $('cockpitExit').value = dollarsToCents(st.params.exit_thresh);
       if ($('cockpitExitReversal') && st.params.exit_reversal != null) $('cockpitExitReversal').value = dollarsToCents(st.params.exit_reversal);
+      // Issue #421: same line in the first-init branch as in the running one —
+      // a field hydrated in only one branch is stale on the other path.
+      if ($('cockpitPairCost') && st.params.max_pair_cost != null) $('cockpitPairCost').value = dollarsToCents(st.params.max_pair_cost);
       if ($('cockpitShares') && st.params.shares != null) $('cockpitShares').value = st.params.shares;
       if ($('cockpitDeadZoneVal') && st.params.dead_zone_val != null) $('cockpitDeadZoneVal').value = st.params.dead_zone_val;
       if ($('cockpitDeadZoneUnit') && st.params.dead_zone_unit != null) $('cockpitDeadZoneUnit').value = st.params.dead_zone_unit;
