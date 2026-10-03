@@ -885,18 +885,33 @@ def test_entry_delay_holds_quotes_until_expiry():
 
 
 def test_entry_delay_anchors_quotes_post_delay():
-    # Mid 0.50 before t=60, 0.55 after. Delay=60 must anchor at 0.55
-    # (resting_up 0.53), not at the 0.50 open (0.48).
+    # Set-and-wait (rule 1): mid 0.50 before t=60, 0.55 after. Delay=60 holds
+    # placement, but the anchor latches at the 0.50 OPEN (resting 0.48/0.48),
+    # not at the 0.55 mid of the placement tick. Prints at the latched price
+    # fill after expiry; prints at the post-delay price do not.
     def mid_fn(i):
         return 0.50 if i < 60 else 0.55
     snaps = _window_snaps(
-        70, mid_fn, lambda i: _tape_both(0.53, 0.43) if i >= 60 else [],
+        70, mid_fn, lambda i: _tape_both(0.48, 0.48) if i >= 60 else [],
         up_ask_fn=lambda i: 0.49 if i < 60 else 0.555,
         down_ask_fn=lambda i: 0.49 if i < 60 else 0.4525)
     w = _simulate_window(snaps, BacktestParams(entry_delay_sec=60.0))
     assert w.pair_captured is True
-    assert w.entry_price_up == 0.53
-    assert w.entry_price_down == 0.43
+    assert w.entry_price_up == 0.48
+    assert w.entry_price_down == 0.48
+
+    # Control: the same window printing at the post-delay price (0.53/0.43),
+    # with both asks held away from the latched 0.48, captures nothing --
+    # that price was never quoted. (The fixture's natural DOWN ask sits
+    # through a stale 0.48 and would fill via the book rule; holding it away
+    # isolates the anchor source, which is what this control owns.)
+    snaps2 = _window_snaps(
+        70, mid_fn, lambda i: _tape_both(0.53, 0.43) if i >= 60 else [],
+        up_ask_fn=lambda i: 0.49 if i < 60 else 0.555,
+        down_ask_fn=lambda i: 0.49 if i < 60 else 0.50)
+    w2 = _simulate_window(snaps2, BacktestParams(entry_delay_sec=60.0))
+    assert w2.filled_up is False
+    assert w2.filled_down is False
 
 
 def test_entry_delay_classifies_full_path():
@@ -1909,11 +1924,17 @@ def test_backtest_stop_loss_anchored_to_an_entry_above_050():
 
     The old anchor only counted a down excursion once the mid was below 0.50, so
     an UP leg entered at 0.55 could lose five cents on the way down to 0.50 with
-    `max_down` still reading 0.00 and the stop never arming. `entry_delay_sec`
-    anchors the quotes on the 0.60 tick, which is what rests UP at 0.55.
+    `max_down` still reading 0.00 and the stop never arming. Set-and-wait
+    (rule 1) latches the 0.60 open, which is what rests UP at 0.55; the tape
+    fills it there and the stop measures the excursion from that entry.
     """
-    snaps = _anchored_window([0.50, 0.50, 0.60, 0.54, 0.52, 0.50])
-    w = _simulate_window(snaps, _params(offset=0.05, entry_delay_sec=2.0))
+    snaps = _anchored_window([0.60, 0.58, 0.55, 0.50])
+    snaps[0]["up_token"] = UP_TOKEN
+    snaps[0]["down_token"] = DN_TOKEN
+    snaps[0]["tape_delta"] = [
+        {"asset": UP_TOKEN, "price": 0.55, "size": 5.0},
+    ]
+    w = _simulate_window(snaps, _params(offset=0.05))
     assert w.filled_up is True
     assert w.filled_down is False
     assert w.entry_price_up == pytest.approx(0.55, abs=1e-6)

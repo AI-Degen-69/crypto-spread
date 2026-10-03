@@ -689,6 +689,12 @@ class MarketLiveState:
     # Strategy orders
     resting_up: float = 0.48
     resting_down: float = 0.48
+    # Set-and-wait anchor (rule 1): latched once per round at the first
+    # in-range two-sided mid seen while clean, then held through every gate.
+    # Delay and queue hold placement only; range and dead zone gate the latch
+    # itself. Cleared on fresh-start reset and window rollover alongside
+    # resting_*.
+    anchored_mid: Optional[float] = None
     original_resting_up: Optional[float] = None
     original_resting_down: Optional[float] = None
     order_shares: int = 5
@@ -4222,25 +4228,26 @@ class LiveTraderEngine:
                 self._reset_round_to_clean(mstate)
 
         # Target resting prices. Anchor the opening quotes symmetrically to the
-        # live synthetic mid computed above: mid - offset on UP, its complement
-        # (1 - mid) - offset on DOWN, so the pair costs 1 - 2*offset. Same
-        # formula as the re-quote path below and as backtest/engine.py:786.
+        # latched set-and-wait mid: mid - offset on UP, its complement
+        # (1 - mid) - offset on DOWN, so the pair costs 1 - 2*offset.
         #
-        # Recomputed on every tick until an order actually exists, which is what
-        # makes the submitted price the mid at placement time rather than one
-        # carried over from before the entry delay expired. Once orders are
-        # placed, prices latch (rules 1, 13).
+        # The latch is taken once per round at the first in-range two-sided
+        # mid seen while clean, then held through every gate: delay and queue
+        # decide WHEN the quote reaches the book, never at WHAT price. Range
+        # and dead zone gate the latch itself, so an open outside the range
+        # latches where the market returns, not where it opened. Once orders
+        # are placed, prices stand (rules 1, 13).
         if not mstate.order_id_up and not mstate.order_id_down and not mstate.filled_up and not mstate.filled_down:
             # Issue #207: Anchor quotes only when a real two-sided mid exists.
             # Never substitute 0.50 for an unpriceable book.
-            if mstate.mid is not None:
-                resting_up = round(min(0.99, max(0.01, mstate.mid - self.offset)), 3)
-                resting_down = round(min(0.99, max(0.01, (1.0 - mstate.mid) - self.offset)), 3)
-                mstate.resting_up = resting_up
-                mstate.resting_down = resting_down
-            else:
-                resting_up = mstate.resting_up
-                resting_down = mstate.resting_down
+            if (mstate.mid is not None and mstate.anchored_mid is None
+                    and not in_dead_zone
+                    and self.quote_range[0] <= mstate.mid <= self.quote_range[1]):
+                mstate.anchored_mid = mstate.mid
+                mstate.resting_up = round(min(0.99, max(0.01, mstate.anchored_mid - self.offset)), 3)
+                mstate.resting_down = round(min(0.99, max(0.01, (1.0 - mstate.anchored_mid) - self.offset)), 3)
+            resting_up = mstate.resting_up
+            resting_down = mstate.resting_down
         else:
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down
@@ -5009,6 +5016,7 @@ class LiveTraderEngine:
             mstate.order_status_down = "NONE"
             mstate.resting_up = None
             mstate.resting_down = None
+            mstate.anchored_mid = None
             mstate.original_resting_up = None
             mstate.original_resting_down = None
             mstate.pair_captured = False
@@ -5237,6 +5245,7 @@ class LiveTraderEngine:
             mstate.chased_fill = False
             mstate.original_resting_up = None
             mstate.original_resting_down = None
+            mstate.anchored_mid = None
             mstate.entry_cancelled_timeout = False
             mstate.rest_up_price = None
             mstate.rest_up_queue = None

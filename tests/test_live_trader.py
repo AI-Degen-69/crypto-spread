@@ -2369,9 +2369,9 @@ def _anchor_at(engine, slug, market, now, up_book, down_book):
     """Round-0 prices for one book, with entry held so nothing latches.
 
     `entry_delay_sec` keeps `can_place_entry` false, so no order is ever placed
-    and no leg fills: the round-0 branch re-runs every tick and `resting_*`
-    always shows the anchor for the book just fed in. That is the same property
-    that makes the placed price placement-time fresh.
+    and no leg fills. Under set-and-wait (rule 1) the first book latches the
+    anchor and later books hold it: `resting_*` shows the latched open price,
+    not the book just fed in.
     """
     engine._update_market_strategy(
         slug, {"market": market, "up_book": up_book, "down_book": down_book}, now)
@@ -2381,7 +2381,11 @@ def _anchor_at(engine, slug, market, now, up_book, down_book):
 
 
 def test_initial_entry_anchor_invariants():
-    """Pair sum is 1 - 2*offset across the range, and mid 0.50 is unchanged."""
+    """Set-and-wait: the open latches, later mids hold it, fresh rounds re-latch.
+
+    Pair sum is 1 - 2*offset for whatever the latch holds, and mid 0.50 keeps
+    the historical 0.48/0.48 fixture value.
+    """
     engine = _fifteen_minute_engine()
     engine.entry_delay_sec = 900.0  # entry held open for the whole window
     _quiet_start(engine)
@@ -2389,20 +2393,40 @@ def test_initial_entry_anchor_invariants():
     now = time.time()
     market = _fifteen_minute_market(now)
 
-    cases = (
-        (0.20, {"best_bid": 0.19, "best_ask": 0.21}, {"best_bid": 0.79, "best_ask": 0.81}),
-        (0.50, {"best_bid": 0.49, "best_ask": 0.51}, {"best_bid": 0.49, "best_ask": 0.51}),
-        (0.80, {"best_bid": 0.79, "best_ask": 0.81}, {"best_bid": 0.19, "best_ask": 0.21}),
-    )
-    for i, (mid_target, up_book, down_book) in enumerate(cases):
-        m = _anchor_at(engine, slug, market, now + i, up_book, down_book)
-        assert m.mid == mid_target
-        assert m.resting_up == round(mid_target - engine.offset, 3)
-        assert m.resting_down == round((1.0 - mid_target) - engine.offset, 3)
-        assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
-        if mid_target == 0.50:
-            # The historical fixture value survives untouched.
-            assert m.resting_up == 0.48 and m.resting_down == 0.48
+    # The 0.20 open latches: 0.18/0.78.
+    m = _anchor_at(engine, slug, market, now,
+                   {"best_bid": 0.19, "best_ask": 0.21},
+                   {"best_bid": 0.79, "best_ask": 0.81})
+    assert m.mid == 0.20
+    assert m.resting_up == round(0.20 - engine.offset, 3) == 0.18
+    assert m.resting_down == round(0.80 - engine.offset, 3) == 0.78
+    assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
+
+    # The market moves to 0.50 while entry is held: the latch holds, the
+    # quote does not chase. This is the set-and-wait demand: the market comes
+    # to the quote.
+    m = _anchor_at(engine, slug, market, now + 1,
+                   {"best_bid": 0.49, "best_ask": 0.51},
+                   {"best_bid": 0.49, "best_ask": 0.51})
+    assert m.mid == 0.50
+    assert m.resting_up == 0.18 and m.resting_down == 0.78
+
+    # A fresh round re-latches at its own first in-range tick.
+    engine._reset_round_to_clean(m)
+    m = _anchor_at(engine, slug, market, now + 2,
+                   {"best_bid": 0.79, "best_ask": 0.81},
+                   {"best_bid": 0.19, "best_ask": 0.21})
+    assert m.mid == 0.80
+    assert m.resting_up == round(0.80 - engine.offset, 3)
+    assert m.resting_down == round(0.20 - engine.offset, 3)
+    assert round(m.resting_up + m.resting_down, 3) == round(1.0 - 2 * engine.offset, 3)
+
+    # The historical 0.50 fixture value survives untouched on its own round.
+    engine._reset_round_to_clean(m)
+    m = _anchor_at(engine, slug, market, now + 3,
+                   {"best_bid": 0.49, "best_ask": 0.51},
+                   {"best_bid": 0.49, "best_ask": 0.51})
+    assert m.resting_up == 0.48 and m.resting_down == 0.48
 
 
 def test_initial_entry_anchor_clamps_at_the_edges():
@@ -2410,6 +2434,10 @@ def test_initial_entry_anchor_clamps_at_the_edges():
     engine = _fifteen_minute_engine()
     engine.offset = 0.05
     engine.entry_delay_sec = 900.0
+    # The 0.02 mid sits outside the default (0.10, 0.90) range, which gates
+    # the latch itself: open the range so this tick owns the clamp, not the
+    # range hold.
+    engine.update_config(quote_range=(0.0, 1.0))
     _quiet_start(engine)
     slug = "btc-up-or-down-15m"
     now = time.time()
@@ -2425,11 +2453,13 @@ def test_initial_entry_anchor_clamps_at_the_edges():
     assert m.resting_down == 0.93
 
 
-def test_initial_entry_price_is_taken_at_placement_not_at_open():
-    """With `entry_delay_sec` armed, the quote uses the mid on the placing tick.
+def test_initial_entry_price_is_latched_at_open_through_delay():
+    """With `entry_delay_sec` armed, the quote keeps the open's mid, not the placing tick's.
 
-    Issue #206, operator's acceptance criterion: the price computed before the
-    delay expired is irrelevant if the market moved during it.
+    Set-and-wait (rule 1, superseding issue #206's placement-time rule): the
+    delay holds WHEN the quote reaches the book, never at WHAT price. The
+    market moves while the delay runs; the quote placed at expiry still rests
+    at the latched open price.
     """
     # Dead-zone guard off: this test isolates the delay, and a 61s-elapsed tick
     # would otherwise trip the skip before the anchor is reached.
@@ -2443,17 +2473,20 @@ def test_initial_entry_price_is_taken_at_placement_not_at_open():
     _open_50_50_quotes(engine, slug, market, now)
     m = engine.markets[slug]
     assert not m.order_id_up and not m.order_id_down, "delay still holding entry"
+    assert m.resting_up == 0.48 and m.resting_down == 0.48
 
-    # Market moves to 0.65 while the delay runs, then the delay expires.
+    # Market moves to 0.52 while the delay runs, then the delay expires. The
+    # books are held off the latched 0.48 so nothing fills: this tick owns the
+    # anchor source, not the fill rule.
     engine._update_market_strategy(slug, {
         "market": market,
-        "up_book": {"best_bid": 0.64, "best_ask": 0.66},
-        "down_book": {"best_bid": 0.34, "best_ask": 0.36},
+        "up_book": {"best_bid": 0.51, "best_ask": 0.53},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.49},
     }, now + 60)
 
-    assert m.mid == 0.65
-    assert m.resting_up == round(0.65 - engine.offset, 3) == 0.63
-    assert m.resting_down == round(0.35 - engine.offset, 3) == 0.33
+    assert m.mid == 0.52
+    assert m.resting_up == 0.48 and m.resting_down == 0.48
+    assert not m.filled_up and not m.filled_down
 
 
 def test_no_requote_when_time_short():
