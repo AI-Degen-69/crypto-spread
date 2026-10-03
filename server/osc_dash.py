@@ -8242,7 +8242,10 @@ function updateBtRuntimeEstimate(){
 function centsToDollars(c){
   const num = Number(c);
   if(!Number.isFinite(num)) return NaN;
-  return Number((num / 100).toFixed(3));
+  // Math.round, not toFixed: toFixed throws a RangeError past 1e21, and an
+  // operator can type an exponent the validator rejects but the preview
+  // still reads — a marked-bad input must never break the render path.
+  return Math.round(num * 10) / 1000;
 }
 function dollarsToCents(d){
   const num = Number(d);

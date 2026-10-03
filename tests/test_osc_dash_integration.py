@@ -10231,6 +10231,8 @@ def test_cents_helpers_convert_exactly_at_the_ui_edge_node():
     for (const d of [0.02, 0.05, 0.105, 0.99, 0.10, 0.90]) {
       assert(centsToDollars(dollarsToCents(d)) === d, d);
     }
+    // A marked-bad giant must never throw the render path (toFixed would).
+    assert(Number.isFinite(centsToDollars('1e22')), 'giant input must not throw');
     console.log('CENTS_HELPERS_OK');
     process.exit(0);
     """
