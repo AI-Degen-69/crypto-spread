@@ -51,7 +51,7 @@ Branch: `i411/backtest-action-row-bottom-right` | Issue: `#411`
   - Depends on: Task 1
   - Verification: `python -m pytest tests/test_osc_dash_integration.py -q -k "backtest or stop_loss or run_buttons"` turns GREEN.
 
-- [ ] **Task 3 (XS)**: `[Verify]` Green run of the targeted dashboard suites
+- [x] **Task 3 (XS)**: `[Verify]` Green run of the targeted dashboard suites
   - Target files: none (verification only)
   - Details: targeted runs only - the full suite is forbidden locally (`AGENTS.md` Testing & Fast Iteration Policy); CI is the merge gate.
   - Depends on: Task 1, Task 2
