@@ -1,56 +1,55 @@
-# Plan: Issue #398 — Fix inconsistent zero line styling across oscillation charts
+# Plan: Issue #399 — Remove unnecessary decimal points on whole dollar Y-axis labels
 
-Branch: `i398/fix-inconsistent-zero-line-styling-across-osc` | Issue: `#398`
+Branch: `i399/remove-unnecessary-decimal-points-on-whole-dollar` | Issue: `#399`
 
 ## Classification & Routing
-- **Size tier**: Small (single file UI styling in `server/osc_dash.py` + tests)
-- **Task type**: Design / UI (`frontend-ui-engineering`, `frontend-design`, `test-driven-development`)
+- **Size tier**: Small (clean tick formatting helper adoption in `server/osc_dash.py` + tests)
+- **Task type**: Design / UI / Code (`frontend-ui-engineering`, `test-driven-development`, `incremental-implementation`)
 
 ## Summary & Problem Analysis
-- **Problem**: In the oscillation summary tab (`renderSummaryCharts` in `server/osc_dash.py`), charts have inconsistent zero line styling. The sweep visual charts use `sweepZeroLinePlugin()` and custom dashed gold zero-line scale grid configuration, while `cPerAsset`, `cHist`, `cStart`, and `cPair` rely on default Chart.js gridlines without zero-line highlights.
+- **Problem**: In `server/osc_dash.py`, several chart Y-axis tick formatting callbacks (such as in `equityChartInstance` and `btProvisionalChart`) format values using `'$' + Number(v).toFixed(2)`, which results in whole-dollar labels with redundant decimal zeros (`$2.00`, `$0.00`, `$-5.00`) instead of clean formatting (`$2`, `$0`, `$-5`).
 - **Solution**:
-  1. Add `plugins: [sweepZeroLinePlugin()]` to all oscillation tab charts (`cPerAsset`, `cHist`, `cStart`, `cPair`). Note that for `cStart` (doughnut chart), `sweepZeroLinePlugin` safely guards against missing `chart.scales.y` and gracefully no-ops.
-  2. Apply consistent y-axis zero-line grid styling (gold color, width 2, borderDash `[6, 4]`) across the Cartesian bar charts (`cPerAsset`, `cHist`, `cPair`) matching the sweep charts standard.
-  3. Add regression integration tests in `tests/test_osc_dash_integration.py` ensuring all oscillation tab chart initializations register the plugin and consistent styling.
+  1. Leverage and verify `formatSweepMoneyTick(v)` in `server/osc_dash.py` to ensure it formats whole integers as `$N` / `$-N`, zero as `$0`, and fractional values as `$N.XX` (e.g., `$2.50`, `$-1.25`).
+  2. Replace legacy inline `'$' + Number(v).toFixed(2)` callbacks in `equityChartInstance` (line ~8162) and `btProvisionalChart` (line ~8433) with `formatSweepMoneyTick(v)`.
+  3. Ensure `btProvisionalHist` and `pnlHistChartInstance` ticks format whole dollar amounts cleanly without trailing zeros.
+  4. Add regression tests in `tests/test_theme_tokens.py` / `tests/test_osc_dash_integration.py` ensuring all money tick callbacks in `FULL_APP_HTML` produce clean labels.
 
 ## CodeRabbit Intake Note
-- Adopted: N/A (no CodeRabbit comment on issue #398).
+- Adopted: N/A (no CodeRabbit comment on issue #399).
 - Rejected: N/A.
 - Unverified: N/A.
 
 ## Improvement Proposal (Adopted by Default)
-- **Proposal**: Standardize both plugin registration (`plugins: [sweepZeroLinePlugin()]`) and y-scale zero-line grid callbacks across `cPerAsset`, `cHist`, and `cPair` so whether canvas post-drawing or Chart.js grid rendering is evaluated, zero-line styling remains identical in appearance and behavior.
-- **Evidence**: `server/osc_dash.py:10049-10053` sets gold dashed grid at y=0 for sweep charts, and `server/osc_dash.py:9878-9900` defines `sweepZeroLinePlugin`.
+- **Proposal**: Unify all money-axis tick callbacks across the dashboard (`equityChartInstance`, `btProvisionalChart`, `sweepChartOptions`) to reuse the single shared `formatSweepMoneyTick(v)` helper, ensuring consistent whole-dollar formatting across both the Backtest Replay and Sweep Visual charts without duplicate logic.
+- **Evidence**: `server/osc_dash.py:8162` and `8433` hardcode `callback: function(v){ return '$' + Number(v).toFixed(2); }`, while `server/osc_dash.py:9831` already defines `formatSweepMoneyTick(v)` with clean whole-dollar stripping (`if (s.endsWith('.00')) s = s.slice(0, -3);`).
 
 ## Tasks
 
-- [x] **Task 1 (S)**: `[Design/UI]` Standardize zero line plugin & grid styling in oscillation tab charts
+- [x] **Task 1 (S)**: `[Design/UI]` Unify chart money-axis tick callbacks to use clean whole-dollar formatting in `server/osc_dash.py`
   - Target files: `server/osc_dash.py`
   - Details:
-    - In `renderSummaryCharts()`, update `cPerAsset`, `cHist`, `cStart`, and `cPair` Chart initializations:
-      - Add `plugins: [sweepZeroLinePlugin()]` to all 4 charts.
-      - Add unified zero-line `grid` styling to `scales.y` for `cPerAsset`, `cHist`, and `cPair`:
-        - `color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; }`
-        - `lineWidth: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? 2 : 1; }`
-        - `borderDash: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? [6, 4] : []; }`
+    - Ensure `formatSweepMoneyTick(v)` is defined and accessible for all chart configurations.
+    - Update `equityChartInstance` y-axis tick callback from `callback: function(v){ return '$' + Number(v).toFixed(2); }` to `callback: function(v){ return formatSweepMoneyTick(v); }`.
+    - Update `btProvisionalChart` y-axis tick callback from `callback: function(v){ return '$' + Number(v).toFixed(2); }` to `callback: function(v){ return formatSweepMoneyTick(v); }`.
+    - Update `pnlHistChartInstance` and `btProvisionalHist` x-axis callbacks if needed to clean whole dollar values cleanly.
   - Depends on: None
-  - Verification: Targeted browser inspection / node script check
+  - Verification: Node.js evaluation of `FULL_APP_HTML` callbacks and browser visual check
 
-- [x] **Task 2 (S)**: `[Testing]` Add regression integration tests for oscillation charts zero line styling
-  - Target files: `tests/test_osc_dash_integration.py`
+- [x] **Task 2 (S)**: `[Testing]` Add regression test coverage for clean whole-dollar tick formatting
+  - Target files: `tests/test_theme_tokens.py`, `tests/test_osc_dash_integration.py`
   - Details:
-    - Add test checking that `server/osc_dash.py` contains `sweepZeroLinePlugin()` in `cPerAsset`, `cHist`, `cStart`, `cPair` chart configurations.
-    - Verify y-axis grid color/dash styling is present on Cartesian oscillation charts.
+    - Enhance `test_format_sweep_money_tick` in `tests/test_theme_tokens.py` to cover cases specified in Issue #399: `$2`, `$0`, `$-5`, `$2.50`, `$-1.25`.
+    - Add assertion in test suite ensuring no chart Y-axis tick callbacks retain the raw `toFixed(2)` without whole-number trimming.
   - Depends on: Task 1
-  - Verification: `python -m pytest tests/test_osc_dash_integration.py -k "oscillation or zero_line" -q`
+  - Verification: `python -m pytest tests/test_theme_tokens.py -q`
 
-- [x] **Task 3 (XS)**: `[Verify]` Verify dashboard integration and syntax
-  - Target files: `server/osc_dash.py`
+- [x] **Task 3 (XS)**: `[Verify]` Verify targeted tests and dashboard syntax
+  - Target files: `server/osc_dash.py`, `tests/test_theme_tokens.py`
   - Details:
-    - Run targeted test suite to confirm zero regressions.
+    - Run targeted pytest test suites to ensure 100% pass rate.
   - Depends on: Task 1, Task 2
-  - Verification: `python -m pytest tests/test_osc_dash_integration.py -k "summary or oscillation" -q`
+  - Verification: `python -m pytest tests/test_theme_tokens.py tests/test_osc_dash_integration.py -q`
 
 ## Checkpoints
-- Checkpoint 1 (after Task 1): Oscillation charts in `server/osc_dash.py` configure `sweepZeroLinePlugin` and gold dashed zero line.
+- Checkpoint 1 (after Task 1): All chart tick callbacks in `server/osc_dash.py` use `formatSweepMoneyTick`.
 - Checkpoint 2 (after Task 2 & 3): Targeted tests pass with zero regressions.
