@@ -74,6 +74,7 @@ loud, use **the trading engine** and **real money**.
 | **a golden day** | One UTC day file inside the golden dataset that passed its per-day verify gate (`PASS` + `COMPLETE CAPTURE`) |
 | **the golden manifest** | `run/ticks/golden/golden_manifest.json` — which days are in the set, each day's verify verdict, and the policy version the certification ran under |
 | **the backtest set** | The fast backtest dataset: a derived, non-canonical subset of the golden dataset in `run/ticks/backtest/` (`scripts/build_research_cut.py`, issue #312, formerly called "the research cut") — stratified, deterministic, floor-respecting at a multiplier of the charter floors. The file the UI backtest runs on; final claims re-run on the golden set |
+| **a backtest template** | `run/backtest_templates/<name>.json` — a named JSON record binding the server-evaluated parameter set with its simulation result summary |
 
 The collector misses seconds. That gap is why the fill rule reads the tape *and* the book
 ([ADR-0002](adr/0002-single-hard-coded-fill-rule.md)), and it is why a backtest predicts

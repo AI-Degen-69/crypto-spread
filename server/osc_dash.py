@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 import urllib.parse
 from collections import defaultdict
@@ -48,6 +49,7 @@ from server.ports import DASHBOARD_PORT
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
 TICKS_DIR = RUN / "ticks"
+BACKTEST_TEMPLATES_DIR = RUN / "backtest_templates"
 RUN.mkdir(parents=True, exist_ok=True)
 TICKS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -3111,6 +3113,7 @@ def _prepare_backtest_request(
     return "ok", {
         "params": params,
         "params_dict": asdict(params) if is_dataclass(params) else dict(params),
+        "echo": echo,
         "size": size,
         "max_start_delay": max_start_delay,
         "raw_params": raw_params,
@@ -3120,7 +3123,60 @@ def _prepare_backtest_request(
         "source_path_str": source_path_str,
         "series_tokens": series_tokens,
         "duration_values": duration_values,
+        "file": file,
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #413: in-memory registry of recently completed backtest runs.
+# Template save looks up run_id here to capture the canonical parameters +
+# result summary. Bounded to _COMPLETED_RUNS_MAX entries, FIFO eviction.
+# ---------------------------------------------------------------------------
+_COMPLETED_RUNS: collections.OrderedDict[str, dict] = collections.OrderedDict()
+_COMPLETED_RUNS_MAX = 32
+_COMPLETED_RUNS_LOCK = threading.Lock()
+
+
+def _record_completed_run(ctx: dict, raw_query: str, request_args: dict, result: dict) -> str:
+    """Record a successful backtest completion and return its run_id.
+
+    Only called for successful worker returns (no error key, no cancellation).
+    """
+    run_id = uuid.uuid4().hex
+    summary_src = result.get("overall", {}) if isinstance(result, dict) else {}
+    entry = {
+        "run_id": run_id,
+        "completed_at": time.time(),
+        "query": raw_query,
+        "request_args": request_args,
+        "echo": ctx.get("echo"),
+        "params_dict": ctx.get("params_dict"),
+        "params_hash": result.get("params_hash") if isinstance(result, dict) else None,
+        "size": ctx.get("size"),
+        "dataset": {
+            "file": ctx.get("file", ""),
+            "resolved": ctx.get("source_path_str") or "",
+        },
+        "scope": {
+            "series": ctx.get("series", ""),
+            "durations": ctx.get("durations", ""),
+            "series_tokens": ctx.get("series_tokens", []),
+            "duration_values": ctx.get("duration_values", []),
+        },
+        "summary": {
+            "params_hash": result.get("params_hash") if isinstance(result, dict) else None,
+            "n_windows": result.get("n_windows") if isinstance(result, dict) else None,
+            "total_pnl_cents": summary_src.get("total_pnl_cents"),
+            "pairs": summary_src.get("pairs"),
+            "win_rate": summary_src.get("win_rate"),
+            "selection": summary_src.get("selection"),
+        },
+    }
+    with _COMPLETED_RUNS_LOCK:
+        _COMPLETED_RUNS[run_id] = entry
+        while len(_COMPLETED_RUNS) > _COMPLETED_RUNS_MAX:
+            _COMPLETED_RUNS.popitem(last=False)
+    return run_id
 
 
 @app.get(
@@ -3131,6 +3187,7 @@ def _prepare_backtest_request(
     },
 )
 async def api_backtest(
+    request: Request,
     file: str = "",
     offset: float = 0.02,
     queue: float = 0.0,
@@ -3242,6 +3299,26 @@ async def api_backtest(
                 status_code=409,
                 content={"error": "Backtest cancelled before it started."},
             )
+        # Issue #413: record the completed run for template save, inject run_id.
+        if isinstance(result, dict) and "error" not in result:
+            _req_args = {
+                "file": file, "offset": offset, "queue": queue,
+                "pair_cost": pair_cost, "exit_default_5m": exit_default_5m,
+                "exit_default_15m": exit_default_15m, "exit_btc_5m": exit_btc_5m,
+                "exit_sol_5m": exit_sol_5m, "exit_reversal": exit_reversal,
+                "size": size, "max_start_delay": max_start_delay,
+                "filter_partial": filter_partial, "quote_lo": quote_lo,
+                "quote_hi": quote_hi, "entry_delay_sec": entry_delay_sec,
+                "entry_delay_pct": entry_delay_pct,
+                "dead_zone_val": dead_zone_val, "dead_zone_pct": dead_zone_pct,
+                "dead_zone_unit": dead_zone_unit,
+                "naked_leg_at_expiry": naked_leg_at_expiry,
+                "enable_leg_chase": enable_leg_chase,
+                "limit_windows": limit_windows,
+                "series": series, "durations": durations,
+            }
+            rid = _record_completed_run(ctx, str(request.url.query), _req_args, result)
+            result["run_id"] = rid
         return result
     except asyncio.TimeoutError:
         # Issue #383: terminate the pool THIS run bound. A global-only call would
@@ -3430,6 +3507,26 @@ async def api_backtest_stream(
             # render a null result as if a run had finished.
             if result is None and run_record.cancel_requested:
                 return
+            # Issue #413: record completed run for template save, inject run_id.
+            if isinstance(result, dict) and "error" not in result:
+                _req_args = {
+                    "file": file, "offset": offset, "queue": queue,
+                    "pair_cost": pair_cost, "exit_default_5m": exit_default_5m,
+                    "exit_default_15m": exit_default_15m, "exit_btc_5m": exit_btc_5m,
+                    "exit_sol_5m": exit_sol_5m, "exit_reversal": exit_reversal,
+                    "size": size, "max_start_delay": max_start_delay,
+                    "filter_partial": filter_partial, "quote_lo": quote_lo,
+                    "quote_hi": quote_hi, "entry_delay_sec": entry_delay_sec,
+                    "entry_delay_pct": entry_delay_pct,
+                    "dead_zone_val": dead_zone_val, "dead_zone_pct": dead_zone_pct,
+                    "dead_zone_unit": dead_zone_unit,
+                    "naked_leg_at_expiry": naked_leg_at_expiry,
+                    "enable_leg_chase": enable_leg_chase,
+                    "limit_windows": limit_windows,
+                    "series": series, "durations": durations,
+                }
+                rid = _record_completed_run(ctx, str(request.url.query), _req_args, result)
+                result["run_id"] = rid
             yield {"event": "message", "data": json.dumps({"type": "final", "result": result})}
         except asyncio.CancelledError:
             # Client disconnected mid-stream (sse_starlette cancels the generator).
@@ -3947,6 +4044,166 @@ async def api_backtest_cancel(request: Request):
         "detail": ("The worker did not confirm death. The run slot stays held until "
                    "it does — press Stop again, or restart the server."),
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #413: Backtest template CRUD endpoints
+# ---------------------------------------------------------------------------
+
+class _TemplateSaveBody(BaseModel):
+    """Request body for POST /api/backtest/templates."""
+    name: str
+    run_id: str
+
+
+@app.post(
+    "/api/backtest/templates",
+    responses={
+        200: {"description": "Template saved"},
+        400: {"description": "Invalid template name"},
+        404: {"description": "Run ID not found in recent completions"},
+    },
+)
+async def api_backtest_template_save(request: Request, body: _TemplateSaveBody):
+    """Save a completed backtest run as a named template."""
+    _verify_safe_origin(request)
+    from backtest.templates import normalize_name, save_template
+    try:
+        norm_name = normalize_name(body.name)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    with _COMPLETED_RUNS_LOCK:
+        entry = _COMPLETED_RUNS.get(body.run_id)
+    if entry is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"run_id '{body.run_id}' not found in recent completions"},
+        )
+
+    record = {
+        "name": norm_name,
+        "saved_at": time.time(),
+        "run_id": entry["run_id"],
+        "query": entry["query"],
+        "request_args": entry["request_args"],
+        "echo": entry["echo"],
+        "params_dict": entry["params_dict"],
+        "params_hash": entry["params_hash"],
+        "dataset": entry["dataset"],
+        "scope": entry["scope"],
+        "summary": entry["summary"],
+    }
+    try:
+        overwritten = save_template(BACKTEST_TEMPLATES_DIR, norm_name, record)
+    except OSError as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return {"status": "saved", "name": norm_name, "overwritten": overwritten}
+
+
+@app.get(
+    "/api/backtest/templates",
+    responses={200: {"description": "List of saved templates"}},
+)
+async def api_backtest_template_list():
+    """List all saved backtest templates."""
+    from backtest.templates import list_templates
+    return {"templates": list_templates(BACKTEST_TEMPLATES_DIR)}
+
+
+@app.get(
+    "/api/backtest/templates/{name}",
+    responses={
+        200: {"description": "Template record"},
+        404: {"description": "Template not found"},
+        409: {"description": "Template stale — parameters no longer validate"},
+        422: {"description": "Malformed template file"},
+    },
+)
+async def api_backtest_template_load(name: str):
+    """Load a saved template. Validates parameters still match the current registry."""
+    from backtest.templates import normalize_name, read_template
+    try:
+        norm_name = normalize_name(name)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    try:
+        record = read_template(BACKTEST_TEMPLATES_DIR, norm_name)
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": f"template not found: {norm_name}"})
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc)})
+
+    # Validate stored request_args still produce the same params_hash.
+    stored_args = record.get("request_args", {})
+    stored_hash = record.get("params_hash")
+    try:
+        rebuild_status, rebuild_ctx = _prepare_backtest_request(
+            file=stored_args.get("file", ""),
+            offset=stored_args.get("offset", 0.02),
+            queue=stored_args.get("queue", 0.0),
+            pair_cost=stored_args.get("pair_cost", 0.99),
+            exit_default_5m=stored_args.get("exit_default_5m", 0.05),
+            exit_default_15m=stored_args.get("exit_default_15m", 0.05),
+            exit_btc_5m=stored_args.get("exit_btc_5m", 0.05),
+            exit_sol_5m=stored_args.get("exit_sol_5m", 0.05),
+            exit_reversal=stored_args.get("exit_reversal", 0.02),
+            size=stored_args.get("size", 5),
+            max_start_delay=stored_args.get("max_start_delay", 0.0),
+            filter_partial=stored_args.get("filter_partial", False),
+            quote_lo=stored_args.get("quote_lo", 0.10),
+            quote_hi=stored_args.get("quote_hi", 0.90),
+            entry_delay_sec=stored_args.get("entry_delay_sec", 0.0),
+            entry_delay_pct=stored_args.get("entry_delay_pct"),
+            dead_zone_val=stored_args.get("dead_zone_val", 0.10),
+            dead_zone_pct=stored_args.get("dead_zone_pct"),
+            dead_zone_unit=stored_args.get("dead_zone_unit", "pct"),
+            naked_leg_at_expiry=stored_args.get("naked_leg_at_expiry", "close"),
+            enable_leg_chase=stored_args.get("enable_leg_chase", False),
+            series=stored_args.get("series", ""),
+            durations=stored_args.get("durations", ""),
+        )
+        if rebuild_status == "ok":
+            current_hash = rebuild_ctx["params"].params_hash()
+            if stored_hash and current_hash != stored_hash:
+                return JSONResponse(status_code=409, content={
+                    "error": "template stale: parameters no longer validate against the current registry",
+                    "stored_hash": stored_hash,
+                    "current_hash": current_hash,
+                })
+    except Exception:
+        return JSONResponse(status_code=409, content={
+            "error": "template stale: parameters no longer validate against the current registry",
+            "stored_hash": stored_hash,
+            "current_hash": None,
+        })
+
+    return record
+
+
+@app.delete(
+    "/api/backtest/templates/{name}",
+    responses={
+        200: {"description": "Template deleted"},
+        404: {"description": "Template not found"},
+    },
+)
+async def api_backtest_template_delete(request: Request, name: str):
+    """Delete a saved backtest template."""
+    _verify_safe_origin(request)
+    from backtest.templates import normalize_name, delete_template
+    try:
+        norm_name = normalize_name(name)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    try:
+        delete_template(BACKTEST_TEMPLATES_DIR, norm_name)
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": f"template not found: {norm_name}"})
+    except OSError as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return {"status": "deleted", "name": norm_name}
 
 
 @app.get("/api/analysis")
@@ -5632,8 +5889,29 @@ textarea:focus-visible,
              hidden and never appears next to an idle tab. -->
         <button class="btn bt-stop" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <!-- Issue #413: manual save of the last completed run as a reusable template. Enabled only when a run_id is available. -->
+        <button class="btn" id="btnSaveTemplate" onclick="saveBacktestTemplate()" disabled title="Save the last completed run as a reusable template">💾 Save as Template</button>
         <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
         <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
+      </div>
+      </div>
+    </div>
+
+    <!-- Issue #413: saved backtest templates — list, load (refills controls, never replays), delete. -->
+    <div class="bt-section bt-peer-section" id="btSecTemplates">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecTemplatesBody" onclick="toggleBtSection(this,'btSecTemplatesBody')">
+        <span class="bt-section-dot bt-section-dot-green"></span>
+        <span>💾 Backtest Templates</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecTemplatesBody">
+      <div class="card">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <input id="btTemplateName" placeholder="Template name…" maxlength="64" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--tx)" aria-label="Template name">
+          <button class="btn" onclick="loadBacktestTemplateList()" title="Reload the saved template list">↻ Refresh</button>
+        </div>
+        <div id="btTemplateStatus" class="mono" style="font-size:11px;color:var(--dim);margin-bottom:6px" aria-live="polite"></div>
+        <div id="btTemplateList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
       </div>
     </div>
@@ -8718,10 +8996,186 @@ async function consumeBacktestStream(res, ctl, onEvent, opts){
   }
 }
 
+// Issue #413: backtest templates — persist a completed run's configuration +
+// result summary under a name, then refill the tab from it on demand.
+// Loading never replays: it only sets controls, chips, preview and estimate.
+window._btSaveableRunId = null;
+
+function setBtSaveableRunId(runId){
+  window._btSaveableRunId = runId || null;
+  const btn = $('btnSaveTemplate');
+  if (btn) btn.disabled = !window._btSaveableRunId;
+}
+
+function btEscHtml(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function btTemplateStatus(msg, isErr){
+  const el = $('btTemplateStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = isErr ? 'var(--down)' : 'var(--dim)';
+}
+
+async function saveBacktestTemplate(){
+  const nameEl = $('btTemplateName');
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!window._btSaveableRunId) { btTemplateStatus('Run a backtest first — nothing to save yet.', true); return; }
+  if (!name) { btTemplateStatus('Type a template name first.', true); return; }
+  try {
+    const res = await fetch('/api/backtest/templates', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, run_id: window._btSaveableRunId}),
+    });
+    const j = await res.json();
+    if (!res.ok) { btTemplateStatus('Save failed: ' + (j.error || res.status), true); return; }
+    btTemplateStatus(j.overwritten ? `Template '${j.name}' overwritten.` : `Template '${j.name}' saved.`);
+    loadBacktestTemplateList();
+  } catch(err) {
+    btTemplateStatus('Save failed: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
+async function loadBacktestTemplateList(){
+  const list = $('btTemplateList');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/backtest/templates');
+    const j = await res.json();
+    const items = (j && j.templates) || [];
+    if (!items.length) {
+      list.innerHTML = '<div class="mono" style="font-size:11px;color:var(--dim)">No saved templates yet — run a backtest, then press Save as Template.</div>';
+      return;
+    }
+    list.innerHTML = items.map(function(t){
+      const nm = t.name || '';
+      const enc = encodeURIComponent(nm);
+      const sub = t.invalid ? 'unreadable file' : `${t.n_windows != null ? t.n_windows + ' windows · ' : ''}${t.total_pnl_cents != null ? (Number(t.total_pnl_cents) >= 0 ? '+' : '') + Number(t.total_pnl_cents).toFixed(1) + 'c · ' : ''}${t.selection ? btEscHtml(t.selection) : ''}`;
+      return `<div style="display:flex;gap:8px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px">`
+        + `<div style="flex:1;min-width:0"><div style="font-weight:600">${btEscHtml(nm)}</div>`
+        + `<div class="mono" style="font-size:10px;color:var(--dim)">${sub}</div></div>`
+        + `<button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadBacktestTemplate('${enc}')">Load</button>`
+        + `<button class="btn" style="font-size:11px;padding:4px 10px" onclick="deleteBacktestTemplate('${enc}')">Delete</button></div>`;
+    }).join('');
+  } catch(err) {
+    btTemplateStatus('Could not load templates: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
+async function loadBacktestTemplate(encName){
+  const name = decodeURIComponent(encName);
+  try {
+    const res = await fetch('/api/backtest/templates/' + encodeURIComponent(name));
+    const j = await res.json();
+    if (res.status === 409) { btTemplateStatus(`Template '${name}' is stale — parameters changed since it was saved.`, true); return; }
+    if (!res.ok) { btTemplateStatus('Load failed: ' + (j.error || res.status), true); return; }
+    const note = applyBacktestTemplate(j);
+    if (note) btTemplateStatus(note, true);
+    else btTemplateStatus(`Template '${name}' loaded — controls updated, no replay started.`);
+  } catch(err) {
+    btTemplateStatus('Load failed: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
+function applyBacktestTemplate(t){
+  const a = (t && t.request_args) || {};
+  let note = null;
+  const setVal = function(id, v){
+    if (v === undefined || v === null) return;
+    const el = $(id);
+    if (el) el.value = String(v);
+  };
+  setVal('btOffset', a.offset);
+  setVal('btQueue', a.queue);
+  setVal('btPairCost', a.pair_cost);
+  setVal('btExit5m', a.exit_default_5m);
+  setVal('btExit15m', a.exit_default_15m);
+  setVal('btExitBtc', a.exit_btc_5m);
+  setVal('btExitSol', a.exit_sol_5m);
+  setVal('btSize', a.size);
+  setVal('btQuoteLo', a.quote_lo);
+  setVal('btQuoteHi', a.quote_hi);
+  setVal('btExitReversal', a.exit_reversal);
+  if (a.entry_delay_pct !== undefined && a.entry_delay_pct !== null) setVal('btEntryDelay', a.entry_delay_pct);
+  else if (a.entry_delay_sec) note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
+  if (a.dead_zone_pct !== undefined && a.dead_zone_pct !== null) setVal('btDeadZoneVal', a.dead_zone_pct);
+  else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null && (a.dead_zone_unit || 'pct') === 'pct') setVal('btDeadZoneVal', Number(a.dead_zone_val) * 100);
+  else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null) note = note || 'Template uses a seconds dead-zone; the percent control was left unchanged.';
+  setVal('btNakedLegAtExpiry', a.naked_leg_at_expiry);
+  if (a.enable_leg_chase !== undefined && a.enable_leg_chase !== null) setVal('btLegChase', a.enable_leg_chase ? '1' : '0');
+  if (a.max_start_delay !== undefined && a.max_start_delay !== null) {
+    const sel = $('btMaxStartDelay');
+    if (sel) {
+      const want = String(a.max_start_delay);
+      let has = false;
+      for (const o of sel.options) { if (o.value === want) { has = true; break; } }
+      if (!has && typeof document !== 'undefined' && document.createElement) {
+        const opt = document.createElement('option');
+        opt.value = want; opt.textContent = want;
+        sel.appendChild(opt);
+      }
+      sel.value = want;
+    }
+  }
+  const file = a.file || '';
+  const sel = $('btFileSelect');
+  if (sel) {
+    let has = false;
+    for (const o of sel.options) { if (o.value === file) { has = true; break; } }
+    if (file && !has && typeof document !== 'undefined' && document.createElement) {
+      const opt = document.createElement('option');
+      opt.value = file; opt.textContent = file + ' (unavailable)';
+      sel.appendChild(opt);
+    }
+    sel.value = file;
+  }
+  window.selectedBacktestFile = file;
+  window._btFileChosen = true;
+  const scope = (t && t.scope) || {};
+  let tokens = Array.isArray(scope.series_tokens) && scope.series_tokens.length ? scope.series_tokens : null;
+  if (!tokens && typeof a.series === 'string' && a.series) {
+    tokens = a.series.split(',').map(function(s){ return s.trim().toUpperCase(); });
+  }
+  if (tokens) {
+    const known = tokens.filter(function(x){ return BT_ALL_TOKENS.indexOf(x) >= 0; });
+    if (known.length) selectedBtTokens = new Set(known);
+  }
+  const durVals = Array.isArray(scope.duration_values) ? scope.duration_values : null;
+  if (durVals) {
+    const only5 = durVals.length === 1 && durVals[0] === 300;
+    const only15 = durVals.length === 1 && durVals[0] === 900;
+    selectedBtDuration = only5 ? '5m' : (only15 ? '15m' : 'both');
+  } else if (typeof a.durations === 'string' && a.durations) {
+    selectedBtDuration = a.durations === '300' ? '5m' : (a.durations === '900' ? '15m' : 'both');
+  }
+  updateBtFilterUI();
+  updateBacktestParamPreview();
+  updateBtRuntimeEstimate();
+  return note;
+}
+
+async function deleteBacktestTemplate(encName){
+  const name = decodeURIComponent(encName);
+  try {
+    const res = await fetch('/api/backtest/templates/' + encodeURIComponent(name), {method: 'DELETE'});
+    const j = await res.json();
+    if (!res.ok) { btTemplateStatus('Delete failed: ' + (j.error || res.status), true); return; }
+    btTemplateStatus(`Template '${name}' deleted.`);
+    loadBacktestTemplateList();
+  } catch(err) {
+    btTemplateStatus('Delete failed: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
 async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
   window._btAbort = ctl;
+  setBtSaveableRunId(null);
   btRenderToken = ctl; // #371: ownership token for coalesced renders
   window._btRunning = true;
   setBacktestLoadingState(true);
@@ -8782,6 +9236,7 @@ async function runBacktest(fileOverride){
       } else if (ev.type === 'final') {
         btDestroyProvisionalChart();
         renderBacktestResult(ev.result, fileVal);
+        if (ev.result && ev.result.run_id) setBtSaveableRunId(ev.result.run_id);
       } else if (ev.type === 'error') {
         markBacktestFailed(ev.error || 'stream error');
       }
@@ -13456,6 +13911,7 @@ if (typeof document !== 'undefined' && document.addEventListener) {
   });
 }
 loadManifest();   // tick files tab: load file list + run integrity verify on every dashboard load
+loadBacktestTemplateList(); // backtest tab: saved-template list (empty state until the first save)
 initBacktestIdle(); // IIIB: backtest tab opens pre-drawn (sweep card idle + chart axes)
 </script></body></html>
 """

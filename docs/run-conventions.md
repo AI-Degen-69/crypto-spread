@@ -26,9 +26,11 @@ Every paper/live run is one self-contained folder. A future script can scan
 
 - `run/` — machine working state (gitignored): `ticks/` capture landing zone,
   `observations/` paper-observer journal, `sweeps/` research *cache* only
-  (`window_cache.pkl`), live runtime state (`live_trades*.jsonl`,
+  (`window_cache.pkl`), `backtest_templates/` saved backtest parameter &
+  result templates, live runtime state (`live_trades*.jsonl`,
   `live_fill_telemetry.jsonl`, `oscillation_*`). Ephemeral except `ticks/`
-  (irreplaceable capture).
+  (irreplaceable capture). Cleanup of `run/` deletes templates; committed
+  docs must not cite a template.
 - `research/sweeps/` — the sweep **drivers and their result tables**, committed.
   They used to sit in `run/sweeps/` beside the cache, which meant a committed
   document (`docs/ev-research-findings-2026-09-11.md`) cited evidence any
