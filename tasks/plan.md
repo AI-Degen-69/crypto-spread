@@ -59,7 +59,7 @@ Branch: `i411/backtest-action-row-bottom-right` | Issue: `#411`
     - `python -m pytest tests/test_osc_dash_integration.py -q -k "backtest or stop_loss or run_buttons"`
     - `python -m pytest tests/test_osc_dash_integration.py -q -k "stop or reset"`
     - `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`
-    - Live browser check of `:5515` Backtest tab at desktop and <900px widths: controls bottom-right, thresholds one row of four, Share Size directly above.
+    - Live browser check of `:5515` Backtest tab at desktop and <900px widths: controls bottom-right, thresholds one row of four at desktop width and two-column grid below 900px, Share Size directly above.
 
 ## Checkpoints
 - **Checkpoint 1** (after Task 1): the new layout tests are RED against the untouched file, each failure naming the layout it pins.

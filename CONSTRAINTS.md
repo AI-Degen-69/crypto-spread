@@ -23,7 +23,7 @@ stop-loss thresholds a row of their own.
 ## 4. Anti-Cheat & Code Standards
 - No new external libraries or runtime dependencies.
 - No new inline `style=` for the moved row - the alignment lives in the `<style>` block.
-- Only `server/osc_dash.py` (markup + CSS in `#tab-backtest`) and `tests/test_osc_dash_integration.py` are touched.
+- Limit implementation and test changes to `server/osc_dash.py` (markup + CSS in `#tab-backtest`) and `tests/test_osc_dash_integration.py`. Per-issue working files (`CONSTRAINTS.md`, `tasks/plan.md`, and `tasks/todo.md`) may also be updated for Issue #411.
 - Must NOT be modified: `btControlValues()`, `btControlQuery()`, `resetBtParams()`, `updateBtStopVisibility()`, `stopBacktestRun()`, any backend endpoint, the Cockpit mirror tab, the Sweep Visual / Per-Series / Log sections, the results tiles, or `btnRunSweepVisual`.
 - Do not add, remove, or reorder the four sub-sections themselves.
 - Use `docs/glossary.md` names in comments ("the backtest tab", "the trading engine"). Never write "live" as a name for the trading engine.

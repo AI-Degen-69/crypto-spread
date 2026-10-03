@@ -17,14 +17,32 @@ client = TestClient(app)
 
 
 class _IdCollector(HTMLParser):
+    _void_tags = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
     def __init__(self):
         super().__init__()
         self.ids = []
+        self.ancestors = {}
+        self._stack = []
 
     def handle_starttag(self, tag, attrs):
-        for k, v in attrs:
-            if k == "id" and v:
-                self.ids.append(v)
+        element_id = dict(attrs).get("id")
+        if element_id:
+            self.ids.append(element_id)
+            self.ancestors[element_id] = {
+                ancestor_id for _, ancestor_id in self._stack if ancestor_id
+            }
+        if tag not in self._void_tags:
+            self._stack.append((tag, element_id))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                del self._stack[index:]
+                break
 
 
 def _extract_ids(html_str: str) -> list[str]:
@@ -4993,6 +5011,11 @@ def test_backtest_run_buttons_sit_at_setup_top_level():
 
     # #btSetupActions is inside #btSecParametersBody, after #btSecGeometry, before #btSecOverall
     assert params_idx < actions_idx < overall_idx, "action row not inside btSecParametersBody or after accordion"
+    collector = _IdCollector()
+    collector.feed(html)
+    assert "btSecParametersBody" in collector.ancestors.get("btSetupActions", set()), (
+        "#btSetupActions must be a descendant of #btSecParametersBody"
+    )
     assert actions_idx > geo_idx, "action row must appear after the accordion sections"
 
     actions_html = html[actions_idx:overall_idx]
@@ -5413,10 +5436,16 @@ def test_stop_loss_thresholds_live_inside_one_grid_group():
     start = op_section.index('<div id="btStopLossFields">')
     end = op_section.index('id="btExitReversal"', start)
     group = op_section[start:end]
+    collector = _IdCollector()
+    collector.feed(group)
     threshold_ids = ["btExit5m", "btExit15m", "btExitBtc", "btExitSol"]
-    extracted = [i for i in _extract_ids(group) if i in threshold_ids]
+    extracted = [
+        i for i in collector.ids
+        if i in threshold_ids
+        and "btStopLossFields" in collector.ancestors.get(i, set())
+    ]
     assert extracted == threshold_ids, (
-        f"Expected stop loss IDs in order {threshold_ids}, got {extracted}"
+        f"Expected stop loss IDs in order {threshold_ids} inside #btStopLossFields, got {extracted}"
     )
 
 
