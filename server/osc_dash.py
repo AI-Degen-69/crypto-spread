@@ -8159,7 +8159,7 @@ equityChartInstance = new Chart(ctx, {
         title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
         ticks: {
           color: theme.dim,
-          callback: function(v){ return '$' + Number(v).toFixed(2); }
+          callback: function(v){ return formatSweepMoneyTick(v); }
         },
         grid: {
           color: function(ctx){ return (ctx.tick && ctx.tick.value === 0) ? theme.gold : theme.line; },
@@ -8299,8 +8299,7 @@ if ($('chartPnlHist')) {
             minRotation: 0,
             autoSkip: false,
             callback: function(v) {
-              const num = Number(v);
-              return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
+              return formatSweepMoneyTick(v);
             }
           },
           grid: {
@@ -8430,7 +8429,7 @@ function btBeginProvisionalChart(){
              ticks: { color: theme.dim, maxTicksLimit: 12 }, grid: { color: theme.line } },
         y: { grace: '18%',
              title: { display: true, text: 'Cumulative P&L ($)', color: theme.dim },
-             ticks: { color: theme.dim, callback: function(v){ return '$' + Number(v).toFixed(2); } },
+             ticks: { color: theme.dim, callback: function(v){ return formatSweepMoneyTick(v); } },
              grid: { color: theme.line } }
       }
     }
@@ -8465,7 +8464,7 @@ function btBeginProvisionalHist(){
       plugins: { legend: { display: false } },
       scales: {
         x: { type: 'linear', title: { display: true, text: 'Window P&L ($)', color: theme.dim },
-             ticks: { color: theme.dim, callback: function(v){ return (v < 0 ? '-$' : '$') + Math.abs(Number(v)).toFixed(2); } },
+             ticks: { color: theme.dim, callback: function(v){ return formatSweepMoneyTick(v); } },
              grid: { color: theme.line } },
         y: { beginAtZero: true, title: { display: true, text: 'Windows Count', color: theme.dim },
              ticks: { color: theme.dim, precision: 0 }, grid: { color: theme.line } }

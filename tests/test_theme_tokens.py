@@ -399,6 +399,10 @@ def test_format_sweep_money_tick():
         [0, '$0'],
         [-0, '$0'],
         [-0.00001, '$0'],
+        [2, '$2'],
+        [-5, '$-5'],
+        [2.5, '$2.50'],
+        [-1.25, '$-1.25'],
         [12.5, '$12.50'],
         [12.34, '$12.34'],
         [12, '$12'],
@@ -417,5 +421,42 @@ def test_format_sweep_money_tick():
     res = subprocess.run([NODE_BIN], input=test_script, capture_output=True, text=True, encoding="utf-8", timeout=10)
     assert res.returncode == 0, f"Node test failed: {res.stderr}\n{res.stdout}"
     assert "FORMAT_SWEEP_MONEY_TICK_PASSED" in res.stdout
+
+
+def test_chart_money_ticks_use_format_sweep_money_tick():
+    """Verify all chart money-axis tick callbacks use formatSweepMoneyTick without raw toFixed(2)."""
+    assert "callback: function(v){ return '$' + Number(v).toFixed(2); }" not in FULL_APP_HTML
+    # Verify equityChartInstance uses formatSweepMoneyTick
+    assert re.search(
+        r"equityChartInstance = new Chart\(.*y:\s*\{.*?ticks:\s*\{.*?callback:\s*function\(v\)\{\s*return formatSweepMoneyTick\(v\);",
+        FULL_APP_HTML,
+        re.DOTALL,
+    )
+    # Verify btProvisionalChart uses formatSweepMoneyTick
+    assert re.search(
+        r"btProvisionalChart = new Chart\(.*y:\s*\{.*?ticks:\s*\{.*?callback:\s*function\(v\)\{\s*return formatSweepMoneyTick\(v\);",
+        FULL_APP_HTML,
+        re.DOTALL,
+    )
+    # Verify sweepChartOptions uses formatSweepMoneyTick
+    assert re.search(
+        r"function sweepChartOptions\(.*?y:\s*\{.*?ticks:\s*\{.*?callback:\s*function\(v\)\{\s*return formatSweepMoneyTick\(v\);",
+        FULL_APP_HTML,
+        re.DOTALL,
+    )
+    # Verify pnlHistChartInstance x-axis uses formatSweepMoneyTick
+    assert re.search(
+        r"pnlHistChartInstance = new Chart\(.*x:\s*\{.*?ticks:\s*\{.*?callback:\s*function\(v\)\s*\{\s*return formatSweepMoneyTick\(v\);",
+        FULL_APP_HTML,
+        re.DOTALL,
+    )
+    # Verify btProvisionalHist x-axis uses formatSweepMoneyTick
+    assert re.search(
+        r"btProvisionalHist = new Chart\(.*x:\s*\{.*?ticks:\s*\{.*?callback:\s*function\(v\)\{\s*return formatSweepMoneyTick\(v\);",
+        FULL_APP_HTML,
+        re.DOTALL,
+    )
+
+
 
 
