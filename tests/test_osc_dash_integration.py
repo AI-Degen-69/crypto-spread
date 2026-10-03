@@ -2676,7 +2676,10 @@ def test_sweep_override_note_wording_node():
     parts = []
     # Issue #355: sweepCard delegates the Markets grid to sweepMarketsGridHtml,
     # so both must be in the harness or the grid renders as `undefined`.
-    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+    # Issue #419: the card and the tick formatter convert through the shared
+    # cents helpers, so those ride along too.
+    for name in ("centsToDollars", "dollarsToCents", "formatCents",
+                 "sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
                  "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
@@ -2730,25 +2733,27 @@ def test_sweep_override_note_wording_node():
     const withStats = sweepCard(v, data, '<span class="sweep-stats">S</span>');
     assert(withStats.includes('sweep-stats'), withStats);
 
-    // Every held parameter shows the operator's submitted value.
-    assert(card.includes('Spread Offset ($)'), card);
-    assert(card.includes('0.020'), card);
+    // Every held parameter shows the operator's submitted value — issue #419:
+    // price knobs render in whole-number cents, one format everywhere.
+    assert(card.includes('Spread Offset (c)'), card);
+    assert(card.includes('2c'), card);
+    assert(!card.includes('0.020'), card);
     assert(card.includes('Queue Depth Filter'), card);
     assert(card.includes('>50<'), card);
     assert(card.includes('Late Entry (% window)'), card);
     assert(card.includes('4%'), card);
-    assert(card.includes('Exit Stop 5m ($)'), card);
-    assert(card.includes('0.06'), card);
-    assert(card.includes('Exit Stop 15m ($)'), card);
-    assert(card.includes('0.07'), card);
-    assert(card.includes('Reversal Buffer ($)'), card);
-    assert(card.includes('0.030'), card);
+    assert(card.includes('Exit Stop 5m (c)'), card);
+    assert(card.includes('6c'), card);
+    assert(card.includes('Exit Stop 15m (c)'), card);
+    assert(card.includes('7c'), card);
+    assert(card.includes('Reversal Buffer (c)'), card);
+    assert(card.includes('3c'), card);
     assert(card.includes('Leg Chase'), card);
     assert(card.includes('Enabled'), card);
 
     // Constraints read from the same snapshot.
-    assert(card.includes('Quotable Range ($)'), card);
-    assert(card.includes('[0.20, 0.80]'), card);
+    assert(card.includes('Quotable Range (c)'), card);
+    assert(card.includes('[20c, 80c]'), card);
     assert(card.includes('Dead Zone (% window)'), card);
     assert(card.includes('12%'), card);
     assert(card.includes('Naked Leg at Expiry'), card);
@@ -2820,16 +2825,16 @@ def test_sweep_override_note_wording_node():
     // Exit Stop 5m row the sweep holds unchanged.
     const btcCard = sweepCard(v, { ...data, axis: 'exit_stop_btc' });
     assert(btcCard.includes('value="exit_stop_btc" selected'), btcCard);
-    assert(btcCard.includes('>BTC 5m Stop ($) <span class="sweep-tag">← subject</span>'), btcCard);
-    assert(btcCard.includes('>0.08<'), btcCard);
+    assert(btcCard.includes('>BTC 5m Stop (c) <span class="sweep-tag">← subject</span>'), btcCard);
+    assert(btcCard.includes('>8c<'), btcCard);
     assert(btcCard.split('← subject').length - 1 === 1, btcCard);
-    assert(!btcCard.includes('Exit Stop 5m ($) <span class="sweep-tag"'), btcCard);
+    assert(!btcCard.includes('Exit Stop 5m (c) <span class="sweep-tag"'), btcCard);
     assert(btcCard.includes('no bar equals it'), btcCard);
 
     const solCard = sweepCard(v, { ...data, axis: 'exit_stop_sol' });
     assert(solCard.includes('value="exit_stop_sol" selected'), solCard);
-    assert(solCard.includes('>SOL 5m Stop ($) <span class="sweep-tag">← subject</span>'), solCard);
-    assert(solCard.includes('>0.09<'), solCard);
+    assert(solCard.includes('>SOL 5m Stop (c) <span class="sweep-tag">← subject</span>'), solCard);
+    assert(solCard.includes('>9c<'), solCard);
     assert(solCard.split('← subject').length - 1 === 1, solCard);
 
     // late_entry and quote_range subjects and formatters
@@ -2840,7 +2845,7 @@ def test_sweep_override_note_wording_node():
 
     const qrCard = sweepCard(v, { ...data, axis: 'quote_range' });
     assert(qrCard.includes('value="quote_range" selected'), qrCard);
-    assert(qrCard.includes('>Quotable Range ($) <span class="sweep-tag">← subject</span>'), qrCard);
+    assert(qrCard.includes('>Quotable Range (c) <span class="sweep-tag">← subject</span>'), qrCard);
     assert(qrCard.split('← subject').length - 1 === 1, qrCard);
 
     const qrPoints = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30];
@@ -2849,7 +2854,9 @@ def test_sweep_override_note_wording_node():
     assert(qrNote.verdict.cls === 'yours', qrNote.head);
 
     assert(formatSweepTickValue('late_entry', 15) === '15%');
-    assert(formatSweepTickValue('quote_range', 0.1) === '[0.10, 0.90]');
+    assert(formatSweepTickValue('quote_range', 0.1) === '[10c, 90c]');
+    assert(formatSweepTickValue('offset', 0.02) === '2c');
+    assert(formatSweepTickValue('exit_stop_default', 0.105) === '10.5c');
 
     // Unknown axis: no claim, card still renders the held knobs.
     const unk = sweepCard(v, { ...data, axis: 'not-an-axis' });
@@ -4783,9 +4790,26 @@ def test_param_spec_endpoint_serves_the_registry():
     body = client.get("/api/params/spec").json()
     assert "groups" in body and "by_surface" in body
     off = body["groups"]["trading_knobs"]["offset"]
-    assert off["label"] == "Spread Offset ($)"
+    # Issue #419: the operator label reads cents; the dollar contract behind
+    # it (unit, bounds, default) is byte-identical.
+    assert off["label"] == "Spread Offset (c)"
+    assert off["unit"] == "$"
     assert off["bounds"] == [0.001, 0.49]   # the bound live actually enforces
+    assert off["default"] == 0.02
+    assert off["display"] == {"unit": "c", "scale": 100, "step": 0.1,
+                              "canonical_label": "Spread Offset ($)"}
     assert "cockpit" in off["surfaces"] and "backtest" in off["surfaces"]
+    qr = body["groups"]["trading_knobs"]["quote_range"]
+    assert qr["label"] == "Quotable Range (c, mid lo/hi)"
+    assert qr["display"]["unit"] == "c"
+    exits = body["groups"]["trading_knobs"]["exit_thresh_by_slug"]
+    assert exits["label"] == "Exit Stop Loss (c)"
+    assert exits["bounds"] is None
+    assert exits["display"]["entry_bounds"] == [0.001, 0.50]
+    for knob in body["groups"]["trading_knobs"].values():
+        if knob["display"] is None:
+            continue
+        assert knob["display"]["unit"] == "c"
 
 
 def _controls_by_surface(html):
@@ -5258,10 +5282,22 @@ def test_every_knob_the_cockpit_posts_is_declared_on_the_payload():
     from server.osc_dash import LiveConfigPayload
 
     html = client.get("/").text
-    block = re.search(r"const numeric = \{(.*?)\};", html, re.S)
-    assert block, "the Cockpit's numeric field map was not found in the page"
-    posted = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+    # Issue #419: pair cost left the shared `numeric` map for its own cents
+    # conversion; collect the posted body keys from the whole submit path.
+    cfg = html[html.index("async function applyCockpitConfig("):]
+    cfg = cfg[:cfg.index("function setCockpitChartMode(")]
+    posted = set(re.findall(r"body\.(\w+)\s*=", cfg))
+    # Shorthand properties in `const body = { offset, exit_thresh, ... }`.
+    body_block = re.search(r"const body = \{(.*?)\};", cfg, re.S)
+    if body_block:
+        for line in body_block.group(1).splitlines():
+            m = re.match(r"\s*(\w+)(?:,|\s*$)", line)
+            if m:
+                posted.add(m.group(1))
     posted |= {"enable_leg_chase"}
+    assert {"offset", "exit_thresh", "exit_reversal", "quote_range",
+            "max_pair_cost", "entry_delay_sec"} <= posted, (
+        f"the Cockpit submit path lost a knob: {sorted(posted)}")
     undeclared = sorted(posted - set(LiveConfigPayload.model_fields))
     assert undeclared == [], (
         f"the Cockpit posts these and the payload silently drops them: {undeclared}")
@@ -5318,7 +5354,7 @@ def test_param_spec_hands_out_a_copy_not_the_cache():
     first["trading_knobs"]["offset"]["label"] = "POISONED"
     first["trading_knobs"]["offset"]["bounds"] = (-99.0, 99.0)
     fresh = BacktestParams.param_spec()
-    assert fresh["trading_knobs"]["offset"]["label"] == "Spread Offset ($)"
+    assert fresh["trading_knobs"]["offset"]["label"] == "Spread Offset (c)"
     assert fresh["trading_knobs"]["offset"]["bounds"] == (0.001, 0.49)
 
 
@@ -5328,7 +5364,7 @@ def test_spec_for_hands_out_a_copy_too():
     s["label"] = "POISONED"
     s["surfaces"] = ()
     again = BacktestParams.spec_for("quote_range")
-    assert again["label"] == "Quotable Range (mid lo/hi)"
+    assert again["label"] == "Quotable Range (c, mid lo/hi)"
     assert "cockpit" in again["surfaces"]
 
 
@@ -5510,9 +5546,13 @@ def test_reset_restores_the_stop_loss_group_defaults():
     fn = html[fn_start:html.index("\n}", fn_start)]
     assert "toggleStopLossInputs" not in fn, (
         "Issue #229: the toggle function is deleted, nothing may call it")
-    assert "$('btQuoteLo').value = \"0.10\";" in fn
-    assert "$('btQuoteHi').value = \"0.90\";" in fn
-    for el_id, val in [("btExit5m", "0.05"), ("btExit15m", "0.05"), ("btExitBtc", "0.05"), ("btExitSol", "0.05"), ("btSize", "5")]:
+    # Issue #419: reset restores cents literals matching the converted inputs.
+    assert "$('btQuoteLo').value = \"10\";" in fn
+    assert "$('btQuoteHi').value = \"90\";" in fn
+    assert "$('btOffset').value = \"2\";" in fn
+    assert "$('btPairCost').value = \"99\";" in fn
+    assert "$('btExitReversal').value = \"2\";" in fn
+    for el_id, val in [("btExit5m", "5"), ("btExit15m", "5"), ("btExitBtc", "5"), ("btExitSol", "5"), ("btSize", "5")]:
         assert f"$('{el_id}').value = \"{val}\";" in fn, f"resetBtParams missing reset for {el_id}"
 
 
@@ -5979,14 +6019,15 @@ def test_backtest_param_preview_zero_handling_node():
     }
 
     const svgHtml = $('btParamPreviewSvg').innerHTML;
-    if (!svgHtml.includes('Long Bid: $0.500') || !svgHtml.includes('Short Comp: $0.500')) {
-      throw new Error(`expected Long Bid & Short Comp at $0.500 for zero offset, got: ${svgHtml}`);
+    // Issue #419: the preview renders the same cents format as the inputs.
+    if (!svgHtml.includes('Long Bid: 50c') || !svgHtml.includes('Short Comp: 50c')) {
+      throw new Error(`expected Long Bid & Short Comp at 50c for zero offset, got: ${svgHtml}`);
     }
 
     // Cluster every visible level at the same price and verify the layout pass
     // enforces its 25-unit minimum gap after sorting and clamping.
-    $('btQuoteLo').value = '0.5';
-    $('btQuoteHi').value = '0.5';
+    $('btQuoteLo').value = '50';
+    $('btQuoteHi').value = '50';
     updateBacktestParamPreview();
     const clusteredCenters = Array.from(
       $('btParamPreviewSvg').innerHTML.matchAll(/data-label-center="([0-9.]+)"/g),
@@ -6154,9 +6195,13 @@ def test_jungle_king_registry_join_and_exit_inheritance():
     by_name = {p["name"]: p for p in params}
     registry = _flatten_registry()
     # Shared params carry the registry's identity (one label source — issue #164 rule).
+    # Issue #419: Jungle King shows dollar manifest values, so converted knobs
+    # keep the canonical dollar label, not the (c) operator label.
     for name in ("offset", "max_pair_cost", "taker_fee_rate", "dead_zone_val"):
         assert by_name[name]["registry"] is not None
-        assert by_name[name]["label"] == registry[name]["label"]
+        expected = (registry[name].get("display") or {}).get("canonical_label") \
+            or registry[name]["label"]
+        assert by_name[name]["label"] == expected, name
         assert by_name[name]["param_class"] == registry[name]["param_class"]
     # exit_thresh_by_slug.* inherits the parent's class (tuning) and derives its label.
     exit5 = by_name["exit_thresh_by_slug.btc-up-or-down-5m"]
@@ -8888,7 +8933,8 @@ def test_sweep_card_anchor_and_clamp_notices_node():
 
     html = osc_dash.FULL_APP_HTML
     parts = []
-    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+    for name in ("centsToDollars", "dollarsToCents", "formatCents",
+                 "sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
                  "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
@@ -8907,14 +8953,16 @@ def test_sweep_card_anchor_and_clamp_notices_node():
     };
     const base = {
       axis: 'offset',
-      points: [{label: '2.5\\u00a2', value: 0.025, overall: {}, per_series: {},
+      points: [{label: '2.5c', value: 0.025, overall: {}, per_series: {},
                 series_present: []}],
       series_order: [], series_labels: {}
     };
     // Anchored, nothing clamped: input carries the anchor, anchor line shows.
+    // Issue #419: the anchor field on a price axis holds cents (4), the
+    // stored sweep_center stays dollars (0.04).
     const anchored = sweepCard(v, { ...base, sweep_center: 0.04, clamped_count: 0 });
     assert(anchored.includes('id="btSweepCenter"'), anchored);
-    assert(anchored.includes('value="0.04"'), anchored);
+    assert(anchored.includes('value="4"'), anchored);
     // Issue #389: probe the notice's own class — `sweep-anchor-field` shares
     // the prefix, so the loose substring check would pass on a card whose
     // anchor notice never rendered.
@@ -8955,7 +9003,8 @@ def test_sweep_anchor_field_is_labelled_node():
 
     html = osc_dash.FULL_APP_HTML
     parts = []
-    for name in ("sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
+    for name in ("centsToDollars", "dollarsToCents", "formatCents",
+                 "sweepOverrideNote", "sweepMarketsGridHtml", "sweepAxisValues",
                  "sweepAxisIsCategorical", "sweepCard", "formatSweepTickValue"):
         found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
         assert found is not None, f"{name} is no longer a top-level function"
@@ -9001,7 +9050,7 @@ def test_sweep_anchor_field_is_labelled_node():
     // quote_range translates the whole [lo, hi] pair, so it shifts the lo bound.
     const qr = sweepCard(v, { ...base, axis: 'quote_range' });
     const qrUnit = /<span class="sweep-anchor-unit">([^<]*)<\/span>/.exec(qr);
-    assert(qrUnit[1] === 'lo bound', 'quote_range unit: ' + qrUnit[1]);
+    assert(qrUnit[1] === 'lo bound (c)', 'quote_range unit: ' + qrUnit[1]);
 
     // Empty: a hint, never a number that reads as live data.
     const empty = sweepCard(v, base);
@@ -9017,9 +9066,10 @@ def test_sweep_anchor_field_is_labelled_node():
     assert(empty.includes('class="sweep-anchor-field"'), empty);
 
     // Set: the field itself says so — including an explicit 0 (falsy but valid).
+    // Issue #419: price-axis anchors display in cents.
     const set = sweepCard(v, { ...base, sweep_center: 0.04 });
     assert(set.includes('class="sweep-anchor-field is-set"'), set);
-    assert(set.includes('value="0.04"'), set);
+    assert(set.includes('value="4"'), set);
     const zero = sweepCard(v, { ...base, axis: 'queue', sweep_center: 0 });
     assert(zero.includes('class="sweep-anchor-field is-set"'), zero);
     assert(zero.includes('value="0"'), zero);
@@ -9042,20 +9092,27 @@ def test_format_sweep_tick_offgrid_node():
         pytest.skip("Node.js not installed")
 
     html = osc_dash.FULL_APP_HTML
+    parts = []
+    for name in ("centsToDollars", "dollarsToCents", "formatCents"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
     found = re.search(r"function formatSweepTickValue\(.*?\n\}", html, re.DOTALL)
     assert found is not None, "formatSweepTickValue is no longer a top-level function"
-    test_js = found.group(0) + """
+    parts.append(found.group(0))
+    test_js = "\n".join(parts) + """
     const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
-    // Defaults pinned.
-    assert(formatSweepTickValue('offset', 0.025) === '2.5\\u00a2');
+    // Defaults pinned — issue #419: one ASCII-cents format, no ¢.
+    assert(formatSweepTickValue('offset', 0.025) === '2.5c');
     assert(formatSweepTickValue('queue', 50) === '50');
     assert(formatSweepTickValue('late_entry', 15) === '15%');
-    assert(formatSweepTickValue('exit_stop_default', 0.10) === '10\\u00a2');
+    assert(formatSweepTickValue('exit_stop_default', 0.10) === '10c');
+    assert(formatSweepTickValue('quote_range', 0.1) === '[10c, 90c]');
     // Off-grid anchored values keep their precision.
-    assert(formatSweepTickValue('offset', 0.0125) === '1.25\\u00a2');
+    assert(formatSweepTickValue('offset', 0.0125) === '1.25c');
     assert(formatSweepTickValue('queue', 5.5) === '5.5');
     assert(formatSweepTickValue('late_entry', 12.5) === '12.5%');
-    assert(formatSweepTickValue('exit_stop_default', 0.0555) === '5.55\\u00a2');
+    assert(formatSweepTickValue('exit_stop_default', 0.0555) === '5.55c');
     console.log('FORMAT_SWEEP_TICK_OFFGRID_OK');
     process.exit(0);
     """
@@ -9086,7 +9143,10 @@ def _sweep_card_harness() -> str:
                  "line: 'l', dim: 'm', faint: 'f', proj: 'p' });")
     # Issue #388: the chart options resolve their x positions and their tick
     # labels through these two, so the harness carries them too.
-    for name in ("sweepLabelWidthPx", "sweepTickStep", "sweepTickIndices",
+    # Issue #419: the tick formatter converts through the shared cents
+    # helpers, so those ride along as well.
+    for name in ("centsToDollars", "dollarsToCents", "formatCents",
+                 "sweepLabelWidthPx", "sweepTickStep", "sweepTickIndices",
                  "sweepIsUniformX", "sweepPixelTickIndices",
                  "formatSweepTickValue", "sweepAxisLabel", "sweepAxisIsCategorical",
                  "sweepPointX", "sweepChartOptions"):
@@ -9597,8 +9657,19 @@ def test_sweep_categorical_axis_rendering_node():
     console.log('SWEEP_CATEGORICAL_RENDER_OK');
     process.exit(0);
     """
-    res = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True,
-                         encoding="utf-8", timeout=15)
+    # Issue #419: the harness (now carrying the cents helpers) exceeds the
+    # Windows command-line length for `node -e`, so it runs from a file.
+    import os
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                      encoding="utf-8") as fh:
+        fh.write(test_js)
+        js_path = fh.name
+    try:
+        res = subprocess.run([node_bin, js_path], capture_output=True, text=True,
+                             encoding="utf-8", timeout=15)
+    finally:
+        os.unlink(js_path)
     assert res.returncode == 0, f"Node script failed: {res.stderr}\n{res.stdout}"
     assert "SWEEP_CATEGORICAL_RENDER_OK" in res.stdout
 
@@ -9624,6 +9695,12 @@ def test_sweep_progress_rerender_keeps_anchor_focus():
     categorical_fn = re.search(r"function sweepAxisIsCategorical\(axis\)\{.*?\n\}", html, re.DOTALL)
     format_tick_fn = re.search(r"function formatSweepTickValue\(.*?\n\}", html, re.DOTALL)
     sweep_axis_label_fn = re.search(r"function sweepAxisLabel\(.*?\n\}", html, re.DOTALL)
+    # Issue #419: the extracted formatter converts through these helpers.
+    helper_fns = []
+    for helper in ("centsToDollars", "dollarsToCents", "formatCents"):
+        found = re.search(rf"function {helper}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{helper} is no longer a top-level function"
+        helper_fns.append(found.group(0))
 
     assert render_fn is not None
     assert destroy_instance_fn is not None
@@ -9794,6 +9871,7 @@ def test_sweep_progress_rerender_keeps_anchor_focus():
 
     {CATEGORICAL_FN}
     {POINT_X_FN}
+    {HELPER_FNS}
     {FORMAT_TICK_FN}
     {SWEEP_AXIS_LABEL_FN}
     {DESTROY_INSTANCE_FN}
@@ -9866,6 +9944,7 @@ def test_sweep_progress_rerender_keeps_anchor_focus():
     harness = (harness
                .replace("{CATEGORICAL_FN}", categorical_fn.group(0))
                .replace("{POINT_X_FN}", point_x_fn.group(0))
+               .replace("{HELPER_FNS}", "\n".join(helper_fns))
                .replace("{FORMAT_TICK_FN}", format_tick_fn.group(0))
                .replace("{SWEEP_AXIS_LABEL_FN}", sweep_axis_label_fn.group(0))
                .replace("{DESTROY_INSTANCE_FN}", destroy_instance_fn.group(0))
@@ -10035,6 +10114,11 @@ def test_backtest_apply_template_round_trip_query():
     reproduces the saved parameter set (Node harness with stub DOM)."""
     html = osc_dash.FULL_APP_HTML
     parts = []
+    # Issue #419: the reader and the template writer convert through these.
+    for name in ("centsToDollars", "dollarsToCents"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
     for name in ("btControlValues", "btSelection", "btControlQuery", "applyBacktestTemplate"):
         chunk = html[html.index(f"function {name}("):]
         # _body-style slice drops the closing brace; re-add it for execution.
@@ -10107,3 +10191,248 @@ def test_backtest_apply_template_round_trip_query():
         pytest.skip("Node.js not installed")
     proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
     assert proc.returncode == 0, proc.stderr
+
+
+def _extract_cents_helpers(html):
+    """Issue #419: pull the shared conversion helpers out of the served page."""
+    parts = []
+    for name in ("centsToDollars", "dollarsToCents", "formatCents"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    return "\n".join(parts)
+
+
+def test_cents_helpers_convert_exactly_at_the_ui_edge_node():
+    """Issue #419: cents inputs convert to the exact dollars the engine runs."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    test_js = _extract_cents_helpers(osc_dash.FULL_APP_HTML) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    assert(centsToDollars(5) === 0.05, centsToDollars(5));
+    assert(centsToDollars(10.5) === 0.105, centsToDollars(10.5));
+    assert(centsToDollars(2) === 0.02, centsToDollars(2));
+    assert(centsToDollars(99) === 0.99, centsToDollars(99));
+    assert(centsToDollars(100) === 1, centsToDollars(100));
+    assert(centsToDollars(0.1) === 0.001, centsToDollars(0.1));
+    assert(dollarsToCents(0.05) === 5, dollarsToCents(0.05));
+    assert(dollarsToCents(0.105) === 10.5, dollarsToCents(0.105));
+    assert(dollarsToCents(0.001) === 0.1, dollarsToCents(0.001));
+    assert(dollarsToCents(0.99) === 99, dollarsToCents(0.99));
+    assert(dollarsToCents(0.50) === 50, dollarsToCents(0.50));
+    assert(formatCents(0.05) === '5c', formatCents(0.05));
+    assert(formatCents(0.105) === '10.5c', formatCents(0.105));
+    assert(formatCents(0.90) === '90c', formatCents(0.90));
+    // Round trips lose nothing at venue-tick resolution.
+    for (const d of [0.02, 0.05, 0.105, 0.99, 0.10, 0.90]) {
+      assert(centsToDollars(dollarsToCents(d)) === d, d);
+    }
+    // A marked-bad giant must never throw the render path (toFixed would).
+    assert(Number.isFinite(centsToDollars('1e22')), 'giant input must not throw');
+    console.log('CENTS_HELPERS_OK');
+    process.exit(0);
+    """
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
+    assert "CENTS_HELPERS_OK" in proc.stdout
+
+
+def test_cents_inputs_round_trip_to_dollar_requests_node():
+    """Issue #419: typing 5 where 0.05 used to go sends offset=0.05."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    html = osc_dash.FULL_APP_HTML
+    parts = [_extract_cents_helpers(html)]
+    for name in ("btControlValues", "btSelection", "btControlQuery"):
+        chunk = html[html.index(f"function {name}("):]
+        parts.append(chunk[:chunk.index("\n}")] + "\n}")
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+    let selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    let selectedBtDuration = 'both';
+    global.window = { selectedBacktestFile: '' };
+    const _els = {};
+    function $(id){
+      if (!_els[id]) _els[id] = {value: '', options: [], disabled: false,
+        setAttribute(){}, classList: {add(){}, remove(){}}};
+      return _els[id];
+    }
+    _els['btOffset'] = {value: '5', options: [], classList: {add(){}, remove(){}}};
+    _els['btExit5m'] = {value: '5', options: [], classList: {add(){}, remove(){}}};
+    _els['btExitReversal'] = {value: '10.5', options: [], classList: {add(){}, remove(){}}};
+    _els['btQuoteLo'] = {value: '10', options: [], classList: {add(){}, remove(){}}};
+    _els['btQuoteHi'] = {value: '90', options: [], classList: {add(){}, remove(){}}};
+    _els['btPairCost'] = {value: '99', options: [], classList: {add(){}, remove(){}}};
+    const q = btControlQuery(btControlValues());
+    for (const needle of ['offset=0.05', 'exit_default_5m=0.05',
+        'exit_reversal=0.105', 'quote_lo=0.1', 'quote_hi=0.9',
+        'pair_cost=0.99']) {
+      assert(q.includes(needle), needle + ' missing from ' + q);
+    }
+    console.log('CENTS_ROUND_TRIP_OK');
+    process.exit(0);
+    """
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
+    assert "CENTS_ROUND_TRIP_OK" in proc.stdout
+
+
+def test_cents_validator_rejects_bad_input_node():
+    """Issue #419: bad cents input is marked, never silently replayed."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    html = osc_dash.FULL_APP_HTML
+    parts = [_extract_cents_helpers(html)]
+    for name in ("validateCentsInput", "validateBacktestInputs"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const _els = {};
+    function mkEl(value, min, max){
+      const cls = new Set();
+      return { value: value, min: min, max: max,
+        classList: { add(c){ cls.add(c); }, remove(c){ cls.delete(c); },
+                     toggle(c, f){ f ? cls.add(c) : cls.delete(c); },
+                     contains(c){ return cls.has(c); } } };
+    }
+    function $(id){ return _els[id] || null; }
+    // Accepts whole and one-decimal cents inside [min, max], edges included.
+    for (const good of ['2', '10.5', '0.1', '49']) {
+      const el = mkEl(good, '0.1', '49');
+      assert(validateCentsInput(el) === true, good);
+      assert(!el.classList.contains('input-invalid'), good);
+    }
+    // Rejects two-decimal, empty, non-finite and out-of-range input.
+    for (const bad of ['10.55', '', 'abc', '50', '0.05', 'Infinity', 'NaN', '1e2']) {
+      const el = mkEl(bad, '0.1', '49');
+      assert(validateCentsInput(el) === false, bad);
+      assert(el.classList.contains('input-invalid'), bad);
+    }
+    // The tab validator covers the nine price inputs plus lo < hi.
+    const ids = ['btOffset', 'btPairCost', 'btExit5m', 'btExit15m', 'btExitBtc',
+                 'btExitSol', 'btExitReversal', 'btQuoteLo', 'btQuoteHi'];
+    const vals = { btOffset: '2', btPairCost: '99', btExit5m: '5',
+      btExit15m: '5', btExitBtc: '5', btExitSol: '5', btExitReversal: '2',
+      btQuoteLo: '10', btQuoteHi: '90' };
+    const mins = { btOffset: '0.1', btPairCost: '50', btQuoteLo: '0', btQuoteHi: '0' };
+    const maxs = { btOffset: '49', btPairCost: '100', btQuoteLo: '100', btQuoteHi: '100' };
+    ids.forEach(id => { _els[id] = mkEl(vals[id], mins[id] || '0.1', maxs[id] || '50'); });
+    assert(validateBacktestInputs() === true, 'defaults must validate');
+    _els['btQuoteLo'].value = '90';
+    _els['btQuoteHi'].value = '10';
+    assert(validateBacktestInputs() === false, 'inverted range must fail');
+    assert(_els['btQuoteLo'].classList.contains('input-invalid'), 'lo must be marked');
+    assert(_els['btQuoteHi'].classList.contains('input-invalid'), 'hi must be marked');
+    console.log('CENTS_VALIDATOR_OK');
+    process.exit(0);
+    """
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
+    assert "CENTS_VALIDATOR_OK" in proc.stdout
+
+
+def test_cockpit_ordering_never_clears_a_cents_hint_node():
+    """CodeRabbit round 1 (#420): the quote-range ordering block must not
+    erase the cents validator's mark when the ordering itself passes."""
+    import shutil
+    import subprocess
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    html = osc_dash.FULL_APP_HTML
+    parts = [_extract_cents_helpers(html)]
+    for name in ("validateCentsInput", "validateCockpitInputs"):
+        found = re.search(rf"function {name}\(.*?\n\}}", html, re.DOTALL)
+        assert found is not None, f"{name} is no longer a top-level function"
+        parts.append(found.group(0))
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const _els = {};
+    function mkEl(value, min, max){
+      const cls = new Set();
+      return { value: value, min: min, max: max,
+        classList: { add(c){ cls.add(c); }, remove(c){ cls.delete(c); },
+                     toggle(c, f){ f ? cls.add(c) : cls.delete(c); },
+                     contains(c){ return cls.has(c); } } };
+    }
+    function $(id){ return _els[id] || null; }
+    _els['cockpitOffset'] = mkEl('2', '0.1', '49');
+    _els['cockpitExit'] = mkEl('5', '0.1', '50');
+    _els['cockpitExitReversal'] = mkEl('2', '0.1', '50');
+    _els['cockpitPairCost'] = mkEl('99', '50', '100');
+    _els['cockpitQuoteLo'] = mkEl('10.55', '0', '100');
+    _els['cockpitQuoteHi'] = mkEl('90', '0', '100');
+    assert(validateCockpitInputs() === false, 'two-decimal lo must fail');
+    assert(_els['cockpitQuoteLo'].classList.contains('input-invalid'),
+           'the ordering pass must not clear the cents hint');
+    // Fully valid input stays clean.
+    _els['cockpitQuoteLo'].value = '10';
+    assert(validateCockpitInputs() === true, 'valid input must pass');
+    assert(!_els['cockpitQuoteLo'].classList.contains('input-invalid'),
+           'fixed input must clear');
+    console.log('COCKPIT_ORDERING_HINT_OK');
+    process.exit(0);
+    """
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
+    assert "COCKPIT_ORDERING_HINT_OK" in proc.stdout
+
+
+def test_converted_inputs_ship_cents_attributes_and_no_dollar_labels():
+    """Issue #419: every converted input ships cents value/step/min/max."""
+    import re
+    html = client.get("/").text
+    for el_id, value, step, lo, hi in [
+        ("btOffset", "2", "0.1", "0.1", "49"),
+        ("btExit5m", "5", "0.1", "0.1", "50"),
+        ("btExit15m", "5", "0.1", "0.1", "50"),
+        ("btExitBtc", "5", "0.1", "0.1", "50"),
+        ("btExitSol", "5", "0.1", "0.1", "50"),
+        ("btExitReversal", "2", "0.1", "0.1", "50"),
+        ("btQuoteLo", "10", "0.1", "0", "100"),
+        ("btQuoteHi", "90", "0.1", "0", "100"),
+        ("btPairCost", "99", "0.1", "50", "100"),
+        ("cockpitOffset", "2", "0.1", "0.1", "49"),
+        ("cockpitExit", "5", "0.1", "0.1", "50"),
+        ("cockpitExitReversal", "2", "0.1", "0.1", "50"),
+        ("cockpitQuoteLo", "10", "0.1", "0", "100"),
+        ("cockpitQuoteHi", "90", "0.1", "0", "100"),
+        ("cockpitPairCost", "99", "0.1", "50", "100"),
+    ]:
+        tag = re.search(rf'<input[^>]*id="{el_id}"[^>]*>', html)
+        assert tag, f"{el_id} missing from the page"
+        for attr, want in (("value", value), ("step", step),
+                            ("min", lo), ("max", hi)):
+            m = re.search(rf'{attr}="([^"]*)"', tag.group(0))
+            assert m and m.group(1) == want, (
+                f"{el_id} {attr}={m.group(1) if m else None!r}, need {want!r}")
+    # No hard-coded ($) survives for a converted knob.
+    for stale in ("Exit Stop Loss 5m ($)", "Exit Stop Loss 15m ($)",
+                  "BTC 5m Stop Loss ($)", "SOL 5m Stop Loss ($)",
+                  "Quotable Range ($)", "Spread Offset ($)",
+                  "Exit Stop Loss ($)", "Reversal Buffer ($)",
+                  "Max Pair Cost ($)"):
+        assert stale not in html, f"hard-coded dollar label survives: {stale}"
+    # The exit inputs and quote ends render their unit from the registry.
+    assert 'data-param-unit="exit_thresh_by_slug"' in html
+    assert 'data-param-unit="quote_range"' in html
+    assert "entry_bounds" in html
+    for helper in ("centsToDollars", "dollarsToCents", "formatCents",
+                   "validateCentsInput", "validateBacktestInputs"):
+        assert f"function {helper}(" in html, f"{helper} missing from the page"

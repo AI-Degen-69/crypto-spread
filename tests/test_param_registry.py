@@ -327,6 +327,58 @@ def test_grouped_params_still_works_unchanged():
     assert "taker_fee_rate" in g["execution_assumptions"]
 
 
+def test_cents_display_covers_exactly_the_five_price_knobs():
+    """Issue #419: the registry owns the cents presentation.
+
+    `display` covers exactly the five operator-settable price knobs and no
+    venue constant; the canonical unit/bounds/defaults stay on the dollar
+    contract; cents values keep at most one decimal (0.1c = venue tick).
+    """
+    by_name = {name: spec for g in SPEC.values() for name, spec in g.items()}
+    expected = {"offset", "max_pair_cost", "quote_range",
+                "exit_thresh_by_slug", "exit_reversal"}
+    shown = {name for name, spec in by_name.items()
+             if spec.get("display") is not None}
+    assert shown == expected, (
+        f"display covers {sorted(shown)}, need {sorted(expected)}")
+    for name in ("taker_fee_rate", "tick_size", "merge_gas_usd",
+                 "min_quote_shares"):
+        assert by_name[name].get("display") is None, (
+            f"venue constant {name} must not carry a display block")
+    canonical_labels = {
+        "offset": "Spread Offset ($)",
+        "max_pair_cost": "Max Pair Cost ($)",
+        "quote_range": "Quotable Range (mid lo/hi)",
+        "exit_thresh_by_slug": "Exit Stop Loss ($)",
+        "exit_reversal": "Reversal Buffer ($)",
+    }
+    for name in expected:
+        spec = by_name[name]
+        display = spec["display"]
+        assert display["unit"] == "c"
+        assert display["scale"] == 100
+        assert display["step"] == 0.1
+        assert spec["unit"] == "$", (
+            f"{name}: canonical unit must stay '$' (dollar contract)")
+        assert display["canonical_label"] == canonical_labels[name]
+        assert "(c" in spec["label"], (
+            f"{name}: operator label must read cents, got {spec['label']!r}")
+    # At most one decimal in every default and bound once scaled to cents.
+    live = BacktestParams()
+    for name in ("offset", "max_pair_cost", "exit_reversal"):
+        default_cents = getattr(live, name) * 100
+        assert default_cents == pytest.approx(round(default_cents, 1)), (
+            f"{name} default is not expressible in 0.1c steps")
+        for bound in by_name[name]["bounds"]:
+            assert bound * 100 == pytest.approx(round(bound * 100, 1)), (
+                f"{name} bound {bound} is not expressible in 0.1c steps")
+    lo, hi = live.quote_range
+    assert (lo * 100, hi * 100) == pytest.approx((10.0, 90.0))
+    # The exit inputs borrow their range from the live payload exit limits.
+    entry_bounds = by_name["exit_thresh_by_slug"]["display"]["entry_bounds"]
+    assert tuple(entry_bounds) == (0.001, 0.50)
+
+
 def test_zero_is_no_longer_a_way_to_switch_the_pair_cost_cap_off():
     """0.0 used to disable the gate. It is now simply out of range (#227).
 
