@@ -4051,6 +4051,7 @@ async def api_backtest_cancel(request: Request):
 # ---------------------------------------------------------------------------
 
 class _TemplateSaveBody(BaseModel):
+    """Request body for POST /api/backtest/templates."""
     name: str
     run_id: str
 
@@ -9072,8 +9073,9 @@ async function loadBacktestTemplate(encName){
     const j = await res.json();
     if (res.status === 409) { btTemplateStatus(`Template '${name}' is stale — parameters changed since it was saved.`, true); return; }
     if (!res.ok) { btTemplateStatus('Load failed: ' + (j.error || res.status), true); return; }
-    applyBacktestTemplate(j);
-    btTemplateStatus(`Template '${name}' loaded — controls updated, no replay started.`);
+    const note = applyBacktestTemplate(j);
+    if (note) btTemplateStatus(note, true);
+    else btTemplateStatus(`Template '${name}' loaded — controls updated, no replay started.`);
   } catch(err) {
     btTemplateStatus('Load failed: ' + (err && err.message ? err.message : err), true);
   }
@@ -9081,6 +9083,7 @@ async function loadBacktestTemplate(encName){
 
 function applyBacktestTemplate(t){
   const a = (t && t.request_args) || {};
+  let note = null;
   const setVal = function(id, v){
     if (v === undefined || v === null) return;
     const el = $(id);
@@ -9098,9 +9101,10 @@ function applyBacktestTemplate(t){
   setVal('btQuoteHi', a.quote_hi);
   setVal('btExitReversal', a.exit_reversal);
   if (a.entry_delay_pct !== undefined && a.entry_delay_pct !== null) setVal('btEntryDelay', a.entry_delay_pct);
-  else if (a.entry_delay_sec !== undefined && a.entry_delay_sec !== null) setVal('btEntryDelay', a.entry_delay_sec);
+  else if (a.entry_delay_sec) note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
   if (a.dead_zone_pct !== undefined && a.dead_zone_pct !== null) setVal('btDeadZoneVal', a.dead_zone_pct);
-  else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null) setVal('btDeadZoneVal', Number(a.dead_zone_val) * 100);
+  else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null && (a.dead_zone_unit || 'pct') === 'pct') setVal('btDeadZoneVal', Number(a.dead_zone_val) * 100);
+  else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null) note = note || 'Template uses a seconds dead-zone; the percent control was left unchanged.';
   setVal('btNakedLegAtExpiry', a.naked_leg_at_expiry);
   if (a.enable_leg_chase !== undefined && a.enable_leg_chase !== null) setVal('btLegChase', a.enable_leg_chase ? '1' : '0');
   if (a.max_start_delay !== undefined && a.max_start_delay !== null) {
@@ -9151,6 +9155,7 @@ function applyBacktestTemplate(t){
   updateBtFilterUI();
   updateBacktestParamPreview();
   updateBtRuntimeEstimate();
+  return note;
 }
 
 async function deleteBacktestTemplate(encName){

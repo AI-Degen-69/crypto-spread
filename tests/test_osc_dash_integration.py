@@ -9911,12 +9911,25 @@ def test_backtest_apply_template_round_trip_query():
     assert([...selectedBtTokens].sort().join(',') === 'BTC,SOL', [...selectedBtTokens].join(','));
     assert(_els['btLegChase'].value === '1', _els['btLegChase'].value);
     assert(_els['btNakedLegAtExpiry'].value === 'hold', _els['btNakedLegAtExpiry'].value);
-    // Legacy fallbacks: pct null falls back to seconds / fraction*100.
-    const tpl2 = {request_args: {entry_delay_sec: 2, entry_delay_pct: null,
-      dead_zone_val: 0.10, dead_zone_pct: null, series: '', durations: '', file: ''},
+    // Seconds-only legacy values never reach the percent controls: seconds
+    // are not percents, so the controls stay put and a note is returned.
+    const pctBefore = _els['btEntryDelay'].value;
+    const dzBefore = _els['btDeadZoneVal'].value;
+    const tpl2 = {request_args: {entry_delay_sec: 30, entry_delay_pct: null,
+      dead_zone_val: 30, dead_zone_pct: null, dead_zone_unit: 'sec',
+      series: '', durations: '', file: ''},
       scope: {series_tokens: [], duration_values: []}};
-    applyBacktestTemplate(tpl2);
-    assert(_els['btEntryDelay'].value === '2', _els['btEntryDelay'].value);
+    const note2 = applyBacktestTemplate(tpl2);
+    assert(typeof note2 === 'string' && note2.includes('entry_delay_sec'), note2);
+    assert(_els['btEntryDelay'].value === pctBefore, _els['btEntryDelay'].value);
+    assert(_els['btDeadZoneVal'].value === dzBefore, _els['btDeadZoneVal'].value);
+    // A pct-unit fraction still restores the percent control exactly.
+    const tpl3 = {request_args: {entry_delay_pct: 4,
+      dead_zone_val: 0.10, dead_zone_pct: null, dead_zone_unit: 'pct',
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: []}};
+    assert(applyBacktestTemplate(tpl3) === null, 'no note for pct-unit values');
+    assert(_els['btEntryDelay'].value === '4', _els['btEntryDelay'].value);
     assert(_els['btDeadZoneVal'].value === '10', _els['btDeadZoneVal'].value);
     """
     node_bin = shutil.which("node")

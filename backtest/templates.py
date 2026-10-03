@@ -147,6 +147,7 @@ def list_templates(directory: Path | str) -> list[dict[str, Any]]:
 
     # Sort valid records newest saved_at first, invalid records last
     def _sort_key(item: dict[str, Any]) -> tuple[int, float]:
+        """Order list rows: valid templates newest-first, unreadable files last."""
         if item.get("invalid"):
             return (0, 0.0)
         saved = item.get("saved_at")
