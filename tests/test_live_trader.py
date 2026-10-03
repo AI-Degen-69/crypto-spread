@@ -2489,6 +2489,61 @@ def test_initial_entry_price_is_latched_at_open_through_delay():
     assert not m.filled_up and not m.filled_down
 
 
+def test_cancel_all_orders_clears_the_anchor_so_restart_re_latches():
+    """A panic cancel ends the round's price: restart quotes the current mid.
+
+    `cancel_all_orders()` drops the order handles; without dropping the latch
+    the next clean tick would re-place the cancelled round's prices instead of
+    latching the mid in front of it (CodeRabbit round 1, issue #422).
+    """
+    engine = _fifteen_minute_engine(dead_zone_val=0.0)
+    _quiet_start(engine)
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+    _open_50_50_quotes(engine, slug, market, now)
+    m = engine.markets[slug]
+    assert m.anchored_mid == 0.50
+    assert m.order_id_up is not None and m.order_id_down is not None
+
+    res = engine.cancel_all_orders()
+    assert res["ok"] is True
+    assert m.order_id_up is None and m.order_id_down is None
+    assert m.anchored_mid is None
+
+    # Restart in the same window: the 0.60 tick latches fresh, not 0.50.
+    engine.is_running = True
+    engine.quoting_halted = False
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.59, "best_ask": 0.61},
+        "down_book": {"best_bid": 0.39, "best_ask": 0.41},
+    }, now + 10)
+    assert m.anchored_mid == pytest.approx(0.60)
+    assert m.resting_up == round(0.60 - engine.offset, 3) == 0.58
+    assert m.resting_down == round(0.40 - engine.offset, 3) == 0.38
+
+
+def test_reset_pnl_clears_the_anchor():
+    """`reset_pnl()` forgets fills and handles, so it must forget the price too.
+
+    Otherwise the next clean tick honors the pre-reset latch as the current
+    round's (CodeRabbit round 1, issue #422).
+    """
+    engine = _fifteen_minute_engine(dead_zone_val=0.0)
+    _quiet_start(engine)
+    slug = "btc-up-or-down-15m"
+    now = time.time()
+    market = _fifteen_minute_market(now)
+    _open_50_50_quotes(engine, slug, market, now)
+    m = engine.markets[slug]
+    assert m.anchored_mid == 0.50
+
+    res = engine.reset_pnl()
+    assert res["ok"] is True
+    assert m.anchored_mid is None
+
+
 def test_no_requote_when_time_short():
     """A merge inside dead zone stays terminal: no second round."""
     # Under fresh_start (rule 13), dead zone (default 10% = 30s for 5m) is the sole time gate.

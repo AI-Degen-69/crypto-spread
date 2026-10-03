@@ -92,8 +92,12 @@ Operator decision, 2026-09-16.
 
 **What it does.** Decides the price of the two opening buy orders for a window.
 
-**Trigger.** The window is open, no order exists yet and neither leg has filled, **and** the
-entry delay has expired (`elapsed >= entry_delay_sec`; with a delay of 0, the first tick).
+**Trigger (two halves).** The *anchor* latches on the first in-range two-sided mid seen while
+the round is clean (no orders, no fills) — the entry delay does not hold it. *Placement*
+of the two orders additionally needs the entry delay expired
+(`elapsed >= entry_delay_sec`; with a delay of 0, the first tick), the quotable range, and
+room before the dead zone. The delay holds WHEN the quote reaches the book, never at WHAT
+price.
 
 **Action on trigger.**
 
@@ -305,7 +309,7 @@ that, and the substitution is what blinded it (issue #207).
 
 **Why they are deleted.** Both computed `|mid - 0.50|` and latched the window shut — the same
 gate under two names, two thresholds and two evaluation times. Distance from 0.50 measures
-nothing this strategy depends on: we quote around the *current* mid (rule 1), not around 0.50.
+nothing this strategy depends on: we quote around the *latched* mid (rule 1), not around 0.50.
 A market at 0.70 offers exactly the trade a market at 0.50 offers — both legs bought for
 `1 - 2*offset`. The number they guarded on stopped being load-bearing when the entry anchor
 was fixed.

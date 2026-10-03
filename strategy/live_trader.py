@@ -1525,6 +1525,10 @@ class LiveTraderEngine:
                 m.order_id_exit_down = None
                 m.order_status_exit_up = "CANCELLED"
                 m.order_status_exit_down = "CANCELLED"
+                # The round's handles are gone, so its price goes with them: a
+                # stale latch would re-place the cancelled round's quotes on
+                # the next tick instead of latching the current mid.
+                m.anchored_mid = None
                 m.next_order_id_up = None
                 m.next_order_id_down = None
                 m.next_quoted = False
@@ -3417,6 +3421,9 @@ class LiveTraderEngine:
         m.order_id_exit_down = None
         m.order_status_exit_up = "NONE"
         m.order_status_exit_down = "NONE"
+        # Order state includes the entry price: without this, reset_pnl()
+        # leaves a latch the next clean tick honors as the current round's.
+        m.anchored_mid = None
 
     def reset_pnl(self) -> Dict[str, Any]:
         """Reset session PnL, trade history, and outstanding order state.
