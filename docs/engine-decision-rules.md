@@ -92,8 +92,12 @@ Operator decision, 2026-09-16.
 
 **What it does.** Decides the price of the two opening buy orders for a window.
 
-**Trigger.** The window is open, no order exists yet and neither leg has filled, **and** the
-entry delay has expired (`elapsed >= entry_delay_sec`; with a delay of 0, the first tick).
+**Trigger (two halves).** The *anchor* latches on the first in-range two-sided mid seen while
+the round is clean (no orders, no fills) — the entry delay does not hold it. *Placement*
+of the two orders additionally needs the entry delay expired
+(`elapsed >= entry_delay_sec`; with a delay of 0, the first tick), the quotable range, and
+room before the dead zone. The delay holds WHEN the quote reaches the book, never at WHAT
+price.
 
 **Action on trigger.**
 
@@ -104,11 +108,15 @@ resting_down = clamp(round((1 - mid) - offset, 3), 0.01, 0.99)
 
 **Two points settled explicitly:**
 
-1. **The price is recomputed on every tick until an order actually exists**, so the submitted
-   price is the mid at placement time, not a mid carried over from an earlier tick. It latches
-   only once an order is live. This is the live engine's behaviour
-   (`strategy/live_trader.py:4396-4405`); the backtest anchored once at delay expiry and never
-   re-anchored (`backtest/engine.py:779-790`), and is aligned to the live rule.
+1. **Set and wait: the price is latched once per round at the first in-range two-sided mid
+   seen while clean, then held through every gate.** The entry delay and the queue gate
+   decide WHEN the quote reaches the book, never at WHAT price. A round that opens at
+   0.50 rests 0.50 − offset no matter how many ticks placement is held; the market comes to
+   the quote, the quote never chases the market. The quotable range and the dead zone gate
+   the latch itself: a market that opens outside the range latches where it returns, not
+   where it opened, so a decided open cannot stamp a stale off-market price. Each fresh
+   round (rule 13) re-latches at its own first in-range tick. Both engines implement the
+   same latch (`strategy/live_trader.py` `anchored_mid`, `backtest/engine.py` `anchored_mid`).
 
 2. **`mid` means the two-sided mid only.** If either side of the book cannot be priced, there
    is no anchor and **no quote is placed** — the window waits. The live engine already does
@@ -301,7 +309,7 @@ that, and the substitution is what blinded it (issue #207).
 
 **Why they are deleted.** Both computed `|mid - 0.50|` and latched the window shut — the same
 gate under two names, two thresholds and two evaluation times. Distance from 0.50 measures
-nothing this strategy depends on: we quote around the *current* mid (rule 1), not around 0.50.
+nothing this strategy depends on: we quote around the *latched* mid (rule 1), not around 0.50.
 A market at 0.70 offers exactly the trade a market at 0.50 offers — both legs bought for
 `1 - 2*offset`. The number they guarded on stopped being load-bearing when the entry anchor
 was fixed.

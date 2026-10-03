@@ -1038,6 +1038,15 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
     quote_lo, quote_hi = params.quote_range
     resting_up: float | None = None
     resting_down: float | None = None
+    # Set-and-wait anchor (rule 1): latched once per round at the first
+    # IN-RANGE two-sided mid seen while clean, then held through every gate.
+    # The resting quotes are priced off this, never off the live mid, so a
+    # window that opens at 0.50 quotes 0.50 - offset even if placement is
+    # held for ticks. Delay and queue hold placement only, never the latch;
+    # range and dead zone gate the latch itself, so an open outside the
+    # quotable range cannot stamp a stale off-market price. Cleared on every
+    # round reset alongside resting_*.
+    anchored_mid: float | None = None
     original_resting_up: float | None = None
     original_resting_down: float | None = None
     # Whether a quote has actually been exposed to the book (issue #225). The
@@ -1089,34 +1098,41 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
         ub = s.get("up_book") or {}
         db = s.get("down_book") or {}
         mid = _mid(ub)
-        # --- ENTRY ANCHOR (issue #225) ---
-        # Two settled points, both of which this used to get wrong.
+        # --- ENTRY ANCHOR (issue #225, set-and-wait) ---
+        # Two settled points.
         #
-        # 1. Repriced on every tick until the quote is actually live, so the
-        #    price that reaches the book is the mid at placement time. The old
-        #    `if resting_up is None` anchored once at delay expiry and never
-        #    again: whenever anything held placement -- a failing queue gate,
-        #    a cancelled window later re-entered -- live kept tracking the
-        #    mid while this stayed frozen on a mid from ticks ago. They
-        #    agreed only when placement happened on the very tick the delay
-        #    expired.
+        # 1. Latched once per round at the first in-range two-sided mid seen
+        #    while clean, then held: the resting quotes are priced off the
+        #    latch, never off the live mid. Delay and queue decide WHEN the
+        #    quote reaches the book, never at WHAT price. A round that opens
+        #    at 0.50 rests 0.50 - offset no matter how many ticks placement
+        #    is held. Range and dead zone gate the latch itself, so a market
+        #    that opens outside the quotable range latches where it returns,
+        #    not where it opened. Each fresh round re-latches at its own
+        #    first in-range tick (the round resets clear the latch alongside
+        #    resting_* below).
         #
         # 2. The anchor is the two-sided mid and nothing else. `s["mid"]` is the
         #    collector's up-leg reading and survives a one-sided down book, so
         #    preferring it quoted a book that priced only one leg -- the same
         #    substitution issue #207 removed from live, on the other side. No
-        #    two-sided mid means no anchor: an already-live quote stands (the
+        #    two-sided mid means no latch: an already-live quote stands (the
         #    order is on the venue), and an unplaced one simply waits.
         delay_expired = entry_delay <= 0 or elapsed >= entry_delay
         anchor_mid = _two_sided_mid(ub, db)
+        if (anchored_mid is None and anchor_mid is not None
+                and not filled_up and not filled_down
+                and not in_dead_zone
+                and quote_lo <= anchor_mid <= quote_hi):
+            anchored_mid = anchor_mid
         # `entry_cancelled` is live's cancelled-orders state: the handles are
-        # gone, so the anchor tracks the mid again and a later re-entry quotes
-        # at the price of its own tick.
+        # gone, so a later re-entry places at the latched price of its round.
         if (not in_dead_zone and not filled_up and not filled_down and delay_expired
                 and (entry_cancelled or not orders_live)
-                and anchor_mid is not None):
-            resting_up = round(min(0.99, max(0.01, anchor_mid - params.offset)), 3)
-            resting_down = round(min(0.99, max(0.01, (1.0 - anchor_mid) - params.offset)), 3)
+                and anchored_mid is not None
+                and resting_up is None and resting_down is None):
+            resting_up = round(min(0.99, max(0.01, anchored_mid - params.offset)), 3)
+            resting_down = round(min(0.99, max(0.01, (1.0 - anchored_mid) - params.offset)), 3)
         # Live holds placement on a tick it cannot price (`no_book_hold`); a
         # quote already resting is unaffected, because it is already on the book.
         no_book_hold = (not orders_live) and anchor_mid is None
@@ -1389,6 +1405,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
 
             resting_up = None
             resting_down = None
+            anchored_mid = None
             filled_up = False
             filled_down = False
             entry_price_up = None
@@ -1456,6 +1473,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                     orders_live = False
                     resting_up = None
                     resting_down = None
+                    anchored_mid = None
                     filled_up = False
                     filled_down = False
                     entry_price_up = None
@@ -1510,6 +1528,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 orders_live = False
                 resting_up = None
                 resting_down = None
+                anchored_mid = None
                 filled_up = False
                 filled_down = False
                 entry_price_up = None
@@ -1558,6 +1577,7 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 orders_live = False
                 resting_up = None
                 resting_down = None
+                anchored_mid = None
                 filled_up = False
                 filled_down = False
                 entry_price_up = None
