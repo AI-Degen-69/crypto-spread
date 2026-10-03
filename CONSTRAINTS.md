@@ -1,21 +1,18 @@
-# Quality Guardrails & Constraints — Issue #392
+# Quality Guardrails & Constraints — Issue #403
 
 ## Scope & Functional Boundaries
-- Make Conventional Commits the single canonical PR-title rule across all repo-side files: `.coderabbit.yaml`, `docs/git-workflow.md`, and `docs/issue-workflow.md`.
-- `.coderabbit.yaml`:
-  - Rewrite `reviews.auto_title_instructions` to generate Conventional Commits PR titles: `<type>(<scope>): <imperative summary> (#<issue>)`.
-  - Rewrite `reviews.pre_merge_checks.title.requirements` to enforce Conventional Commits referencing the issue number (`#<issue>`).
-  - Allow types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`, `ci`, `style`, `revert`.
-  - Keep `mode: error` and `request_changes_workflow: true`.
-  - Keep `custom_checks` (with `No Hardcoded Secrets`) intact in the same `pre_merge_checks` mapping without duplicate keys.
-  - Do NOT touch `path_filters`, `path_instructions`, `tools`, or other sections.
-- `docs/git-workflow.md`:
-  - Update §3 `PR title:` bullet to clearly describe the canonical format, state that `.coderabbit.yaml` enforces it at `mode: error`, and provide one real worked example from history.
-- `docs/issue-workflow.md`:
-  - Ensure references to PR title point to `docs/git-workflow.md` §3 as canonical.
+- Investigate and resolve empty simulation results ($0 PnL, zero pairs captured) for high-volume markets (BTC, ETH) in parameter sweeps when `queue_gate > 0`.
+- Root cause: Real-market order book queue depths for BTC/ETH range from 180 to 1600+ shares, while existing sweep axes only tested `[0, 10, 25, 50, 100, 200]`, blocking 100% of BTC/ETH ticks at all non-zero sweep points.
+- Code changes:
+  - `server/osc_dash.py`: Update `SWEEP_AXES["queue"]` to `[0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]`.
+  - `scripts/sweep_backtest.py`: Update `generate_sensitivity_grid()`, `generate_random_grid()`, and `generate_joint_grid()` queue axis values to include high-depth values (`500.0`, `1000.0`, `2000.0`).
+  - Add regression tests in `tests/test_sweep_backtest.py` and `tests/test_osc_dash_integration.py` verifying that sweeps include the widened queue points and produce non-zero results on high-depth windows.
+- Invariant & Non-Goals:
+  - Do NOT weaken or bypass the binary queue gate logic in `backtest/engine.py:_simulate_window` (queue gate semantics remain strict: `q_up <= gate and q_dn <= gate`).
+  - No changes to `BacktestParams` schema or bounds (`(0.0, 100000.0)` already accommodates up to 100k shares).
+  - No new dependencies.
 
 ## Anti-Regression & Verification
-- Verify valid YAML syntax in `.coderabbit.yaml` using `python -c "import yaml; yaml.safe_load(open('.coderabbit.yaml'))"`.
-- Verify no remaining `[TAG]` requirements in `.coderabbit.yaml` or `docs/`.
-- No new runtime dependencies in `requirements.txt`.
-- No full test suite execution locally per project AGENTS.md policy.
+- Targeted unit tests in `tests/test_sweep_backtest.py` and `tests/test_osc_dash_integration.py` pass.
+- Verification command: `python -m pytest tests/test_sweep_backtest.py -q`.
+- Verification command: `python -m pytest tests/test_osc_dash_integration.py -k "sweep" -q`.

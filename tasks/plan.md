@@ -1,38 +1,34 @@
-# Plan — Issue #392: Align the PR-title rule between docs/git-workflow.md and .coderabbit.yaml
+# Plan: Issue #403 — Investigate and fix empty sweeper results under queue_gate
 
-Branch: `i392/align-pr-title-rule` | Issue: #392
+Branch: `i403/empty-results-sweeper-queue-gate` | Issue: `#403`
 
-## Overview
-The repository documents Conventional Commits PR titles (`feat(scope): summary (#N)`) in `docs/git-workflow.md`, but `.coderabbit.yaml` currently enforces an incompatible `[TAG]` vocabulary at `mode: error`, leading to merge-blocking false positives.
-We will align all repository artifacts to use Conventional Commits referencing the issue number as the single canonical PR-title rule.
-
-## CodeRabbit Intake Summary
-- **Adopted:** Conventional Commits `<type>(<scope>): <imperative summary> (#<issue>)` format, updating `.coderabbit.yaml` (`auto_title_instructions` and `pre_merge_checks.title.requirements`), updating `docs/git-workflow.md` §3 with worked example and `.coderabbit.yaml` enforcement note, aligning `docs/issue-workflow.md`, and verifying YAML validity.
-- **Rejected:** None.
-- **Status:** Verified and ready.
+## Summary & Findings
+- **Investigation / Root Cause**: Real order-book queue depths for BTC/ETH on Polymarket range from 180 to 1600+ shares (BTC 5m average ~847 shares, max ~1563). The parameter sweeper and dashboard sweep visual only swept queue gate values up to 200 shares (`[0, 10, 25, 50, 100, 200]`). Because `queue_gate` strictly requires resting depth on both legs `q <= queue_gate`, 100% of BTC/ETH ticks were filtered out at every non-zero gate point, yielding empty tables ($0 PnL, 0 pairs captured).
+- **Solution**: Widen the queue sensitivity sweep axis to `[0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]` across `scripts/sweep_backtest.py` and `server/osc_dash.py:SWEEP_AXES`, and include corresponding high-depth sampling in random/joint grids. Add regression tests verifying deep-book windows produce active trades at high queue gate thresholds.
 
 ## Tasks
 
-- [x] **Task 1: Update `.coderabbit.yaml` to Conventional Commits PR-title format**
-  - **Size:** XS
-  - **Domain:** `[Config/Workflow]`
-  - **Files:** `.coderabbit.yaml`
-  - **Depends on:** None
-  - **Details:** Rewrite `reviews.auto_title_instructions` and `reviews.pre_merge_checks.title.requirements` to enforce `<type>(<scope>): <imperative summary> (#<issue>)` where type is in `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`, `ci`, `style`, `revert`. Instruct CodeRabbit not to fail valid technical identifiers, scopes, or standard abbreviations. Preserve `custom_checks` (`No Hardcoded Secrets`) in the same `pre_merge_checks` mapping. Update header comments.
-  - **Verification:** `python -c "import yaml; data=yaml.safe_load(open('.coderabbit.yaml')); assert 'title' in data['reviews']['pre_merge_checks']; assert 'custom_checks' in data['reviews']['pre_merge_checks']"`
+- [x] **Task 1 (S)**: `[Quant/Sweeper]` Widen queue gate axis in `scripts/sweep_backtest.py`
+  - Target files: `scripts/sweep_backtest.py`
+  - Details:
+    - Update `generate_sensitivity_grid()`: set `queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]`.
+    - Update `generate_random_grid()`: preserve legacy stream draws while supporting high queue depth variations.
+    - Update `generate_joint_grid()` default queues to include representative high queue depth (`(0.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0)`).
+  - Depends on: None
+  - Verification: `python -m pytest tests/test_sweep_backtest.py -q`
 
-- [x] **Task 2: Align `docs/git-workflow.md` and `docs/issue-workflow.md`**
-  - **Size:** XS
-  - **Domain:** `[Docs/Workflow]`
-  - **Files:** `docs/git-workflow.md`, `docs/issue-workflow.md`
-  - **Depends on:** Task 1
-  - **Details:** In `docs/git-workflow.md` §3, update the `PR title:` bullet to clearly describe the Conventional Commits format referencing the issue, note that `.coderabbit.yaml` enforces it at `mode: error`, and add a real worked example (`feat(backtest): a Stop control for backtest and sweep runs (#383)`). In `docs/issue-workflow.md`, ensure all PR title mentions refer to `docs/git-workflow.md` §3.
-  - **Verification:** `grep -n "PR title" docs/git-workflow.md docs/issue-workflow.md`
+- [x] **Task 2 (S)**: `[Dashboard/Backend]` Widen queue axis in dashboard sweep visual
+  - Target files: `server/osc_dash.py`
+  - Details:
+    - Update `SWEEP_AXES["queue"] = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]`.
+  - Depends on: Task 1
+  - Verification: `python -m pytest tests/test_osc_dash_integration.py -k "sweep" -q`
 
-- [x] **Task 3: Verification gate and check for obsolete `[TAG]` strings**
-  - **Size:** XS
-  - **Domain:** `[Verification]`
-  - **Files:** `.coderabbit.yaml`, `docs/git-workflow.md`, `docs/issue-workflow.md`
-  - **Depends on:** Task 2
-  - **Details:** Run YAML validation, check that no stray `[TAG]` or `[ADD]` requirements remain in `.coderabbit.yaml`, and confirm all git status changes are clean and expected.
-  - **Verification:** YAML load check and grep inspection.
+- [x] **Task 3 (S)**: `[Testing]` Add regression unit tests for widened queue sensitivity & high-depth window simulation
+  - Target files: `tests/test_sweep_backtest.py`, `tests/test_osc_dash_integration.py`
+  - Details:
+    - Add test verifying `generate_sensitivity_grid` outputs queue labels up to `queue=2000`.
+    - Add test simulating a high-depth window (e.g. depth=600) showing it is blocked at `queue_gate=200` but trades successfully and captures pairs at `queue_gate=1000`.
+    - Verify dashboard `/api/analysis` sweep endpoint returns valid curve data for all widened queue axis points.
+  - Depends on: Task 1, Task 2
+  - Verification: `python -m pytest tests/test_sweep_backtest.py -q` && `python -m pytest tests/test_osc_dash_integration.py -k "sweep" -q`

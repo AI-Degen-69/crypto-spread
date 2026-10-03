@@ -172,7 +172,7 @@ def generate_sensitivity_grid(
             grid.append((f"offset={off:.3f}", p))
 
     # 3. Queue gate variations
-    queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]
+    queues = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0]
     for q in queues:
         if q != base.queue_gate:
             p = replace(base, queue_gate=q)
@@ -335,7 +335,7 @@ def deduplicate_grid(
 
 def generate_joint_grid(
     offsets: Sequence[float] = (0.015, 0.020, 0.025, 0.030),
-    queues: Sequence[float] = (0.0, 25.0, 50.0, 100.0),
+    queues: Sequence[float] = (0.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0),
     exit_5ms: Sequence[float] = (0.08, 0.10, 0.12, 0.14),
     exit_reversals: Sequence[float] = (0.015, 0.020),
     quote_ranges: Sequence[tuple[float, float]] | None = None,
