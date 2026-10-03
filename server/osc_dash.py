@@ -5176,19 +5176,19 @@ textarea:focus-visible,
 @keyframes dot-blink{0%,80%,100%{opacity:0.2;transform:scale(0.8)}40%{opacity:1;transform:scale(1.2)}}
 .btn-danger{background:rgba(240,104,77,.2);color:var(--down);border-color:rgba(240,104,77,.4)}
 .btn-danger:hover{background:rgba(240,104,77,.3)}
-.form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-@media(max-width:900px){.form-grid{grid-template-columns:repeat(2,1fr)}}
+.form-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media(max-width:900px){.form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 /* Issue #201, carried through #229 and #411: the four backtest thresholds are one
    group owning their own full-width row in .form-grid via grid-column:1/-1 with a
-   repeat(4,1fr) inner grid. display:contents was removed in issue #411 because it
+   repeat(4,minmax(0,1fr)) inner grid. display:contents was removed in issue #411 because it
    smeared the group across adjacent rows. The [hidden] rule is required because
    the id selector would otherwise outrank the UA one. */
-#btStopLossFields{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-@media(max-width:900px){#btStopLossFields{grid-template-columns:repeat(2,1fr)}}
+#btStopLossFields{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media(max-width:900px){#btStopLossFields{grid-template-columns:repeat(2,minmax(0,1fr))}}
 #btStopLossFields[hidden]{display:none}
-.form-group{display:flex;flex-direction:column;gap:4px}
+.form-group{display:flex;flex-direction:column;gap:4px;min-width:0}
 .form-group label{font:600 11px var(--disp);color:var(--dim);letter-spacing:.04em;text-align:left}
-.form-group input, .form-group select{background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
+.form-group input, .form-group select{width:100%;box-sizing:border-box;min-width:0;background:var(--panel2);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:500 13px var(--mono);transition:border-color .15s ease,box-shadow .15s ease,background .15s ease}
 .form-group input::placeholder{color:var(--faint);opacity:0.75}
 .form-group input.input-invalid{border:1px solid var(--down) !important;box-shadow:0 0 6px rgba(240,104,77,0.45) !important;background:rgba(240,104,77,0.06) !important}
 .form-group .input-hint{font:500 10px var(--mono);color:var(--faint);margin-top:2px;display:block}
