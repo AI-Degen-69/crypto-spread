@@ -9677,13 +9677,16 @@ def test_oscillation_charts_zero_line_styling():
           throw new Error('Missing sweepZeroLine plugin on ' + id);
         }
       }
-      // Check grid styling on cPerAsset
-      const yGrid = createdCharts['cPerAsset'].options.scales.y.grid;
-      if (!yGrid) throw new Error('Missing y.grid on cPerAsset');
-      if (yGrid.color({ tick: { value: 0 } }) !== theme.gold) throw new Error('yGrid zero color mismatch');
-      if (yGrid.lineWidth({ tick: { value: 0 } }) !== 2) throw new Error('yGrid zero lineWidth mismatch');
-      const dash = yGrid.borderDash({ tick: { value: 0 } });
-      if (!dash || dash[0] !== 6 || dash[1] !== 4) throw new Error('yGrid zero borderDash mismatch');
+      // Check grid styling on all Cartesian oscillation charts
+      const cartesianIds = ['cPerAsset', 'cHist', 'cPair'];
+      for (const cid of cartesianIds) {
+        const yGrid = createdCharts[cid].options.scales.y.grid;
+        if (!yGrid) throw new Error('Missing y.grid on ' + cid);
+        if (yGrid.color({ tick: { value: 0 } }) !== theme.gold) throw new Error('yGrid zero color mismatch on ' + cid);
+        if (yGrid.lineWidth({ tick: { value: 0 } }) !== 2) throw new Error('yGrid zero lineWidth mismatch on ' + cid);
+        const dash = yGrid.borderDash({ tick: { value: 0 } });
+        if (!dash || dash[0] !== 6 || dash[1] !== 4) throw new Error('yGrid zero borderDash mismatch on ' + cid);
+      }
 
       console.log('OSCILLATION_CHARTS_ZERO_LINE_OK');
     })();
