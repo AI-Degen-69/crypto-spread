@@ -2192,6 +2192,25 @@ def test_replay_trades_sample_contains_pairs_list():
     assert t["pairs"][0]["edge_cents"] == 4.0
 
 
+def test_replay_trades_sample_passes_timing_and_stops():
+    """Issue #377: replay() exposes per-pair timing and the stops ledger."""
+    snaps_data = [
+        snap(100.0, 0.50, up_ask=0.48, down_ask=0.48),
+        snap(101.0, 0.50, up_ask=0.55, down_ask=0.55),
+    ]
+    out = replay(snaps_data, BacktestParams(offset=0.02))
+    t = out["trades_sample"][0]
+    assert "stops" in t
+    assert isinstance(t["stops"], list)
+    p = t["pairs"][0]
+    for key in ("fill_ts_up", "fill_elapsed_up", "fill_ts_down",
+                "fill_elapsed_down", "resolve_ts", "resolve_elapsed",
+                "duration_sec"):
+        assert key in p
+    assert p["duration_sec"] == pytest.approx(
+        p["resolve_elapsed"] - min(p["fill_elapsed_up"], p["fill_elapsed_down"]))
+
+
 def _timing_tick(t_sec, m, ub_bid, ub_ask, db_bid, db_ask, t0, end_ts, duration):
     return {
         "ts": t_sec, "cid": "0xpair_timing", "series": "btc-up-or-down-15m",

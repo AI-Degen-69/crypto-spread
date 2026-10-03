@@ -2278,6 +2278,7 @@ def _run_backtest_simulation_worker(
             "pairs_count": w.pairs_count,
             "stops_count": w.stops_count,
             "pairs": w.pairs,
+            "stops": w.stops,
         })
 
     total_windows = len(per_window)

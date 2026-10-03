@@ -1781,6 +1781,7 @@ def replay(snaps: Iterable[dict], params: BacktestParams) -> dict:
             "pairs_count": w.pairs_count,
             "stops_count": w.stops_count,
             "pairs": w.pairs,
+            "stops": w.stops,
         })
 
         # Per series tracking
