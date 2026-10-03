@@ -10491,6 +10491,7 @@ def test_cockpit_hydrates_every_engine_param_in_both_branches():
         "running": html[run_at:init_at],
         "first-init": html[init_at:html.index("else if (st.is_running && st.selected_series)", init_at)],
     }
+    converted = "$('cockpitPairCost').value = dollarsToCents(st.params.max_pair_cost);"
 
     hydrated = {}
     for name, block in branches.items():
@@ -10502,6 +10503,11 @@ def test_cockpit_hydrates_every_engine_param_in_both_branches():
                    for el, _ in keys), f"{name}: a cockpit input is set to a literal"
         assert dict(keys)["cockpitPairCost"] == "max_pair_cost", (
             f"{name}: pair cost is not hydrated from the engine's max_pair_cost")
+        # Checked per branch, not page-wide: a page-wide match is satisfied by
+        # the *other* branch, so one of them could regress to a raw float
+        # assignment and the field would render 0.995 into a cents input.
+        assert converted in block, (
+            f"{name}: pair cost does not go through dollarsToCents in this branch")
         hydrated[name] = keys
 
     # Same fields, same order, in both branches: a field that quietly drops out
@@ -10522,6 +10528,3 @@ def test_cockpit_hydrates_every_engine_param_in_both_branches():
         ("cockpitQuoteLo", "quote_range"),
         ("cockpitQuoteHi", "quote_range"),
     ], "the hydrated cockpit field list changed — update this pin deliberately"
-    # The engine-state value has to reach the field through the cents helper,
-    # not by raw float assignment.
-    assert "$('cockpitPairCost').value = dollarsToCents(st.params.max_pair_cost);" in html
