@@ -38,7 +38,7 @@ Branch: `i411/backtest-action-row-bottom-right` | Issue: `#411`
   - Depends on: None
   - Verification: `python -m pytest tests/test_osc_dash_integration.py -q -k "backtest or stop_loss or run_buttons"` must be **RED** on the untouched `server/osc_dash.py`, and each failure must name the layout it pins.
 
-- [ ] **Task 2 (S)**: `[Design/UI]` Move the action row and rebuild the stop-loss row
+- [x] **Task 2 (S)**: `[Design/UI]` Move the action row and rebuild the stop-loss row
   - Target files: `server/osc_dash.py`
   - Details:
     - Delete the toolbar `div` at `:5455-5464` from between `#btHash` and `.bt-accordion`. Keep `#btHash` as the first body child.
