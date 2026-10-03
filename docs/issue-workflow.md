@@ -126,8 +126,8 @@ issue and plan). Findings are merged into one deduplicated list, fixed with a
 anything is pushed.
 
 Then sync with `master`, push the branch, open the PR via `gh pr create` with
-a Conventional-Commits title, `Closes #<n>`, and `@coderabbitai summary` —
-and hand off to Station V. Robert's phrasing: **"ship."**
+the canonical Conventional-Commits title referencing the issue (`docs/git-workflow.md` §3),
+`Closes #<n>`, and `@coderabbitai summary` — and hand off to Station V. Robert's phrasing: **"ship."**
 
 ## 5. Station V — `v-babysit-pr-and-merge` (Babysitter)
 
