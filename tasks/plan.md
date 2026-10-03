@@ -90,7 +90,7 @@ each other, both pure/convert-then-render) → T4 (test lock-in). T2 is the larg
   `formatSweepTickValue()`, sweep anchor, `updateBacktestParamPreview()` all
   through `formatCents()`; `¢` → `c`; sweep dollar state/clamp untouched.
   Verify: node held-card + formatter tests. Depends on: T1.
-- [ ] T4 [Code/Logic] S — update label/format/held-card pins, extend registry
+- [x] T4 [Code/Logic] S — update label/format/held-card pins, extend registry
   `display` assertions, add conversion + validator tests; final targeted gate
   `python -m pytest tests/test_osc_dash_integration.py tests/test_param_registry.py -q`.
   Depends on: T2, T3.

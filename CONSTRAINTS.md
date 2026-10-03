@@ -1,27 +1,37 @@
-# CONSTRAINTS.md — Issue #410 (sweep-visual bars + queue ticks)
+# CONSTRAINTS.md — Issue #419 (sub-dollar price params → cents inputs/displays)
 
-Locked by Station II (`ii-plan-issue #410`). Guardrails for Stations III–V.
+Locked by Station II (`ii-plan-issue #419`). Guardrails for Stations III–V.
 Open questions resolved from code + CodeRabbit plan (see `tasks/plan.md`);
 nothing left to ask the operator.
 
 ## Zero regressions
-- `python -m pytest tests/test_osc_dash_integration.py -q -k "sweep"` must pass
-  while iterating; full file + `tests/test_theme_tokens.py -q` before handoff.
-- Uniform axes (`offset`, `late_entry`, categorical) render byte-identical tick
-  count/label content — pinned by new tests, not eyeballing.
-- Small per-market cards keep their #390 planner untouched; the width plugin
-  must be a proven no-op on uniform axes.
+- `python -m pytest tests/test_osc_dash_integration.py tests/test_param_registry.py -q`
+  must pass before handoff (targeted suites only locally; full suite is CI's job).
+- `btControlQuery()` strings stay dollar-identical to today (`offset=0.05` when
+  `btOffset` holds `5`) — pinned by a new round-trip test, not eyeballing.
+- `/api/live/config` server cents-heuristic tests stay unchanged and green.
+- Jungle King baselines/candidates stay dollar values; only label selection changes.
 
 ## Scope freeze
-- `sweepChartOptions` x-axis + bar datasets only. No y-axis, theme/colour,
-  sweep engine, backtest maths, or data changes. No new dependencies
-  (Chart.js public plugin hooks only — no private controller overrides).
+- Converted surfaces only: backtest + cockpit price inputs, sweep held rows,
+  price-axis tick labels, quote-range display, registry `display` metadata,
+  `/api/params/spec` pass-through, `_jk_label()` canonical-label preference.
+- No engine internals (`_clamp_to_spec`, `_build_backtest_params`,
+  `_sweep_params_for_value`, fields, fill rule), no CLI flags, no venue
+  constants, no `research/jungle-king/` data, no non-price inputs, no market-
+  result displays. No new external dependencies (shared JS helpers only).
+
+## Performance thresholds
+- Conversion helpers are pure arithmetic (no I/O, no per-tick cost — they run
+  only on input read/write and card render). No measurable latency budget change.
 
 ## Anti-cheat
 - Forbid skipping/disabling tests, deleting assertions, suppressing linters.
-- The pre-existing `test_sweep_categorical_axis_rendering_node` failure is
-  NOT to be "fixed" by weakening it — if the diff touches its path, prove the
-  failure signature is unchanged vs base.
+- The held-card pins (`0.020`/`0.07`/`0.030`) and registry label pins MUST be
+  updated to the new cents convention with equal-or-stronger assertions — never
+  deleted or weakened to pass.
+- `CONSTRAINTS.md` for issue #410 does not apply to this ticket.
 
 ## Out of scope
-- Y axis, theme logic, sweep engine/maths, underlying data, #174, #396.
+- Engine/API/CLI dollar contract, venue constants, non-price inputs, Jungle King
+  manifest values, market-result displays, theme, y-axes, sweep engine/maths.
