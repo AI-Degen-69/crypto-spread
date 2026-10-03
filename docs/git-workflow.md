@@ -49,8 +49,11 @@ that *produces* the work is documented in `docs/issue-workflow.md`; the older
 - **Review:** CodeRabbit reviews every PR. The PR author's agent triages
   comments (accept-and-fix, or reject with a reasoned reply) — this is the
   `babysit-pr-and-merge` skill's job, exactly one focused review round.
-- **PR title:** Conventional Commits format referencing the *issue*,
-  `feat(scope): summary (#N)` — set by `review-build-and-pr`.
+- **PR title:** Conventional Commits format referencing the *issue*:
+  `<type>(<scope>): <imperative summary> (#<issue>)` (set automatically by
+  `iv-review-build-and-pr`). Enforced by `.coderabbit.yaml` at `mode: error`;
+  a mismatched title blocks merge.
+  - Worked example: `feat(backtest): a Stop control for backtest and sweep runs (#383)`
 - **Merge:** squash-merge; the squash commit title keeps the conventional
   format but references the *PR* number, `feat(scope): summary (#PR)` —
   matching `git log` history. Don't "fix" either number into the other.

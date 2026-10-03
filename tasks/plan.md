@@ -1,46 +1,38 @@
-# Plan — Issue #367: Sweep Visual: human market names in token colours, and trim trailing decimals from P&L axis labels
+# Plan — Issue #392: Align the PR-title rule between docs/git-workflow.md and .coderabbit.yaml
 
-Branch: `i367/sweep-visual-human-market-names` | Issue: #367
+Branch: `i392/align-pr-title-rule` | Issue: #392
 
 ## Overview
-In the Sweep Visual tab (`server/osc_dash.py`), the ten per-market cards currently render raw slugs during progress runs (e.g. `btc-up-or-down-5m`) and display values on the Y-axis with redundant `.00` decimals (`$-200.00`).
-We will introduce 3 pure JavaScript presentation helpers (`sweepMarketName`, `sweepTokenColor`, and `formatSweepMoneyTick`), integrate them across `renderSweepVisual`, `openBtChartDetail`, and `sweepChartOptions`, and add unit test coverage in `tests/test_theme_tokens.py`.
+The repository documents Conventional Commits PR titles (`feat(scope): summary (#N)`) in `docs/git-workflow.md`, but `.coderabbit.yaml` currently enforces an incompatible `[TAG]` vocabulary at `mode: error`, leading to merge-blocking false positives.
+We will align all repository artifacts to use Conventional Commits referencing the issue number as the single canonical PR-title rule.
 
 ## CodeRabbit Intake Summary
-- **Adopted:** Pure JS presentation helpers (`sweepMarketName`, `sweepTokenColor`, `formatSweepMoneyTick`), extracting token brand colors from `ALL_COCKPIT_SERIES`, trimming trailing `.00` from Y ticks, and Node harness test coverage.
-- **Rejected:** Modifying backend `series_labels` in Python (preserving API contracts and Issue #270 convention).
+- **Adopted:** Conventional Commits `<type>(<scope>): <imperative summary> (#<issue>)` format, updating `.coderabbit.yaml` (`auto_title_instructions` and `pre_merge_checks.title.requirements`), updating `docs/git-workflow.md` §3 with worked example and `.coderabbit.yaml` enforcement note, aligning `docs/issue-workflow.md`, and verifying YAML validity.
+- **Rejected:** None.
 - **Status:** Verified and ready.
 
 ## Tasks
 
-- [x] **Task 1: Add presentation helpers in `server/osc_dash.py`**
-  - **Size:** S
-  - **Domain:** `[UI/Frontend]`
-  - **Files:** `server/osc_dash.py`
+- [x] **Task 1: Update `.coderabbit.yaml` to Conventional Commits PR-title format**
+  - **Size:** XS
+  - **Domain:** `[Config/Workflow]`
+  - **Files:** `.coderabbit.yaml`
   - **Depends on:** None
-  - **Details:** Implement `sweepMarketName(slug)`, `sweepTokenColor(slug)`, and `formatSweepMoneyTick(v)` near `formatSweepTickValue` / `sweepChartColors`. Ensure `sweepTokenColor` reads `ALL_COCKPIT_SERIES` dynamically without hardcoding hex literals.
-  - **Verification:** Unit assertions in Node harness.
+  - **Details:** Rewrite `reviews.auto_title_instructions` and `reviews.pre_merge_checks.title.requirements` to enforce `<type>(<scope>): <imperative summary> (#<issue>)` where type is in `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`, `ci`, `style`, `revert`. Instruct CodeRabbit not to fail valid technical identifiers, scopes, or standard abbreviations. Preserve `custom_checks` (`No Hardcoded Secrets`) in the same `pre_merge_checks` mapping. Update header comments.
+  - **Verification:** `python -c "import yaml; data=yaml.safe_load(open('.coderabbit.yaml')); assert 'title' in data['reviews']['pre_merge_checks']; assert 'custom_checks' in data['reviews']['pre_merge_checks']"`
 
-- [x] **Task 2: Connect helpers to Sweep Visual UI and Chart Options**
-  - **Size:** S
-  - **Domain:** `[UI/Frontend]`
-  - **Files:** `server/osc_dash.py`
+- [x] **Task 2: Align `docs/git-workflow.md` and `docs/issue-workflow.md`**
+  - **Size:** XS
+  - **Domain:** `[Docs/Workflow]`
+  - **Files:** `docs/git-workflow.md`, `docs/issue-workflow.md`
   - **Depends on:** Task 1
-  - **Details:** In `renderSweepVisual`, format card titles and `aria-label` using `sweepMarketName(seriesKey)` and apply `sweepTokenColor(seriesKey)` to the title style. Pass formatted name and color to `openBtChartDetail`. In `openBtChartDetail`, set dialog heading text and color. In `sweepChartOptions`, use `formatSweepMoneyTick(v)` as the Y-axis tick callback. Update best market display in stats row.
-  - **Verification:** Browser preview / integration test checks.
+  - **Details:** In `docs/git-workflow.md` §3, update the `PR title:` bullet to clearly describe the Conventional Commits format referencing the issue, note that `.coderabbit.yaml` enforces it at `mode: error`, and add a real worked example (`feat(backtest): a Stop control for backtest and sweep runs (#383)`). In `docs/issue-workflow.md`, ensure all PR title mentions refer to `docs/git-workflow.md` §3.
+  - **Verification:** `grep -n "PR title" docs/git-workflow.md docs/issue-workflow.md`
 
-- [x] **Task 3: Update and add tests in `tests/test_theme_tokens.py`**
-  - **Size:** S
-  - **Domain:** `[Test/Integration]`
-  - **Files:** `tests/test_theme_tokens.py`
-  - **Depends on:** Task 2
-  - **Details:** Update `test_sweep_visual_uses_numeric_axis_and_aligned_market_labels` to match updated title rendering and add tests verifying `sweepMarketName`, `sweepTokenColor`, `formatSweepMoneyTick`, and lack of hardcoded hex values.
-  - **Verification:** `python -m pytest tests/test_theme_tokens.py -q`.
-
-- [x] **Task 4: Run targeted integration suite and verify regression safety**
+- [x] **Task 3: Verification gate and check for obsolete `[TAG]` strings**
   - **Size:** XS
   - **Domain:** `[Verification]`
-  - **Files:** `server/osc_dash.py`, `tests/test_theme_tokens.py`
-  - **Depends on:** Task 3
-  - **Details:** Run targeted test suites to confirm no regressions in dashboard rendering or API behavior.
-  - **Verification:** `python -m pytest tests/test_theme_tokens.py tests/test_osc_dash_integration.py -q`.
+  - **Files:** `.coderabbit.yaml`, `docs/git-workflow.md`, `docs/issue-workflow.md`
+  - **Depends on:** Task 2
+  - **Details:** Run YAML validation, check that no stray `[TAG]` or `[ADD]` requirements remain in `.coderabbit.yaml`, and confirm all git status changes are clean and expected.
+  - **Verification:** YAML load check and grep inspection.
