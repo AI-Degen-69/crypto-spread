@@ -86,7 +86,7 @@ each other, both pure/convert-then-render) → T4 (test lock-in). T2 is the larg
   validator swap + `renderCockpitUI()` hydration; drop client heuristic.
   Verify: node-harness round-trip (`5` → `offset=0.05`) + targeted suites.
   Depends on: T1.
-- [ ] T3 [Design/UI] M — `server/osc_dash.py`: `sweepCard()`/tails held rows,
+- [x] T3 [Design/UI] M — `server/osc_dash.py`: `sweepCard()`/tails held rows,
   `formatSweepTickValue()`, sweep anchor, `updateBacktestParamPreview()` all
   through `formatCents()`; `¢` → `c`; sweep dollar state/clamp untouched.
   Verify: node held-card + formatter tests. Depends on: T1.

@@ -9852,7 +9852,19 @@ function onSweepAxisChange(){
 // must not restart the one-worker sweep on every keystroke.
 function onSweepCenterChange(raw){
   const num = (raw === '' || raw === null || raw === undefined) ? NaN : Number(raw);
-  window._btSweepCenter = Number.isFinite(num) ? num : null;
+  let val = Number.isFinite(num) ? num : null;
+  // Issue #419: the anchor field on price axes holds cents — convert to the
+  // dollar anchor the grids and the server clamp on. Blank stays null and an
+  // explicit 0 stays 0 through the conversion.
+  if(val !== null){
+    const axis = ($('btSweepAxis') && $('btSweepAxis').value) || '';
+    if(axis === 'offset' || axis === 'exit_rev' || axis === 'quote_range'
+       || axis === 'exit_stop_default' || axis === 'exit_stop_btc' || axis === 'exit_stop_sol'){
+      const d = centsToDollars(val);
+      val = Number.isFinite(d) ? d : null;
+    }
+  }
+  window._btSweepCenter = val;
   if (window._btSweepAbort) { try { window._btSweepAbort.abort(); } catch {} window._btSweepAbort = null; }
   runSweepVisual();
 }
@@ -10244,7 +10256,9 @@ function sweepCard(v, data, statsHtml){
     late_entry: 'Late Entry (% window)',
     quote_range: 'Quotable Range',
   })[data.axis] || data.axis;
-  const values = (data.points || []).map(p => p.label).join(', ');
+  // Issue #419: summaries resolve through the tick formatter, so pending,
+  // idle and final cards print one cents convention.
+  const values = (data.points || []).map(p => formatSweepTickValue(data.axis, p.value)).join(', ');
   // Issue #355: the grid is built in one place (see sweepMarketsGridHtml).
   const mktsHtml = sweepMarketsGridHtml(data.points, data.selected_series);
   const row = (k, val, subject) => `<span class="sweep-row${subject ? ' subject' : ''}">`
@@ -10253,20 +10267,20 @@ function sweepCard(v, data, statsHtml){
   const held = `
     <span class="sweep-dl">
       <span class="sweep-lab">Parameters held</span>
-      ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
+      ${row('Spread Offset (c)', formatCents(v.offset), data.axis === 'offset')}
       ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
       ${row('Late Entry (% window)', pct(v.entryDelayPct), data.axis === 'late_entry')}
-      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop_default')}
-      ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
-      ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
-      ${row('SOL 5m Stop ($)', v.exitSol.toFixed(2), data.axis === 'exit_stop_sol')}
-      ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
+      ${row('Exit Stop 5m (c)', formatCents(v.exit5m), data.axis === 'exit_stop_default')}
+      ${row('Exit Stop 15m (c)', formatCents(v.exit15m), data.axis === 'exit_stop_default')}
+      ${row('BTC 5m Stop (c)', formatCents(v.exitBtc), data.axis === 'exit_stop_btc')}
+      ${row('SOL 5m Stop (c)', formatCents(v.exitSol), data.axis === 'exit_stop_sol')}
+      ${row('Reversal Buffer (c)', formatCents(v.exitReversal), data.axis === 'exit_rev')}
       ${row('Leg Chase', onoff(v.legChase), data.axis === 'leg_chase')}
     </span>`;
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
-      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`, data.axis === 'quote_range')}
+      ${row('Quotable Range (c)', `[${formatCents(v.quoteLo)}, ${formatCents(v.quoteHi)}]`, data.axis === 'quote_range')}
       ${row('Dead Zone (% window)', pct(v.deadZonePct), data.axis === 'dead_zone_pct')}
       ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close', data.axis === 'naked_leg')}
     </span>`;
@@ -10295,9 +10309,12 @@ function sweepCard(v, data, statsHtml){
   // number: the placeholder used to be the default grid's own midpoint, so a
   // blank field displayed something that looked like live data.
   const anchorSet = (data.sweep_center !== undefined && data.sweep_center !== null);
-  const anchorVal = anchorSet ? String(data.sweep_center) : '';
+  // Issue #419: the anchor input on price axes holds cents, like every other
+  // price input; the stored sweep_center stays dollars.
+  const anchorIsPrice = ['offset', 'exit_stop_default', 'exit_stop_btc', 'exit_stop_sol', 'exit_rev', 'quote_range'].includes(data.axis);
+  const anchorVal = anchorSet ? String(anchorIsPrice ? dollarsToCents(data.sweep_center) : data.sweep_center) : '';
   // `quote_range` shifts the lo half of the [lo, hi] pair — say which half.
-  const anchorUnit = ({queue: 'shares', offset: '$', exit_stop_default: '$', exit_stop_btc: '$', exit_stop_sol: '$', exit_rev: '$', late_entry: '%', quote_range: 'lo bound', leg_chase: '', naked_leg: '', dead_zone_pct: '%'})[data.axis] || '';
+  const anchorUnit = ({queue: 'shares', offset: 'c', exit_stop_default: 'c', exit_stop_btc: 'c', exit_stop_sol: 'c', exit_rev: 'c', late_entry: '%', quote_range: 'lo bound (c)', leg_chase: '', naked_leg: '', dead_zone_pct: '%'})[data.axis] || '';
   // Issue #388: categorical axes have no midpoint — the field is shown but
   // disabled (the grid is always the literal value list), with an empty unit
   // and a title that says why instead of inviting a number.
@@ -10338,7 +10355,8 @@ function sweepCard(v, data, statsHtml){
 // Everything after the title selector in the sweep card — the part that
 // re-renders on each progress event without disturbing the axis dropdown.
 function sweepCardTail(v, data, statsHtml){
-  const values = (data.points || []).map(p => p.label).join(', ');
+  // Issue #419: see sweepCard — summaries use the tick formatter.
+  const values = (data.points || []).map(p => formatSweepTickValue(data.axis, p.value)).join(', ');
   const pct = x => x + '%';
   const onoff = x => (String(x) === '1' || x === true) ? 'Enabled' : 'Disabled';
   const mktsHtml = sweepMarketsGridHtml(data.points, data.selected_series);
@@ -10348,20 +10366,20 @@ function sweepCardTail(v, data, statsHtml){
   const held = `
     <span class="sweep-dl">
       <span class="sweep-lab">Parameters held</span>
-      ${row('Spread Offset ($)', v.offset.toFixed(3), data.axis === 'offset')}
+      ${row('Spread Offset (c)', formatCents(v.offset), data.axis === 'offset')}
       ${row('Queue Depth Filter', String(Math.round(v.queue)), data.axis === 'queue')}
       ${row('Late Entry (% window)', pct(v.entryDelayPct), data.axis === 'late_entry')}
-      ${row('Exit Stop 5m ($)', v.exit5m.toFixed(2), data.axis === 'exit_stop_default')}
-      ${row('Exit Stop 15m ($)', v.exit15m.toFixed(2), data.axis === 'exit_stop_default')}
-      ${row('BTC 5m Stop ($)', v.exitBtc.toFixed(2), data.axis === 'exit_stop_btc')}
-      ${row('SOL 5m Stop ($)', v.exitSol.toFixed(2), data.axis === 'exit_stop_sol')}
-      ${row('Reversal Buffer ($)', v.exitReversal.toFixed(3), data.axis === 'exit_rev')}
+      ${row('Exit Stop 5m (c)', formatCents(v.exit5m), data.axis === 'exit_stop_default')}
+      ${row('Exit Stop 15m (c)', formatCents(v.exit15m), data.axis === 'exit_stop_default')}
+      ${row('BTC 5m Stop (c)', formatCents(v.exitBtc), data.axis === 'exit_stop_btc')}
+      ${row('SOL 5m Stop (c)', formatCents(v.exitSol), data.axis === 'exit_stop_sol')}
+      ${row('Reversal Buffer (c)', formatCents(v.exitReversal), data.axis === 'exit_rev')}
       ${row('Leg Chase', onoff(v.legChase), data.axis === 'leg_chase')}
     </span>`;
   const rules = `
     <span class="sweep-dl">
       <span class="sweep-lab">Designed constraints / rules</span>
-      ${row('Quotable Range ($)', `[${v.quoteLo.toFixed(2)}, ${v.quoteHi.toFixed(2)}]`, data.axis === 'quote_range')}
+      ${row('Quotable Range (c)', `[${formatCents(v.quoteLo)}, ${formatCents(v.quoteHi)}]`, data.axis === 'quote_range')}
       ${row('Dead Zone (% window)', pct(v.deadZonePct), data.axis === 'dead_zone_pct')}
       ${row('Naked Leg at Expiry', v.nakedLegAtExpiry === 'hold' ? 'Hold' : 'Close', data.axis === 'naked_leg')}
     </span>`;
@@ -10416,23 +10434,14 @@ function formatSweepTickValue(axis, val){
     return `${Number(num.toFixed(6))}%`;
   }
   if (axis === 'quote_range') {
-    const lo = num.toFixed(2);
-    const hi = (1.0 - num).toFixed(2);
-    return `[${lo}, ${hi}]`;
+    // Issue #419: the value is the lo end; hi mirrors it around 1.00.
+    return `[${formatCents(num)}, ${formatCents(1.0 - num)}]`;
   }
-  if (axis === 'offset' || axis === 'exit_rev') {
-    const cents = num * 100;
-    const rounded = Number(cents.toFixed(2));
-    // Issue #378: keep the fixed format when it represents the value (1e-9);
-    // off-grid anchored values fall through to more decimals instead.
-    if (Math.abs(rounded - cents) < 1e-9) return `${rounded}¢`;
-    return `${Number(cents.toFixed(4))}¢`;
-  }
-  if (axis === 'exit_stop_default' || axis === 'exit_stop_btc' || axis === 'exit_stop_sol') {
-    const cents = num * 100;
-    const rounded = Number(cents.toFixed(1));
-    if (Math.abs(rounded - cents) < 1e-9) return `${rounded}¢`;
-    return `${Number(cents.toFixed(2))}¢`;
+  if (axis === 'offset' || axis === 'exit_rev'
+      || axis === 'exit_stop_default' || axis === 'exit_stop_btc' || axis === 'exit_stop_sol') {
+    // Issue #419: one cents format (was two ¢ precisions); off-grid anchored
+    // values keep precision via dollarsToCents instead of going silent.
+    return formatCents(num);
   }
   return Number.isInteger(num) ? String(num) : num.toFixed(3);
 }
@@ -13853,7 +13862,7 @@ function updateBacktestParamPreview(){
     const isMid = Math.abs(p - 0.50) < 0.001;
     gridSvg += `
       <line x1="${padL}" y1="${yPos.toFixed(1)}" x2="${padL + plotW}" y2="${yPos.toFixed(1)}" stroke="${isMid ? 'rgba(243,186,47,0.45)' : 'rgba(255,255,255,0.06)'}" stroke-width="${isMid ? 1.5 : 1}" stroke-dasharray="${isMid ? '4,3' : '2,3'}"/>
-      <text x="${padL - 6}" y="${(yPos + 3.5).toFixed(1)}" fill="${isMid ? 'var(--gold)' : 'var(--dim)'}" font-size="10" font-family="var(--mono)" font-weight="${isMid ? '700' : '400'}" text-anchor="end">$${p.toFixed(2)}</text>
+      <text x="${padL - 6}" y="${(yPos + 3.5).toFixed(1)}" fill="${isMid ? 'var(--gold)' : 'var(--dim)'}" font-size="10" font-family="var(--mono)" font-weight="${isMid ? '700' : '400'}" text-anchor="end">${formatCents(p)}</text>
     `;
   }
 
@@ -13936,7 +13945,7 @@ function updateBacktestParamPreview(){
       <!-- Spread bracket line -->
       <line x1="${midX.toFixed(1)}" y1="${yShort.toFixed(1)}" x2="${midX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="rgba(255,255,255,0.2)" stroke-width="1.2" stroke-dasharray="2,2"/>
       <rect x="${(midX - 35).toFixed(1)}" y="${(getY(mid) - 7).toFixed(1)}" width="70" height="14" rx="3" fill="var(--panel)" stroke="rgba(255,255,255,0.15)"/>
-      <text x="${midX.toFixed(1)}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--tx)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">2×off: ${(offset*200).toFixed(1)}¢</text>
+      <text x="${midX.toFixed(1)}" y="${(getY(mid) + 3.5).toFixed(1)}" fill="var(--tx)" font-size="9" font-family="var(--mono)" text-anchor="middle" font-weight="700">2×off: ${formatCents(2 * offset)}</text>
 
       <!-- Long Bid Line -->
       <line x1="${activeStartX.toFixed(1)}" y1="${yLong.toFixed(1)}" x2="${activeEndX.toFixed(1)}" y2="${yLong.toFixed(1)}" stroke="var(--cyan)" stroke-width="2"/>
@@ -13954,19 +13963,19 @@ function updateBacktestParamPreview(){
 
   const labelX = padL + plotW + 18;
   const labelItems = [
-    { y: (qHiY + qLoY) / 2, color: 'var(--cyan)', text: `Quotable: $${quoteLo.toFixed(2)}–$${quoteHi.toFixed(2)}` },
-    { y: getY(mid), color: 'var(--gold)', text: 'Mid: $0.500' },
+    { y: (qHiY + qLoY) / 2, color: 'var(--cyan)', text: `Quotable: ${formatCents(quoteLo)}–${formatCents(quoteHi)}` },
+    { y: getY(mid), color: 'var(--gold)', text: 'Mid: 50c' },
   ];
   if (activeWidth > 0) {
     labelItems.push(
-      { y: yLong, color: 'var(--cyan)', text: `Long Bid: $${longBid.toFixed(3)}` },
-      { y: yShort, color: 'var(--up)', text: `Short Comp: $${shortComp.toFixed(3)}` },
+      { y: yLong, color: 'var(--cyan)', text: `Long Bid: ${formatCents(longBid)}` },
+      { y: yShort, color: 'var(--up)', text: `Short Comp: ${formatCents(shortComp)}` },
     );
     if (exitStop > 0) {
-      labelItems.push({ y: getY(stopPrice), color: 'var(--down)', text: `Stop Loss: $${stopPrice.toFixed(3)} (-${(exitStop * 100).toFixed(1)}¢)` });
+      labelItems.push({ y: getY(stopPrice), color: 'var(--down)', text: `Stop Loss: ${formatCents(stopPrice)} (-${formatCents(exitStop)})` });
     }
     if (exitStop > 0 && exitReversal > 0 && getY(stopPrice) > getY(revPrice)) {
-      labelItems.push({ y: getY(revPrice), color: 'var(--gold)', text: `Reversal: $${revPrice.toFixed(3)} (+${(exitReversal * 100).toFixed(1)}¢)` });
+      labelItems.push({ y: getY(revPrice), color: 'var(--gold)', text: `Reversal: ${formatCents(revPrice)} (+${formatCents(exitReversal)})` });
     }
   }
   const labelsSvg = layoutBacktestPreviewLabels(labelItems, padL + plotW, labelX, w - 18, padT, padT + plotH);
