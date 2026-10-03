@@ -1981,7 +1981,9 @@ def test_every_backtest_knob_reaches_the_sweep_base():
 
     backtest_params = set(inspect.signature(osc_dash.api_backtest).parameters)
     sweep_params = set(inspect.signature(osc_dash.api_backtest_sweep).parameters)
-    missing = backtest_params - sweep_params
+    # Issue #413: `request: Request` is FastAPI plumbing (raw-query capture
+    # for template save), not an operator knob — the sweep needs no copy.
+    missing = (backtest_params - sweep_params) - {"request"}
     assert missing == set(), (
         "sweep endpoint is missing knobs the backtest accepts: " f"{sorted(missing)}"
     )
@@ -6769,7 +6771,15 @@ def test_backtest_stream_progress_before_final_and_curve_equality(tmp_path, monk
     assert final["type"] == "final"
 
     blocking = client.get("/api/backtest?file=fake_stream.jsonl&offset=0.02&size=5").json()
-    assert json.dumps(final["result"], sort_keys=True) == json.dumps(blocking, sort_keys=True)
+    # Issue #413: each transport records its own completion, so the random
+    # run_id differs by design — compare payloads, then the ids separately.
+    final_result = dict(final["result"])
+    blocking_result = dict(blocking)
+    final_rid = final_result.pop("run_id", None)
+    blocking_rid = blocking_result.pop("run_id", None)
+    assert final_rid and blocking_rid, "both transports must attach a template-save run_id"
+    assert final_rid != blocking_rid, "each completion records its own run_id"
+    assert json.dumps(final_result, sort_keys=True) == json.dumps(blocking_result, sort_keys=True)
 
     # Provisional running total reaches the final unlimited total.
     progress_points = [p for e in events if e["type"] == "progress" for p in e["points"]]
@@ -6782,7 +6792,11 @@ def test_backtest_stream_progress_before_final_and_curve_equality(tmp_path, monk
     limited_final = next(e for e in limited_events if e["type"] == "final")
     limited_blocking = client.get(
         "/api/backtest?file=fake_stream.jsonl&offset=0.02&size=5&limit_windows=2").json()
-    assert json.dumps(limited_final["result"], sort_keys=True) == json.dumps(limited_blocking, sort_keys=True)
+    limited_final_result = dict(limited_final["result"])
+    limited_blocking_result = dict(limited_blocking)
+    limited_final_result.pop("run_id", None)
+    limited_blocking_result.pop("run_id", None)
+    assert json.dumps(limited_final_result, sort_keys=True) == json.dumps(limited_blocking_result, sort_keys=True)
 
     mock_pool.shutdown(wait=True)
 
@@ -9788,3 +9802,125 @@ def test_oscillation_charts_zero_line_styling():
 
 
 
+
+
+# ── Issue #413: Save-as-Template on the Backtest tab ─────────────────────────
+
+def test_backtest_save_template_button_and_section():
+    """Save button lives in the setup action row (disabled until a run completes);
+    the templates card holds the name input, status line, and list."""
+    html = client.get("/").text
+    actions_idx = html.index('id="btSetupActions"')
+    overall_idx = html.index('id="btSecOverall"')
+    actions_html = html[actions_idx:overall_idx]
+    assert 'id="btnSaveTemplate"' in actions_html
+    assert 'onclick="saveBacktestTemplate()"' in actions_html
+    assert 'id="btnSaveTemplate" onclick="saveBacktestTemplate()" disabled' in html.replace("  ", " ")
+
+    tpl_idx = html.index('id="btSecTemplates"')
+    assert actions_idx < tpl_idx < overall_idx, "templates card must sit between Setup and Overall"
+    section = html[tpl_idx:overall_idx]
+    for frag in ('id="btSecTemplatesBody"', 'id="btTemplateName"', 'id="btTemplateStatus"',
+                 'id="btTemplateList"', 'onclick="loadBacktestTemplateList()"'):
+        assert frag in section, f"{frag} missing from templates card"
+    assert "bt-peer-section" in html[html.index('id="btSecTemplates"') - 60:tpl_idx]
+
+
+def test_backtest_template_js_wiring():
+    """All five template functions exist; the saveable run id flows from the
+    stream final event to the Save button; loading never replays."""
+    html = osc_dash.FULL_APP_HTML
+    for fname in ("saveBacktestTemplate", "loadBacktestTemplateList",
+                  "loadBacktestTemplate", "applyBacktestTemplate",
+                  "deleteBacktestTemplate", "setBtSaveableRunId"):
+        assert f"function {fname}(" in html, f"{fname} missing"
+    assert "window._btSaveableRunId" in html
+    assert "setBtSaveableRunId(ev.result.run_id)" in html
+    assert "setBtSaveableRunId(null)" in html
+
+    def _body(name):
+        chunk = html[html.index(f"function {name}("):]
+        return chunk[:chunk.index("\n}")]
+
+    apply = _body("applyBacktestTemplate")
+    # Refills every knob family: 16 parameter controls + dataset + scope chips.
+    for frag in ("btOffset", "btQueue", "btPairCost", "btExit5m", "btExit15m",
+                 "btExitBtc", "btExitSol", "btSize", "btMaxStartDelay",
+                 "btQuoteLo", "btQuoteHi", "btEntryDelay", "btExitReversal",
+                 "btDeadZoneVal", "btNakedLegAtExpiry", "btLegChase",
+                 "btFileSelect", "selectedBtTokens", "selectedBtDuration",
+                 "updateBacktestParamPreview()", "updateBtRuntimeEstimate()"):
+        assert frag in apply, f"apply misses {frag}"
+    # Load path restores state without starting a replay.
+    assert "runBacktest(" not in apply
+    assert "btControlQuery" not in apply
+    # Stale templates surface a 409 message instead of applying silently.
+    assert "409" in _body("loadBacktestTemplate")
+    # Errors stay in the status line with the theme danger token.
+    assert "var(--down)" in _body("btTemplateStatus")
+
+
+def test_backtest_apply_template_round_trip_query():
+    """Applying a template record restores the controls so btControlQuery
+    reproduces the saved parameter set (Node harness with stub DOM)."""
+    html = osc_dash.FULL_APP_HTML
+    parts = []
+    for name in ("btControlValues", "btSelection", "btControlQuery", "applyBacktestTemplate"):
+        chunk = html[html.index(f"function {name}("):]
+        # _body-style slice drops the closing brace; re-add it for execution.
+        parts.append(chunk[:chunk.index("\n}")] + "\n}")
+    test_js = "\n".join(parts) + """
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    const BT_ALL_TOKENS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP'];
+    let selectedBtTokens = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP']);
+    let selectedBtDuration = 'both';
+    global.window = {};
+    const _els = {};
+    function $(id){
+      if (!_els[id]) _els[id] = {value: '', options: [], disabled: false,
+        setAttribute(){}, classList: {add(){}, remove(){}}};
+      return _els[id];
+    }
+    function updateBtFilterUI(){}
+    function updateBacktestParamPreview(){}
+    function updateBtRuntimeEstimate(){}
+    const tpl = {request_args: {
+      offset: 0.03, queue: 25, pair_cost: 0.95,
+      exit_default_5m: 0.04, exit_default_15m: 0.06,
+      exit_btc_5m: 0.07, exit_sol_5m: 0.08,
+      exit_reversal: 0.03, size: 10, max_start_delay: 5.0,
+      quote_lo: 0.2, quote_hi: 0.8,
+      entry_delay_sec: 0.0, entry_delay_pct: 5,
+      dead_zone_val: 0.15, dead_zone_pct: 15, dead_zone_unit: 'pct',
+      naked_leg_at_expiry: 'hold', enable_leg_chase: true,
+      series: 'btc,sol', durations: '300', file: ''},
+      scope: {series: 'btc,sol', durations: '300',
+        series_tokens: ['BTC', 'SOL'], duration_values: [300]}};
+    applyBacktestTemplate(tpl);
+    const q = btControlQuery(btControlValues());
+    for (const needle of ['offset=0.03', 'queue=25', 'pair_cost=0.95',
+        'exit_default_5m=0.04', 'exit_default_15m=0.06',
+        'exit_btc_5m=0.07', 'exit_sol_5m=0.08',
+        'size=10', 'quote_lo=0.2', 'quote_hi=0.8',
+        'entry_delay_pct=5', 'exit_reversal=0.03', 'dead_zone_pct=15',
+        'naked_leg_at_expiry=hold', 'enable_leg_chase=1',
+        'series=btc%2Csol', 'durations=300']) {
+      assert(q.includes(needle), needle + ' missing from ' + q);
+    }
+    assert(selectedBtDuration === '5m', selectedBtDuration);
+    assert([...selectedBtTokens].sort().join(',') === 'BTC,SOL', [...selectedBtTokens].join(','));
+    assert(_els['btLegChase'].value === '1', _els['btLegChase'].value);
+    assert(_els['btNakedLegAtExpiry'].value === 'hold', _els['btNakedLegAtExpiry'].value);
+    // Legacy fallbacks: pct null falls back to seconds / fraction*100.
+    const tpl2 = {request_args: {entry_delay_sec: 2, entry_delay_pct: null,
+      dead_zone_val: 0.10, dead_zone_pct: null, series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: []}};
+    applyBacktestTemplate(tpl2);
+    assert(_els['btEntryDelay'].value === '2', _els['btEntryDelay'].value);
+    assert(_els['btDeadZoneVal'].value === '10', _els['btDeadZoneVal'].value);
+    """
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js not installed")
+    proc = subprocess.run([node_bin, "-e", test_js], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr

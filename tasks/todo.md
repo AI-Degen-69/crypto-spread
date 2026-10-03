@@ -11,11 +11,13 @@
   - Implement POST/GET/DELETE `/api/backtest/templates` endpoints with origin checks and stale hash validation (409).
   - Add endpoint test suite in `tests/test_backtest_templates.py`.
 
-- [ ] **Task 3: UI Controls & Tab Integration** (`server/osc_dash.py`, `tests/test_osc_dash_integration.py`)
+- [x] **Task 3: UI Controls & Tab Integration** (`server/osc_dash.py`, `tests/test_osc_dash_integration.py`)
   - Add `btnSaveTemplate` button and `#btSecTemplates` list card in Backtest tab.
   - Wire `_btSaveableRunId`, `saveBacktestTemplate()`, `loadBacktestTemplateList()`, `loadBacktestTemplate()`, `applyBacktestTemplate()`, `deleteBacktestTemplate()`.
   - Add JS/HTML integration tests in `tests/test_osc_dash_integration.py`.
 
-- [ ] **Final Verification Gate**
+- [x] **Final Verification Gate**
+  - `tests/test_backtest_templates.py`: 18 passed.
+  - `tests/test_osc_dash_integration.py` + `tests/test_theme_tokens.py`: 348 passed, 1 pre-existing env failure (`test_sweep_categorical_axis_rendering_node` — Windows `node -e` length limit, fails identically on base `7b914a9`).
   - Run `python -m pytest tests/test_backtest_templates.py -q`.
   - Run `python -m pytest tests/test_osc_dash_integration.py tests/test_theme_tokens.py -q`.

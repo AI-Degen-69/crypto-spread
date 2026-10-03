@@ -5888,8 +5888,29 @@ textarea:focus-visible,
              hidden and never appears next to an idle tab. -->
         <button class="btn bt-stop" id="btnStopBacktest" onclick="stopBacktestRun()" hidden>⏹ Stop</button>
         <button class="btn" id="btnResetParams" onclick="resetBtParams()">Reset to Defaults</button>
+        <!-- Issue #413: manual save of the last completed run as a reusable template. Enabled only when a run_id is available. -->
+        <button class="btn" id="btnSaveTemplate" onclick="saveBacktestTemplate()" disabled title="Save the last completed run as a reusable template">💾 Save as Template</button>
         <span id="btRuntimeEstBadge" class="bt-runtime-badge" title="Estimated execution runtime based on selected dataset and scope" aria-live="polite">⏱️ Est: calculating…</span>
         <span id="btLastRunTime" class="mono" style="font-size:11px;color:var(--dim)" aria-live="polite"></span>
+      </div>
+      </div>
+    </div>
+
+    <!-- Issue #413: saved backtest templates — list, load (refills controls, never replays), delete. -->
+    <div class="bt-section bt-peer-section" id="btSecTemplates">
+      <button type="button" class="bt-section-head" aria-expanded="true" aria-controls="btSecTemplatesBody" onclick="toggleBtSection(this,'btSecTemplatesBody')">
+        <span class="bt-section-dot bt-section-dot-green"></span>
+        <span>💾 Backtest Templates</span>
+        <span class="bt-section-chevron" aria-hidden="true">▾</span>
+      </button>
+      <div class="bt-section-body" id="btSecTemplatesBody">
+      <div class="card">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <input id="btTemplateName" placeholder="Template name…" maxlength="64" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--tx)" aria-label="Template name">
+          <button class="btn" onclick="loadBacktestTemplateList()" title="Reload the saved template list">↻ Refresh</button>
+        </div>
+        <div id="btTemplateStatus" class="mono" style="font-size:11px;color:var(--dim);margin-bottom:6px" aria-live="polite"></div>
+        <div id="btTemplateList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
       </div>
     </div>
@@ -8974,10 +8995,182 @@ async function consumeBacktestStream(res, ctl, onEvent, opts){
   }
 }
 
+// Issue #413: backtest templates — persist a completed run's configuration +
+// result summary under a name, then refill the tab from it on demand.
+// Loading never replays: it only sets controls, chips, preview and estimate.
+window._btSaveableRunId = null;
+
+function setBtSaveableRunId(runId){
+  window._btSaveableRunId = runId || null;
+  const btn = $('btnSaveTemplate');
+  if (btn) btn.disabled = !window._btSaveableRunId;
+}
+
+function btEscHtml(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function btTemplateStatus(msg, isErr){
+  const el = $('btTemplateStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = isErr ? 'var(--down)' : 'var(--dim)';
+}
+
+async function saveBacktestTemplate(){
+  const nameEl = $('btTemplateName');
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!window._btSaveableRunId) { btTemplateStatus('Run a backtest first — nothing to save yet.', true); return; }
+  if (!name) { btTemplateStatus('Type a template name first.', true); return; }
+  try {
+    const res = await fetch('/api/backtest/templates', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, run_id: window._btSaveableRunId}),
+    });
+    const j = await res.json();
+    if (!res.ok) { btTemplateStatus('Save failed: ' + (j.error || res.status), true); return; }
+    btTemplateStatus(j.overwritten ? `Template '${j.name}' overwritten.` : `Template '${j.name}' saved.`);
+    loadBacktestTemplateList();
+  } catch(err) {
+    btTemplateStatus('Save failed: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
+async function loadBacktestTemplateList(){
+  const list = $('btTemplateList');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/backtest/templates');
+    const j = await res.json();
+    const items = (j && j.templates) || [];
+    if (!items.length) {
+      list.innerHTML = '<div class="mono" style="font-size:11px;color:var(--dim)">No saved templates yet — run a backtest, then press Save as Template.</div>';
+      return;
+    }
+    list.innerHTML = items.map(function(t){
+      const nm = t.name || '';
+      const enc = encodeURIComponent(nm);
+      const sub = t.invalid ? 'unreadable file' : `${t.n_windows != null ? t.n_windows + ' windows · ' : ''}${t.total_pnl_cents != null ? (Number(t.total_pnl_cents) >= 0 ? '+' : '') + Number(t.total_pnl_cents).toFixed(1) + 'c · ' : ''}${t.selection ? btEscHtml(t.selection) : ''}`;
+      return `<div style="display:flex;gap:8px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px">`
+        + `<div style="flex:1;min-width:0"><div style="font-weight:600">${btEscHtml(nm)}</div>`
+        + `<div class="mono" style="font-size:10px;color:var(--dim)">${sub}</div></div>`
+        + `<button class="btn" style="font-size:11px;padding:4px 10px" onclick="loadBacktestTemplate('${enc}')">Load</button>`
+        + `<button class="btn" style="font-size:11px;padding:4px 10px" onclick="deleteBacktestTemplate('${enc}')">Delete</button></div>`;
+    }).join('');
+  } catch(err) {
+    btTemplateStatus('Could not load templates: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
+async function loadBacktestTemplate(encName){
+  const name = decodeURIComponent(encName);
+  try {
+    const res = await fetch('/api/backtest/templates/' + encodeURIComponent(name));
+    const j = await res.json();
+    if (res.status === 409) { btTemplateStatus(`Template '${name}' is stale — parameters changed since it was saved.`, true); return; }
+    if (!res.ok) { btTemplateStatus('Load failed: ' + (j.error || res.status), true); return; }
+    applyBacktestTemplate(j);
+    btTemplateStatus(`Template '${name}' loaded — controls updated, no replay started.`);
+  } catch(err) {
+    btTemplateStatus('Load failed: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
+function applyBacktestTemplate(t){
+  const a = (t && t.request_args) || {};
+  const setVal = function(id, v){
+    if (v === undefined || v === null) return;
+    const el = $(id);
+    if (el) el.value = String(v);
+  };
+  setVal('btOffset', a.offset);
+  setVal('btQueue', a.queue);
+  setVal('btPairCost', a.pair_cost);
+  setVal('btExit5m', a.exit_default_5m);
+  setVal('btExit15m', a.exit_default_15m);
+  setVal('btExitBtc', a.exit_btc_5m);
+  setVal('btExitSol', a.exit_sol_5m);
+  setVal('btSize', a.size);
+  setVal('btQuoteLo', a.quote_lo);
+  setVal('btQuoteHi', a.quote_hi);
+  setVal('btExitReversal', a.exit_reversal);
+  if (a.entry_delay_pct !== undefined && a.entry_delay_pct !== null) setVal('btEntryDelay', a.entry_delay_pct);
+  else if (a.entry_delay_sec !== undefined && a.entry_delay_sec !== null) setVal('btEntryDelay', a.entry_delay_sec);
+  if (a.dead_zone_pct !== undefined && a.dead_zone_pct !== null) setVal('btDeadZoneVal', a.dead_zone_pct);
+  else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null) setVal('btDeadZoneVal', Number(a.dead_zone_val) * 100);
+  setVal('btNakedLegAtExpiry', a.naked_leg_at_expiry);
+  if (a.enable_leg_chase !== undefined && a.enable_leg_chase !== null) setVal('btLegChase', a.enable_leg_chase ? '1' : '0');
+  if (a.max_start_delay !== undefined && a.max_start_delay !== null) {
+    const sel = $('btMaxStartDelay');
+    if (sel) {
+      const want = String(a.max_start_delay);
+      let has = false;
+      for (const o of sel.options) { if (o.value === want) { has = true; break; } }
+      if (!has && typeof document !== 'undefined' && document.createElement) {
+        const opt = document.createElement('option');
+        opt.value = want; opt.textContent = want;
+        sel.appendChild(opt);
+      }
+      sel.value = want;
+    }
+  }
+  const file = a.file || '';
+  const sel = $('btFileSelect');
+  if (sel) {
+    let has = false;
+    for (const o of sel.options) { if (o.value === file) { has = true; break; } }
+    if (file && !has && typeof document !== 'undefined' && document.createElement) {
+      const opt = document.createElement('option');
+      opt.value = file; opt.textContent = file + ' (unavailable)';
+      sel.appendChild(opt);
+    }
+    sel.value = file;
+  }
+  window.selectedBacktestFile = file;
+  window._btFileChosen = true;
+  const scope = (t && t.scope) || {};
+  let tokens = Array.isArray(scope.series_tokens) && scope.series_tokens.length ? scope.series_tokens : null;
+  if (!tokens && typeof a.series === 'string' && a.series) {
+    tokens = a.series.split(',').map(function(s){ return s.trim().toUpperCase(); });
+  }
+  if (tokens) {
+    const known = tokens.filter(function(x){ return BT_ALL_TOKENS.indexOf(x) >= 0; });
+    if (known.length) selectedBtTokens = new Set(known);
+  }
+  const durVals = Array.isArray(scope.duration_values) ? scope.duration_values : null;
+  if (durVals) {
+    const only5 = durVals.length === 1 && durVals[0] === 300;
+    const only15 = durVals.length === 1 && durVals[0] === 900;
+    selectedBtDuration = only5 ? '5m' : (only15 ? '15m' : 'both');
+  } else if (typeof a.durations === 'string' && a.durations) {
+    selectedBtDuration = a.durations === '300' ? '5m' : (a.durations === '900' ? '15m' : 'both');
+  }
+  updateBtFilterUI();
+  updateBacktestParamPreview();
+  updateBtRuntimeEstimate();
+}
+
+async function deleteBacktestTemplate(encName){
+  const name = decodeURIComponent(encName);
+  try {
+    const res = await fetch('/api/backtest/templates/' + encodeURIComponent(name), {method: 'DELETE'});
+    const j = await res.json();
+    if (!res.ok) { btTemplateStatus('Delete failed: ' + (j.error || res.status), true); return; }
+    btTemplateStatus(`Template '${name}' deleted.`);
+    loadBacktestTemplateList();
+  } catch(err) {
+    btTemplateStatus('Delete failed: ' + (err && err.message ? err.message : err), true);
+  }
+}
+
 async function runBacktest(fileOverride){
   if (window._btAbort) { try{ window._btAbort.abort(); }catch{} }
   const ctl = new AbortController();
   window._btAbort = ctl;
+  setBtSaveableRunId(null);
   btRenderToken = ctl; // #371: ownership token for coalesced renders
   window._btRunning = true;
   setBacktestLoadingState(true);
@@ -9038,6 +9231,7 @@ async function runBacktest(fileOverride){
       } else if (ev.type === 'final') {
         btDestroyProvisionalChart();
         renderBacktestResult(ev.result, fileVal);
+        if (ev.result && ev.result.run_id) setBtSaveableRunId(ev.result.run_id);
       } else if (ev.type === 'error') {
         markBacktestFailed(ev.error || 'stream error');
       }
@@ -13712,6 +13906,7 @@ if (typeof document !== 'undefined' && document.addEventListener) {
   });
 }
 loadManifest();   // tick files tab: load file list + run integrity verify on every dashboard load
+loadBacktestTemplateList(); // backtest tab: saved-template list (empty state until the first save)
 initBacktestIdle(); // IIIB: backtest tab opens pre-drawn (sweep card idle + chart axes)
 </script></body></html>
 """
