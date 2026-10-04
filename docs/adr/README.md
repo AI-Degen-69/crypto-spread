@@ -12,6 +12,7 @@ live in [`../engine-decision-rules.md`](../engine-decision-rules.md), not here.
 | [0001](0001-parity-harness-over-shared-module.md) | A parity harness, not a shared decision module | accepted | 2026-09-16 |
 | [0002](0002-single-hard-coded-fill-rule.md) | One hard-coded fill rule; `fill_model` is not a knob | accepted | 2026-09-16 |
 | [0003](0003-structural-limits-separate-from-tuning-knobs.md) | Structural limits are a separate parameter class from tuning knobs | accepted | 2026-09-16 |
+| [0004](0004-retire-maker-config.md) | Retire strategy/config.py MakerConfig as executable configuration surface | accepted | 2026-10-04 |
 
 ## Writing one
 
