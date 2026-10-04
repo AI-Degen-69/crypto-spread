@@ -1022,12 +1022,12 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
     last_chased_resting: float | None = None
 
     # Patient entry delay (issue #145, mirrors live issue #137): `entry_delay`
-    # holds all quoting until that far into the window (0 = off).
-    # Resting quotes anchor at the first mid AT/AFTER delay expiry (sim2
-    # research-sim parity: sim2 anchors from its cached window mids, same
-    # one-sided source as `s["mid"]` here); with delay 0 that is the first
-    # valid snapshot, exactly as before. Explicit None handling matches the
-    # validator (`__post_init__` owns range/finiteness for constructed params).
+    # holds quote placement until that far into the window (0 = off).
+    # The anchor latch is independent of delay: it fires at the first
+    # in-range two-sided mid seen while clean, even if delay has not yet
+    # expired. Delay decides WHEN the quote reaches the book, never at
+    # WHAT price. Explicit None handling matches the validator
+    # (`__post_init__` owns range/finiteness for constructed params).
     # Issue #228: the entry band is deleted and the range below is judged on
     # the anchor's own two-sided mid.
     entry_delay = (
@@ -1052,10 +1052,10 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
     # Whether a quote has actually been exposed to the book (issue #225). The
     # backtest has no order object, so "an order is live" is "the quote reached
     # fill detection on some earlier tick and has not been cancelled since" --
-    # the condition live spells as `order_id_up or order_id_down`. Until then
-    # the anchor is repriced every tick, so the price that goes on the book is
-    # the mid at placement time and not one carried over from before whatever
-    # was holding placement cleared.
+    # the condition live spells as `order_id_up or order_id_down`. The anchor
+    # is latched once per round (set-and-wait, #422) and held at its latched
+    # price regardless of whether placement has occurred; this flag tracks
+    # whether fill detection should run, not whether the anchor moves.
     orders_live = False
     entry_cancelled = False
     # Dead zone at window start (issue #229 / rule §8):
