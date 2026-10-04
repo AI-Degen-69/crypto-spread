@@ -6543,7 +6543,9 @@ def test_jungle_king_render_node():
 # Registry parameters deliberately not swept go in this allow-list, one reason
 # per entry; execution assumptions DO belong in the manifest (held-at-baseline
 # group), so they are covered and never listed here.
-_JK_OUT_OF_SCOPE_ALLOW_LIST: dict[str, str] = {}
+_JK_OUT_OF_SCOPE_ALLOW_LIST: dict[str, str] = {
+    "pair_cost_gate": "Issue #433: entry-side touch pair gate research knob with disable switch (0.0); out of scope for Jungle King OFAT viewer",
+}
 
 
 def test_jungle_king_covers_every_registry_parameter():
