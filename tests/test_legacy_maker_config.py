@@ -30,13 +30,15 @@ def test_no_live_code_imports_strategy_config():
     }
 
     violating_imports: list[str] = []
+    unparsable: list[str] = []
 
     for file_path in py_files:
         if file_path in allowed_files:
             continue
         try:
             tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        except Exception:
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            unparsable.append(f"{file_path.relative_to(ROOT)}: {exc}")
             continue
 
         for node in ast.walk(tree):
@@ -52,6 +54,7 @@ def test_no_live_code_imports_strategy_config():
                         if alias.name in ("config", "MakerConfig"):
                             violating_imports.append(f"{file_path.relative_to(ROOT)}:{node.lineno}: from strategy import {alias.name}")
 
+    assert not unparsable, f"Could not scan files: {unparsable}"
     assert not violating_imports, f"Found active imports of strategy.config: {violating_imports}"
 
 
