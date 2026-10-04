@@ -119,7 +119,9 @@ def test_sweep_visual_uses_numeric_axis_and_aligned_market_labels():
     assert "parsing: false" in FULL_APP_HTML
     assert "beginAtZero: true" in FULL_APP_HTML
     assert "afterBuildTicks" in FULL_APP_HTML
-    assert "xTickLabels" in FULL_APP_HTML
+    # The tick labels are resolved at the call sites by `xTickLabel` (issue
+    # #388); the old value -> label map it replaced had no reader.
+    assert "xTickLabel(" in FULL_APP_HTML
     assert "best_overall" in FULL_APP_HTML
     assert "best_market" in FULL_APP_HTML
     assert "series_labels" in FULL_APP_HTML

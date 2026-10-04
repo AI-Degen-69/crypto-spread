@@ -10701,10 +10701,8 @@ function sweepPixelTickIndices(xVals, plotWidthPx, labelW, maxTicks, gapPx){
 function sweepChartOptions(data, detail, isAgg){
   const theme = getThemeTokens();
   const points = data.points || [];
-  const labels = points.map(p => p.label);
   const xVals = points.map((p, i) => sweepPointX(data.axis, p, i));
   const axisLabel = sweepAxisLabel(data.axis);
-  const xTickLabels = new Map(xVals.map((value, index) => [value, labels[index]]));
   const maxTicks = detail ? Math.min(14, xVals.length) : Math.min(4, xVals.length);
   // Issue #388: on a categorical axis a tick value is a bar index, so every
   // label site (the width-measuring planner, the tick list both branches build
