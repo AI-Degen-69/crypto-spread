@@ -288,8 +288,15 @@ paying more for the pair than the pair returns. Both engines clamp to 1.00.
 two asks of a binary pair always sum to roughly 1.00-1.01, so the check carries no
 information. Operator decision, 2026-09-16.
 
-**Naming.** The backtest field `pair_cost_gate` is renamed to `max_pair_cost`, matching live.
+**Naming.** The backtest field `pair_cost_gate` was renamed to `max_pair_cost`, matching live.
 The old name described the deleted entry gate, not the surviving cap.
+
+**Research re-introduction (`pair_cost_gate`, issue #433):** For offline quantitative sweeps
+evaluating entry-side market quality filters, `BacktestParams` re-introduces `pair_cost_gate`
+(default `0.0`, disabled). When set to `> 0`, it checks `touch = up_ask + dn_ask <= pair_cost_gate`
+before admitting a window. Setting `<= 0` disables the gate. The default of `0.0` preserves
+exact baseline replay equivalence with the live engine (which maintains no entry-side pair gate).
+
 ## 5. `unpriceable_leg_skip` — a book that cannot be priced  *(agreed 2026-09-16)*
 
 An instance of **Invariant 0**.

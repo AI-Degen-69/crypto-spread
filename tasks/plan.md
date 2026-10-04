@@ -50,7 +50,7 @@
 
 ---
 
-### Task 3: [Backend/Docs] [S] Parameter sweep compatibility, doc update & targeted test verification
+### Task 3: [Backend/Docs] [S] Parameter sweep compatibility, doc update & targeted test verification [x]
 - **Depends on**: Task 2
 - **Files**: `scripts/sweep_backtest.py`, `docs/engine-decision-rules.md`, `tests/test_sweep_backtest.py`
 - **Helper Skill**: `documentation-and-adrs`, `test-driven-development`
