@@ -10534,16 +10534,21 @@ def test_cockpit_hydrates_every_engine_param_in_both_branches():
 
 # --- Golden dataset dashboard backtest tests (Issue #436) --------------------
 
-def test_resolve_tick_file_golden_directory():
+def test_resolve_tick_file_golden_directory(monkeypatch, tmp_path):
     """Issue #436: _resolve_tick_file permits allow-listed directory targets like 'golden'."""
-    from server.osc_dash import _resolve_tick_file, TICKS_DIR
+    from server import osc_dash
+    from server.osc_dash import _resolve_tick_file
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+
     status, path = _resolve_tick_file("golden")
     assert status == "ok"
-    assert path == (TICKS_DIR / "golden").resolve()
+    assert path == golden_dir.resolve()
 
     status_slash, path_slash = _resolve_tick_file("golden/")
     assert status_slash == "ok"
-    assert path_slash == (TICKS_DIR / "golden").resolve()
+    assert path_slash == golden_dir.resolve()
 
     # Traversal and disallowed directories are rejected
     assert _resolve_tick_file("../golden") == ("invalid", None)
@@ -10552,8 +10557,32 @@ def test_resolve_tick_file_golden_directory():
     assert _resolve_tick_file("golden/sub/extra") == ("invalid", None)
 
 
-def test_api_ticks_manifest_surfaces_golden_dataset():
+def test_api_ticks_manifest_surfaces_golden_dataset(monkeypatch, tmp_path):
     """Issue #436: GET /api/ticks/manifest surfaces aggregated golden dataset."""
+    from server import osc_dash
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+
+    manifest = {
+        "status": "certified",
+        "totals": {
+            "windows_count": 4910,
+            "valid_ticks": 1428888,
+        },
+        "days": [
+            {
+                "file": "ticks_2026-03-20.jsonl",
+                "market_breakdown": [
+                    {"series": "btc-up-or-down-5m", "duration": 300, "windows": 200, "trades": 500},
+                    {"series": "btc-up-or-down-15m", "duration": 900, "windows": 100, "trades": 300},
+                ],
+            }
+        ],
+    }
+    (golden_dir / "golden_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (golden_dir / "ticks_2026-03-20.jsonl").write_text("", encoding="utf-8")
+
     res = client.get("/api/ticks/manifest")
     assert res.status_code == 200
     data = res.json()
@@ -10563,10 +10592,12 @@ def test_api_ticks_manifest_surfaces_golden_dataset():
     assert golden["windows_count"] == 4910
     assert golden["is_dir"] is True
     assert golden["is_golden"] is True
-    assert len(golden["market_breakdown"]) == 10
-    assert golden["windows_5m"] + golden["windows_15m"] == 4910
+    assert len(golden["market_breakdown"]) == 2
+    assert golden["windows_5m"] == 200
+    assert golden["windows_15m"] == 100
     # Also included in files array for dropdown and runtime estimator
     assert any(f["name"] == "golden" for f in data["files"])
+
 
 
 def test_bt_file_select_includes_golden_option():
