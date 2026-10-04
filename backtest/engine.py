@@ -1306,6 +1306,18 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                         last_chased_leg = "up"
                         last_chased_resting = resting_up
 
+        # Touch pair gate (issue #433: <= 0 disables)
+        if params.pair_cost_gate <= 0:
+            pair_cost_ok = True
+        else:
+            touch = None
+            if up_ask is not None and dn_ask is not None:
+                touch = up_ask + dn_ask
+            pair_cost_ok = (touch is None) or (touch <= params.pair_cost_gate)
+
+        if not pair_cost_ok:
+            if not filled_up and not filled_down:
+                continue
 
         if not queue_ok:
             if not filled_up and not filled_down:

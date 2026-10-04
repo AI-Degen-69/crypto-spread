@@ -469,6 +469,67 @@ def test_simulate_window_tracks_entered_flag():
     assert w.entered is True
 
 
+def test_simulate_pair_cost_gate_zero_disables():
+    """Issue #433: with pair_cost_gate <= 0, gate is disabled even if touch is wide."""
+    tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
+    snaps = [snap(1.0, 0.50, up_ask=0.60, down_ask=0.60, tape=tape)]
+    # 0.0 disables (default)
+    w0 = _simulate_window(snaps, BacktestParams(pair_cost_gate=0.0))
+    assert w0.filled_up is True
+    # negative disables
+    w_neg = _simulate_window(snaps, BacktestParams(pair_cost_gate=-1.0))
+    assert w_neg.filled_up is True
+
+
+def test_simulate_pair_cost_gate_blocks_wide_touch():
+    """Issue #433: pair_cost_gate > 0 blocks entry when touch exceeds threshold."""
+    tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
+    # up_ask=0.55 + dn_ask=0.55 = 1.10 touch > 1.05 gate
+    snaps = [snap(1.0, 0.50, up_ask=0.55, down_ask=0.55, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(pair_cost_gate=1.05))
+    assert w.filled_up is False
+    assert w.entered is False
+
+
+def test_simulate_pair_cost_gate_allows_touch_under_threshold():
+    """Issue #433: pair_cost_gate > 0 permits entry when touch <= gate."""
+    tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
+    # up_ask=0.51 + dn_ask=0.51 = 1.02 touch <= 1.05 gate
+    snaps = [snap(1.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)]
+    w = _simulate_window(snaps, BacktestParams(pair_cost_gate=1.05))
+    assert w.filled_up is True
+
+
+def test_simulate_pair_cost_gate_does_not_block_open_leg_resolution():
+    """Issue #433: once one leg is filled, wide touch does not strand the position."""
+    # Tick 1: tight touch (1.00), UP fills on tape.
+    # Tick 2: touch widens to 1.10 (0.55 + 0.55), but DOWN ask reaches resting 0.48
+    s1 = snap(1.0, 0.50, up_ask=0.50, down_ask=0.50,
+              tape=[{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}])
+    s2 = snap(2.0, 0.50, up_ask=0.55, down_ask=0.55,
+              tape=[{"asset": DN_TOKEN, "price": 0.48, "size": 5.0}])
+    w = _simulate_window([s1, s2], BacktestParams(pair_cost_gate=1.05))
+    assert w.filled_up is True
+    assert w.filled_down is True
+    assert w.pair_captured is True
+
+
+def test_backtest_params_pair_cost_gate_validation():
+    """Issue #433: __post_init__ validates pair_cost_gate."""
+    assert BacktestParams(pair_cost_gate=0.0).pair_cost_gate == 0.0
+    assert BacktestParams(pair_cost_gate=-0.5).pair_cost_gate == -0.5
+    assert BacktestParams(pair_cost_gate=1.05).pair_cost_gate == 1.05
+    assert BacktestParams(pair_cost_gate=2.00).pair_cost_gate == 2.00
+    with pytest.raises(ValueError, match="pair_cost_gate"):
+        BacktestParams(pair_cost_gate=2.01)
+    with pytest.raises(ValueError, match="pair_cost_gate"):
+        BacktestParams(pair_cost_gate=True)
+    with pytest.raises(ValueError, match="pair_cost_gate"):
+        BacktestParams(pair_cost_gate=float("nan"))
+    with pytest.raises(ValueError, match="pair_cost_gate"):
+        BacktestParams(pair_cost_gate=float("inf"))
+
+
 # --- simulation: exit -----------------------------------------------------
 
 def test_simulate_exit_when_one_side_filled_and_drifts():

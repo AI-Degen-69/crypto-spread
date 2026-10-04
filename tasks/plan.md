@@ -31,7 +31,7 @@
 
 ---
 
-### Task 2: [Backend/Logic] [S] Implement touch pair gate in `_simulate_window` & add engine tests
+### Task 2: [Backend/Logic] [S] Implement touch pair gate in `_simulate_window` & add engine tests [x]
 - **Depends on**: Task 1
 - **Files**: `backtest/engine.py`, `tests/test_backtest_engine.py`
 - **Helper Skill**: `test-driven-development`, `debugging-and-error-recovery`
