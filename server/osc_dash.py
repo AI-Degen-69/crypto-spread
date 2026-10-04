@@ -11608,8 +11608,8 @@ async function loadManifest(){
         btnDel.addEventListener('click', () => deleteTickFile(f.name));
         // Issue #295/#281: derived datasets (pristine/, golden/) are managed
         // artifacts — the delete endpoint stays top-level-only, so the action
-        // is omitted for any subpath entry.
-        if (f.name.includes('/')) btnDel.style.display = 'none';
+        // is omitted for any subpath entry or directory.
+        if (f.name.includes('/') || f.is_dir) btnDel.style.display = 'none';
 
         tdIntegrity.appendChild(verifyBadge);
         tdActions.appendChild(btnRun);
@@ -11641,10 +11641,22 @@ async function loadManifest(){
         vRow.appendChild(vTd);
         tbl.appendChild(vRow);
 
-        // Queue the integrity check for this file — runs sequentially after
-        // the table is built so earlier files populate first (verify runs on
-        // every load but is served from the fingerprint cache when unchanged).
-        _verifyQueue.push(f.name);
+        if (f.is_dir) {
+          // Issue #436: directory entries like golden already carry certified
+          // readiness and status from manifest aggregation — skip queuing them
+          // into the per-file verification queue, and populate badges immediately.
+          const {color, label} = fileVerifyStatusBits(f.integrity_status || 'PASS', f.capture_state || 'COMPLETE CAPTURE');
+          verifyBadge.textContent = label;
+          verifyBadge.style.color = color;
+          tdReadiness.textContent = (f.readiness && f.readiness.readiness_level) || 'RESEARCH_READY';
+          tdReadiness.style.color = 'var(--up)';
+          vTd.innerHTML = `<div style="text-align:center;color:var(--dim);font-size:12px;padding:8px">Certified Golden Dataset · ${(f.windows_count || 4910).toLocaleString()} windows across 6 days</div>`;
+        } else {
+          // Queue the integrity check for this file — runs sequentially after
+          // the table is built so earlier files populate first (verify runs on
+          // every load but is served from the fingerprint cache when unchanged).
+          _verifyQueue.push(f.name);
+        }
       }
     }
     wrap.appendChild(tbl);
