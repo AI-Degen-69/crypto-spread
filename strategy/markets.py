@@ -408,19 +408,3 @@ def recent_trades(condition_id: str, seen: set, limit: int = 500,
             continue
         out.setdefault(tok, {})[p] = out.setdefault(tok, {}).get(p, 0.0) + size
     return out
-
-
-if __name__ == "__main__":
-    from strategy.config import load
-
-    cfg = load()
-    m = fetch_live_market(cfg.gamma_host, cfg.series_slug)
-    if not m:
-        print("no live market right now")
-    else:
-        rem = m.t_remaining()
-        print(f"live: {m.market_slug}  t_remaining={rem:.1f}s")
-        print(f"  cond={m.condition_id}")
-        print(f"  up_token={m.up_token[:18]}...")
-        print(f"  down_token={m.down_token[:18]}...")
-        print(f"  tick={m.tick_size}  neg_risk={m.neg_risk}")
