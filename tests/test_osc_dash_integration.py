@@ -10530,3 +10530,122 @@ def test_cockpit_hydrates_every_engine_param_in_both_branches():
         ("cockpitQuoteLo", "quote_range"),
         ("cockpitQuoteHi", "quote_range"),
     ], "the hydrated cockpit field list changed — update this pin deliberately"
+
+
+# --- Golden dataset dashboard backtest tests (Issue #436) --------------------
+
+def test_resolve_tick_file_golden_directory(monkeypatch, tmp_path):
+    """Issue #436: _resolve_tick_file permits allow-listed directory targets like 'golden'."""
+    from server import osc_dash
+    from server.osc_dash import _resolve_tick_file
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+
+    status, path = _resolve_tick_file("golden")
+    assert status == "ok"
+    assert path == golden_dir.resolve()
+
+    status_slash, path_slash = _resolve_tick_file("golden/")
+    assert status_slash == "ok"
+    assert path_slash == golden_dir.resolve()
+
+    # Traversal and disallowed directories are rejected
+    assert _resolve_tick_file("../golden") == ("invalid", None)
+    assert _resolve_tick_file("/golden") == ("invalid", None)
+    assert _resolve_tick_file("quarantine") == ("not_found", None)
+    assert _resolve_tick_file("golden/sub/extra") == ("invalid", None)
+
+
+def test_api_ticks_manifest_surfaces_golden_dataset(monkeypatch, tmp_path):
+    """Issue #436: GET /api/ticks/manifest surfaces aggregated golden dataset."""
+    from server import osc_dash
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+
+    manifest = {
+        "status": "certified",
+        "totals": {
+            "windows_count": 4910,
+            "valid_ticks": 1428888,
+        },
+        "days": [
+            {
+                "file": "ticks_2026-03-20.jsonl",
+                "market_breakdown": [
+                    {"series": "btc-up-or-down-5m", "duration": 300, "windows": 200, "trades": 500},
+                    {"series": "btc-up-or-down-15m", "duration": 900, "windows": 100, "trades": 300},
+                ],
+            }
+        ],
+    }
+    (golden_dir / "golden_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (golden_dir / "ticks_2026-03-20.jsonl").write_text("", encoding="utf-8")
+
+    res = client.get("/api/ticks/manifest")
+    assert res.status_code == 200
+    data = res.json()
+    assert "golden" in data and data["golden"] is not None
+    golden = data["golden"]
+    assert golden["name"] == "golden"
+    assert golden["windows_count"] == 4910
+    assert golden["is_dir"] is True
+    assert golden["is_golden"] is True
+    assert len(golden["market_breakdown"]) == 2
+    assert golden["windows_5m"] == 200
+    assert golden["windows_15m"] == 100
+    # Also included in files array for dropdown and runtime estimator
+    assert any(f["name"] == "golden" for f in data["files"])
+
+
+
+def test_bt_file_select_includes_golden_option():
+    """Issue #436: Backtest dropdown in loadManifest populates Golden Dataset option."""
+    html = client.get("/").text
+    assert "★ Golden Dataset /" in html
+    assert "goldOpt.value = 'golden'" in html
+
+
+def test_api_backtest_with_golden_directory(monkeypatch, tmp_path):
+    """Issue #436: /api/backtest executes successfully with file=golden."""
+    from server import osc_dash
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+    fake_file = golden_dir / "ticks_2026-03-20.jsonl"
+
+    ticks = []
+    cid = "0xCID_GOLDEN_0"
+    slug = "btc-up-or-down-15m"
+    base_ts = 1000.0
+    ticks.append(_make_fake_tick_15m(base_ts, cid, slug, "btc-up-or-down-15m", 0.50, tape=[{"asset": f"{cid}_up", "price": 0.48, "size": 100}]))
+    ticks.append(_make_fake_tick_15m(base_ts + 1, cid, slug, "btc-up-or-down-15m", 0.48))
+    ticks.append(_make_fake_tick_15m(base_ts + 2, cid, slug, "btc-up-or-down-15m", 0.52, tape=[{"asset": f"{cid}_dn", "price": 0.46, "size": 100}]))
+    ticks.append(_make_fake_tick_15m(base_ts + 3, cid, slug, "btc-up-or-down-15m", 0.50))
+
+    with open(fake_file, "w", encoding="utf-8") as f:
+        for t in ticks:
+            f.write(json.dumps(t) + "\n")
+
+    manifest = {
+        "status": "certified",
+        "total_windows": 1,
+        "days": [{
+            "file": "ticks_2026-03-20.jsonl",
+            "market_breakdown": [{"series": "btc-up-or-down-15m", "duration": 900, "windows": 1}],
+        }]
+    }
+    with open(golden_dir / "golden_manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+
+    res = client.get("/api/backtest?file=golden&series=btc-up-or-down-15m&durations=900")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["n_windows"] == 1
+    assert "overall" in data
+    assert "total_pnl_cents" in data["overall"]
+    assert data["coverage"]["expected_source"] == "golden_manifest"
+    assert "run_id" in data
+
+
