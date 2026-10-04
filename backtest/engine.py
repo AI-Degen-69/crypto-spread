@@ -318,6 +318,9 @@ class BacktestParams:
     # into a pair at or under the cap instead of riding it. The quote is only
     # ever raised, never lowered. False = off = today's behaviour.
     enable_leg_chase: bool = False
+    # Issue #433: entry-side touch pair gate. 0.0 disables (default), preserving
+    # existing behaviour. When > 0, requires touch_pair <= pair_cost_gate.
+    pair_cost_gate: float = 0.0
 
     # ── param grouping metadata ──────────────────────────────────────────────
     # Separates operator-controlled (live-replicable) knobs from execution
@@ -393,6 +396,9 @@ class BacktestParams:
              "bool", None, ("backtest", "cockpit"), "tuning"),
             ("exit_reversal", "Reversal Buffer (c)", "How far back toward 0.50 cancels a stop you were about to take",
              "$", (0.001, 0.50), ("backtest", "cockpit"), "tuning"),
+            # Issue #433: entry-side touch pair gate with disable switch (0.0 disables)
+            ("pair_cost_gate", "Pair Cost Gate ($)", "Entry-side touch pair gate (0 disables)",
+             "$", (0.0, 2.00), ("backtest",), "tuning"),
         ],
         "execution_assumptions": [
             # All four are venue facts rather than operator decisions, so
@@ -646,6 +652,16 @@ class BacktestParams:
         ):
             raise ValueError(
                 f"quote_range must be (lo, hi) with 0.0 <= lo < hi <= 1.0, got {qr!r}"
+            )
+        # Issue #433: entry-side touch pair gate with disable switch (<= 0 disables)
+        if (
+            isinstance(self.pair_cost_gate, bool)
+            or not isinstance(self.pair_cost_gate, (int, float))
+            or not math.isfinite(self.pair_cost_gate)
+            or self.pair_cost_gate > 2.00
+        ):
+            raise ValueError(
+                f"pair_cost_gate must be a finite number <= 2.00, got {self.pair_cost_gate!r}"
             )
 
     def exit_thresh(self, slug: str, duration: int, series: str = "") -> float:
