@@ -500,6 +500,18 @@ def test_simulate_pair_cost_gate_allows_touch_under_threshold():
     assert w.filled_up is True
 
 
+@pytest.mark.parametrize("missing_leg", ["up", "down"])
+def test_simulate_pair_cost_gate_allows_tape_fill_when_ask_missing(missing_leg):
+    """Issue #433 / CodeRabbit: unknown touch does not block tape fill on later ticks."""
+    tape = [{"asset": UP_TOKEN, "price": 0.48, "size": 5.0}]
+    first = snap(1.0, 0.50, up_ask=0.51, down_ask=0.51)
+    second = snap(2.0, 0.50, up_ask=0.51, down_ask=0.51, tape=tape)
+    second[f"{missing_leg}_book"]["best_ask"] = None
+    w = _simulate_window(
+        [first, second], BacktestParams(pair_cost_gate=1.05))
+    assert w.filled_up is True
+
+
 def test_simulate_pair_cost_gate_does_not_block_open_leg_resolution():
     """Issue #433: once one leg is filled, wide touch does not strand the position."""
     # Tick 1: tight touch (1.00), UP fills on tape.

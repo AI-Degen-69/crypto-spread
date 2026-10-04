@@ -398,7 +398,7 @@ class BacktestParams:
              "$", (0.001, 0.50), ("backtest", "cockpit"), "tuning"),
             # Issue #433: entry-side touch pair gate with disable switch (0.0 disables)
             ("pair_cost_gate", "Pair Cost Gate ($)", "Entry-side touch pair gate (0 disables)",
-             "$", (0.0, 2.00), ("backtest",), "tuning"),
+             "$", (0.0, 2.00), (), "tuning"),
         ],
         "execution_assumptions": [
             # All four are venue facts rather than operator decisions, so
