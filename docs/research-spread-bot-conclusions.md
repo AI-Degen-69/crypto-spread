@@ -137,8 +137,9 @@
 
 ### 4.5 What `strategy/config.py` is and is not for SPREAD 2
 
-- `strategy/config.py:1-5` header says numbers derived from `powerwinner`'s 56,768 BTC/ETH 5-min fills over 2026-07-14..21. `AGENTS.md:22` warns: "Heavily commented with measured values from the hunter fleet — most MakerConfig fields (rewards, skew, caps) are legacy from that experiment, not the SPREAD-2 target. Verify against README.md:22."
-- **Legacy / do-not-reuse-as-is:** `objective="rewards"`, `reward_offset`, `rewardsMaxSpread 4.5c / rewardsMinSize 50` (per `strategy/config.py:32-36`), `est_reward_pool_usd 143` — `strategy/config.py:498`, `exponent`/`rebateRate` tuning for reward score, `max_market_frac`, scarcity logic, markout horizons, float-mark retention. These are reward-farming artefacts.
+- `strategy/config.py` is retired from runtime execution per ADR-0004 (`docs/adr/0004-retire-maker-config.md`). Detailed measured rationale is preserved in `docs/maker-config-legacy-rationale.md`.
+- Live and paper trading configuration is owned exclusively by `LiveTraderEngine.__init__` in `strategy/live_trader.py` (canonical default `max_pair_cost = 0.99`), and backtest simulation by `BacktestParams` in `backtest/engine.py`.
+- **Legacy / do-not-reuse-as-is:** `objective="rewards"`, `reward_offset`, `rewardsMaxSpread 4.5c / rewardsMinSize 50`, `est_reward_pool_usd 143`, `exponent`/`rebateRate` tuning for reward score, `max_market_frac`, scarcity logic, markout horizons, float-mark retention. These are reward-farming artefacts.
 - **Reusable mechanics (with re-measurement):** `price_band`, `decided_price`, `max_book_spread` / `min_book_depth_sh`, `max_rest_queue_ahead`, `max_pair_cost`, `max_naked_usd` / `max_fleet_naked_usd` / `max_committed_usd`, `enable_pairs_rule` / `pairs_exit_window_sec`, `requote/poll intervals`, `book Health` gates, `parse_book`/`full_book`/`recent_trades` plumbing, latency constants.
 
 ---

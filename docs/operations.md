@@ -220,7 +220,8 @@ Total: 44 (engine) + 5 (index) + 4 (smoke) = 49.
   fetched over REST every round, so book freshness is bounded by the round, not
   by the venue. Since #167 the effective cadence is round + `POLL_INTERVAL`
   (~1.45s, published live as `sampling_interval_s`) rather than the 1s this
-  section used to claim: `requote_interval` in `strategy/config.py:637` and the
+  section used to claim: `requote_interval` in historical `strategy/config.py` (see
+  `docs/maker-config-legacy-rationale.md`) and the
   documented `post_venue_accept_ms=81` should be read against that real figure.
 - **No V2 pUSD migration.** `merge_gas_usd 0.05` is a placeholder; verify
   against the real on-chain figure before any live merge.
