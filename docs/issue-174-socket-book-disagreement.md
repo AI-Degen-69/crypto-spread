@@ -64,6 +64,51 @@ Full coverage across all 10 series:
 
 As outlined in Issue #350, aggregate statistics cannot isolate whether the defect stems from `price_change` delta application, `tick_size_change`, or post-reconnect resynchronization.
 
-The immediate follow-up is:
+The immediate follow-up was:
 - **Issue #359**: `diag(market-data): per-delta socket-book reconciliation replay — name the event type that breaks the #174 book`
-- Replay captured tick streams event-by-event against REST snapshots to isolate the exact breaking event sequence.
+- **Issue #362** (Commit `a704e4d`): Pruned ghost levels outside declared `best_bid` and `best_ask` in `apply_price_change`.
+
+---
+
+## 6. Post-#362 Empirical Live Re-measurement (2026-10-04)
+
+Following the Issue #362 ghost-level pruning fix, a fresh live capture session was conducted across all 10 series with `scripts/collect_ticks.py` to evaluate whether divergence was driven down to the < ~1% GO-threshold.
+
+### Measurement Summary
+
+- **Session Timestamp**: 2026-10-04 22:08 UTC+3
+- **Git Commit Baseline**: `a704e4d` (PR #363 / Issue #362)
+- **Tooling**: `python -m scripts.collect_ticks --no-align`
+- **Total Comparisons**: 1,940 (all 10 series)
+- **Divergent Comparisons (> 0.001)**: 326
+- **Live Divergence Rate**: **16.80% (0.1680)** (vs 29.78% pre-fix baseline)
+- **Max Best Bid Gap (`max_bb`)**: **0.080 (8.0¢)** (vs 32.0¢ pre-fix)
+- **Max Best Ask Gap (`max_ba`)**: **0.090 (9.0¢)** (vs 32.0¢ pre-fix)
+- **Mean Absolute Deltas**:
+  - `mean_abs_bb_delta`: 0.002004 (0.20¢ vs 0.59¢ pre-fix)
+  - `mean_abs_ba_delta`: 0.002025 (0.20¢ vs 0.59¢ pre-fix)
+  - `mean_abs_mid_delta`: 0.002000 (0.20¢ vs 0.53¢ pre-fix)
+
+### Per-Series Breakdown (Post-#362)
+
+| Series | Comparisons | Divergent | Divergence Rate |
+|---|---|---|---|
+| `btc-up-or-down-15m` | 194 | 10 | **5.15%** |
+| `eth-up-or-down-5m` | 194 | 20 | **10.31%** |
+| `sol-up-or-down-15m` | 194 | 22 | **11.34%** |
+| `eth-up-or-down-15m` | 194 | 23 | **11.86%** |
+| `bnb-up-or-down-15m` | 194 | 29 | **14.95%** |
+| `btc-up-or-down-5m` | 194 | 30 | **15.46%** |
+| `xrp-up-or-down-15m` | 194 | 33 | **17.01%** |
+| `sol-up-or-down-5m` | 194 | 51 | **26.29%** |
+| `bnb-up-or-down-5m` | 194 | 52 | **26.80%** |
+| `xrp-up-or-down-5m` | 194 | 56 | **28.87%** |
+
+### Post-#362 Verdict: NO-GO for Phase 2 Switch
+
+While the fix in Issue #362 successfully pruned ghost levels—cutting the divergence rate from ~30% to **16.8%**, compressing mean delta by 66%, and reducing the worst-case gap from **32¢ to 9¢**—the measured divergence rate remains **~17x higher than the < ~1% threshold required to switch**.
+
+A 9-cent maximum gap on contracts priced with 1-cent spreads confirms that socket-authoritative order books cannot safely replace REST as the primary pricing authority in live execution.
+
+**Conclusion**: The Phase 2 switch to socket-authoritative order books remains **BLOCKED (NO-GO)**. REST must remain the primary source of truth, with WebSocket order books utilized only for top-of-book leading indicators and tape deltas.
+
