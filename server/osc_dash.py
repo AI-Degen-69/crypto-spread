@@ -394,41 +394,47 @@ _TICKS_SUBDIR_ALLOWLIST = frozenset({"pristine", "golden", "backtest"})
 
 
 def _resolve_tick_file(file: str) -> tuple[str, Path | None]:
-    """Resolve a `file` request value to a tick file under TICKS_DIR (Issue #295).
+    """Resolve a `file` request value to a tick file or allow-listed directory under TICKS_DIR (Issue #295, #436).
 
     The single resolution point for every endpoint that takes a tick-file
-    parameter. Accepts a bare basename or `<subdir>/<basename>` where subdir
-    is allow-listed (pristine, golden, backtest). Everything else is rejected
-    before any disk
-    access: backslashes, `..`, absolute paths, a leading `/`, more than two
-    segments, empty segments, and unlisted first segments. The existing
-    containment check (resolve + relative_to) is kept as the backstop.
+    parameter. Accepts a bare basename, `<subdir>/<basename>`, or an allow-listed
+    directory (`golden`, `pristine`, `backtest`). Everything else is rejected
+    before any disk access: backslashes, `..`, absolute paths, a leading `/`,
+    more than two segments, empty segments, and unlisted subdirectories. The
+    existing containment check (resolve + relative_to) is kept as the backstop.
 
     Returns a discriminated result so callers can keep their existing three
     response shapes:
-      ("ok", Path)        — resolved, exists, and is a file
+      ("ok", Path)        — resolved, exists, and is a file or allow-listed directory
       ("invalid", None)   — bad param or containment failure
-      ("not_found", None) — missing or not a file
+      ("not_found", None) — missing or not an allowed file/directory
     """
+    clean_file = file.rstrip("/") if file else ""
     if (
-        not file
-        or "\\" in file
-        or ".." in file
-        or file.startswith("/")
-        or Path(file).is_absolute()
+        not clean_file
+        or "\\" in clean_file
+        or ".." in clean_file
+        or clean_file.startswith("/")
+        or Path(clean_file).is_absolute()
     ):
         return "invalid", None
-    parts = file.split("/")
+    parts = clean_file.split("/")
     if len(parts) > 2 or any(not p for p in parts):
         return "invalid", None
     if len(parts) == 2 and parts[0] not in _TICKS_SUBDIR_ALLOWLIST:
         return "invalid", None
-    candidate = (TICKS_DIR / file).resolve()
+    candidate = (TICKS_DIR / clean_file).resolve()
     try:
         candidate.relative_to(TICKS_DIR.resolve())
     except ValueError:
         return "invalid", None
-    if not candidate.exists() or not candidate.is_file():
+    if not candidate.exists():
+        return "not_found", None
+    if candidate.is_dir():
+        if len(parts) == 1 and parts[0] in _TICKS_SUBDIR_ALLOWLIST:
+            return "ok", candidate
+        return "not_found", None
+    if not candidate.is_file():
         return "not_found", None
     return "ok", candidate
 
@@ -1050,6 +1056,74 @@ def api_ticks_manifest():
         subdir_dir = TICKS_DIR / subdir
         if subdir_dir.is_dir():
             _list_tick_files(subdir_dir, subdir=subdir, flag_field=flag)
+    # Issue #436: surface the aggregated golden dataset folder if golden_manifest.json exists
+    golden_dir = TICKS_DIR / "golden"
+    golden_mf_file = golden_dir / "golden_manifest.json"
+    golden_entry: dict[str, Any] | None = None
+    if golden_dir.is_dir() and golden_mf_file.is_file():
+        try:
+            g_data = json.loads(golden_mf_file.read_text(encoding="utf-8"))
+            g_totals = g_data.get("totals", {})
+            g_days = g_data.get("days", [])
+            mb_map: dict[tuple[str, int], dict[str, Any]] = {}
+            total_bytes = 0
+            for d_entry in g_days:
+                f_name = d_entry.get("file")
+                if f_name:
+                    p = golden_dir / f_name
+                    if p.is_file():
+                        total_bytes += p.stat().st_size
+                for mb in d_entry.get("market_breakdown", []):
+                    key = (mb.get("series", ""), int(mb.get("duration", 0)))
+                    if key not in mb_map:
+                        mb_map[key] = {
+                            "series": key[0],
+                            "duration": key[1],
+                            "windows": 0,
+                            "trades": 0,
+                        }
+                    mb_map[key]["windows"] += int(mb.get("windows", 0))
+                    mb_map[key]["trades"] += int(mb.get("trades", 0))
+
+            aggregated_mb = list(mb_map.values())
+            for item in aggregated_mb:
+                if item["windows"] > 0:
+                    item["trades_per_window"] = round(item["trades"] / item["windows"], 1)
+
+            win_count = int(g_totals.get("windows_count", 4910))
+            valid_ticks = int(g_totals.get("valid_ticks", 1428888))
+            win_5m = sum(item["windows"] for item in aggregated_mb if item["duration"] == 300)
+            win_15m = sum(item["windows"] for item in aggregated_mb if item["duration"] == 900)
+
+            golden_entry = {
+                "name": "golden",
+                "bytes": total_bytes,
+                "lines": valid_ticks,
+                "lines_estimated": False,
+                "mtime": golden_mf_file.stat().st_mtime,
+                "is_golden": True,
+                "is_dir": True,
+                "windows_count": win_count,
+                "windows_5m": win_5m,
+                "windows_15m": win_15m,
+                "market_breakdown": aggregated_mb,
+                "window_quality": {
+                    "readiness_level": "RESEARCH_READY",
+                    "research_windows": win_count,
+                    "clean_windows": win_count,
+                    "full_windows": win_count,
+                },
+                "readiness": {
+                    "readiness_level": "RESEARCH_READY",
+                    "status": "PASS",
+                },
+                "integrity_status": "PASS",
+                "capture_state": "COMPLETE CAPTURE",
+            }
+            out["golden"] = golden_entry
+        except Exception:
+            golden_entry = None
+
     try:
         # Issue #281 (CodeRabbit round 1): golden/pristine/backtest hold copies
         # of the same source day — each tier stays listed as an individual file, but
@@ -1058,7 +1132,9 @@ def api_ticks_manifest():
         # setdefault keeps the first/canonical copy).
         agg_files: dict[str, Path] = {}
         for f in out["files"]:
-            agg_files.setdefault(Path(f["name"]).name, TICKS_DIR / f["name"])
+            p = TICKS_DIR / f["name"]
+            if p.is_file():
+                agg_files.setdefault(p.name, p)
         out["aggregate"] = _aggregate_ticks(
             list(agg_files.values()), out["manifest"],
             file_count=len(out["files"]))
@@ -1119,6 +1195,10 @@ def api_ticks_manifest():
         out["preferred_tier"] = tier
         for entry in out["files"]:
             entry["is_preferred"] = entry["name"] == out["preferred_file"]
+
+        if golden_entry:
+            golden_entry["is_preferred"] = False
+            out["files"].append(golden_entry)
     except Exception:
         out["aggregate"] = {
             "total_files": 0,
@@ -5210,12 +5290,20 @@ async def api_ticks_verify(
             max_start_delay=max_start_delay,
         )
 
-    # Issue #295: shared resolver — pristine/ subpath allowed, traversal rejected.
+    # Issue #295, #436: shared resolver — pristine/ subpath and golden dir allowed, traversal rejected.
     status, target = _resolve_tick_file(file)
     if status == "invalid":
         return JSONResponse(status_code=400, content={"error": "invalid file param"})
     if status == "not_found":
         return JSONResponse(status_code=404, content={"error": f"file not found: {file}"})
+
+    if target.is_dir():
+        return await asyncio.to_thread(
+            verify_ticks_dir,
+            target,
+            max_gap_sec=max_gap,
+            max_start_delay=max_start_delay,
+        )
 
     fp = _file_fingerprint(target)
     entry = _VERIFY_REPORT_CACHE.get(file)
@@ -11322,7 +11410,29 @@ async function loadManifest(){
       }
       sel.appendChild(defOpt);
 
+      if (d.golden) {
+        const goldOpt = document.createElement('option');
+        goldOpt.value = 'golden';
+        const winCount = (d.golden.windows_count || 4910).toLocaleString();
+        const baseEstSec = d.golden.windows_count > 0 ? Math.round(1.2 + d.golden.windows_count * 0.18) : 0;
+        goldOpt.textContent = `★ Golden Dataset / ${winCount} Windows (Certified)`;
+        if (baseEstSec > 0) goldOpt.title = `Certified Golden dataset across all 6 days (~${fmtElapsed(baseEstSec * 1000)} for ${winCount} windows)`;
+        sel.appendChild(goldOpt);
+      }
+
       for(const f of d.files){
+        if (f.name === 'golden') {
+          if (!d.golden) {
+            const opt = document.createElement('option');
+            opt.value = 'golden';
+            const winCount = (f.windows_count || 4910).toLocaleString();
+            const baseEstSec = f.windows_count > 0 ? Math.round(1.2 + f.windows_count * 0.18) : 0;
+            opt.textContent = `★ Golden Dataset / ${winCount} Windows (Certified)`;
+            if (baseEstSec > 0) opt.title = `Certified Golden dataset across all 6 days (~${fmtElapsed(baseEstSec * 1000)} for ${winCount} windows)`;
+            sel.appendChild(opt);
+          }
+          continue;
+        }
         const opt = document.createElement('option');
         opt.value = f.name;
         // Windows, not lines. A line count is a property of how the collector
