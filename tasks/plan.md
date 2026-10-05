@@ -28,21 +28,21 @@ Branch: i449/fixpaper-clear-unfilled-entry-orders-at-window-rol | Issue: #449
 
 ## Tasks
 
-### [ ] Task 1: [Debug] Paper rollover cleanup in `strategy/live_trader.py` (M)
+### [x] Task 1: [Debug] Paper rollover cleanup in `strategy/live_trader.py` (M)
 - **Files:** `strategy/live_trader.py` (`_handle_window_rollover`, `get_open_orders_list` synthesis block)
 - **Depends on:** none (riskiest: synthesis-guard interaction with existing QUOTING tests — first)
 - **Description:** (a) paper branch beside live entry-cancel (5122-5127): for each unfilled leg with a current entry handle, call `_clear_order_handles` under `_engine_lock`, no venue calls; (b) paper-only quote reset: when no advance handle is promoted, set `resting_up/down` to `None`; synthesis skips legs with `None` resting price; (c) promotion pricing: promoted paper legs get the advance quote price (reuse pre-quote computation, no formula copy); synthesis skips the synthetic row when a tracked current entry handle exists (one row per leg); (d) reset `_orders_cache_ts` at end of completed rollover, both modes, not on failed-stop early return. Verify entry gates refuse `None` resting price (add minimal guard only if a gap exists).
 - **Skill:** `debugging-and-error-recovery`
 - **Verification:** new regression tests (Task 2) fail-before/pass-after for the stale-row case.
 
-### [ ] Task 2: [Debug] Rollover regression tests in `tests/test_live_trader.py` (S)
+### [x] Task 2: [Debug] Rollover regression tests in `tests/test_live_trader.py` (S)
 - **Files:** `tests/test_live_trader.py` (near `test_window_rollover_clears_cancelled_orders`)
 - **Depends on:** Task 1
 - **Description:** (a) resting-paper-entry test: QUOTING market, both tokens, two RESTING handles, asymmetric prices (0.52/0.01), `get_state()` to fill cache, rollover → handles cleared, nothing RESTING, no old IDs/prices in list or state, no `cancel*` client calls, paper stop handle cleared; (b) promotion test: seeded advance handles → promoted current, exactly one row per leg at advance price; (c) STOP_EXIT_PENDING test: one filled leg → exit recorded, no handles remain, status QUOTING; (d) live test: patched `cancel_live_order` returns True → exactly one call per unfilled leg ID.
 - **Skill:** `test-driven-development`
 - **Verification:** `python -m pytest tests/test_live_trader.py -q` green.
 
-### [ ] Task 3: [Backend/Logic] Targeted verification sweep (XS)
+### [x] Task 3: [Backend/Logic] Targeted verification sweep (XS)
 - **Files:** none (verification only)
 - **Depends on:** Task 2
 - **Description:** Run `python -m pytest tests/test_live_trader.py -q` and `python -m pytest tests/test_stop_orders.py -q`. Confirm no full-suite local run. Confirm glossary terms in comments ("entry leg", "advance handle", "stop handle").
