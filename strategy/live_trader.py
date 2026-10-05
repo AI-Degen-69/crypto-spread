@@ -4904,7 +4904,7 @@ class LiveTraderEngine:
         # --- DEAD ZONE EXPIRY FOR NAKED LEG (issue #229, superseding #124) ---
         # In the dead zone: cancel any unfilled opposite resting quote, and for an unpaired leg:
         # if naked_leg_at_expiry == "close": exit at the live book bid.
-        if (mstate.filled_up != mstate.filled_down) and mstate.status != "STOP_EXIT_PENDING" and in_dead_zone:
+        if (mstate.filled_up != mstate.filled_down) and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING" and in_dead_zone:
                 # Cancel opposite resting buy order if still active
                 opposite_attr = "order_id_down" if mstate.filled_up else "order_id_up"
                 opp_status_attr = "order_status_down" if mstate.filled_up else "order_status_up"
