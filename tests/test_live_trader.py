@@ -1837,6 +1837,146 @@ def test_window_rollover_clears_cancelled_orders() -> None:
     assert len(m.cancelled_orders) == 0
 
 
+def test_window_rollover_clears_paper_entry_legs() -> None:
+    """Issue #449: paper rollover clears unfilled entry legs — no dead-anchor rows."""
+    import time
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    client_spy = MagicMock()
+    engine.get_clob_client = MagicMock(return_value=client_spy)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "QUOTING"
+    m.market_slug = "btc-updown-5m-win1"
+    m.up_token = "tok_up_1"
+    m.down_token = "tok_dn_1"
+    m.order_id_up = "paper_up_btc-up-or-down-5m"
+    m.order_id_down = "paper_dn_btc-up-or-down-5m"
+    m.order_status_up = "RESTING"
+    m.order_status_down = "RESTING"
+    m.resting_up = 0.52
+    m.resting_down = 0.01
+    m.stop_order_id = "paper_stop_btc-updown-5m-win1"
+    m.stop_order_status = "STAGED"
+    engine.get_state()  # fill the 5s open-orders cache
+
+    engine._handle_window_rollover(m, time.time(), new_cid="0xnewcid")
+
+    assert m.order_id_up is None
+    assert m.order_id_down is None
+    assert m.order_status_up != "RESTING"
+    assert m.order_status_down != "RESTING"
+    assert m.stop_order_id is None
+    listed = engine.get_open_orders_list()
+    state_rows = engine.get_state()["open_orders"]
+    for rows in (listed, state_rows):
+        ids = [r["order_id"] for r in rows]
+        assert "paper_up_btc-up-or-down-5m" not in ids
+        assert "paper_dn_btc-up-or-down-5m" not in ids
+        assert 0.52 not in [r["price"] for r in rows]
+        assert 0.01 not in [r["price"] for r in rows]
+    client_spy.cancel.assert_not_called()
+    client_spy.cancel_orders.assert_not_called()
+    client_spy.cancel_all.assert_not_called()
+
+
+def test_window_rollover_paper_promotion_prices_at_advance_quote() -> None:
+    """Issue #449: promoted paper advance handles price at the advance quote, one row per leg."""
+    import time
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "QUOTING"
+    m.market_slug = "btc-updown-5m-win1"
+    m.up_token = "tok_up_1"
+    m.down_token = "tok_dn_1"
+    m.resting_up = 0.52
+    m.resting_down = 0.01
+    m.next_quoted = True
+    m.next_condition_id = "0xnext"
+    m.next_market_slug = "btc-updown-5m-win2"
+    m.next_order_id_up = "paper_up_btc-updown-5m-win2"
+    m.next_order_id_down = "paper_dn_btc-updown-5m-win2"
+    advance_px = round(0.50 - engine.offset, 3)
+
+    engine._handle_window_rollover(m, time.time(), new_cid="0xnext")
+
+    assert m.order_id_up == "paper_up_btc-updown-5m-win2"
+    assert m.order_id_down == "paper_dn_btc-updown-5m-win2"
+    assert m.resting_up == advance_px
+    assert m.resting_down == advance_px
+    rows = engine.get_open_orders_list()
+    up_rows = [r for r in rows if r["order_id"] == "paper_up_btc-updown-5m-win2"]
+    dn_rows = [r for r in rows if r["order_id"] == "paper_dn_btc-updown-5m-win2"]
+    assert len(up_rows) == 1
+    assert len(dn_rows) == 1
+    assert up_rows[0]["price"] == advance_px
+    assert dn_rows[0]["price"] == advance_px
+
+
+def test_window_rollover_paper_stop_exit_pending_reconciles() -> None:
+    """Issue #449: paper STOP_EXIT_PENDING reconciles at rollover, leaving no handles."""
+    import time
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "STOP_EXIT_PENDING"
+    m.market_slug = "btc-updown-5m-win1"
+    m.up_token = "tok_up_1"
+    m.down_token = "tok_dn_1"
+    m.filled_up = True
+    m.fill_price_up = 0.55
+    m.exit_price_up = 0.43
+    m.order_id_down = "paper_dn_btc-up-or-down-5m"
+    m.order_status_down = "RESTING"
+    m.resting_down = 0.35
+    before = len(engine.trades)
+
+    engine._handle_window_rollover(m, time.time(), new_cid="0xnext")
+
+    assert len(engine.trades) == before + 1
+    assert m.order_id_up is None
+    assert m.order_id_down is None
+    assert m.stop_order_id is None
+    assert m.status == "QUOTING"
+    assert engine.get_open_orders_list() == []
+
+
+def test_window_rollover_live_cancels_each_unfilled_leg() -> None:
+    """Issue #449: live rollover venue-cancel behavior is unchanged (one call per leg)."""
+    import time
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
+    engine.cancel_live_order = MagicMock(return_value=True)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "QUOTING"
+    m.order_id_up = "clob_up_1"
+    m.order_id_down = "clob_dn_1"
+    m.order_status_up = "RESTING"
+    m.order_status_down = "RESTING"
+
+    engine._handle_window_rollover(m, time.time(), new_cid="0xnext")
+
+    called_ids = [c.args[0] for c in engine.cancel_live_order.call_args_list]
+    assert "clob_up_1" in called_ids
+    assert "clob_dn_1" in called_ids
+    assert engine.cancel_live_order.call_count == 2
+
+
 def test_cancel_all_orders_retains_cancelled_orders() -> None:
     """Issue #76: Emergency panic cancel records active orders into cancelled_orders before clearing handles."""
     from unittest.mock import MagicMock
