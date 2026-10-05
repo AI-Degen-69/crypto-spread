@@ -1,40 +1,54 @@
-Branch: i445/featbacktest-ship-overnight-btceth-winners-as-load | Issue: #445
+Branch: i449/fixpaper-clear-unfilled-entry-orders-at-window-rol | Issue: #449
 
-# Implementation Plan — Overnight BTC/ETH Winners as Loadable Backtest Preset
+# Implementation Plan — Clear Unfilled Paper Entry Orders at Window Rollover
 
 ## Size & Stack
-- Tier: **Standard** — 3 files touched (seed JSON, server hook, tests), one architectural decision (static seed + copy-if-missing vs generated record).
-- Task type: **Code** (Backend/Logic). Stack: Python, FastAPI (`server/osc_dash.py`), pytest. No UI change (existing #413 template card).
+- Tier: **Small** — one source module (`strategy/live_trader.py`, rollover + synthesis cluster) plus regression tests; single decision (mirror live cleanup locally, no venue calls).
+- Task type: **Code + Debug**. Stack: Python, pytest (`tests/test_live_trader.py`, `tests/test_stop_orders.py`). No UI, no API, no dependency change.
 
 ## CodeRabbit Intake Note
-- Plan prompt posted on #445; no bot reply arrived before planning. Nothing adopted, nothing rejected, nothing `[UNVERIFIED]` from CodeRabbit — plan built from repo research instead.
+- Adopted: 4-task skeleton merged into 3 atomic tasks; seam pointers (rollover 5107+, synthesis 2366-2408, reset 5242+, cache 3607-pattern); test cases near `test_window_rollover_clears_cancelled_orders`.
+- Rejected: over-split Phase/Task ceremony and invented abstractions — merged into one source task; no new files, no helper extraction unless direct reuse of the pre-quote computation proves impossible.
+- `[UNVERIFIED]` at intake: none left — every cited seam spot-checked against live code (5122-5127 live gate, 5214-5240 promotion, 5237-5240 else-clear, 5242+ reset without resting_up/down reset, 2366-2408 synthesis without handle/anchor checks, 2414-2428 retained guard, 2592-2594 cache, 3607 invalidation pattern, 1118-1151 stop-clear, 1402+ `_clear_order_handles` with paper provenance).
 
-## Resolved Open Questions (needs-answers removed 2026-10-05)
-- **Seeding path:** resolved from code. Load rebuilds params from `request_args` and 409s on hash drift (`server/osc_dash.py:4318-4323`); `series` accepts `"BTC,ETH"` (`backtest/selection.py:22`, tokens case-insensitive); no mkdir/startup copy exists today. Decision: static seed JSON under `backtest/seed_templates/` + copy-if-missing hook at server startup computing `params_hash` fresh via `_prepare_backtest_request`.
-- **type-design-analyzer:** skipped — record schema frozen by `REQUIRED_RECORD_KEYS` (`backtest/templates.py:22-33`); no new invariants to design (not invented, recorded here).
-- **code-explorer:** skipped — execution path (`save → list → load → apply`) already traced via tests + endpoints during research.
+## Resolved Open Questions (from code, not asked)
+- **Cancel-sim vs handle-clear:** resolved from code. `_clear_order_handles` (`live_trader.py:1402`) already records a `CANCELLED` row with `PAPER_SIMULATION` provenance and clears the handle; the rollover reset (`5244`) clears `cancelled_orders` later in the same function. Decision: call `_clear_order_handles` under `_engine_lock` for each unfilled paper entry leg — visible transition, then reset removes it. Matches the existing rollover-clears-history contract (`test_window_rollover_clears_cancelled_orders`).
+- **Retained `end_ts` guard coverage:** resolved from code. Guard at 2416-2418 skips settled windows; new paper rows are recorded then removed by the same reset, so they never reach the list. No guard change needed.
+- **Stop handle:** resolved from code. `_cancel_stop_order` (1118) clears paper STAGED stops locally already; only RESTING live stops need venue cancel. No stop change needed — tests preserve the behavior.
+- **type-design-analyzer / code-explorer:** skipped — no interface change, execution path traced directly in `live_trader.py`.
+
+## Spec (embedded — Small tier)
+- Goal: after paper-mode window rollover, OPEN ORDERS shows no leg priced from the dead window's anchor.
+- Acceptance: (1) unfilled paper entry legs cleared, no stale rows/IDs/prices; (2) live venue cancels fire exactly as before; (3) new regression test for resting paper legs; (4) targeted suites green.
+- Out of scope: live cancel flow, CLOB client, backtest engine, dashboard rendering.
+
+## Improvement Proposal (adopted — edge-case hardening)
+- Evidence (code): "`get_state` caches the order list for 5 seconds. Only PnL reset and demo seeding invalidate the cache." + `_orders_cache_ts = 0.0` pattern at 3607.
+- Proposal: reset `_orders_cache_ts` at the end of completed rollover (both modes, local timestamp only) so `get_state` cannot serve pre-rollover rows for 5s. Adopted into Task 1 (not on the failed-stop early-return path, which changes no order state).
 
 ## Tasks
 
-### [x] Task 1: [Backend/Logic] Seed JSON + startup copy-if-missing hook (M)
-- **Files:** `backtest/seed_templates/overnight-majors-btc-eth.json` (new), `server/osc_dash.py` (hook near `BACKTEST_TEMPLATES_DIR`)
-- **Depends on:** none (riskiest: hash/registry coupling — first)
-- **Description:** Commit the seed record (seven winning knobs, `series: "BTC,ETH"`); on startup copy it into `run/backtest_templates/` only when missing, recomputing `params_hash` via `_prepare_backtest_request` (adopted improvement, see below). Never overwrite existing files.
-- **Verification:** manual startup check + Task 2 tests green.
+### [ ] Task 1: [Debug] Paper rollover cleanup in `strategy/live_trader.py` (M)
+- **Files:** `strategy/live_trader.py` (`_handle_window_rollover`, `get_open_orders_list` synthesis block)
+- **Depends on:** none (riskiest: synthesis-guard interaction with existing QUOTING tests — first)
+- **Description:** (a) paper branch beside live entry-cancel (5122-5127): for each unfilled leg with a current entry handle, call `_clear_order_handles` under `_engine_lock`, no venue calls; (b) paper-only quote reset: when no advance handle is promoted, set `resting_up/down` to `None`; synthesis skips legs with `None` resting price; (c) promotion pricing: promoted paper legs get the advance quote price (reuse pre-quote computation, no formula copy); synthesis skips the synthetic row when a tracked current entry handle exists (one row per leg); (d) reset `_orders_cache_ts` at end of completed rollover, both modes, not on failed-stop early return. Verify entry gates refuse `None` resting price (add minimal guard only if a gap exists).
+- **Skill:** `debugging-and-error-recovery`
+- **Verification:** new regression tests (Task 2) fail-before/pass-after for the stale-row case.
 
-### [x] Task 2: [Backend/Logic] Seed + hook tests (S)
-- **Files:** `tests/test_backtest_templates.py` (append) or new `tests/test_seed_templates.py`
+### [ ] Task 2: [Debug] Rollover regression tests in `tests/test_live_trader.py` (S)
+- **Files:** `tests/test_live_trader.py` (near `test_window_rollover_clears_cancelled_orders`)
 - **Depends on:** Task 1
-- **Description:** Seed validates via `validate_record`; rebuilt hash from `request_args` matches stored hash; hook creates missing file, never overwrites existing; seeded record loads 200 through the API (existing TestClient fixture pattern, `test_backtest_templates.py:230`).
-- **Verification:** `python -m pytest tests/test_backtest_templates.py -q` green.
+- **Description:** (a) resting-paper-entry test: QUOTING market, both tokens, two RESTING handles, asymmetric prices (0.52/0.01), `get_state()` to fill cache, rollover → handles cleared, nothing RESTING, no old IDs/prices in list or state, no `cancel*` client calls, paper stop handle cleared; (b) promotion test: seeded advance handles → promoted current, exactly one row per leg at advance price; (c) STOP_EXIT_PENDING test: one filled leg → exit recorded, no handles remain, status QUOTING; (d) live test: patched `cancel_live_order` returns True → exactly one call per unfilled leg ID.
+- **Skill:** `test-driven-development`
+- **Verification:** `python -m pytest tests/test_live_trader.py -q` green.
 
-### [x] Task 3: [Verification/QA] Checkpoint + acceptance sweep (S)
+### [ ] Task 3: [Backend/Logic] Targeted verification sweep (XS)
 - **Files:** none (verification only)
-- **Depends on:** Task 1, Task 2
-- **Description:** Confirm the four SPEC.md acceptance criteria end to end (load 200, fresh-checkout seeding, no-overwrite, targeted suite green).
-- **Verification:** `python -m pytest tests/test_backtest_templates.py -q`.
+- **Depends on:** Task 2
+- **Description:** Run `python -m pytest tests/test_live_trader.py -q` and `python -m pytest tests/test_stop_orders.py -q`. Confirm no full-suite local run. Confirm glossary terms in comments ("entry leg", "advance handle", "stop handle").
+- **Skill:** `incremental-implementation`
+- **Verification:** both suites green; branch clean except intended files.
 
-**Checkpoint:** after Task 1 — seed file + hook live, suite green (one-line progress note in Mode A).
-
-## Improvement Proposal (adopted)
-- **Hash the seed at copy time, not at author time.** Evidence verbatim: `if stored_hash and current_hash != stored_hash:` → `return JSONResponse(status_code=409, ... "template stale ...")` (`server/osc_dash.py:4318-4323`). A hardcoded hash rots on the next registry change; recomputing via `_prepare_backtest_request` during the startup copy makes drift impossible. Folded into Task 1 (hardening, not scope expansion).
+## Checkpoints
+- After Task 1: paper rollover leaves no handle/price/cache from the dead window (shown by Task 2 tests).
+- After Task 3: plan acceptance criteria provable, ready for `iii-build-plan` handoff review.
