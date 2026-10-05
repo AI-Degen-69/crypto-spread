@@ -35,7 +35,7 @@ Branch: i452/fix-paper-stop-loss-note-claims-drift-breach-when | Issue: #452
 - **Skill:** `debugging-and-error-recovery`
 - **Verification:** Task 3 UP tests fail before / pass after; trigger condition truth table unchanged (same fires, different words).
 
-### Task 2: [Debug] Mirror note selection in the DOWN trigger (`strategy/live_trader.py:4968-4990`) (S)
+### [x] Task 2: [Debug] Mirror note selection in the DOWN trigger (`strategy/live_trader.py:4968-4990`) (S)
 - **Files:** `strategy/live_trader.py` (DOWN stop block only)
 - **Depends on:** Task 1 (note shape locked once, mirrored once)
 - **Description:** same change with `filled_down`/`filled_up`/`max_up_drift`/`paper_stop_hit_down`/`down_bid`, side text "DOWN". Leave demo note 3670 untouched.
