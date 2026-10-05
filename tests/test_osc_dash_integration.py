@@ -10222,9 +10222,9 @@ def test_backtest_apply_template_round_trip_query():
     assert([...selectedBtTokens].sort().join(',') === 'BTC,SOL', [...selectedBtTokens].join(','));
     assert(_els['btLegChase'].value === '1', _els['btLegChase'].value);
     assert(_els['btNakedLegAtExpiry'].value === 'hold', _els['btNakedLegAtExpiry'].value);
-    // Seconds-only legacy values never reach the percent controls: seconds
-    // are not percents, so the controls stay put and a note is returned.
-    const pctBefore = _els['btEntryDelay'].value;
+    // Seconds-only legacy values convert to the closest percent of the
+    // shortest scoped timeframe (default scope: 30s of 300s -> 10%) and the
+    // notice spells out the approximation instead of dropping the delay.
     const dzBefore = _els['btDeadZoneVal'].value;
     const tpl2 = {request_args: {entry_delay_sec: 30, entry_delay_pct: null,
       dead_zone_val: 30, dead_zone_pct: null, dead_zone_unit: 'sec',
@@ -10232,8 +10232,31 @@ def test_backtest_apply_template_round_trip_query():
       scope: {series_tokens: [], duration_values: []}};
     const note2 = applyBacktestTemplate(tpl2);
     assert(typeof note2 === 'string' && note2.includes('entry_delay_sec'), note2);
-    assert(_els['btEntryDelay'].value === pctBefore, _els['btEntryDelay'].value);
+    assert(_els['btEntryDelay'].value === '10', _els['btEntryDelay'].value);
+    assert(note2.includes('10%') && note2.includes('~90s of 15m'), note2);
     assert(_els['btDeadZoneVal'].value === dzBefore, _els['btDeadZoneVal'].value);
+    // Scope narrowing changes the conversion base: 5m-only scope converts
+    // 60s against 300s -> 20% exactly (the overnight-majors preset case).
+    const tpl2b = {request_args: {entry_delay_sec: 60, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: ['BTC', 'ETH'], duration_values: [300]}};
+    const note2b = applyBacktestTemplate(tpl2b);
+    assert(_els['btEntryDelay'].value === '20', _els['btEntryDelay'].value);
+    assert(note2b !== null && note2b.includes('60s loaded as 20%'), note2b);
+    // A seconds value that rounds to 0% (or non-finite input) still cannot
+    // be honestly represented: controls stay put, notice is returned.
+    const pctBefore = _els['btEntryDelay'].value;
+    const tpl2c = {request_args: {entry_delay_sec: 1, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: [900]}};
+    const note2c = applyBacktestTemplate(tpl2c);
+    assert(_els['btEntryDelay'].value === pctBefore, _els['btEntryDelay'].value);
+    assert(typeof note2c === 'string' && note2c.includes('left unchanged'), note2c);
+    const tpl2d = {request_args: {entry_delay_sec: 'abc', entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: []}};
+    const note2d = applyBacktestTemplate(tpl2d);
+    assert(typeof note2d === 'string' && note2d.includes('left unchanged'), note2d);
     // A pct-unit fraction still restores the percent control exactly.
     const tpl3 = {request_args: {entry_delay_pct: 4,
       dead_zone_val: 0.10, dead_zone_pct: null, dead_zone_unit: 'pct',

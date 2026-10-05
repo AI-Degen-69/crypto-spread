@@ -9496,7 +9496,30 @@ function applyBacktestTemplate(t){
   setCents('btQuoteHi', a.quote_hi);
   setCents('btExitReversal', a.exit_reversal);
   if (a.entry_delay_pct !== undefined && a.entry_delay_pct !== null) setVal('btEntryDelay', a.entry_delay_pct);
-  else if (a.entry_delay_sec) note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
+  else if (a.entry_delay_sec) {
+    // #445 N2: the tab exposes one percent for both durations, but the engine
+    // resolves that percent against each window's own length. A seconds-only
+    // template used to be dropped here; now it converts against the shortest
+    // scoped timeframe (exact there — the preset's measured winner — and a
+    // longer wait on longer windows), and the notice spells out both numbers
+    // so the approximation is visible instead of the delay vanishing.
+    const durs = (t && t.scope && Array.isArray(t.scope.duration_values) && t.scope.duration_values.length)
+      ? t.scope.duration_values : [300, 900];
+    const sec = Number(a.entry_delay_sec);
+    const shortest = Math.min.apply(null, durs.filter(d => Number.isFinite(d) && d > 0));
+    // One percent control (step=1) serves both durations: convert against the
+    // shortest scoped window and round to the control's own granularity.
+    // Below half a percent the control cannot represent the delay at all —
+    // refuse rather than write a value that vanishes on the next spin.
+    const pct = Math.round((sec / shortest) * 100);
+    if (Number.isFinite(pct) && pct >= 1) {
+      setVal('btEntryDelay', pct);
+      const perDur = durs.map(d => '~' + Math.round(pct / 100 * d) + 's of ' + (d === 300 ? '5m' : '15m')).join(', ');
+      note = 'Template uses entry_delay_sec: ' + sec + 's loaded as ' + pct + '% (' + perDur + '), closest single percent for the scoped timeframes.';
+    } else {
+      note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
+    }
+  }
   if (a.dead_zone_pct !== undefined && a.dead_zone_pct !== null) setVal('btDeadZoneVal', a.dead_zone_pct);
   else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null && (a.dead_zone_unit || 'pct') === 'pct') setVal('btDeadZoneVal', Number(a.dead_zone_val) * 100);
   else if (a.dead_zone_val !== undefined && a.dead_zone_val !== null) note = note || 'Template uses a seconds dead-zone; the percent control was left unchanged.';
