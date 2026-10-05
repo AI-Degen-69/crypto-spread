@@ -266,7 +266,7 @@
     }
 
     .chart-tooltip {
-      position: absolute;
+      position: fixed;
       background: #1e293b;
       color: #fff;
       padding: 8px 12px;
@@ -808,8 +808,8 @@
     <div id="tab-table" class="tab-content">
       <div class="panel">
         <div class="panel-title">
-          <span>Search & Filter All 187 Configurations</span>
-          <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);" id="tableCountDisplay">Showing 187 runs</span>
+          <span>Search & Filter Representative Runs (24 of 187 Configurations)</span>
+          <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);" id="tableCountDisplay">Showing 24 runs</span>
         </div>
 
         <div class="filter-bar">
@@ -1077,15 +1077,15 @@ max_pair_cost = 0.97           # Minimum 3c edge</pre>
       const tt = document.getElementById('chartTooltip');
       tt.innerHTML = text;
       tt.style.display = 'block';
-      tt.style.left = (e.pageX - 80) + 'px';
-      tt.style.top = (e.pageY - 45) + 'px';
+      tt.style.left = (e.clientX - 80) + 'px';
+      tt.style.top = (e.clientY - 45) + 'px';
     }
 
     function hideTooltip() {
       document.getElementById('chartTooltip').style.display = 'none';
     }
 
-    // Data for Table (Comprehensive list of top runs, baselines, and representative configs)
+    // Data for Table (Representative subset: top runs, baselines, and sample configs — 24 of 187 sweep runs)
     const tableData = [
       { id: "RUN_0001 (Baseline)", asset: "ALL", off: 0.02, q: 50, sz: 120, chase: "False", rev: 0.02, pnl: -165.66, wr: 12.0, dd: 165.66, pf: 0.15 },
       { id: "RUN_0001 (Baseline)", asset: "BTC", off: 0.02, q: 50, sz: 120, chase: "False", rev: 0.02, pnl: 4.80, wr: 8.33, dd: 0.0, pf: 999.0 },
@@ -1149,7 +1149,8 @@ max_pair_cost = 0.97           # Minimum 3c edge</pre>
       const chase = document.getElementById('chaseSelect').value;
 
       currentData = tableData.filter(r => {
-        const matchesQuery = r.id.toLowerCase().includes(q) || r.asset.toLowerCase().includes(q) || String(r.off).includes(q);
+        const chaseText = r.chase === "True" ? "chase on true" : "chase off false";
+        const matchesQuery = r.id.toLowerCase().includes(q) || r.asset.toLowerCase().includes(q) || String(r.off).includes(q) || chaseText.includes(q) || String(r.q).includes(q) || String(r.sz).includes(q) || String(r.rev).includes(q);
         const matchesAsset = asset === 'ALL' || r.asset === asset;
         const matchesChase = chase === 'ANY' || (chase === 'TRUE' && r.chase === 'True') || (chase === 'FALSE' && r.chase === 'False');
         return matchesQuery && matchesAsset && matchesChase;
