@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 from backtest.engine import (
     BacktestParams,
     WindowResult,
@@ -222,11 +227,11 @@ def load_golden_windows(
         if max_windows and len(windows_dict) > max_windows:
             break
 
-    windows: list[tuple[str, list[dict]]] = [
-        (cid, sorted(snaps, key=lambda x: x.get("ts", 0.0)))
-        for cid, snaps in windows_dict.items()
-        if snaps
-    ]
+    windows: list[tuple[str, list[dict]]] = []
+    for cid in list(windows_dict.keys()):
+        snaps = windows_dict.pop(cid)
+        if snaps:
+            windows.append((cid, snaps))
     windows.sort(key=lambda kv: kv[1][0].get("ts", 0.0))
     if max_windows:
         windows = windows[:max_windows]
@@ -489,17 +494,17 @@ def run_overnight_sweep(
     series_whitelist: set[str] | None = None,
 ) -> int:
     """Execute full overnight optimization simulation."""
-    print("=" * 70)
-    print("SPREAD-2 OVERNIGHT PARAMETER OPTIMIZATION SWEEP")
-    print(f"Source: {source_dir}")
-    print(f"Iterations: {n_iterations} | Seed: {seed}")
-    print(f"CSV Output: {out_csv}")
-    print(f"Summary Report: {summary_md}")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print("SPREAD-2 OVERNIGHT PARAMETER OPTIMIZATION SWEEP", flush=True)
+    print(f"Source: {source_dir}", flush=True)
+    print(f"Iterations: {n_iterations} | Seed: {seed}", flush=True)
+    print(f"CSV Output: {out_csv}", flush=True)
+    print(f"Summary Report: {summary_md}", flush=True)
+    print("=" * 70, flush=True)
 
     # 1. Load Windows
     t0 = time.perf_counter()
-    print(f"\n[1/4] Loading windows from {source_dir}...")
+    print(f"\n[1/4] Loading windows from {source_dir}...", flush=True)
     try:
         windows = load_golden_windows(
             source_dir,
@@ -507,22 +512,22 @@ def run_overnight_sweep(
             max_windows=max_windows,
         )
     except Exception as e:
-        print(f"Error loading tick windows: {e}", file=sys.stderr)
+        print(f"Error loading tick windows: {e}", file=sys.stderr, flush=True)
         return 1
 
     t_load = time.perf_counter() - t0
-    print(f"Loaded {len(windows):,} windows in {t_load:.2f}s.")
+    print(f"Loaded {len(windows):,} windows in {t_load:.2f}s.", flush=True)
 
     # 2. Generate Candidate Configurations
-    print("\n[2/4] Generating parameter candidates (Baseline + Search Space)...")
+    print("\n[2/4] Generating parameter candidates (Baseline + Search Space)...", flush=True)
     candidates = generate_candidates(n_iterations=n_iterations, seed=seed)
-    print(f"Generated {len(candidates)} configurations to evaluate.")
+    print(f"Generated {len(candidates)} configurations to evaluate.", flush=True)
 
     # 3. Initialize CSV File
     init_csv_file(out_csv)
 
     # 4. Simulation Execution Loop
-    print("\n[3/4] Running simulation evaluations...")
+    print("\n[3/4] Running simulation evaluations...", flush=True)
     t_sim_start = time.perf_counter()
     completed = 0
 
@@ -543,18 +548,19 @@ def run_overnight_sweep(
             pf = overall_row["profit_factor"]
             print(
                 f"[{idx:03d}/{len(candidates):03d}] {label[:45]:<45} | "
-                f"PnL: ${pnl:+8.2f} | WR: {wr:5.1f}% | DD: ${dd:7.2f} | PF: {pf:4.2f}"
+                f"PnL: ${pnl:+8.2f} | WR: {wr:5.1f}% | DD: ${dd:7.2f} | PF: {pf:4.2f}",
+                flush=True
             )
 
             # Periodically update summary report so it reflects live progress
-            if completed % 25 == 0:
+            if completed == 1 or completed % 25 == 0:
                 try:
                     generate_summary_report(out_csv, summary_md)
                 except Exception:
                     pass
 
         except Exception as e:
-            print(f"[{idx:03d}/{len(candidates):03d}] ERROR in configuration {label}: {e}", file=sys.stderr)
+            print(f"[{idx:03d}/{len(candidates):03d}] ERROR in configuration {label}: {e}", file=sys.stderr, flush=True)
             continue
 
     t_sim = time.perf_counter() - t_sim_start
