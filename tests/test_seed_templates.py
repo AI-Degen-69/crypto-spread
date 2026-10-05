@@ -51,6 +51,8 @@ def test_materialize_returns_none_on_garbage():
     assert mod._materialize_seed_template({"name": "x", "request_args": {"series": "bcc-nope"}}) is None
     bare = mod._materialize_seed_template({"name": "x"})
     assert bare["params_dict"]["offset"] == 0.02
+    assert mod._materialize_seed_template({"name": "x", "summary": [1, 2]}) is None
+    assert mod._materialize_seed_template({"name": "x", "summary": "pnl"}) is None
 
 
 def test_ensure_materializes_valid_record(tmp_path):

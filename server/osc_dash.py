@@ -4250,7 +4250,10 @@ def _materialize_seed_template(seed: dict) -> dict | None:
     name = seed.get("name", "")
     if not name:
         return None
-    summary = dict(seed.get("summary", {}) or {})
+    raw_summary = seed.get("summary") or {}
+    if not isinstance(raw_summary, dict):
+        return None
+    summary = dict(raw_summary)
     summary["params_hash"] = params.params_hash()
     query = "&".join(f"{k}={args[k]}" for k in (
         "offset", "queue", "pair_cost", "size", "exit_reversal",

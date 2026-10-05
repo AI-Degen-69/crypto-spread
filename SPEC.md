@@ -3,10 +3,16 @@
 ## 1. Objective & Scope
 Ship one named backtest template (`overnight-majors-btc-eth`) baking in the PR #444 overnight-sweep BTC/ETH winning settings, loadable in one click on the Backtest tab via the existing Issue #413 template system. The operator stops retyping seven knobs.
 
-Winning set (from `overnight_summary.md` + findings-report production box):
-- `offset` 0.035, `queue_gate` 25, `quote_shares` 200, `enable_leg_chase` true,
-  `exit_reversal` 0.075, exits 0.05 (`exit_default_5m/15m`), `max_pair_cost` 0.98,
+Winning set (measured RUN_0153 from `run/backtest_results_overnight.csv`, chosen
+in Station III over the unmeasured findings-report compromise of 0.035/25/200:
+no sweep run ever used those values, so no honest summary exists for them):
+- `offset` 0.10, `queue_gate` 5, `quote_shares` 75, `entry_delay_sec` 60,
+  `enable_leg_chase` false, `exit_reversal` 0.02, exits 0.30/0.045
+  (`exit_default_5m/15m`, `exit_btc_5m` 0.30), `max_pair_cost` 0.99,
   scoped to `series` BTC,ETH.
+- Measured scope outcome: +$15.00 over 2011 windows, 1 pair, zero drawdown
+  (BTC +$15.00/1 trade; ETH 0 trades). Small size (75) avoids the
+  size-scaling distortion of the +$950/+$700 runs.
 
 ## 2. Interface Contract (locked)
 - Seed file: `backtest/seed_templates/overnight-majors-btc-eth.json` — a full template
