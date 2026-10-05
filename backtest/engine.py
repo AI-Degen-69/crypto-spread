@@ -1140,7 +1140,12 @@ def _simulate_window(window_snaps: list[dict], params: BacktestParams,
                 and not filled_up and not filled_down
                 and not in_dead_zone
                 and quote_lo <= anchor_mid <= quote_hi):
-            anchored_mid = anchor_mid
+            leg_up = round(min(0.99, max(0.01, anchor_mid - params.offset)), 3)
+            leg_down = round(min(0.99, max(0.01, (1.0 - anchor_mid) - params.offset)), 3)
+            # Issue #456: quote_range guards order prices, not just the mid.
+            # A leg outside the range latches nothing; a later tick retries.
+            if quote_lo <= leg_up <= quote_hi and quote_lo <= leg_down <= quote_hi:
+                anchored_mid = anchor_mid
         # `entry_cancelled` is live's cancelled-orders state: the handles are
         # gone, so a later re-entry places at the latched price of its round.
         if (not in_dead_zone and not filled_up and not filled_down and delay_expired

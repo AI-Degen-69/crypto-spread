@@ -33,7 +33,7 @@ See `SPEC.md` (Standard tier): pair rejection on out-of-range legs, inclusive bo
 - **Skill:** `test-driven-development`
 - **Verification:** Task 3 live tests fail before / pass after; mid-gate-only behavior unchanged.
 
-### Task 2: [Backend/Logic] Mirror leg gate in the backtest latch (`backtest/engine.py:1139-1151`) (S)
+### [x] Task 2: [Backend/Logic] Mirror leg gate in the backtest latch (`backtest/engine.py:1139-1151`) (S)
 - **Files:** `backtest/engine.py` (anchor latch block only)
 - **Depends on:** Task 1 (condition shape locked once, mirrored once)
 - **Description:** same conjunct on the computed resting_up/down with inclusive bounds. No other backtest logic touched.
