@@ -42,7 +42,7 @@ Branch: i452/fix-paper-stop-loss-note-claims-drift-breach-when | Issue: #452
 - **Skill:** `debugging-and-error-recovery`
 - **Verification:** Task 3 DOWN test fail-before/pass-after; symmetry with Task 1 by inspection.
 
-### Task 3: [Debug] Note-selection regression tests in `tests/test_live_trader.py` (S)
+### [x] Task 3: [Debug] Note-selection regression tests in `tests/test_live_trader.py` (S)
 - **Files:** `tests/test_live_trader.py` (near `test_naked_leg_stops_at_exit_thresh`, line 2957)
 - **Depends on:** Task 2
 - **Description:** (a) staged-stop-only UP (thresh 0.05, fill `(0.47,0.479,0.51,0.52)`, exit `(0.43,0.44,0.53,0.54)` → drift 0.030 < 0.05, bid touches stop 0.43) and DOWN mirror — assert no "Adverse drift", side + threshold present; (b) drift-only (thresh 0.03, exit `(0.46,0.47,0.59,0.60)` → drift 0.045, bid above stop 0.45) assert exact "Adverse drift 0.045 >= 0.03"; (c) simultaneous (thresh 0.05, exit `(0.43,0.44,0.59,0.60)`) assert drift format (precedence lock); (d) harden line 2984 with one companion assertion pinning that fixture's actual note shape. Setup mirrors neighbors (`_naked_market`, `_open_50_50_quotes`, paper mode, `load_persisted=False`). Weaken nothing.
