@@ -47,7 +47,7 @@ See `SPEC.md` (Standard tier): pair rejection on out-of-range legs, inclusive bo
 - **Skill:** `test-driven-development`
 - **Verification:** new tests fail pre-fix, pass post-fix.
 
-### Task 4: [Backend/Logic] Targeted verification sweep (XS)
+### [x] Task 4: [Backend/Logic] Targeted verification sweep (XS)
 - **Files:** none (verification only)
 - **Depends on:** Task 3
 - **Description:** run `tests/test_live_trader.py`, `tests/test_quote_range_parity.py`, `tests/test_backtest_engine.py` (plus `test_engine_parity.py` if touched). No full-suite local run; no CI gate exists. Confirm glossary terms in comments ("trading engine", "paper mode").
