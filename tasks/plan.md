@@ -49,7 +49,7 @@ Branch: i452/fix-paper-stop-loss-note-claims-drift-breach-when | Issue: #452
 - **Skill:** `test-driven-development`
 - **Verification:** new tests fail on pre-fix notes, pass after Tasks 1–2.
 
-### Task 4: [Backend/Logic] Targeted verification sweep (XS)
+### [x] Task 4: [Backend/Logic] Targeted verification sweep (XS)
 - **Files:** none (verification only)
 - **Depends on:** Task 3
 - **Description:** run `python -m pytest tests/test_live_trader.py -q` and `tests/test_stop_orders.py -q`. No full-suite local run; no CI gate exists. Confirm glossary terms in comments ("trading engine", "paper mode").
