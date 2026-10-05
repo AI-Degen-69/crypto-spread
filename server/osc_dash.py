@@ -4283,6 +4283,7 @@ def ensure_seed_templates(directory: Path | str = BACKTEST_TEMPLATES_DIR) -> lis
     from backtest.templates import save_template, template_path
 
     seeded: list[str] = []
+    skipped: list[str] = []
     try:
         seed_files = sorted(SEED_TEMPLATES_DIR.glob("*.json"))
     except Exception:
@@ -4295,21 +4296,27 @@ def ensure_seed_templates(directory: Path | str = BACKTEST_TEMPLATES_DIR) -> lis
         try:
             seed = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
+            skipped.append(path.name)
             continue
         name = seed.get("name", path.stem) if isinstance(seed, dict) else path.stem
         try:
             if template_path(directory, name).exists():
                 continue
         except ValueError:
+            skipped.append(path.name)
             continue
         record = _materialize_seed_template(seed)
         if record is None:
+            skipped.append(path.name)
             continue
         try:
             save_template(directory, record["name"], record)
         except (OSError, ValueError):
+            skipped.append(path.name)
             continue
         seeded.append(record["name"])
+    if skipped:
+        print(f"[osc_dash] skipping seed templates: {', '.join(skipped)}")
     return seeded
 
 

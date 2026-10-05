@@ -97,6 +97,17 @@ def test_ensure_never_overwrites(tmp_path):
     assert json.loads(tampered.read_text(encoding="utf-8")) == {"operator": True}
 
 
+def test_ensure_reports_skipped_seeds(tmp_path, monkeypatch, capsys):
+    """Corrupt or invalid seeds are named on stdout, never swallowed."""
+    import server.osc_dash as mod
+
+    (tmp_path / "seeds").mkdir()
+    (tmp_path / "seeds" / "broken.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(mod, "SEED_TEMPLATES_DIR", tmp_path / "seeds")
+    assert mod.ensure_seed_templates(tmp_path / "templates") == []
+    assert "broken.json" in capsys.readouterr().out
+
+
 def test_seeded_preset_loads_200(tmp_path, monkeypatch):
     """Seeded preset passes the load endpoint's registry validation."""
     import server.osc_dash as mod
