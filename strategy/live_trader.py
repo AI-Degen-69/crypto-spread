@@ -4944,13 +4944,16 @@ class LiveTraderEngine:
             and mstate.up_bid is not None and mstate.stop_price is not None
             and mstate.up_bid <= mstate.stop_price
         )
-        if ((mstate.filled_up and not mstate.filled_down and mstate.max_down_drift >= self.exit_thresh
+        drift_breach_up = (mstate.filled_up and not mstate.filled_down
+                           and mstate.max_down_drift >= self.exit_thresh)
+        if ((drift_breach_up
                 or paper_stop_hit_up)
                 and not mstate.reversal_seen_down and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING"):
             sell_bid = mstate.up_bid
             if sell_bid is not None:
                 with self._engine_lock:
                     mstate.status = "STOP_EXIT_PENDING"
+                staged_stop_price_up = mstate.stop_price
                 if mstate.stop_order_id:
                     # Buffered stop: protection was staged in memory at fill time
                     # (zero venue exposure). The monitored exit submits the SELL
@@ -4959,7 +4962,11 @@ class LiveTraderEngine:
                     mstate.stop_order_id = None
                     mstate.stop_price = None
                     mstate.stop_side = None
-                trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
+                if drift_breach_up:
+                    trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
+                else:
+                    trigger_note = (f"Staged stop hit: UP bid {sell_bid:.2f} <= stop {staged_stop_price_up:.2f} "
+                                    f"(drift {mstate.max_down_drift:.3f} < {self.exit_thresh:.2f})")
                 self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
                 return
 
