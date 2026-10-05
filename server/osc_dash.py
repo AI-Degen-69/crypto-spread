@@ -50,6 +50,9 @@ ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "run"
 TICKS_DIR = RUN / "ticks"
 BACKTEST_TEMPLATES_DIR = RUN / "backtest_templates"
+# Issue #445: version-controlled preset seeds materialized into the templates
+# dir on startup (run/ is gitignored, so seeds cannot live there directly).
+SEED_TEMPLATES_DIR = ROOT / "backtest" / "seed_templates"
 RUN.mkdir(parents=True, exist_ok=True)
 TICKS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -4198,6 +4201,119 @@ async def api_backtest_cancel(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Issue #445: seed preset templates (e.g. overnight-sweep winners) into the
+# templates dir on fresh checkouts. Copy-if-missing only — never overwrite an
+# operator-saved template. params_hash is computed at copy time through the
+# same builder the load endpoint validates against, so registry drift can
+# never ship a stale (HTTP 409) preset.
+# ---------------------------------------------------------------------------
+
+
+def _materialize_seed_template(seed: dict) -> dict | None:
+    """Build a complete template record from a seed-file dict.
+
+    Returns None when the seed's request_args no longer validate (fail loud
+    at startup logs, never a half-written record).
+    """
+    from backtest.selection import parse_durations, parse_series_tokens
+
+    if not isinstance(seed, dict):
+        return None
+    args = seed.get("request_args", {})
+    if not isinstance(args, dict):
+        return None
+    try:
+        series_tokens = parse_series_tokens(args.get("series", ""))
+        duration_values = parse_durations(args.get("durations", ""))
+        params, echo = _build_backtest_params(
+            offset=args.get("offset", 0.02),
+            queue=args.get("queue", 0.0),
+            pair_cost=args.get("pair_cost", 0.99),
+            exit_default_5m=args.get("exit_default_5m", 0.05),
+            exit_default_15m=args.get("exit_default_15m", 0.05),
+            exit_btc_5m=args.get("exit_btc_5m", 0.05),
+            exit_sol_5m=args.get("exit_sol_5m", 0.05),
+            exit_reversal=args.get("exit_reversal", 0.02),
+            size=args.get("size", 5),
+            quote_lo=args.get("quote_lo", 0.10),
+            quote_hi=args.get("quote_hi", 0.90),
+            entry_delay_sec=args.get("entry_delay_sec", 0.0),
+            entry_delay_pct=args.get("entry_delay_pct"),
+            dead_zone_val=args.get("dead_zone_val", 0.10),
+            dead_zone_pct=args.get("dead_zone_pct"),
+            dead_zone_unit=args.get("dead_zone_unit", "pct"),
+            naked_leg_at_expiry=args.get("naked_leg_at_expiry", "close"),
+            enable_leg_chase=args.get("enable_leg_chase", False),
+        )
+    except Exception:
+        return None
+    name = seed.get("name", "")
+    if not name:
+        return None
+    summary = dict(seed.get("summary", {}) or {})
+    summary["params_hash"] = params.params_hash()
+    query = "&".join(f"{k}={args[k]}" for k in (
+        "offset", "queue", "pair_cost", "size", "exit_reversal",
+    ) if k in args)
+    return {
+        "name": name,
+        "saved_at": time.time(),
+        "run_id": f"seed-{name}",
+        "query": query,
+        "request_args": args,
+        "echo": echo,
+        "params_dict": asdict(params) if is_dataclass(params) else dict(params),
+        "params_hash": params.params_hash(),
+        "dataset": {"file": args.get("file", ""), "resolved": ""},
+        "scope": {
+            "series": args.get("series", ""),
+            "durations": args.get("durations", ""),
+            "series_tokens": list(series_tokens),
+            "duration_values": list(duration_values),
+        },
+        "summary": summary,
+    }
+
+
+def ensure_seed_templates(directory: Path | str = BACKTEST_TEMPLATES_DIR) -> list[str]:
+    """Copy missing seed presets into the templates directory.
+
+    Returns the names that were seeded. Existing files are never touched.
+    """
+    from backtest.templates import save_template, template_path
+
+    seeded: list[str] = []
+    try:
+        seed_files = sorted(SEED_TEMPLATES_DIR.glob("*.json"))
+    except Exception:
+        return seeded
+    try:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return seeded
+    for path in seed_files:
+        try:
+            seed = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        name = seed.get("name", path.stem) if isinstance(seed, dict) else path.stem
+        try:
+            if template_path(directory, name).exists():
+                continue
+        except ValueError:
+            continue
+        record = _materialize_seed_template(seed)
+        if record is None:
+            continue
+        try:
+            save_template(directory, record["name"], record)
+        except (OSError, ValueError):
+            continue
+        seeded.append(record["name"])
+    return seeded
+
+
+# ---------------------------------------------------------------------------
 # Issue #413: Backtest template CRUD endpoints
 # ---------------------------------------------------------------------------
 
@@ -5264,6 +5380,12 @@ def _prewarm_verify_cache() -> None:
 def _startup_prewarm() -> None:
     """Load verify sidecars into memory at startup for instant first reports."""
     _prewarm_verify_cache()
+    try:
+        seeded = ensure_seed_templates()
+    except Exception:
+        return
+    if seeded:
+        print(f"[osc_dash] seeded backtest templates: {', '.join(seeded)}")
 
 
 @app.on_event("shutdown")

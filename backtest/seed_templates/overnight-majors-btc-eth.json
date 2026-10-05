@@ -1,0 +1,42 @@
+{
+  "name": "overnight-majors-btc-eth",
+  "request_args": {
+    "offset": 0.1,
+    "queue": 5.0,
+    "pair_cost": 0.99,
+    "exit_default_5m": 0.3,
+    "exit_default_15m": 0.045,
+    "exit_btc_5m": 0.3,
+    "exit_sol_5m": 0.045,
+    "exit_reversal": 0.02,
+    "size": 75,
+    "max_start_delay": 0.0,
+    "filter_partial": false,
+    "quote_lo": 0.1,
+    "quote_hi": 0.9,
+    "entry_delay_sec": 60.0,
+    "entry_delay_pct": null,
+    "dead_zone_val": 0.1,
+    "dead_zone_pct": null,
+    "dead_zone_unit": "pct",
+    "naked_leg_at_expiry": "close",
+    "enable_leg_chase": false,
+    "limit_windows": 0,
+    "series": "BTC,ETH",
+    "durations": "",
+    "file": ""
+  },
+  "summary": {
+    "params_hash": null,
+    "n_windows": 2011,
+    "total_pnl_cents": 1500.0,
+    "pairs": 1,
+    "win_rate": 0.0005,
+    "selection": "BTC+ETH 5m+15m | overnight sweep #444 RUN_0153 (Golden Dataset)"
+  },
+  "provenance": {
+    "sweep_run_id": "RUN_0153_1791193279",
+    "sweep_label": "run_152_off=0.100_q=5_sz=75_sec=60_nochase_rev=0.020",
+    "note": "Single measured sweep run, exact knobs above (exit_sol_5m out of scope, kept at sweep value). BTC: +$15.00 / 1 trade / zero DD over 1009 windows. ETH: 0 trades over 1002 windows. win_rate = 1 winning pair / 2011 windows. params_hash is filled at copy time so registry drift can never ship a stale preset."
+  }
+}
