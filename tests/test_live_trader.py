@@ -3015,8 +3015,7 @@ def test_stop_note_names_staged_stop_when_drift_below_threshold_up():
     assert m.exit_taken is True
     assert m.status == "STOP_EXIT"
     note = engine.trades[-1].notes
-    assert "Adverse drift" not in note
-    assert "Staged stop" in note and "UP" in note and "0.05" in note
+    assert note == "Staged stop hit: UP bid 0.43 <= stop 0.43 (drift 0.030 < 0.05)"
 
 
 def test_stop_note_names_staged_stop_when_drift_below_threshold_down():
@@ -3049,8 +3048,7 @@ def test_stop_note_names_staged_stop_when_drift_below_threshold_down():
     assert m.status == "STOP_EXIT"
     assert engine.trades[-1].action == "STOP_EXIT_DOWN"
     note = engine.trades[-1].notes
-    assert "Adverse drift" not in note
-    assert "Staged stop" in note and "DOWN" in note and "0.05" in note
+    assert note == "Staged stop hit: DOWN bid 0.43 <= stop 0.43 (drift 0.030 < 0.05)"
 
 
 def test_stop_note_keeps_drift_format_on_genuine_breach():

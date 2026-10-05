@@ -4965,6 +4965,8 @@ class LiveTraderEngine:
                 if drift_breach_up:
                     trigger_note = f"Adverse drift {mstate.max_down_drift:.3f} >= {self.exit_thresh:.2f}"
                 else:
+                    # paper_stop_hit_up requires stop_price; the capture above is never None here.
+                    assert staged_stop_price_up is not None
                     trigger_note = (f"Staged stop hit: UP bid {sell_bid:.2f} <= stop {staged_stop_price_up:.2f} "
                                     f"(drift {mstate.max_down_drift:.3f} < {self.exit_thresh:.2f})")
                 self._execute_stop_exit(slug, mstate, "UP", sell_bid, trigger_note, now)
@@ -4998,6 +5000,8 @@ class LiveTraderEngine:
                 if drift_breach_down:
                     trigger_note = f"Adverse drift {mstate.max_up_drift:.3f} >= {self.exit_thresh:.2f}"
                 else:
+                    # paper_stop_hit_down requires stop_price; the capture above is never None here.
+                    assert staged_stop_price_down is not None
                     trigger_note = (f"Staged stop hit: DOWN bid {sell_bid:.2f} <= stop {staged_stop_price_down:.2f} "
                                     f"(drift {mstate.max_up_drift:.3f} < {self.exit_thresh:.2f})")
                 self._execute_stop_exit(slug, mstate, "DOWN", sell_bid, trigger_note, now)
