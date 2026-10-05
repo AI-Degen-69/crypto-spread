@@ -3042,6 +3042,117 @@ def test_naked_leg_dead_zone_force_exits_when_close():
     assert "Dead-zone expiry exit" in engine.trades[-1].notes
 
 
+def test_dead_zone_expiry_exit_fires_once_across_repeated_ticks():
+    """Issue #451: repeated dead-zone ticks book exactly one expiry exit, not one per tick."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    # paper mode is the engine default; the dead-zone expiry path is shared by both execution modes.
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+
+    # First dead-zone tick (29s remaining): the legitimate expiry exit fires.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 261.0)
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert m.exit_side == "UP"
+    assert len(engine.trades) == 1
+    first = engine.trades[0]
+    assert first.action == "STOP_EXIT_UP"
+    assert first.exit_price == 0.47
+    assert first.shares == 5
+    assert first.pnl_usd == pytest.approx(-0.05)
+    assert "Dead-zone expiry exit" in first.notes
+    pnl_after_first = m.realized_pnl_usd
+    stops_after_first = m.stops_count
+    trades_after_first = m.trades_count
+
+    # Two more ticks in the same dead zone, bids changed but above the stop.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.475, "best_ask": 0.485},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 265.0)
+    assert m.unrealized_pnl_usd == 0.0
+    assert m.total_pnl_usd == pytest.approx(m.realized_pnl_usd)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.48, "best_ask": 0.49},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 270.0)
+    assert len(engine.trades) == 1
+    assert engine.trades[0].exit_price == 0.47
+    assert engine.trades[0].shares == 5
+    assert engine.trades[0].pnl_usd == pytest.approx(-0.05)
+    assert m.realized_pnl_usd == pnl_after_first
+    assert m.unrealized_pnl_usd == 0.0
+    assert m.total_pnl_usd == pytest.approx(m.realized_pnl_usd)
+    assert m.stops_count == stops_after_first
+    assert m.trades_count == trades_after_first
+    assert m.status == "STOP_EXIT"
+
+    # Reset boundary: a fresh round re-arms the exit (the guard must not over-suppress).
+    engine._reset_round_to_clean(m)
+    assert m.exit_taken is False
+    assert m.filled_up is False and m.filled_down is False
+    assert m.stops_count == stops_after_first  # cumulative counters preserved
+
+
+def test_ordinary_stop_before_dead_zone_blocks_later_expiry_exit():
+    """Issue #451: an ordinary stop that finalizes first leaves no second expiry trade."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
+    engine.exit_thresh = 0.03
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+
+    # Ordinary stop before the dead zone: drift 0.04 reaches exit_thresh 0.03.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.45, "best_ask": 0.47},
+        "down_book": {"best_bid": 0.53, "best_ask": 0.55},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert len(engine.trades) == 1
+    pnl_after_stop = m.realized_pnl_usd
+
+    # Dead-zone ticks must add nothing: same stale fills, exit already taken.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 261.0)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.475, "best_ask": 0.485},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now + 265.0)
+    assert len(engine.trades) == 1
+    assert m.realized_pnl_usd == pnl_after_stop
+
+
 def test_naked_leg_dead_zone_holds_when_hold_configured():
     """An unpaired leg in the dead zone is held when naked_leg_at_expiry='hold'."""
     engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="hold", dead_zone_val=0.10, dead_zone_unit="pct")

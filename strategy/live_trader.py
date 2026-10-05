@@ -4904,7 +4904,7 @@ class LiveTraderEngine:
         # --- DEAD ZONE EXPIRY FOR NAKED LEG (issue #229, superseding #124) ---
         # In the dead zone: cancel any unfilled opposite resting quote, and for an unpaired leg:
         # if naked_leg_at_expiry == "close": exit at the live book bid.
-        if (mstate.filled_up != mstate.filled_down) and mstate.status != "STOP_EXIT_PENDING" and in_dead_zone:
+        if (mstate.filled_up != mstate.filled_down) and not mstate.exit_taken and mstate.status != "STOP_EXIT_PENDING" and in_dead_zone:
                 # Cancel opposite resting buy order if still active
                 opposite_attr = "order_id_down" if mstate.filled_up else "order_id_up"
                 opp_status_attr = "order_status_down" if mstate.filled_up else "order_status_up"
@@ -4990,7 +4990,11 @@ class LiveTraderEngine:
                 return
 
         # --- UNREALIZED PnL CALCULATION ---
-        if not (mstate.filled_up or mstate.filled_down):
+        # A finalized exit leaves fill flags set (round ends at rollover), so gate
+        # on exit_taken first: a closed leg must not re-enter unrealized PnL.
+        if mstate.exit_taken:
+            mstate.unrealized_pnl_usd = 0.0
+        elif not (mstate.filled_up or mstate.filled_down):
             mstate.unrealized_pnl_usd = 0.0
         else:
             unrealized = 0.0
