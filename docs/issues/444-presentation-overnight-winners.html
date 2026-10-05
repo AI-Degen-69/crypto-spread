@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>בדקנו 187 דרכים לסחור — מצאנו את המנצחות</title>
+<style>
+:root { --ink:#eaf1f6; --muted:#9aabb8; --bg:#0b1117; --panel:#121c25; --panel-2:#172530;
+--line:#29404d; --accent:#f4b860; --accent-ink:#3a2404; --green:#34d399; --red:#f17c78; --shadow:0 20px 55px rgba(0,0,0,.28); }
+* { box-sizing:border-box } body { margin:0; color:var(--ink); background:var(--bg); font:16px/1.65 "Segoe UI",Tahoma,sans-serif }
+main { max-width:1100px; margin:auto; padding:40px 20px 70px }
+h1 { font-size:2rem; letter-spacing:-.01em; margin:0 0 .4rem }
+.lede { color:var(--muted); font-size:1.05rem; max-width:60ch }
+.badge { display:inline-block; font-size:.75rem; font-weight:700; background:var(--accent); color:var(--accent-ink); border-radius:999px; padding:.25rem .9rem; margin-bottom:1rem }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px; margin-top:24px; box-shadow:var(--shadow) }
+.figure { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--panel-2) }
+.figure-label { font-size:.7rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); padding:.8rem 1rem 0 }
+.figure-controls { display:flex; gap:.5rem; align-items:center; padding:.6rem 1rem; border-top:1px solid var(--line); flex-wrap:wrap }
+.ctrl-btn { font-size:.85rem; padding:.5rem 1.1rem; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink); cursor:pointer }
+.ctrl-btn.active { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:700 }
+.compare { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:1rem }
+@media(max-width:700px){ .compare{ grid-template-columns:1fr } }
+.side { border-radius:12px; padding:20px; border:1px solid var(--line); background:var(--panel) }
+.side.new { border-color:var(--accent) }
+.side h3 { margin:0 0 .6rem; font-size:.95rem; color:var(--muted) }
+.bignum { font-size:2.4rem; font-weight:800; letter-spacing:-.02em }
+.up { color:var(--green) } .down { color:var(--red) } .flat { color:var(--muted) }
+.knobs { margin:.8rem 0 0; padding:0; list-style:none; font-size:.9rem; color:var(--muted) }
+.knobs li { margin:.25rem 0 }
+.knobs b { color:var(--ink) }
+.figure-caption { font-size:.78rem; color:var(--muted); padding:.6rem 1rem .8rem; border-top:1px solid var(--line) }
+.callout { border-right:3px solid var(--accent); background:rgba(255,255,255,.04); padding:1rem 1.2rem; border-radius:8px 0 0 8px; margin:1.2rem 0 }
+.links { margin-top:24px; font-size:.85rem; color:var(--muted) }
+.links a { color:var(--accent) }
+@media (prefers-reduced-motion: reduce){ *{ transition:none !important; animation:none !important } }
+</style>
+</head>
+<body>
+<main>
+<span class="badge">עדכון חי — 187 בדיקות הסתיימו</span>
+<h1>בדקנו 187 דרכים לסחור — מצאנו את המנצחות</h1>
+<p class="lede">לפני: ההגדרה הישנה הפסידה 165 דולר על הנייר.
+עכשיו: לכל קבוצת מטבעות יש הגדרה מנצחת משלה. לחצו על לשונית ותראו ישן מול חדש.</p>
+
+<div class="panel">
+<div class="figure">
+<div class="figure-label">בוחרים קבוצה — רואים ישן מול מנצח</div>
+<div class="figure-controls" role="tablist" aria-label="קבוצות מטבעות">
+<button class="ctrl-btn active" role="tab" data-tab="majors">הגדולים: ביטקוין ואתריום</button>
+<button class="ctrl-btn" role="tab" data-tab="alts">הקטנים: ריפל וסולנה</button>
+<button class="ctrl-btn" role="tab" data-tab="bnb">בי־אן־בי: יושבים בחוץ</button>
+</div>
+<div class="compare" id="tab-majors">
+<div class="side">
+<h3>ההגדרה הישנה</h3>
+<div class="bignum down">‎−$43.67</div>
+<p>אתריום הפסיד. ביטקוין בקושי הרוויח 4.80 דולר. צמוד מדי למחיר, בלי מרדף.</p>
+</div>
+<div class="side new">
+<h3>ההגדרה המנצחת</h3>
+<div class="bignum up">‎+$950.08</div>
+<ul class="knobs">
+<li>ביטקוין: <b>‎+$950.08</b> · אתריום: <b>‎+$140.00</b> בלי ירידה בכלל</li>
+<li>מרחק מהמחיר: <b>3.5 סנט</b> במקום 2</li>
+<li>מרדף: <b>דלוק</b> — כשרגל אחת נתפסת, רודפים אחרי השנייה</li>
+</ul>
+</div>
+</div>
+<div class="compare" id="tab-alts" hidden>
+<div class="side">
+<h3>ההגדרה הישנה</h3>
+<div class="bignum down">‎−$55.17</div>
+<p>סולנה וריפל קפצניים מדי להגדרה הצמודה — ההפסדים נערמו: ‎−$55.17 ו־‎−$43.69.</p>
+</div>
+<div class="side new">
+<h3>ההגדרה המנצחת</h3>
+<div class="bignum up">‎+$129.20</div>
+<ul class="knobs">
+<li>ריפל: <b>‎+$129.20</b> · סולנה: <b>‎+$95.48</b></li>
+<li>מרחק מהמחיר: <b>20 סנט</b> — כרית רחבה לקפיצות חדות</li>
+<li>מרדף: <b>דלוק</b> בריפל, כבוי בסולנה</li>
+</ul>
+</div>
+</div>
+<div class="compare" id="tab-bnb" hidden>
+<div class="side">
+<h3>ההגדרה הישנה</h3>
+<div class="bignum down">‎−$27.93</div>
+<p>בי־אן־בי הפסיד עם ההגדרה הישנה — הספרים שם דלילים מדי.</p>
+</div>
+<div class="side new">
+<h3>ההחלטה המנצחת: לא לשחק</h3>
+<div class="bignum flat">$0.00</div>
+<ul class="knobs">
+<li><b>0 עסקאות</b> בכל ההגדרות המרוויחות — וזה טוב</li>
+<li>כלל חדש: <b>מכבים את בי־אן־בי</b> עד שהנזילות משתפרת</li>
+<li>לפעמים הניצחון הוא לדעת איפה לא לשחק</li>
+</ul>
+</div>
+</div>
+<div class="figure-caption">מספרים אמיתיים מ־187 ההרצות על נתוני הזהב. לחיצה על לשונית מחליפה קבוצה — שום דבר לא נשלח לשום מקום.</div>
+</div>
+</div>
+
+<div class="callout"><b>השורה התחתונה:</b> אין הגדרה אחת שמתאימה לכולם. לגדולים — מרחק קטן ומרדף דלוק. לקטנים — כרית רחבה. לבי־אן־בי — הפסקה.</div>
+
+<div class="links">בעיה #442 · שינוי #444 חי ומוזג · הדוח המלא עם כל הטבלאות: <code>docs/explanations/overnight_backtest_results.html</code></div>
+</main>
+<script>
+(function(){
+var btns = document.querySelectorAll('[data-tab]');
+btns.forEach(function(b){
+b.addEventListener('click', function(){
+btns.forEach(function(x){ x.classList.remove('active'); });
+b.classList.add('active');
+['majors','alts','bnb'].forEach(function(id){
+document.getElementById('tab-' + id).hidden = (id !== b.getAttribute('data-tab'));
+});
+});
+});
+})();
+</script>
+</body>
+</html>
