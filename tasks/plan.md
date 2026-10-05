@@ -36,7 +36,7 @@ Branch: i451/fix-paper-dead-zone-expiry-exit-books-the-same-leg | Issue: #451
 - **Skill:** `debugging-and-error-recovery`
 - **Verification:** Task 2 repeated-tick test fails before, passes after; first-exit values byte-identical to pre-fix behavior.
 
-### Task 2: [Debug] Repeated-tick regression tests in `tests/test_live_trader.py` (S)
+### [x] Task 2: [Debug] Repeated-tick regression tests in `tests/test_live_trader.py` (S)
 - **Files:** `tests/test_live_trader.py` (near `test_naked_leg_dead_zone_force_exits_when_close`, line 3015)
 - **Depends on:** Task 1
 - **Description:** (a) repeated-tick test: reuse `_naked_market` + `_open_50_50_quotes`, fill UP only, first dead-zone tick books one `STOP_EXIT_UP` trade — then send 2+ more dead-zone ticks with a changed bid (still above the stop threshold) and assert trade count, price, shares, PnL, `realized_pnl_usd`, `stops_count`, `trades_count`, and `STOP_EXIT` status all unchanged; (b) stop-before-dead-zone test: ordinary stop fires first, then dead-zone ticks add nothing; (c) reset-boundary assertion: after `_reset_round_to_clean`, a fresh naked leg in the dead zone expiry-exits exactly once.
