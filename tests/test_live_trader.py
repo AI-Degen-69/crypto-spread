@@ -2982,6 +2982,131 @@ def test_naked_leg_stops_at_exit_thresh():
     assert m.exit_taken is True
     assert m.status == "STOP_EXIT"
     assert "0.03" in engine.trades[-1].notes
+    # Drift here is 0.020 < 0.03: the staged stop fired, so no drift-breach claim.
+    assert "Adverse drift" not in engine.trades[-1].notes
+
+
+def test_stop_note_names_staged_stop_when_drift_below_threshold_up():
+    """Issue #452: a staged-stop fire logs a staged-stop note, never an Adverse drift claim."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.exit_thresh = 0.05
+    engine.enable_leg_chase = False
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    # Fill UP at 0.48; stop staged at 0.43.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+    assert m.stop_price == 0.43
+
+    # Drift 0.030 < 0.05; bid touches the staged stop 0.43.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.43, "best_ask": 0.44},
+        "down_book": {"best_bid": 0.53, "best_ask": 0.54},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    note = engine.trades[-1].notes
+    assert note == "Staged stop hit: UP bid 0.43 <= stop 0.43 (drift 0.030 < 0.05)"
+
+
+def test_stop_note_names_staged_stop_when_drift_below_threshold_down():
+    """Issue #452: DOWN mirror — staged-stop fire logs a staged-stop note."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.exit_thresh = 0.05
+    engine.enable_leg_chase = False
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    # Fill DOWN at 0.48; stop staged at 0.43.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.51, "best_ask": 0.52},
+        "down_book": {"best_bid": 0.47, "best_ask": 0.479},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_down is True and m.filled_up is False
+    assert m.stop_price == 0.43
+
+    # Drift 0.030 < 0.05; bid touches the staged stop 0.43.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.53, "best_ask": 0.54},
+        "down_book": {"best_bid": 0.43, "best_ask": 0.44},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert engine.trades[-1].action == "STOP_EXIT_DOWN"
+    note = engine.trades[-1].notes
+    assert note == "Staged stop hit: DOWN bid 0.43 <= stop 0.43 (drift 0.030 < 0.05)"
+
+
+def test_stop_note_keeps_drift_format_on_genuine_breach():
+    """Issue #452: a genuine drift breach keeps the exact Adverse drift format."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.exit_thresh = 0.03
+    engine.enable_leg_chase = False
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    # Fill UP at 0.48; stop staged at 0.45.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+
+    # Drift 0.035 >= 0.03; bid 0.455 stays above stop 0.45 — drift-only fire.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.455, "best_ask": 0.465},
+        "down_book": {"best_bid": 0.565, "best_ask": 0.575},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert engine.trades[-1].notes == "Adverse drift 0.035 >= 0.03"
+
+
+def test_stop_note_prefers_drift_when_both_conditions_fire():
+    """Issue #452: simultaneous drift breach + stop touch keeps the drift note."""
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.exit_thresh = 0.05
+    engine.enable_leg_chase = False
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now)
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    # Fill UP at 0.48; stop staged at 0.43.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+
+    # Drift 0.060 >= 0.05 AND bid touches stop 0.43 — drift takes precedence.
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.43, "best_ask": 0.44},
+        "down_book": {"best_bid": 0.59, "best_ask": 0.60},
+    }, now + 1)
+    assert m.exit_taken is True
+    assert engine.trades[-1].notes == "Adverse drift 0.060 >= 0.05"
 
 
 def test_paired_position_not_stopped_by_naked_threshold():
