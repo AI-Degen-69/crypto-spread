@@ -119,8 +119,11 @@ def generate_candidates(
 
     rng = random.Random(seed)
     seen: set[tuple] = set()
-
-    for idx in range(1, n_iterations):
+    attempts = 0
+    max_attempts = n_iterations * 10
+    idx = 1
+    while len(candidates) < n_iterations and attempts < max_attempts:
+        attempts += 1
         # Sample parameters
         off = rng.choice(PARAM_SPACE["offset"])
         q = rng.choice(PARAM_SPACE["queue_depth"])
@@ -172,6 +175,7 @@ def generate_candidates(
             exit_thresh_by_slug=stops,
         )
         candidates.append((label, params))
+        idx += 1
 
     return candidates
 
@@ -201,25 +205,31 @@ def load_golden_windows(
     if not files:
         raise ValueError(f"No ticks_*.jsonl files found in {source_dir}")
 
-    windows: list[tuple[str, list[dict]]] = []
-    total_snaps = 0
+    from collections import defaultdict
+    windows_dict: dict[str, list[dict]] = defaultdict(list)
 
     for fpath in files:
-        snaps = list(iter_ticks(fpath))
-        if not snaps:
-            continue
-        total_snaps += len(snaps)
-        for cid, group in group_by_cid(snaps):
-            if not group:
+        for snap in iter_ticks(fpath):
+            cid = snap.get("cid")
+            if not cid:
                 continue
-            series = group[0].get("series")
+            series = snap.get("series")
             if series_whitelist and series not in series_whitelist:
                 continue
-            windows.append((cid, group))
-            if max_windows and len(windows) >= max_windows:
+            windows_dict[cid].append(snap)
+            if max_windows and len(windows_dict) > max_windows:
                 break
-        if max_windows and len(windows) >= max_windows:
+        if max_windows and len(windows_dict) > max_windows:
             break
+
+    windows: list[tuple[str, list[dict]]] = [
+        (cid, sorted(snaps, key=lambda x: x.get("ts", 0.0)))
+        for cid, snaps in windows_dict.items()
+        if snaps
+    ]
+    windows.sort(key=lambda kv: kv[1][0].get("ts", 0.0))
+    if max_windows:
+        windows = windows[:max_windows]
 
     return windows
 
@@ -535,6 +545,13 @@ def run_overnight_sweep(
                 f"[{idx:03d}/{len(candidates):03d}] {label[:45]:<45} | "
                 f"PnL: ${pnl:+8.2f} | WR: {wr:5.1f}% | DD: ${dd:7.2f} | PF: {pf:4.2f}"
             )
+
+            # Periodically update summary report so it reflects live progress
+            if completed % 25 == 0:
+                try:
+                    generate_summary_report(out_csv, summary_md)
+                except Exception:
+                    pass
 
         except Exception as e:
             print(f"[{idx:03d}/{len(candidates):03d}] ERROR in configuration {label}: {e}", file=sys.stderr)
