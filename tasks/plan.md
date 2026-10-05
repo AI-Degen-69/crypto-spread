@@ -43,7 +43,7 @@ Branch: i451/fix-paper-dead-zone-expiry-exit-books-the-same-leg | Issue: #451
 - **Skill:** `test-driven-development`
 - **Verification:** new tests fail on the pre-fix predicate, pass after Task 1.
 
-### Task 3: [Backend/Logic] Targeted verification sweep (XS)
+### [x] Task 3: [Backend/Logic] Targeted verification sweep (XS)
 - **Files:** none (verification only)
 - **Depends on:** Task 2
 - **Description:** run `python -m pytest tests/test_live_trader.py -q`, `tests/test_dead_zone_parity.py -q`, `tests/test_stop_orders.py -q`. No full-suite local run (CI owns it). Confirm glossary terms in comments ("trading engine", "paper mode").
