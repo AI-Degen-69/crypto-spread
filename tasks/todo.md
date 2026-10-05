@@ -1,5 +1,5 @@
-# Todo Checklist — Issue #445
+# Todo Checklist — Issue #449
 
-- [x] Task 1: Seed JSON + startup copy-if-missing hook (`backtest/seed_templates/`, `server/osc_dash.py`)
-- [x] Task 2: Seed + hook tests (`tests/test_backtest_templates.py`)
-- [x] Task 3: Acceptance sweep (SPEC.md §3, targeted suite green)
+- [x] Task 1: Paper rollover cleanup (`strategy/live_trader.py`)
+- [x] Task 2: Rollover regression tests (`tests/test_live_trader.py`)
+- [x] Task 3: Targeted verification sweep (live_trader + stop_orders suites)

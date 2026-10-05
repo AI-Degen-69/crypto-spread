@@ -2370,7 +2370,10 @@ class LiveTraderEngine:
                     continue
                 # Only include active quoting markets with resolved tokens within active window
                 if m.status in ("QUOTING", "PRE_QUOTING") and m.up_token and m.down_token:
-                    if not m.filled_up:
+                    # Issue #449: a leg with no quote yet (dead anchor dropped
+                    # at rollover, latch not fired) emits no row; a leg with a
+                    # tracked current entry handle already has its row above.
+                    if not m.filled_up and m.resting_up is not None and not m.order_id_up:
                         oid_up = f"paper_up_{m.slug}"
                         if oid_up not in existing_ids:
                             orders.append({
@@ -2388,7 +2391,7 @@ class LiveTraderEngine:
                                 "time": m.order_time_up if m.order_time_up != "-" else now_time_str,
                             })
                             existing_ids.add(oid_up)
-                    if not m.filled_down:
+                    if not m.filled_down and m.resting_down is not None and not m.order_id_down:
                         oid_dn = f"paper_dn_{m.slug}"
                         if oid_dn not in existing_ids:
                             orders.append({
@@ -5125,6 +5128,18 @@ class LiveTraderEngine:
                 self.cancel_live_order(mstate.order_id_up)
             if mstate.order_id_down and not mstate.filled_down:
                 self.cancel_live_order(mstate.order_id_down)
+        else:
+            # Issue #449: paper rollover mirrors the live cleanup locally —
+            # no venue call. Each unfilled entry leg goes through
+            # _clear_order_handles (CANCELLED + handle cleared + paper row
+            # recorded); the window reset below removes the recorded rows.
+            up_id = mstate.order_id_up
+            down_id = mstate.order_id_down
+            with self._engine_lock:
+                if up_id and not mstate.filled_up:
+                    self._clear_order_handles(up_id)
+                if down_id and not mstate.filled_down:
+                    self._clear_order_handles(down_id)
         # OCO Case C: cancel any stop-loss alongside entry orders (issue #87).
         # If the venue cancel fails, defer the window reset so the stale remote
         # stop can't survive into the next window with a cleared local handle.
@@ -5133,6 +5148,10 @@ class LiveTraderEngine:
                 "[%s] Window rollover deferred until stop-loss cancellation succeeds",
                 mstate.slug,
             )
+            # Review #450: successful entry cancels above already cleared their
+            # handles (cancel_live_order clears on success), so drop the cached
+            # rows instead of serving them for up to 5s while deferred.
+            self._orders_cache_ts = 0.0
             return
 
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
@@ -5212,7 +5231,8 @@ class LiveTraderEngine:
                     self._save_persisted_trades()
 
         # Promote advance pre-quoted orders from next window if available and matching new_cid
-        if mstate.next_quoted and mstate.next_condition_id and (not new_cid or mstate.next_condition_id == new_cid):
+        promoted = bool(mstate.next_quoted and mstate.next_condition_id and (not new_cid or mstate.next_condition_id == new_cid))
+        if promoted:
             mstate.order_id_up = mstate.next_order_id_up
             mstate.order_id_down = mstate.next_order_id_down
             mstate.order_time_up = mstate.next_order_time_up if mstate.next_order_time_up != "-" else time.strftime("%H:%M:%S")
@@ -5225,6 +5245,14 @@ class LiveTraderEngine:
             mstate.next_order_time_down = "-"
             mstate.next_quoted = False
             log.info("[%s] PROMOTED advance pre-quotes to active live window (UP: %s, DN: %s)", mstate.slug, mstate.order_id_up, mstate.order_id_down)
+            if self.mode == "paper":
+                # Issue #449: promoted advance handles were priced at the
+                # pre-quote coin-flip (0.50 - offset, same expression as the
+                # advance pre-quoting block). Carry that price onto the entry
+                # legs so tracked rows never show the dead window's anchor.
+                advance_px = round(0.50 - self.offset, 3)
+                mstate.resting_up = advance_px
+                mstate.resting_down = advance_px
         else:
             if self.mode == "live":
                 if mstate.next_order_id_up:
@@ -5253,6 +5281,12 @@ class LiveTraderEngine:
             mstate.original_resting_up = None
             mstate.original_resting_down = None
             mstate.anchored_mid = None
+            if self.mode == "paper" and not promoted:
+                # Issue #449: drop the dead window's anchor prices. The next
+                # anchor latch installs fresh ones; synthesis skips legs with
+                # no quote until then.
+                mstate.resting_up = None  # type: ignore[assignment]
+                mstate.resting_down = None  # type: ignore[assignment]
             mstate.entry_cancelled_timeout = False
             mstate.rest_up_price = None
             mstate.rest_up_queue = None
@@ -5321,6 +5355,11 @@ class LiveTraderEngine:
         mstate.reversal_seen_down = False
         mstate.status = "QUOTING" if self.is_running else "IDLE"
         mstate.last_action = "New Window Quoting"
+        # Issue #449: invalidate the open-orders cache so get_state cannot
+        # serve pre-rollover rows for 5s. Local timestamp only (same method as
+        # the PnL reset path) — mode-neutral, no venue effect. Not done on the
+        # failed-stop early return above, which changes no order state.
+        self._orders_cache_ts = 0.0
 
     def _record_timeline_point(self, now: float):
         """Append real-time equity & per-market PnL data point for chart logging."""
@@ -5331,7 +5370,13 @@ class LiveTraderEngine:
 
         pnl_by_mkt_usd = {slug: round(m.total_pnl_usd, 3) for slug, m in self.markets.items()}
         pnl_by_mkt_pct = {
-            slug: round((m.total_pnl_usd / max(0.01, self.shares * m.resting_up * 2)) * 100.0, 2)
+            # Issue #449: no quote yet (dead anchor dropped at rollover,
+            # latch not fired) means no cost basis — report 0.0, never crash.
+            slug: (
+                round((m.total_pnl_usd / max(0.01, self.shares * m.resting_up * 2)) * 100.0, 2)
+                if m.resting_up is not None
+                else 0.0
+            )
             for slug, m in self.markets.items()
         }
 
