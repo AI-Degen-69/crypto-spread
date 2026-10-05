@@ -865,39 +865,48 @@
     <div id="tab-action" class="tab-content">
       <div class="panel">
         <div class="panel-title">Production Engine Recommended Tuning</div>
-        <p class="panel-subtitle">Immediate calibration for <code>LiveTraderEngine</code> in <code>strategy/live_trader.py</code> based on certified Golden dataset findings.</p>
+        <p class="panel-subtitle">Measured single-run preset (RUN_0153) shipped as the <code>overnight-majors-btc-eth</code> backtest template. These are the exact knobs the sweep measured — not a narrative blend. Note the strategy is deliberately near-passive: it entered once in 2,011 windows.</p>
 
         <div class="grid-2col">
           <div class="preset-box">
-            <div class="preset-title">Recommended Major Pairs Preset (BTC & ETH)</div>
+            <div class="preset-title">Measured Preset — RUN_0153 (BTC & ETH)</div>
             <p style="font-size: 0.85rem; color: var(--text-muted);">
-              Optimized for tight books, high frequency, and zero-drawdown risk control.
+              BTC: +$15.00 / 1 trade / zero drawdown over 1,009 windows. ETH: 0 trades over 1,002 windows. Combined: 1,500c PnL, win_rate 0.05%. Provenance: <code>run_152_off=0.100_q=5_sz=75_sec=60_nochase_rev=0.020</code> on the certified Golden Dataset.
             </p>
             <pre class="preset-code">
-# Production Tuning for BTC & ETH (5m & 15m)
-spread_offset = 0.035          # Widened from 0.020 baseline
-queue_gate = 25.0              # Min depth before quoting
-quote_shares = 200             # Scaled to available depth
-enable_leg_chase = True        # CRITICAL: Hedging single legs
-exit_reversal = 0.075          # Fast mean-reversion protection
-exit_stop_loss = 0.050         # Global stop-loss limit
-max_pair_cost = 0.98           # Guarantees 2c locked arbitrage</pre>
+# Measured production tuning (RUN_0153) — BTC & ETH (5m & 15m)
+spread_offset = 0.10           # As measured; not the 0.035 narrative blend
+queue_gate = 5.0               # Min depth before quoting
+quote_shares = 75              # Per leg
+entry_delay_sec = 60.0         # Hold quotes until 60s into each window
+enable_leg_chase = False       # No chase in the measured run
+exit_reversal = 0.02
+exit_stop_loss = 0.30          # 5m; 15m legs measured at 0.045
+max_pair_cost = 0.99
+quote_range = (0.10, 0.90)     # Mid-based gate; legs price off mid - offset</pre>
           </div>
 
           <div class="preset-box">
-            <div class="preset-title">Recommended Altcoin Preset (SOL & XRP)</div>
+            <div class="preset-title">Not Recommended: The Compromise Blend</div>
             <p style="font-size: 0.85rem; color: var(--text-muted);">
-              Optimized for high-volatility, wider spreads, and defense against liquidation cascades.
+              The numbers previously shown here (<code>off=0.035, q=25, 200 shares, chase=True, rev=0.075, stop=0.05</code>) were assembled from different sweep runs and were never measured together. A paper session running them bled via repeated stop-outs. Do not deploy the blend; the earlier table cards on the BTC/ETH tabs report genuine single-run sweep rows and stay untouched.
             </p>
             <pre class="preset-code">
-# Production Tuning for SOL & XRP (5m & 15m)
-spread_offset = 0.150          # Defense against high beta spikes
-queue_gate = 10.0              # Low queue filter for thinner books
-quote_shares = 100             # Capped exposure per window
-enable_leg_chase = True        # Mandatory to avoid orphan decay
-exit_reversal = 0.025          # Tighter reversal reaction
-exit_stop_loss = 0.080         # Expanded stop for volatile swings
-max_pair_cost = 0.97           # Minimum 3c edge</pre>
+# Unmeasured blend — shown for the record only, DO NOT deploy
+spread_offset = 0.035
+queue_gate = 25.0
+quote_shares = 200
+enable_leg_chase = True
+exit_reversal = 0.075
+exit_stop_loss = 0.050
+max_pair_cost = 0.98</pre>
+          </div>
+        </div>
+
+        <div class="insight-card warning" style="margin-top: 20px;">
+          <div class="insight-title">Altcoin Preset (SOL & XRP): Pending Measurement</div>
+          <div class="insight-body">
+            The altcoin numbers previously shown here (offset 0.150, chase mandatory) came from the same unmeasured blend and were removed. A SOL/XRP preset (Issue #446) is queued behind the majors pipeline and will ship with measured sweep provenance. Until then, do not deploy altcoin tuning from this report.
           </div>
         </div>
 
