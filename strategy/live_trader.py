@@ -5366,7 +5366,13 @@ class LiveTraderEngine:
 
         pnl_by_mkt_usd = {slug: round(m.total_pnl_usd, 3) for slug, m in self.markets.items()}
         pnl_by_mkt_pct = {
-            slug: round((m.total_pnl_usd / max(0.01, self.shares * m.resting_up * 2)) * 100.0, 2)
+            # Issue #449: no quote yet (dead anchor dropped at rollover,
+            # latch not fired) means no cost basis — report 0.0, never crash.
+            slug: (
+                round((m.total_pnl_usd / max(0.01, self.shares * m.resting_up * 2)) * 100.0, 2)
+                if m.resting_up is not None
+                else 0.0
+            )
             for slug, m in self.markets.items()
         }
 

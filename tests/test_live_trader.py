@@ -1977,6 +1977,23 @@ def test_window_rollover_live_cancels_each_unfilled_leg() -> None:
     assert engine.cancel_live_order.call_count == 2
 
 
+def test_timeline_point_with_no_quote_reports_zero_pct() -> None:
+    """Issue #449 review: timeline point survives a quoteless window (None resting)."""
+    import time
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "paper"
+    engine.is_running = True
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.resting_up = None
+    m.resting_down = None
+    m.total_pnl_usd = 1.5
+
+    engine._record_timeline_point(time.time())
+
+    assert engine.timeline[-1]["pnl_pct"]["btc-up-or-down-5m"] == 0.0
+
+
 def test_cancel_all_orders_retains_cancelled_orders() -> None:
     """Issue #76: Emergency panic cancel records active orders into cancelled_orders before clearing handles."""
     from unittest.mock import MagicMock
