@@ -8676,6 +8676,16 @@ function btControlQuery(v, axis){
 // former success path of runBacktest. `data` is the exact backtest result dict;
 // `fileVal` feeds the hash badge suffix. Any stream transport may call this —
 // the chart and payload rendering must stay identical to the blocking era.
+// Zero-fill runs carry an empty bucket array: the edge loop below would read
+// histBuckets[-1].hi and throw, and the stream dispatcher would mislabel the
+// run Failed. An empty chart keeps the axis contract (min 0, max 1).
+function histEdgeValues(buckets){
+  const edges = [];
+  for (let i = 0; i <= buckets.length; i++) {
+    edges.push(i === buckets.length ? (buckets.length ? buckets[i - 1].hi / 100 : 1) : buckets[i].lo / 100);
+  }
+  return edges.map(v => Math.round(v * 100) / 100);
+}
 function renderBacktestResult(data, fileVal){
   const ov = data.overall || {};
   const enteredTxt = (ov.entered_windows !== undefined) ? ` (${ov.entered_windows} entered)` : '';
@@ -8862,11 +8872,7 @@ if ($('chartPnlHist')) {
     x: (b.lo + b.hi) / 200,
     y: b.count
   }));
-  const allEdges = [];
-  for (let i = 0; i <= histBuckets.length; i++) {
-    const val = i === histBuckets.length ? histBuckets[i - 1].hi / 100 : histBuckets[i].lo / 100;
-    allEdges.push(Math.round(val * 100) / 100);
-  }
+  const allEdges = histEdgeValues(histBuckets);
   const histCounts = histBuckets.map(b => b.count);
   const histBgColors = histBuckets.map(b => {
     if (b.hi <= 0) return hexToRgba(theme.down, 0.7);

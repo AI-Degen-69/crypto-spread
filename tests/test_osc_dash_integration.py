@@ -8304,6 +8304,29 @@ def test_mark_backtest_failed_shows_visible_message():
     assert "MARK_FAILED_OK" in result.stdout
 
 
+def test_hist_edge_values_empty_buckets_no_crash():
+    """Zero-fill runs must render, not throw: an empty bucket array yields
+    the fallback edge instead of reading histBuckets[-1].hi (which the
+    stream dispatcher surfaced as 'Render error ... reading hi' + Failed)."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("Node.js is not installed")
+    html = client.get("/").text
+    fn = re.search(r"function histEdgeValues\(buckets\)\{.*?\n\}", html, re.DOTALL)
+    assert fn is not None
+    harness = f"""
+    {fn.group(0)}
+    const empty = histEdgeValues([]);
+    if (empty.length !== 1 || empty[0] !== 1) throw new Error('empty buckets must yield [1], got ' + JSON.stringify(empty));
+    const two = histEdgeValues([{{lo: -200, hi: -100, count: 1}}, {{lo: 100, hi: 300, count: 2}}]);
+    if (JSON.stringify(two) !== JSON.stringify([-2, 1, 3])) throw new Error('non-empty edges changed: ' + JSON.stringify(two));
+    console.log('HIST_EDGE_OK');
+    """
+    result = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0, f"Node script failed: {result.stderr}\n{result.stdout}"
+    assert "HIST_EDGE_OK" in result.stdout
+
+
 def test_backtest_429_visible_message_and_no_final_sleep():
     """#371: the last 429 attempt surfaces an actionable message instead of a
     silent give-up, and no sleep runs after the final attempt."""
