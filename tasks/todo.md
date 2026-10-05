@@ -1,6 +1,6 @@
-# Todo Checklist — Issue #452
+# Todo Checklist — Issue #456
 
-- [x] Task 1: Note selection in the UP trigger (`strategy/live_trader.py:4942-4964`)
-- [x] Task 2: Mirror note selection in the DOWN trigger (`strategy/live_trader.py:4968-4990`)
-- [x] Task 3: Note-selection regression tests (`tests/test_live_trader.py`)
-- [x] Task 4: Targeted verification sweep (live_trader + stop_orders suites)
+- [x] Task 1: Leg gate in the live latch (`strategy/live_trader.py:4250-4258`)
+- [x] Task 2: Mirror leg gate in the backtest latch (`backtest/engine.py:1139-1151`)
+- [x] Task 3: Rejection + parity regression tests
+- [x] Task 4: Targeted verification sweep (live_trader + quote_range_parity + backtest_engine suites)

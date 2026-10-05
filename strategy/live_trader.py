@@ -4253,9 +4253,15 @@ class LiveTraderEngine:
             if (mstate.mid is not None and mstate.anchored_mid is None
                     and not in_dead_zone
                     and self.quote_range[0] <= mstate.mid <= self.quote_range[1]):
-                mstate.anchored_mid = mstate.mid
-                mstate.resting_up = round(min(0.99, max(0.01, mstate.anchored_mid - self.offset)), 3)
-                mstate.resting_down = round(min(0.99, max(0.01, (1.0 - mstate.anchored_mid) - self.offset)), 3)
+                leg_up = round(min(0.99, max(0.01, mstate.mid - self.offset)), 3)
+                leg_down = round(min(0.99, max(0.01, (1.0 - mstate.mid) - self.offset)), 3)
+                # Issue #456: quote_range guards order prices, not just the mid.
+                # A leg outside the range rejects the pair; the next tick retries.
+                if (self.quote_range[0] <= leg_up <= self.quote_range[1]
+                        and self.quote_range[0] <= leg_down <= self.quote_range[1]):
+                    mstate.anchored_mid = mstate.mid
+                    mstate.resting_up = leg_up
+                    mstate.resting_down = leg_down
             resting_up = mstate.resting_up
             resting_down = mstate.resting_down
         else:
@@ -4522,6 +4528,9 @@ class LiveTraderEngine:
             and not entry_delay_pending
             and not range_hold
             and not no_book_hold
+            # Issue #456: no latched in-range legs, no orders. The latch
+            # rejects out-of-range legs by leaving anchored_mid unset.
+            and mstate.anchored_mid is not None
             # Invariant 1 (#224): no clock, no new exposure. Reached only when a
             # leg is already filled -- an unfilled window returns much earlier.
             and not no_clock
