@@ -1994,6 +1994,37 @@ def test_timeline_point_with_no_quote_reports_zero_pct() -> None:
     assert engine.timeline[-1]["pnl_pct"]["btc-up-or-down-5m"] == 0.0
 
 
+def test_window_rollover_failed_stop_still_invalidates_cache() -> None:
+    """PR #450 review: deferred rollover (failed stop cancel) drops cached rows."""
+    import time
+    from unittest.mock import MagicMock
+    engine = LiveTraderEngine(load_persisted=False)
+    engine.mode = "live"
+    engine.is_running = True
+    engine.get_clob_client = MagicMock(return_value=None)
+
+    def _cancel(order_id: str) -> bool:
+        return order_id != "clob_stop_1"
+
+    engine.cancel_live_order = MagicMock(side_effect=_cancel)
+
+    m = engine.markets["btc-up-or-down-5m"]
+    m.status = "QUOTING"
+    m.order_id_up = "clob_up_1"
+    m.order_id_down = "clob_dn_1"
+    m.order_status_up = "RESTING"
+    m.order_status_down = "RESTING"
+    m.stop_order_id = "clob_stop_1"
+    m.stop_order_status = "RESTING"
+    engine._orders_cache_ts = 999.0
+
+    engine._handle_window_rollover(m, time.time(), new_cid="0xnext")
+
+    assert m.stop_order_status == "CANCEL_FAILED"
+    assert m.status == "QUOTING"  # early return: no window reset ran
+    assert engine._orders_cache_ts == 0.0
+
+
 def test_cancel_all_orders_retains_cancelled_orders() -> None:
     """Issue #76: Emergency panic cancel records active orders into cancelled_orders before clearing handles."""
     from unittest.mock import MagicMock

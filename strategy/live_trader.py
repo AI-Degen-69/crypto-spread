@@ -5148,6 +5148,10 @@ class LiveTraderEngine:
                 "[%s] Window rollover deferred until stop-loss cancellation succeeds",
                 mstate.slug,
             )
+            # Review #450: successful entry cancels above already cleared their
+            # handles (cancel_live_order clears on success), so drop the cached
+            # rows instead of serving them for up to 5s while deferred.
+            self._orders_cache_ts = 0.0
             return
 
         if (mstate.filled_up or mstate.filled_down) and not mstate.pair_captured and not mstate.exit_taken:
