@@ -40,7 +40,7 @@ See `SPEC.md` (Standard tier): pair rejection on out-of-range legs, inclusive bo
 - **Skill:** `test-driven-development`
 - **Verification:** Task 3 backtest tests fail before / pass after; parity suite green.
 
-### Task 3: [Backend/Logic] Rejection + parity regression tests (S)
+### [x] Task 3: [Backend/Logic] Rejection + parity regression tests (S)
 - **Files:** `tests/test_live_trader.py`, `tests/test_quote_range_parity.py` (and backtest engine suite if that is where quoting tests live)
 - **Depends on:** Task 2
 - **Description:** (a) live: mid 0.19/offset 0.15 latches nothing, no order handles, retry next tick quotes when mid returns in-range-legged; (b) backtest mirror of (a); (c) boundary: legs exactly at lo/hi quote; (d) lone-leg ban: one leg out → neither places; (e) in-range control unchanged. Weaken nothing.

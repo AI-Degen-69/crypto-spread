@@ -102,22 +102,29 @@ def test_return_inside_range_is_quoted_again_in_the_same_window():
 
 
 def test_boundary_mid_010_is_inside():
-    """The range is inclusive: a two-sided mid of exactly 0.10 is quotable."""
+    """Issue #456: the range is inclusive on the mid AND the legs.
+
+    Mid exactly 0.10 with legs 0.08/0.88 under (0.05, 0.90): quotable —
+    the boundary holds when the computed legs are inside too.
+    """
     snaps = [_snap(0.0, 0.095, 0.105, 0.895, 0.905, recorded_mid=0.10)]
-    _engine, mstate = _drive_live(snaps, offset=OFFSET)
+    _engine, mstate = _drive_live(snaps, offset=OFFSET, quote_range=(0.05, 0.90))
     assert mstate.order_id_up is not None and mstate.order_id_down is not None
 
-    w = _simulate_window(snaps, _bt_params())
+    w = _simulate_window(snaps, _bt_params(quote_range=(0.05, 0.90)))
     assert w.entered is True
 
 
 def test_boundary_mid_090_is_inside():
-    """The range is inclusive: a two-sided mid of exactly 0.90 is quotable."""
+    """Issue #456: the range is inclusive on the mid AND the legs.
+
+    Mid exactly 0.90 with legs 0.88/0.08 under (0.05, 0.90): quotable.
+    """
     snaps = [_snap(0.0, 0.895, 0.905, 0.095, 0.105, recorded_mid=0.90)]
-    _engine, mstate = _drive_live(snaps, offset=OFFSET)
+    _engine, mstate = _drive_live(snaps, offset=OFFSET, quote_range=(0.05, 0.90))
     assert mstate.order_id_up is not None and mstate.order_id_down is not None
 
-    w = _simulate_window(snaps, _bt_params())
+    w = _simulate_window(snaps, _bt_params(quote_range=(0.05, 0.90)))
     assert w.entered is True
 
 
@@ -176,3 +183,64 @@ def test_narrow_custom_range_holds_placement_outside_it():
     ]}
     w = _simulate_window(snaps, _bt_params(quote_range=(0.40, 0.60)))
     assert w.pair_captured is True
+
+
+# Issue #456: quote_range guards order prices, not just the mid. At offset
+# 0.15 a mid of 0.19 rests the UP leg at 0.04 — outside (0.10, 0.90) — so the
+# pair is rejected as a unit even though the mid itself is in range.
+LEG_OFFSET = 0.15
+
+# Mid 0.19, legs 0.04 / 0.66 at offset 0.15: UP leg out, DOWN leg in.
+LEG_OUT_OF_RANGE = [
+    _snap(0.0, 0.035, 0.045, 0.655, 0.665, recorded_mid=0.19),
+    _snap(20.0, 0.035, 0.045, 0.655, 0.665, recorded_mid=0.19),
+]
+
+# The 0.19 open reverts to a 0.50 book: legs 0.35 / 0.35, quotable again.
+LEG_OUT_THEN_IN = LEG_OUT_OF_RANGE[:1] + [
+    _snap(20.0, 0.495, 0.505, 0.495, 0.505, recorded_mid=0.50),
+    _snap(40.0, 0.495, 0.505, 0.495, 0.505, recorded_mid=0.50),
+]
+
+
+def test_leg_outside_range_places_nothing_in_either_engine():
+    """Mid 0.19 in range, UP leg 0.04 out: neither leg is quoted, nothing latched."""
+    _engine, mstate = _drive_live(LEG_OUT_OF_RANGE, offset=LEG_OFFSET)
+    assert mstate.anchored_mid is None
+    assert mstate.order_id_up is None and mstate.order_id_down is None
+    assert mstate.order_status_up != "RESTING"
+    assert mstate.order_status_down != "RESTING"
+    assert not mstate.filled_up and not mstate.filled_down
+
+    w = _simulate_window(LEG_OUT_OF_RANGE, _bt_params(offset=LEG_OFFSET))
+    assert w.entered is False
+    assert not w.filled_up and not w.filled_down
+
+
+def test_leg_returns_inside_range_quotes_again_in_the_same_window():
+    """The 0.19 open reverts to 0.50: both engines quote the pair at 0.35."""
+    _engine, mstate = _drive_live(LEG_OUT_THEN_IN, offset=LEG_OFFSET)
+    assert mstate.order_id_up is not None and mstate.order_id_down is not None
+    assert mstate.resting_up == pytest.approx(0.35)
+    assert mstate.resting_down == pytest.approx(0.35)
+
+    snaps = [dict(s) for s in LEG_OUT_THEN_IN]
+    snaps[-1] = {**snaps[-1], "tape_delta": [
+        {"asset": UP_TOKEN, "price": 0.35, "size": 10.0},
+        {"asset": DN_TOKEN, "price": 0.35, "size": 10.0},
+    ]}
+    w = _simulate_window(snaps, _bt_params(offset=LEG_OFFSET))
+    assert w.pair_captured is True
+    assert w.entry_price_up == pytest.approx(0.35)
+    assert w.entry_price_down == pytest.approx(0.35)
+
+
+def test_boundary_leg_010_is_inside():
+    """The leg range is inclusive: a computed UP leg of exactly 0.10 is quotable."""
+    snaps = [_snap(0.0, 0.095, 0.105, 0.595, 0.605, recorded_mid=0.25)]
+    _engine, mstate = _drive_live(snaps, offset=LEG_OFFSET)
+    assert mstate.order_id_up is not None and mstate.order_id_down is not None
+    assert mstate.resting_up == pytest.approx(0.10)
+
+    w = _simulate_window(snaps, _bt_params(offset=LEG_OFFSET))
+    assert w.entered is True

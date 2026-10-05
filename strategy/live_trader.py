@@ -4528,6 +4528,9 @@ class LiveTraderEngine:
             and not entry_delay_pending
             and not range_hold
             and not no_book_hold
+            # Issue #456: no latched in-range legs, no orders. The latch
+            # rejects out-of-range legs by leaving anchored_mid unset.
+            and mstate.anchored_mid is not None
             # Invariant 1 (#224): no clock, no new exposure. Reached only when a
             # leg is already filled -- an unfilled window returns much earlier.
             and not no_clock
