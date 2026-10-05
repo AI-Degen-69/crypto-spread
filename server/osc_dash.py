@@ -8680,6 +8680,7 @@ function btControlQuery(v, axis){
 // histBuckets[-1].hi and throw, and the stream dispatcher would mislabel the
 // run Failed. An empty chart keeps the axis contract (min 0, max 1).
 function histEdgeValues(buckets){
+  if (!Array.isArray(buckets) || !buckets.length) return [1];
   const edges = [];
   for (let i = 0; i <= buckets.length; i++) {
     edges.push(i === buckets.length ? (buckets.length ? buckets[i - 1].hi / 100 : 1) : buckets[i].lo / 100);
@@ -9496,28 +9497,40 @@ function applyBacktestTemplate(t){
   setCents('btQuoteHi', a.quote_hi);
   setCents('btExitReversal', a.exit_reversal);
   if (a.entry_delay_pct !== undefined && a.entry_delay_pct !== null) setVal('btEntryDelay', a.entry_delay_pct);
-  else if (a.entry_delay_sec) {
+  else if (a.entry_delay_sec !== undefined && a.entry_delay_sec !== null && a.entry_delay_sec !== '') {
     // #445 N2: the tab exposes one percent for both durations, but the engine
     // resolves that percent against each window's own length. A seconds-only
     // template used to be dropped here; now it converts against the shortest
     // scoped timeframe (exact there — the preset's measured winner — and a
     // longer wait on longer windows), and the notice spells out both numbers
     // so the approximation is visible instead of the delay vanishing.
-    const durs = (t && t.scope && Array.isArray(t.scope.duration_values) && t.scope.duration_values.length)
+    const rawDurs = (t && t.scope && Array.isArray(t.scope.duration_values) && t.scope.duration_values.length)
       ? t.scope.duration_values : [300, 900];
     const sec = Number(a.entry_delay_sec);
-    const shortest = Math.min.apply(null, durs.filter(d => Number.isFinite(d) && d > 0));
-    // One percent control (step=1) serves both durations: convert against the
-    // shortest scoped window and round to the control's own granularity.
-    // Below half a percent the control cannot represent the delay at all —
-    // refuse rather than write a value that vanishes on the next spin.
-    const pct = Math.round((sec / shortest) * 100);
-    if (Number.isFinite(pct) && pct >= 1) {
-      setVal('btEntryDelay', pct);
-      const perDur = durs.map(d => '~' + Math.round(pct / 100 * d) + 's of ' + (d === 300 ? '5m' : '15m')).join(', ');
-      note = 'Template uses entry_delay_sec: ' + sec + 's loaded as ' + pct + '% (' + perDur + '), closest single percent for the scoped timeframes.';
+    if (sec === 0) {
+      setVal('btEntryDelay', 0);
+      note = null;
     } else {
-      note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
+      let validDurs = rawDurs.map(Number).filter(d => Number.isFinite(d) && d > 0);
+      if (!validDurs.length) validDurs = [300, 900];
+      const shortest = Math.min.apply(null, validDurs);
+      const durLabel = d => d === 300 ? '5m' : d === 900 ? '15m' : (d / 60) + 'm';
+      // One percent control (step=1, max=100) serves both durations: convert
+      // against the shortest scoped window and round to the control's own
+      // granularity. Below half a percent the control cannot represent the
+      // delay at all — refuse rather than write a value that vanishes; above
+      // the control max the replay would clamp silently, so clamp the write
+      // and say so instead of claiming a percent the replay never runs.
+      let pct = Math.round((sec / shortest) * 100);
+      if (Number.isFinite(pct) && pct >= 1) {
+        let clampedNote = '';
+        if (pct > 100) { pct = 100; clampedNote = ' (clamped to control max)'; }
+        setVal('btEntryDelay', pct);
+        const perDur = validDurs.map(d => '~' + Math.round(pct / 100 * d) + 's of ' + durLabel(d)).join(', ');
+        note = 'Template uses entry_delay_sec: ' + sec + 's loaded as ' + pct + '%' + clampedNote + ' (' + perDur + '), closest single percent for the scoped timeframes.';
+      } else {
+        note = 'Template uses entry_delay_sec; the percent control was left unchanged.';
+      }
     }
   }
   if (a.dead_zone_pct !== undefined && a.dead_zone_pct !== null) setVal('btDeadZoneVal', a.dead_zone_pct);

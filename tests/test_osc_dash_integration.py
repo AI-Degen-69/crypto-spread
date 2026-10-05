@@ -8313,11 +8313,15 @@ def test_hist_edge_values_empty_buckets_no_crash():
         pytest.skip("Node.js is not installed")
     html = client.get("/").text
     fn = re.search(r"function histEdgeValues\(buckets\)\{.*?\n\}", html, re.DOTALL)
-    assert fn is not None
+    assert fn is not None, "histEdgeValues is no longer a top-level function"
     harness = f"""
     {fn.group(0)}
     const empty = histEdgeValues([]);
     if (empty.length !== 1 || empty[0] !== 1) throw new Error('empty buckets must yield [1], got ' + JSON.stringify(empty));
+    const nulled = histEdgeValues(null);
+    if (nulled.length !== 1 || nulled[0] !== 1) throw new Error('null buckets must yield [1], got ' + JSON.stringify(nulled));
+    const single = histEdgeValues([{{lo: 0, hi: 100, count: 5}}]);
+    if (JSON.stringify(single) !== JSON.stringify([0, 1])) throw new Error('single bucket edges changed: ' + JSON.stringify(single));
     const two = histEdgeValues([{{lo: -200, hi: -100, count: 1}}, {{lo: 100, hi: 300, count: 2}}]);
     if (JSON.stringify(two) !== JSON.stringify([-2, 1, 3])) throw new Error('non-empty edges changed: ' + JSON.stringify(two));
     console.log('HIST_EDGE_OK');
@@ -10257,6 +10261,43 @@ def test_backtest_apply_template_round_trip_query():
       scope: {series_tokens: [], duration_values: []}};
     const note2d = applyBacktestTemplate(tpl2d);
     assert(typeof note2d === 'string' && note2d.includes('left unchanged'), note2d);
+    // Zero seconds means "off": falsy but explicit, so the control resets to
+    // 0 with no notice instead of keeping a stale percent silently.
+    const tpl2e = {request_args: {entry_delay_sec: 0, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: []}};
+    assert(applyBacktestTemplate(tpl2e) === null, 'no note for zero delay');
+    assert(_els['btEntryDelay'].value === '0', _els['btEntryDelay'].value);
+    // Dirty duration arrays fall back to [300, 900]: [0, 900] converts 90s
+    // against 900 -> 10%; an all-invalid [0] refuses like a sub-granularity
+    // value instead of writing Infinity/NaN.
+    const tpl2f = {request_args: {entry_delay_sec: 90, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: [0, 900]}};
+    const note2f = applyBacktestTemplate(tpl2f);
+    assert(_els['btEntryDelay'].value === '10', _els['btEntryDelay'].value);
+    assert(note2f.includes('10%') && note2f.includes('~90s of 15m'), note2f);
+    const tpl2g = {request_args: {entry_delay_sec: 30, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: [0]}};
+    const note2g = applyBacktestTemplate(tpl2g);
+    assert(note2g.includes('10%'), note2g);
+    assert(_els['btEntryDelay'].value === '10', _els['btEntryDelay'].value);
+    // Non-canonical durations get a generic minute label, never a wrong 15m.
+    const tpl2h = {request_args: {entry_delay_sec: 60, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: [600]}};
+    const note2h = applyBacktestTemplate(tpl2h);
+    assert(_els['btEntryDelay'].value === '10', _els['btEntryDelay'].value);
+    assert(note2h.includes('10m'), note2h);
+    // Above the control max the write clamps to 100 and says so: 600s of a
+    // 300s window would claim 200% the replay clamps to 100.
+    const tpl2i = {request_args: {entry_delay_sec: 600, entry_delay_pct: null,
+      series: '', durations: '', file: ''},
+      scope: {series_tokens: [], duration_values: [300]}};
+    const note2i = applyBacktestTemplate(tpl2i);
+    assert(_els['btEntryDelay'].value === '100', _els['btEntryDelay'].value);
+    assert(note2i.includes('clamped to control max'), note2i);
     // A pct-unit fraction still restores the percent control exactly.
     const tpl3 = {request_args: {entry_delay_pct: 4,
       dead_zone_val: 0.10, dead_zone_pct: null, dead_zone_unit: 'pct',
