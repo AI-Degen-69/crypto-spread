@@ -10595,9 +10595,49 @@ def test_api_ticks_manifest_surfaces_golden_dataset(monkeypatch, tmp_path):
     assert len(golden["market_breakdown"]) == 2
     assert golden["windows_5m"] == 200
     assert golden["windows_15m"] == 100
+    assert golden["status"] == "PASS"
+    assert golden["valid_ticks"] == 1428888
+    assert golden["capture_state"]["label"] == "COMPLETE CAPTURE"
+    assert "level" in golden["readiness"]
     # Also included in files array for dropdown and runtime estimator
     assert any(f["name"] == "golden" for f in data["files"])
 
+
+def test_api_ticks_verify_golden_dataset(monkeypatch, tmp_path):
+    """GET /api/ticks/verify?file=golden returns certified report instantly."""
+    from server import osc_dash
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+
+    manifest = {
+        "status": "certified",
+        "totals": {
+            "windows_count": 4910,
+            "valid_ticks": 1428888,
+        },
+        "days": [
+            {
+                "file": "ticks_2026-03-20.jsonl",
+                "market_breakdown": [
+                    {"series": "btc-up-or-down-5m", "duration": 300, "windows": 200, "trades": 500},
+                    {"series": "btc-up-or-down-15m", "duration": 900, "windows": 100, "trades": 300},
+                ],
+            }
+        ],
+    }
+    (golden_dir / "golden_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (golden_dir / "ticks_2026-03-20.jsonl").write_text("", encoding="utf-8")
+
+    res = client.get("/api/ticks/verify?file=golden")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["file"] == "golden"
+    assert data["status"] == "PASS"
+    assert data["capture_state"]["label"] == "COMPLETE CAPTURE"
+    assert data["windows_count"] == 4910
+    assert data["valid_ticks"] == 1428888
+    assert len(data["market_breakdown"]) == 2
 
 
 def test_bt_file_select_includes_golden_option():
@@ -10605,6 +10645,8 @@ def test_bt_file_select_includes_golden_option():
     html = client.get("/").text
     assert "★ Golden Dataset /" in html
     assert "goldOpt.value = 'golden'" in html
+    assert "🏆 Golden Dataset" in html
+    assert "renderFileVerifyHtml(f.name, f)" in html
 
 
 def test_api_backtest_with_golden_directory(monkeypatch, tmp_path):
