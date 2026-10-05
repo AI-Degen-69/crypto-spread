@@ -4990,7 +4990,11 @@ class LiveTraderEngine:
                 return
 
         # --- UNREALIZED PnL CALCULATION ---
-        if not (mstate.filled_up or mstate.filled_down):
+        # A finalized exit leaves fill flags set (round ends at rollover), so gate
+        # on exit_taken first: a closed leg must not re-enter unrealized PnL.
+        if mstate.exit_taken:
+            mstate.unrealized_pnl_usd = 0.0
+        elif not (mstate.filled_up or mstate.filled_down):
             mstate.unrealized_pnl_usd = 0.0
         else:
             unrealized = 0.0

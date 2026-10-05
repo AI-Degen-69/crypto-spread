@@ -3085,6 +3085,8 @@ def test_dead_zone_expiry_exit_fires_once_across_repeated_ticks():
         "up_book": {"best_bid": 0.475, "best_ask": 0.485},
         "down_book": {"best_bid": 0.51, "best_ask": 0.52},
     }, now + 265.0)
+    assert m.unrealized_pnl_usd == 0.0
+    assert m.total_pnl_usd == pytest.approx(m.realized_pnl_usd)
     engine._update_market_strategy(slug, {
         "market": market,
         "up_book": {"best_bid": 0.48, "best_ask": 0.49},
@@ -3095,6 +3097,8 @@ def test_dead_zone_expiry_exit_fires_once_across_repeated_ticks():
     assert engine.trades[0].shares == 5
     assert engine.trades[0].pnl_usd == pytest.approx(-0.05)
     assert m.realized_pnl_usd == pnl_after_first
+    assert m.unrealized_pnl_usd == 0.0
+    assert m.total_pnl_usd == pytest.approx(m.realized_pnl_usd)
     assert m.stops_count == stops_after_first
     assert m.trades_count == trades_after_first
     assert m.status == "STOP_EXIT"
