@@ -16,19 +16,19 @@ Branch: i445/featbacktest-ship-overnight-btceth-winners-as-load | Issue: #445
 
 ## Tasks
 
-### [ ] Task 1: [Backend/Logic] Seed JSON + startup copy-if-missing hook (M)
+### [x] Task 1: [Backend/Logic] Seed JSON + startup copy-if-missing hook (M)
 - **Files:** `backtest/seed_templates/overnight-majors-btc-eth.json` (new), `server/osc_dash.py` (hook near `BACKTEST_TEMPLATES_DIR`)
 - **Depends on:** none (riskiest: hash/registry coupling — first)
 - **Description:** Commit the seed record (seven winning knobs, `series: "BTC,ETH"`); on startup copy it into `run/backtest_templates/` only when missing, recomputing `params_hash` via `_prepare_backtest_request` (adopted improvement, see below). Never overwrite existing files.
 - **Verification:** manual startup check + Task 2 tests green.
 
-### [ ] Task 2: [Backend/Logic] Seed + hook tests (S)
+### [x] Task 2: [Backend/Logic] Seed + hook tests (S)
 - **Files:** `tests/test_backtest_templates.py` (append) or new `tests/test_seed_templates.py`
 - **Depends on:** Task 1
 - **Description:** Seed validates via `validate_record`; rebuilt hash from `request_args` matches stored hash; hook creates missing file, never overwrites existing; seeded record loads 200 through the API (existing TestClient fixture pattern, `test_backtest_templates.py:230`).
 - **Verification:** `python -m pytest tests/test_backtest_templates.py -q` green.
 
-### [ ] Task 3: [Verification/QA] Checkpoint + acceptance sweep (S)
+### [x] Task 3: [Verification/QA] Checkpoint + acceptance sweep (S)
 - **Files:** none (verification only)
 - **Depends on:** Task 1, Task 2
 - **Description:** Confirm the four SPEC.md acceptance criteria end to end (load 200, fresh-checkout seeding, no-overwrite, targeted suite green).
