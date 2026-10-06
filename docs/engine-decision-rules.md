@@ -540,6 +540,13 @@ This closes #212.
 - **`close`** *(default)* — the dead zone closes the unpaired leg at the book.
 - **`hold`** — the leg is carried to settlement and pays 1.00 or 0.00.
 
+**No executable bid = no exit here either.** `close` resolves the leg's exit price through the
+same `_resolve_exit_bid` ladder the stop exit uses (issue #160), and when every stage of that
+ladder fails the leg is held and re-evaluated on the next tick rather than closed at an invented
+price — the hold contract already stated for the stop path above, applied to the dead-zone close
+(issue #459). `close` decides *that* an unpaired leg is closed in the dead zone, never *at what
+price* when the book offers no mark.
+
 **Why the old name goes.** `stop_loss_enabled = False` reads as "the stop is off", but the stop
 is still armed and still fires on an adverse move. What the flag actually changed was the end
 of the leg's life, and the new name says so.

@@ -4931,7 +4931,21 @@ class LiveTraderEngine:
                     naked_side = "UP" if mstate.filled_up else "DOWN"
                     naked_bid = mstate.up_bid if naked_side == "UP" else mstate.down_bid
                     if naked_bid is None:
-                        naked_bid = self._resolve_exit_bid(slug, mstate, naked_side)
+                        # Same ladder and same hold-on-failure contract as the stop exit
+                        # (`_execute_stop_exit`, issue #160): the resolver returns
+                        # (price, source), and when every stage fails there is no executable
+                        # mark — the leg stays naked and is re-evaluated on the next tick
+                        # rather than exiting at an invented price (Invariant 0, #224).
+                        # Issue #459: this call used to pass three arguments to a two-argument
+                        # helper, so it raised TypeError on every such tick.
+                        try:
+                            naked_bid, _bid_src = self._resolve_exit_bid(mstate, naked_side)
+                        except RuntimeError:
+                            log.warning(
+                                "[%s] Dead-zone expiry exit for %s leg held: no executable bid in book or latch",
+                                mstate.slug, naked_side,
+                            )
+                            return
                     if naked_bid is not None and naked_bid > 0.0:
                         with self._engine_lock:
                             mstate.status = "STOP_EXIT_PENDING"
