@@ -7,7 +7,7 @@ wires shadow_ev_pilot.py to the new layout.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -125,3 +125,74 @@ def test_pilot_smoke_writes_new_layout(tmp_path):
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["kind"] == "paper"
     assert manifest["final"]["total_trades"] == 0
+
+
+# --- Issue #465 T3: local_tz_abbr must be filename-safe even when the host
+# returns a full Windows zone display name (e.g. 'Jerusalem Daylight Time')
+# instead of an abbreviation like IDT — that display name made new_run_dir
+# raise and blocked the pilot launch.
+
+
+class _FakeZone:
+    def tzname(self, _dt=None):
+        return "Jerusalem Daylight Time"
+
+    def utcoffset(self, _dt=None):
+        return timedelta(hours=3)
+
+
+class _FakeAware:
+    def astimezone(self, _tz=None):
+        return _FakeZone()
+
+
+def test_local_tz_abbr_safe_when_tzname_is_a_display_name(monkeypatch):
+    """A Windows display-name tzname falls back to the fixed-offset form."""
+    monkeypatch.setattr(rl, "datetime", type(
+        "FakeDT", (), {"now": classmethod(lambda cls: _FakeAware())}))
+    abbr = rl.local_tz_abbr()
+    assert rl._SAFE_TZ_RE.match(abbr), f"unsafe tz abbreviation: {abbr!r}"
+    assert abbr == "UTC+03-00"
+
+
+def test_local_tz_abbr_keeps_a_real_abbreviation(monkeypatch):
+    """A genuine abbreviation (IDT) passes through untouched."""
+
+    class _RealZone(_FakeZone):
+        def tzname(self, _dt=None):
+            return "IDT"
+
+    class _RealAware(_FakeAware):
+        def astimezone(self, _tz=None):
+            return _RealZone()
+
+    monkeypatch.setattr(rl, "datetime", type(
+        "FakeDT", (), {"now": classmethod(lambda cls: _RealAware())}))
+    assert rl.local_tz_abbr() == "IDT"
+
+
+class _FakeWestZone(_FakeZone):
+    def tzname(self, _dt=None):
+        return "Eastern Standard Time"
+
+    def utcoffset(self, _dt=None):
+        return timedelta(hours=-5)
+
+
+class _FakeWestAware(_FakeAware):
+    def astimezone(self, _tz=None):
+        return _FakeWestZone()
+
+
+def test_local_tz_abbr_keeps_a_negative_offset_signed(monkeypatch):
+    """A western host keeps its minus sign — the sign branch is the one that can hide a bug."""
+    monkeypatch.setattr(rl, "datetime", type(
+        "FakeDT", (), {"now": classmethod(lambda cls: _FakeWestAware())}))
+    abbr = rl.local_tz_abbr()
+    assert abbr == "UTC-05-00"
+    assert rl._SAFE_TZ_RE.match(abbr), f"unsafe tz abbreviation: {abbr!r}"
+
+
+def test_local_tz_abbr_filename_safe_on_this_host():
+    """Whatever the host returns, the result must be usable in a run id."""
+    assert rl._SAFE_TZ_RE.match(rl.local_tz_abbr())

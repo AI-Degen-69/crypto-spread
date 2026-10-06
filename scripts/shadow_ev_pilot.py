@@ -1,10 +1,14 @@
 """Shadow EV pilot — paper-only validation of the EV-research winner.
 
-Recommended config (research-papers/abstract-and-methodology.html
-in any paper run, winner section):
-  delay 60s · band 0.03-0.04 · quote both sides at mid-0.03 ·
-  no stop-loss · hold-to-settle · chase capped at pair cost 0.98 ·
+Measured configuration (#223 verdict, docs/dead-zone-naked-leg-measurements.md):
+  delay 60s · quote both sides at mid-0.03 ·
+  naked leg closes at expiry (naked_leg_at_expiry="close") ·
+  chase capped at pair cost 0.98 ·
   universe xrp-15m + bnb-15m + eth-5m · 5 shares/leg.
+
+Stop-loss note: exit_reversal is pinned at its 0.50 maximum below, which disarms the
+mid-drift stop but NOT the paper-mode bid-touch stop — a paper night therefore still
+cuts legs at entry-5c. Measured: docs/issue-465-paper-replay-stop-divergence.md.
 
 Paper mode only: never posts orders, never touches wallet keys.
 Simulates fills off the live book exactly like the cockpit paper engine.
@@ -34,19 +38,25 @@ from scripts import run_layout  # noqa: E402
 
 
 def build_engine(delay: float, shares: int, starting_balance: float) -> LiveTraderEngine:
-    """Paper-only engine pinned to the hold-to-settle winner preset; refuses live/stop modes."""
+    """Paper-only engine pinned to the measured configuration (#223 verdict: close
+    the naked leg at expiry); refuses live/stop modes."""
     eng = LiveTraderEngine(load_persisted=False)
-    # Pinned to the hold-to-settle winner configuration (offset 0.03 /
+    # Pinned to the measured configuration (offset 0.03 /
     # delay 60s / quote_range (0.10, 0.90) / max_pair_cost 0.98 /
-    # xrp15+bnb15+eth5 universe). Issue #229 deleted stop_loss_enabled and the
-    # timeout clocks: hold-to-settle is now naked_leg_at_expiry="hold", and
-    # the exit_reversal mercy rule stays wide for the same reason as before.
+    # xrp15+bnb15+eth5 universe). #223 measured close-vs-hold and decided
+    # `close` decisively (docs/dead-zone-naked-leg-measurements.md), so the
+    # engine default naked_leg_at_expiry="close" is pinned explicitly here.
+    # Issue #229 deleted stop_loss_enabled and the timeout clocks; the
+    # exit_reversal mercy rule stays wide for the same reason as before.
+    # Caveat (measured 2026-10-07): 0.50 disarms only the mid-drift stop. The
+    # paper-mode bid-touch stop is not covered by this knob — see
+    # docs/issue-465-paper-replay-stop-divergence.md §5.
     eng.update_config(
         mode="paper",
         offset=0.03,
         entry_delay_sec=delay,
         quote_range=(0.10, 0.90),
-        naked_leg_at_expiry="hold",
+        naked_leg_at_expiry="close",
         max_pair_cost=0.98,
         selected_markets=["xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"],
         shares=shares,
@@ -54,8 +64,9 @@ def build_engine(delay: float, shares: int, starting_balance: float) -> LiveTrad
         enable_leg_chase=True,
         exit_reversal=0.50,
     )
-    if eng.naked_leg_at_expiry != "hold":
-        raise RuntimeError("shadow pilot requires naked_leg_at_expiry='hold'")
+    if eng.naked_leg_at_expiry != "close":
+        raise RuntimeError(
+            "shadow pilot requires naked_leg_at_expiry='close' (#223 verdict)")
     if eng.mode != "paper":
         raise RuntimeError("shadow pilot must run in paper mode — refusing to start")
     return eng
@@ -125,8 +136,8 @@ async def amain(hours: float, delay: float, shares: int,
         "offset": 0.03,
         "quote_range": [0.10, 0.90],
         "entry_delay_sec": delay,
-        "naked_leg_at_expiry": "hold",
-        "hold_to_settle": True,
+        "naked_leg_at_expiry": "close",
+        "hold_to_settle": False,
         "enable_leg_chase": True,
         "max_pair_cost": 0.98,
         "shares": shares,
@@ -224,7 +235,7 @@ async def amain(hours: float, delay: float, shares: int,
             "started_utc": started_utc.isoformat(),
             "stopped_utc": stopped_utc.isoformat(),
             "tz": run_layout.local_tz_abbr(),
-            "preset": "hold_to_settle",
+            "preset": "close_at_expiry",
             "config_hypothesis": config_hypothesis,
             "planned_hours": hours,
             "final": {k: final[k] for k in (

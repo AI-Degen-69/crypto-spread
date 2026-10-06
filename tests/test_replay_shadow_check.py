@@ -7,7 +7,9 @@ synthetic snaps only — never the 700MB tick file or gitignored runs/ data.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import importlib
+import json
 
 import pytest
 
@@ -144,3 +146,176 @@ def test_select_groups_rejects_empty():
     """Empty scope fails fast instead of producing vacuous totals."""
     with pytest.raises(AssertionError):
         mod.select_groups([])
+
+
+# --- Issue #465 T2: scope a run that is not the recorded #146 one -----------
+
+# The recorded #146 shadow ran hold-to-settle; #223 measured `close` and the
+# engine default is `close` (strategy/live_trader.py:926). The frozen default
+# stays "hold" so the reproduction is byte-identical, but the mirror must
+# follow whatever a given run actually recorded.
+def test_build_params_default_naked_leg_is_frozen_hold():
+    """The frozen #146 reproduction replays under the policy it ran (hold)."""
+    assert mod.build_params(True).naked_leg_at_expiry == "hold"
+    assert mod.build_params(False, 1.00).naked_leg_at_expiry == "hold"
+
+
+def test_naked_leg_mirror_follows_recorded_config():
+    """A run that recorded `close` is mirrored under `close`, not the default."""
+    recorded_close = dict(RECORDED, naked_leg_at_expiry="close")
+    params = mod.build_params(True, naked_leg_at_expiry="close")
+    mod.assert_config_mirror(params, recorded_close, True)
+    with pytest.raises(AssertionError):
+        # hold params under a close run must fail the mirror, not silently replay
+        mod.assert_config_mirror(mod.build_params(True), recorded_close, True)
+
+
+def test_default_scope_is_the_frozen_146_constants():
+    """A bare invocation reproduces #146 byte-for-byte from module constants."""
+    scope = mod.default_scope()
+    assert scope.ticks_file == mod.TICKS_FILE
+    assert scope.shadow_dir == mod.SHADOW_DIR
+    assert scope.out_dir == mod.OUT_DIR
+    assert scope.universe == mod.UNIVERSE
+    assert (scope.t0, scope.t1) == (mod.T0, mod.T1)
+    assert mod.resolve_scope("", "") == scope
+
+
+def _write_run(run_dir, *, started: str, stopped: str,
+               universe: tuple[str, ...] = ("xrp-up-or-down-15m",),
+               start_in_final: bool = False) -> None:
+    """Write a run dir in the shape the pilot actually records.
+
+    The pilot stamps started_utc into data/meta.json (:142) and writes only
+    stopped_utc into data/final.json — every recorded run on disk, including
+    the #146 one, has no started_utc in final.json. `start_in_final` writes
+    the legacy shape so the fallback stays covered.
+    """
+    data = run_dir / "data"
+    data.mkdir(parents=True)
+    (data / "meta.json").write_text(
+        json.dumps({"started_utc": started,
+                    "config_hypothesis": {"universe": list(universe)}}),
+        encoding="utf-8")
+    final = {"stopped_utc": stopped}
+    if start_in_final:
+        final["started_utc"] = started
+    (data / "final.json").write_text(json.dumps(final), encoding="utf-8")
+
+
+def test_derive_scope_reads_universe_and_times_from_run(tmp_path):
+    """UNIVERSE+T0 come from meta.json, T1 from final.json, OUT_DIR stays inside."""
+    run_dir = tmp_path / "2026-10-06_22-10_IDT"
+    _write_run(run_dir, started="2026-10-06T22:10:54.616454+00:00",
+               stopped="2026-10-07T09:10:58.928115+00:00",
+               universe=("xrp-up-or-down-15m", "eth-up-or-down-5m"))
+    ticks = tmp_path / "ticks_x.jsonl"
+    scope = mod.derive_scope(run_dir, ticks)
+    assert scope.universe == ("xrp-up-or-down-15m", "eth-up-or-down-5m")
+    assert scope.out_dir == run_dir / "replay_comparison"
+    assert scope.ticks_file == ticks
+    assert scope.t0 < scope.t1
+    assert scope.t1 == datetime.datetime.fromisoformat(
+        "2026-10-07T09:10:58.928115+00:00").timestamp()
+
+
+def test_derive_scope_reads_start_from_meta_when_final_lacks_it(tmp_path):
+    """The recorded shape (no started_utc in final.json) still derives a scope.
+
+    Regression for the T2 assumption that failed on the first real run: the
+    driver must not depend on a key no writer has ever produced.
+    """
+    run_dir = tmp_path / "2026-10-06_17-48_UTC+03-00"
+    _write_run(run_dir, started="2026-10-06T14:48:37.977556+00:00",
+               stopped="2026-10-06T16:48:43.452185+00:00")
+    final = json.loads((run_dir / "data" / "final.json").read_text(encoding="utf-8"))
+    assert "started_utc" not in final, "fixture must match the recorded layout"
+    scope = mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+    assert scope.t0 == datetime.datetime.fromisoformat(
+        "2026-10-06T14:48:37.977556+00:00").timestamp()
+    assert scope.t1 == datetime.datetime.fromisoformat(
+        "2026-10-06T16:48:43.452185+00:00").timestamp()
+
+
+def test_derive_scope_falls_back_to_final_start_stamp(tmp_path):
+    """A legacy run dir carrying started_utc only in final.json still derives."""
+    run_dir = tmp_path / "legacy"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00", start_in_final=True)
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    del meta["started_utc"]
+    (run_dir / "data" / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    scope = mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+    assert scope.t0 == datetime.datetime.fromisoformat(
+        "2026-10-06T22:10:00+00:00").timestamp()
+
+
+def test_derive_scope_without_any_start_stamp_names_both_files(tmp_path):
+    """No start stamp at all fails loudly, naming where it looked."""
+    run_dir = tmp_path / "stampless"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00")
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    del meta["started_utc"]
+    (run_dir / "data" / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="started_utc"):
+        mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+
+
+def test_derive_scope_without_a_universe_names_the_artifact(tmp_path):
+    """A run dir whose meta.json carries no universe fails loudly, naming the key.
+
+    The two stamp checks below raise a RuntimeError that names the file and the key;
+    the universe read must fail the same way rather than surfacing a bare KeyError
+    from nested indexing (the same unhelpful-failure class the T4 fix addressed).
+    """
+    run_dir = tmp_path / "nouniverse"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00")
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    del meta["config_hypothesis"]
+    (run_dir / "data" / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="config_hypothesis"):
+        mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+
+
+def test_derive_scope_defaults_ticks_to_the_stop_day(tmp_path, monkeypatch):
+    """Without --ticks, the coverage file named for the stop date is used."""
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    run_dir = tmp_path / "run"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00")
+    ticks_dir = tmp_path / "run" / "ticks"
+    ticks_dir.mkdir(parents=True)
+    (ticks_dir / "ticks_2026-10-07.jsonl").touch()
+    scope = mod.derive_scope(run_dir)
+    assert scope.ticks_file == ticks_dir / "ticks_2026-10-07.jsonl"
+
+
+def test_derive_scope_missing_stop_day_ticks_names_the_flag(tmp_path, monkeypatch):
+    """No coverage file for the stop day fails loudly and points at --ticks."""
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    run_dir = tmp_path / "run"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00")
+    with pytest.raises(RuntimeError, match="--ticks"):
+        mod.derive_scope(run_dir)
+
+
+def test_derive_scope_rejects_inverted_times(tmp_path):
+    """A run whose stop predates its start is a corrupt artifact, not a scope."""
+    run_dir = tmp_path / "bad"
+    _write_run(run_dir, started="2026-10-07T09:10:00+00:00",
+               stopped="2026-10-06T22:10:00+00:00")
+    with pytest.raises(RuntimeError, match="postdate"):
+        mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+
+
+def test_resolve_scope_ticks_only_keeps_frozen_universe_and_times(tmp_path):
+    """--ticks alone re-scopes the coverage file without touching universe/times."""
+    other = tmp_path / "ticks_other.jsonl"
+    scope = mod.resolve_scope("", str(other))
+    assert scope.ticks_file == other
+    assert scope.universe == mod.UNIVERSE
+    assert (scope.t0, scope.t1) == (mod.T0, mod.T1)
+    assert scope.out_dir == mod.OUT_DIR

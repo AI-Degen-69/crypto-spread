@@ -15,9 +15,16 @@ symmetrically.
 
 Usage:
     python -m scripts.replay_shadow_check
+        # bare: frozen #146 reproduction (module defaults below)
+    python -m scripts.replay_shadow_check --run runs/paper/<id> [--ticks <jsonl>]
+        # scope an arbitrary run: UNIVERSE + T0 from its data/meta.json,
+        # T1 from data/final.json (stopped_utc), OUT_DIR inside the run dir
+        # (issue #465 T2).
 """
 from __future__ import annotations
 
+import argparse
+import dataclasses
 import datetime
 import json
 from pathlib import Path
@@ -60,13 +67,117 @@ PAIR_CAPS = (0.98, 1.00)
 SHARES = 5
 
 
+@dataclasses.dataclass(frozen=True)
+class RunScope:
+    """Everything the driver scopes to, resolved for one run.
+
+    The module constants above are the frozen #146 reproduction values;
+    a scope derived from a run dir (derive_scope) replaces them wholesale
+    so any run can be cross-checked, not just the recorded one.
+    """
+    ticks_file: Path
+    shadow_dir: Path
+    out_dir: Path
+    universe: tuple[str, ...]
+    t0: float
+    t1: float
+
+
+def default_scope() -> RunScope:
+    """The frozen #146 scope — a bare invocation stays byte-identical."""
+    return RunScope(
+        ticks_file=TICKS_FILE,
+        shadow_dir=SHADOW_DIR,
+        out_dir=OUT_DIR,
+        universe=UNIVERSE,
+        t0=T0,
+        t1=T1,
+    )
+
+
+def _parse_utc(stamp: str) -> float:
+    """Parse an ISO-8601 UTC timestamp (meta.json/final.json format) to epoch seconds."""
+    return datetime.datetime.fromisoformat(stamp).timestamp()
+
+
+def derive_scope(run_dir: Path, ticks_file: Path | None = None) -> RunScope:
+    """Resolve the scope from a run's own artifacts (issue #465 T2).
+
+    UNIVERSE and the start stamp T0 come from data/meta.json (written at
+    run start); T1 comes from data/final.json stopped_utc (written at stop);
+    OUT_DIR stays inside the run. The pilot records no started_utc in
+    final.json, so both files are read for the start stamp — a run dir in
+    either shape derives a scope. Each missing artifact key raises a
+    RuntimeError naming its file and key rather than a bare KeyError.
+    Without an explicit ticks file, the coverage file named for the stop
+    date is required (the overnight pattern: collection floors at midnight).
+    """
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    final = json.loads((run_dir / "data" / "final.json").read_text(encoding="utf-8"))
+    hypothesis = meta.get("config_hypothesis") or {}
+    if not hypothesis.get("universe"):
+        raise RuntimeError(
+            f"run {run_dir}: no universe — expected config_hypothesis.universe "
+            f"in data/meta.json")
+    universe = tuple(hypothesis["universe"])
+    started = meta.get("started_utc") or final.get("started_utc")
+    if not started:
+        raise RuntimeError(
+            f"run {run_dir}: no start stamp — expected started_utc in "
+            f"data/meta.json or data/final.json")
+    if not final.get("stopped_utc"):
+        raise RuntimeError(
+            f"run {run_dir}: no stop stamp — expected stopped_utc in "
+            f"data/final.json")
+    t0 = _parse_utc(started)
+    t1 = _parse_utc(final["stopped_utc"])
+    if not t1 > t0:
+        raise RuntimeError(
+            f"run {run_dir}: stopped_utc must postdate started_utc")
+    if ticks_file is None:
+        stop_day = datetime.datetime.fromtimestamp(t1, tz=datetime.timezone.utc)
+        ticks_file = ROOT / "run" / "ticks" / f"ticks_{stop_day:%Y-%m-%d}.jsonl"
+        if not ticks_file.exists():
+            raise RuntimeError(
+                f"no ticks file for the stop day: expected {ticks_file.name} "
+                f"in {ticks_file.parent}; pass --ticks explicitly")
+    return RunScope(
+        ticks_file=ticks_file,
+        shadow_dir=run_dir,
+        out_dir=run_dir / "replay_comparison",
+        universe=universe,
+        t0=t0,
+        t1=t1,
+    )
+
+
+def resolve_scope(run_arg: str, ticks_arg: str) -> RunScope:
+    """CLI scope resolution: bare = frozen #146; --run derives; --ticks overrides.
+
+    Only --ticks (no --run) keeps the frozen universe/times and swaps the
+    coverage file — a deliberate re-scope of the #146 reproduction.
+    """
+    if run_arg:
+        return derive_scope(Path(run_arg),
+                            Path(ticks_arg) if ticks_arg else None)
+    if ticks_arg:
+        return dataclasses.replace(default_scope(), ticks_file=Path(ticks_arg))
+    return default_scope()
+
+
 def build_params(gates_on: bool = True,
-                 pair_cap: float = 0.98) -> BacktestParams:
+                 pair_cap: float = 0.98,
+                 naked_leg_at_expiry: str = "hold") -> BacktestParams:
     """Mirror the shadow final.json params into engine knobs (issue #146 §1).
 
     The prescribed verdict leg has the gates on. The fill model used to be the
     other axis of a 2x2 matrix; issue #226 left one fill rule, so the legs are
     now gates x pair cap and divergence can only be attributed to those.
+
+    `naked_leg_at_expiry` defaults to "hold" — the recorded #146 shadow ran
+    hold-to-settle, so the frozen reproduction stays byte-identical. main()
+    passes the run's own recorded value, so a fresh run ("close", #223) is
+    replayed under the policy it actually ran.
     """
     return BacktestParams(
         offset=0.03,
@@ -83,7 +194,7 @@ def build_params(gates_on: bool = True,
         quote_shares=SHARES,
         merge_gas_usd=0.0,
         entry_delay_sec=60.0 if gates_on else 0.0,
-        naked_leg_at_expiry="hold",
+        naked_leg_at_expiry=naked_leg_at_expiry,
         # Issue #229: the deleted timeout/late-start clocks are gone; the
         # shadow dead zone (default 0.10 pct) is mirrored implicitly — a
         # drift there now fails the mirror like any other knob.
@@ -111,6 +222,8 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
     is now one word in both (issue #227). queue_gate/merge_gas_usd have no
     recorded equivalent (replay-side documented choices).
     pair_cap 1.00 is a deliberate loosest-cap override, not a transcription.
+    `naked_leg_at_expiry` is compared against the recorded config when the
+    run records it (it does), defaulting to the #146 "hold" otherwise.
     """
     pairs = [
         ("offset", recorded["offset"]),
@@ -122,6 +235,9 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
     for field, want in pairs:
         got = getattr(params, field)
         assert got == want, f"config mirror broken: {field}={got!r} want {want!r}"
+    want_naked = str(recorded.get("naked_leg_at_expiry", "hold"))
+    assert params.naked_leg_at_expiry == want_naked, (
+        f"naked-leg mirror broken: {params.naked_leg_at_expiry!r} want {want_naked!r}")
     assert params.queue_gate == 0.0, "queue gate must stay off (paper has none)"
     assert params.merge_gas_usd == 0.0, "merge gas must stay 0 (gasless merges)"
     assert recorded["exit_thresh"] == 0.05
@@ -131,14 +247,15 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
         assert params.exit_thresh_by_slug.get(slug) == 0.05, f"exit mirror gap: {slug}"
 
 
-def load_scoped_snaps() -> list[dict]:
+def load_scoped_snaps(scope: RunScope | None = None) -> list[dict]:
     """Stream the tick file, keeping only universe snaps inside [T0, T1]."""
+    scope = scope or default_scope()
     kept: list[dict] = []
-    for snap in iter_ticks(TICKS_FILE):
-        if snap.get("series") not in UNIVERSE:
+    for snap in iter_ticks(scope.ticks_file):
+        if snap.get("series") not in scope.universe:
             continue
         ts = float(snap.get("ts", 0.0) or 0.0)
-        if T0 <= ts <= T1:
+        if scope.t0 <= ts <= scope.t1:
             kept.append(snap)
     assert kept, "scope filter empty: no universe snaps in [T0, T1]"
     return kept
@@ -160,17 +277,19 @@ def snap_touch(snap: dict) -> float | None:
     return float(up_ask) + float(dn_ask)
 
 
-def select_groups(snaps: list[dict]) -> tuple[list[tuple[str, list[dict]]], dict]:
+def select_groups(snaps: list[dict],
+                  scope: RunScope | None = None) -> tuple[list[tuple[str, list[dict]]], dict]:
     """Keep fully-observed, sane-book windows; count exclusions by reason."""
+    scope = scope or default_scope()
     included: list[tuple[str, list[dict]]] = []
     excluded = {"pre_coverage": 0, "strict_late": 0, "touch_insane": 0}
     for cid, group in group_by_cid(snaps):
         start_ts = float(group[0].get("start_ts", 0.0) or 0.0)
-        if start_ts < T0 - START_TOL_SEC:
+        if start_ts < scope.t0 - START_TOL_SEC:
             excluded["pre_coverage"] += 1
             continue
         first_delay = float(group[0].get("ts", 0.0) or 0.0) - start_ts
-        grandfathered = start_ts == T0
+        grandfathered = start_ts == scope.t0
         if first_delay > STRICT_START_DELAY_SEC and not grandfathered:
             excluded["strict_late"] += 1
             continue
@@ -251,22 +370,23 @@ def summarize(params: BacktestParams, groups: list[tuple[str, list[dict]]]) -> d
     }
 
 
-def require_tick_verification() -> dict:
+def require_tick_verification(scope: RunScope | None = None) -> dict:
     """Enforce the Task-1 integrity gate via its file-bound artifact.
 
     The verifier scan is expensive (700MB), so main() validates the recorded
     report instead of re-scanning: same ticks file, no FAIL status, zero
     corrupt lines. Raises with the exact remediation command otherwise.
     """
-    path = OUT_DIR / "verify_ticks.json"
+    scope = scope or default_scope()
+    path = scope.out_dir / "verify_ticks.json"
     hint = ("run: python -m scripts.verify_tick_data "
-            "run/ticks/ticks_2026-09-12.jsonl --json > " + str(path))
+            f"{scope.ticks_file} --json > " + str(path))
     if not path.exists():
         raise RuntimeError(f"missing tick verification artifact {path}; {hint}")
     report = json.loads(path.read_text(encoding="utf-8"))
-    if report.get("file") != TICKS_FILE.name:
+    if report.get("file") != scope.ticks_file.name:
         raise RuntimeError(f"verification artifact is for {report.get('file')}, "
-                           f"not {TICKS_FILE.name}; {hint}")
+                           f"not {scope.ticks_file.name}; {hint}")
     if report.get("status") == "FAIL" or report.get("corrupt_lines"):
         raise RuntimeError(f"tick data failed verification ({path}); refusing replay")
     return report
@@ -274,16 +394,28 @@ def require_tick_verification() -> dict:
 
 def main() -> None:
     """Run the scoped replay legs and write replay_totals.json."""
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    verification = require_tick_verification()
-    recorded = load_shadow_recorded()
-    snaps = load_scoped_snaps()
-    groups, excluded = select_groups(snaps)
+    ap = argparse.ArgumentParser(
+        description="Replay cross-check of a shadow paper run (issues #146, #465)")
+    ap.add_argument("--run", type=str, default="",
+                    help="runs/paper/<id> to cross-check "
+                         "(default: the frozen 2026-09-11_22-10_IDT reproduction)")
+    ap.add_argument("--ticks", type=str, default="",
+                    help="ticks jsonl to scope "
+                         "(default with --run: run/ticks/ticks_<stop-date>.jsonl)")
+    args = ap.parse_args()
+    scope = resolve_scope(args.run, args.ticks)
+    scope.out_dir.mkdir(parents=True, exist_ok=True)
+    verification = require_tick_verification(scope)
+    recorded = load_shadow_recorded(
+        scope.shadow_dir / "data" / "final.json")
+    naked = str(recorded.get("naked_leg_at_expiry", "hold"))
+    snaps = load_scoped_snaps(scope)
+    groups, excluded = select_groups(snaps, scope)
     legs: dict[str, dict] = {}
     for gates_on, pair_cap in (
             (True, PAIR_CAPS[0]), (False, PAIR_CAPS[0]),
             (True, PAIR_CAPS[1]), (False, PAIR_CAPS[1])):
-        params = build_params(gates_on, pair_cap)
+        params = build_params(gates_on, pair_cap, naked_leg_at_expiry=naked)
         assert_config_mirror(params, recorded, gates_on, pair_cap)
         totals = summarize(params, groups)
         totals["params_hash"] = params.params_hash()
@@ -299,11 +431,13 @@ def main() -> None:
         "verdict_leg": "gates_pc1.0",
         "legs": legs,
         "scope": {
-            "ticks_file": TICKS_FILE.name,
+            "ticks_file": scope.ticks_file.name,
             "tick_verification_status": verification.get("status"),
-            "universe": list(UNIVERSE),
-            "t0_utc": "2026-09-12T00:00:00Z",
-            "t1_utc": "2026-09-12T09:10:58Z",
+            "universe": list(scope.universe),
+            "t0_utc": datetime.datetime.fromtimestamp(
+                scope.t0, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "t1_utc": datetime.datetime.fromtimestamp(
+                scope.t1, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "strict_start_delay_sec": STRICT_START_DELAY_SEC,
             "touch_bounds": [TOUCH_LO, TOUCH_HI],
             "pair_caps": list(PAIR_CAPS),
@@ -317,7 +451,7 @@ def main() -> None:
             "EXCLUDED from the paper comparison (paper books pairs/settles gross)."
         ),
     }
-    out = OUT_DIR / "replay_totals.json"
+    out = scope.out_dir / "replay_totals.json"
     out.write_text(json.dumps(out_payload, indent=1), encoding="utf-8")
     print(f"wrote {out}")
 
