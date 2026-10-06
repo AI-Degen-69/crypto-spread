@@ -10778,3 +10778,49 @@ def test_api_backtest_with_golden_directory(monkeypatch, tmp_path):
     assert "run_id" in data
 
 
+# --- Issue #462: per-market tick health in the live cockpit ---
+
+
+def test_cockpit_exposes_stale_markets_badge():
+    """Issue #462: the cockpit header carries a stale-market counter next to the active count."""
+    html = client.get("/").text
+    assert 'id="cockpitStaleMarketsBadge"' in html
+    assert "0 STALE" in html
+    assert "cockpitActiveMarketsBadge" in html
+
+
+def test_cockpit_tick_health_pill_contract():
+    """Issue #462: the grid renders a health pill built from the engine's tick-health fields."""
+    html = client.get("/").text
+    # A dedicated colour, so "nothing is updating this market" never reads like
+    # "this market's status changed".
+    assert re.search(r"\.pill-stale\{[^}]*var\(--gold\)", html)
+    for field in ("tick_age_sec", "tick_stale", "tick_error_count", "last_tick_error"):
+        assert field in html, f"cockpit render does not consume {field}"
+    assert "cockpitStaleMarketsBadge" in html
+    # The error text reaches a tooltip, so it must go through the escaper.
+    assert "esc(healthTitle)" in html
+    # Stale markets are counted once per card render.
+    assert "staleMarkets += 1" in html
+
+
+def test_cockpit_staleness_outranks_sticky_error_history():
+    """Issue #462: the live alarm owns the pill; sticky history stays in the tooltip.
+
+    An error count never resets, so letting it colour the pill would leave every market
+    red after a long enough run and drown the one signal the operator can act on. The
+    single exception is a market that never completed an update at all — starving, not
+    scarred — which must not sit on "waiting" forever either.
+    """
+    src = client.get("/").text
+    block = src[src.index("const tickAge ="):src.index("let posStr")]
+
+    # Staleness is decided first and owns the amber colour...
+    assert block.index("healthCls = 'pill-stale'") < block.index("healthCls = 'pill-mono'")
+    # ...and the failure colour is gated on "never completed", never on the raw count.
+    assert "tickNeverCompleted = tickAge === null && tickErrors > 0" in block
+    assert block.index("tickNeverCompleted = tickAge") < block.index("healthCls = 'pill-mono'")
+    # A starving market is counted whichever way it is starving.
+    assert "if (m.tick_stale || tickNeverCompleted) staleMarkets += 1;" in block
+    # The failure is still surfaced in the tooltip.
+    assert "healthTooltipParts.push" in block

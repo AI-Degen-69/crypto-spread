@@ -95,6 +95,11 @@ _queue_ahead = book_math.queue_ahead
 # fill answering the tape-vs-tapeq question with real fills.
 FILL_TELEMETRY_FILE = RUN_DIR / "live_fill_telemetry.jsonl"
 FILL_RATIO_FLAG_THRESHOLD = 10.0
+
+# Issue #462: how long a market may go without a strategy update before the cockpit
+# paints it stale. Display-only — three missed ticks at the loop's 1s cadence — and
+# never read by any trading decision.
+TICK_STALE_THRESHOLD_SEC = 3.0
 FILL_PRICE_TICK_TOL = 0.001
 TAPE_FETCH_TIMEOUT = (3.05, 5.0)
 
@@ -832,6 +837,15 @@ class MarketLiveState:
         """Initialize non-serialized telemetry runtime attributes (issue #221)."""
         self._last_strategy_tick_perf: Optional[float] = None
         self._tick_intervals: deque[float] = deque(maxlen=1000)
+        # Tick health for the cockpit (issue #462): display-only, never read by a
+        # trading decision. The age reads its own clock, stamped only after an update
+        # *completes* — `_last_strategy_tick_perf` above is written at the top of the
+        # update, so a market whose update raises every tick would re-stamp it and read
+        # as fresh, and a timing-statistics reset would wipe the health signal entirely.
+        self._last_completed_tick_perf: Optional[float] = None
+        self._last_tick_error: Optional[str] = None
+        self._last_tick_error_perf: Optional[float] = None
+        self._tick_error_count: int = 0
 
 
 @dataclass
@@ -2580,6 +2594,24 @@ class LiveTraderEngine:
             # name, so the seeker bar shows nothing instead of showing a lie.
             dur = (d["end_ts"] - d["start_ts"]) if d["end_ts"] > d["start_ts"] else 0.0
             d["win_duration_sec"] = round(dur, 3)
+            # Tick health (issue #462), display only. The age reads the clock stamped
+            # only after a strategy update *completes*, so a market that keeps failing
+            # goes stale instead of reading fresh. A market that never completed an
+            # update reports None so a fresh start never paints it stale, and staleness
+            # needs a running engine — a stopped bot is not a starving one.
+            mstate = self.markets[slug]
+            last_perf = mstate._last_completed_tick_perf
+            age = None if last_perf is None else max(0.0, time.perf_counter() - last_perf)
+            d["tick_age_sec"] = None if age is None else round(age, 3)
+            d["tick_stale"] = bool(
+                self.is_running and age is not None and age > TICK_STALE_THRESHOLD_SEC
+            )
+            err_perf = mstate._last_tick_error_perf
+            d["tick_error_count"] = mstate._tick_error_count
+            d["last_tick_error"] = mstate._last_tick_error
+            d["last_tick_error_age_sec"] = (
+                None if err_perf is None else round(max(0.0, time.perf_counter() - err_perf), 3)
+            )
         # Copied under the lock its writer holds, so the dashboard can never read a
         # tally mid-update with `reentries` bumped but the outcome bucket not yet.
         with self._engine_lock:
@@ -2632,6 +2664,7 @@ class LiveTraderEngine:
                 "max_pair_cost": self.max_pair_cost,
                 "entry_delay_sec": self.entry_delay_sec,
                 "quote_range": [float(self.quote_range[0]), float(self.quote_range[1])],
+                "tick_stale_threshold_sec": TICK_STALE_THRESHOLD_SEC,
             },
             "active_preset": self.active_preset,
             "band_skip_stats": band_skip_stats_snapshot,
@@ -3845,6 +3878,19 @@ class LiveTraderEngine:
                 "pnl_pct": mkt_pct,
             })
 
+    def _record_tick_error(self, slug: str, exc: BaseException) -> None:
+        """Record a tick failure against one market (issue #462).
+
+        One write path, so the per-market guard that #461 will add can call this
+        instead of duplicating the history. Display-only: nothing here changes trading.
+        """
+        mstate = self.markets.get(slug)
+        if mstate is None:
+            return
+        mstate._last_tick_error = str(exc) or exc.__class__.__name__
+        mstate._last_tick_error_perf = time.perf_counter()
+        mstate._tick_error_count += 1
+
     async def _run_loop(self):
         """Main async ticker loop (1s resolution)."""
         log.info("LiveTraderEngine background loop running")
@@ -3877,7 +3923,20 @@ class LiveTraderEngine:
                     log.warning("Poll exception for %s: %s", slug, res)
                     continue
                 if res:
-                    self._update_market_strategy(slug, res, now)
+                    try:
+                        self._update_market_strategy(slug, res, now)
+                    except Exception as exc:
+                        # Issue #462: record the failure against the market whose update
+                        # raised — attribution, not isolation — then re-raise unchanged.
+                        # The attribution lives here because the `slug` local is the only
+                        # place it is still known; the whole-tick catch in `_run_loop`
+                        # cannot tell which market aborted. Per-market isolation remains
+                        # #461's deliverable.
+                        self._record_tick_error(slug, exc)
+                        raise
+                    # Stamped only on completion, so health answers "is this market
+                    # actually being updated" rather than "was an update attempted".
+                    self.markets[slug]._last_completed_tick_perf = time.perf_counter()
 
             active_tokens = []
             for m in self.markets.values():

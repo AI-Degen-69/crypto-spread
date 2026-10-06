@@ -5696,6 +5696,9 @@ textarea:focus-visible,
 .pill-osc{background:rgba(51,201,181,.12);color:var(--up);border-color:rgba(51,201,181,.3)}
 .pill-mono{background:rgba(240,104,77,.12);color:var(--down);border-color:rgba(240,104,77,.3)}
 .pill-flat{background:var(--panel2);color:var(--dim)}
+/* Issue #462: a market the engine has stopped updating gets its own colour —
+   "status looks fine" and "nothing is updating this market" are different facts. */
+.pill-stale{background:rgba(232,184,75,.14);color:var(--gold);border-color:rgba(232,184,75,.35)}
 .live-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
 @media(max-width:1000px){.live-grid{grid-template-columns:repeat(2,1fr)}}
 .liveBox{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
@@ -6693,6 +6696,7 @@ textarea:focus-visible,
       <h3 style="margin:0 0 10px">
         <span>🎯 Market Matrix</span>
         <span id="cockpitActiveMarketsBadge" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600">5 ACTIVE MARKETS</span>
+        <span id="cockpitStaleMarketsBadge" class="pill pill-flat" style="font-size:11px;padding:2px 8px;font-weight:600" title="Markets whose strategy update has not run within the staleness threshold">0 STALE</span>
       </h3>
       <div id="cockpitMarketGrid" class="live-grid" style="grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));gap:10px"></div>
     </div>
@@ -13339,6 +13343,7 @@ function renderCockpitUI(st) {
   }
   if (gridEl && st.markets) {
     let gridHtml = '';
+    let staleMarkets = 0;
     for (const item of activeSeries) {
       const m = st.markets[item.slug] || {};
       const midStr = m.mid != null ? `$${m.mid.toFixed(3)}` : '-';
@@ -13359,6 +13364,39 @@ function renderCockpitUI(st) {
         statusBadgeCls = 'pill-osc';
       }
       const statusText = otStatusLabel(marketStatusRaw);
+
+      // Issue #462: per-market tick health. Staleness is the authoritative signal —
+      // "status looks fine" and "nothing is updating this market" are different facts —
+      // so the pill colours by whether updates are actually landing, never by raw error
+      // history: that count is sticky and would leave every market red after a long
+      // enough run, drowning the one signal the operator can act on. History is named in
+      // the tooltip. The one failure that does colour is a market that never once got
+      // through — starving rather than merely scarred, and it would otherwise sit on
+      // "waiting" forever, hiding exactly what this feature exists to show.
+      const tickAge = (m.tick_age_sec === null || m.tick_age_sec === undefined) ? null : m.tick_age_sec;
+      const tickErrors = m.tick_error_count || 0;
+      const tickNeverCompleted = tickAge === null && tickErrors > 0;
+      if (m.tick_stale || tickNeverCompleted) staleMarkets += 1;
+      let healthCls = 'pill-flat';
+      let healthText = 'waiting';
+      if (m.tick_stale) {
+        healthCls = 'pill-stale';
+        healthText = `stale ${Math.round(tickAge)}s`;
+      } else if (tickNeverCompleted) {
+        healthCls = 'pill-mono';
+        healthText = `failed x${tickErrors}`;
+      } else if (tickAge !== null) {
+        healthText = `${tickAge.toFixed(1)}s`;
+      }
+      const healthTooltipParts = [
+        tickAge === null ? 'no strategy update yet' : `last update ${tickAge.toFixed(1)}s ago`,
+      ];
+      if (m.tick_stale) healthTooltipParts.push('stale: the engine has stopped updating this market');
+      if (tickNeverCompleted) healthTooltipParts.push('stale: no update has ever completed for this market');
+      if (tickErrors > 0) {
+        healthTooltipParts.push(`${tickErrors} tick error(s), last: ${m.last_tick_error || 'unknown'}`);
+      }
+      const healthTitle = healthTooltipParts.join(' \u00b7 ');
 
       let posStr = 'FLAT';
       const actualUp = cockpitLegPrice(m, 'up', st?.params?.offset);
@@ -13462,7 +13500,10 @@ function renderCockpitUI(st) {
 
           <div>
             <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
-              <span class="pill ${statusBadgeCls}" style="font-size:9px;padding:2px 6px">${statusText}</span>
+              <span style="display:flex;align-items:center;gap:6px">
+                <span class="pill ${statusBadgeCls}" style="font-size:9px;padding:2px 6px">${statusText}</span>
+                <span class="pill ${healthCls}" style="font-size:9px;padding:2px 6px" title="${esc(healthTitle)}">${esc(healthText)}</span>
+              </span>
               <span class="mono" style="font-size:12px;font-weight:700;color:${pnlColor}">
                 ${mktPnl >= 0 ? '+' : ''}$${mktPnl.toFixed(2)}
               </span>
@@ -13473,6 +13514,14 @@ function renderCockpitUI(st) {
     }
     gridEl.innerHTML = gridHtml;
     wireMarketCardHighlight(gridEl);
+
+    // Issue #462: one number for the whole book, so a starving market is visible
+    // even when the eye is not on its card.
+    const staleBadgeEl = $('cockpitStaleMarketsBadge');
+    if (staleBadgeEl) {
+      staleBadgeEl.textContent = `${staleMarkets} STALE`;
+      staleBadgeEl.className = staleMarkets > 0 ? 'pill pill-stale' : 'pill pill-flat';
+    }
   }
 
   // 4. Tab 1: Render Open Orders & Pre-Quotes Table (9 columns, grouped by pair)
