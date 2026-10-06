@@ -225,9 +225,11 @@ def run_coordinate_descent(
     baseline_result, history).
     """
     def _key(params) -> str:
+        """Stable identity for a params object, so no candidate is evaluated twice."""
         return json.dumps(asdict(params), sort_keys=True, default=str)
 
     def _score(result: SweepRunResult) -> float:
+        """Gate-aware score: a candidate below the sample gate scores -infinity."""
         if not passes_sample_gate(result, min_filled_windows):
             return float("-inf")
         return result.total_pnl_cents
@@ -294,6 +296,7 @@ def confirm_on_holdout(
 ) -> tuple:
     """Confirm the in-sample winner against the baseline on holdout data."""
     def _key(params) -> str:
+        """Stable identity for a params object, so winner and baseline compare by value."""
         return json.dumps(asdict(params), sort_keys=True, default=str)
 
     results = run_sweep(
