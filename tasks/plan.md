@@ -32,7 +32,7 @@ Skipped with reason: the plan is already minimal and complete (sweep-layer only,
 - **Skill:** `test-driven-development`
 - **Verification:** Task 3 gate/split tests fail before / pass after.
 
-### Task 2: [Backend/Logic] Coordinate descent + holdout confirmation + `iterative` CLI (M)
+### [x] Task 2: [Backend/Logic] Coordinate descent + holdout confirmation + `iterative` CLI (M)
 - **Files:** `scripts/sweep_backtest.py` (new functions + main wiring)
 - **Depends on:** Task 1 (gate + split primitives)
 - **Description:** (a) `run_coordinate_descent(...)`: baseline `BacktestParams(quote_shares=size)`, per-pass `deduplicate_grid(generate_sensitivity_grid(base_params=incumbent,...))` via `run_sweep`, skip seen (canonical sorted-keys serialization), reject gate failures, best remaining PnL (ties → grid order), strict improvement to accept (incumbent below gate scores -inf), stop at no-improvement or max_passes, per-pass history with `pN:` labels; (b) `confirm_on_holdout(...)`: one run_sweep for baseline+winner, confirmed iff winner holds gate + strict holdout PnL win (baseline retained → not confirmed), short reason strings; (c) CLI: `iterative` preset + `--min-filled-windows` (default 30), `--holdout-frac` (0.3), `--max-passes` (5), ap.error validation (min ≥ 1, 0 < frac < 1, non-empty partitions; keep --only/requires-sensitivity), console tables + JSON keys (split/history/baselines/winner/params/confirmed/reason), exit 0 always. Knobs default, structural only via --include-structural.
