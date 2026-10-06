@@ -24,9 +24,10 @@ with a stop-loss that the replay does not model and that **real money would not 
    backtest/engine.py` → `0`). So this stop can fire in paper, and can fire in neither of the two
    places a paper result is supposed to predict: real money, and the replay.
 5. The knob meant to disarm the stop (`exit_reversal`, pinned at its maximum `0.50` by the pilot at
-   `scripts/shadow_ev_pilot.py:58`) disarms **only the drift path**, by arithmetic, in *both* engines.
-   It never reaches the paper-only bid-touch path — which is precisely why a night documented as
-   "no stop-loss" took 144 stops.
+   `scripts/shadow_ev_pilot.py:58`) disarms **only the drift path**, by arithmetic, in *both* engines
+   (exactly: for every crossing that is not a ≥50¢ single-tick collapse — see §5). It never reaches the
+   paper-only bid-touch path — which is precisely why a night documented as "no stop-loss" took 144
+   stops.
 6. Therefore the paper number is not evidence of paper pessimism about the strategy: it is mostly the
    cost of a stop that neither the replay nor a real-money run of this configuration would take. The
    gate verdict is unaffected — it was decided by the replay's own `replay_expectancy = −0.9978`
@@ -45,6 +46,15 @@ with a stop-loss that the replay does not model and that **real money would not 
 
 In scope the paper's realized P&L is `−84.55` of the night's realized `−92.34` (total `−95.69`,
 including `−3.35` unrealized); the 5 out-of-scope markets carry the rest.
+
+**Metric note — "against #146's 100%" mixes two denominators.** The register's `optimism_pct` divides by
+the run's night `total_pnl`; #146's own 100% divides by the scoped paper P&L of the prescribed leg
+(`runs/paper/2026-09-11_22-10_IDT/replay_comparison/comparison.md:28` — `$5.265 = 100% of scoped paper
+P&L`, against a replay leg of `$0.00`). On night totals the register's own formula returns **389.3%** for
+that same night — `(6.74 − (−19.50)) / |6.74|`. Both are "share of claimed paper P&L"; they are not the
+same base, so a future run that actually reaches rule 4/5 must settle on one definition before its
+`optimism_pct` can be compared with either figure. This verdict is unaffected: rule 2 fired first, and
+`optimism_pct` is undefined on this night by the rule's own condition (`paper_gross_usd > 0`).
 
 ## 3. Accounting — where the −48.63 difference lives
 
@@ -125,8 +135,17 @@ Why the maximum disarms the drift path *by arithmetic*, in both engines:
 2. On the first tick where the excursion reaches `exit_thresh`, the trigger sees the **previous** max
    (still < 5¢) and does not fire; the same tick then raises the max *and* latches the reversal, because
    `excursion < exit_reversal` is true whenever `exit_reversal > exit_thresh` (5¢ < 50¢).
-3. From the next tick on, `not reversal_seen` blocks the trigger **forever**. The stop is unreachable,
-   not merely rare.
+3. From the next tick on, `not reversal_seen` blocks the trigger for the rest of that round. The stop
+   is therefore unreachable **in practice**, not impossible **in principle**: the latch fails to set on
+   the crossing tick only when that same tick already carries an excursion of `≥ exit_reversal` (50¢),
+   which requires the mid to fall from the leg's entry to `entry − 0.50` inside one second. Nothing caps
+   excursions below 50¢, so that case exists in principle; this night never produced it, and that is now
+   **measured** rather than inferred from the absence of stops. On the engine's own two-sided mid
+   (`book_math.two_sided_mid`), any such crossing tick implies a single-tick mid drop strictly greater
+   than `50¢ − 5¢ = 45¢` regardless of the leg's entry price — and **0 of the 36** scoped windows
+   contains one (`run/analysis/latch_singletick_probe.py`): the night's maximum single-tick mid drop is
+   **0.30**. The trigger itself is live in those same windows — it takes **413** stops at the 0.02
+   default — so this is a property of the latch, not of a quiet night.
 
 Measured, on the same 36 windows, by re-running the replay core with the buffer armed
 (`run/analysis/stop_divergence_probe.py`):
@@ -136,9 +155,11 @@ Measured, on the same 36 windows, by re-running the replay core with the buffer 
 | `exit_reversal = 0.50` (as recorded) | 96 (+28.85) | **0** | 15 (−21.73) | 20 (−43.04) | **−35.92** |
 | `exit_reversal = 0.02` (engine default, parity value) | 139 (+41.77) | **413 (−183.60)** | 2 (−0.10) | 0 | **−141.93** |
 
-Two conclusions. (a) The "0 stops" in §3 is a property of the **latch**, not of the windows — the
-trigger works fine at the default. (b) `exit_reversal` is a **first-order P&L knob** in the backtest
-(±$106 between the two values on two hours), which is why it belongs in the run's own record —
+Two conclusions. (a) The "0 stops" in §3 is a property of the **latch** — unreachable in practice,
+because no window's mid fell 45¢ in one tick (§5 step 3) — not of the windows: the trigger works fine
+at the default.
+(b) `exit_reversal` is a **first-order P&L knob** in the backtest (±$106 between the two values on two
+hours), which is why it belongs in the run's own record —
 recorded as candidate **N2** in `docs/issues/465-noticed-but-not-touching.md`.
 
 The defect is therefore one knob with **two different reach**: wide enough to switch the drift trigger

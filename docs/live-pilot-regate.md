@@ -144,3 +144,20 @@ additional run length would move a rule-2 NO-GO.
   the comparison — the same scope rule #146 used.
 - Engine taker fees (45.31 cents) are tracked separately and excluded from the
   comparison: paper books pairs and settles gross.
+
+### Metric note (appended 2026-10-07 — the pre-registration above is unchanged)
+
+"Report `optimism_pct` against #146's 100%" mixes two denominators. This file's
+`optimism_pct` divides by the run's night `total_pnl`; #146's own 100% divides by the
+scoped paper P&L of its prescribed leg
+(`runs/paper/2026-09-11_22-10_IDT/replay_comparison/comparison.md:28` —
+`$5.265 = 100% of scoped paper P&L`, against a replay leg of `$0.00`). On night totals
+this file's own formula returns **389.3%** for that same night —
+`(6.74 − (−19.50)) / |6.74|`.
+
+The verdict below is unaffected — rule 2 fired first, and `optimism_pct` is undefined
+on this night by the rule's own condition (`paper_gross_usd > 0`) — but a future run
+that reaches rule 4 or 5 must settle on one definition before its number can be
+compared with either. Detail: `docs/issue-465-paper-replay-stop-divergence.md` §2. The
+pre-registration above was not reworded, since this issue's constraint freezes it once
+the numbers exist.
