@@ -10,7 +10,7 @@ Single source of truth for the /runs convention:
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 import re
@@ -36,8 +36,22 @@ _SAFE_SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 
 
 def local_tz_abbr() -> str:
-    """Local zone abbreviation from the machine (e.g. IDT/IST)."""
-    return datetime.now().astimezone().tzname() or "UTC"
+    """Local zone abbreviation from the machine (e.g. IDT/IST).
+
+    Some Windows/Python combinations return the full zone display name
+    (e.g. 'Jerusalem Daylight Time') instead of an abbreviation; such a name
+    breaks new_run_dir's filename-safety gate, so fall back to the
+    fixed-offset form (e.g. 'UTC+03-00').
+    """
+    aware = datetime.now().astimezone()
+    name = aware.tzname() or ""
+    if _SAFE_TZ_RE.match(name):
+        return name
+    offset = aware.utcoffset() or timedelta(0)
+    total_min = int(offset.total_seconds()) // 60
+    sign = "+" if total_min >= 0 else "-"
+    total_min = abs(total_min)
+    return f"UTC{sign}{total_min // 60:02d}-{total_min % 60:02d}"
 
 
 def new_run_dir(kind: RunKind | str, start: datetime, tz_abbr: str,
