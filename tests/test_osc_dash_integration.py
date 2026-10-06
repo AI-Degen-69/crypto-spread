@@ -10808,15 +10808,19 @@ def test_cockpit_staleness_outranks_sticky_error_history():
     """Issue #462: the live alarm owns the pill; sticky history stays in the tooltip.
 
     An error count never resets, so letting it colour the pill would leave every market
-    red after a long enough run and drown the one signal the operator can act on.
+    red after a long enough run and drown the one signal the operator can act on. The
+    single exception is a market that never completed an update at all — starving, not
+    scarred — which must not sit on "waiting" forever either.
     """
     src = client.get("/").text
     block = src[src.index("const tickAge ="):src.index("let posStr")]
 
-    # Only staleness may colour the pill...
-    assert "pill-stale" in block
-    assert "pill-mono" not in block, "a sticky error count must not colour the live pill"
-    # ...and it is decided before the failure history is folded into the tooltip.
-    assert block.index("healthCls = 'pill-stale'") < block.index("if (tickErrors > 0)")
-    # The failure is still surfaced, just not as the colour.
+    # Staleness is decided first and owns the amber colour...
+    assert block.index("healthCls = 'pill-stale'") < block.index("healthCls = 'pill-mono'")
+    # ...and the failure colour is gated on "never completed", never on the raw count.
+    assert "tickNeverCompleted = tickAge === null && tickErrors > 0" in block
+    assert block.index("tickNeverCompleted = tickAge") < block.index("healthCls = 'pill-mono'")
+    # A starving market is counted whichever way it is starving.
+    assert "if (m.tick_stale || tickNeverCompleted) staleMarkets += 1;" in block
+    # The failure is still surfaced in the tooltip.
     assert "healthTooltipParts.push" in block

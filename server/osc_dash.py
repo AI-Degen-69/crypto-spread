@@ -13367,18 +13367,24 @@ function renderCockpitUI(st) {
 
       // Issue #462: per-market tick health. Staleness is the authoritative signal —
       // "status looks fine" and "nothing is updating this market" are different facts —
-      // so the live alarm owns the pill's colour and clears itself the moment the market
-      // updates again. The failure count is sticky history: letting it colour the pill
-      // would leave every market red after a long enough run and drown the one signal
-      // the operator can act on, so it is named in the tooltip instead.
+      // so the pill colours by whether updates are actually landing, never by raw error
+      // history: that count is sticky and would leave every market red after a long
+      // enough run, drowning the one signal the operator can act on. History is named in
+      // the tooltip. The one failure that does colour is a market that never once got
+      // through — starving rather than merely scarred, and it would otherwise sit on
+      // "waiting" forever, hiding exactly what this feature exists to show.
       const tickAge = (m.tick_age_sec === null || m.tick_age_sec === undefined) ? null : m.tick_age_sec;
       const tickErrors = m.tick_error_count || 0;
-      if (m.tick_stale) staleMarkets += 1;
+      const tickNeverCompleted = tickAge === null && tickErrors > 0;
+      if (m.tick_stale || tickNeverCompleted) staleMarkets += 1;
       let healthCls = 'pill-flat';
       let healthText = 'waiting';
       if (m.tick_stale) {
         healthCls = 'pill-stale';
         healthText = `stale ${Math.round(tickAge)}s`;
+      } else if (tickNeverCompleted) {
+        healthCls = 'pill-mono';
+        healthText = `failed x${tickErrors}`;
       } else if (tickAge !== null) {
         healthText = `${tickAge.toFixed(1)}s`;
       }
@@ -13386,6 +13392,7 @@ function renderCockpitUI(st) {
         tickAge === null ? 'no strategy update yet' : `last update ${tickAge.toFixed(1)}s ago`,
       ];
       if (m.tick_stale) healthTooltipParts.push('stale: the engine has stopped updating this market');
+      if (tickNeverCompleted) healthTooltipParts.push('stale: no update has ever completed for this market');
       if (tickErrors > 0) {
         healthTooltipParts.push(`${tickErrors} tick error(s), last: ${m.last_tick_error || 'unknown'}`);
       }

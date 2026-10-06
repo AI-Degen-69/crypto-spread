@@ -4409,7 +4409,7 @@ def test_tick_health_marks_stale_only_while_running():
     """Issue #462: staleness needs a running engine; age alone never paints a market red."""
     engine = LiveTraderEngine(load_persisted=False)
     m = engine.markets[_TICK_HEALTH_SLUG]
-    m._last_strategy_tick_perf = time.perf_counter() - 12.0
+    m._last_completed_tick_perf = time.perf_counter() - 12.0
 
     stopped = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
     assert stopped["tick_age_sec"] > 9.0
@@ -4419,7 +4419,7 @@ def test_tick_health_marks_stale_only_while_running():
     stale = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
     assert stale["tick_stale"] is True
 
-    m._last_strategy_tick_perf = time.perf_counter()
+    m._last_completed_tick_perf = time.perf_counter()
     fresh = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
     assert fresh["tick_stale"] is False
     assert fresh["tick_age_sec"] < 1.0
@@ -4449,26 +4449,22 @@ def test_tick_error_history_survives_a_successful_update():
     assert recovered["last_tick_error"] == "boom"
 
 
-def test_attribute_tick_failure_uses_the_inflight_market():
-    """Issue #462: a failure is blamed on the market whose update was in flight, and on nobody otherwise."""
-    engine = LiveTraderEngine(tokens=["BTC", "ETH"], durations=[300])
-    engine._inflight_strategy_slug = "eth-up-or-down-5m"
+def _failing_engine(tokens=("BTC",), exc=RuntimeError("kaboom")):
+    """An engine whose one real market's strategy update always raises (issue #462)."""
+    engine = LiveTraderEngine(tokens=list(tokens), durations=[300])
+    engine.is_running = True
+    poll = _tick_health_poll(_TICK_HEALTH_SLUG, time.time())
+    engine._poll_single_market = lambda slug: poll if slug == _TICK_HEALTH_SLUG else None
 
-    engine._attribute_tick_failure(RuntimeError("kaboom"))
+    def _boom(slug, res, now):
+        raise exc
 
-    eth = engine.get_state()["markets"]["eth-up-or-down-5m"]
-    btc = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
-    assert eth["tick_error_count"] == 1
-    assert eth["last_tick_error"] == "kaboom"
-    assert btc["tick_error_count"] == 0
-
-    engine._inflight_strategy_slug = None
-    engine._attribute_tick_failure(RuntimeError("unattributable"))
-    assert engine.get_state()["markets"]["eth-up-or-down-5m"]["tick_error_count"] == 1
+    engine._update_market_strategy = _boom
+    return engine
 
 
-def test_tick_all_markets_clears_the_inflight_slug():
-    """Issue #462: the in-flight marker never leaks past a finished tick."""
+def test_tick_all_markets_stamps_the_completion_clock_only_on_success():
+    """Issue #462: health measures a completed update, not an attempted one."""
     import asyncio
 
     engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
@@ -4478,29 +4474,63 @@ def test_tick_all_markets_clears_the_inflight_slug():
 
     asyncio.run(engine._tick_all_markets())
 
-    assert engine._inflight_strategy_slug is None
-    assert engine.markets[_TICK_HEALTH_SLUG]._last_strategy_tick_perf is not None
+    assert engine.markets[_TICK_HEALTH_SLUG]._last_completed_tick_perf is not None
+    assert engine.get_state()["markets"][_TICK_HEALTH_SLUG]["tick_age_sec"] < 5.0
 
 
-def test_tick_all_markets_still_propagates_a_market_failure():
-    """Issue #462: the in-flight mark is bookkeeping (try/finally), not a swallowing guard.
+def test_a_market_failing_every_tick_is_attributed_and_still_reads_stale():
+    """Issue #462: the failure lands on the right market, and that market cannot look fresh.
 
-    Per-market isolation belongs to #461, so this asserts the opposite: a failing update
-    still aborts the tick exactly as it did before, and the marker never leaks out.
+    Two ways this silently breaks, both caught here: attribution done anywhere but the
+    call site loses the slug before the handler runs (count stays 0), and reading the
+    #221 timing clock would re-stamp every tick and report a starving market as fresh.
     """
     import asyncio
 
-    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine = _failing_engine(tokens=("BTC", "ETH"))
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="kaboom"):
+            asyncio.run(engine._tick_all_markets())
+
+    btc = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert btc["tick_error_count"] == 2
+    assert btc["last_tick_error"] == "kaboom"
+    # No update ever completed, so there is no age to report — and the market must not
+    # be able to borrow one from the attempt clock (proved in the test below).
+    assert engine.markets[_TICK_HEALTH_SLUG]._last_completed_tick_perf is None
+    assert btc["tick_age_sec"] is None
+    # No cross-attribution: a failure in one market is never blamed on another.
+    assert engine.get_state()["markets"]["eth-up-or-down-5m"]["tick_error_count"] == 0
+
+
+def test_tick_health_reads_the_completion_clock_not_the_attempt_clock():
+    """Issue #462: a fresh *attempt* must not make a market whose updates keep failing look healthy.
+
+    `_update_market_strategy` stamps `_last_strategy_tick_perf` before it does any work, so
+    reading that clock for health would re-stamp on every failing tick and report a
+    starving market as fresh — the exact case this feature exists to surface.
+    """
+    engine = LiveTraderEngine(load_persisted=False)
     engine.is_running = True
-    poll = _tick_health_poll(_TICK_HEALTH_SLUG, time.time())
-    engine._poll_single_market = lambda slug: poll if slug == _TICK_HEALTH_SLUG else None
+    m = engine.markets[_TICK_HEALTH_SLUG]
+    m._last_strategy_tick_perf = time.perf_counter()
+    m._last_completed_tick_perf = time.perf_counter() - 12.0
 
-    def _boom(slug, res, now):
-        raise RuntimeError("kaboom")
+    health = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert health["tick_age_sec"] > 9.0
+    assert health["tick_stale"] is True
 
-    engine._update_market_strategy = _boom
 
-    with pytest.raises(RuntimeError, match="kaboom"):
-        asyncio.run(engine._tick_all_markets())
+def test_timing_statistics_reset_does_not_wipe_tick_health():
+    """Issue #462: resetting the #221 timing stats must not erase a live health signal."""
+    engine = _failing_engine()
+    engine._record_tick_error(_TICK_HEALTH_SLUG, RuntimeError("kaboom"))
+    engine.markets[_TICK_HEALTH_SLUG]._last_completed_tick_perf = time.perf_counter() - 12.0
 
-    assert engine._inflight_strategy_slug is None
+    engine.reset_tick_timing_stats()
+
+    assert engine.markets[_TICK_HEALTH_SLUG]._last_strategy_tick_perf is None
+    health = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert health["tick_age_sec"] is not None and health["tick_age_sec"] > 9.0
+    assert health["tick_error_count"] == 1

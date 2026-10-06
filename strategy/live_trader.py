@@ -838,7 +838,11 @@ class MarketLiveState:
         self._last_strategy_tick_perf: Optional[float] = None
         self._tick_intervals: deque[float] = deque(maxlen=1000)
         # Tick health for the cockpit (issue #462): display-only, never read by a
-        # trading decision. The age itself comes from `_last_strategy_tick_perf`.
+        # trading decision. The age reads its own clock, stamped only after an update
+        # *completes* — `_last_strategy_tick_perf` above is written at the top of the
+        # update, so a market whose update raises every tick would re-stamp it and read
+        # as fresh, and a timing-statistics reset would wipe the health signal entirely.
+        self._last_completed_tick_perf: Optional[float] = None
         self._last_tick_error: Optional[str] = None
         self._last_tick_error_perf: Optional[float] = None
         self._tick_error_count: int = 0
@@ -990,9 +994,6 @@ class LiveTraderEngine:
         self._clob_client: Optional[Any] = None
         self._orders_cache: List[Dict[str, Any]] = []
         self._orders_cache_ts: float = 0.0
-        # Issue #462: the slug whose strategy update is running right now, so a tick
-        # failure can be attributed to a market instead of to "somewhere".
-        self._inflight_strategy_slug: Optional[str] = None
         self.quoting_halted: bool = False
         
         # Unified tick authority
@@ -2593,12 +2594,13 @@ class LiveTraderEngine:
             # name, so the seeker bar shows nothing instead of showing a lie.
             dur = (d["end_ts"] - d["start_ts"]) if d["end_ts"] > d["start_ts"] else 0.0
             d["win_duration_sec"] = round(dur, 3)
-            # Tick health (issue #462), display only. The age reads the perf clock the
-            # engine already stamps at the top of every strategy update (#221); a market
-            # that never ticked reports None so a fresh start never paints it stale, and
-            # staleness needs a running engine — a stopped bot is not a starving one.
+            # Tick health (issue #462), display only. The age reads the clock stamped
+            # only after a strategy update *completes*, so a market that keeps failing
+            # goes stale instead of reading fresh. A market that never completed an
+            # update reports None so a fresh start never paints it stale, and staleness
+            # needs a running engine — a stopped bot is not a starving one.
             mstate = self.markets[slug]
-            last_perf = mstate._last_strategy_tick_perf
+            last_perf = mstate._last_completed_tick_perf
             age = None if last_perf is None else max(0.0, time.perf_counter() - last_perf)
             d["tick_age_sec"] = None if age is None else round(age, 3)
             d["tick_stale"] = bool(
@@ -3889,21 +3891,6 @@ class LiveTraderEngine:
         mstate._last_tick_error_perf = time.perf_counter()
         mstate._tick_error_count += 1
 
-    def _attribute_tick_failure(self, exc: BaseException) -> None:
-        """Attribute a tick failure to the market whose update was in flight (issue #462).
-
-        Heuristic by design: the dispatch loop is sequential, so an error raised inside a
-        market's update is attributed exactly, while an error raised by tick bookkeeping
-        outside any update lands on whoever was last in flight. Staleness — not this — is
-        the authoritative signal in the cockpit, and no per-market isolation happens here
-        (#461 owns that).
-        """
-        slug = self._inflight_strategy_slug
-        if slug is None:
-            log.error("Tick failure outside any market update: %s", exc)
-            return
-        self._record_tick_error(slug, exc)
-
     async def _run_loop(self):
         """Main async ticker loop (1s resolution)."""
         log.info("LiveTraderEngine background loop running")
@@ -3911,7 +3898,6 @@ class LiveTraderEngine:
             try:
                 await self._tick_all_markets()
             except Exception as e:
-                self._attribute_tick_failure(e)
                 log.error("Error in LiveTraderEngine tick: %s", e, exc_info=True)
             await asyncio.sleep(1.0)
 
@@ -3937,14 +3923,20 @@ class LiveTraderEngine:
                     log.warning("Poll exception for %s: %s", slug, res)
                     continue
                 if res:
-                    # Issue #462: mark the market whose update is running so a failure
-                    # raised inside it can be attributed to it, and never leak the mark
-                    # past this market's update.
-                    self._inflight_strategy_slug = slug
                     try:
                         self._update_market_strategy(slug, res, now)
-                    finally:
-                        self._inflight_strategy_slug = None
+                    except Exception as exc:
+                        # Issue #462: record the failure against the market whose update
+                        # raised — attribution, not isolation — then re-raise unchanged.
+                        # The attribution lives here because the `slug` local is the only
+                        # place it is still known; the whole-tick catch in `_run_loop`
+                        # cannot tell which market aborted. Per-market isolation remains
+                        # #461's deliverable.
+                        self._record_tick_error(slug, exc)
+                        raise
+                    # Stamped only on completion, so health answers "is this market
+                    # actually being updated" rather than "was an update attempted".
+                    self.markets[slug]._last_completed_tick_perf = time.perf_counter()
 
             active_tokens = []
             for m in self.markets.values():
