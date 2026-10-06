@@ -917,4 +917,6 @@ def test_cli_iterative_rejects_empty_holdout_and_bad_frac(tmp_path: Path):
         sweep_main([str(ticks), "--preset", "iterative"])
     with pytest.raises(SystemExit):
         sweep_main([str(ticks), "--preset", "iterative", "--holdout-frac", "0"])
+    with pytest.raises(SystemExit):
+        sweep_main([str(ticks), "--preset", "iterative", "--max-passes", "0"])
 

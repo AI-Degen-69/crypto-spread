@@ -819,6 +819,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.preset == "iterative":
         if args.min_filled_windows < 1:
             ap.error("--min-filled-windows must be at least 1")
+        if args.max_passes < 1:
+            ap.error("--max-passes must be at least 1")
         if not 0.0 < args.holdout_frac < 1.0:
             ap.error("--holdout-frac must be strictly between 0 and 1")
     size = max(5, args.size)
