@@ -18,7 +18,7 @@
 
 ## 4. Boundaries — do not touch
 - Trading logic: quoting, entry/exit gates, sizing, stop/bid resolution, and anything consumed by a trade decision.
-- `_tick_all_markets`'s exception behaviour (no new try/except around the strategy call) — #461 owns it.
+- `_tick_all_markets`'s exception behaviour: no new **`except`** around the strategy call, so a failing update still aborts the tick exactly as it did before — #461 owns per-market isolation. A `try/finally` that only resets the in-flight attribution mark is allowed: it catches nothing and changes no propagation.
 - The stream protocol shape (`DashboardEnvelope`, event names) and `/api/live/state`'s existing fields.
 - No new dependencies; the dashboard stays a single self-contained FastAPI module.
 

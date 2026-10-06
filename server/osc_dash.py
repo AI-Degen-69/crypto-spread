@@ -13367,15 +13367,16 @@ function renderCockpitUI(st) {
 
       // Issue #462: per-market tick health. Staleness is the authoritative signal —
       // "status looks fine" and "nothing is updating this market" are different facts —
-      // and a recorded failure colours the pill even while the market is updating again.
+      // so the live alarm owns the pill's colour and clears itself the moment the market
+      // updates again. The failure count is sticky history: letting it colour the pill
+      // would leave every market red after a long enough run and drown the one signal
+      // the operator can act on, so it is named in the tooltip instead.
       const tickAge = (m.tick_age_sec === null || m.tick_age_sec === undefined) ? null : m.tick_age_sec;
+      const tickErrors = m.tick_error_count || 0;
       if (m.tick_stale) staleMarkets += 1;
       let healthCls = 'pill-flat';
       let healthText = 'waiting';
-      if (m.tick_error_count > 0) {
-        healthCls = 'pill-mono';
-        healthText = `failed x${m.tick_error_count}`;
-      } else if (m.tick_stale) {
+      if (m.tick_stale) {
         healthCls = 'pill-stale';
         healthText = `stale ${Math.round(tickAge)}s`;
       } else if (tickAge !== null) {
@@ -13385,8 +13386,8 @@ function renderCockpitUI(st) {
         tickAge === null ? 'no strategy update yet' : `last update ${tickAge.toFixed(1)}s ago`,
       ];
       if (m.tick_stale) healthTooltipParts.push('stale: the engine has stopped updating this market');
-      if (m.tick_error_count > 0) {
-        healthTooltipParts.push(`${m.tick_error_count} tick error(s), last: ${m.last_tick_error || 'unknown'}`);
+      if (tickErrors > 0) {
+        healthTooltipParts.push(`${tickErrors} tick error(s), last: ${m.last_tick_error || 'unknown'}`);
       }
       const healthTitle = healthTooltipParts.join(' \u00b7 ');
 

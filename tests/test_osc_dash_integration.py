@@ -10802,3 +10802,21 @@ def test_cockpit_tick_health_pill_contract():
     assert "esc(healthTitle)" in html
     # Stale markets are counted once per card render.
     assert "staleMarkets += 1" in html
+
+
+def test_cockpit_staleness_outranks_sticky_error_history():
+    """Issue #462: the live alarm owns the pill; sticky history stays in the tooltip.
+
+    An error count never resets, so letting it colour the pill would leave every market
+    red after a long enough run and drown the one signal the operator can act on.
+    """
+    src = client.get("/").text
+    block = src[src.index("const tickAge ="):src.index("let posStr")]
+
+    # Only staleness may colour the pill...
+    assert "pill-stale" in block
+    assert "pill-mono" not in block, "a sticky error count must not colour the live pill"
+    # ...and it is decided before the failure history is folded into the tooltip.
+    assert block.index("healthCls = 'pill-stale'") < block.index("if (tickErrors > 0)")
+    # The failure is still surfaced, just not as the colour.
+    assert "healthTooltipParts.push" in block

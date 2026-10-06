@@ -4480,3 +4480,27 @@ def test_tick_all_markets_clears_the_inflight_slug():
 
     assert engine._inflight_strategy_slug is None
     assert engine.markets[_TICK_HEALTH_SLUG]._last_strategy_tick_perf is not None
+
+
+def test_tick_all_markets_still_propagates_a_market_failure():
+    """Issue #462: the in-flight mark is bookkeeping (try/finally), not a swallowing guard.
+
+    Per-market isolation belongs to #461, so this asserts the opposite: a failing update
+    still aborts the tick exactly as it did before, and the marker never leaks out.
+    """
+    import asyncio
+
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+    poll = _tick_health_poll(_TICK_HEALTH_SLUG, time.time())
+    engine._poll_single_market = lambda slug: poll if slug == _TICK_HEALTH_SLUG else None
+
+    def _boom(slug, res, now):
+        raise RuntimeError("kaboom")
+
+    engine._update_market_strategy = _boom
+
+    with pytest.raises(RuntimeError, match="kaboom"):
+        asyncio.run(engine._tick_all_markets())
+
+    assert engine._inflight_strategy_slug is None
