@@ -1,0 +1,5 @@
+# #459 — Noticed but not touching
+
+| ID | Candidate | Discovering station | Evidence | Status | Disposition |
+|----|-----------|--------------------|----------|--------|-------------|
+| N1 | `_tick_all_markets` dispatches `self._update_market_strategy(slug, res, now)` with no per-market guard — only the fetch results are checked (`if isinstance(res, Exception)`), while `_run_loop` catches at whole-tick level. One market's exception therefore aborts the strategy update for every later market in that tick, which is exactly the blast radius this defect produced: the malformed call logged once per second while the remaining markets went stale. Isolation per market (log the slug, continue) is the real fix for the radius | iii-build-plan | `strategy/live_trader.py:3872-3886` (loop + unguarded call), `strategy/live_trader.py:3867-3869` (`_run_loop` catch) | open | — |
