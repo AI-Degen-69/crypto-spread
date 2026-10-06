@@ -10778,3 +10778,27 @@ def test_api_backtest_with_golden_directory(monkeypatch, tmp_path):
     assert "run_id" in data
 
 
+# --- Issue #462: per-market tick health in the live cockpit ---
+
+
+def test_cockpit_exposes_stale_markets_badge():
+    """Issue #462: the cockpit header carries a stale-market counter next to the active count."""
+    html = client.get("/").text
+    assert 'id="cockpitStaleMarketsBadge"' in html
+    assert "0 STALE" in html
+    assert "cockpitActiveMarketsBadge" in html
+
+
+def test_cockpit_tick_health_pill_contract():
+    """Issue #462: the grid renders a health pill built from the engine's tick-health fields."""
+    html = client.get("/").text
+    # A dedicated colour, so "nothing is updating this market" never reads like
+    # "this market's status changed".
+    assert re.search(r"\.pill-stale\{[^}]*var\(--gold\)", html)
+    for field in ("tick_age_sec", "tick_stale", "tick_error_count", "last_tick_error"):
+        assert field in html, f"cockpit render does not consume {field}"
+    assert "cockpitStaleMarketsBadge" in html
+    # The error text reaches a tooltip, so it must go through the escaper.
+    assert "esc(healthTitle)" in html
+    # Stale markets are counted once per card render.
+    assert "staleMarkets += 1" in html
