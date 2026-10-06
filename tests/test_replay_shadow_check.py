@@ -182,19 +182,29 @@ def test_default_scope_is_the_frozen_146_constants():
 
 
 def _write_run(run_dir, *, started: str, stopped: str,
-               universe: tuple[str, ...] = ("xrp-up-or-down-15m",)) -> None:
+               universe: tuple[str, ...] = ("xrp-up-or-down-15m",),
+               start_in_final: bool = False) -> None:
+    """Write a run dir in the shape the pilot actually records.
+
+    The pilot stamps started_utc into data/meta.json (:142) and writes only
+    stopped_utc into data/final.json — every recorded run on disk, including
+    the #146 one, has no started_utc in final.json. `start_in_final` writes
+    the legacy shape so the fallback stays covered.
+    """
     data = run_dir / "data"
     data.mkdir(parents=True)
     (data / "meta.json").write_text(
-        json.dumps({"config_hypothesis": {"universe": list(universe)}}),
+        json.dumps({"started_utc": started,
+                    "config_hypothesis": {"universe": list(universe)}}),
         encoding="utf-8")
-    (data / "final.json").write_text(
-        json.dumps({"started_utc": started, "stopped_utc": stopped}),
-        encoding="utf-8")
+    final = {"stopped_utc": stopped}
+    if start_in_final:
+        final["started_utc"] = started
+    (data / "final.json").write_text(json.dumps(final), encoding="utf-8")
 
 
 def test_derive_scope_reads_universe_and_times_from_run(tmp_path):
-    """UNIVERSE comes from meta.json, T0/T1 from final.json, OUT_DIR stays inside."""
+    """UNIVERSE+T0 come from meta.json, T1 from final.json, OUT_DIR stays inside."""
     run_dir = tmp_path / "2026-10-06_22-10_IDT"
     _write_run(run_dir, started="2026-10-06T22:10:54.616454+00:00",
                stopped="2026-10-07T09:10:58.928115+00:00",
@@ -207,6 +217,49 @@ def test_derive_scope_reads_universe_and_times_from_run(tmp_path):
     assert scope.t0 < scope.t1
     assert scope.t1 == datetime.datetime.fromisoformat(
         "2026-10-07T09:10:58.928115+00:00").timestamp()
+
+
+def test_derive_scope_reads_start_from_meta_when_final_lacks_it(tmp_path):
+    """The recorded shape (no started_utc in final.json) still derives a scope.
+
+    Regression for the T2 assumption that failed on the first real run: the
+    driver must not depend on a key no writer has ever produced.
+    """
+    run_dir = tmp_path / "2026-10-06_17-48_UTC+03-00"
+    _write_run(run_dir, started="2026-10-06T14:48:37.977556+00:00",
+               stopped="2026-10-06T16:48:43.452185+00:00")
+    final = json.loads((run_dir / "data" / "final.json").read_text(encoding="utf-8"))
+    assert "started_utc" not in final, "fixture must match the recorded layout"
+    scope = mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+    assert scope.t0 == datetime.datetime.fromisoformat(
+        "2026-10-06T14:48:37.977556+00:00").timestamp()
+    assert scope.t1 == datetime.datetime.fromisoformat(
+        "2026-10-06T16:48:43.452185+00:00").timestamp()
+
+
+def test_derive_scope_falls_back_to_final_start_stamp(tmp_path):
+    """A legacy run dir carrying started_utc only in final.json still derives."""
+    run_dir = tmp_path / "legacy"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00", start_in_final=True)
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    del meta["started_utc"]
+    (run_dir / "data" / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    scope = mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+    assert scope.t0 == datetime.datetime.fromisoformat(
+        "2026-10-06T22:10:00+00:00").timestamp()
+
+
+def test_derive_scope_without_any_start_stamp_names_both_files(tmp_path):
+    """No start stamp at all fails loudly, naming where it looked."""
+    run_dir = tmp_path / "stampless"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00")
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    del meta["started_utc"]
+    (run_dir / "data" / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="started_utc"):
+        mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
 
 
 def test_derive_scope_defaults_ticks_to_the_stop_day(tmp_path, monkeypatch):

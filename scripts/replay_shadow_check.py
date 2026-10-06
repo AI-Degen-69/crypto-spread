@@ -17,9 +17,9 @@ Usage:
     python -m scripts.replay_shadow_check
         # bare: frozen #146 reproduction (module defaults below)
     python -m scripts.replay_shadow_check --run runs/paper/<id> [--ticks <jsonl>]
-        # scope an arbitrary run: UNIVERSE from its data/meta.json,
-        # T0/T1 from its data/final.json (started_utc/stopped_utc),
-        # OUT_DIR inside the run dir (issue #465 T2).
+        # scope an arbitrary run: UNIVERSE + T0 from its data/meta.json,
+        # T1 from data/final.json (stopped_utc), OUT_DIR inside the run dir
+        # (issue #465 T2).
 """
 from __future__ import annotations
 
@@ -103,15 +103,27 @@ def _parse_utc(stamp: str) -> float:
 def derive_scope(run_dir: Path, ticks_file: Path | None = None) -> RunScope:
     """Resolve the scope from a run's own artifacts (issue #465 T2).
 
-    UNIVERSE comes from data/meta.json config_hypothesis; T0/T1 from
-    data/final.json started_utc/stopped_utc; OUT_DIR stays inside the run.
+    UNIVERSE and the start stamp T0 come from data/meta.json (written at
+    run start); T1 comes from data/final.json stopped_utc (written at stop);
+    OUT_DIR stays inside the run. The pilot records no started_utc in
+    final.json, so both files are read for the start stamp — a run dir in
+    either shape derives a scope.
     Without an explicit ticks file, the coverage file named for the stop
     date is required (the overnight pattern: collection floors at midnight).
     """
     meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
     final = json.loads((run_dir / "data" / "final.json").read_text(encoding="utf-8"))
     universe = tuple(meta["config_hypothesis"]["universe"])
-    t0 = _parse_utc(final["started_utc"])
+    started = meta.get("started_utc") or final.get("started_utc")
+    if not started:
+        raise RuntimeError(
+            f"run {run_dir}: no start stamp — expected started_utc in "
+            f"data/meta.json or data/final.json")
+    if not final.get("stopped_utc"):
+        raise RuntimeError(
+            f"run {run_dir}: no stop stamp — expected stopped_utc in "
+            f"data/final.json")
+    t0 = _parse_utc(started)
     t1 = _parse_utc(final["stopped_utc"])
     if not t1 > t0:
         raise RuntimeError(
