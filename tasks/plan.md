@@ -39,7 +39,7 @@ Skipped with reason: the plan is already minimal and complete (sweep-layer only,
 - **Skill:** `test-driven-development`
 - **Verification:** Task 3 descent/confirm/CLI tests fail before / pass after.
 
-### Task 3: [Backend/Logic] Regression tests + glossary term (M)
+### [x] Task 3: [Backend/Logic] Regression tests + glossary term (M)
 - **Files:** `tests/test_sweep_backtest.py`, `docs/glossary.md`
 - **Depends on:** Task 2
 - **Description:** (a) extend `_make_window_result` with filled_up/down (defaults preserved); metric test (settlement/paired/stopped/no-fill → count 3); RUN_0153-shape gate reject + 30-window accept; (b) split test (15-min crosser purged, no-clock counted, disjoint CIDs, max-in-end ≤ min-hold-start, deterministic); (c) descent test with monkeypatched run_sweep (1-window high-PnL never accepted, queue+offset coordinates preserved, terminates ≤ max_passes) + confirmation accept/reject cases; (d) CLI test (tmp ticks → exit 0, iterative keys, confirmed false on tiny data; SystemExit on empty holdout and frac 0); (e) glossary "filled window" line. Weaken nothing. Record (don't fix) the overnight total_trades undercount as a noticed row if surfaced.
