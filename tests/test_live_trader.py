@@ -3235,6 +3235,112 @@ def test_dead_zone_expiry_exit_fires_once_across_repeated_ticks():
     assert m.stops_count == stops_after_first  # cumulative counters preserved
 
 
+def _naked_up_filled_at_50_50(engine: LiveTraderEngine, slug: str, market: Any, now: float) -> MarketLiveState:
+    """Open 50/50 quotes and fill the UP leg alone, leaving a naked UP position."""
+    _open_50_50_quotes(engine, slug, market, now - 1)
+    engine._update_market_strategy(slug, {
+        "market": market,
+        "up_book": {"best_bid": 0.47, "best_ask": 0.479},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }, now)
+    m = engine.markets[slug]
+    assert m.filled_up is True and m.filled_down is False
+    return m
+
+
+def _unmarked_up_poll(market: Any) -> dict:
+    """Poll whose naked UP side carries no direct book bid, while the DOWN ask stays markable."""
+    return {
+        "market": market,
+        "up_book": {"best_bid": None, "best_ask": 0.505},
+        "down_book": {"best_bid": 0.51, "best_ask": 0.52},
+    }
+
+
+# 300s window with a 10% dead zone opens the dead zone at 270s elapsed (29s remaining at +261s).
+_DEAD_ZONE_TICK_AT = 261.0
+
+
+def test_dead_zone_expiry_resolves_unmarked_bid_through_the_ladder():
+    """Issue #459: with no direct book bid, the expiry exit marks through the shared ladder."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
+    m = _naked_up_filled_at_50_50(engine, slug, market, now)
+
+    engine._update_market_strategy(slug, _unmarked_up_poll(market), now + _DEAD_ZONE_TICK_AT)
+
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert m.exit_side == "UP"
+    assert len(engine.trades) == 1
+    # Ladder stage 2: binary complement of the DOWN ask (1.0 - 0.52), not the raw tuple.
+    assert engine.trades[0].exit_price == pytest.approx(0.48)
+    assert "Dead-zone expiry exit" in engine.trades[0].notes
+
+
+def test_dead_zone_expiry_holds_when_the_ladder_cannot_mark(monkeypatch):
+    """Issue #459: a failing ladder holds the exit instead of inventing a price."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
+    m = _naked_up_filled_at_50_50(engine, slug, market, now)
+
+    def _never_resolves(mstate, side):
+        raise RuntimeError("no executable book mark")
+
+    monkeypatch.setattr(engine, "_resolve_exit_bid", _never_resolves)
+    stop_id_before, stop_status_before = m.stop_order_id, m.stop_order_status
+
+    engine._update_market_strategy(slug, _unmarked_up_poll(market), now + _DEAD_ZONE_TICK_AT)
+
+    assert m.exit_taken is False
+    assert m.status != "STOP_EXIT_PENDING"
+    assert len(engine.trades) == 0
+    # The held exit must not touch the staged stop handle either.
+    assert m.stop_order_id == stop_id_before
+    assert m.stop_order_status == stop_status_before
+
+
+def test_dead_zone_expiry_holds_then_exits_once_when_the_book_returns(monkeypatch):
+    """Issue #459: the held leg is re-evaluated next tick and books exactly one exit."""
+    engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
+    engine.start()
+    slug = "btc-up-or-down-5m"
+    now = time.time()
+    market = _naked_market(now, elapsed=10.0, duration=300.0)
+    m = _naked_up_filled_at_50_50(engine, slug, market, now)
+
+    real_resolve = engine._resolve_exit_bid
+    calls = {"n": 0}
+
+    def _fails_then_delegates(mstate, side):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("no executable book mark")
+        return real_resolve(mstate, side)
+
+    monkeypatch.setattr(engine, "_resolve_exit_bid", _fails_then_delegates)
+
+    engine._update_market_strategy(slug, _unmarked_up_poll(market), now + _DEAD_ZONE_TICK_AT)
+    assert calls["n"] == 1
+    assert m.exit_taken is False
+    assert len(engine.trades) == 0
+
+    engine._update_market_strategy(slug, _unmarked_up_poll(market), now + _DEAD_ZONE_TICK_AT + 1.0)
+    assert calls["n"] == 2
+    assert m.exit_taken is True
+    assert m.status == "STOP_EXIT"
+    assert m.exit_side == "UP"
+    assert len(engine.trades) == 1
+    assert engine.trades[0].exit_price == pytest.approx(0.48)
+    assert "Dead-zone expiry exit" in engine.trades[0].notes
+
+
 def test_ordinary_stop_before_dead_zone_blocks_later_expiry_exit():
     """Issue #451: an ordinary stop that finalizes first leaves no second expiry trade."""
     engine = LiveTraderEngine(load_persisted=False, naked_leg_at_expiry="close", dead_zone_val=0.10, dead_zone_unit="pct")
