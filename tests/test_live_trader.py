@@ -3890,6 +3890,21 @@ def test_shadow_snapshot_exports_book_bids():
     assert mkt["last_valid_down_ask"] == 0.51
 
 
+def test_shadow_pilot_runs_the_measured_naked_leg_decision():
+    """Issue #465: the pilot must exercise the configuration the repo measured, not a rejected one.
+
+    The close-vs-hold question was measured by #223 and decided `close` decisively, and
+    `close` is the engine default. A pilot pinned to `hold` would validate a rejected
+    configuration and would have to override a measured default to do it.
+    """
+    from scripts.shadow_ev_pilot import build_engine
+
+    engine = build_engine(delay=60.0, shares=5, starting_balance=1000.0)
+
+    assert engine.naked_leg_at_expiry == "close"
+    assert engine.mode == "paper"
+
+
 def test_unpriceable_book_yields_none_mid_and_no_drift():
     """Issue #207: unpriceable book sets mstate.mid to None and does NOT accumulate drift."""
     engine = LiveTraderEngine(load_persisted=False)
