@@ -49,6 +49,9 @@ class SweepRunResult:
     # recovered after the adverse-open gate skipped them, and their net PnL.
     reentered_windows: int
     reentered_pnl_cents: float
+    # Issue #455: windows with at least one filled leg, counted once — the
+    # unit of the sample gate (includes settlement-only legs).
+    filled_windows: int = 0
 
     def to_dict(self) -> dict:
         """Serialize run result to dictionary."""
@@ -83,10 +86,12 @@ def compute_metrics(
             per_series_pnl={},
             reentered_windows=0,
             reentered_pnl_cents=0.0,
+            filled_windows=0,
         )
 
     pairs = sum(1 for w in window_results if w.pair_captured)
     exits = sum(1 for w in window_results if w.exit_taken)
+    filled_windows = sum(1 for w in window_results if w.filled_up or w.filled_down)
     pnls = [(w.pnl_cents - w.fees_cents) * size for w in window_results]
     wins = sum(1 for p in pnls if p > 0)
     total_pnl = sum(pnls)
@@ -142,7 +147,64 @@ def compute_metrics(
         per_series_pnl=per_series_pnl,
         reentered_windows=reentered_windows,
         reentered_pnl_cents=round(reentered_pnl_cents, 2),
+        filled_windows=filled_windows,
     )
+
+
+# Issue #455: a configuration with fewer filled windows than this never
+# becomes an incumbent or a confirmed winner, no matter its PnL.
+MIN_FILLED_WINDOWS = 30
+
+
+def passes_sample_gate(result: SweepRunResult, min_filled_windows: int = MIN_FILLED_WINDOWS) -> bool:
+    """True only when the result rests on a real trade sample."""
+    return result.filled_windows >= min_filled_windows
+
+
+def split_windows_chronologically(
+    grouped_windows: list[tuple[str, list[dict]]],
+    holdout_frac: float,
+) -> tuple[list[tuple[str, list[dict]]], list[tuple[str, list[dict]]], dict]:
+    """Split whole CID groups into in-sample and holdout partitions.
+
+    The boundary T is the start_ts at floor(n * (1 - holdout_frac)) over
+    start_ts-sorted clocked windows. In-sample takes end_ts <= T, holdout
+    takes start_ts >= T; crossing windows are purged, unclocked ones counted.
+    """
+    clocked: list[tuple[float, float, tuple[str, list[dict]]]] = []
+    unclocked = 0
+    for group in grouped_windows:
+        first = group[1][0] if len(group) > 1 and group[1] else {}
+        try:
+            start_ts = float(first.get("start_ts"))
+            end_ts = float(first.get("end_ts"))
+        except (TypeError, ValueError):
+            unclocked += 1
+            continue
+        if not (math.isfinite(start_ts) and math.isfinite(end_ts) and end_ts > start_ts):
+            unclocked += 1
+            continue
+        clocked.append((start_ts, end_ts, group))
+    clocked.sort(key=lambda item: item[0])
+    n = len(clocked)
+    boundary = clocked[math.floor(n * (1.0 - holdout_frac))][0] if n else 0.0
+    in_sample: list[tuple[str, list[dict]]] = []
+    holdout: list[tuple[str, list[dict]]] = []
+    purged = 0
+    for start_ts, end_ts, group in clocked:
+        if end_ts <= boundary:
+            in_sample.append(group)
+        elif start_ts >= boundary:
+            holdout.append(group)
+        else:
+            purged += 1
+    summary = {
+        "in_sample": len(in_sample),
+        "holdout": len(holdout),
+        "purged": purged,
+        "unclocked": unclocked,
+    }
+    return in_sample, holdout, summary
 
 
 def generate_sensitivity_grid(
