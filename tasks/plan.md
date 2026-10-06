@@ -46,7 +46,7 @@ Skipped with reason: the plan is already minimal and complete (sweep-layer only,
 - **Skill:** `test-driven-development`
 - **Verification:** new tests fail pre-fix, pass post-fix.
 
-### Task 4: [Backend/Logic] Targeted verification sweep (XS)
+### [x] Task 4: [Backend/Logic] Targeted verification sweep (XS)
 - **Files:** none (verification only)
 - **Depends on:** Task 3
 - **Description:** run `python -m pytest tests/test_sweep_backtest.py -q`. No full-suite local run; no CI gate exists. Confirm glossary terms in comments where touched.
