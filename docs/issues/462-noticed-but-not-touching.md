@@ -1,0 +1,5 @@
+# #462 — Noticed but not touching
+
+| ID | Candidate | Discovering station | Evidence | Status | Disposition |
+|----|-----------|--------------------|----------|--------|-------------|
+| N1 | The Station IV browser gate writes `.playwright-cli/` into the repo root and the repo does not ignore it, so the pipeline's own required gate leaves the tree dirty and breaks Station VI's Clean Exit Gate (`git status --porcelain` must be empty). Encountered twice inside this one session — created by the first gate, deleted by hand before the fix commit, re-created by the post-fix re-run that Step 3 mandates | iv-review-build-and-pr | `.playwright-cli/` in the repo root after `playwright-cli open`; `git check-ignore -v .playwright-cli` reports it unignored; `git status --porcelain` prints `?? .playwright-cli/` | published | Published as #464 at the #462 closeout (operator-approved). Not fixed here: Station VI's single code-change exception is dead code, and this is a repository hygiene change rather than a leftover of #462 |
