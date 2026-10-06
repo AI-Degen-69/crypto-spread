@@ -49,6 +49,9 @@ class SweepRunResult:
     # recovered after the adverse-open gate skipped them, and their net PnL.
     reentered_windows: int
     reentered_pnl_cents: float
+    # Issue #455: windows with at least one filled leg, counted once — the
+    # unit of the sample gate (includes settlement-only legs).
+    filled_windows: int = 0
 
     def to_dict(self) -> dict:
         """Serialize run result to dictionary."""
@@ -83,10 +86,12 @@ def compute_metrics(
             per_series_pnl={},
             reentered_windows=0,
             reentered_pnl_cents=0.0,
+            filled_windows=0,
         )
 
     pairs = sum(1 for w in window_results if w.pair_captured)
     exits = sum(1 for w in window_results if w.exit_taken)
+    filled_windows = sum(1 for w in window_results if w.filled_up or w.filled_down)
     pnls = [(w.pnl_cents - w.fees_cents) * size for w in window_results]
     wins = sum(1 for p in pnls if p > 0)
     total_pnl = sum(pnls)
@@ -142,7 +147,225 @@ def compute_metrics(
         per_series_pnl=per_series_pnl,
         reentered_windows=reentered_windows,
         reentered_pnl_cents=round(reentered_pnl_cents, 2),
+        filled_windows=filled_windows,
     )
+
+
+# Issue #455: a configuration with fewer filled windows than this never
+# becomes an incumbent or a confirmed winner, no matter its PnL.
+MIN_FILLED_WINDOWS = 30
+
+
+def passes_sample_gate(result: SweepRunResult, min_filled_windows: int = MIN_FILLED_WINDOWS) -> bool:
+    """True only when the result rests on a real trade sample."""
+    return result.filled_windows >= min_filled_windows
+
+
+def split_windows_chronologically(
+    grouped_windows: list[tuple[str, list[dict]]],
+    holdout_frac: float,
+) -> tuple[list[tuple[str, list[dict]]], list[tuple[str, list[dict]]], dict]:
+    """Split whole CID groups into in-sample and holdout partitions.
+
+    The boundary T is the start_ts at floor(n * (1 - holdout_frac)) over
+    start_ts-sorted clocked windows. In-sample takes end_ts <= T, holdout
+    takes start_ts >= T; crossing windows are purged, unclocked ones counted.
+    """
+    clocked: list[tuple[float, float, tuple[str, list[dict]]]] = []
+    unclocked = 0
+    for group in grouped_windows:
+        first = group[1][0] if len(group) > 1 and group[1] else {}
+        try:
+            start_ts = float(first.get("start_ts"))
+            end_ts = float(first.get("end_ts"))
+        except (TypeError, ValueError):
+            unclocked += 1
+            continue
+        if not (math.isfinite(start_ts) and math.isfinite(end_ts) and end_ts > start_ts):
+            unclocked += 1
+            continue
+        clocked.append((start_ts, end_ts, group))
+    clocked.sort(key=lambda item: item[0])
+    n = len(clocked)
+    boundary = clocked[math.floor(n * (1.0 - holdout_frac))][0] if n else 0.0
+    in_sample: list[tuple[str, list[dict]]] = []
+    holdout: list[tuple[str, list[dict]]] = []
+    purged = 0
+    for start_ts, end_ts, group in clocked:
+        if end_ts <= boundary:
+            in_sample.append(group)
+        elif start_ts >= boundary:
+            holdout.append(group)
+        else:
+            purged += 1
+    summary = {
+        "in_sample": len(in_sample),
+        "holdout": len(holdout),
+        "purged": purged,
+        "unclocked": unclocked,
+    }
+    return in_sample, holdout, summary
+
+
+def run_coordinate_descent(
+    in_sample_windows: list[tuple[str, list[dict]]],
+    base_params,
+    size: int = 5,
+    series_whitelist: set[str] | None = None,
+    max_start_delay_sec: float = 0.0,
+    include_structural: bool = False,
+    min_filled_windows: int = MIN_FILLED_WINDOWS,
+    max_passes: int = 5,
+) -> tuple:
+    """Best-improvement coordinate descent from a baseline, gate-aware.
+
+    Each pass evaluates the 1D sensitivity neighborhood of the incumbent via
+    run_sweep. Gated-out candidates can never win; the incumbent below the
+    gate scores -infinity. Returns (incumbent_params, incumbent_result,
+    baseline_result, history).
+    """
+    def _key(params) -> str:
+        return json.dumps(asdict(params), sort_keys=True, default=str)
+
+    def _score(result: SweepRunResult) -> float:
+        if not passes_sample_gate(result, min_filled_windows):
+            return float("-inf")
+        return result.total_pnl_cents
+
+    baseline_result = run_sweep(
+        in_sample_windows, [("Baseline", base_params)],
+        series_whitelist=series_whitelist, size=size,
+        max_start_delay_sec=max_start_delay_sec)[0]
+    incumbent_params = base_params
+    incumbent_result = baseline_result
+    incumbent_score = _score(baseline_result)
+    seen = {_key(base_params)}
+    history: list[dict] = []
+    accepted_runs: list[dict] = [baseline_result.to_dict()]
+    for pass_no in range(1, max_passes + 1):
+        grid = deduplicate_grid(generate_sensitivity_grid(
+            base_params=incumbent_params, size=size,
+            include_structural=include_structural))
+        fresh = [(label, params) for label, params in grid if _key(params) not in seen]
+        for _, params in fresh:
+            seen.add(_key(params))
+        if not fresh:
+            break
+        results = run_sweep(
+            in_sample_windows, fresh,
+            series_whitelist=series_whitelist, size=size,
+            max_start_delay_sec=max_start_delay_sec)
+        gate_rejected = sum(
+            1 for r in results if not passes_sample_gate(r, min_filled_windows))
+        gated = [r for r in results if passes_sample_gate(r, min_filled_windows)]
+        best = max(gated, key=lambda r: r.total_pnl_cents) if gated else None
+        if best is not None and best.total_pnl_cents > incumbent_score:
+            incumbent_params = best.params
+            incumbent_result = best
+            incumbent_score = best.total_pnl_cents
+            accepted_runs.append(best.to_dict())
+            history.append({
+                "pass": pass_no,
+                "accepted": f"p{pass_no}: {best.param_label}",
+                "total_pnl_cents": best.total_pnl_cents,
+                "filled_windows": best.filled_windows,
+                "gate_rejected": gate_rejected,
+            })
+        else:
+            history.append({
+                "pass": pass_no,
+                "accepted": None,
+                "total_pnl_cents": incumbent_result.total_pnl_cents,
+                "filled_windows": incumbent_result.filled_windows,
+                "gate_rejected": gate_rejected,
+            })
+            break
+    return incumbent_params, incumbent_result, baseline_result, history, accepted_runs
+
+
+def confirm_on_holdout(
+    holdout_windows: list[tuple[str, list[dict]]],
+    baseline_params,
+    winner_params,
+    size: int = 5,
+    series_whitelist: set[str] | None = None,
+    max_start_delay_sec: float = 0.0,
+    min_filled_windows: int = MIN_FILLED_WINDOWS,
+) -> tuple:
+    """Confirm the in-sample winner against the baseline on holdout data."""
+    def _key(params) -> str:
+        return json.dumps(asdict(params), sort_keys=True, default=str)
+
+    results = run_sweep(
+        holdout_windows, [("Baseline", baseline_params), ("Winner", winner_params)],
+        series_whitelist=series_whitelist, size=size,
+        max_start_delay_sec=max_start_delay_sec)
+    baseline_result, winner_result = results[0], results[1]
+    if _key(winner_params) == _key(baseline_params):
+        return baseline_result, winner_result, False, "descent retained the baseline"
+    if not passes_sample_gate(winner_result, min_filled_windows):
+        return baseline_result, winner_result, False, "winner below sample gate on holdout"
+    if not winner_result.total_pnl_cents > baseline_result.total_pnl_cents:
+        return baseline_result, winner_result, False, "winner does not beat baseline on holdout"
+    return baseline_result, winner_result, True, "winner beats baseline on gated holdout"
+
+
+def _run_iterative(ap, args, grouped, whitelist, size, max_delay, include_structural) -> int:
+    """Run the iterative preset: split, descend in-sample, confirm on holdout."""
+    in_sample, holdout, split = split_windows_chronologically(grouped, args.holdout_frac)
+    print(f"Split: {split['in_sample']} in-sample, {split['holdout']} holdout, "
+          f"{split['purged']} purged, {split['unclocked']} unclocked.")
+    if not in_sample or not holdout:
+        ap.error("split left an empty partition (too few clocked windows)")
+    base = BacktestParams(quote_shares=size)
+    incumbent_params, incumbent_result, baseline_result, history, accepted_runs = \
+        run_coordinate_descent(
+            in_sample, base, size=size, series_whitelist=whitelist,
+            max_start_delay_sec=max_delay, include_structural=include_structural,
+            min_filled_windows=args.min_filled_windows, max_passes=args.max_passes)
+    print("\n### Descent history (in-sample):")
+    for entry in history:
+        print(f"  pass {entry['pass']}: {entry['accepted']} "
+              f"pnl={entry['total_pnl_cents']:.2f} filled={entry['filled_windows']} "
+              f"gate_rejected={entry['gate_rejected']}")
+    base_holdout, winner_holdout, confirmed, reason = confirm_on_holdout(
+        holdout, base, incumbent_params, size=size, series_whitelist=whitelist,
+        max_start_delay_sec=max_delay, min_filled_windows=args.min_filled_windows)
+    print("\n### Holdout confirmation:")
+    print(f"  baseline pnl={base_holdout.total_pnl_cents:.2f} "
+          f"filled={base_holdout.filled_windows}")
+    print(f"  winner   pnl={winner_holdout.total_pnl_cents:.2f} "
+          f"filled={winner_holdout.filled_windows}")
+    print(f"Confirmed: {confirmed} ({reason})")
+    if args.out:
+        out_payload = {
+            "source": str(args.source),
+            "preset": args.preset,
+            "only": args.only,
+            "include_structural": include_structural,
+            "size": size,
+            "max_start_delay_sec": max_delay,
+            "count": None,
+            "seed": None,
+            "min_filled_windows": args.min_filled_windows,
+            "holdout_frac": args.holdout_frac,
+            "max_passes": args.max_passes,
+            "split": split,
+            "history": history,
+            "baseline_in_sample": baseline_result.to_dict(),
+            "winner_in_sample": incumbent_result.to_dict(),
+            "baseline_holdout": base_holdout.to_dict(),
+            "winner_holdout": winner_holdout.to_dict(),
+            "winner_params": asdict(incumbent_params),
+            "confirmed": confirmed,
+            "reason": reason,
+            "n_runs": len(accepted_runs),
+            "runs": accepted_runs,
+        }
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(out_payload, f, indent=2)
+        print(f"\nWrote iterative sweep results to {args.out}")
+    return 0
 
 
 def generate_sensitivity_grid(
@@ -558,8 +781,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="SPREAD-2 Quant Parameter Sweep Runner")
     ap.add_argument("source", nargs="?", default=str(DEFAULT_TICKS),
                     help="ticks directory or .jsonl[.gz] file")
-    ap.add_argument("--preset", choices=["sensitivity", "grid", "assets", "random"], default="sensitivity",
-                    help="Sweep preset: sensitivity (1D), grid (joint), assets (universe), random (stochastic)")
+    ap.add_argument("--preset", choices=["sensitivity", "grid", "assets", "random", "iterative"], default="sensitivity",
+                    help="Sweep preset: sensitivity (1D), grid (joint), assets (universe), random (stochastic), iterative (coordinate descent with sample gate)")
     ap.add_argument("--only", choices=list(SENSITIVITY_AXES) + ["dead_zone"], default=None,
                     help="Sensitivity preset only: run Baseline plus a single 1D axis "
                          "(e.g. --only exit_rev for the issue #110 mercy-distance sweep). "
@@ -584,9 +807,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="Comma-separated series whitelist (e.g. btc-up-or-down-5m,eth-up-or-down-5m)")
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional JSON output file path")
+    ap.add_argument("--min-filled-windows", type=int, default=MIN_FILLED_WINDOWS,
+                    help="Iterative preset only: configurations with fewer filled windows fail the 30-trade sample gate")
+    ap.add_argument("--holdout-frac", type=float, default=0.3,
+                    help="Iterative preset only: fraction of clocked windows held out for confirmation")
+    ap.add_argument("--max-passes", type=int, default=5,
+                    help="Iterative preset only: maximum coordinate-descent passes")
     args = ap.parse_args(argv)
     if args.only is not None and args.preset != "sensitivity":
         ap.error("--only requires --preset sensitivity")
+    if args.preset == "iterative":
+        if args.min_filled_windows < 1:
+            ap.error("--min-filled-windows must be at least 1")
+        if args.max_passes < 1:
+            ap.error("--max-passes must be at least 1")
+        if not 0.0 < args.holdout_frac < 1.0:
+            ap.error("--holdout-frac must be strictly between 0 and 1")
     size = max(5, args.size)
     max_delay = args.max_start_delay
     if args.filter_partial and max_delay <= 0:
@@ -610,6 +846,10 @@ def main(argv: list[str] | None = None) -> int:
 
     grouped = group_by_cid(snaps)
     print(f"Grouped into {len(grouped)} condition windows. Running '{args.preset}' sweep (size={size} shares)...")
+
+    if args.preset == "iterative":
+        return _run_iterative(ap, args, grouped, whitelist, size, max_delay,
+                              include_structural)
 
     # Build grid based on preset
     base = BacktestParams(quote_shares=size)

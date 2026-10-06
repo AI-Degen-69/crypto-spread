@@ -9,15 +9,20 @@ import pytest
 
 from backtest.engine import BacktestParams, WindowResult
 from scripts.sweep_backtest import (
+    MIN_FILLED_WINDOWS,
     SweepRunResult,
     compute_metrics,
+    confirm_on_holdout,
     filter_sensitivity_grid,
     format_markdown_table,
     generate_joint_grid,
     generate_random_grid,
     generate_sensitivity_grid,
     main,
+    passes_sample_gate,
+    run_coordinate_descent,
     run_sweep,
+    split_windows_chronologically,
 )
 
 
@@ -29,6 +34,8 @@ def _make_window_result(
     exit_taken: bool = False,
     fees_cents: float = 0.0,
     reentry_count: int = 0,
+    filled_up: bool | None = None,
+    filled_down: bool | None = None,
 ) -> WindowResult:
     return WindowResult(
         cid=cid,
@@ -39,8 +46,8 @@ def _make_window_result(
         class_label="oscillating",
         max_up=0.03,
         max_down=0.03,
-        filled_up=pair_captured,
-        filled_down=pair_captured,
+        filled_up=pair_captured if filled_up is None else filled_up,
+        filled_down=pair_captured if filled_down is None else filled_down,
         pair_captured=pair_captured,
         exit_taken=exit_taken,
         exit_side="",
@@ -726,4 +733,190 @@ def test_sweep_queue_gate_high_depth_market():
     # At queue=1000, depth (600) passes gate -> pair captured, positive PnL
     assert results[1].pair_rate == 1.0
     assert results[1].total_pnl_cents > 0.0
+
+
+def test_compute_metrics_counts_filled_windows_once():
+    """Issue #455: settlement-only, paired and stopped legs each count once."""
+    settled = _make_window_result(cid="s1", pnl_cents=-1.0, pair_captured=False,
+                                 filled_up=True, filled_down=False)
+    paired = _make_window_result(cid="p1", pnl_cents=4.0, pair_captured=True)
+    stopped = _make_window_result(cid="x1", pnl_cents=-2.0, pair_captured=False,
+                                 exit_taken=True, filled_up=True, filled_down=False)
+    empty = _make_window_result(cid="e1", pnl_cents=0.0, pair_captured=False,
+                               filled_up=False, filled_down=False)
+    res = compute_metrics([settled, paired, stopped, empty], BacktestParams(),
+                          label="filled_test", size=5)
+    assert res.filled_windows == 3
+    assert res.n_windows == 4
+    assert res.to_dict()["filled_windows"] == 3
+
+
+def test_sample_gate_rejects_single_trade_winner():
+    """Issue #455: a RUN_0153 shape (1 filled window, positive PnL) fails the gate."""
+    lone = _make_window_result(cid="w1", pnl_cents=300.0, pair_captured=False,
+                               filled_up=True, filled_down=False)
+    quiet = [_make_window_result(cid=f"q{i}", pnl_cents=0.0, pair_captured=False,
+                                 filled_up=False, filled_down=False)
+             for i in range(2000)]
+    res = compute_metrics([lone] + quiet, BacktestParams(), label="run_0153",
+                          size=5)
+    assert res.filled_windows == 1
+    assert res.total_pnl_cents > 0
+    assert passes_sample_gate(res) is False
+    assert passes_sample_gate(res, min_filled_windows=1) is True
+    crowd = [_make_window_result(cid=f"c{i}", pnl_cents=1.0, pair_captured=True)
+             for i in range(30)]
+    assert passes_sample_gate(
+        compute_metrics(crowd, BacktestParams(), label="crowd", size=5)) is True
+    assert MIN_FILLED_WINDOWS == 30
+
+
+def _split_snap(cid, start_ts, end_ts):
+    return {"cid": cid, "series": "btc-up-or-down-5m", "ts": start_ts,
+            "start_ts": start_ts, "end_ts": end_ts}
+
+
+def test_split_purges_crossing_and_counts_unclocked():
+    """Issue #455: partitions are disjoint, ordered, purged and deterministic."""
+    grouped = [
+        ("w0", [_split_snap("w0", 0, 300)]),
+        ("w1", [_split_snap("w1", 300, 600)]),
+        ("w2", [_split_snap("w2", 600, 900)]),
+        ("wx", [_split_snap("wx", 400, 1000)]),
+        ("w3", [_split_snap("w3", 900, 1200)]),
+        ("w4", [_split_snap("w4", 1200, 1500)]),
+        ("wn", [{"cid": "wn", "series": "btc-up-or-down-5m"}]),
+    ]
+    in_sample, holdout, summary = split_windows_chronologically(grouped, 0.5)
+    in_ids = [cid for cid, _ in in_sample]
+    hold_ids = [cid for cid, _ in holdout]
+    assert set(in_ids) & set(hold_ids) == set()
+    assert "wx" not in in_ids + hold_ids
+    assert summary["purged"] == 1
+    assert summary["unclocked"] == 1
+    in_ends = [snaps[0]["end_ts"] for _, snaps in in_sample]
+    hold_starts = [snaps[0]["start_ts"] for _, snaps in holdout]
+    assert max(in_ends) <= min(hold_starts)
+    again = split_windows_chronologically(grouped, 0.5)
+    assert ([c for c, _ in again[0]], [c for c, _ in again[1]], again[2]) == (
+        in_ids, hold_ids, summary)
+
+
+def _gated_result(label, params, total, filled, size=5, n_total=40):
+    wins = [_make_window_result(cid=f"{label}-{i}",
+                                pnl_cents=total / (filled * size),
+                                pair_captured=False,
+                                filled_up=True, filled_down=False)
+            for i in range(filled)]
+    quiet = [_make_window_result(cid=f"{label}-q{i}", pnl_cents=0.0,
+                                 pair_captured=False,
+                                 filled_up=False, filled_down=False)
+             for i in range(n_total - filled)]
+    return compute_metrics(wins + quiet, params, label=label, size=size)
+
+
+def test_descent_rejects_single_trade_and_keeps_coordinates(monkeypatch):
+    """Issue #455: the n=1 high-PnL neighbor never wins; accepts accumulate."""
+    import scripts.sweep_backtest as sweep_mod
+
+    def fake_run_sweep(windows, grid, series_whitelist=None, size=5,
+                       max_start_delay_sec=0.0):
+        out = []
+        for label, params in grid:
+            if params.queue_gate == 1000.0:
+                out.append(_gated_result(label, params, 10000.0, 1, size=size))
+            elif params.queue_gate == 100.0 and params.offset == 0.035:
+                out.append(_gated_result(label, params, 800.0, 40, size=size))
+            elif params.queue_gate == 100.0:
+                out.append(_gated_result(label, params, 500.0, 40, size=size))
+            else:
+                out.append(_gated_result(label, params, 100.0, 40, size=size))
+        return out
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", fake_run_sweep)
+    base = BacktestParams(quote_shares=5)
+    winner, wres, bres, history, _runs = sweep_mod.run_coordinate_descent(
+        [], base, size=5, max_passes=5)
+    assert winner.queue_gate == 100.0
+    assert winner.offset == 0.035
+    assert all("1000" not in entry["accepted"] for entry in history
+               if entry["accepted"])
+    assert len(history) == 3
+    assert len(history) <= 5
+    assert wres.total_pnl_cents == 800.0
+
+
+def test_confirm_on_holdout_accepts_and_rejects(monkeypatch):
+    """Issue #455: confirmation needs a gated winner that beats the baseline."""
+    import scripts.sweep_backtest as sweep_mod
+
+    base = BacktestParams(quote_shares=5)
+    winner = replace(base, offset=0.035)
+    good_w = _gated_result("Winner", winner, 800.0, 40)
+    good_b = _gated_result("Baseline", base, 500.0, 40)
+    thin_w = _gated_result("Winner", winner, 900.0, 12)
+    poor_w = _gated_result("Winner", winner, 100.0, 40)
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", lambda *a, **k: [good_b, good_w])
+    _b, _w, confirmed, _reason = sweep_mod.confirm_on_holdout([], base, winner)
+    assert confirmed is True
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", lambda *a, **k: [good_b, thin_w])
+    _b, _w, confirmed, reason = sweep_mod.confirm_on_holdout([], base, winner)
+    assert confirmed is False
+    assert "gate" in reason
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", lambda *a, **k: [good_b, poor_w])
+    _b, _w, confirmed, reason = sweep_mod.confirm_on_holdout([], base, winner)
+    assert confirmed is False
+    assert "baseline" in reason
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", lambda *a, **k: [good_b, good_b])
+    _b, _w, confirmed, _reason = sweep_mod.confirm_on_holdout([], base, base)
+    assert confirmed is False
+
+
+def _write_iterative_ticks(path: Path, n_windows: int) -> None:
+    lines = []
+    for i in range(n_windows):
+        start = 100.0 + i * 300.0
+        lines.append(json.dumps({
+            "cid": f"0xw{i}", "series": "btc-up-or-down-5m",
+            "slug": "btc-up-or-down-5m", "duration": 300, "ts": start,
+            "start_ts": start, "end_ts": start + 300.0,
+            "up_book": {"best_bid": 0.48, "best_ask": 0.52},
+            "down_book": {"best_bid": 0.48, "best_ask": 0.52},
+        }))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_cli_iterative_runs_and_reports_unconfirmed(tmp_path: Path):
+    """Issue #455: tiny dataset runs exit 0 with split/history and no confirmation."""
+    from scripts.sweep_backtest import main as sweep_main
+
+    ticks = tmp_path / "ticks_iter.jsonl"
+    _write_iterative_ticks(ticks, 4)
+    out = tmp_path / "iter.json"
+    code = sweep_main([str(ticks), "--preset", "iterative", "--max-passes", "1",
+                       "--out", str(out)])
+    assert code == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["preset"] == "iterative"
+    assert "confirmed" in data and "split" in data and "history" in data
+    assert data["confirmed"] is False
+    assert data["split"]["in_sample"] + data["split"]["holdout"] <= 4
+
+
+def test_cli_iterative_rejects_empty_holdout_and_bad_frac(tmp_path: Path):
+    """Issue #455: empty partitions and bad fractions fail loud via SystemExit."""
+    from scripts.sweep_backtest import main as sweep_main
+
+    ticks = tmp_path / "ticks_one.jsonl"
+    _write_iterative_ticks(ticks, 1)
+    with pytest.raises(SystemExit):
+        sweep_main([str(ticks), "--preset", "iterative"])
+    with pytest.raises(SystemExit):
+        sweep_main([str(ticks), "--preset", "iterative", "--holdout-frac", "0"])
+    with pytest.raises(SystemExit):
+        sweep_main([str(ticks), "--preset", "iterative", "--max-passes", "0"])
 
