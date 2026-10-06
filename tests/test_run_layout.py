@@ -171,6 +171,28 @@ def test_local_tz_abbr_keeps_a_real_abbreviation(monkeypatch):
     assert rl.local_tz_abbr() == "IDT"
 
 
+class _FakeWestZone(_FakeZone):
+    def tzname(self, _dt=None):
+        return "Eastern Standard Time"
+
+    def utcoffset(self, _dt=None):
+        return timedelta(hours=-5)
+
+
+class _FakeWestAware(_FakeAware):
+    def astimezone(self, _tz=None):
+        return _FakeWestZone()
+
+
+def test_local_tz_abbr_keeps_a_negative_offset_signed(monkeypatch):
+    """A western host keeps its minus sign — the sign branch is the one that can hide a bug."""
+    monkeypatch.setattr(rl, "datetime", type(
+        "FakeDT", (), {"now": classmethod(lambda cls: _FakeWestAware())}))
+    abbr = rl.local_tz_abbr()
+    assert abbr == "UTC-05-00"
+    assert rl._SAFE_TZ_RE.match(abbr), f"unsafe tz abbreviation: {abbr!r}"
+
+
 def test_local_tz_abbr_filename_safe_on_this_host():
     """Whatever the host returns, the result must be usable in a run id."""
     assert rl._SAFE_TZ_RE.match(rl.local_tz_abbr())

@@ -107,13 +107,19 @@ def derive_scope(run_dir: Path, ticks_file: Path | None = None) -> RunScope:
     run start); T1 comes from data/final.json stopped_utc (written at stop);
     OUT_DIR stays inside the run. The pilot records no started_utc in
     final.json, so both files are read for the start stamp — a run dir in
-    either shape derives a scope.
+    either shape derives a scope. Each missing artifact key raises a
+    RuntimeError naming its file and key rather than a bare KeyError.
     Without an explicit ticks file, the coverage file named for the stop
     date is required (the overnight pattern: collection floors at midnight).
     """
     meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
     final = json.loads((run_dir / "data" / "final.json").read_text(encoding="utf-8"))
-    universe = tuple(meta["config_hypothesis"]["universe"])
+    hypothesis = meta.get("config_hypothesis") or {}
+    if not hypothesis.get("universe"):
+        raise RuntimeError(
+            f"run {run_dir}: no universe — expected config_hypothesis.universe "
+            f"in data/meta.json")
+    universe = tuple(hypothesis["universe"])
     started = meta.get("started_utc") or final.get("started_utc")
     if not started:
         raise RuntimeError(

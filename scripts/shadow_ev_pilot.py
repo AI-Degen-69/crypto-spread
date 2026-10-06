@@ -2,9 +2,13 @@
 
 Measured configuration (#223 verdict, docs/dead-zone-naked-leg-measurements.md):
   delay 60s · quote both sides at mid-0.03 ·
-  no stop-loss · naked leg closes at expiry (naked_leg_at_expiry="close") ·
+  naked leg closes at expiry (naked_leg_at_expiry="close") ·
   chase capped at pair cost 0.98 ·
   universe xrp-15m + bnb-15m + eth-5m · 5 shares/leg.
+
+Stop-loss note: exit_reversal is pinned at its 0.50 maximum below, which disarms the
+mid-drift stop but NOT the paper-mode bid-touch stop — a paper night therefore still
+cuts legs at entry-5c. Measured: docs/issue-465-paper-replay-stop-divergence.md.
 
 Paper mode only: never posts orders, never touches wallet keys.
 Simulates fills off the live book exactly like the cockpit paper engine.
@@ -44,6 +48,9 @@ def build_engine(delay: float, shares: int, starting_balance: float) -> LiveTrad
     # engine default naked_leg_at_expiry="close" is pinned explicitly here.
     # Issue #229 deleted stop_loss_enabled and the timeout clocks; the
     # exit_reversal mercy rule stays wide for the same reason as before.
+    # Caveat (measured 2026-10-07): 0.50 disarms only the mid-drift stop. The
+    # paper-mode bid-touch stop is not covered by this knob — see
+    # docs/issue-465-paper-replay-stop-divergence.md §5.
     eng.update_config(
         mode="paper",
         offset=0.03,

@@ -262,6 +262,23 @@ def test_derive_scope_without_any_start_stamp_names_both_files(tmp_path):
         mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
 
 
+def test_derive_scope_without_a_universe_names_the_artifact(tmp_path):
+    """A run dir whose meta.json carries no universe fails loudly, naming the key.
+
+    The two stamp checks below raise a RuntimeError that names the file and the key;
+    the universe read must fail the same way rather than surfacing a bare KeyError
+    from nested indexing (the same unhelpful-failure class the T4 fix addressed).
+    """
+    run_dir = tmp_path / "nouniverse"
+    _write_run(run_dir, started="2026-10-06T22:10:00+00:00",
+               stopped="2026-10-07T09:10:00+00:00")
+    meta = json.loads((run_dir / "data" / "meta.json").read_text(encoding="utf-8"))
+    del meta["config_hypothesis"]
+    (run_dir / "data" / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="config_hypothesis"):
+        mod.derive_scope(run_dir, tmp_path / "ticks_x.jsonl")
+
+
 def test_derive_scope_defaults_ticks_to_the_stop_day(tmp_path, monkeypatch):
     """Without --ticks, the coverage file named for the stop date is used."""
     monkeypatch.setattr(mod, "ROOT", tmp_path)
