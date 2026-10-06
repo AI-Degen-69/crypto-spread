@@ -4369,3 +4369,114 @@ def test_stop_exit_uses_the_resolver_ladder_not_a_constant():
     assert engine.trades[-1].exit_price == pytest.approx(0.38, abs=1e-6)
 
 
+# --- Issue #462: per-market tick health for the live cockpit ---
+
+_TICK_HEALTH_SLUG = "btc-up-or-down-5m"
+
+
+def _tick_health_poll(slug: str, now: float) -> dict:
+    """Minimal poll payload that lets one market's strategy update run for real."""
+    return {
+        "market": {
+            "conditionId": "0xhealth",
+            "slug": slug,
+            "start_ts": now - 10.0,
+            "end_ts": now + 290.0,
+            "up_token": "token_up",
+            "down_token": "token_dn",
+            "series": slug,
+        },
+        "next_market": None,
+        "up_book": {"bids": [{"price": 0.48, "size": 100.0}], "asks": [{"price": 0.52, "size": 100.0}]},
+        "down_book": {"bids": [{"price": 0.48, "size": 100.0}], "asks": [{"price": 0.52, "size": 100.0}]},
+    }
+
+
+def test_tick_health_never_ticked_market_is_quiet():
+    """Issue #462: a market that never ticked reports no age and is never stale."""
+    engine = LiveTraderEngine(load_persisted=False)
+    health = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+
+    assert health["tick_age_sec"] is None
+    assert health["tick_stale"] is False
+    assert health["tick_error_count"] == 0
+    assert health["last_tick_error"] is None
+    assert health["last_tick_error_age_sec"] is None
+    assert engine.get_state()["params"]["tick_stale_threshold_sec"] == pytest.approx(3.0)
+
+
+def test_tick_health_marks_stale_only_while_running():
+    """Issue #462: staleness needs a running engine; age alone never paints a market red."""
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets[_TICK_HEALTH_SLUG]
+    m._last_strategy_tick_perf = time.perf_counter() - 12.0
+
+    stopped = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert stopped["tick_age_sec"] > 9.0
+    assert stopped["tick_stale"] is False
+
+    engine.is_running = True
+    stale = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert stale["tick_stale"] is True
+
+    m._last_strategy_tick_perf = time.perf_counter()
+    fresh = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert fresh["tick_stale"] is False
+    assert fresh["tick_age_sec"] < 1.0
+
+
+def test_tick_error_history_survives_a_successful_update():
+    """Issue #462: a later good update refreshes the age but never erases the failure history."""
+    import asyncio
+
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+    engine._record_tick_error(_TICK_HEALTH_SLUG, ValueError("boom"))
+
+    recorded = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert recorded["tick_error_count"] == 1
+    assert recorded["last_tick_error"] == "boom"
+    assert recorded["last_tick_error_age_sec"] >= 0.0
+
+    poll = _tick_health_poll(_TICK_HEALTH_SLUG, time.time())
+    engine._poll_single_market = lambda slug: poll if slug == _TICK_HEALTH_SLUG else None
+    asyncio.run(engine._tick_all_markets())
+
+    recovered = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert recovered["tick_age_sec"] < 5.0
+    assert recovered["tick_stale"] is False
+    assert recovered["tick_error_count"] == 1
+    assert recovered["last_tick_error"] == "boom"
+
+
+def test_attribute_tick_failure_uses_the_inflight_market():
+    """Issue #462: a failure is blamed on the market whose update was in flight, and on nobody otherwise."""
+    engine = LiveTraderEngine(tokens=["BTC", "ETH"], durations=[300])
+    engine._inflight_strategy_slug = "eth-up-or-down-5m"
+
+    engine._attribute_tick_failure(RuntimeError("kaboom"))
+
+    eth = engine.get_state()["markets"]["eth-up-or-down-5m"]
+    btc = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert eth["tick_error_count"] == 1
+    assert eth["last_tick_error"] == "kaboom"
+    assert btc["tick_error_count"] == 0
+
+    engine._inflight_strategy_slug = None
+    engine._attribute_tick_failure(RuntimeError("unattributable"))
+    assert engine.get_state()["markets"]["eth-up-or-down-5m"]["tick_error_count"] == 1
+
+
+def test_tick_all_markets_clears_the_inflight_slug():
+    """Issue #462: the in-flight marker never leaks past a finished tick."""
+    import asyncio
+
+    engine = LiveTraderEngine(tokens=["BTC"], durations=[300])
+    engine.is_running = True
+    poll = _tick_health_poll(_TICK_HEALTH_SLUG, time.time())
+    engine._poll_single_market = lambda slug: poll if slug == _TICK_HEALTH_SLUG else None
+
+    asyncio.run(engine._tick_all_markets())
+
+    assert engine._inflight_strategy_slug is None
+    assert engine.markets[_TICK_HEALTH_SLUG]._last_strategy_tick_perf is not None
