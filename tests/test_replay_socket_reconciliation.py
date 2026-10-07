@@ -13,6 +13,7 @@ from scripts.replay_socket_reconciliation import (
     extract_fixture,
     replay_file,
     replay_fixture,
+    tick_bucket,
 )
 
 
@@ -322,4 +323,183 @@ def test_reconciler_quote_change_with_rest_snapshot_does_not_false_diverge():
     assert rep.in_frame_divergences.get("price_change", 0) == 0
     assert rep.rest_divergences.get("price_change", 0) == 0
     assert rep.first_divergence is None
+
+
+# --- Issue #438: magnitude buckets, per-series split and skew classification ---
+
+
+def test_tick_bucket_edges_are_expressed_in_venue_ticks():
+    """The bucket edges sit at one and three venue ticks (0.001 each)."""
+    assert tick_bucket(0.0) == "exact"
+    assert tick_bucket(0.0005) == "sub_tick"
+    assert tick_bucket(0.001) == "sub_tick"
+    assert tick_bucket(0.0011) == "1_3_ticks"
+    assert tick_bucket(0.003) == "1_3_ticks"
+    assert tick_bucket(0.0031) == ">3_ticks"
+    assert tick_bucket(0.08) == ">3_ticks"
+
+
+def test_report_helpers_bucket_magnitude_series_and_skew():
+    """The report aggregates every comparable pair, not only the divergent ones."""
+    rep = ReconciliationReport()
+
+    rep.note_magnitude(0.0)
+    rep.note_magnitude(0.0005)
+    rep.note_magnitude(0.002)
+    rep.note_magnitude(0.01)
+    assert rep.magnitude_buckets == {
+        "exact": 1, "sub_tick": 1, "1_3_ticks": 1, ">3_ticks": 1,
+    }
+
+    rep.note_series("btc-5m", True, 0.01)
+    rep.note_series("btc-5m", False, 0.0005)
+    assert rep.per_series["btc-5m"] == {
+        "comparisons": 2,
+        "rest_divergences": 1,
+        "divergence_rate": 0.5,
+        "max_gap": 0.01,
+    }
+
+    rep.note_skew(100.5, 100.0)
+    rep.note_skew(100.0, 100.5)
+    rep.note_skew(None, 100.0)
+    assert rep.skew_buckets == {
+        "rest_after_ws": 1, "rest_before_ws": 1, "unknown": 1,
+    }
+
+
+def test_a_sub_tick_gap_is_measured_but_never_divergent():
+    """A gap at or below one tick is invisible to `divergent` yet still counted.
+
+    This is the population the issue's own ``<= 1 tick`` bucket was meant to
+    hold; before #438 the instrument could not see it at all, so the claimed
+    sub-tick bulk was an assumption rather than a measurement.
+    """
+    reconciler = SocketReconciler()
+    token = "tok_sub"
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 10.0,
+        "ev": {
+            "event_type": "book",
+            "asset_id": token,
+            "bids": [{"price": "0.50", "size": "100"}],
+            "asks": [{"price": "0.52", "size": "100"}],
+        },
+    }))
+    # A level below the top leaves the maintained best bid at 0.50, while the
+    # frame declares 0.5005 -- half a tick away, so not a divergence.
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 10.5,
+        "ev": {
+            "event_type": "price_change",
+            "price_changes": [{
+                "asset_id": token,
+                "side": "BUY",
+                "price": "0.44",
+                "size": "10",
+                "best_bid": "0.5005",
+                "best_ask": "0.52",
+            }],
+        },
+    }))
+
+    rep = reconciler.report
+    assert rep.in_frame_divergences.get("price_change", 0) == 0
+    assert rep.magnitude_buckets.get("sub_tick", 0) >= 1
+    assert rep.first_divergence is None
+
+
+def test_a_rest_divergence_carries_series_bucket_and_both_timestamps():
+    """A counted REST divergence is attributable to a series and to a timing order."""
+    reconciler = SocketReconciler()
+    token = "tok_rest"
+    series = "btc-up-or-down-5m"
+
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 100.0,
+        "ev": {
+            "event_type": "book",
+            "asset_id": token,
+            "bids": [{"price": "0.50", "size": "100"}],
+            "asks": [{"price": "0.52", "size": "100"}],
+        },
+    }))
+    reconciler.feed_line(json.dumps({
+        "type": "rest",
+        "rx": 100.0,
+        "series": series,
+        "token": token,
+        "book": {
+            "best_bid": 0.53,
+            "best_ask": 0.52,
+            "bids": {"0.53": "100"},
+            "asks": {"0.52": "100"},
+        },
+    }))
+    # The frame declares the REST ground truth (0.53) while the maintained book
+    # still holds 0.50: the REST comparison is therefore allowed through and the
+    # 3c gap is counted against the series.
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 100.1,
+        "ev": {
+            "event_type": "price_change",
+            "price_changes": [{
+                "asset_id": token,
+                "side": "BUY",
+                "price": "0.44",
+                "size": "10",
+                "best_bid": "0.53",
+                "best_ask": "0.52",
+            }],
+        },
+    }))
+
+    rep = reconciler.report
+    assert rep.rest_divergences.get("price_change", 0) == 1
+    assert rep.per_series[series]["comparisons"] == 1
+    assert rep.per_series[series]["rest_divergences"] == 1
+    assert rep.per_series[series]["divergence_rate"] == 1.0
+    assert rep.skew_buckets.get("rest_before_ws", 0) == 1
+    # Both comparable pairs land in the same bucket: the in-frame pair (maintained
+    # book vs the frame's declared quotes) and the REST pair (maintained book vs
+    # ground truth) are each a comparison, and each is 3c wide here.
+    assert rep.magnitude_buckets.get(">3_ticks", 0) == 2
+
+    rest_recs = [r for r in rep.all_divergences if r.source == "rest"]
+    assert len(rest_recs) == 1
+    rec = rest_recs[0]
+    assert rec.ws_rx == 100.1
+    assert rec.rest_rx == 100.0
+    assert rec.tick_bucket == ">3_ticks"
+
+
+def test_per_series_keeps_unknown_when_no_rest_record_names_the_series():
+    """A token with no REST record has no series to attribute, and says so."""
+    rep = ReconciliationReport()
+    rep.note_series("unknown", True, 0.01)
+    assert rep.per_series["unknown"]["rest_divergences"] == 1
+
+
+def test_exact_agreement_is_not_folded_into_the_drift_bucket():
+    """A zero gap is agreement, not sub-tick drift: the bimodality claim needs both."""
+    rep = ReconciliationReport()
+    rep.note_magnitude(0.0)
+    assert rep.magnitude_buckets == {"exact": 1}
+    assert rep.magnitude_buckets.get("sub_tick", 0) == 0
+
+
+def test_summary_dict_carries_the_new_aggregates():
+    """The serializable summary exposes buckets, skew and the per-series split."""
+    rep = ReconciliationReport()
+    rep.note_magnitude(0.01)
+    rep.note_skew(100.5, 100.0)
+    rep.note_series("btc-5m", True, 0.01)
+    summary = rep.summary_dict()
+    assert summary["magnitude_buckets"] == {">3_ticks": 1}
+    assert summary["skew_buckets"] == {"rest_after_ws": 1}
+    assert summary["per_series"]["btc-5m"]["rest_divergences"] == 1
 

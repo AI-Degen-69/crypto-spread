@@ -139,6 +139,18 @@ it is settled by T2 before any analysis code is trusted.
 - **Domain tag:** `[Debug]` + `[Backend/Logic]` · **Helper skills:**
   `incremental-implementation`, `test-driven-development`, and `doubt-driven-development` for the
   instrument-versus-instrument doubt recorded in SPEC.md §3
+- **Status:** ✅ done. `tick_bucket` expresses the edges in venue ticks (one tick = TOLERANCE);
+  `note_magnitude` / `note_series` / `note_skew` aggregate **every** comparable pair, not only the
+  divergent ones; `DivergenceRecord` carries `ws_rx`, `rest_rx` and `tick_bucket`;
+  `_select_rest_book` now returns the snapshot's receive time alongside the book so skew is
+  computable; `print_report_table` gains the bucket, timing and per-series sections. 6 new tests,
+  RED first (`ImportError: cannot import name 'tick_bucket'`) → 15 pass.
+  **Two things the end-to-end run taught us** (see below), both folded back into the code:
+  a zero gap is agreement and is reported as `exact`, kept out of the `sub_tick` drift bucket;
+  and per-series attribution needs a REST record to name a token's series, so tokens without one
+  report under `unknown` rather than being dropped. Measured on the real 35,333-line session
+  (4.1 s, single pass): **69,162 comparable in-frame pairs, all `exact`**, with zero REST
+  comparisons — the premise of the issue, made visible by the instrument.
 
 ### T4 — [Research/Docs] Name the cause, write the verdict, commit the fixture
 - **Size:** M · **Files:** `docs/issue-174-socket-book-disagreement.md`,

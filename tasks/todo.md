@@ -3,8 +3,8 @@
 - [x] T1 [Debug] Make a REST-less capture impossible to mistake — done: `capture_verdict` + per-token counts + non-zero exit; new `tests/test_record_raw_socket_session.py` (10 tests, RED first)
 - [ ] T2 [Debug] Capture a REST-bearing session — **operational, needs a live window; CP1 halt**
 - [ ] **CP1** — a REST-bearing capture exists with per-token counts (`rest_snapshot_count > 0`)
-- [ ] T3 [Debug/Backend] Extend the replay: per-series + magnitude buckets + `rest_rx`/`ws_rx` skew delta
-- [ ] **CP2** — the extended report prints the per-series split over the T2 session
+- [x] T3 [Debug/Backend] Extend the replay: per-series + magnitude buckets + `rest_rx`/`ws_rx` skew delta — done (6 new tests, RED first; 15 pass). Real-session measurement: 69,162 in-frame pairs, all `exact`, 0 REST comparisons
+- [ ] **CP2** — the extended report prints the per-series split over the T2 session (blocked on T2: no REST-bearing session exists yet)
 - [ ] T4 [Research/Docs] Verdict appended to `docs/issue-174-socket-book-disagreement.md` + fixture + test
 - [ ] Final gate: `python -m pytest tests/test_replay_socket_reconciliation.py tests/test_record_raw_socket_session.py tests/test_clob_ws_collector.py -q`
 
