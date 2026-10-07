@@ -168,16 +168,27 @@ class ReconciliationReport:
         rate hides exactly that spread. `gap` is optional because a pair whose
         two books carry disjoint quote fields has no measurable gap, yet is
         still a comparison in the denominator.
+
+        The magnitude buckets are carried per series too, not only globally:
+        acceptance criterion 3 asks for the bimodal split *per series*, and a
+        global histogram lets one series' violent population be hidden by
+        another series' sub-tick drift. These buckets cover this series' REST
+        comparisons, which is a narrower population than the report-wide
+        `magnitude_buckets` (those also count in-frame pairs).
         """
         row = self.per_series.setdefault(series, {
             "comparisons": 0, "rest_divergences": 0,
             "divergence_rate": 0.0, "max_gap": 0.0,
+            "magnitude_buckets": {},
         })
         row["comparisons"] += 1
         if divergent:
             row["rest_divergences"] += 1
         if gap is not None:
             row["max_gap"] = max(row["max_gap"], gap)
+            buckets = row["magnitude_buckets"]
+            key = tick_bucket(gap)
+            buckets[key] = buckets.get(key, 0) + 1
         row["divergence_rate"] = round(row["rest_divergences"] / row["comparisons"], 4)
 
     def note_skew(self, rest_rx: Optional[float], ws_rx: float) -> None:
@@ -188,7 +199,10 @@ class ReconciliationReport:
         instants, not corruption. Counting the pairs this way is what rules the
         hypothesis in or out rather than arguing about it.
         """
-        if rest_rx is None:
+        if rest_rx is None or ws_rx <= 0.0:
+            # Ordering is a claim about two timestamps. A WS record with no
+            # receive time (rx == 0) makes the pair unclassifiable rather than
+            # "REST after WS", which any positive REST time would satisfy.
             key = SKEW_UNKNOWN
         elif rest_rx > ws_rx:
             key = SKEW_REST_AFTER_WS
@@ -238,7 +252,12 @@ class ReconciliationReport:
             "skew_buckets": dict(self.skew_buckets),
             "age_buckets_all": dict(self.age_buckets_all),
             "age_buckets_divergent": dict(self.age_buckets_divergent),
-            "per_series": {k: dict(v) for k, v in self.per_series.items()},
+            # Rows are copied, and the nested bucket map copied with them, so a
+            # caller mutating the summary cannot reach back into the report.
+            "per_series": {
+                k: {**v, "magnitude_buckets": dict(v.get("magnitude_buckets") or {})}
+                for k, v in self.per_series.items()
+            },
             "first_divergence": (
                 {
                     "event_index": self.first_divergence.event_index,
@@ -636,11 +655,15 @@ def print_report_table(report: ReconciliationReport) -> None:
             div = report.age_buckets_divergent.get(key, 0)
             print(f"  {key:<12} {total:<8} {div:<10} {div / total * 100:.1f}%")
     if report.per_series:
-        print("PER SERIES (REST comparisons):")
+        print("PER SERIES (REST comparisons; buckets over this series' comparisons):")
         for slug, row in sorted(report.per_series.items()):
             rate = f"{row['divergence_rate'] * 100:.1f}%"
             print(f"  {slug:<30} comps={row['comparisons']:<7} div={row['rest_divergences']:<6} "
                   f"rate={rate:<8} max_gap=${row['max_gap']:.4f}")
+            buckets = row.get("magnitude_buckets") or {}
+            if buckets:
+                split = " ".join(f"{key}={buckets.get(key, 0)}" for key in MAGNITUDE_BUCKETS)
+                print(f"    {'':<28} {split}")
     print("=" * 80)
 
     if report.first_divergence:

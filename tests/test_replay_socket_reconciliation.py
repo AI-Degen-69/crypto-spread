@@ -359,6 +359,7 @@ def test_report_helpers_bucket_magnitude_series_and_skew():
         "rest_divergences": 1,
         "divergence_rate": 0.5,
         "max_gap": 0.01,
+        "magnitude_buckets": {"sub_tick": 1, ">3_ticks": 1},
     }
 
     rep.note_skew(100.5, 100.0)
@@ -476,6 +477,38 @@ def test_a_rest_divergence_carries_series_bucket_and_both_timestamps():
     assert rec.ws_rx == 100.1
     assert rec.rest_rx == 100.0
     assert rec.tick_bucket == ">3_ticks"
+
+
+def test_per_series_carries_its_own_magnitude_buckets():
+    """Acceptance criterion 3 of #438 asks for the bimodal split per series —
+    rate *and* magnitude buckets — so one series' violent population cannot be
+    hidden by another series' sub-tick drift in a single global histogram."""
+    rep = ReconciliationReport()
+    rep.note_series("btc-5m", True, 0.01)
+    rep.note_series("btc-5m", False, 0.0)
+    rep.note_series("sol-5m", False, 0.01)
+    # A pair whose books carry disjoint quote fields has no gap to bucket, but it
+    # is still a comparison in the denominator.
+    rep.note_series("sol-5m", False, None)
+
+    assert rep.per_series["btc-5m"]["magnitude_buckets"] == {"exact": 1, ">3_ticks": 1}
+    assert rep.per_series["sol-5m"]["magnitude_buckets"] == {">3_ticks": 1}
+    assert rep.per_series["sol-5m"]["comparisons"] == 2
+
+    summary = rep.summary_dict()
+    assert summary["per_series"]["btc-5m"]["magnitude_buckets"] == {"exact": 1, ">3_ticks": 1}
+    # A serialized summary must not alias the live report's rows.
+    summary["per_series"]["btc-5m"]["magnitude_buckets"]["exact"] = 99
+    assert rep.per_series["btc-5m"]["magnitude_buckets"]["exact"] == 1
+
+
+def test_a_ws_event_without_a_timestamp_has_an_unknown_skew():
+    """Ordering is a claim about two timestamps; with no WS receive time the
+    pair is unclassifiable, not "REST after WS" — which any positive REST time
+    would otherwise satisfy against ws_rx == 0."""
+    rep = ReconciliationReport()
+    rep.note_skew(100.0, 0.0)
+    assert rep.skew_buckets == {"unknown": 1}
 
 
 def test_per_series_keeps_unknown_when_no_rest_record_names_the_series():
