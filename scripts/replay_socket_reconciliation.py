@@ -55,6 +55,13 @@ SKEW_REST_AFTER_WS = "rest_after_ws"
 SKEW_REST_BEFORE_WS = "rest_before_ws"
 SKEW_UNKNOWN = "unknown"
 
+#: The boundary the divergence rule itself uses: a gap counts as divergent only when
+#: it is *strictly* greater than `TOLERANCE + EPSILON`. The magnitude buckets must be
+#: measured against the same boundary, or a gap the rule calls agreement is reported
+#: as drift -- which is exactly what an exact one-tick gap does, because a subtraction
+#: like `abs(0.55 - 0.549)` lands a few ulps *above* 0.001 (issue #438, PR #469 review).
+DIVERGENCE_EDGE = TOLERANCE + EPSILON
+
 AGE_UNKNOWN = "unknown"
 AGE_BUCKETS = ("le_50ms", "le_100ms", "le_250ms", "le_500ms", AGE_UNKNOWN)
 
@@ -85,8 +92,9 @@ def tick_bucket(gap: float) -> str:
 
     `exact` and `sub_tick` together hold the population the divergence rule
     cannot see: no gap at or below one tick registers as divergent, because
-    divergence requires strictly more than TOLERANCE. They are kept apart on
-    purpose -- perfect agreement and sub-tick drift are different observations,
+    divergence requires strictly more than `TOLERANCE + EPSILON`. They are kept
+    apart on purpose -- perfect agreement and one-tick drift are different
+    observations,
     and the issue's bimodality claim ("a large population of sub-tick drift plus
     a rare, violent population") cannot be tested if agreement is folded into the
     drift bucket. Bucketing *every* comparable pair, not only the divergent
@@ -94,9 +102,9 @@ def tick_bucket(gap: float) -> str:
     """
     if gap <= 0.0:
         return EXACT
-    if gap <= TICK:
+    if gap <= DIVERGENCE_EDGE:
         return SUB_TICK
-    if gap <= 3 * TICK:
+    if gap <= 3 * TICK + EPSILON:
         return TICKS_1_3
     return TICKS_OVER_3
 

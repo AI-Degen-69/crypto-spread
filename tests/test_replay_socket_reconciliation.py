@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 from scripts.replay_socket_reconciliation import (
+    EPSILON,
+    TICK,
+    TOLERANCE,
     ReconciliationReport,
     SocketReconciler,
     _load_fixture_object,
@@ -338,6 +341,23 @@ def test_tick_bucket_edges_are_expressed_in_venue_ticks():
     assert tick_bucket(0.003) == "1_3_ticks"
     assert tick_bucket(0.0031) == ">3_ticks"
     assert tick_bucket(0.08) == ">3_ticks"
+
+
+def test_bucket_edges_use_the_same_boundary_as_the_divergence_rule():
+    """A gap the rule calls agreement must not be reported as drift.
+
+    An exact one-tick gap computed by subtraction lands a few ulps above `TICK`
+    (`abs(0.55 - 0.549)` == 0.0010000000000000009), so a bucket edge at plain
+    `TICK` files it as the 1-3 tick drift population while the divergence rule —
+    which uses `TOLERANCE + EPSILON` — calls it agreement (PR #469 review).
+    """
+    exact_tick = abs(0.55 - 0.549)
+    assert exact_tick > TICK, "the float subtraction must overshoot or this test proves nothing"
+    assert not (exact_tick > TOLERANCE + EPSILON), "and the rule must call it agreement"
+
+    assert tick_bucket(exact_tick) == "sub_tick"
+    assert tick_bucket(3 * TICK + EPSILON) == "1_3_ticks"
+    assert tick_bucket(3 * TICK + 1e-3) == ">3_ticks"
 
 
 def test_report_helpers_bucket_magnitude_series_and_skew():

@@ -87,6 +87,10 @@ def capture_verdict(ws_events: int, rest_snapshots: int) -> Tuple[int, Optional[
     if rest_snapshots == 0:
         return 1, ("no REST snapshots captured — a session without ground truth "
                    "is not a usable input")
+    if ws_events == 0:
+        # The mirror case, and just as unusable: the replay counts comparisons off
+        # WebSocket events, so REST alone yields zero comparisons (issue #438).
+        return 1, "no WS events captured — there is nothing to compare REST against"
     return 0, None
 
 

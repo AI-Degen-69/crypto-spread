@@ -220,7 +220,7 @@ it is settled by T2 before any analysis code is trusted.
   **The named cause:** the residual is an artefact of the comparison instrument, not a defect in
   the socket book — the maintained book matched the venue's own declared quote on **every** frame
   that carries one (0 in-frame divergences over 70,869 `price_change` events), and all 46 counted
-  divergences sit in the 158 comparisons where the concordance guard (`:346`) is structurally
+  divergences sit in the 158 comparisons where the concordance guard (`:373`) is structurally
   blind because the frame declares no quote (`book` 31/104, `last_trade_price` 15/54), versus
   **0/27,127** on the fully-declared frame type. Hypothesis 4 **ruled in** with a measured
   gradient: disagreement is monotone in the reference age (guard rejection on `price_change`

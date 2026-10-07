@@ -57,6 +57,18 @@ def test_capture_verdict_passes_a_rest_bearing_session():
     assert reason is None
 
 
+def test_capture_verdict_fails_a_rest_only_session():
+    """REST with no WebSocket traffic is as unusable as the mirror case.
+
+    The replay counts comparisons off WS events, so a REST-only capture yields
+    zero comparisons and cannot support the diagnosis (PR #469 review).
+    """
+    code, reason = capture_verdict(ws_events=0, rest_snapshots=10)
+    assert code == 1
+    assert reason is not None
+    assert "WS" in reason
+
+
 def test_capture_verdict_fails_a_rest_less_session():
     """WS events without REST ground truth is a failed capture, not a neutral one."""
     code, reason = capture_verdict(ws_events=35333, rest_snapshots=0)

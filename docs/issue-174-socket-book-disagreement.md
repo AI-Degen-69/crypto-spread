@@ -128,7 +128,7 @@ single quantity:
 | Instrument | Temporal alignment of the compared pair | Population | Rate |
 |---|---|---|---|
 | Live collector — `shadow_compare_book` (`scripts/collect_ticks.py:556`, called `:948-952`) | **none**: the freshly fetched REST book is compared against the socket's cached book at that instant | 1,940 comparisons (#174 re-measure, 2026-10-04) | **16.80%** (326) |
-| Offline replay — `_select_rest_book` (`scripts/replay_socket_reconciliation.py:333`) | nearest REST read within **±0.5 s** plus the in-frame concordance guard (`:365`) | 27,285 REST comparisons, capture `run/diag_ws/raw_session_2026-10-07_00-42-10.jsonl` | **0.17%** (46) |
+| Offline replay — `_select_rest_book` (`scripts/replay_socket_reconciliation.py:341`) | nearest REST read within **±0.5 s** plus the in-frame concordance guard (`:373`) | 27,285 REST comparisons, capture `run/diag_ws/raw_session_2026-10-07_00-42-10.jsonl` | **0.17%** (46) |
 
 The replay having its own numbers is not the reason the two differ, and the replay is **not**
 expected to reproduce 16.8%: the collector's path has no timestamp comparison at all, so its
@@ -151,27 +151,31 @@ of exactly one tick is not a divergence, since divergence is strictly greater th
 | Bucket | Edge | Pairs |
 |---|---|---|
 | `exact` | gap = 0 | 168,975 |
-| `sub_tick` | 0 < gap ≤ 1 tick | **0** |
-| `1_3_ticks` | 1 tick < gap ≤ 3 ticks | 2 |
+| `sub_tick` | 0 < gap ≤ 1 tick | 2 |
+| `1_3_ticks` | 1 tick < gap ≤ 3 ticks | **0** |
 | `>3_ticks` | gap > 3 ticks | 46 |
 
-The split is reported **per series** as well as globally, and it is flat: every series is exact agreement
-plus its own divergent pairs, and the only two sub-3-tick pairs in the whole capture both sit in
-`bnb-up-or-down-15m` (max gap $0.001) — the other nine series hold nothing between exact agreement
-and the widest bucket.
+The split is reported **per series** as well as globally, and it is flat: nine of the ten series are
+exact agreement plus their own divergent pairs, and the only two pairs anywhere between exact
+agreement and the widest bucket both sit in `bnb-up-or-down-15m`. Both of those are exactly **one
+tick** — `abs(0.55 - 0.549)` = `0.0010000000000000009`, the ulp-level overshoot of a one-tick
+subtraction — which the divergence rule already treats as agreement. The buckets are measured
+against that same boundary: with an edge at plain `TICK`, those two pairs were reported as the
+`1_3_ticks` drift population while the rule called them agreement. That inconsistency was caught in
+PR #469's review, and the first version of this table was wrong about it.
 
-The third assumption to fall: there is **no sub-tick drift population at all**. The issue's
+The third assumption to fall: there is **no sub-tick drift population worth the name**. The issue's
 proposed central claim — "a large population of sub-tick drift plus a rare, violent population" —
 is falsified by its own instrument. The distribution is instead *exact agreement, or a whole-cent
-jump*: 48 pairs disagree in any amount out of 169,023 (0.028%), and 46 of those 48 are in the
-widest bucket.
+jump*: 48 pairs out of 169,023 are not exactly equal (0.028%) — 46 divergent in the widest bucket
+and 2 sitting exactly on the one-tick edge, with **nothing in between**.
 
 ### 7.3 All 46 counted divergences sit where the concordance guard is blind
 
-`_select_rest_book` (`:333`) drops a comparison — returns `None`, counting nothing — when the
+`_select_rest_book` (`:341`) drops a comparison — returns `None`, counting nothing — when the
 candidate REST book disagrees with the **declared quote carried by that same WebSocket frame**
-(`:365`). Declared quotes are only extracted for `price_change` and `best_bid_ask` frames
-(`:405-406`); for `book` and `last_trade_price` frames the guard has nothing to test and is
+(`:373`). Declared quotes are only extracted for `price_change` and `best_bid_ask` frames
+(`:413-414`); for `book` and `last_trade_price` frames the guard has nothing to test and is
 structurally a no-op.
 
 Measured on the capture, over pairs that pass the ±0.5 s window:
@@ -214,19 +218,24 @@ frame type triggered the read**. Below ~100 ms it is zero in this capture.
 
 ### 7.5 Named cause
 
-**The residual divergence is an artefact of the comparison instrument, not a defect in the socket
-book.** Precisely:
+**Sampling skew is the leading explanation for the residual divergence; this capture does not prove
+it is the only one.** Precisely:
 
 1. The maintained WebSocket book agrees with the venue's own declared top of book on every frame
    that carries one (0 in-frame divergences over 70,869 events) — the socket book is internally
-   consistent, and #362's fix is not leaking.
+   consistent on every frame where it can be checked against the venue, and #362's fix is not
+   leaking. That does **not** validate the 158 declaration-free comparisons, which are the only ones
+   that can carry a REST divergence at all.
 2. What the metric counts as "divergence" is a pair of reads of one book separated in time, and it
    is **only ever counted on frames that carry no declared quote to check the REST read against**
    (`book`: 29.8%, `last_trade_price`: 27.8%). On frames that do carry one, the same disagreement
    is rejected by the guard and the rate is 0.0% — at every reference age, including 11,990 pairs
    at ≤500 ms.
-3. Within the blind population the disagreement rate rises monotonically with the reference's age
-   (§7.4). Staleness, not corruption, reproduces the observed gradient.
+3. Within the blind population the disagreement rate rises with the reference's age (§7.4). That
+   gradient is the discriminator: a book that is simply *wrong* on these frames would disagree with
+   a fresh REST read too, so it would not be confined to the oldest buckets. It cannot, however,
+   exclude a defect that systematically co-occurs with an ageing reference, and the young blind
+   sample is small — 29 pairs below 100 ms (§7.7).
 
 **The metric, not the socket, is what needs the change.** The Phase 2 NO-GO above stands on its own
 measurements, and REST remaining the primary source of truth is unaffected by this verdict; but
@@ -258,9 +267,11 @@ reference to compare against.
   here claims those would have agreed; they were never evaluated.
 - The claim that the gate-rejected pairs and the counted divergences are one population rests on
   matching rates and matching age gradients, not on a per-pair identity.
-- The 0-divergence cells below 100 ms in the blind population rest on 15 observations.
+- The 0-divergence cells below 100 ms **in the blind population** rest on 29 observations (15
+  `book` + 14 `last_trade_price`), not on the 6,745 that hold below 100 ms across all REST
+  comparisons — the gated majority of those can never be divergent by construction (§7.3).
 - Magnitude is reported in units of `TOLERANCE` (0.001), while the venue's top-of-book grid is
-  generally 1¢ (ten of those units) — which is why `1_3_ticks` holds 2 pairs out of 169,023 and is
-  effectively unreachable. Recorded as N2 in `docs/issues/438-noticed-but-not-touching.md`; not
-  changed here.
+  generally 1¢ (ten of those units) — which is why `1_3_ticks` holds 0 of 169,023 comparable pairs
+  and cannot separate a moderate population from the violent tail. Recorded as N2 in
+  `docs/issues/438-noticed-but-not-touching.md`; not changed here.
 
