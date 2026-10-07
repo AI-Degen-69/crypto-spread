@@ -55,6 +55,30 @@ SKEW_REST_AFTER_WS = "rest_after_ws"
 SKEW_REST_BEFORE_WS = "rest_before_ws"
 SKEW_UNKNOWN = "unknown"
 
+AGE_UNKNOWN = "unknown"
+AGE_BUCKETS = ("le_50ms", "le_100ms", "le_250ms", "le_500ms", AGE_UNKNOWN)
+
+
+def age_bucket(age: Optional[float]) -> str:
+    """Bucket the age of the REST reference behind one comparison.
+
+    Hypothesis 4 of #438 says a divergent comparison may be one correct book read
+    at two instants, which is a claim about *staleness*, not about order. Recording
+    only which read came first cannot test it when the ordering is one-sided, as it
+    is on the first ground-truth capture; the age distribution can: if divergences
+    sit in older buckets than the population they came from, staleness explains them
+    and the metric is the thing at fault.
+    """
+    if age is None:
+        return AGE_UNKNOWN
+    if age <= 0.05:
+        return "le_50ms"
+    if age <= 0.1:
+        return "le_100ms"
+    if age <= 0.25:
+        return "le_250ms"
+    return "le_500ms"
+
 
 def tick_bucket(gap: float) -> str:
     """Magnitude bucket for one comparison gap, expressed in venue ticks.
@@ -107,6 +131,7 @@ class DivergenceRecord:
     ws_rx: float = 0.0
     rest_rx: Optional[float] = None
     tick_bucket: str = ""
+    age_s: Optional[float] = None
 
 
 @dataclass
@@ -125,6 +150,8 @@ class ReconciliationReport:
     all_divergences: List[DivergenceRecord] = field(default_factory=list)
     magnitude_buckets: Dict[str, int] = field(default_factory=dict)
     skew_buckets: Dict[str, int] = field(default_factory=dict)
+    age_buckets_all: Dict[str, int] = field(default_factory=dict)
+    age_buckets_divergent: Dict[str, int] = field(default_factory=dict)
     per_series: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def note_magnitude(self, gap: float) -> None:
@@ -169,6 +196,18 @@ class ReconciliationReport:
             key = SKEW_REST_BEFORE_WS
         self.skew_buckets[key] = self.skew_buckets.get(key, 0) + 1
 
+    def note_age(self, age: Optional[float], divergent: bool) -> None:
+        """Histogram the REST reference's age, for the population and for divergences.
+
+        Two histograms rather than one: the hypothesis is comparative (are divergent
+        pairs older than the pairs around them?), so the denominator has to be
+        recorded alongside the numerator (issue #438, T3b).
+        """
+        key = age_bucket(age)
+        self.age_buckets_all[key] = self.age_buckets_all.get(key, 0) + 1
+        if divergent:
+            self.age_buckets_divergent[key] = self.age_buckets_divergent.get(key, 0) + 1
+
     def summary_dict(self) -> Dict[str, Any]:
         """Generate serializable summary breakdown by event type."""
         types = sorted(set(self.events_by_type.keys()) | set(self.comparisons_by_type.keys()))
@@ -197,6 +236,8 @@ class ReconciliationReport:
             "by_type": type_stats,
             "magnitude_buckets": dict(self.magnitude_buckets),
             "skew_buckets": dict(self.skew_buckets),
+            "age_buckets_all": dict(self.age_buckets_all),
+            "age_buckets_divergent": dict(self.age_buckets_divergent),
             "per_series": {k: dict(v) for k, v in self.per_series.items()},
             "first_divergence": (
                 {
@@ -423,11 +464,13 @@ class SocketReconciler:
                     )
                     deltas_rest = [d for d in (d_bb_rest, d_ba_rest) if d is not None]
                     gap_rest = max(deltas_rest) if deltas_rest else None
+                    age_s = (ws_rx - rest_rx) if (rest_rx is not None and ws_rx > 0) else None
                     if gap_rest is not None:
                         self.report.note_magnitude(gap_rest)
                         self.report.note_skew(rest_rx, ws_rx)
                     self.report.note_series(
                         self.token_series.get(tok, "unknown"), divergent_rest, gap_rest)
+                    self.report.note_age(age_s, divergent_rest)
                     if divergent_rest:
                         self.report.rest_divergences[ev_type] = (
                             self.report.rest_divergences.get(ev_type, 0) + 1
@@ -440,6 +483,7 @@ class SocketReconciler:
                             ws_rx=ws_rx,
                             rest_rx=rest_rx,
                             tick_bucket=tick_bucket(max_d_rest),
+                            age_s=age_s,
                             event_index=self.report.total_ws_events,
                             event_type=ev_type,
                             token=tok,
@@ -562,6 +606,15 @@ def print_report_table(report: ReconciliationReport) -> None:
         print("REST/WS TIMING ORDER (hypothesis 4: skew, not corruption):")
         for key in (SKEW_REST_AFTER_WS, SKEW_REST_BEFORE_WS, SKEW_UNKNOWN):
             print(f"  {key:<16} {report.skew_buckets.get(key, 0)}")
+    if report.age_buckets_all:
+        print("REST REFERENCE AGE (hypothesis 4: staleness, not corruption):")
+        print(f"  {'bucket':<12} {'all':<8} {'divergent':<10} {'div rate'}")
+        for key in AGE_BUCKETS:
+            total = report.age_buckets_all.get(key, 0)
+            if not total:
+                continue
+            div = report.age_buckets_divergent.get(key, 0)
+            print(f"  {key:<12} {total:<8} {div:<10} {div / total * 100:.1f}%")
     if report.per_series:
         print("PER SERIES (REST comparisons):")
         for slug, row in sorted(report.per_series.items()):

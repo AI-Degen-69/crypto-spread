@@ -170,6 +170,36 @@ it is settled by T2 before any analysis code is trusted.
   (4.1 s, single pass): **69,162 comparable in-frame pairs, all `exact`**, with zero REST
   comparisons — the premise of the issue, made visible by the instrument.
 
+### T3b — [Code/Research] Measure the REST reference's *age*, not just its order
+- **Size:** S · **Files:** `scripts/replay_socket_reconciliation.py`,
+  `tests/test_replay_socket_reconciliation.py`
+- **Depends on:** T3
+- **Discovered at CP1, not in the original plan.** `note_skew` records which of the two reads came
+  first, and on the first REST-bearing capture the ordering is one-sided (27,285 `rest_before_ws`,
+  0 `rest_after_ws`). Ordering alone cannot decide hypothesis 4 for the dominant direction; the
+  question is how *stale* the reference is. Record the age (ws_rx − rest_rx) per divergent pair and
+  histogram it for all comparisons and for the divergent ones separately, so the verdict can ask
+  whether divergences concentrate in the oldest bucket.
+- **Verify:** tests for the bucket edges, for a deliberately stale divergent comparison, and for the
+  unknown-age path. Then re-run over `run/diag_ws/raw_session_2026-10-07_00-42-10.jsonl`.
+- **Domain tag:** `[Debug]` + `[Backend/Logic]` · **Helper skills:** `test-driven-development`,
+  `doubt-driven-development`
+- **Status:** ✅ done — and it settles the question. `age_bucket` + `note_age` histogram the
+  reference age for the population and for divergences, and `DivergenceRecord` carries `age_s`.
+  4 new tests, RED first → 19 pass. Measured on the capture:
+
+  | reference age | all | divergent | rate |
+  |---|---:|---:|---:|
+  | ≤50 ms | 3,732 | **0** | 0.0% |
+  | ≤100 ms | 3,013 | **0** | 0.0% |
+  | ≤250 ms | 8,463 | 10 | 0.1% |
+  | ≤500 ms | 12,077 | 36 | 0.3% |
+
+  **Every one of the 46 divergences is in the two oldest buckets; none occur below 250 ms** across
+  6,745 comparisons, and the rate rises monotonically with age. That is the signature of reference
+  staleness, not of a corrupt book — and it means a time-aligned comparison agrees with REST
+  perfectly. No new ruff codes versus baseline.
+
 ### T4 — [Research/Docs] Name the cause, write the verdict, commit the fixture
 - **Size:** M · **Files:** `docs/issue-174-socket-book-disagreement.md`,
   `tests/fixtures/<new fixture>.json`, `tests/test_replay_socket_reconciliation.py`

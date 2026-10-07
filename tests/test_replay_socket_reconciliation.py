@@ -10,6 +10,7 @@ from scripts.replay_socket_reconciliation import (
     ReconciliationReport,
     SocketReconciler,
     _load_fixture_object,
+    age_bucket,
     extract_fixture,
     replay_file,
     replay_fixture,
@@ -502,4 +503,95 @@ def test_summary_dict_carries_the_new_aggregates():
     assert summary["magnitude_buckets"] == {">3_ticks": 1}
     assert summary["skew_buckets"] == {"rest_after_ws": 1}
     assert summary["per_series"]["btc-5m"]["rest_divergences"] == 1
+
+
+# --- Issue #438 T3b: the reference's age, not merely which read came first ---
+
+
+def test_age_bucket_edges_split_the_reference_age():
+    """Age buckets are ordered by how stale the REST reference is."""
+    assert age_bucket(None) == "unknown"
+    assert age_bucket(0.0) == "le_50ms"
+    assert age_bucket(0.05) == "le_50ms"
+    assert age_bucket(0.051) == "le_100ms"
+    assert age_bucket(0.1) == "le_100ms"
+    assert age_bucket(0.2) == "le_250ms"
+    assert age_bucket(0.3) == "le_500ms"
+    assert age_bucket(0.5) == "le_500ms"
+
+
+def test_age_histograms_separate_all_comparisons_from_divergences():
+    """Both histograms exist, so divergent pairs can be compared to the population."""
+    rep = ReconciliationReport()
+    rep.note_age(0.02, False)
+    rep.note_age(0.02, True)
+    rep.note_age(0.4, True)
+    rep.note_age(None, False)
+
+    assert rep.age_buckets_all == {"le_50ms": 2, "le_500ms": 1, "unknown": 1}
+    assert rep.age_buckets_divergent == {"le_50ms": 1, "le_500ms": 1}
+
+
+def test_a_stale_divergent_reference_is_recorded_with_its_age():
+    """A divergence against an old REST read carries that age into the record."""
+    reconciler = SocketReconciler()
+    token = "tok_age"
+    series = "btc-up-or-down-5m"
+
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 100.0,
+        "ev": {
+            "event_type": "book",
+            "asset_id": token,
+            "bids": [{"price": "0.50", "size": "100"}],
+            "asks": [{"price": "0.52", "size": "100"}],
+        },
+    }))
+    # The REST ground truth was polled 300ms before the WS event that follows.
+    reconciler.feed_line(json.dumps({
+        "type": "rest",
+        "rx": 99.7,
+        "series": series,
+        "token": token,
+        "book": {
+            "best_bid": 0.53,
+            "best_ask": 0.52,
+            "bids": {"0.53": "100"},
+            "asks": {"0.52": "100"},
+        },
+    }))
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 100.0,
+        "ev": {
+            "event_type": "price_change",
+            "price_changes": [{
+                "asset_id": token,
+                "side": "BUY",
+                "price": "0.44",
+                "size": "10",
+                "best_bid": "0.53",
+                "best_ask": "0.52",
+            }],
+        },
+    }))
+
+    rep = reconciler.report
+    assert rep.rest_divergences.get("price_change", 0) == 1
+    assert rep.age_buckets_divergent.get("le_500ms", 0) == 1
+    assert rep.age_buckets_all.get("le_500ms", 0) == 1
+
+    rec = [r for r in rep.all_divergences if r.source == "rest"][0]
+    assert rec.age_s is not None
+    assert abs(rec.age_s - 0.3) < 1e-9
+
+
+def test_an_event_without_a_timestamp_has_an_unknown_age():
+    """No WS timestamp means no measurable age, and it is reported as unknown."""
+    rep = ReconciliationReport()
+    rep.note_age(None, True)
+    assert rep.age_buckets_all == {"unknown": 1}
+    assert rep.age_buckets_divergent == {"unknown": 1}
+    assert rep.summary_dict()["age_buckets_all"] == {"unknown": 1}
 
