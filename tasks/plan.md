@@ -214,6 +214,34 @@ it is settled by T2 before any analysis code is trusted.
   passes.
 - **Domain tag:** `[Research]` + `[Docs]` · **Helper skills:** `idea-refine` (spike → reasoned
   recommendation), `documentation-and-adrs` (the appended verdict section)
+- **Status:** ✅ done. Verdict appended as §7 of `docs/issue-174-socket-book-disagreement.md`
+  (Phase 1 text untouched); fixture `tests/fixtures/socket_rest_reference_staleness.json`;
+  4 new tests (3 written RED first: `assert 'rest_reference' in {'description': … }`).
+  **The named cause:** the residual is an artefact of the comparison instrument, not a defect in
+  the socket book — the maintained book matched the venue's own declared quote on **every** frame
+  that carries one (0 in-frame divergences over 70,869 `price_change` events), and all 46 counted
+  divergences sit in the 158 comparisons where the concordance guard (`:346`) is structurally
+  blind because the frame declares no quote (`book` 31/104, `last_trade_price` 15/54), versus
+  **0/27,127** on the fully-declared frame type. Hypothesis 4 **ruled in** with a measured
+  gradient: disagreement is monotone in the reference age (guard rejection on `price_change`
+  10.4% → 21.7% → 27.2% → 35.0% across the four age buckets; counted divergence on `book`
+  0% → 0% → 20.7% → 41.7%), and zero below ~100 ms.
+  **Three planning assumptions fell to the instrument:** (a) the issue's assumed "large sub-tick
+  drift population" is **empty** — 0 pairs in `(0, 1 tick]` out of 169,023, so the distribution is
+  *exact agreement or a whole-cent jump*, not bimodal drift; (b) the per-series spread does not
+  reproduce (0.0–0.2%, max gap $0.05 — no "5m at 26–29% vs `btc-15m` at 5.2%"); (c) the ±0.5 s
+  window rejects 103,094 candidate pairs (72%), so most comparisons are never evaluated.
+  **Fixture-schema gap found while writing the test:** an extracted REST-sourced divergence could
+  not reproduce its own failure, because the #359 fixture shape carries no reference to compare
+  against. `extract_fixture`/`replay_fixture` gained `rest_reference`/`ws_rx`/`age_s`, added
+  **only** for REST-sourced divergences, so the existing fixture and its replay are untouched
+  (pinned by `test_an_in_frame_fixture_omits_the_rest_reference`). The first attempt at the unit
+  scenario was wrong, not the implementation: I built it on a `price_change` frame, on which a
+  counted REST divergence is impossible by construction — the test was moved to a `book` frame,
+  which is what the real capture's divergence actually is.
+  New ledger rows: **N2** (buckets expressed in `TOLERANCE` units make `1_3_ticks` unreachable —
+  2/169,023) and **N3** (the metric cannot say whether a pair was checkable — point #440's
+  re-scoping at §7.3 rather than at the headline rate).
 
 ## Checkpoints
 
@@ -222,6 +250,11 @@ it is settled by T2 before any analysis code is trusted.
   proceeding to analyse nothing.
 - **CP2 — after T3.** The extended report runs over the T2 session and prints the per-series
   split; no verdict written yet.
+- **CP3 — before the verdict.** The two questions T3b was added for, answered from the capture
+  before any cause is named: is the age effect confounded with the frame type (it is not — the
+  gradient is present on the gated type as guard rejection), and is the guard active on every
+  comparison of that type (it is — 38,005/38,005 in-window `price_change` pairs declare both
+  quotes, which is what makes that row's 0.0% a consequence rather than a coincidence).
 
 ## Improvement proposal (Step 5) — adopted by default
 
