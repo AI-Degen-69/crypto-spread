@@ -122,8 +122,26 @@ it is settled by T2 before any analysis code is trusted.
   do not analyse it.
 - **Domain tag:** `[Debug]` · **Helper skills:** `debugging-and-error-recovery`
   (`doubt-driven-development` if the capture succeeds but the counts look wrong)
-- **Status:** ⬜ pending — ⚠️ **the only step that cannot be done from the repo alone**; it needs
-  the network and a live window.
+- **Status:** ✅ done — **CP1 passed.** `run/diag_ws/raw_session_2026-10-07_00-42-10.jsonl`
+  (49.5 MB, gitignored): **71,690 WS events + 680 REST snapshots**, exit code 0, first capture
+  with ground truth. Mechanical check on the file: 680 `rest` lines = the summary's count exactly;
+  all **10 series** represented (34 snapshots per token, 68 per series); 0 empty books, 0 fetch
+  errors. REST timestamps span the WS window (679/680 inside it). The recorder's new per-token
+  table printed.
+- **First signal from the T3 instrument on this session** (read-only; the verdict is T4's job and
+  is **not** written yet): 46 divergences across 27,285 REST comparisons (**0.17%**), not 16.8%.
+  They live entirely in `book` (31/104 = 29.8%) and `last_trade_price` (15/54 = 27.8%) events —
+  while **`price_change`, the event type #359/#362 blamed, has 0 divergences over 27,127
+  comparisons**. Magnitude: 46 pairs in `>3_ticks`, 2 in `1_3_ticks`, 0 `sub_tick`, max gap 5¢.
+  Per series, rates are 0.0–0.2% (btc-5m 0.2%, eth-5m 0.2%, sol-15m 0.1%, xrp-5m 0.1%) — the
+  issue's "5m series at 26–29% vs btc-15m at 5.2%" does not appear.
+- ⚠️ **Instrument gap found while reading that signal, before drawing any conclusion.**
+  `note_skew` records the *order* (REST read before/after the WS mutation) but not the *age gap*
+  between them. On this capture the ordering is one-sided — `rest_after_ws` 0, `rest_before_ws`
+  27,285 — so the ordering data rules out one skew form but cannot by itself rule out staleness in
+  the other direction, which is the dominant ordering. Deciding hypothesis 4 properly needs the age
+  distribution for divergent versus non-divergent pairs. Flagged for T4 rather than silently
+  treated as answered.
 
 ### T3 — [Code/Research] Extend the replay with per-series, magnitude and skew instrumentation
 - **Size:** M · **Files:** `scripts/replay_socket_reconciliation.py`,
