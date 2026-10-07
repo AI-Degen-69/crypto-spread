@@ -559,6 +559,11 @@ def replay_fixture(file_path: Path) -> ReconciliationReport:
     effect of `preceding_events`, so those are never re-dispatched) and runs only
     `breaking_event` through the existing WS-event path, scoped to the fixture
     token (Issue #362).
+
+    A fixture whose divergence was measured against REST also carries
+    `rest_reference` and `ws_rx`; replaying those first is what lets such a
+    fixture reproduce its own failure, since the comparison happens against the
+    reference rather than against the frame's own declared quotes (Issue #438).
     """
     fixture = json.loads(Path(file_path).read_text(encoding="utf-8", errors="replace"))
     token = str(fixture.get("token") or "")
@@ -570,8 +575,23 @@ def replay_fixture(file_path: Path) -> ReconciliationReport:
             [{"price": p, "size": s} for p, s in (before.get("bids") or {}).items()],
             [{"price": p, "size": s} for p, s in (before.get("asks") or {}).items()],
         )
+    reference = fixture.get("rest_reference") or {}
+    if token and reference.get("book"):
+        reconciler.feed_line(json.dumps({
+            "type": "rest",
+            "token": token,
+            "rx": reference.get("rx"),
+            "book": reference["book"],
+        }))
     if fixture.get("breaking_event"):
-        reconciler.feed_line(json.dumps(fixture["breaking_event"]))
+        ws_rx = _num(fixture.get("ws_rx"))
+        if ws_rx:
+            # Carry the WS receive time, or the comparison has no age to report.
+            reconciler.feed_line(json.dumps({
+                "type": "ws", "rx": ws_rx, "ev": fixture["breaking_event"],
+            }))
+        else:
+            reconciler.feed_line(json.dumps(fixture["breaking_event"]))
     return reconciler.report
 
 
@@ -653,6 +673,19 @@ def extract_fixture(report: ReconciliationReport, out_path: Path) -> bool:
         "breaking_event": fd.event,
         "preceding_events": fd.preceding_events,
     }
+    # Issue #438: a divergence measured against REST is only reproducible if the
+    # fixture carries that reference and the times it was compared across. The
+    # two fields are added only for REST-sourced divergences, so the #359 fixture
+    # shape (an in-frame divergence against the frame's own quotes) is unchanged.
+    if fd.source == "rest" and fd.rest_rx is not None:
+        # best_bid/best_ask are the only fields the divergence rule reads, so the
+        # fixture stores exactly what the comparison used rather than a book's depth.
+        fixture_data["rest_reference"] = {
+            "rx": fd.rest_rx,
+            "book": {"best_bid": fd.ref_bb, "best_ask": fd.ref_ba},
+        }
+        fixture_data["ws_rx"] = fd.ws_rx
+        fixture_data["age_s"] = round(fd.age_s, 6) if fd.age_s is not None else None
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(fixture_data, f, indent=2)
     print(f"Saved breaking fixture to {out_path}")

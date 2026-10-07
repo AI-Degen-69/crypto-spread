@@ -582,7 +582,7 @@ def test_a_stale_divergent_reference_is_recorded_with_its_age():
     assert rep.age_buckets_divergent.get("le_500ms", 0) == 1
     assert rep.age_buckets_all.get("le_500ms", 0) == 1
 
-    rec = [r for r in rep.all_divergences if r.source == "rest"][0]
+    rec = next(r for r in rep.all_divergences if r.source == "rest")
     assert rec.age_s is not None
     assert abs(rec.age_s - 0.3) < 1e-9
 
@@ -594,4 +594,132 @@ def test_an_event_without_a_timestamp_has_an_unknown_age():
     assert rep.age_buckets_all == {"unknown": 1}
     assert rep.age_buckets_divergent == {"unknown": 1}
     assert rep.summary_dict()["age_buckets_all"] == {"unknown": 1}
+
+
+REST_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "socket_rest_reference_staleness.json"
+)
+
+
+def _stale_rest_divergence_reconciler() -> SocketReconciler:
+    """A reconciler whose only divergence is measured against an old REST read.
+
+    The frame is a `book` snapshot, which carries no declared top-of-book quote,
+    so the concordance guard in `_select_rest_book` has nothing to reject on and
+    the pair is counted. That is the shape of the whole residual population in
+    the 2026-10-07 capture: a REST divergence can only be *counted* on a frame
+    with no same-frame declared quote to check the REST read against, because on
+    a frame that has one, the guard drops the disagreeing pair (Issue #438).
+    """
+    reconciler = SocketReconciler()
+    token = "tok_rest_fixture"
+    # The REST ground truth was polled 300ms before the WS event it is compared to.
+    reconciler.feed_line(json.dumps({
+        "type": "rest",
+        "rx": 99.7,
+        "series": "btc-up-or-down-5m",
+        "token": token,
+        "book": {
+            "best_bid": 0.53,
+            "best_ask": 0.54,
+            "bids": {"0.53": "100"},
+            "asks": {"0.54": "100"},
+        },
+    }))
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": 100.0,
+        "ev": {
+            "event_type": "book",
+            "asset_id": token,
+            "bids": [{"price": "0.52", "size": "100"}],
+            "asks": [{"price": "0.55", "size": "100"}],
+        },
+    }))
+    return reconciler
+
+
+def test_extracted_rest_divergence_fixture_keeps_the_reference_it_compared(tmp_path):
+    """A REST-sourced divergence must carry the REST read it diverged from.
+
+    Without it the fixture cannot reproduce its own failure: replaying it would
+    compare the book against nothing, and the #359 fixture shape never had to
+    carry a reference because its divergence was against the frame's own quotes
+    (Issue #438).
+    """
+    out = tmp_path / "rest_fixture.json"
+    ok = extract_fixture(_stale_rest_divergence_reconciler().report, out)
+    assert ok is True
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["source"] == "rest"
+    assert data["event_type"] == "book"
+    assert data["ws_rx"] == 100.0
+    assert data["rest_reference"]["rx"] == 99.7
+    assert data["rest_reference"]["book"]["best_bid"] == 0.53
+    assert data["rest_reference"]["book"]["best_ask"] == 0.54
+    assert abs(data["age_s"] - 0.3) < 1e-9
+
+
+def test_extracted_rest_fixture_reproduces_the_divergence_through_the_ws_client(tmp_path):
+    """The extracted fixture replays through CLOBMarketWSClient and reproduces
+    the divergence *and its age* — the mechanism the #438 verdict names."""
+    out = tmp_path / "rest_fixture.json"
+    extract_fixture(_stale_rest_divergence_reconciler().report, out)
+
+    rep = replay_fixture(out)
+    assert rep.total_ws_events == 1
+    assert rep.total_rest_snapshots == 1
+    assert rep.in_frame_divergences == {}
+    assert rep.rest_divergences.get("book", 0) == 1
+    rec = next(r for r in rep.all_divergences if r.source == "rest")
+    assert rec.tick_bucket == ">3_ticks"
+    assert rec.age_s is not None
+    assert abs(rec.age_s - 0.3) < 1e-9
+
+
+def test_the_committed_rest_fixture_reproduces_the_captured_divergence():
+    """The fixture extracted from the 2026-10-07 capture reproduces its own
+    divergence, at the reference age recorded in the capture (Issue #438)."""
+    assert REST_FIXTURE_PATH.exists(), f"missing fixture: {REST_FIXTURE_PATH}"
+    fixture = json.loads(REST_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert fixture["source"] == "rest"
+    assert "rest_reference" in fixture
+
+    rep = replay_fixture(REST_FIXTURE_PATH)
+    assert rep.total_ws_events == 1
+    assert rep.in_frame_divergences == {}
+    assert rep.rest_divergences.get(fixture["event_type"], 0) == 1
+    rec = next(r for r in rep.all_divergences if r.source == "rest")
+    assert abs(rec.max_gap - fixture["max_gap"]) < 1e-9
+    assert rec.age_s is not None
+    assert abs(rec.age_s - fixture["age_s"]) < 1e-6
+
+
+def test_an_in_frame_fixture_omits_the_rest_reference(tmp_path):
+    """Additive only: an in-frame divergence keeps the exact #359 fixture shape,
+    so the existing fixture and its replay path are untouched (Issue #438)."""
+    reconciler = SocketReconciler()
+    token = "tok_in_frame"
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "ev": {
+            "event_type": "price_change",
+            "price_changes": [{
+                "asset_id": token,
+                "side": "BUY",
+                "price": "0.46",
+                "size": "10",
+                "best_bid": "0.50",
+                "best_ask": "0.62",
+            }],
+        },
+    }))
+    assert reconciler.report.in_frame_divergences["price_change"] == 1
+
+    out = tmp_path / "in_frame.json"
+    assert extract_fixture(reconciler.report, out) is True
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["source"] == "in_frame"
+    assert "rest_reference" not in data
+    assert "ws_rx" not in data
 
