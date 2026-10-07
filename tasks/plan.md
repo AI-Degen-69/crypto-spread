@@ -103,6 +103,13 @@ it is settled by T2 before any analysis code is trusted.
   first.
 - **Domain tag:** `[Debug]` · **Helper skills:** `debugging-and-error-recovery` (classify the two
   silent branches), `test-driven-development` (RED first on the new file)
+- **Status:** ✅ done. `capture_verdict` separates three failures (nothing recorded / WS without
+  REST / healthy); `poll_rest_once` counts recorded, empty-book and fetch-error **per token** and
+  logs the last two distinctly; the summary prints the per-token table; `main` prints `FAILURE`
+  and exits non-zero on a ground-truth-less capture. `run_session` returns a `SessionResult`
+  (its only caller is `main`). New file `tests/test_record_raw_socket_session.py`: 10 tests,
+  written RED first (`ImportError: cannot import name 'SessionResult'`). No new ruff codes
+  versus the module's baseline; the new test file is ruff-clean.
 
 ### T2 — [Research] Capture a REST-bearing session (operational)
 - **Size:** S · **Files:** `run/diag_ws/<new session>.jsonl` (gitignored evidence)

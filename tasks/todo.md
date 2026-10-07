@@ -1,6 +1,6 @@
 # Todo Checklist — Issue #438
 
-- [ ] T1 [Debug] Make a REST-less capture impossible to mistake — new test file written RED first
+- [x] T1 [Debug] Make a REST-less capture impossible to mistake — done: `capture_verdict` + per-token counts + non-zero exit; new `tests/test_record_raw_socket_session.py` (10 tests, RED first)
 - [ ] T2 [Debug] Capture a REST-bearing session — **operational, needs a live window; CP1 halt**
 - [ ] **CP1** — a REST-bearing capture exists with per-token counts (`rest_snapshot_count > 0`)
 - [ ] T3 [Debug/Backend] Extend the replay: per-series + magnitude buckets + `rest_rx`/`ws_rx` skew delta
