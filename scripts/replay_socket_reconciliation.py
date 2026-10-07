@@ -40,6 +40,74 @@ class RestSnapshotRecord:
 TOLERANCE = 0.001
 EPSILON = TOLERANCE * 1e-6
 
+#: One venue tick. Equal to TOLERANCE by construction (issue #438), and divergence
+#: is defined as *strictly* greater than it -- so a gap of exactly one tick is not a
+#: divergence, and anything at or below one tick is invisible to the divergence rule.
+TICK = TOLERANCE
+
+EXACT = "exact"
+SUB_TICK = "sub_tick"
+TICKS_1_3 = "1_3_ticks"
+TICKS_OVER_3 = ">3_ticks"
+MAGNITUDE_BUCKETS = (EXACT, SUB_TICK, TICKS_1_3, TICKS_OVER_3)
+
+SKEW_REST_AFTER_WS = "rest_after_ws"
+SKEW_REST_BEFORE_WS = "rest_before_ws"
+SKEW_UNKNOWN = "unknown"
+
+#: The boundary the divergence rule itself uses: a gap counts as divergent only when
+#: it is *strictly* greater than `TOLERANCE + EPSILON`. The magnitude buckets must be
+#: measured against the same boundary, or a gap the rule calls agreement is reported
+#: as drift -- which is exactly what an exact one-tick gap does, because a subtraction
+#: like `abs(0.55 - 0.549)` lands a few ulps *above* 0.001 (issue #438, PR #469 review).
+DIVERGENCE_EDGE = TOLERANCE + EPSILON
+
+AGE_UNKNOWN = "unknown"
+AGE_BUCKETS = ("le_50ms", "le_100ms", "le_250ms", "le_500ms", AGE_UNKNOWN)
+
+
+def age_bucket(age: Optional[float]) -> str:
+    """Bucket the age of the REST reference behind one comparison.
+
+    Hypothesis 4 of #438 says a divergent comparison may be one correct book read
+    at two instants, which is a claim about *staleness*, not about order. Recording
+    only which read came first cannot test it when the ordering is one-sided, as it
+    is on the first ground-truth capture; the age distribution can: if divergences
+    sit in older buckets than the population they came from, staleness explains them
+    and the metric is the thing at fault.
+    """
+    if age is None:
+        return AGE_UNKNOWN
+    if age <= 0.05:
+        return "le_50ms"
+    if age <= 0.1:
+        return "le_100ms"
+    if age <= 0.25:
+        return "le_250ms"
+    return "le_500ms"
+
+
+def tick_bucket(gap: float) -> str:
+    """Magnitude bucket for one comparison gap, expressed in venue ticks.
+
+    `exact` and `sub_tick` together hold the population the divergence rule
+    cannot see: no gap at or below one tick registers as divergent, because
+    divergence requires strictly more than `TOLERANCE + EPSILON`. They are kept
+    apart on purpose -- perfect agreement and one-tick drift are different
+    observations,
+    and the issue's bimodality claim ("a large population of sub-tick drift plus
+    a rare, violent population") cannot be tested if agreement is folded into the
+    drift bucket. Bucketing *every* comparable pair, not only the divergent
+    ones, is what makes that claim measurable instead of assumed.
+    """
+    if gap <= 0.0:
+        return EXACT
+    if gap <= DIVERGENCE_EDGE:
+        return SUB_TICK
+    if gap <= 3 * TICK + EPSILON:
+        return TICKS_1_3
+    return TICKS_OVER_3
+
 
 def _num(v: Any) -> Optional[float]:
     """Parse numeric value safely to float or None."""
@@ -68,6 +136,10 @@ class DivergenceRecord:
     event: Dict[str, Any]
     preceding_events: List[Dict[str, Any]]
     book_snapshot_before: Optional[Dict[str, Any]] = None
+    ws_rx: float = 0.0
+    rest_rx: Optional[float] = None
+    tick_bucket: str = ""
+    age_s: Optional[float] = None
 
 
 @dataclass
@@ -84,6 +156,79 @@ class ReconciliationReport:
     max_gap_by_type: Dict[str, float] = field(default_factory=dict)
     first_divergence: Optional[DivergenceRecord] = None
     all_divergences: List[DivergenceRecord] = field(default_factory=list)
+    magnitude_buckets: Dict[str, int] = field(default_factory=dict)
+    skew_buckets: Dict[str, int] = field(default_factory=dict)
+    age_buckets_all: Dict[str, int] = field(default_factory=dict)
+    age_buckets_divergent: Dict[str, int] = field(default_factory=dict)
+    per_series: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    def note_magnitude(self, gap: float) -> None:
+        """Count one comparable pair into its magnitude bucket (issue #438)."""
+        key = tick_bucket(gap)
+        self.magnitude_buckets[key] = self.magnitude_buckets.get(key, 0) + 1
+
+    def note_series(self, series: str, divergent: bool,
+                    gap: Optional[float] = None) -> None:
+        """Count one REST comparison into its series' row.
+
+        The per-series split is the deliverable: the issue records 5m series
+        diverging at 26-29% while `btc-15m` sits at 5.2%, and a single global
+        rate hides exactly that spread. `gap` is optional because a pair whose
+        two books carry disjoint quote fields has no measurable gap, yet is
+        still a comparison in the denominator.
+
+        The magnitude buckets are carried per series too, not only globally:
+        acceptance criterion 3 asks for the bimodal split *per series*, and a
+        global histogram lets one series' violent population be hidden by
+        another series' sub-tick drift. These buckets cover this series' REST
+        comparisons, which is a narrower population than the report-wide
+        `magnitude_buckets` (those also count in-frame pairs).
+        """
+        row = self.per_series.setdefault(series, {
+            "comparisons": 0, "rest_divergences": 0,
+            "divergence_rate": 0.0, "max_gap": 0.0,
+            "magnitude_buckets": {},
+        })
+        row["comparisons"] += 1
+        if divergent:
+            row["rest_divergences"] += 1
+        if gap is not None:
+            row["max_gap"] = max(row["max_gap"], gap)
+            buckets = row["magnitude_buckets"]
+            key = tick_bucket(gap)
+            buckets[key] = buckets.get(key, 0) + 1
+        row["divergence_rate"] = round(row["rest_divergences"] / row["comparisons"], 4)
+
+    def note_skew(self, rest_rx: Optional[float], ws_rx: float) -> None:
+        """Classify whether the REST read happened after the WS mutation.
+
+        Hypothesis 4 of #438: a comparison whose REST snapshot postdates the WS
+        event that set the top quote may be one correct book observed at two
+        instants, not corruption. Counting the pairs this way is what rules the
+        hypothesis in or out rather than arguing about it.
+        """
+        if rest_rx is None or ws_rx <= 0.0:
+            # Ordering is a claim about two timestamps. A WS record with no
+            # receive time (rx == 0) makes the pair unclassifiable rather than
+            # "REST after WS", which any positive REST time would satisfy.
+            key = SKEW_UNKNOWN
+        elif rest_rx > ws_rx:
+            key = SKEW_REST_AFTER_WS
+        else:
+            key = SKEW_REST_BEFORE_WS
+        self.skew_buckets[key] = self.skew_buckets.get(key, 0) + 1
+
+    def note_age(self, age: Optional[float], divergent: bool) -> None:
+        """Histogram the REST reference's age, for the population and for divergences.
+
+        Two histograms rather than one: the hypothesis is comparative (are divergent
+        pairs older than the pairs around them?), so the denominator has to be
+        recorded alongside the numerator (issue #438, T3b).
+        """
+        key = age_bucket(age)
+        self.age_buckets_all[key] = self.age_buckets_all.get(key, 0) + 1
+        if divergent:
+            self.age_buckets_divergent[key] = self.age_buckets_divergent.get(key, 0) + 1
 
     def summary_dict(self) -> Dict[str, Any]:
         """Generate serializable summary breakdown by event type."""
@@ -111,6 +256,16 @@ class ReconciliationReport:
             "total_ws_events": self.total_ws_events,
             "total_rest_snapshots": self.total_rest_snapshots,
             "by_type": type_stats,
+            "magnitude_buckets": dict(self.magnitude_buckets),
+            "skew_buckets": dict(self.skew_buckets),
+            "age_buckets_all": dict(self.age_buckets_all),
+            "age_buckets_divergent": dict(self.age_buckets_divergent),
+            # Rows are copied, and the nested bucket map copied with them, so a
+            # caller mutating the summary cannot reach back into the report.
+            "per_series": {
+                k: {**v, "magnitude_buckets": dict(v.get("magnitude_buckets") or {})}
+                for k, v in self.per_series.items()
+            },
             "first_divergence": (
                 {
                     "event_index": self.first_divergence.event_index,
@@ -146,6 +301,9 @@ class SocketReconciler:
         self.report = ReconciliationReport()
         self.history_buffer_size = history_buffer_size
         self._recent_events: List[Dict[str, Any]] = []
+        #: token -> series slug, learned from REST records (WS frames name only
+        #: tokens). A token with no REST record has no series to attribute.
+        self.token_series: Dict[str, str] = {}
 
     def feed_line(self, line: str) -> None:
         """Parse and route one JSONL line from a capture session."""
@@ -175,6 +333,9 @@ class SocketReconciler:
         if tok and book:
             self.rest_books[tok] = book
             self.rest_snapshots[tok].append(RestSnapshotRecord(rx=rx, book=book))
+            series = str(record.get("series") or "")
+            if series:
+                self.token_series[tok] = series
             self.report.total_rest_snapshots += 1
 
     def _select_rest_book(
@@ -183,17 +344,27 @@ class SocketReconciler:
         ws_rx: float,
         in_bb: Optional[float] = None,
         in_ba: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Select a temporally matched REST snapshot for tok at ws_rx."""
+    ) -> Optional[Tuple[Dict[str, Any], Optional[float]]]:
+        """Select a temporally matched REST snapshot for tok at ws_rx.
+
+        Returns the book together with the snapshot's receive time, so a caller
+        can tell sampling skew (the REST read landed after the WS mutation it is
+        compared against) from genuine disagreement (issue #438). The
+        in-frame-disagreement guard is unchanged: a REST read that contradicts
+        the frame's own declared quotes is skipped rather than counted.
+        """
         snapshots = self.rest_snapshots.get(tok)
         if not snapshots:
-            return self.rest_books.get(tok)
+            fallback = self.rest_books.get(tok)
+            return (fallback, None) if fallback else None
 
         if ws_rx <= 0.0:
-            candidate = snapshots[-1].book
+            candidate, cand_rx = snapshots[-1].book, snapshots[-1].rx
         else:
             best = min(snapshots, key=lambda s: abs(s.rx - ws_rx))
-            candidate = best.book if abs(best.rx - ws_rx) <= 0.5 else None
+            if abs(best.rx - ws_rx) > 0.5:
+                return None
+            candidate, cand_rx = best.book, best.rx
 
         if candidate and (in_bb is not None or in_ba is not None):
             cand_bb = _num(candidate.get("best_bid"))
@@ -204,7 +375,7 @@ class SocketReconciler:
             ):
                 return None
 
-        return candidate
+        return candidate, cand_rx
 
     def _handle_ws_event(self, record: Dict[str, Any]) -> None:
         """Process WS message, update local book, and check against references."""
@@ -263,6 +434,11 @@ class SocketReconciler:
             if declared_bb is not None or declared_ba is not None:
                 d_bb = abs(ws_bb - declared_bb) if (ws_bb is not None and declared_bb is not None) else None
                 d_ba = abs(ws_ba - declared_ba) if (ws_ba is not None and declared_ba is not None) else None
+                deltas_in = [d for d in (d_bb, d_ba) if d is not None]
+                if deltas_in:
+                    # Every comparable pair is bucketed, not only the divergent ones
+                    # (issue #438): the sub-tick population is otherwise invisible.
+                    self.report.note_magnitude(max(deltas_in))
                 divergent_in = any(d is not None and d > TOLERANCE + EPSILON for d in (d_bb, d_ba))
                 if divergent_in:
                     self.report.in_frame_divergences[ev_type] = (
@@ -273,6 +449,8 @@ class SocketReconciler:
                         self.report.max_gap_by_type.get(ev_type, 0.0), max_d
                     )
                     div_rec = DivergenceRecord(
+                        ws_rx=ws_rx,
+                        tick_bucket=tick_bucket(max_d),
                         event_index=self.report.total_ws_events,
                         event_type=ev_type,
                         token=tok,
@@ -293,8 +471,9 @@ class SocketReconciler:
                     self.report.all_divergences.append(div_rec)
 
             # 2. Concurrent REST reconciliation
-            rest_book = self._select_rest_book(tok, ws_rx, declared_bb, declared_ba)
-            if rest_book:
+            selected = self._select_rest_book(tok, ws_rx, declared_bb, declared_ba)
+            if selected:
+                rest_book, rest_rx = selected
                 rest_bb = _num(rest_book.get("best_bid"))
                 rest_ba = _num(rest_book.get("best_ask"))
                 if (rest_bb is not None or rest_ba is not None) and (ws_bb is not None or ws_ba is not None):
@@ -310,15 +489,28 @@ class SocketReconciler:
                     divergent_rest = any(
                         d is not None and d > TOLERANCE + EPSILON for d in (d_bb_rest, d_ba_rest)
                     )
+                    deltas_rest = [d for d in (d_bb_rest, d_ba_rest) if d is not None]
+                    gap_rest = max(deltas_rest) if deltas_rest else None
+                    age_s = (ws_rx - rest_rx) if (rest_rx is not None and ws_rx > 0) else None
+                    if gap_rest is not None:
+                        self.report.note_magnitude(gap_rest)
+                        self.report.note_skew(rest_rx, ws_rx)
+                    self.report.note_series(
+                        self.token_series.get(tok, "unknown"), divergent_rest, gap_rest)
+                    self.report.note_age(age_s, divergent_rest)
                     if divergent_rest:
                         self.report.rest_divergences[ev_type] = (
                             self.report.rest_divergences.get(ev_type, 0) + 1
                         )
-                        max_d_rest = max(d for d in (d_bb_rest, d_ba_rest) if d is not None)
+                        max_d_rest = max(deltas_rest)
                         self.report.max_gap_by_type[ev_type] = max(
                             self.report.max_gap_by_type.get(ev_type, 0.0), max_d_rest
                         )
                         div_rec_rest = DivergenceRecord(
+                            ws_rx=ws_rx,
+                            rest_rx=rest_rx,
+                            tick_bucket=tick_bucket(max_d_rest),
+                            age_s=age_s,
                             event_index=self.report.total_ws_events,
                             event_type=ev_type,
                             token=tok,
@@ -394,6 +586,11 @@ def replay_fixture(file_path: Path) -> ReconciliationReport:
     effect of `preceding_events`, so those are never re-dispatched) and runs only
     `breaking_event` through the existing WS-event path, scoped to the fixture
     token (Issue #362).
+
+    A fixture whose divergence was measured against REST also carries
+    `rest_reference` and `ws_rx`; replaying those first is what lets such a
+    fixture reproduce its own failure, since the comparison happens against the
+    reference rather than against the frame's own declared quotes (Issue #438).
     """
     fixture = json.loads(Path(file_path).read_text(encoding="utf-8", errors="replace"))
     token = str(fixture.get("token") or "")
@@ -405,8 +602,23 @@ def replay_fixture(file_path: Path) -> ReconciliationReport:
             [{"price": p, "size": s} for p, s in (before.get("bids") or {}).items()],
             [{"price": p, "size": s} for p, s in (before.get("asks") or {}).items()],
         )
+    reference = fixture.get("rest_reference") or {}
+    if token and reference.get("book"):
+        reconciler.feed_line(json.dumps({
+            "type": "rest",
+            "token": token,
+            "rx": reference.get("rx"),
+            "book": reference["book"],
+        }))
     if fixture.get("breaking_event"):
-        reconciler.feed_line(json.dumps(fixture["breaking_event"]))
+        ws_rx = _num(fixture.get("ws_rx"))
+        if ws_rx:
+            # Carry the WS receive time, or the comparison has no age to report.
+            reconciler.feed_line(json.dumps({
+                "type": "ws", "rx": ws_rx, "ev": fixture["breaking_event"],
+            }))
+        else:
+            reconciler.feed_line(json.dumps(fixture["breaking_event"]))
     return reconciler.report
 
 
@@ -432,6 +644,34 @@ def print_report_table(report: ReconciliationReport) -> None:
             f"{ev_type:<18} | {s['events']:<8} | {s['in_frame_divergences']:<12} | "
             f"{s['comparisons']:<10} | {s['rest_divergences']:<9} | {rate_str:<9} | {gap_str}"
         )
+    if report.magnitude_buckets:
+        print("-" * 80)
+        print("MAGNITUDE BUCKETS (every comparable pair; one tick = $0.001):")
+        for key in MAGNITUDE_BUCKETS:
+            print(f"  {key:<12} {report.magnitude_buckets.get(key, 0)}")
+    if report.skew_buckets:
+        print("REST/WS TIMING ORDER (hypothesis 4: skew, not corruption):")
+        for key in (SKEW_REST_AFTER_WS, SKEW_REST_BEFORE_WS, SKEW_UNKNOWN):
+            print(f"  {key:<16} {report.skew_buckets.get(key, 0)}")
+    if report.age_buckets_all:
+        print("REST REFERENCE AGE (hypothesis 4: staleness, not corruption):")
+        print(f"  {'bucket':<12} {'all':<8} {'divergent':<10} {'div rate'}")
+        for key in AGE_BUCKETS:
+            total = report.age_buckets_all.get(key, 0)
+            if not total:
+                continue
+            div = report.age_buckets_divergent.get(key, 0)
+            print(f"  {key:<12} {total:<8} {div:<10} {div / total * 100:.1f}%")
+    if report.per_series:
+        print("PER SERIES (REST comparisons; buckets over this series' comparisons):")
+        for slug, row in sorted(report.per_series.items()):
+            rate = f"{row['divergence_rate'] * 100:.1f}%"
+            print(f"  {slug:<30} comps={row['comparisons']:<7} div={row['rest_divergences']:<6} "
+                  f"rate={rate:<8} max_gap=${row['max_gap']:.4f}")
+            buckets = row.get("magnitude_buckets") or {}
+            if buckets:
+                split = " ".join(f"{key}={buckets.get(key, 0)}" for key in MAGNITUDE_BUCKETS)
+                print(f"    {'':<28} {split}")
     print("=" * 80)
 
     if report.first_divergence:
@@ -464,6 +704,19 @@ def extract_fixture(report: ReconciliationReport, out_path: Path) -> bool:
         "breaking_event": fd.event,
         "preceding_events": fd.preceding_events,
     }
+    # Issue #438: a divergence measured against REST is only reproducible if the
+    # fixture carries that reference and the times it was compared across. The
+    # two fields are added only for REST-sourced divergences, so the #359 fixture
+    # shape (an in-frame divergence against the frame's own quotes) is unchanged.
+    if fd.source == "rest" and fd.rest_rx is not None:
+        # best_bid/best_ask are the only fields the divergence rule reads, so the
+        # fixture stores exactly what the comparison used rather than a book's depth.
+        fixture_data["rest_reference"] = {
+            "rx": fd.rest_rx,
+            "book": {"best_bid": fd.ref_bb, "best_ask": fd.ref_ba},
+        }
+        fixture_data["ws_rx"] = fd.ws_rx
+        fixture_data["age_s"] = round(fd.age_s, 6) if fd.age_s is not None else None
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(fixture_data, f, indent=2)
     print(f"Saved breaking fixture to {out_path}")
