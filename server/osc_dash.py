@@ -7983,7 +7983,11 @@ async function refreshCollectorStatus(){
         // badge_text is server-rendered (single source of truth, tested in
         // Python); the UI only picks the color from the rate.
         sb.textContent = bs.badge_text;
-        if(bs.divergence_rate > bs.tolerance){
+        if(typeof bs.tolerance !== 'number' || !Number.isFinite(bs.tolerance)){
+          sb.style.color = 'var(--dim)';
+          sb.style.borderColor = 'var(--line)';
+          sb.style.background = 'var(--panel2)';
+        } else if(bs.divergence_rate > bs.tolerance){
           sb.style.color = 'var(--gold)';
           sb.style.borderColor = 'rgba(240,180,41,0.5)';
           sb.style.background = 'rgba(240,180,41,0.15)';
@@ -7999,7 +8003,10 @@ async function refreshCollectorStatus(){
             return `${slug}: ${r}% (${s.comparisons})`;
           })
           .join('\n');
-        sb.title = `WS vs REST book disagreement (diverged = delta > ${bs.tolerance})` +
+        const tolLabel = (typeof bs.tolerance === 'number' && Number.isFinite(bs.tolerance))
+          ? `diverged = delta > ${bs.tolerance}`
+          : 'tolerance unavailable';
+        sb.title = `WS vs REST book disagreement (${tolLabel})` +
           (rows ? `\n${rows}` : '');
       } else {
         sb.textContent = 'Book Δ: not enough data yet';
