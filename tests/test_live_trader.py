@@ -3818,8 +3818,10 @@ def test_rollover_settle_latched_bid_when_book_wiped_at_boundary():
     m.condition_id = "0xxrp_cid"
     m.filled_up = True
     m.fill_price_up = 0.48
-    # Earlier tick latched a real executable bid
+    # Earlier tick latched a real executable bid (issue #472: fixtures stamp
+    # the write time, as the WS/REST paths now do)
     m.last_valid_up_bid = 0.02
+    m.last_valid_up_bid_ts = time.time()
     # Boundary poll cleared bids to None
     m.up_bid = None
     m.down_ask = None
@@ -3953,11 +3955,24 @@ def test_rollover_clears_latched_bids_for_next_window():
     m.last_valid_down_bid = 0.48
     m.last_valid_up_ask = 0.51
     m.last_valid_down_ask = 0.52
+    m.last_valid_up_bid_ts = time.time()
+    m.last_valid_down_bid_ts = time.time()
+    m.last_valid_up_ask_ts = time.time()
+    m.last_valid_down_ask_ts = time.time()
+    m.best_ts_up = time.time()
+    m.best_ts_down = time.time()
     engine._handle_window_rollover(m, time.time(), new_cid="0xbnb_next")
     assert m.last_valid_up_bid is None
     assert m.last_valid_down_bid is None
     assert m.last_valid_up_ask is None
     assert m.last_valid_down_ask is None
+    # Issue #472: ages reset with the latches — no inherited quotes.
+    assert m.last_valid_up_bid_ts is None
+    assert m.last_valid_down_bid_ts is None
+    assert m.last_valid_up_ask_ts is None
+    assert m.last_valid_down_ask_ts is None
+    assert m.best_ts_up is None
+    assert m.best_ts_down is None
 
 
 def test_shadow_snapshot_exports_book_bids():
@@ -4684,3 +4699,78 @@ def test_tick_all_markets_isolates_a_failing_market(caplog):
     assert btc["last_tick_error"] == "kaboom"
     assert engine.markets[_TICK_HEALTH_SLUG]._last_completed_tick_perf is None
     assert engine.get_state()["markets"]["eth-up-or-down-5m"]["tick_error_count"] == 0
+
+
+def _exit_probe_market(engine, slug="xrp-up-or-down-5m"):
+    """A market with no live book and no mid — only latches can price it (issue #472)."""
+    m = engine.markets[slug]
+    m.up_bid = None
+    m.down_bid = None
+    m.up_ask = None
+    m.down_ask = None
+    m.mid = None
+    return m
+
+
+def test_exit_not_priced_from_stale_latch(caplog):
+    """Issue #472: a latch older than the bound never prices an exit.
+
+    Stale rung 3 falls through to a fresh rung 4, the skip is logged once
+    with its age, and the winning basis carries its own age.
+    """
+    engine = LiveTraderEngine(load_persisted=False)
+    m = _exit_probe_market(engine)
+    m.last_valid_up_bid = 0.48
+    m.last_valid_up_bid_ts = time.time() - 400.0
+    m.last_valid_down_ask = 0.40
+    m.last_valid_down_ask_ts = time.time()
+
+    caplog.set_level("INFO", logger="live_trader")
+    px, basis = engine._resolve_exit_bid(m, "UP")
+
+    assert px == pytest.approx(0.60, abs=1e-4)
+    assert basis.startswith("latched_complement_ask@")
+    assert "rung=latched_bid skipped" in caplog.text
+
+
+def test_exit_uses_fresh_latch_with_age_in_notes():
+    """Issue #472: a latch inside the bound still prices the exit, and the age
+    reaches the trade notes (e.g. `latched_bid@8.0s`)."""
+    engine = LiveTraderEngine(load_persisted=False)
+    m = engine.markets["xrp-up-or-down-5m"]
+    m.condition_id = "0xxrp_cid"
+    m.filled_up = True
+    m.fill_price_up = 0.48
+    m.last_valid_up_bid = 0.02
+    m.last_valid_up_bid_ts = time.time() - 8.0
+    m.up_bid = None
+    m.down_ask = None
+    engine._handle_window_rollover(m, time.time(), new_cid="0xxrp_next")
+    trade = [t for t in engine.trades if t.action == "WINDOW_SETTLE"][-1]
+    assert trade.exit_price == pytest.approx(0.02, abs=1e-4)
+    assert "latched_bid@" in trade.notes
+
+
+def test_stale_mid_falls_through_to_runtime_error():
+    """Issue #472: the mid fallback needs young leg bests, not just a past update.
+
+    A qualifying mid with no (or old) best stamps cannot price the exit — the
+    ladder still raises RuntimeError; fresh stamps restore the rung with an
+    aged basis.
+    """
+    engine = LiveTraderEngine(load_persisted=False)
+    m = _exit_probe_market(engine)
+    m.mid = 0.60
+    assert m.best_ts_up is None and m.best_ts_down is None
+    with pytest.raises(RuntimeError, match="No executable book mark available"):
+        engine._resolve_exit_bid(m, "UP")
+
+    m.best_ts_up = time.time() - 500.0
+    m.best_ts_down = time.time()
+    with pytest.raises(RuntimeError, match="No executable book mark available"):
+        engine._resolve_exit_bid(m, "UP")
+
+    m.best_ts_up = time.time()
+    px, basis = engine._resolve_exit_bid(m, "UP")
+    assert px == pytest.approx(0.60, abs=1e-4)
+    assert basis.startswith("mid_fallback@")
