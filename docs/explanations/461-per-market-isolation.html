@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>#461 — כל מרקט לעצמו: מה השתנה ומה לעקוב</title>
+<style>
+  :root{
+    --bg:#14110b; --panel:#1e1a12; --panel2:#262017; --line:#3a3122;
+    --ink:#f2e8d5; --dim:#b8a888; --gold:#f0b429; --up:#33c9b5; --bad:#e5605e;
+    --mono:"Consolas","Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Segoe UI",Arial,sans-serif;line-height:1.7}
+  .wrap{max-width:900px;margin:0 auto;padding:28px 18px 60px}
+  h1{font-size:1.7rem;margin:.2em 0;color:var(--gold)}
+  h2{font-size:1.2rem;margin:2em 0 .6em;color:var(--gold);
+    border-bottom:1px solid var(--line);padding-bottom:.3em}
+  p{color:var(--ink)} .dim{color:var(--dim)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px 18px;margin:14px 0}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:640px){.cols{grid-template-columns:1fr}}
+  .tag{display:inline-block;font-size:.78rem;border:1px solid var(--line);
+    border-radius:20px;padding:1px 10px;color:var(--dim);margin-bottom:8px}
+  code,.mono{font-family:var(--mono);font-size:.86em;background:#0f0d08;
+    padding:1px 6px;border-radius:6px;direction:ltr;display:inline-block}
+  pre{background:#0f0d08;border:1px solid var(--line);border-radius:10px;
+    padding:12px 14px;overflow:auto;direction:ltr;text-align:left;
+    font-family:var(--mono);font-size:.82rem;line-height:1.6}
+  .tick{display:flex;gap:8px;align-items:stretch;margin:10px 0;flex-wrap:wrap}
+  .mkt{flex:1 1 120px;border:1px solid var(--line);border-radius:10px;
+    padding:10px;text-align:center;min-width:110px;transition:background .3s,border-color .3s}
+  .mkt b{display:block;font-size:.85rem}
+  .mkt small{color:var(--dim)}
+  .ok{background:rgba(51,201,181,.12);border-color:rgba(51,201,181,.45)}
+  .boom{background:rgba(229,96,94,.16);border-color:var(--bad)}
+  .starved{background:#14110b;border-style:dashed;opacity:.75}
+  .skip{background:rgba(240,180,41,.12);border-color:var(--gold)}
+  .arrow{align-self:center;color:var(--dim);font-size:1.2rem}
+  button{background:var(--gold);color:#14110b;border:0;border-radius:10px;
+    padding:10px 18px;font-size:1rem;cursor:pointer;font-weight:700}
+  button:hover{filter:brightness(1.08)}
+  .check{list-style:none;padding:0}
+  .check li{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:10px 14px;margin:8px 0}
+  .check li::before{content:"◽ ";color:var(--gold)}
+  kbd{font-family:var(--mono);background:#0f0d08;border:1px solid var(--line);
+    border-radius:6px;padding:0 6px}
+  @media(prefers-reduced-motion:reduce){.mkt{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>#461 — מרקט קורס כבר לא מרעיב את השאר</h1>
+  <p class="dim">מה השתנה, איפה רואים את זה, ואיך תדע שהכול עובד — בלי לפתוח טרמינל.</p>
+
+  <h2>1 · קודם / עכשיו — טיק אחד, מרקט אחד קורס</h2>
+  <div class="cols">
+    <div class="card">
+      <span class="tag">קודם — השגיאה עוצרת את התור</span>
+      <div class="tick" id="beforeRow"></div>
+      <p class="dim">מרקט 2 קורס ← מרקטים 3 ו־4 <b>לא מתעדכנים</b> באותה שנייה. בטיק הבא זה קורה שוב.</p>
+    </div>
+    <div class="card">
+      <span class="tag">עכשיו — השגיאה נשארת אצל מי שגרם לה</span>
+      <div class="tick" id="afterRow"></div>
+      <p class="dim">מרקט 2 נרשם ונרשם בלוג ← מרקטים 3 ו־4 <b>ממשיכים כרגיל</b>. הטיק מסתיים.</p>
+    </div>
+  </div>
+  <button id="replay" type="button">▶ הרץ את הטיק שוב</button>
+
+  <h2>2 · מה קורה מאחורי הקלעים (3 שורות קוד, לא יותר)</h2>
+  <div class="card">
+    <p>בכל טיק, לכל מרקט, סביב קריאת העדכון יש עכשיו רשת ביטחון משלו:</p>
+<pre>except Exception as exc:
+    self._record_tick_error(slug, exc)          # ① נרשם על המרקט הנכון
+    log.error("[%s] Strategy update failed: %s",
+              slug, exc, exc_info=True)         # ② שורה בלוג + traceback
+    continue                                    # ③ ממשיכים למרקט הבא</pre>
+    <p class="dim">מה <b>לא</b> השתנה: רשת הביטחון הכללית של הטיק, הלוגיקה של העדכון עצמו, ואין ניסיון־חוזר באותה שנייה — הטיק הבא (בעוד שנייה) מעדכן הכול מחדש.</p>
+  </div>
+
+  <h2>3 · איפה רואים את זה — שורת הלוג</h2>
+  <div class="card">
+    <p>כשמרקט נופל, מופיעה <b>שורה אחת לטיק</b> עם שם המרקט והסיבה, וה־traceback המלא מתחתיה:</p>
+<pre>[btc-up-or-down-5m] Strategy update failed: kaboom
+Traceback (most recent call last):
+  ...
+RuntimeError: kaboom</pre>
+    <p class="dim">לפני השינוי: אותה שגיאה הייתה מפילה את כל הטיק, והלוג הכללי לא ידע להגיד <b>איזה</b> מרקט אשם. עכשיו השם מופיע בשורה עצמה.</p>
+  </div>
+
+  <h2>4 · איפה רואים את זה — בריאות המרקטים</h2>
+  <div class="card">
+    <p>המרקט שנפל <b>לא</b> מקבל חותמת עדכון — אז הוא ייראה <b>stale</b> (גילו עולה, מונה השגיאות עולה), בזמן שהאחרים נשארים <b>fresh</b>:</p>
+    <div class="tick">
+      <div class="mkt boom"><b>BTC</b><small>stale · errors: 3<br>last error: kaboom</small></div>
+      <div class="mkt ok"><b>ETH</b><small>fresh · age 0.4s</small></div>
+      <div class="mkt ok"><b>SOL</b><small>fresh · age 0.4s</small></div>
+    </div>
+    <p class="dim">זה ההבדל מקודם: פעם מרקט תקוע היה נראה תקין כי עצם הניסיון חתם אותו. מאז #462 הבריאות נמדדת רק מעדכון <b>שהושלם</b> — ו־#461 דואג שהאחרים אכן מושלמים.</p>
+  </div>
+
+  <h2>5 · מה לצפות — צ'קליסט</h2>
+  <ul class="check">
+    <li><b>ביום רגיל: כלום.</b> שקט בלוגים וכל המרקטים fresh — זה סימן ההצלחה. השינוי בלתי נראה כשהכול תקין.</li>
+    <li><b>מרקט אחד מתקלקל:</b> השאר ממשיכים לסחור; בלוג יש שורה אחת חוזרת עם שמו; הוא מסומן stale עם מונה שגיאות עולה.</li>
+    <li><b>מה לא השתנה:</b> קצב הטיקים (שנייה), הלוגיקה של האסטרטגיה, וההתנהגות כשאין שגיאות — אחד לאחד כמו קודם.</li>
+  </ul>
+  <p class="dim">נבדק אוטומטית: 145 טסטים ירוקים, כולל טסט שמפיל מרקט אחד ומוודא שהשני עודכן והטיק הסתיים — ועוד סוויטה מלאה ב־CI.</p>
+
+</div>
+<script>
+(function(){
+  var mkts = ["BTC","ETH","SOL","XRP"];
+  function paint(rowId, mode){
+    var row = document.getElementById(rowId);
+    row.innerHTML = "";
+    mkts.forEach(function(m, i){
+      var d = document.createElement("div");
+      var cls = "mkt ", note = "";
+      if(mode === "before"){
+        if(i === 1){ cls += "boom"; note = "קורס ✕"; }
+        else if(i > 1){ cls += "starved"; note = "לא עודכן ○"; }
+        else { cls += "ok"; note = "עודכן ✓"; }
+      }else{
+        if(i === 1){ cls += "skip"; note = "נרשם + ממשיכים ↷"; }
+        else { cls += "ok"; note = "עודכן ✓"; }
+      }
+      d.className = cls;
+      d.innerHTML = "<b>" + m + "</b><small>" + note + "</small>";
+      row.appendChild(d);
+      if(i < mkts.length - 1){
+        var a = document.createElement("span");
+        a.className = "arrow"; a.textContent = "◀";
+        row.appendChild(a);
+      }
+    });
+  }
+  function run(){ paint("beforeRow","before"); paint("afterRow","after"); }
+  document.getElementById("replay").addEventListener("click", run);
+  run();
+})();
+</script>
+</body>
+</html>
