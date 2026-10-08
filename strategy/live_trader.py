@@ -128,6 +128,12 @@ WS_BOOK_DRIFT_GUARD_CENTS = 0.02
 # sample. The per-run flip/block log lines added here are the instrument for
 # re-tuning it later.
 WS_BOOK_COMPARABLE_AGE_SEC = 0.1
+# Exit-quote age bound (issue #472). A latched quote older than this never
+# prices an exit — resolution falls through to the next rung. Starting
+# proposal, not a measurement: survives many missed polls on thin books
+# while killing the minutes-old case. The age-tagged skip/resolution log
+# lines in _resolve_exit_bid are the instrument for re-tuning it later.
+EXIT_QUOTE_MAX_AGE_SEC = 30.0
 
 
 def _age_between(earlier: Any, later: float) -> Optional[float]:
@@ -739,6 +745,15 @@ class MarketLiveState:
     last_valid_down_bid: Optional[float] = None
     last_valid_up_ask: Optional[float] = None
     last_valid_down_ask: Optional[float] = None
+    # Issue #472: write-time stamps (local clock, time.time()) for the latches
+    # above, plus per-leg best-quote stamps for the mid fallback. Rollover
+    # clears all six alongside the latches so a window never inherits ages.
+    last_valid_up_bid_ts: Optional[float] = None
+    last_valid_down_bid_ts: Optional[float] = None
+    last_valid_up_ask_ts: Optional[float] = None
+    last_valid_down_ask_ts: Optional[float] = None
+    best_ts_up: Optional[float] = None
+    best_ts_down: Optional[float] = None
     
     # Strategy orders
     resting_up: float = 0.48
@@ -2158,10 +2173,13 @@ class LiveTraderEngine:
                     m.up_bid = best_b
                     m.up_ask = best_a
                     m.book_source_up = "ws"
+                    m.best_ts_up = time.time()
                     if best_b is not None and 0.0 < best_b <= 1.0:
                         m.last_valid_up_bid = best_b
+                        m.last_valid_up_bid_ts = time.time()
                     if best_a is not None and 0.0 < best_a <= 1.0:
                         m.last_valid_up_ask = best_a
+                        m.last_valid_up_ask_ts = time.time()
                 else:
                     m.ws_bids_down = dict(bids)
                     m.ws_asks_down = dict(asks)
@@ -2171,10 +2189,13 @@ class LiveTraderEngine:
                     m.down_bid = best_b
                     m.down_ask = best_a
                     m.book_source_down = "ws"
+                    m.best_ts_down = time.time()
                     if best_b is not None and 0.0 < best_b <= 1.0:
                         m.last_valid_down_bid = best_b
+                        m.last_valid_down_bid_ts = time.time()
                     if best_a is not None and 0.0 < best_a <= 1.0:
                         m.last_valid_down_ask = best_a
+                        m.last_valid_down_ask_ts = time.time()
                 # mid/spread recomputed from authoritative bests
                 # Issue #207: use honest book_math.two_sided_mid (None for unpriceable leg)
                 # rather than fabricating 0.50 which compromises all downstream gates.
@@ -4276,10 +4297,13 @@ class LiveTraderEngine:
                     ub_best_a = ubook.get("best_ask")
                     mstate.up_bid = ub_best_b
                     mstate.up_ask = ub_best_a
+                    mstate.best_ts_up = time.time()
                     if ub_best_b is not None and 0.0 < ub_best_b <= 1.0:
                         mstate.last_valid_up_bid = ub_best_b
+                        mstate.last_valid_up_bid_ts = time.time()
                     if ub_best_a is not None and 0.0 < ub_best_a <= 1.0:
                         mstate.last_valid_up_ask = ub_best_a
+                        mstate.last_valid_up_ask_ts = time.time()
                     # When REST wins, replace the ladder (stale WS depth must not survive for queue-audit)
                     try:
                         raw_bids = ubook.get("bids")
@@ -4295,10 +4319,13 @@ class LiveTraderEngine:
                     db_best_a = dbook.get("best_ask")
                     mstate.down_bid = db_best_b
                     mstate.down_ask = db_best_a
+                    mstate.best_ts_down = time.time()
                     if db_best_b is not None and 0.0 < db_best_b <= 1.0:
                         mstate.last_valid_down_bid = db_best_b
+                        mstate.last_valid_down_bid_ts = time.time()
                     if db_best_a is not None and 0.0 < db_best_a <= 1.0:
                         mstate.last_valid_down_ask = db_best_a
+                        mstate.last_valid_down_ask_ts = time.time()
                     try:
                         raw_bids = dbook.get("bids")
                         raw_asks = dbook.get("asks")
@@ -5280,9 +5307,15 @@ class LiveTraderEngine:
         Order of resolution (issue #160):
         1. Direct book bid: mstate.up_bid / mstate.down_bid if 0.0 < bid <= 1.0.
         2. Binary complement ask: 1.0 - opposite_ask if 0.0 < opposite_ask <= 1.0.
-        3. Latched valid book bid: last seen valid positive bid on this leg.
-        4. Latched binary complement ask: 1.0 - last seen valid opposite ask.
-        5. Synthetic mid: derived mid if present and not exactly default 0.50.
+        3. Latched valid book bid: last seen valid positive bid on this leg,
+           only while younger than EXIT_QUOTE_MAX_AGE_SEC (issue #472).
+        4. Latched binary complement ask: 1.0 - last seen valid opposite ask,
+           same age bound.
+        5. Synthetic mid: derived mid if present, not exactly default 0.50,
+           and both leg bests younger than the bound.
+
+        Aged rungs report their age in the basis (e.g. `latched_bid@8.4s`) so
+        the exit record and trade notes say how old the pricing quote was.
 
         Note: Opposite bid is NOT used for binary complement because
         (1.0 - B_opp) synthesizes an ask (A_same), whereas closing a long position
@@ -5296,10 +5329,27 @@ class LiveTraderEngine:
             raise ValueError(f"Unknown side: {side}")
 
         is_up = (side_norm == "UP")
+        now = time.time()
         leg_bid = mstate.up_bid if is_up else mstate.down_bid
         opp_ask = mstate.down_ask if is_up else mstate.up_ask
         latched_bid = mstate.last_valid_up_bid if is_up else mstate.last_valid_down_bid
         latched_opp_ask = mstate.last_valid_down_ask if is_up else mstate.last_valid_up_ask
+        latched_bid_ts = mstate.last_valid_up_bid_ts if is_up else mstate.last_valid_down_bid_ts
+        latched_opp_ask_ts = mstate.last_valid_down_ask_ts if is_up else mstate.last_valid_up_ask_ts
+
+        def _quote_age(ts):
+            """Age of a write-time stamp, or None when unmeasurable/stale by
+            construction. Negative ages (clock moved backwards) never gate
+            anything open — they read as stale."""
+            age = _age_between(ts, now)
+            if age is None or age < 0.0 or age > EXIT_QUOTE_MAX_AGE_SEC:
+                return None
+            return age
+
+        def _age_label(ts):
+            """Display age for a skip line: seconds, or unknown when unmeasurable."""
+            raw = _age_between(ts, now)
+            return "unknown" if raw is None else f"{raw:.1f}s"
 
         # 1. Direct book bid
         if leg_bid is not None and 0.0 < leg_bid <= 1.0:
@@ -5309,21 +5359,54 @@ class LiveTraderEngine:
         if opp_ask is not None and 0.0 < opp_ask <= 1.0:
             return round(max(0.0001, min(0.9999, 1.0 - opp_ask)), 4), "complement_ask"
 
-        # 3. Latched valid book bid
+        # 3. Latched valid book bid (issue #472: only while the latch is young;
+        # otherwise fall through — a window-open quote must not price the close).
         if latched_bid is not None and 0.0 < latched_bid <= 1.0:
-            return round(max(0.0001, min(0.9999, latched_bid)), 4), "latched_bid"
+            bid_age = _quote_age(latched_bid_ts)
+            if bid_age is not None:
+                log.info("[%s] exit-quote-age rung=latched_bid age=%.1fs",
+                         mstate.slug, bid_age)
+                return (round(max(0.0001, min(0.9999, latched_bid)), 4),
+                        f"latched_bid@{bid_age:.1f}s")
+            log.info("[%s] exit-quote-age rung=latched_bid skipped age=%s",
+                     mstate.slug, _age_label(latched_bid_ts))
 
-        # 4. Latched binary complement ask
+        # 4. Latched binary complement ask (same age bound).
         if latched_opp_ask is not None and 0.0 < latched_opp_ask <= 1.0:
-            return round(max(0.0001, min(0.9999, 1.0 - latched_opp_ask)), 4), "latched_complement_ask"
+            ask_age = _quote_age(latched_opp_ask_ts)
+            if ask_age is not None:
+                log.info("[%s] exit-quote-age rung=latched_complement_ask age=%.1fs",
+                         mstate.slug, ask_age)
+                return (round(max(0.0001, min(0.9999, 1.0 - latched_opp_ask)), 4),
+                        f"latched_complement_ask@{ask_age:.1f}s")
+            log.info("[%s] exit-quote-age rung=latched_complement_ask skipped age=%s",
+                     mstate.slug, _age_label(latched_opp_ask_ts))
 
-        # 5. Synthetic mid (only if engine observed at least one book update and mid != 0.50)
+        # 5. Synthetic mid (only if both leg bests are young and mid != 0.50;
+        # issue #472 replaces the old last_update_ts presence test).
         leg_mid = mstate.mid if is_up else (1.0 - mstate.mid if mstate.mid is not None else None)
-        if (getattr(mstate, "last_update_ts", 0) > 0
-                and leg_mid is not None
+        up_age = _age_between(mstate.best_ts_up, now)
+        down_age = _age_between(mstate.best_ts_down, now)
+        mid_age = None
+        if (up_age is not None and up_age >= 0.0
+                and down_age is not None and down_age >= 0.0):
+            mid_age = max(up_age, down_age)
+            if mid_age > EXIT_QUOTE_MAX_AGE_SEC:
+                mid_age = None
+        if (leg_mid is not None
                 and 0.0 < leg_mid < 1.0
                 and abs(leg_mid - 0.50) > 1e-4):
-            return round(max(0.0001, min(0.9999, leg_mid)), 4), "mid_fallback"
+            if mid_age is not None:
+                log.info("[%s] exit-quote-age rung=mid_fallback age=%.1fs",
+                         mstate.slug, mid_age)
+                return (round(max(0.0001, min(0.9999, leg_mid)), 4),
+                        f"mid_fallback@{mid_age:.1f}s")
+            oldest = None
+            if up_age is not None and down_age is not None:
+                oldest = max(up_age, down_age)
+            log.info("[%s] exit-quote-age rung=mid_fallback skipped age=%s",
+                     mstate.slug,
+                     "unknown" if oldest is None else f"{oldest:.1f}s")
 
         log.critical("[%s] Window Rollover FAILED: No valid market book or latched quote for %s leg", mstate.slug, side)
         raise RuntimeError(f"[{mstate.slug}] No executable book mark available for {side} leg settle at rollover")
@@ -5521,6 +5604,13 @@ class LiveTraderEngine:
             mstate.last_valid_down_bid = None
             mstate.last_valid_up_ask = None
             mstate.last_valid_down_ask = None
+            # Issue #472: ages reset with the latches — no inherited quotes.
+            mstate.last_valid_up_bid_ts = None
+            mstate.last_valid_down_bid_ts = None
+            mstate.last_valid_up_ask_ts = None
+            mstate.last_valid_down_ask_ts = None
+            mstate.best_ts_up = None
+            mstate.best_ts_down = None
             mstate.fill_telemetry_done_up = False
             mstate.fill_telemetry_done_down = False
             mstate.first_seen_start_ts = None
