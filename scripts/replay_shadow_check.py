@@ -215,7 +215,8 @@ def load_shadow_recorded(path: Path | None = None) -> dict:
 
 def assert_config_mirror(params: BacktestParams, recorded: dict,
                          gates_on: bool,
-                         pair_cap: float = 0.98) -> None:
+                         pair_cap: float = 0.98,
+                         universe: tuple[str, ...] | None = None) -> None:
     """Fail fast if any mirrored knob drifts from the recorded shadow config.
 
     Field renames recorded -> engine: shares -> quote_shares. `max_pair_cost`
@@ -243,7 +244,9 @@ def assert_config_mirror(params: BacktestParams, recorded: dict,
     assert recorded["exit_thresh"] == 0.05
     for key, want in (("default_5m", 0.05), ("default_15m", 0.05)):
         assert params.exit_thresh_by_slug.get(key) == want, f"exit mirror gap: {key}"
-    for slug in UNIVERSE:
+    if universe is None:
+        universe = UNIVERSE
+    for slug in universe:
         assert params.exit_thresh_by_slug.get(slug) == 0.05, f"exit mirror gap: {slug}"
 
 
@@ -416,7 +419,8 @@ def main() -> None:
             (True, PAIR_CAPS[0]), (False, PAIR_CAPS[0]),
             (True, PAIR_CAPS[1]), (False, PAIR_CAPS[1])):
         params = build_params(gates_on, pair_cap, naked_leg_at_expiry=naked)
-        assert_config_mirror(params, recorded, gates_on, pair_cap)
+        assert_config_mirror(params, recorded, gates_on, pair_cap,
+                             universe=scope.universe)
         totals = summarize(params, groups)
         totals["params_hash"] = params.params_hash()
         leg = f"{'gates' if gates_on else 'nogates'}_pc{pair_cap}"
