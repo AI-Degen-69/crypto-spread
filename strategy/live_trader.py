@@ -128,6 +128,12 @@ WS_BOOK_DRIFT_GUARD_CENTS = 0.02
 # sample. The per-run flip/block log lines added here are the instrument for
 # re-tuning it later.
 WS_BOOK_COMPARABLE_AGE_SEC = 0.1
+# Exit-quote age bound (issue #472). A latched quote older than this never
+# prices an exit — resolution falls through to the next rung. Starting
+# proposal, not a measurement: survives many missed polls on thin books
+# while killing the minutes-old case. The age-tagged skip/resolution log
+# lines in _resolve_exit_bid are the instrument for re-tuning it later.
+EXIT_QUOTE_MAX_AGE_SEC = 30.0
 
 
 def _age_between(earlier: Any, later: float) -> Optional[float]:
@@ -739,6 +745,15 @@ class MarketLiveState:
     last_valid_down_bid: Optional[float] = None
     last_valid_up_ask: Optional[float] = None
     last_valid_down_ask: Optional[float] = None
+    # Issue #472: write-time stamps (local clock, time.time()) for the latches
+    # above, plus per-leg best-quote stamps for the mid fallback. Rollover
+    # clears all six alongside the latches so a window never inherits ages.
+    last_valid_up_bid_ts: Optional[float] = None
+    last_valid_down_bid_ts: Optional[float] = None
+    last_valid_up_ask_ts: Optional[float] = None
+    last_valid_down_ask_ts: Optional[float] = None
+    best_ts_up: Optional[float] = None
+    best_ts_down: Optional[float] = None
     
     # Strategy orders
     resting_up: float = 0.48
@@ -2158,10 +2173,13 @@ class LiveTraderEngine:
                     m.up_bid = best_b
                     m.up_ask = best_a
                     m.book_source_up = "ws"
+                    m.best_ts_up = time.time()
                     if best_b is not None and 0.0 < best_b <= 1.0:
                         m.last_valid_up_bid = best_b
+                        m.last_valid_up_bid_ts = time.time()
                     if best_a is not None and 0.0 < best_a <= 1.0:
                         m.last_valid_up_ask = best_a
+                        m.last_valid_up_ask_ts = time.time()
                 else:
                     m.ws_bids_down = dict(bids)
                     m.ws_asks_down = dict(asks)
@@ -2171,10 +2189,13 @@ class LiveTraderEngine:
                     m.down_bid = best_b
                     m.down_ask = best_a
                     m.book_source_down = "ws"
+                    m.best_ts_down = time.time()
                     if best_b is not None and 0.0 < best_b <= 1.0:
                         m.last_valid_down_bid = best_b
+                        m.last_valid_down_bid_ts = time.time()
                     if best_a is not None and 0.0 < best_a <= 1.0:
                         m.last_valid_down_ask = best_a
+                        m.last_valid_down_ask_ts = time.time()
                 # mid/spread recomputed from authoritative bests
                 # Issue #207: use honest book_math.two_sided_mid (None for unpriceable leg)
                 # rather than fabricating 0.50 which compromises all downstream gates.
@@ -4276,10 +4297,13 @@ class LiveTraderEngine:
                     ub_best_a = ubook.get("best_ask")
                     mstate.up_bid = ub_best_b
                     mstate.up_ask = ub_best_a
+                    mstate.best_ts_up = time.time()
                     if ub_best_b is not None and 0.0 < ub_best_b <= 1.0:
                         mstate.last_valid_up_bid = ub_best_b
+                        mstate.last_valid_up_bid_ts = time.time()
                     if ub_best_a is not None and 0.0 < ub_best_a <= 1.0:
                         mstate.last_valid_up_ask = ub_best_a
+                        mstate.last_valid_up_ask_ts = time.time()
                     # When REST wins, replace the ladder (stale WS depth must not survive for queue-audit)
                     try:
                         raw_bids = ubook.get("bids")
@@ -4295,10 +4319,13 @@ class LiveTraderEngine:
                     db_best_a = dbook.get("best_ask")
                     mstate.down_bid = db_best_b
                     mstate.down_ask = db_best_a
+                    mstate.best_ts_down = time.time()
                     if db_best_b is not None and 0.0 < db_best_b <= 1.0:
                         mstate.last_valid_down_bid = db_best_b
+                        mstate.last_valid_down_bid_ts = time.time()
                     if db_best_a is not None and 0.0 < db_best_a <= 1.0:
                         mstate.last_valid_down_ask = db_best_a
+                        mstate.last_valid_down_ask_ts = time.time()
                     try:
                         raw_bids = dbook.get("bids")
                         raw_asks = dbook.get("asks")
@@ -5521,6 +5548,13 @@ class LiveTraderEngine:
             mstate.last_valid_down_bid = None
             mstate.last_valid_up_ask = None
             mstate.last_valid_down_ask = None
+            # Issue #472: ages reset with the latches — no inherited quotes.
+            mstate.last_valid_up_bid_ts = None
+            mstate.last_valid_down_bid_ts = None
+            mstate.last_valid_up_ask_ts = None
+            mstate.last_valid_down_ask_ts = None
+            mstate.best_ts_up = None
+            mstate.best_ts_down = None
             mstate.fill_telemetry_done_up = False
             mstate.fill_telemetry_done_down = False
             mstate.first_seen_start_ts = None
