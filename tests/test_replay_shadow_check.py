@@ -319,3 +319,40 @@ def test_resolve_scope_ticks_only_keeps_frozen_universe_and_times(tmp_path):
     assert scope.universe == mod.UNIVERSE
     assert (scope.t0, scope.t1) == (mod.T0, mod.T1)
     assert scope.out_dir == mod.OUT_DIR
+
+
+def _foreign_params(extra_slug="sol-up-or-down-5m", value=0.05):
+    """build_params() plus one slug outside UNIVERSE (issue #467)."""
+    base = mod.build_params(True)
+    mapping = dict(base.exit_thresh_by_slug)
+    mapping[extra_slug] = value
+    return dataclasses.replace(base, exit_thresh_by_slug=mapping)
+
+
+def test_mirror_checks_foreign_universe_slug():
+    """A scope universe outside UNIVERSE is actually checked, not skipped."""
+    params = _foreign_params()
+    mod.assert_config_mirror(params, RECORDED, True,
+                             universe=("sol-up-or-down-5m",))
+
+
+def test_mirror_fails_foreign_slug_without_threshold():
+    """A scope slug with no exit threshold fails the mirror gate."""
+    params = mod.build_params(True)
+    with pytest.raises(AssertionError, match="exit mirror gap: sol-up-or-down-5m"):
+        mod.assert_config_mirror(params, RECORDED, True,
+                                 universe=("sol-up-or-down-5m",))
+
+
+def test_mirror_fails_foreign_slug_wrong_value():
+    """A scope slug with a drifted threshold fails the mirror gate."""
+    params = _foreign_params(value=0.09)
+    with pytest.raises(AssertionError, match="exit mirror gap: sol-up-or-down-5m"):
+        mod.assert_config_mirror(params, RECORDED, True,
+                                 universe=("sol-up-or-down-5m",))
+
+
+def test_mirror_default_still_checks_frozen_universe():
+    """No universe given: the frozen UNIVERSE is checked, extras ignored."""
+    params = _foreign_params(extra_slug="sol-up-or-down-5m", value=0.99)
+    mod.assert_config_mirror(params, RECORDED, True)
