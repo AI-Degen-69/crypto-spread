@@ -21,7 +21,7 @@ execution modes; `mode="live"` means real money.
 ## Commands
 ```powershell
 pip install -r requirements.txt
-pip install pytest                          # dev: 932 tests across 18 files
+pip install pytest                          # dev: 1630 tests across 59 files
 python -m pytest tests/test_<module>.py -q  # targeted tests (FAST: <1s; ALWAYS prefer during dev & review)
 python -m scripts.collect_ticks             # capture: full-depth + tape to run/ticks/ticks_YYYY-MM-DD.jsonl (1s poll, 10 series)
 python -m scripts.collect_ticks --once      # single poll smoke test
@@ -34,8 +34,8 @@ python -m uvicorn server.osc_dash:app --host 127.0.0.1 --port 5515  # dashboard
 
 ## Testing & Fast Iteration Policy
 - **Targeted tests ONLY during development and Station IV review:** Run only test files matching modified modules (e.g. `python -m pytest tests/test_backtest_engine.py -q` or `-k <test_name>`). These finish in <1-2s.
-- **NEVER run the full test suite (`python -m pytest -q`) locally:** The suite contains 932 tests across 18 files and takes ~96 seconds. Full runs locally are strictly forbidden as redundant.
-- **GitHub Actions CI is the sole merge gate:** Pushing a branch automatically triggers full-suite CI in the cloud. Local agents must rely on targeted tests and let CI gate regressions.
+- **NEVER run the full test suite (`python -m pytest -q`) locally:** The suite contains 1630 tests across 59 files. Full runs locally are strictly forbidden as redundant.
+- **GitHub Actions CI is the sole merge gate:** Pushing a branch or opening a PR automatically triggers the full suite (`.github/workflows/tests.yml`) in the cloud. Local agents must rely on targeted tests and let CI gate regressions.
 
 ## Structure
 - `scripts/collect_ticks.py` — primary collector. Polls 10 series (`strategy/series.py:SERIES`), fetches both books + tape via CLOB/data-api, writes replay-grade `run/ticks/ticks_YYYY-MM-DD.jsonl` (full bids/asks + tape_delta per second) + `manifest.json`. Use this for backtests.
