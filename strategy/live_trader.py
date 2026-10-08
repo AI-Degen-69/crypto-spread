@@ -128,6 +128,25 @@ WS_BOOK_DRIFT_GUARD_CENTS = 0.02
 # sample. The per-run flip/block log lines added here are the instrument for
 # re-tuning it later.
 WS_BOOK_COMPARABLE_AGE_SEC = 0.1
+
+
+def _age_between(earlier: Any, later: float) -> Optional[float]:
+    """`later - earlier` in seconds, or None when it cannot be measured honestly.
+
+    Never raises and never returns NaN/inf (both poison JSON snapshots):
+    non-numeric stamps, NaN and infinities all read as "unmeasurable".
+    Negative finite ages pass through — callers map them to age_unknown
+    without clamping, so clock skew stays visible instead of hidden.
+    """
+    if isinstance(earlier, bool) or not isinstance(earlier, (int, float)):
+        return None
+    try:
+        age = later - earlier
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if age != age or abs(age) == float("inf"):
+        return None
+    return age
 # One window's prints at one price level. A cap is needed because the ledger is
 # only trimmed by window rollover, and a hot market can print continuously; the
 # oldest entries are dropped first, which biases toward undercounting rather
@@ -680,6 +699,17 @@ class MarketLiveState:
     # decision, so the cockpit never shows a source that never priced.
     book_source_up: str = ""
     book_source_down: str = ""
+    # Reconcile verdict per leg (issue #471): why the last decision went the
+    # way it did — "ws_stale", "drift", "age_unknown", "unaligned", "agree",
+    # "no_compare" or "fallback_disabled" — plus both read ages in seconds.
+    # "" / None until the first decision. Ages stay JSON-safe: unmeasurable
+    # reads record None, never NaN or inf.
+    book_verdict_up: str = ""
+    book_verdict_down: str = ""
+    book_ws_age_up: Optional[float] = None
+    book_ws_age_down: Optional[float] = None
+    book_rest_age_up: Optional[float] = None
+    book_rest_age_down: Optional[float] = None
     # Pending WS tape prints per window (consumed next tick or instantly)
     pending_ws_trades_up: List[Dict[str, Any]] = field(default_factory=list)
     pending_ws_trades_down: List[Dict[str, Any]] = field(default_factory=list)
@@ -4153,24 +4183,36 @@ class LiveTraderEngine:
         # We keep best + depth so queue_ahead sees the whole ladder. REST wins only if
         # WS leg is stale or missing; otherwise we preserve WS's fresher value.
         # The REST payload may be {} (no market) or {best_bid/ask, bids, asks}.
-        def _use_rest_for_leg(leg: str) -> bool:
-            """True when REST may overwrite this leg's book (WS missing or stale)."""
-            if not self.rest_fallback_enabled:
-                return False
-            # If WS book missing/stale or socket disconnected, accept REST.
-            # Otherwise keep WS.
+        def _use_rest_for_leg(leg: str):
+            """Decide whether REST may overwrite this leg's book.
+
+            Returns (apply, reason, ws_age, rest_age). Issue #471: a price gap
+            wider than WS_BOOK_DRIFT_GUARD_CENTS flips authority only while the
+            socket read is young enough to compare (WS_BOOK_COMPARABLE_AGE_SEC).
+            `now` predates the fetch and can carry a server-clock offset, so the
+            check uses only the socket age on the local clock; the REST age is
+            approximate and recorded, never gating.
+            """
+            sample = time.time()
             if leg == "UP":
-                has_ws = (mstate.ws_book_ts_up is not None)
-                fresh = self.is_ws_book_fresh(mstate, "UP")
+                ts = mstate.ws_book_ts_up
                 rest_book = ubook
                 ws_b, ws_a = mstate.up_bid, mstate.up_ask
             else:
-                has_ws = (mstate.ws_book_ts_down is not None)
-                fresh = self.is_ws_book_fresh(mstate, "DOWN")
+                ts = mstate.ws_book_ts_down
                 rest_book = dbook
                 ws_b, ws_a = mstate.down_bid, mstate.down_ask
-            if not has_ws or not fresh:
-                return True
+            ws_age = _age_between(ts, sample)
+            try:
+                rest_age = _age_between(float(now), sample)
+            except (TypeError, ValueError, OverflowError):
+                rest_age = None
+            if not self.rest_fallback_enabled:
+                return False, "fallback_disabled", ws_age, rest_age
+            # If WS book missing/stale or socket disconnected, accept REST.
+            # Otherwise keep WS.
+            if ts is None or not self.is_ws_book_fresh(mstate, leg):
+                return True, "ws_stale", ws_age, rest_age
             # Drift guard (issue #353 — implemented; the comment describing it
             # predates the code since #169): a FRESH socket book still loses
             # one round to REST when a full REST book disagrees by more than
@@ -4180,25 +4222,37 @@ class LiveTraderEngine:
             rb_b = rest_book.get("best_bid") if isinstance(rest_book, dict) else None
             rb_a = rest_book.get("best_ask") if isinstance(rest_book, dict) else None
             if rb_b is None or rb_a is None or ws_b is None or ws_a is None:
-                return False
+                return False, "no_compare", ws_age, rest_age
             try:
-                if (abs(float(rb_b) - float(ws_b)) > WS_BOOK_DRIFT_GUARD_CENTS
-                        or abs(float(rb_a) - float(ws_a)) > WS_BOOK_DRIFT_GUARD_CENTS):
-                    return True
+                drift = (abs(float(rb_b) - float(ws_b)) > WS_BOOK_DRIFT_GUARD_CENTS
+                         or abs(float(rb_a) - float(ws_a)) > WS_BOOK_DRIFT_GUARD_CENTS)
             except (TypeError, ValueError, OverflowError):
-                return False
-            return False
+                return False, "no_compare", ws_age, rest_age
+            if not drift:
+                return False, "agree", ws_age, rest_age
+            # Age comparison (issue #471): only a comparably young socket read
+            # may lose on price. Unmeasurable or negative ages keep today's
+            # rule (drift decides) as age_unknown — never clamped, so clock
+            # skew stays visible.
+            if ws_age is None or ws_age < 0:
+                return True, "age_unknown", ws_age, rest_age
+            if ws_age > WS_BOOK_COMPARABLE_AGE_SEC:
+                return False, "unaligned", ws_age, rest_age
+            return True, "drift", ws_age, rest_age
 
         # Decide per-leg whether to apply REST.
-        apply_up = _use_rest_for_leg("UP")
-        apply_down = _use_rest_for_leg("DOWN")
+        verdict_up = _use_rest_for_leg("UP")
+        verdict_down = _use_rest_for_leg("DOWN")
+        apply_up, apply_down = verdict_up[0], verdict_down[0]
         if apply_up or apply_down:
             with self._book_reconcile_lock:
                 # Re-evaluate under lock — WS may have become fresh between the check above and now
-                if apply_up and not _use_rest_for_leg("UP"):
-                    apply_up = False
-                if apply_down and not _use_rest_for_leg("DOWN"):
-                    apply_down = False
+                if apply_up:
+                    verdict_up = _use_rest_for_leg("UP")
+                    apply_up = verdict_up[0]
+                if apply_down:
+                    verdict_down = _use_rest_for_leg("DOWN")
+                    apply_down = verdict_down[0]
                 if apply_up:
                     ub_best_b = ubook.get("best_bid")
                     ub_best_a = ubook.get("best_ask")
@@ -4240,6 +4294,12 @@ class LiveTraderEngine:
         # kept reads "ws". The cockpit renders these verbatim.
         mstate.book_source_up = "rest" if apply_up else "ws"
         mstate.book_source_down = "rest" if apply_down else "ws"
+        # Verdict detail (issue #471): the final reason and both read ages ride
+        # alongside the source labels, from the same final verdict.
+        apply_up, reason_up, ws_age_up, rest_age_up = verdict_up
+        apply_down, reason_down, ws_age_down, rest_age_down = verdict_down
+        mstate.book_verdict_up, mstate.book_ws_age_up, mstate.book_rest_age_up = reason_up, ws_age_up, rest_age_up
+        mstate.book_verdict_down, mstate.book_ws_age_down, mstate.book_rest_age_down = reason_down, ws_age_down, rest_age_down
         # Mid/spread always derived from current bests regardless of source.
         # Held under the same lock as the writes above and as on_book_update:
         # reading the bests and writing the mid they imply must be one step, or
