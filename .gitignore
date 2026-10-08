@@ -23,3 +23,6 @@ diff.diff
 
 # one-off agent handoff notes — local scratch, never part of the repo
 /HANDOFF.md
+
+# Station IV browser-gate scratch (playwright-cli sessions) — local only
+.playwright-cli/
