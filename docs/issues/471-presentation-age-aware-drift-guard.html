@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>הסבר חזותי — Issue #471: הגנת סחיפת ספר עם בדיקת גיל</title>
+<style>
+  :root{
+    --bg:#0e1117; --bg2:#161b23; --panel:#1c232d; --panel2:#232b37;
+    --line:#2f3947; --line2:#3d4a5c;
+    --tx:#e7edf5; --tx2:#a7b4c4; --tx3:#74839a;
+    --ok:#5fd0a5; --warn:#f2c14e; --bad:#f1776d; --info:#6fb3f2; --acc:#b98cf2;
+    --mono:ui-monospace,"Cascadia Code","SF Mono",Consolas,monospace;
+    --r:12px; --max:1120px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:linear-gradient(180deg,#0e1117 0%,#12161e 100%);
+    color:var(--tx); font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+    line-height:1.65; font-size:16px;
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+  }
+  .wrap{max-width:var(--max);margin:0 auto;padding:32px 20px 80px}
+  header.hero{
+    border:1px solid var(--line); border-radius:var(--r); background:
+      radial-gradient(900px 300px at 80% -10%, rgba(185,140,242,.16), transparent 60%),
+      linear-gradient(180deg,var(--panel),var(--bg2));
+    padding:28px; margin-bottom:28px;
+  }
+  h1{margin:0 0 6px; font-size:clamp(22px,3.4vw,34px); line-height:1.25; letter-spacing:-.2px}
+  .sub{color:var(--tx2); margin:0; font-size:15px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{
+    font-size:12.5px; padding:4px 10px; border-radius:999px;
+    border:1px solid var(--line2); background:var(--panel2); color:var(--tx2);
+    font-family:var(--mono); direction:ltr; unicode-bidi:isolate;
+  }
+  .chip.ok{border-color:rgba(95,208,165,.5); color:var(--ok)}
+  .chip.merged{border-color:rgba(111,179,242,.5); color:var(--info)}
+  section{
+    border:1px solid var(--line); border-radius:var(--r); background:var(--panel);
+    padding:22px; margin:20px 0;
+  }
+  h2{
+    margin:0 0 4px; font-size:20px; display:flex; align-items:center; gap:10px;
+    letter-spacing:-.1px;
+  }
+  h2 .num{
+    font-family:var(--mono); font-size:12px; color:var(--tx3);
+    border:1px solid var(--line2); border-radius:6px; padding:1px 7px; flex:none;
+  }
+  h3{margin:20px 0 8px; font-size:16px; color:var(--tx)}
+  p{margin:10px 0}
+  .lead{color:var(--tx2); margin-top:2px; font-size:15px}
+  code,.mono{font-family:var(--mono); direction:ltr; unicode-bidi:isolate; font-size:.92em}
+  code{background:var(--panel2); padding:1px 5px; border-radius:5px; color:var(--info)}
+  pre{
+    background:#0b0f15; border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; overflow-x:auto; margin:12px 0; line-height:1.6; font-size:13px;
+  }
+  pre code{background:none;padding:0;color:var(--tx)}
+  .add{color:#8fd3a8;background:rgba(95,208,165,.10)}
+  .del{color:#f5a49c;background:rgba(241,119,109,.10)}
+  .cmt{color:var(--tx3); font-style:italic}
+  .kw{color:#c98cf2}
+  .str{color:#8fd3a8}
+  pre code{background:none;padding:0;color:var(--tx);white-space:pre;direction:ltr;unicode-bidi:isolate}
+  .grid{display:grid; gap:14px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+  .card{border:1px solid var(--line); border-radius:10px; background:var(--panel2); padding:16px}
+  .card h4{margin:0 0 8px; font-size:14.5px; display:flex; gap:8px; align-items:center}
+  .card p{font-size:14px; color:var(--tx2); margin:6px 0}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  table{width:100%; border-collapse:collapse; margin:12px 0; font-size:14px}
+  th,td{padding:9px 11px; border-bottom:1px solid var(--line); text-align:right; vertical-align:top}
+  th{color:var(--tx2); font-weight:600; font-size:13px; background:var(--panel2)}
+  td:first-child,th:first-child{text-align:right}
+  .tbl-wrap{overflow-x:auto}
+  .ltr{direction:ltr; unicode-bidi:isolate}
+  .callout{
+    border-radius:10px; padding:14px 16px; margin:14px 0;
+    border-right:4px solid var(--info); background:rgba(111,179,242,.07);
+  }
+  .callout.warn{border-color:var(--warn); background:rgba(242,193,78,.07)}
+  .callout.bad{border-color:var(--bad); background:rgba(241,119,109,.07)}
+  .callout.ok{border-color:var(--ok); background:rgba(95,208,165,.07)}
+  .callout b{display:block; margin-bottom:4px; font-size:14.5px}
+  .callout p{margin:4px 0; font-size:14px; color:var(--tx2)}
+  .tabs{display:flex; gap:8px; flex-wrap:wrap; margin:14px 0 0}
+  .tab{
+    font:inherit; font-size:13.5px; cursor:pointer; padding:8px 14px; border-radius:8px;
+    border:1px solid var(--line2); background:var(--panel2); color:var(--tx2);
+  }
+  .tab[aria-selected="true"]{background:var(--acc);border-color:var(--acc);color:#12071d;font-weight:600}
+  .tab:focus-visible{outline:2px solid var(--info);outline-offset:2px}
+  .pane{display:none; border:1px solid var(--line); border-top:none; border-radius:0 0 10px 10px; padding:16px; background:#0f141b}
+  .pane.active{display:block}
+  .legend{display:flex;flex-wrap:wrap; gap:14px; margin:10px 0 0; font-size:12.5px; color:var(--tx2)}
+  .legend span{display:flex; align-items:center; gap:6px}
+  svg{width:100%; height:auto; display:block}
+  .axis{stroke:var(--line2); stroke-width:1}
+  .gridline{stroke:var(--line); stroke-width:1; opacity:.5}
+  .tick{fill:var(--tx3); font-size:10px; font-family:var(--mono)}
+  .lbl{fill:var(--tx); font-size:12px; font-family:system-ui}
+  .lbl2{fill:var(--tx2); font-size:11px}
+  .kpi{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:6px 0 2px}
+  .kpi div{border:1px solid var(--line); border-radius:10px; background:var(--panel2); padding:12px 14px}
+  .kpi b{display:block; font-size:22px; font-family:var(--mono); color:var(--acc)}
+  .kpi span{font-size:12.5px; color:var(--tx2)}
+  footer{color:var(--tx3); font-size:12.5px; text-align:center; margin-top:28px; line-height:1.9}
+  a{color:var(--info)}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  details{border:1px solid var(--line); border-radius:10px; background:var(--panel2); padding:12px 14px; margin:12px 0}
+  summary{cursor:pointer; font-size:14px; color:var(--tx)}
+  summary::marker{color:var(--tx3)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>מה באמת תקן ה־#471: הגנת סחיפה לפי מחיר, עכשיו גם לפי גיל</h1>
+  <p class="sub">מדוע ספר ישן נחשב "טועה", כיצד נוסף גבול השוואה של 0.1 שניות, ומה נרשם בכל החלטה</p>
+  <div class="meta">
+    <span class="chip">Issue #471</span>
+    <span class="chip merged">PR #473</span>
+    <span class="chip ok">ממוזג · ddfb8a9</span>
+    <span class="chip">strategy/live_trader.py</span>
+    <span class="chip">144 בדיקות ירוקות</span>
+  </div>
+</header>
+
+<!-- 1 -->
+<section>
+  <h2><span class="num">1</span> הבעיה: השוואה בין שני קריאות בזמנים שונים</h2>
+  <p class="lead">ההגנה קיבלה שני מחירים שנקראו בשני רגעים שונים, הפרידה ביניהם, והסיקה שמי שהבעית הוא <em>מי שטועה</em> — בלי לבדוק כמה זמן עבר ביניהם.</p>
+
+  <div class="ltr">
+  <svg viewBox="0 0 1000 300" role="img" aria-labelledby="tlTitle tlDesc">
+    <title id="tlTitle">ציר זמן של שתי קריאות ושני ספרים</title>
+    <desc id="tlDesc">קריאת סוקט בשנייה 0.0 מחזיקה ספר עם ביד 0.60. קריאת REST מגיעה בשנייה 1.0 ומחזירה ביד 0.60 זהה. למרות זאת ההגנה הישנה ראתה פער והחליפה את הספר.</desc>
+
+    <!-- baseline -->
+    <line x1="70" y1="180" x2="940" y2="180" class="axis"/>
+    <g class="tick">
+      <text x="80" y="200">t=0.0s</text>
+      <text x="470" y="200">t=0.6s</text>
+      <text x="840" y="200">t=1.0s</text>
+    </g>
+
+    <!-- socket read -->
+    <line x1="120" y1="70" x2="120" y2="180" stroke="#6fb3f2" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="120" cy="70" r="6" fill="#6fb3f2"/>
+    <text x="120" y="52" class="lbl" text-anchor="middle">קריאת סוקט (WS)</text>
+    <text x="120" y="34" class="lbl2" text-anchor="middle">best bid = 0.60</text>
+
+    <!-- socket book life -->
+    <rect x="120" y="96" width="720" height="18" rx="9" fill="rgba(111,179,242,.22)" stroke="#6fb3f2" stroke-width="1.5"/>
+    <text x="480" y="110" class="lbl" text-anchor="middle" fill="#dbe7f7">הספר בן 1.0 שניות — עדיין "טרי" לפי ws_book_max_age_sec = 2.5s</text>
+
+    <!-- rest read -->
+    <line x1="840" y1="228" x2="840" y2="180" stroke="#f2c14e" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="840" cy="228" r="6" fill="#f2c14e"/>
+    <text x="840" y="252" class="lbl" text-anchor="middle">קריאת REST</text>
+    <text x="840" y="270" class="lbl2" text-anchor="middle">best bid = 0.60</text>
+
+    <!-- gap arrow -->
+    <line x1="120" y1="152" x2="838" y2="152" stroke="#f1776d" stroke-width="2" stroke-dasharray="6 5"/>
+    <path d="M120 152 l12 -5 l0 10 z" fill="#f1776d"/>
+    <path d="M840 152 l-12 -5 l0 10 z" fill="#f1776d"/>
+    <text x="480" y="142" class="lbl" text-anchor="middle" fill="#f1776d">פער 1.0 שניות בין שתי הקריאות — לא נבדק</text>
+  </svg>
+  </div>
+
+  <div class="callout bad">
+    <b>האבחון המקורי (docs/issue-174-socket-book-disagreement.md §7)</b>
+    <p>המדידה של הפרויקט הראתה שהפער בין שתי הקריאות <strong>מסביר את הפער במחיר</strong>: ככל שהקריאה היינה יותר ישנה, כך יותר היו ההבדלים. הבעיה הקודמת הייתה דווח אחוז סטייה של 16.8% — שהתברר שהוא מדד <strong>גיל</strong>, לא נזק.</p>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h4><span class="dot" style="background:var(--bad)"></span>מה קרה לפני התיקון</h4>
+      <p>הסוקט בן 1.0s + פער מחיר &gt; 2¢ ⇒ ההגנה החליצה את הספר מ־REST והדביקה אותו כ"<em>הבעית</em>".</p>
+      <p>התוצאה בפועל: סבב ציטוט אחד אבד, והספר נשמר נקי אך עם תווית שגויה.</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:var(--ok)"></span>מה קורה עכשיו</h4>
+      <p>המחיר יכול להפיך סמכות רק אם הקריאה של הסוקט <strong>צעירה מ־0.1 שניות</strong>.</p>
+      <p>ספר בן 1.0s ⇒ נחסם, נשאר סמכות, ונרשם <code>unaligned</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section>
+  <h2><span class="num">2</span> התוכנית: שעון אחד לשני הצדדים</h2>
+  <p class="lead">שתי בעיות נפתרו יחד: להשוות את <strong>גיל הספר</strong>, ולא לערבב בין שעונים שונים.</p>
+
+  <div class="grid g2">
+    <div class="card">
+      <h4><span class="dot" style="background:var(--bad)"></span>בעיה שנמצאה בתכנון</h4>
+      <p>התוכנית המקורית של הבעיה הציעה למדוד את גיל ה־REST מתוך <code>now</code> — אותו <code>now</code> שנדגם <strong>לפני</strong> הבקשה, ועלול לכלול הסחה של שעון השרת.</p>
+      <p>כל הסחה כזו היא ≥ 2 שניות — פי 20 מגבול 0.1s. שימוש בו היה מייצר תשובות שגויות בלי דוח.</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:var(--ok)"></span>החלטה שאומתה</h4>
+      <p>הבדיקה משתמשת <strong>רק בגיל הסוקט</strong>, מחושב בשעון מקומי אחד.</p>
+      <p>גיל ה־REST נרשם לצורך בקרה בלבד ומסומן <code>approx</code> — הוא לא חוסם ולא מאשר דבר.</p>
+    </div>
+  </div>
+
+  <div class="ltr">
+  <svg viewBox="0 0 1000 210" role="img" aria-label="טבלת שעונים לשני הצדדים">
+    <rect x="0" y="0" width="490" height="176" rx="10" fill="rgba(95,208,165,.07)" stroke="#5fd0a5"/>
+    <text x="20" y="28" class="lbl" fill="#5fd0a5">שעון מקומי — time.time()</text>
+    <text x="20" y="56" class="lbl2">on_book_update  ← חותך ws_book_ts_*</text>
+    <text x="20" y="76" class="lbl2">is_ws_book_fresh ← אותו שעון</text>
+    <text x="20" y="96" class="lbl2">בדיקת הגיל (הכרעה) ← אותו שעון</text>
+    <text x="20" y="132" class="lbl" fill="#5fd0a5">ההחלטה מתקבלת כאן</text>
+    <text x="20" y="156" class="lbl2">שני מספרים, שעון אחד — השוואה הוגנת</text>
+
+    <rect x="510" y="0" width="490" height="176" rx="10" fill="rgba(242,193,78,.06)" stroke="#f2c14e"/>
+    <text x="530" y="28" class="lbl" fill="#f2c14e">שעון מהותלם — get_real_utc_time()</text>
+    <text x="530" y="56" class="lbl2">now = נדגם לפני הבקשה (שורה 3906)</text>
+    <text x="530" y="76" class="lbl2">עלול לכלול הסחת שעון שרת ≥ 2s</text>
+    <text x="530" y="112" class="lbl" fill="#f2c14e">מתאים לתזמון החלטות</text>
+    <text x="530" y="136" class="lbl2">לא למדידת גיל — רק לרישום</text>
+    <text x="530" y="160" class="lbl2">book_rest_age_* מסומן approx</text>
+  </svg>
+  </div>
+</section>
+
+<!-- 3 -->
+<section>
+  <h2><span class="num">3</span> שני הגבולות: גיל ושמירה</h2>
+  <p class="lead">שני מספרים קבועים, שתי משמעויות שונות במלואן — והטעות הקלאסית היא להחליף ביניהם.</p>
+
+  <div class="ltr">
+  <svg viewBox="0 0 1000 190" role="img" aria-labelledby="axTitle axDesc">
+    <title id="axTitle">ציר גיל של הספר עם שני גבולות</title>
+    <desc id="axDesc">עד 0.1 שניות הקריאות נחשבות ניתנות להשוואה. עד 2.5 שניות הספר עדיין ניתן לשימוש. מעבר לכך ה־REST זוכה אוטומטית.</desc>
+    <defs>
+      <linearGradient id="gA" x1="0" x2="1"><stop offset="0" stop-color="#5fd0a5"/><stop offset="1" stop-color="#6fb3f2"/></linearGradient>
+      <linearGradient id="gB" x1="0" x2="1"><stop offset="0" stop-color="#6fb3f2"/><stop offset="1" stop-color="#f2c14e"/></linearGradient>
+      <linearGradient id="gC" x1="0" x2="1"><stop offset="0" stop-color="#f2c14e"/><stop offset="1" stop-color="#f1776d"/></linearGradient>
+    </defs>
+    <rect x="60" y="60" width="72" height="34" rx="6" fill="url(#gA)"/>
+    <rect x="132" y="60" width="408" height="34" rx="6" fill="url(#gB)"/>
+    <rect x="540" y="60" width="360" height="34" rx="6" fill="url(#gC)"/>
+    <text x="96" y="82" class="lbl" text-anchor="middle" fill="#0b0f15" font-weight="700">0.1s</text>
+    <text x="336" y="82" class="lbl" text-anchor="middle" fill="#0b0f15">שני קריאות ניתנות להשוואה</text>
+    <text x="720" y="82" class="lbl" text-anchor="middle" fill="#0b0f15">ה־REST זוכה אוטומטית</text>
+
+    <line x1="132" y1="46" x2="132" y2="112" stroke="#5fd0a5" stroke-width="2"/>
+    <line x1="540" y1="46" x2="540" y2="112" stroke="#f2c14e" stroke-width="2"/>
+    <text x="132" y="36" class="lbl" text-anchor="middle" fill="#5fd0a5">WS_BOOK_COMPARABLE_AGE_SEC = 0.1</text>
+    <text x="540" y="36" class="lbl" text-anchor="middle" fill="#f2c14e">ws_book_max_age_sec = 2.5</text>
+
+    <text x="96" y="130" class="lbl2" text-anchor="middle">שנייה אחת</text>
+    <line x1="60" y1="112" x2="900" y2="112" class="axis"/>
+    <g class="tick">
+      <text x="60" y="132" text-anchor="middle">0</text>
+      <text x="348" y="132" text-anchor="middle">0.5</text>
+      <text x="600" y="132" text-anchor="middle">1.5</text>
+      <text x="900" y="132" text-anchor="middle">2.5</text>
+    </g>
+    <text x="480" y="168" class="lbl2" text-anchor="middle">גיל ספר הסוקט (שניות)</text>
+    <text x="96" y="152" class="lbl2" text-anchor="middle">compare</text>
+  </svg>
+  </div>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>גבול</th><th>מה הוא שומר</th><th>מה קורה מעבר לו</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="ltr"><code>WS_BOOK_COMPARABLE_AGE_SEC</code><br><span class="mono" style="color:var(--tx3)">= 0.1</span></td>
+        <td>שההשוואה בין שני ספרים תהיה הוגנת</td>
+        <td>פער מחיר <strong>אינו</strong> יכול להפיך סמכות — נחסם כ־<code>unaligned</code></td>
+      </tr>
+      <tr>
+        <td class="ltr"><code>ws_book_max_age_sec</code><br><span class="mono" style="color:var(--tx3)">= 2.5</span></td>
+        <td>שהספר עדיין ראוי לתמחור</td>
+        <td>ה־REST זוכה <strong>ללא</strong> בדיקת גיל — הסתעפיות ללא תנאי</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout warn">
+    <b>למה 0.1 שניות, ולמה זה עדיין זמני</b>
+    <p>המספר נגזר ממדידה אמיתית (issue-174 §7.4): מתחת ל־100 מילישניות לא נמצאה אף סטייה. אבל §7.7 מציין שהתאים האלה נשענים על <strong>29 תצפיות בלבד</strong>, לא על אלפים.</p>
+    <p>לכן הקוד מסמן את הערך כזמני, ושורות הלוג שנוספו הן <strong>המכשיר לכיול מחדש</strong> לאחר איסוף נתונים אמיתיים.</p>
+  </div>
+</section>
+
+<!-- 4 -->
+<section>
+  <h2><span class="num">4</span> הנתיב החדש, שלב אחר שלב</h2>
+  <p class="lead">ההגנה הוחזרה להחזיר ארבעה ערכים במקום אחד — וכך ניתן לדעת <em>למה</em> החליטה כך.</p>
+
+  <div class="tabs" role="tablist" aria-label="מסלולי ההחלטה">
+    <button class="tab" role="tab" id="t1" aria-controls="p1" aria-selected="true">החלטה עכשיו</button>
+    <button class="tab" role="tab" id="t2" aria-controls="p2" aria-selected="false">שלושה מקרים אמיתיים</button>
+    <button class="tab" role="tab" id="t3" aria-controls="p3" aria-selected="false">הקוד עצמו</button>
+  </div>
+
+  <div class="pane active" id="p1" role="tabpanel" aria-labelledby="t1">
+    <div class="ltr">
+    <svg viewBox="0 0 1000 620" role="img" aria-labelledby="fcTitle fcDesc">
+      <title id="fcTitle">תרשים זרימה של הגנת הסחיפה החדשה</title>
+      <desc id="fcDesc">שבעה ענפים לפי סדר: הפעלה כבויה, ספר מיושן או חסר, אין מה להשוואת, הסתכלבות, גיל לא ידוע, לא מסונכרן, סטייה אמיתית.</desc>
+      <defs>
+        <marker id="ar" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+          <path d="M0 0 L10 4 L0 8 z" fill="#8b98ab"/>
+        </marker>
+      </defs>
+
+      <!-- start -->
+      <rect x="360" y="10" width="280" height="42" rx="21" fill="#6fb3f2"/>
+      <text x="500" y="36" class="lbl" text-anchor="middle" fill="#0b0f15" font-weight="700">כל 1 שנייה, לכל רגל בנפרד</text>
+
+      <!-- 1 fallback disabled -->
+      <rect x="60" y="90" width="330" height="40" rx="8" fill="var(--panel2)" stroke="#3d4a5c"/>
+      <text x="76" y="115" class="lbl" text-anchor="middle">הגנת גיבוי כבויה?</text>
+      <rect x="700" y="90" width="240" height="40" rx="8" fill="rgba(116,131,154,.18)" stroke="#74839a"/>
+      <text x="820" y="115" class="lbl" text-anchor="middle">fallback_disabled — אין תיקון</text>
+      <line x1="500" y1="52" x2="500" y2="74" class="axis" marker-end="url(#ar)"/>
+      <line x1="360" y1="110" x2="398" y2="110" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="110" x2="700" y2="110" class="axis" marker-end="url(#ar)"/>
+
+      <!-- 2 ws_stale -->
+      <rect x="60" y="160" width="330" height="44" rx="8" fill="rgba(242,193,78,.10)" stroke="#f2c14e"/>
+      <text x="225" y="181" class="lbl" text-anchor="middle">אין חותמת, או הספר מיושן מעל 2.5s?</text>
+      <text x="225" y="197" class="lbl2" text-anchor="middle">מתי מבצע גם בדיקת חיבור</text>
+      <rect x="700" y="160" width="240" height="44" rx="8" fill="rgba(242,193,78,.16)" stroke="#f2c14e"/>
+      <text x="820" y="182" class="lbl" text-anchor="middle" fill="#f2c14e">ws_stale → ה־REST זוכה</text>
+      <text x="820" y="198" class="lbl2" text-anchor="middle">ללא תנאי — משמר מה־#353</text>
+      <line x1="225" y1="130" x2="225" y2="156" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="182" x2="696" y2="182" class="axis" marker-end="url(#ar)"/>
+
+      <!-- 3 no_compare -->
+      <rect x="60" y="234" width="330" height="44" rx="8" fill="var(--panel2)" stroke="#3d4a5c"/>
+      <text x="225" y="255" class="lbl" text-anchor="middle">חסרים מחירים, או המרה נכשלת?</text>
+      <rect x="700" y="234" width="240" height="44" rx="8" fill="rgba(95,208,165,.16)" stroke="#5fd0a5"/>
+      <text x="820" y="255" class="lbl" text-anchor="middle" fill="#5fd0a5">no_compare → הסוקט נשאר</text>
+      <line x1="225" y1="204" x2="225" y2="230" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="256" x2="696" y2="256" class="axis" marker-end="url(#ar)"/>
+
+      <!-- 4 agree -->
+      <rect x="60" y="308" width="330" height="44" rx="8" fill="var(--panel2)" stroke="#3d4a5c"/>
+      <text x="225" y="329" class="lbl" text-anchor="middle">הפער 2¢ או פחות?</text>
+      <rect x="700" y="308" width="240" height="44" rx="8" fill="rgba(95,208,165,.16)" stroke="#5fd0a5"/>
+      <text x="820" y="329" class="lbl" text-anchor="middle" fill="#5fd0a5">agree → הסוקט נשאר</text>
+      <line x1="225" y1="278" x2="225" y2="304" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="330" x2="696" y2="330" class="axis" marker-end="url(#ar)"/>
+
+      <!-- 5 age_unknown -->
+      <rect x="60" y="382" width="330" height="48" rx="8" fill="rgba(185,140,242,.12)" stroke="#b98cf2"/>
+      <text x="225" y="403" class="lbl" text-anchor="middle">הגיל לא נמדד, או שלילי?</text>
+      <text x="225" y="420" class="lbl2" text-anchor="middle">הכלל הישן ממשיך להכריע</text>
+      <rect x="700" y="382" width="240" height="48" rx="8" fill="rgba(185,140,242,.18)" stroke="#b98cf2"/>
+      <text x="820" y="404" class="lbl" text-anchor="middle" fill="#b98cf2">age_unknown → ה־REST זוכה</text>
+      <text x="820" y="420" class="lbl2" text-anchor="middle">החלטה מכוונת שמירה</text>
+      <line x1="225" y1="352" x2="225" y2="378" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="406" x2="696" y2="406" class="axis" marker-end="url(#ar)"/>
+
+      <!-- 6 unaligned -->
+      <rect x="60" y="460" width="330" height="48" rx="8" fill="rgba(241,119,109,.14)" stroke="#f1776d"/>
+      <text x="225" y="481" class="lbl" text-anchor="middle">הספר בן יותר מ־0.1 שניות?</text>
+      <text x="225" y="498" class="lbl2" text-anchor="middle">החלטה חדשה של #471</text>
+      <rect x="700" y="460" width="240" height="48" rx="8" fill="rgba(95,208,165,.16)" stroke="#5fd0a5"/>
+      <text x="820" y="481" class="lbl" text-anchor="middle" fill="#5fd0a5">unaligned → הסוקט נשאר</text>
+      <text x="820" y="498" class="lbl2" text-anchor="middle">הפער לא מספיק להפיך</text>
+      <line x1="225" y1="430" x2="225" y2="456" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="484" x2="696" y2="484" class="axis" marker-end="url(#ar)"/>
+
+      <!-- 7 drift -->
+      <rect x="60" y="538" width="330" height="44" rx="8" fill="rgba(95,208,165,.14)" stroke="#5fd0a5"/>
+      <text x="225" y="564" class="lbl" text-anchor="middle">שני ספרים צעירים ובאמת שונים</text>
+      <rect x="700" y="538" width="240" height="44" rx="8" fill="rgba(95,208,165,.2)" stroke="#5fd0a5"/>
+      <text x="820" y="564" class="lbl" text-anchor="middle" fill="#5fd0a5">drift → ה־REST זוכה</text>
+      <line x1="225" y1="508" x2="225" y2="534" class="axis" marker-end="url(#ar)"/>
+      <line x1="390" y1="560" x2="696" y2="560" class="axis" marker-end="url(#ar)"/>
+    </svg>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:#5fd0a5"></span>הסוקט נשאר</span>
+      <span><span class="dot" style="background:#f2c14e"></span>ה־REST זוכה — ללא תנאי</span>
+      <span><span class="dot" style="background:#b98cf2"></span>הכרעה מכוונת שמירה</span>
+      <span><span class="dot" style="background:#f1776d"></span>הענף החדש של #471</span>
+    </div>
+  </div>
+
+  <div class="pane" id="p2" role="tabpanel" aria-labelledby="t2">
+    <p>שלושה מקרים שנבדקו בבדיקות אוטומטיות, כולם עם אותה סטיית מחיר של 0.32¢ — ההבדל היחיד הוא <strong>גיל הספר</strong>.</p>
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>גיל הסוקט</th><th>סוג ההחלטה</th><th>מי זוכה</th><th>מה נבדק בבדיקה</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">0.05s</td><td><code>drift</code></td>
+          <td style="color:var(--ok)">ה־REST</td>
+          <td>החלפה מתרחשת; הגילים נרשמים</td>
+        </tr>
+        <tr>
+          <td class="mono">1.0s</td><td><code>unaligned</code></td>
+          <td style="color:var(--ok)">הסוקט</td>
+          <td>הספר <strong>לא</strong> הוחלף; נשמר <code>last_valid_*</code></td>
+        </tr>
+        <tr>
+          <td class="mono">2.6s</td><td><code>ws_stale</code></td>
+          <td style="color:var(--warn)">ה־REST</td>
+          <td>החלפה תמידית, בלי בדיקת גיל</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="callout ok">
+      <b>הבדיקה הראשונה הוכיחה את התקלה</b>
+      <p>הבדיקה <code>test_drift_guard_blocks_unaligned_pair</code> נכתבה <strong>לפני</strong> התיקון, וכשהרצנו אותה היא התפלה: הספר בן שנייה הוחלף. זו הייתה ההוכחה הישירה שהתקלה קיימת, לא סתם הרשאה מהפרויקט.</p>
+    </div>
+  </div>
+
+  <div class="pane" id="p3" role="tabpanel" aria-labelledby="t3">
+    <p class="lead">שבעת הענפים בקוד, כפי שמוזגו ב־<span class="mono">strategy/live_trader.py</span>:</p>
+<pre><code><span class="cmt"># החלטה מוחזרת: (להחיל?, סיבה, גיל סוקט, גיל REST)</span>
+<span class="cmt"># שעון אחד לשני הצדדים — בדיקה על גיל הסוקט בלבד</span>
+sample  = time.time()
+ws_age  = _age_between(ts, sample)
+rest_age = _age_between(float(now), sample)   <span class="cmt"># מתויג approx, לא מכריע</span>
+
+<span class="cmt"># סדר הענפים נשמר בדיוק כמו שהיה — לא שום הזזה</span>
+<span class="kw">if</span> <span class="kw">not</span> self.rest_fallback_enabled:
+    <span class="kw">return</span> False, <span class="str">"fallback_disabled"</span>, ws_age, rest_age
+<span class="kw">if</span> ts <span class="kw">is None or not</span> self.is_ws_book_fresh(mstate, leg):
+    <span class="kw">return</span> True,  <span class="str">"ws_stale"</span>, ws_age, rest_age      <span class="cmt"># ללא תנאי — משומר מ־#353</span>
+<span class="cmt"># ... אין מה להשוואת / שגיאת המרה → no_compare, סוקט נשאר</span>
+<span class="kw">if not</span> drift:
+    <span class="kw">return</span> False, <span class="str">"agree"</span>, ws_age, rest_age
+
+<span class="cmt"># הענף החדש של #471</span>
+<span class="kw">if</span> ws_age <span class="kw">is None or</span> ws_age &lt; 0:
+    <span class="kw">return</span> True,  <span class="str">"age_unknown"</span>, ws_age, rest_age  <span class="cmt"># כלל ישן, לא נחסם</span>
+<span class="kw">if</span> ws_age &gt; WS_BOOK_COMPARABLE_AGE_SEC:
+    <span class="kw">return</span> False, <span class="str">"unaligned"</span>, ws_age, rest_age   <span class="cmt"># ← התיקון</span>
+<span class="kw">return</span> True,  <span class="str">"drift"</span>, ws_age, rest_age</code></pre>
+    <div class="callout">
+      <b>סדר הענפים הוא חוזה, לא ברירת מחדל</b>
+      <p>התנאי <code>"=="</code> המדויק על 0.1 שניות נחשב ניתן להשוואה, ואילו גדול ממנו נחסם — בדיוק כמו שהבדיקת הסטייה עצמה מתעברת. הגבול הקשיח מוגדר רק על ידי <code>get_real_utc_time</code> חוצה, לא על ידי תנאי מקרי.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5 -->
+<section>
+  <h2><span class="num">5</span> מה נרשם בכל החלטה</h2>
+  <p class="lead">כל החלטה נושאת עכשיו שם שמסביר <em>למה</em>, ושני גילים — כך שאפשר לספור את קצב ההחלפות ולכייל את 0.1 מחדש.</p>
+
+  <div class="grid g2">
+    <div class="card">
+      <h4><span class="dot" style="background:var(--acc)"></span>במצב השוק</h4>
+      <p>שישה שדות חדשים ליד <code>book_source_*</code>, המזוהים בקובץ ה־JSON שנשלח ללוח הבקרה.</p>
+      <p><code>book_verdict_up/down</code> · <code>book_ws_age_up/down</code> · <code>book_rest_age_up/down</code></p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:var(--acc)"></span>בלוג</h4>
+      <p>שורה אחת לכל רגל ש<strong>עברה</strong> ל־REST או ש<strong>נחסמה</strong> ע"י הבדיקה החדשה.</p>
+      <p>לא נרשמות החלטות שקטות כמו <code>agree</code> — הן רועש, לא אירוע.</p>
+    </div>
+  </div>
+
+<pre><code><span class="cmt"># דוגמה אמיתית — שורת לוג מתוך הבדיקה שמסומנת unaligned:</span>
+book_authority slug=btc-up-or-down-5m leg=UP reason=unaligned source=ws-&gt;ws \
+  ws_age_s=1.000 rest_age_s_approx=0.052 comparable_bound_s=0.1 \
+  max_age_s=2.5 ws_best=(0.6, 0.62) rest_best=(0.28, 0.3)</code></pre>
+
+  <div class="callout">
+    <b>קריאה לשורה זו אומרת</b>
+    <p>ה־REST הציע 0.28/0.30 מול 0.60/0.62 של הסוקט — פער עצום. אבל הספר של הסוקט היה בן <strong>שנייה</strong>, פי 10 מהגבול. המערכת סירבה להחליף והשאירה את הספר. <span class="mono">rest_age_s_approx</span> מסומן במפורש כלא מדויק — הוא נמדד לצורך בקרה בלבד.</p>
+  </div>
+</section>
+
+<!-- 6 -->
+<section>
+  <h2><span class="num">6</span> מה <em>לא</em> השתנה — ומה נדחה ולמה</h2>
+
+  <div class="grid g2">
+    <div class="card">
+      <h4><span class="dot" style="background:var(--tx3)"></span>גבולות שנשמרו בכוונה</h4>
+      <p>הסטייה עצמה (<code>0.02</code>) לא נגעה — כיול מחדש שלה דורש את נתוני הגיל שהשינוי הזה מייצר.</p>
+      <p>הבדיקה מחדש <strong>תחת הנעילה</strong> נשמרה כמות שהיא, וכך גם ערכי <code>book_source_*</code>.</p>
+      <p>מחירי היציאה, מחירי הספר הנשמרים, טבלת הריפליי והדשבורד — לא נגעו.</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:var(--warn)"></span>הצעה שנדחה בסקירת הביט</h4>
+      <p>CodeRabbit הציע לחסום גם כאשר הגיל <em>לא נמדד</em> או שלילי — להחזיר סמכות לסוקט.</p>
+      <p><strong>נדחה, מסומן ומנומק:</strong> גיל שלילי מגיע כמעט תמיד כאשר <code>ws_book_ts_*</code> מכיל זמן התקנת REST ולא זמן סוקט. חסימה כזו הייתה מקפיאה ספרי REST לכל היום, ומתייגת אותם <code>ws</code> בטעות — בעוד התוצאה בפועל זהה.</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>מה נותר מחוץ לתחום וראוי להבאה</summary>
+    <ul style="font-size:14px; color:var(--tx2); margin:10px 0 0; padding-inline-start:20px">
+      <li><strong>Issue #472</strong> — ציטוטים שמחירים יציאה עם גיל בלתי מוגבל. שורש אחר לאותה מחלה: כאן הספר הנכנס, שם הוא יוצא.</li>
+      <li><strong>מקור הספר</strong> — אין שדה שמסביר אם הספר הנוכחי הגיע מהסוקט או מ־REST. בליו ההגנה עלולה להחזיק ספר ישן עד 2.5 שניות.</li>
+      <li><strong>חותמת הגעה מדויקת ל־REST</strong> — דורשת שינוי במבנה הנתונים של הסקירה; נדחה מכוונה להמשך.</li>
+      <li><strong>כיול ה־0.1</strong> — רק לאחר שיוצרו נתוני לוג אמיתיים מריצה חיה.</li>
+    </ul>
+  </details>
+</section>
+
+<!-- 7 -->
+<section>
+  <h2><span class="num">7</span> איך זה נבדק</h2>
+  <div class="kpi">
+    <div><b>144</b><span>בדיקות בקובץ — כולן ירוקות</span></div>
+    <div><b>4</b><span>בדיקות חדשות ל־#471</span></div>
+    <div><b>0</b><span>שבירות בקוד הקיים</span></div>
+    <div><b>3</b><span>קומיטים נפרדים וממוקדים</span></div>
+  </div>
+  <p class="lead">המתודה הייתה לכתוב קודם את הבדיקה ולראות אותה נופלת — כך התקלה הוכחה ולא רק תוענה. הבדיקה הראשונה הפכה את הספר המיושן, ורק אז נכתב התיקון.</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>בדיקה</th><th>מה היא מוכיחה</th></tr></thead>
+    <tbody>
+      <tr><td class="mono" style="font-size:12.5px">..._comparable_bound_within_max_age</td><td>גבול ההשוואה לעולם אינו עולה על גבול השמישות</td></tr>
+      <tr><td class="mono" style="font-size:12.5px">..._blocks_unaligned_pair</td><td>ספר מיושן עם סטייה גדולה <strong>אינו</strong> מוחלף</td></tr>
+      <tr><td class="mono" style="font-size:12.5px">..._flips_on_young_disagreeing_pair</td><td>שני ספרים צעירים ושונים — <strong>כן</strong> מוחלפים</td></tr>
+      <tr><td class="mono" style="font-size:12.5px">..._stale_socket_loses_unconditionally</td><td>מעבר ל־2.5s — ה־REST זוכה תמיד</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer>
+  הסבר מבוסס על הקוד הממוזג ב-<span class="mono">master</span> (commit <span class="mono">ddfb8a9</span>).<br>
+  מספרי המדידה מתוך <span class="mono">docs/issue-174-socket-book-disagreement.md</span> §7.4 / §7.7 · תכנון והחלטות ב־<span class="mono">tasks/plan.md</span>.<br>
+  הערך 0.1 שניות הוא <strong>הערכה זמנית</strong> הנשענת על 29 תצפיות — לא עובדה מוכחת.
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  function select(tab){
+    tabs.forEach(function(t){
+      var on = t === tab;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      document.getElementById(t.getAttribute('aria-controls')).classList.toggle('active', on);
+    });
+  }
+  tabs.forEach(function(t){
+    t.addEventListener('click', function(){ select(t); });
+    t.addEventListener('keydown', function(e){
+      var i = tabs.indexOf(t), n = null;
+      if (e.key === 'ArrowRight') n = tabs[(i+1) % tabs.length];
+      else if (e.key === 'ArrowLeft') n = tabs[(i-1+tabs.length) % tabs.length];
+      else if (e.key === 'Home') n = tabs[0];
+      else if (e.key === 'End') n = tabs[tabs.length-1];
+      if (n){ e.preventDefault(); n.focus(); select(n); }
+    });
+  });
+})();
+</script>
+</body>
+</html>
