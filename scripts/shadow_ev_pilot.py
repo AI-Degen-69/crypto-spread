@@ -132,6 +132,11 @@ async def amain(hours: float, delay: float, shares: int,
     snap_file.touch()
     trades_file.touch()
     started_utc = datetime.now(timezone.utc)
+    # Issue #468: the engine exists before its description does, so the record
+    # below carries the engine's real values. Building it here starts no
+    # network work — only eng.start() does that, further down.
+    eng = build_engine(delay, shares, starting_balance)
+    eng_params = eng.get_state()["params"]
     config_hypothesis = {
         "offset": 0.03,
         "quote_range": [0.10, 0.90],
@@ -144,6 +149,9 @@ async def amain(hours: float, delay: float, shares: int,
         "starting_balance": starting_balance,
         "mode": "paper",
         "universe": ["xrp-up-or-down-15m", "bnb-up-or-down-15m", "eth-up-or-down-5m"],
+        "exit_reversal": eng_params["exit_reversal"],
+        "dead_zone_val": eng_params["dead_zone_val"],
+        "dead_zone_unit": eng_params["dead_zone_unit"],
     }
     meta = {
         "started_utc": started_utc.isoformat(),
@@ -161,7 +169,6 @@ async def amain(hours: float, delay: float, shares: int,
         f"<pre>{json.dumps(config_hypothesis, indent=2)}</pre>",
     )
 
-    eng = build_engine(delay, shares, starting_balance)
     eng.start()
     print(f"[shadow] engine started mode={eng.mode} preset={eng.active_preset} "
           f"delay={eng.entry_delay_sec} "
