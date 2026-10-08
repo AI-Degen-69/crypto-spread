@@ -5347,6 +5347,7 @@ class LiveTraderEngine:
             return age
 
         def _age_label(ts):
+            """Display age for a skip line: seconds, or unknown when unmeasurable."""
             raw = _age_between(ts, now)
             return "unknown" if raw is None else f"{raw:.1f}s"
 
