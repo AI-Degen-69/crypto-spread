@@ -144,7 +144,7 @@ def _age_between(earlier: Any, later: float) -> Optional[float]:
         age = later - earlier
     except (TypeError, ValueError, OverflowError):
         return None
-    if age != age or abs(age) == float("inf"):
+    if math.isnan(age) or math.isinf(age):
         return None
     return age
 
@@ -153,7 +153,7 @@ def _fmt_age(value: Any) -> str:
     """Format a recorded age for logs — "unknown", never raising, never NaN."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "unknown"
-    if value != value or abs(value) == float("inf"):
+    if math.isnan(value) or math.isinf(value):
         return "unknown"
     return f"{value:.3f}"
 # One window's prints at one price level. A cap is needed because the ledger is
@@ -4192,7 +4192,7 @@ class LiveTraderEngine:
         # We keep best + depth so queue_ahead sees the whole ladder. REST wins only if
         # WS leg is stale or missing; otherwise we preserve WS's fresher value.
         # The REST payload may be {} (no market) or {best_bid/ask, bids, asks}.
-        def _use_rest_for_leg(leg: str):
+        def _use_rest_for_leg(leg: str) -> Tuple[bool, str, Optional[float], Optional[float]]:
             """Decide whether REST may overwrite this leg's book.
 
             Returns (apply, reason, ws_age, rest_age). Issue #471: a price gap

@@ -271,6 +271,7 @@ def test_drift_guard_blocks_unaligned_pair(monkeypatch, caplog):
     assert mstate.book_ws_age_up == pytest.approx(1.0)
     assert (mstate.down_bid, mstate.down_ask) == (0.36, 0.38)
     assert mstate.book_source_down == "ws"
+    assert mstate.book_verdict_down == "agree"
     assert "reason=unaligned" in caplog.text
     assert "ws_age_s=1.000" in caplog.text
 
@@ -294,6 +295,7 @@ def test_drift_guard_flips_on_young_disagreeing_pair(monkeypatch, caplog):
     assert mstate.book_rest_age_up is not None
     assert (mstate.down_bid, mstate.down_ask) == (0.36, 0.38)
     assert mstate.book_source_down == "ws"
+    assert mstate.book_verdict_down == "agree"
     assert "reason=drift" in caplog.text
     assert "rest_age_s_approx=" in caplog.text
 
@@ -312,6 +314,9 @@ def test_drift_guard_stale_socket_loses_unconditionally(monkeypatch):
     assert (mstate.up_bid, mstate.up_ask) == (0.28, 0.30)
     assert mstate.book_source_up == "rest"
     assert mstate.book_verdict_up == "ws_stale"
+    assert (mstate.down_bid, mstate.down_ask) == (0.355, 0.375)
+    assert mstate.book_source_down == "rest"
+    assert mstate.book_verdict_down == "ws_stale"
 
 
 def test_ws_book_kept_when_no_rest_book_fetched():
