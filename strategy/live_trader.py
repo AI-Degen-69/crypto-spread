@@ -3976,13 +3976,18 @@ class LiveTraderEngine:
                         self._update_market_strategy(slug, res, now)
                     except Exception as exc:
                         # Issue #462: record the failure against the market whose update
-                        # raised — attribution, not isolation — then re-raise unchanged.
-                        # The attribution lives here because the `slug` local is the only
-                        # place it is still known; the whole-tick catch in `_run_loop`
-                        # cannot tell which market aborted. Per-market isolation remains
-                        # #461's deliverable.
+                        # raised — the attribution lives here because the `slug` local
+                        # is the only place it is still known; the whole-tick catch in
+                        # `_run_loop` cannot tell which market aborted. Issue #461:
+                        # isolation — log with the slug and continue to the next
+                        # market instead of re-raising, so one market's defect
+                        # cannot starve the rest of the tick. No in-tick retry:
+                        # the next tick, one second later, re-evaluates every
+                        # market by itself.
                         self._record_tick_error(slug, exc)
-                        raise
+                        log.error("[%s] Strategy update failed: %s", slug, exc,
+                                 exc_info=True)
+                        continue
                     # Stamped only on completion, so health answers "is this market
                     # actually being updated" rather than "was an update attempted".
                     self.markets[slug]._last_completed_tick_perf = time.perf_counter()
