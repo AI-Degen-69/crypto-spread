@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your safety stamp now checks your run — not last month's</title>
+<style>
+  :root { --paper:#faf7f0; --ink:#2b2118; --amber:#b45309; --amber-soft:#f5e3c3;
+          --green:#1e7a3c; --green-soft:#ddefe2; --red:#b3261e; --red-soft:#f7ddd9;
+          --line:#e2d7c3; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink);
+         font-family:Georgia,"Times New Roman",serif; line-height:1.55; }
+  .wrap { max-width:860px; margin:0 auto; padding:32px 20px 64px; }
+  .kicker { font-family:Verdana,Geneva,sans-serif; font-size:12px; letter-spacing:2px;
+            text-transform:uppercase; color:var(--amber); margin:0 0 8px; }
+  h1 { font-size:clamp(28px,5vw,44px); line-height:1.15; margin:0 0 12px; }
+  .lede { font-size:18px; max-width:60ch; margin:0 0 28px; }
+  .toggle-row { display:flex; gap:10px; margin:0 0 20px; flex-wrap:wrap;
+                font-family:Verdana,Geneva,sans-serif; }
+  .toggle-row button { border:2px solid var(--amber); background:#fff; color:var(--ink);
+    border-radius:999px; padding:10px 22px; font-size:15px; cursor:pointer; }
+  .toggle-row button[aria-pressed="true"] { background:var(--amber); color:#fff; }
+  .panels { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:640px){ .panels{ grid-template-columns:1fr; } }
+  .panel { border:2px solid var(--line); border-radius:14px; padding:20px;
+           background:#fff; }
+  .panel h2 { font-size:20px; margin:0 0 4px; }
+  .panel .sub { font-family:Verdana,Geneva,sans-serif; font-size:13px; color:#6b5d4d;
+                margin:0 0 14px; }
+  .chips { list-style:none; margin:0 0 14px; padding:0; display:flex;
+           flex-direction:column; gap:8px; }
+  .chips li { border-radius:10px; padding:9px 12px; font-family:Verdana,Geneva,sans-serif;
+              font-size:14px; display:flex; justify-content:space-between; gap:8px; }
+  .hit { background:var(--green-soft); border:1px solid var(--green); }
+  .miss { background:var(--red-soft); border:1px solid var(--red); }
+  .verdict { border-radius:10px; padding:12px 14px; font-size:17px; margin:0; }
+  .verdict.bad { background:var(--red); color:#fff; }
+  .verdict.good { background:var(--green); color:#fff; }
+  .note { margin-top:26px; border-left:5px solid var(--amber); background:var(--amber-soft);
+          border-radius:0 12px 12px 0; padding:16px 18px; font-size:16px; }
+  .note h2 { font-size:18px; margin:0 0 6px; }
+  .note ul { margin:8px 0 0; padding-left:20px; }
+  footer { margin-top:28px; font-family:Verdana,Geneva,sans-serif; font-size:12px;
+           color:#6b5d4d; }
+  @media (prefers-reduced-motion:reduce){ *{ transition:none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="kicker">What changed</p>
+  <h1>Your safety stamp now checks your run — not last month's list</h1>
+  <p class="lede">Every test run ends with a safety stamp: did the replay use the
+  exact settings the live run used? Before, the stamp always checked the same old
+  three-item list — even when your run used something new. It said "all good"
+  while looking the other way. Now it checks exactly what your run used.</p>
+
+  <div class="toggle-row" role="group" aria-label="Flip between old and new check">
+    <button id="btnOld" aria-pressed="true">Old check</button>
+    <button id="btnNew" aria-pressed="false">New check</button>
+  </div>
+
+  <div class="panels">
+    <section class="panel" aria-label="What the run used">
+      <h2>This run used</h2>
+      <p class="sub">One new series joined the test: SOL 5-minute.</p>
+      <ul class="chips">
+        <li class="hit"><span>SOL 5-minute</span><span>new</span></li>
+      </ul>
+    </section>
+    <section class="panel" aria-label="What the stamp checked">
+      <h2 id="checkTitle">The stamp checked</h2>
+      <p class="sub" id="checkSub">The same old three items — SOL never looked at.</p>
+      <ul class="chips" id="chipList"></ul>
+      <p class="verdict bad" id="verdict">Stamp says "all good" — but SOL was skipped.</p>
+    </section>
+  </div>
+
+  <div class="note">
+    <h2>Why this matters</h2>
+    A stamp that passes without checking the new arrival is worse than no stamp:
+    it teaches everyone to trust a number nobody verified. From now on, a run
+    with a new series fails loudly until that series gets its own safety limit.
+    <ul>
+      <li>The default replay is untouched — same three items, same result.</li>
+      <li>Nothing else about the check changed — same limit, same wording.</li>
+    </ul>
+  </div>
+
+  <footer>Change put live with update #477 · the stamp lives in the replay checker</footer>
+</div>
+<script>
+(function(){
+  "use strict";
+  var oldList = [
+    {name:"XRP 15-minute", seen:true},
+    {name:"BNB 15-minute", seen:true},
+    {name:"ETH 5-minute", seen:true},
+    {name:"SOL 5-minute", seen:false}
+  ];
+  var newList = [ {name:"SOL 5-minute", seen:true} ];
+  var chipList = document.getElementById("chipList");
+  var verdict = document.getElementById("verdict");
+  var checkSub = document.getElementById("checkSub");
+  var btnOld = document.getElementById("btnOld");
+  var btnNew = document.getElementById("btnNew");
+  function render(list, isNew){
+    chipList.innerHTML = "";
+    list.forEach(function(item){
+      var li = document.createElement("li");
+      li.className = item.seen ? "hit" : "miss";
+      var left = document.createElement("span");
+      left.textContent = item.name;
+      var right = document.createElement("span");
+      right.textContent = item.seen ? "checked" : "skipped";
+      li.appendChild(left); li.appendChild(right);
+      chipList.appendChild(li);
+    });
+    if (isNew) {
+      verdict.className = "verdict good";
+      verdict.textContent = "Stamp passes — SOL was really checked.";
+      checkSub.textContent = "Exactly what this run used — SOL included.";
+    } else {
+      verdict.className = "verdict bad";
+      verdict.textContent = "Stamp says \u201Call good\u201D — but SOL was skipped.";
+      checkSub.textContent = "The same old three items — SOL never looked at.";
+    }
+    btnOld.setAttribute("aria-pressed", String(!isNew));
+    btnNew.setAttribute("aria-pressed", String(isNew));
+  }
+  btnOld.addEventListener("click", function(){ render(oldList, false); });
+  btnNew.addEventListener("click", function(){ render(newList, true); });
+  render(oldList, false);
+})();
+</script>
+</body>
+</html>
