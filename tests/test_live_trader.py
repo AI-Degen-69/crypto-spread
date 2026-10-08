@@ -248,7 +248,7 @@ def _ws_authority_frozen_clock(monkeypatch, clock):
     monkeypatch.setattr(lt.time, "time", lambda: clock[0])
 
 
-def test_drift_guard_blocks_unaligned_pair(monkeypatch):
+def test_drift_guard_blocks_unaligned_pair(monkeypatch, caplog):
     """Issue #471: a 1 s-old socket book inside the 2.5 s window is not comparable.
 
     UP drift exceeds 2c but the socket read is 1.0 s old — REST must not win,
@@ -261,6 +261,7 @@ def test_drift_guard_blocks_unaligned_pair(monkeypatch):
     engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
 
     clock[0] = 1001.0
+    caplog.set_level("INFO", logger="live_trader")
     engine._update_market_strategy(slug, _ws_authority_drift_poll(1001.0), 1001.0)
 
     assert (mstate.up_bid, mstate.up_ask) == (0.60, 0.62)
@@ -270,9 +271,11 @@ def test_drift_guard_blocks_unaligned_pair(monkeypatch):
     assert mstate.book_ws_age_up == pytest.approx(1.0)
     assert (mstate.down_bid, mstate.down_ask) == (0.36, 0.38)
     assert mstate.book_source_down == "ws"
+    assert "reason=unaligned" in caplog.text
+    assert "ws_age_s=1.000" in caplog.text
 
 
-def test_drift_guard_flips_on_young_disagreeing_pair(monkeypatch):
+def test_drift_guard_flips_on_young_disagreeing_pair(monkeypatch, caplog):
     """Issue #471: a large drift between two comparably young reads still flips."""
     engine, slug, mstate = _ws_authority_harness()
     clock = [1000.0]
@@ -281,6 +284,7 @@ def test_drift_guard_flips_on_young_disagreeing_pair(monkeypatch):
     engine.on_book_update("tok_dn", bids={0.36: 10.0}, asks={0.38: 10.0})
 
     clock[0] = 1000.05
+    caplog.set_level("INFO", logger="live_trader")
     engine._update_market_strategy(slug, _ws_authority_drift_poll(1000.05), 1000.05)
 
     assert (mstate.up_bid, mstate.up_ask) == (0.28, 0.30)
@@ -290,6 +294,8 @@ def test_drift_guard_flips_on_young_disagreeing_pair(monkeypatch):
     assert mstate.book_rest_age_up is not None
     assert (mstate.down_bid, mstate.down_ask) == (0.36, 0.38)
     assert mstate.book_source_down == "ws"
+    assert "reason=drift" in caplog.text
+    assert "rest_age_s_approx=" in caplog.text
 
 
 def test_drift_guard_stale_socket_loses_unconditionally(monkeypatch):

@@ -147,6 +147,15 @@ def _age_between(earlier: Any, later: float) -> Optional[float]:
     if age != age or abs(age) == float("inf"):
         return None
     return age
+
+
+def _fmt_age(value: Any) -> str:
+    """Format a recorded age for logs — "unknown", never raising, never NaN."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    if value != value or abs(value) == float("inf"):
+        return "unknown"
+    return f"{value:.3f}"
 # One window's prints at one price level. A cap is needed because the ledger is
 # only trimmed by window rollover, and a hot market can print continuously; the
 # oldest entries are dropped first, which biases toward undercounting rather
@@ -4241,6 +4250,10 @@ class LiveTraderEngine:
             return True, "drift", ws_age, rest_age
 
         # Decide per-leg whether to apply REST.
+        # Socket bests snapshotted before any REST overwrite — the flip/block
+        # log below needs both sides of the comparison after the write.
+        ws_best_up = (mstate.up_bid, mstate.up_ask)
+        ws_best_down = (mstate.down_bid, mstate.down_ask)
         verdict_up = _use_rest_for_leg("UP")
         verdict_down = _use_rest_for_leg("DOWN")
         apply_up, apply_down = verdict_up[0], verdict_down[0]
@@ -4292,6 +4305,7 @@ class LiveTraderEngine:
         # Per-leg pricing source (issue #353): the reconcile verdict above is
         # the decision point — a leg REST overwrote reads "rest", a leg WS
         # kept reads "ws". The cockpit renders these verbatim.
+        old_source_up, old_source_down = mstate.book_source_up, mstate.book_source_down
         mstate.book_source_up = "rest" if apply_up else "ws"
         mstate.book_source_down = "rest" if apply_down else "ws"
         # Verdict detail (issue #471): the final reason and both read ages ride
@@ -4300,6 +4314,34 @@ class LiveTraderEngine:
         apply_down, reason_down, ws_age_down, rest_age_down = verdict_down
         mstate.book_verdict_up, mstate.book_ws_age_up, mstate.book_rest_age_up = reason_up, ws_age_up, rest_age_up
         mstate.book_verdict_down, mstate.book_ws_age_down, mstate.book_rest_age_down = reason_down, ws_age_down, rest_age_down
+        # Flip/block audit (issue #471): one line per applied REST leg and per
+        # blocked leg, outside the lock. Authority off means REST is primary,
+        # so logging every poll would be noise without audit value.
+        if self.ws_book_authority:
+            for leg, verdict, old_source, ws_best, rest_book in (
+                ("UP", verdict_up, old_source_up, ws_best_up, ubook),
+                ("DOWN", verdict_down, old_source_down, ws_best_down, dbook),
+            ):
+                applied, reason, ws_age, rest_age = verdict
+                if applied and reason not in ("ws_stale", "drift", "age_unknown"):
+                    continue
+                if not applied and reason != "unaligned":
+                    continue
+                if applied:
+                    rest_best = ((mstate.up_bid, mstate.up_ask) if leg == "UP"
+                                 else (mstate.down_bid, mstate.down_ask))
+                elif isinstance(rest_book, dict):
+                    rest_best = (rest_book.get("best_bid"), rest_book.get("best_ask"))
+                else:
+                    rest_best = (None, None)
+                log.info(
+                    "book_authority slug=%s leg=%s reason=%s source=%s->%s "
+                    "ws_age_s=%s rest_age_s_approx=%s comparable_bound_s=%s "
+                    "max_age_s=%s ws_best=%s rest_best=%s",
+                    slug, leg, reason, old_source, "rest" if applied else "ws",
+                    _fmt_age(ws_age), _fmt_age(rest_age),
+                    WS_BOOK_COMPARABLE_AGE_SEC, self.ws_book_max_age_sec,
+                    ws_best, rest_best)
         # Mid/spread always derived from current bests regardless of source.
         # Held under the same lock as the writes above and as on_book_update:
         # reading the bests and writing the mid they imply must be one step, or
