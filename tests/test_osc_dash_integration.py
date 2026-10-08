@@ -1356,8 +1356,9 @@ def test_api_collector_status_tape_metrics(tmp_path, monkeypatch):
 def test_api_collector_status_book_shadow(tmp_path, monkeypatch):
     """Issue #349: /api/collector/status surfaces the #174 Phase 1 book_shadow summary.
 
-    Present block -> flat summary with rate, count and tolerance; absent block or
-    malformed manifest -> null; the response change stays additive either way.
+    Present block -> flat summary with rate, count and the manifest's tolerance
+    (#470 — verbatim, even when not 0.001); absent block or malformed manifest
+    -> null; the response change stays additive either way.
     """
     monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
     monkeypatch.setattr(osc_dash, "_collector_proc", None)
@@ -1367,7 +1368,8 @@ def test_api_collector_status_book_shadow(tmp_path, monkeypatch):
     assert res.status_code == 200
     assert res.json()["book_shadow"] is None
 
-    # Present block -> flat ready-to-read summary; tolerance supplied by server.
+    # Present block -> flat ready-to-read summary; tolerance comes from the
+    # manifest (#470), so a non-default value proves it follows the collector.
     mf = tmp_path / "manifest.json"
     mf.write_text(
         json.dumps({
@@ -1376,6 +1378,7 @@ def test_api_collector_status_book_shadow(tmp_path, monkeypatch):
                 "comparisons": 39414,
                 "divergent": 11737,
                 "divergence_rate": 0.2977,
+                "tolerance": 0.0025,
                 "mean_abs_bb_delta": 0.0064,
                 "mean_abs_ba_delta": 0.0064,
                 "max_bb": 0.32,
@@ -1395,7 +1398,8 @@ def test_api_collector_status_book_shadow(tmp_path, monkeypatch):
     assert bs["comparisons"] == 39414
     assert bs["divergent"] == 11737
     assert bs["divergence_rate"] == 0.2977
-    assert bs["tolerance"] == 0.001
+    # Issue #470: non-default tolerance surfaces verbatim — no dashboard copy.
+    assert bs["tolerance"] == 0.0025
     assert bs["max_bb"] == 0.32
     # per_series stays in the payload for the badge tooltip.
     assert bs["per_series"]["sol-up-or-down-5m"]["divergent"] == 1246
@@ -1405,6 +1409,21 @@ def test_api_collector_status_book_shadow(tmp_path, monkeypatch):
     res = client.get("/api/collector/status")
     assert res.status_code == 200
     assert res.json()["book_shadow"] is None
+
+
+@pytest.mark.parametrize("bad_tol", [None, "0.001", True, [0.001], {"v": 0.001}])
+def test_api_collector_status_book_shadow_bad_tolerance(tmp_path, monkeypatch, bad_tol):
+    """Issue #470: absent or malformed manifest tolerance renders null, never an error."""
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "book_shadow": {"comparisons": 100, "divergent": 20,
+                        "divergence_rate": 0.2, "tolerance": bad_tol,
+                        "per_series": {}},
+    }), encoding="utf-8")
+    res = client.get("/api/collector/status")
+    assert res.status_code == 200
+    assert res.json()["book_shadow"]["tolerance"] is None
 
 
 def test_shadow_badge_format(tmp_path, monkeypatch):
@@ -1432,6 +1451,8 @@ def test_shadow_badge_format(tmp_path, monkeypatch):
     }), encoding="utf-8")
     d = client.get("/api/collector/status").json()
     assert d["book_shadow"]["badge_text"] == "Book Δ: 20.0% (100)"
+    # Issue #470: no tolerance key in the manifest -> null beside the badge text.
+    assert d["book_shadow"]["tolerance"] is None
 
 
 def test_collector_status_large_tick_file_uses_size_estimate(tmp_path, monkeypatch):

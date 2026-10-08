@@ -4518,10 +4518,10 @@ def api_analysis():
 
 
 # Collector endpoints
-# Issue #349: the #174 Phase 1 divergence threshold (scripts/collect_ticks.py).
-# Kept in sync by name/comment; the collector owns the comparison, the dashboard
-# only displays what it recorded.
-BOOK_SHADOW_TOLERANCE = 0.001
+# Issue #349: the #174 Phase 1 divergence threshold lives in
+# scripts/collect_ticks.py and is recorded per-run in manifest.json as
+# book_shadow.tolerance; the dashboard only displays what it recorded and
+# keeps no copy of the value (#470).
 
 
 def _shadow_badge_text(bs: dict) -> str:
@@ -4581,17 +4581,18 @@ def api_collector_status():
                     tape_alert = True
             # Issue #349: surface the #174 Phase 1 book_shadow disagreement
             # summary so the operator reads it in the dashboard, not in a JSON
-            # file. Flat copy of the manifest's ready-to-read fields; the
-            # tolerance is supplied here because the collector keeps it as a
-            # module constant, not a manifest key. Same fault tolerance as the
-            # tape fields above: absent/malformed -> null, never an error.
+            # file. Flat copy of the manifest's ready-to-read fields, including
+            # the tolerance the collector recorded (#470 — the dashboard keeps
+            # no copy of its own). Same fault tolerance as the tape fields
+            # above: absent/malformed -> null, never an error.
             bs = mdata.get("book_shadow")
             if isinstance(bs, dict) and bs.get("comparisons"):
+                bs_tol = bs.get("tolerance")
                 book_shadow = {
                     "comparisons": bs.get("comparisons"),
                     "divergent": bs.get("divergent"),
                     "divergence_rate": bs.get("divergence_rate"),
-                    "tolerance": BOOK_SHADOW_TOLERANCE,
+                    "tolerance": bs_tol if _jk_is_finite_number(bs_tol) else None,
                     "mean_abs_bb_delta": bs.get("mean_abs_bb_delta"),
                     "mean_abs_ba_delta": bs.get("mean_abs_ba_delta"),
                     "max_bb": bs.get("max_bb"),
@@ -7982,7 +7983,11 @@ async function refreshCollectorStatus(){
         // badge_text is server-rendered (single source of truth, tested in
         // Python); the UI only picks the color from the rate.
         sb.textContent = bs.badge_text;
-        if(bs.divergence_rate > bs.tolerance){
+        if(typeof bs.tolerance !== 'number' || !Number.isFinite(bs.tolerance)){
+          sb.style.color = 'var(--dim)';
+          sb.style.borderColor = 'var(--line)';
+          sb.style.background = 'var(--panel2)';
+        } else if(bs.divergence_rate > bs.tolerance){
           sb.style.color = 'var(--gold)';
           sb.style.borderColor = 'rgba(240,180,41,0.5)';
           sb.style.background = 'rgba(240,180,41,0.15)';
@@ -7998,7 +8003,10 @@ async function refreshCollectorStatus(){
             return `${slug}: ${r}% (${s.comparisons})`;
           })
           .join('\n');
-        sb.title = `WS vs REST book disagreement (diverged = delta > ${bs.tolerance})` +
+        const tolLabel = (typeof bs.tolerance === 'number' && Number.isFinite(bs.tolerance))
+          ? `diverged = delta > ${bs.tolerance}`
+          : 'tolerance unavailable';
+        sb.title = `WS vs REST book disagreement (${tolLabel})` +
           (rows ? `\n${rows}` : '');
       } else {
         sb.textContent = 'Book Δ: not enough data yet';
