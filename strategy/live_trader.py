@@ -5307,9 +5307,15 @@ class LiveTraderEngine:
         Order of resolution (issue #160):
         1. Direct book bid: mstate.up_bid / mstate.down_bid if 0.0 < bid <= 1.0.
         2. Binary complement ask: 1.0 - opposite_ask if 0.0 < opposite_ask <= 1.0.
-        3. Latched valid book bid: last seen valid positive bid on this leg.
-        4. Latched binary complement ask: 1.0 - last seen valid opposite ask.
-        5. Synthetic mid: derived mid if present and not exactly default 0.50.
+        3. Latched valid book bid: last seen valid positive bid on this leg,
+           only while younger than EXIT_QUOTE_MAX_AGE_SEC (issue #472).
+        4. Latched binary complement ask: 1.0 - last seen valid opposite ask,
+           same age bound.
+        5. Synthetic mid: derived mid if present, not exactly default 0.50,
+           and both leg bests younger than the bound.
+
+        Aged rungs report their age in the basis (e.g. `latched_bid@8.4s`) so
+        the exit record and trade notes say how old the pricing quote was.
 
         Note: Opposite bid is NOT used for binary complement because
         (1.0 - B_opp) synthesizes an ask (A_same), whereas closing a long position
@@ -5323,10 +5329,26 @@ class LiveTraderEngine:
             raise ValueError(f"Unknown side: {side}")
 
         is_up = (side_norm == "UP")
+        now = time.time()
         leg_bid = mstate.up_bid if is_up else mstate.down_bid
         opp_ask = mstate.down_ask if is_up else mstate.up_ask
         latched_bid = mstate.last_valid_up_bid if is_up else mstate.last_valid_down_bid
         latched_opp_ask = mstate.last_valid_down_ask if is_up else mstate.last_valid_up_ask
+        latched_bid_ts = mstate.last_valid_up_bid_ts if is_up else mstate.last_valid_down_bid_ts
+        latched_opp_ask_ts = mstate.last_valid_down_ask_ts if is_up else mstate.last_valid_up_ask_ts
+
+        def _quote_age(ts):
+            """Age of a write-time stamp, or None when unmeasurable/stale by
+            construction. Negative ages (clock moved backwards) never gate
+            anything open — they read as stale."""
+            age = _age_between(ts, now)
+            if age is None or age < 0.0 or age > EXIT_QUOTE_MAX_AGE_SEC:
+                return None
+            return age
+
+        def _age_label(ts):
+            raw = _age_between(ts, now)
+            return "unknown" if raw is None else f"{raw:.1f}s"
 
         # 1. Direct book bid
         if leg_bid is not None and 0.0 < leg_bid <= 1.0:
@@ -5336,21 +5358,54 @@ class LiveTraderEngine:
         if opp_ask is not None and 0.0 < opp_ask <= 1.0:
             return round(max(0.0001, min(0.9999, 1.0 - opp_ask)), 4), "complement_ask"
 
-        # 3. Latched valid book bid
+        # 3. Latched valid book bid (issue #472: only while the latch is young;
+        # otherwise fall through — a window-open quote must not price the close).
         if latched_bid is not None and 0.0 < latched_bid <= 1.0:
-            return round(max(0.0001, min(0.9999, latched_bid)), 4), "latched_bid"
+            bid_age = _quote_age(latched_bid_ts)
+            if bid_age is not None:
+                log.info("[%s] exit-quote-age rung=latched_bid age=%.1fs",
+                         mstate.slug, bid_age)
+                return (round(max(0.0001, min(0.9999, latched_bid)), 4),
+                        f"latched_bid@{bid_age:.1f}s")
+            log.info("[%s] exit-quote-age rung=latched_bid skipped age=%s",
+                     mstate.slug, _age_label(latched_bid_ts))
 
-        # 4. Latched binary complement ask
+        # 4. Latched binary complement ask (same age bound).
         if latched_opp_ask is not None and 0.0 < latched_opp_ask <= 1.0:
-            return round(max(0.0001, min(0.9999, 1.0 - latched_opp_ask)), 4), "latched_complement_ask"
+            ask_age = _quote_age(latched_opp_ask_ts)
+            if ask_age is not None:
+                log.info("[%s] exit-quote-age rung=latched_complement_ask age=%.1fs",
+                         mstate.slug, ask_age)
+                return (round(max(0.0001, min(0.9999, 1.0 - latched_opp_ask)), 4),
+                        f"latched_complement_ask@{ask_age:.1f}s")
+            log.info("[%s] exit-quote-age rung=latched_complement_ask skipped age=%s",
+                     mstate.slug, _age_label(latched_opp_ask_ts))
 
-        # 5. Synthetic mid (only if engine observed at least one book update and mid != 0.50)
+        # 5. Synthetic mid (only if both leg bests are young and mid != 0.50;
+        # issue #472 replaces the old last_update_ts presence test).
         leg_mid = mstate.mid if is_up else (1.0 - mstate.mid if mstate.mid is not None else None)
-        if (getattr(mstate, "last_update_ts", 0) > 0
-                and leg_mid is not None
+        up_age = _age_between(mstate.best_ts_up, now)
+        down_age = _age_between(mstate.best_ts_down, now)
+        mid_age = None
+        if (up_age is not None and up_age >= 0.0
+                and down_age is not None and down_age >= 0.0):
+            mid_age = max(up_age, down_age)
+            if mid_age > EXIT_QUOTE_MAX_AGE_SEC:
+                mid_age = None
+        if (leg_mid is not None
                 and 0.0 < leg_mid < 1.0
                 and abs(leg_mid - 0.50) > 1e-4):
-            return round(max(0.0001, min(0.9999, leg_mid)), 4), "mid_fallback"
+            if mid_age is not None:
+                log.info("[%s] exit-quote-age rung=mid_fallback age=%.1fs",
+                         mstate.slug, mid_age)
+                return (round(max(0.0001, min(0.9999, leg_mid)), 4),
+                        f"mid_fallback@{mid_age:.1f}s")
+            oldest = None
+            if up_age is not None and down_age is not None:
+                oldest = max(up_age, down_age)
+            log.info("[%s] exit-quote-age rung=mid_fallback skipped age=%s",
+                     mstate.slug,
+                     "unknown" if oldest is None else f"{oldest:.1f}s")
 
         log.critical("[%s] Window Rollover FAILED: No valid market book or latched quote for %s leg", mstate.slug, side)
         raise RuntimeError(f"[{mstate.slug}] No executable book mark available for {side} leg settle at rollover")
