@@ -4593,6 +4593,9 @@ def test_tick_all_markets_stamps_the_completion_clock_only_on_success():
 def test_a_market_failing_every_tick_is_attributed_and_still_reads_stale():
     """Issue #462: the failure lands on the right market, and that market cannot look fresh.
 
+    Issue #461: the tick no longer propagates the failure (isolated per market),
+    so the loop below asserts completion — while every attribution line stays exact.
+
     Two ways this silently breaks, both caught here: attribution done anywhere but the
     call site loses the slug before the handler runs (count stays 0), and reading the
     #221 timing clock would re-stamp every tick and report a starving market as fresh.
@@ -4602,8 +4605,7 @@ def test_a_market_failing_every_tick_is_attributed_and_still_reads_stale():
     engine = _failing_engine(tokens=("BTC", "ETH"))
 
     for _ in range(2):
-        with pytest.raises(RuntimeError, match="kaboom"):
-            asyncio.run(engine._tick_all_markets())
+        asyncio.run(engine._tick_all_markets())
 
     btc = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
     assert btc["tick_error_count"] == 2
@@ -4646,3 +4648,39 @@ def test_timing_statistics_reset_does_not_wipe_tick_health():
     health = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
     assert health["tick_age_sec"] is not None and health["tick_age_sec"] > 9.0
     assert health["tick_error_count"] == 1
+
+
+def test_tick_all_markets_isolates_a_failing_market(caplog):
+    """Issue #461: one market's strategy failure must not starve the rest of the tick.
+
+    BTC raises on every update; ETH must still be updated and the tick must
+    complete without propagating. The failure is logged once with the slug and
+    its traceback, attributed to BTC only, and BTC stays unstamped.
+    """
+    import asyncio
+
+    engine = LiveTraderEngine(tokens=["BTC", "ETH"], durations=[300])
+    engine.is_running = True
+    engine._poll_single_market = lambda slug: _tick_health_poll(slug, time.time())
+
+    updated = []
+
+    def selective(slug, res, now):
+        if slug == _TICK_HEALTH_SLUG:
+            raise RuntimeError("kaboom")
+        updated.append(slug)
+
+    engine._update_market_strategy = selective
+
+    caplog.set_level("ERROR", logger="live_trader")
+    asyncio.run(engine._tick_all_markets())  # must not raise (#461)
+
+    assert updated == ["eth-up-or-down-5m"]
+    assert caplog.text.count("Strategy update failed") == 1
+    assert _TICK_HEALTH_SLUG in caplog.text
+    assert "Traceback" in caplog.text
+    btc = engine.get_state()["markets"][_TICK_HEALTH_SLUG]
+    assert btc["tick_error_count"] == 1
+    assert btc["last_tick_error"] == "kaboom"
+    assert engine.markets[_TICK_HEALTH_SLUG]._last_completed_tick_perf is None
+    assert engine.get_state()["markets"]["eth-up-or-down-5m"]["tick_error_count"] == 0
