@@ -222,6 +222,14 @@ def test_ws_drift_guard_prefers_rest_on_large_disagreement():
     assert mstate.book_source_down == "ws"
 
 
+def test_ws_book_comparable_bound_within_max_age():
+    """Issue #471: the comparability bound must never exceed the servability bound."""
+    import strategy.live_trader as lt
+
+    engine = LiveTraderEngine()
+    assert lt.WS_BOOK_COMPARABLE_AGE_SEC <= engine.ws_book_max_age_sec
+
+
 def test_ws_book_kept_when_no_rest_book_fetched():
     """Issue #353: with no REST book to compare, the guard cannot fire.
 

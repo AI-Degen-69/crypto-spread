@@ -118,6 +118,16 @@ WS_TAPE_AUTHORITY_HORIZON_SEC = 90.0
 # more than this on best bid or ask loses one reconcile round to REST.
 # Small gaps stay WS microstructure noise and never flip authority.
 WS_BOOK_DRIFT_GUARD_CENTS = 0.02
+# Socket BOOK comparability bound (issue #471). This is a comparability bound,
+# not a servability bound: a price gap wider than WS_BOOK_DRIFT_GUARD_CENTS may
+# flip authority only while the socket book is this young, so the two reads are
+# close enough in time to compare. The value comes from §7.4 of
+# docs/issue-174-socket-book-disagreement.md (zero divergence below ~100 ms).
+# It is provisional, not proven safe: §7.7 notes the 0-divergence cells below
+# 100 ms in the blind population rest on 29 observations, not on the full
+# sample. The per-run flip/block log lines added here are the instrument for
+# re-tuning it later.
+WS_BOOK_COMPARABLE_AGE_SEC = 0.1
 # One window's prints at one price level. A cap is needed because the ledger is
 # only trimmed by window rollover, and a hot market can print continuously; the
 # oldest entries are dropped first, which biases toward undercounting rather
