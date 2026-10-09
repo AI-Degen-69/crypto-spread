@@ -606,6 +606,7 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
     })
 
     def _exclude(reason: str) -> None:
+        """Ledger one pair the freshness rules kept out, with its reason."""
         shadow["excluded"][reason] = shadow["excluded"].get(reason, 0) + 1
         shadow["freshness_bound_s"] = FRESHNESS_WINDOW_S
 
