@@ -88,7 +88,7 @@ Depends on: T2.
 Verify: `python -m pytest tests/test_clob_ws_collector.py tests/test_osc_dash_integration.py -q`.
 Checkpoint: both instruments corrected — replay and live classify identically.
 
-### T4 [Docs/Gate] — M — pre-registered rule + cross-check/parity/flag-off tests
+### T4 [Docs/Gate] — M — pre-registered rule + cross-check/parity/flag-off tests [x]
 Files: `docs/issue-174-socket-book-disagreement.md` (§7 rule section),
 `tests/test_replay_socket_reconciliation.py`, `tests/test_clob_ws_collector.py`,
 `tests/test_osc_dash_integration.py`.

@@ -304,3 +304,28 @@ Verdict is recorded in §9 either way: GO only if every bullet above holds on th
 
 ## 9. Measurement run against the §8 rule (Issue #440 — filled by the run, not edited after)
 
+Run: corrected instrument (commit `d08d56b` + T1–T4 code) over
+`run/diag_ws/raw_session_2026-10-07_00-42-10.jsonl`
+(72,370 lines; 71,690 WS events; 680 REST snapshots; all 10 series).
+Rule §8 was locked before this run (same commit); the run below is the first
+measurement the corrected instrument ever produced.
+
+- Gated: **0 material divergences / 27,127** → rate **0.0%** (bar ≤ 1.0%) ✓
+- Sample: `n_gated = 27,127` (bar ≥ 5,000) ✓
+- Max single gated gap: **$0.0000** (veto above $0.02) ✓
+- Blind: 46/158 (29.1%) with the §7.4 age gradient intact (0 below 100 ms,
+  rising to 0.3% at ≤500 ms) → read as staleness per the skew-correction
+  bullet, kept out of the gate ✓
+- Escape hatch: zero divergences on fully-gated pairs ✓
+- Excluded, now counted instead of silent: 103,094 `outside_freshness_window`,
+  10,878 `guard_reject`, 1,302 `no_snapshot`
+
+**Verdict: GO — the gate clears on the corrected metric.**
+
+Caveat, recorded so the verdict cannot be over-read: the §8 thresholds were set
+with knowledge of §7's old-instrument measurements on this same capture (the
+issue body quotes them), so this is a confirmation run on known data, not an
+out-of-sample trial. Recommended before acting on it: one fresh-capture
+confirmation run against the unchanged §8 rule. Flipping the Phase 2 switch
+itself is out of scope here; the standing NO-GO is untouched by this verdict.
+
