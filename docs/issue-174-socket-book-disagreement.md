@@ -322,6 +322,12 @@ measurement the corrected instrument ever produced.
 
 **Verdict: GO — the gate clears on the corrected metric.**
 
+Freshness mechanism (criterion 10): quoting reads the socket book's
+`last_updated`, stamped at frame arrival in the same critical section as the
+mutation — bounded by venue publication, not the 1 s poll loop. Pinned by test
+(`test_book_freshness_is_stamped_at_frame_arrival`: stamp lands inside
+[frame arrival, now]); a quiet token visibly ages instead of looking polled.
+
 Caveat, recorded so the verdict cannot be over-read: the §8 thresholds were set
 with knowledge of §7's old-instrument measurements on this same capture (the
 issue body quotes them), so this is a confirmation run on known data, not an

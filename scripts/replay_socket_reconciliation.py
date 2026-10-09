@@ -314,14 +314,17 @@ class ReconciliationReport:
             "gated": {
                 "comparisons": self.gated_comparisons,
                 "divergences": self.gated_divergences,
+                # No evidence is not a clean pass: None, never 0.0, on an
+                # empty denominator (review: the #349 badge rule applies to
+                # machine-readable summaries too).
                 "rate": round(self.gated_divergences / self.gated_comparisons, 4)
-                if self.gated_comparisons else 0.0,
+                if self.gated_comparisons else None,
             },
             "blind": {
                 "comparisons": self.blind_comparisons,
                 "divergences": self.blind_divergences,
                 "rate": round(self.blind_divergences / self.blind_comparisons, 4)
-                if self.blind_comparisons else 0.0,
+                if self.blind_comparisons else None,
             },
             "excluded": dict(self.excluded),
             "magnitude_buckets": dict(self.magnitude_buckets),

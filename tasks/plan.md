@@ -39,8 +39,9 @@ Stack: Python; test runner `pytest` (targeted files only; full suite = CI).
 - C3 streaming (`strategy/streaming.py`): additive
   `book_snapshot_provenance(token_id)` → `{book, frame_kind|None,
   declared_best_bid|None, declared_best_ask|None}`; `book_snapshot()`
-  untouched; dispatch records last frame kind + declared quotes per token
-  under the existing lock.
+  untouched; last BOOK-MUTATING frame recorded per token under the existing
+  lock (trade prints mutate no levels, so they leave provenance intact —
+  review fix, otherwise quiet tokens would bleed gated coverage).
 
 ## Improvement proposal (adopted by default — simplification)
 

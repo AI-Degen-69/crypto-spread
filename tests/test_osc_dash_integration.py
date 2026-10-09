@@ -10887,3 +10887,21 @@ def test_shadow_badge_prefers_the_gated_rate(tmp_path, monkeypatch):
     assert bs["divergence_rate_blind"] == 1.0
     assert bs["excluded"] == {"outside_freshness_window": 3}
     assert bs["freshness_bound_s"] == 0.5
+
+@pytest.mark.parametrize("bad_rate", ["0.2", True, [0.2], {"v": 0.2}, float("nan")])
+def test_shadow_badge_malformed_rate_is_no_measurement(bad_rate):
+    """Issue #440: a non-numeric rate is no measurement — never a crash, never a badge."""
+    assert "not enough data" in osc_dash._shadow_badge_text({
+        "comparisons": 100, "divergent": 20, "divergence_rate": bad_rate,
+        "tolerance": 0.001, "per_series": {},
+    }).lower()
+
+
+@pytest.mark.parametrize("bad_comps", ["100", 100.0, True, None, 0, -5])
+def test_shadow_badge_malformed_count_is_no_measurement(bad_comps):
+    """Issue #440 review: the count formats with `:,` — non-integers read as
+    no measurement instead of raising inside the status handler."""
+    assert "not enough data" in osc_dash._shadow_badge_text({
+        "comparisons": bad_comps, "divergent": 0, "divergence_rate": 0.0,
+        "tolerance": 0.001, "per_series": {},
+    }).lower()

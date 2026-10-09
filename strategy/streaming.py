@@ -719,7 +719,10 @@ class CLOBMarketWSClient:
             if overflow > 0:
                 del buf[:overflow]
                 self.trades_dropped += overflow
-        self._record_frame(token_id, "last_trade_price")
+        # No provenance update: a print does not mutate the book, so the last
+        # book-mutating frame stays the classifier. Recording the trade would
+        # relabel a gateable ladder as blind and bleed gated coverage on
+        # quiet tokens (review: only quote frames classify).
         if self.on_trade:
             try:
                 self.on_trade(trade)

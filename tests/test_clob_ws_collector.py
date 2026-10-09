@@ -1762,18 +1762,27 @@ def test_best_bid_ask_frame_records_declared_quotes():
     assert prov["declared_best_ask"] == 0.52
 
 
-def test_last_trade_print_records_blind_provenance():
-    """A trade print is not a quote — blind by construction."""
+def test_last_trade_print_leaves_book_provenance_intact():
+    """A print mutates no levels, so it must not relabel the ladder (#440 review).
+
+    Recording the trade as the last frame would turn a gateable book blind on
+    every quiet token and bleed the gated sample the gate is read on.
+    """
     client = CLOBMarketWSClient()
-    client.apply_book_snapshot("tok", [{"price": "0.48", "size": "10"}],
-                               [{"price": "0.52", "size": "10"}])
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{
+            "asset_id": "tok", "side": "BUY", "price": "0.48", "size": "10",
+            "best_bid": "0.48", "best_ask": "0.52",
+        }],
+    }))
     client.record_trade("tok", {"price": "0.50", "size": "5", "side": "BUY",
                                 "timestamp": 1700000000000})
     prov = client.book_snapshot_provenance("tok")
     assert prov is not None
-    assert prov["frame_kind"] == "last_trade_price"
-    assert prov["declared_best_bid"] is None
-    assert prov["declared_best_ask"] is None
+    assert prov["frame_kind"] == "price_change"
+    assert prov["declared_best_bid"] == 0.48
+    assert prov["declared_best_ask"] == 0.52
 
 
 def test_provenance_book_is_isolated_from_mutation():

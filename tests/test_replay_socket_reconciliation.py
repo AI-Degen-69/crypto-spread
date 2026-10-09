@@ -921,6 +921,10 @@ def test_summary_dict_exposes_gated_blind_and_excluded():
     assert summary["gated"] == {"comparisons": 2, "divergences": 1, "rate": 0.5}
     assert summary["blind"] == {"comparisons": 1, "divergences": 0, "rate": 0.0}
     assert summary["excluded"] == {"outside_freshness_window": 1}
+    # No evidence is not a clean pass: empty denominators report None (#440 review).
+    empty = ReconciliationReport().summary_dict()
+    assert empty["gated"]["rate"] is None
+    assert empty["blind"]["rate"] is None
 
 
 def test_one_tick_gap_is_agreement_and_middle_bucket_populable():
@@ -938,3 +942,32 @@ def test_one_tick_gap_is_agreement_and_middle_bucket_populable():
     assert rep.blind_divergences == 0
     assert rep.magnitude_buckets.get("sub_tick", 0) >= 1
 
+
+def test_quoteless_books_are_excluded_not_counted():
+    """A REST record carrying no quotes gives the pair nothing to compare."""
+    reconciler = SocketReconciler()
+    token = "tok_no_quotes"
+    reconciler.feed_line(json.dumps({
+        "type": "rest", "rx": 100.0, "series": "btc-up-or-down-5m",
+        "token": token,
+        "book": {"bids": {}, "asks": {}},
+    }))
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    assert rep.excluded == {"no_comparable_quotes": 1}
+    assert rep.comparisons_by_type == {}
+
+
+def test_divergence_records_carry_their_population():
+    """Rest-sourced records say whether they were gated — debuggable later."""
+    reconciler = SocketReconciler()
+    token = "tok_rec_check"
+    _feed_rest(reconciler, token, 100.0, 0.60, 0.62)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+    _feed_price_change(reconciler, token, 100.0, "0.50", "0.52")
+
+    recs = [r for r in reconciler.report.all_divergences if r.source == "rest"]
+    assert len(recs) == 1
+    assert recs[0].event_type == "book"
+    assert recs[0].checkability == "blind"

@@ -4542,13 +4542,19 @@ def _shadow_badge_text(bs: dict) -> str:
     # A present-but-None gated key means "no gated evidence" (or a manifest
     # predating the split, where the API materialized the missing keys) —
     # either way fall back to the global fields rather than calling it empty.
+    # Non-numeric rates (malformed manifest) are no measurement either — same
+    # fault tolerance as the #470 tolerance handling below, never a crash.
     rate = bs.get("divergence_rate_gated")
     if rate is None:
         rate = bs.get("divergence_rate")
+    if not _jk_is_finite_number(rate):
+        return "Book Δ: not enough data yet"
     comps = bs.get("comparisons_gated")
     if comps is None:
         comps = bs.get("comparisons")
-    if not comps or rate is None:
+    # Counts format with `:,` — a non-integer (malformed manifest) must read
+    # as no measurement, never raise inside the status handler (review).
+    if isinstance(comps, bool) or not isinstance(comps, int) or comps <= 0:
         return "Book Δ: not enough data yet"
     return f"Book Δ: {rate * 100:.1f}% ({comps:,})"
 
