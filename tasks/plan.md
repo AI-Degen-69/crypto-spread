@@ -103,7 +103,7 @@ Verify: `python -m pytest tests/test_replay_socket_reconciliation.py
 tests/test_clob_ws_collector.py tests/test_osc_dash_integration.py -q`.
 Checkpoint: rule locked + all three suites green.
 
-### T5 [Validation/Run] — S — measurement run + verdict either way
+### T5 [Validation/Run] — S — measurement run + verdict either way [x]
 Files: docs verdict section (same file as T4), no code.
 Build: run corrected instruments against the pre-registered rule on a fresh
 capture; publish numbers; record GO/NO-GO verbatim in the doc.
