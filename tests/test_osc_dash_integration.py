@@ -10845,3 +10845,45 @@ def test_cockpit_staleness_outranks_sticky_error_history():
     assert "if (m.tick_stale || tickNeverCompleted) staleMarkets += 1;" in block
     # The failure is still surfaced in the tooltip.
     assert "healthTooltipParts.push" in block
+
+def test_shadow_badge_prefers_the_gated_rate(tmp_path, monkeypatch):
+    """Issue #440: the badge shows the gated population, never the blind average.
+
+    A manifest with a hot blind population and a clean gated one badges the
+    gated rate; blind-only evidence badges "not enough data yet".
+    """
+    assert osc_dash._shadow_badge_text({
+        "comparisons": 10, "divergent": 5, "divergence_rate": 0.5,
+        "comparisons_gated": 8, "divergent_gated": 0,
+        "divergence_rate_gated": 0.0,
+        "comparisons_blind": 2, "divergent_blind": 2,
+        "divergence_rate_blind": 1.0,
+    }) == "Book Δ: 0.0% (8)"
+    assert "not enough data" in osc_dash._shadow_badge_text({
+        "comparisons": 2, "divergent": 2, "divergence_rate": 1.0,
+        "comparisons_gated": 0, "divergent_gated": 0,
+        "divergence_rate_gated": None,
+        "comparisons_blind": 2, "divergent_blind": 2,
+        "divergence_rate_blind": 1.0,
+    }).lower()
+
+    # The status payload carries the split through for the badge and tooltip.
+    monkeypatch.setattr(osc_dash, "TICKS_DIR", tmp_path)
+    monkeypatch.setattr(osc_dash, "_collector_proc", None)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "book_shadow": {"comparisons": 10, "divergent": 5,
+                        "divergence_rate": 0.0,
+                        "comparisons_gated": 8, "divergent_gated": 0,
+                        "divergence_rate_gated": 0.0,
+                        "comparisons_blind": 2, "divergent_blind": 2,
+                        "divergence_rate_blind": 1.0,
+                        "excluded": {"outside_freshness_window": 3},
+                        "freshness_bound_s": 0.5,
+                        "tolerance": 0.001, "per_series": {}},
+    }), encoding="utf-8")
+    d = client.get("/api/collector/status").json()
+    bs = d["book_shadow"]
+    assert bs["badge_text"] == "Book Δ: 0.0% (8)"
+    assert bs["divergence_rate_blind"] == 1.0
+    assert bs["excluded"] == {"outside_freshness_window": 3}
+    assert bs["freshness_bound_s"] == 0.5

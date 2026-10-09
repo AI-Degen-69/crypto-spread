@@ -1529,6 +1529,13 @@ def _shadow_stats() -> dict:
     return {}
 
 
+def _prov(book: dict, kind: str = "price_change",
+          dbb: float | None = 0.50, dba: float | None = 0.52) -> dict:
+    """Wrap a plain book in Issue #440 live provenance for the shadow split."""
+    return {"book": book, "frame_kind": kind,
+            "declared_best_bid": dbb, "declared_best_ask": dba}
+
+
 def test_shadow_compare_counts_divergence_and_deltas():
     """A perturbed WS book counts as divergent with the right accumulated deltas."""
     import scripts.collect_ticks as ct
@@ -1536,14 +1543,19 @@ def test_shadow_compare_counts_divergence_and_deltas():
     stats = _shadow_stats()
     rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
     ws = {"bids": {}, "asks": {}, "best_bid": 0.505, "best_ask": 0.52}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, _prov(ws),
+                            rest_rx=100.0, ws_rx=100.0)
     s = stats["book_shadow"]
     assert s["comparisons"] == 1
     assert s["divergent"] == 1  # 0.005 bid delta > tolerance
+    assert s["comparisons_gated"] == 1
+    assert s["divergent_gated"] == 1
+    assert s["comparisons_blind"] == 0
     assert round(s["abs_bb_sum"], 6) == 0.005 == round(s["max_bb"], 6)
     assert s["abs_ba_sum"] == 0.0
     assert s["per_series"]["btc-up-or-down-5m"]["divergent"] == 1
     assert s["divergence_rate"] == 1.0
+    assert s["freshness_bound_s"] == 0.5
 
 
 def test_shadow_compare_equal_books_are_not_divergent():
@@ -1552,12 +1564,17 @@ def test_shadow_compare_equal_books_are_not_divergent():
 
     stats = _shadow_stats()
     book = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", book, dict(book))
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", book,
+                            _prov(dict(book)), rest_rx=100.0, ws_rx=100.0)
     tiny_ws = {"bids": {}, "asks": {}, "best_bid": 0.5005, "best_ask": 0.52}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", book, tiny_ws)
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", book,
+                            _prov(tiny_ws, kind="book", dbb=None, dba=None),
+                            rest_rx=100.0, ws_rx=100.0)
     s = stats["book_shadow"]
     assert s["comparisons"] == 2
     assert s["divergent"] == 0
+    assert s["comparisons_gated"] == 1
+    assert s["comparisons_blind"] == 1
     assert s["divergence_rate"] == 0.0
     assert s["mean_abs_mid_delta"] is not None
 
@@ -1569,7 +1586,8 @@ def test_shadow_compare_exact_tolerance_threshold_stays_within_tolerance():
     stats = _shadow_stats()
     rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
     ws = {"bids": {}, "asks": {}, "best_bid": 0.501, "best_ask": 0.52}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, _prov(ws),
+                            rest_rx=100.0, ws_rx=100.0)
     s = stats["book_shadow"]
     assert s["comparisons"] == 1
     assert s["divergent"] == 0
@@ -1582,11 +1600,15 @@ def test_shadow_compare_ignores_missing_ws_snapshot_and_garbage():
 
     stats = _shadow_stats()
     rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, None)
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, None,
+                            rest_rx=100.0, ws_rx=100.0)
     assert "book_shadow" not in stats  # nothing comparable happened
     ws_bad = {"bids": {}, "asks": {}, "best_bid": "not-a-number", "best_ask": None}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws_bad)
-    assert "book_shadow" not in stats  # no comparable quotes: no comparison counted
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws_bad,
+                            rest_rx=100.0, ws_rx=100.0)
+    # A book with no provenance cannot be classified: excluded, not rated (#440).
+    assert stats["book_shadow"]["comparisons"] == 0
+    assert stats["book_shadow"]["excluded"] == {"no_provenance": 1}
 
 
 def test_shadow_compare_one_sided_books_track_separate_sample_counts():
@@ -1596,7 +1618,8 @@ def test_shadow_compare_one_sided_books_track_separate_sample_counts():
     stats = _shadow_stats()
     rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": None}
     ws = {"bids": {}, "asks": {}, "best_bid": 0.502, "best_ask": None}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, _prov(ws),
+                            rest_rx=100.0, ws_rx=100.0)
     s = stats["book_shadow"]
     assert s["comparisons"] == 1
     assert s["bb_samples"] == 1
@@ -1612,7 +1635,8 @@ def test_book_shadow_is_public_and_reaches_the_manifest(tmp_path):
     stats = _shadow_stats()
     rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
     ws = {"bids": {}, "asks": {}, "best_bid": 0.55, "best_ask": 0.52}
-    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, ws)
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, _prov(ws),
+                            rest_rx=100.0, ws_rx=100.0)
     ct.update_manifest(tmp_path, stats)
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert "book_shadow" in manifest
@@ -1771,3 +1795,80 @@ def test_rotated_out_tokens_drop_their_provenance():
     assert client.book_snapshot_provenance("tok_old") is not None
     client.update_tokens(["tok_new"])
     assert client.book_snapshot_provenance("tok_old") is None
+
+# --------------------------------------------------------------------------
+# Issue #440: the live instrument carries time and reports its population
+# --------------------------------------------------------------------------
+
+def test_shadow_compare_stale_pairs_are_excluded_not_rated():
+    """A socket book a second older than the REST read is no reference."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.60, "best_ask": 0.62}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, _prov(ws),
+                            rest_rx=100.0, ws_rx=99.0)
+    s = stats["book_shadow"]
+    assert s["comparisons"] == 0
+    assert s["excluded"] == {"outside_freshness_window": 1}
+    assert s["freshness_bound_s"] == 0.5
+
+
+def test_shadow_compare_counts_blind_divergence_apart_from_gated():
+    """A blind 5c jump must not move the gated headline rate."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.55, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest,
+                            _prov(ws, kind="book", dbb=None, dba=None),
+                            rest_rx=100.0, ws_rx=100.0)
+    s = stats["book_shadow"]
+    assert s["comparisons_blind"] == 1
+    assert s["divergent_blind"] == 1
+    assert s["divergence_rate_blind"] == 1.0
+    assert s["comparisons_gated"] == 0
+    assert s["divergence_rate"] is None  # no gated evidence: no gated headline
+
+
+def test_shadow_compare_missing_ws_time_is_excluded():
+    """A book with no `last_updated` has unmeasurable separation: excluded."""
+    import scripts.collect_ticks as ct
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ws = {"bids": {}, "asks": {}, "best_bid": 0.50, "best_ask": 0.52}
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, _prov(ws),
+                            rest_rx=100.0, ws_rx=None)
+    assert stats["book_shadow"]["comparisons"] == 0
+    assert stats["book_shadow"]["excluded"] == {"outside_freshness_window": 1}
+
+
+def test_bridge_provenance_reaches_the_shadow_split():
+    """End to end: a live client book flows through the bridge classified."""
+    import scripts.collect_ticks as ct
+
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{
+            "asset_id": "tok", "side": "BUY", "price": "0.48", "size": "10",
+            "best_bid": "0.48", "best_ask": "0.52",
+        }],
+    }))
+    bridge = CLOBStreamCollectorBridge.__new__(CLOBStreamCollectorBridge)
+    bridge.client = client
+    prov = bridge.get_book_provenance_for_token("tok")
+    assert prov is not None and prov["frame_kind"] == "price_change"
+
+    stats = _shadow_stats()
+    rest = {"bids": {}, "asks": {}, "best_bid": 0.48, "best_ask": 0.52}
+    ws_rx = prov["book"].get("last_updated")
+    assert ws_rx is not None
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", "tok", rest, prov,
+                            rest_rx=ws_rx, ws_rx=ws_rx)
+    s = stats["book_shadow"]
+    assert s["comparisons_gated"] == 1
+    assert s["divergent_gated"] == 0

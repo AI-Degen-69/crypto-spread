@@ -1136,6 +1136,10 @@ class CLOBStreamCollectorBridge:
         """Return a book snapshot isolated from the worker thread, or None."""
         return self.client.book_snapshot(token_id)
 
+    def get_book_provenance_for_token(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Book plus frame kind and declared quotes for the gated/blind split (#440)."""
+        return self.client.book_snapshot_provenance(token_id)
+
     def get_status(self) -> Dict[str, Any]:
         """Return socket health, capture counters and runner state."""
         status = self.client.get_status()

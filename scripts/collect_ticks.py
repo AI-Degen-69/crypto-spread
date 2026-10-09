@@ -65,6 +65,10 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import requests
 from strategy import book_math
+from scripts.replay_socket_reconciliation import (
+    FRESHNESS_WINDOW_S,
+    checkability as _replay_checkability,
+)
 from strategy.markets import (CLOB_HOST, GAMMA_HOST, full_book, recent_trades,
                               select_window)
 from strategy.series import SERIES
@@ -554,16 +558,34 @@ BOOK_SHADOW_TOLERANCE = 0.001
 
 
 def shadow_compare_book(stats: dict, series_slug: str, token: str,
-                        rest_book: dict, ws_book: Optional[dict]) -> None:
+                        rest_book: dict, ws: Optional[dict],
+                        *, rest_rx: float, ws_rx: Optional[float]) -> None:
     """Record one WS-vs-REST book comparison into `stats["book_shadow"]`.
 
     Read-only telemetry for Phase 1 of #174: the REST book stays the recorded
     book, a WS failure counts as "no comparison" and never touches the run.
     Deltas accumulate as sums so the manifest can derive means without keeping
     a per-tick buffer.
+
+    Issue #440: both observation times are required. `rest_rx` is when the
+    REST book was fetched, `ws_rx` is the socket book's own `last_updated`.
+    A pair whose separation is unmeasurable or beyond `FRESHNESS_WINDOW_S` is
+    excluded with its reason — never rated. `ws` is the provenance dict from
+    `get_book_provenance_for_token`; a book without provenance cannot be
+    classified gated/blind, so it is excluded too.
     """
-    if ws_book is None:
+    if ws is None:
         return  # socket not connected / token not subscribed: no evidence
+
+    if isinstance(ws, dict) and "frame_kind" in ws:
+        kind = ws.get("frame_kind")
+        ws_book = ws.get("book")
+        decl_bb_raw = ws.get("declared_best_bid")
+        decl_ba_raw = ws.get("declared_best_ask")
+    else:
+        kind, ws_book, decl_bb_raw, decl_ba_raw = None, ws, None, None
+    if ws_book is None:
+        return
 
     def _num(v: Any) -> Optional[float]:
         """Parse one quote value to a finite float, or None when unusable."""
@@ -572,6 +594,27 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
             return f if math.isfinite(f) else None
         except (TypeError, ValueError):
             return None
+
+    shadow = stats.setdefault("book_shadow", {
+        "comparisons": 0, "divergent": 0,
+        "comparisons_gated": 0, "divergent_gated": 0,
+        "comparisons_blind": 0, "divergent_blind": 0,
+        "excluded": {},
+        "abs_bb_sum": 0.0, "abs_ba_sum": 0.0, "abs_mid_sum": 0.0,
+        "max_bb": 0.0, "max_ba": 0.0,
+        "per_series": {},
+    })
+
+    def _exclude(reason: str) -> None:
+        shadow["excluded"][reason] = shadow["excluded"].get(reason, 0) + 1
+        shadow["freshness_bound_s"] = FRESHNESS_WINDOW_S
+
+    if kind is None:
+        _exclude("no_provenance")
+        return
+    if ws_rx is None or abs(rest_rx - ws_rx) > FRESHNESS_WINDOW_S:
+        _exclude("outside_freshness_window")
+        return
 
     bb_rest, bb_ws = _num(rest_book.get("best_bid")), _num(ws_book.get("best_bid"))
     ba_rest, ba_ws = _num(rest_book.get("best_ask")), _num(ws_book.get("best_ask"))
@@ -586,13 +629,14 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
     # snapshot is no evidence of agreement — counting it would report venue
     # outages as apparent consensus (#174 review).
     if d_bb is None and d_ba is None:
+        _exclude("no_comparable_quotes")
         return
-    shadow = stats.setdefault("book_shadow", {
-        "comparisons": 0, "divergent": 0,
-        "abs_bb_sum": 0.0, "abs_ba_sum": 0.0, "abs_mid_sum": 0.0,
-        "max_bb": 0.0, "max_ba": 0.0,
-        "per_series": {},
-    })
+    if _replay_checkability(kind, _num(decl_bb_raw), _num(decl_ba_raw)) == "gated":
+        shadow["comparisons_gated"] += 1
+        gated = True
+    else:
+        shadow["comparisons_blind"] += 1
+        gated = False
     shadow["comparisons"] += 1
     if d_bb is not None:
         shadow["abs_bb_sum"] += d_bb
@@ -612,6 +656,10 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
                     for d in (d_bb, d_ba))
     if divergent:
         shadow["divergent"] += 1
+        if gated:
+            shadow["divergent_gated"] += 1
+        else:
+            shadow["divergent_blind"] += 1
     per_series = shadow["per_series"].setdefault(series_slug, {"comparisons": 0, "divergent": 0})
     per_series["comparisons"] += 1
     if divergent:
@@ -621,8 +669,16 @@ def shadow_compare_book(stats: dict, series_slug: str, token: str,
     # numbers an operator can compare across runs without a calculator. Each
     # mean divides by its own valid-sample count so one-sided books do not
     # dilute the other fields' denominators.
-    n = shadow["comparisons"]
-    shadow["divergence_rate"] = round(shadow["divergent"] / n, 4) if n else None
+    #
+    # Issue #440: the headline `divergence_rate` IS the gated rate — the only
+    # population the concordance guard could verify. The blind population gets
+    # its own rate; the two are never averaged.
+    n_gated = shadow["comparisons_gated"]
+    n_blind = shadow["comparisons_blind"]
+    shadow["divergence_rate"] = round(shadow["divergent_gated"] / n_gated, 4) if n_gated else None
+    shadow["divergence_rate_gated"] = shadow["divergence_rate"]
+    shadow["divergence_rate_blind"] = round(shadow["divergent_blind"] / n_blind, 4) if n_blind else None
+    shadow["freshness_bound_s"] = FRESHNESS_WINDOW_S
     bb_n, ba_n, mid_n = (shadow.get("bb_samples", 0), shadow.get("ba_samples", 0),
                          shadow.get("mid_samples", 0))
     shadow["mean_abs_bb_delta"] = round(shadow["abs_bb_sum"] / bb_n, 6) if bb_n else None
@@ -667,6 +723,9 @@ class SeriesFetch:
     err: str = ""
     up_book: dict = field(default_factory=dict)
     down_book: dict = field(default_factory=dict)
+    #: When this series' books finished fetching (Issue #440): the REST read
+    #: time the live shadow comparison measures the socket book's age against.
+    fetched_at: float = 0.0
 
 
 @dataclass
@@ -734,6 +793,7 @@ def fetch_series_books(series_slug: str, duration: int, label: str, now: float,
         series_slug, duration, label, info, "",
         _book_or_err(info["up_token"], "up"),
         _book_or_err(info["down_token"], "down"),
+        time.time(),
     )
 
 
@@ -945,11 +1005,19 @@ def poll_once(out_dir: Path, gzip: bool, stats: dict,
         # the recorded book, and a WS hiccup costs one skipped comparison.
         # A disconnected bridge retains its cached books: comparing them would
         # measure staleness, not disagreement, so require the live connection.
+        # Issue #440: both observation times travel with the pair — the REST
+        # fetch stamp and the socket book's own `last_updated` — so a stale
+        # cached book is excluded, never rated.
         if ws_bridge is not None and getattr(ws_bridge, "is_connected", False):
             for tok, rbook in ((w["up_token"], ub), (w["down_token"], db)):
                 try:
-                    shadow_compare_book(stats, series_slug, tok, rbook,
-                                        ws_bridge.get_book_for_token(tok))
+                    prov = ws_bridge.get_book_provenance_for_token(tok)
+                    ws_rx = None
+                    if prov is not None and prov.get("book") is not None:
+                        ws_rx = prov["book"].get("last_updated")
+                    shadow_compare_book(stats, series_slug, tok, rbook, prov,
+                                        rest_rx=(fetched.fetched_at or now),
+                                        ws_rx=ws_rx)
                 except Exception as e:
                     errs.append(f"shadow:{series_slug}:{e}")
 

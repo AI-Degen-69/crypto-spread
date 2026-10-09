@@ -4532,11 +4532,25 @@ def _shadow_badge_text(bs: dict) -> str:
     testable in Python). #349 rules: never a rate without its sample size, and
     no data / zero comparisons renders "not enough data yet" — never 0%, which
     would read as a measured clean pass instead of an absent measurement.
+
+    Issue #440: the badge shows the GATED rate — the only population the
+    concordance guard could verify. Manifests predating the gated keys fall
+    back to the global fields, so old runs keep their badge.
     """
-    rate = bs.get("divergence_rate") if isinstance(bs, dict) else None
-    if not bs or not bs.get("comparisons") or rate is None:
+    if not isinstance(bs, dict):
         return "Book Δ: not enough data yet"
-    return f"Book Δ: {rate * 100:.1f}% ({bs['comparisons']:,})"
+    # A present-but-None gated key means "no gated evidence" (or a manifest
+    # predating the split, where the API materialized the missing keys) —
+    # either way fall back to the global fields rather than calling it empty.
+    rate = bs.get("divergence_rate_gated")
+    if rate is None:
+        rate = bs.get("divergence_rate")
+    comps = bs.get("comparisons_gated")
+    if comps is None:
+        comps = bs.get("comparisons")
+    if not comps or rate is None:
+        return "Book Δ: not enough data yet"
+    return f"Book Δ: {rate * 100:.1f}% ({comps:,})"
 
 
 @app.get("/api/collector/status")
@@ -4592,6 +4606,16 @@ def api_collector_status():
                     "comparisons": bs.get("comparisons"),
                     "divergent": bs.get("divergent"),
                     "divergence_rate": bs.get("divergence_rate"),
+                    # Issue #440: the gated/blind split travels with the
+                    # summary so the badge and tooltip never average them.
+                    "comparisons_gated": bs.get("comparisons_gated"),
+                    "divergent_gated": bs.get("divergent_gated"),
+                    "divergence_rate_gated": bs.get("divergence_rate_gated"),
+                    "comparisons_blind": bs.get("comparisons_blind"),
+                    "divergent_blind": bs.get("divergent_blind"),
+                    "divergence_rate_blind": bs.get("divergence_rate_blind"),
+                    "excluded": bs.get("excluded", {}),
+                    "freshness_bound_s": bs.get("freshness_bound_s"),
                     "tolerance": bs_tol if _jk_is_finite_number(bs_tol) else None,
                     "mean_abs_bb_delta": bs.get("mean_abs_bb_delta"),
                     "mean_abs_ba_delta": bs.get("mean_abs_ba_delta"),
@@ -7976,10 +8000,13 @@ async function refreshCollectorStatus(){
     // sample size always travel together; amber when books diverge beyond the
     // tolerance, same palette as the tape alert. The tooltip carries the
     // per-series breakdown so an operator can see which series diverge.
+    // Issue #440: the color follows the GATED rate (the only verified
+    // population); manifests predating the gated keys fall back to global.
     const sb = $('shadowBadge');
     if(sb){
       const bs = st.book_shadow;
       if(bs && bs.comparisons > 0 && bs.badge_text){
+        const gateRate = (bs.divergence_rate_gated ?? bs.divergence_rate);
         // badge_text is server-rendered (single source of truth, tested in
         // Python); the UI only picks the color from the rate.
         sb.textContent = bs.badge_text;
@@ -7987,7 +8014,7 @@ async function refreshCollectorStatus(){
           sb.style.color = 'var(--dim)';
           sb.style.borderColor = 'var(--line)';
           sb.style.background = 'var(--panel2)';
-        } else if(bs.divergence_rate > bs.tolerance){
+        } else if(gateRate > bs.tolerance){
           sb.style.color = 'var(--gold)';
           sb.style.borderColor = 'rgba(240,180,41,0.5)';
           sb.style.background = 'rgba(240,180,41,0.15)';
