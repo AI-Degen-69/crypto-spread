@@ -1658,3 +1658,116 @@ def test_socket_divergence_smoking_gun_reconciliation():
     assert client.top_of_book[token]["best_bid"] == fixture["reference_ground"]["best_bid"]
     assert client.top_of_book[token]["best_ask"] == fixture["reference_ground"]["best_ask"]
 
+
+# --------------------------------------------------------------------------
+# Issue #440: frame-kind + declared-quote provenance for gated/blind split
+# --------------------------------------------------------------------------
+
+def test_provenance_absent_before_any_frame():
+    """No book means no provenance — never a denominator."""
+    client = CLOBMarketWSClient()
+    assert client.book_snapshot_provenance("tok") is None
+
+
+def test_book_snapshot_shape_is_unchanged_by_provenance():
+    """`book_snapshot` stays exactly the book: no frame keys leak into it."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.48", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    snap = client.book_snapshot("tok")
+    assert set(snap) == {"bids", "asks", "best_bid", "best_ask", "last_updated"}
+
+
+def test_book_frame_records_blind_provenance():
+    """A `book` frame carries no declared quotes, so it is always blind."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": "tok",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+    }))
+    prov = client.book_snapshot_provenance("tok")
+    assert prov is not None
+    assert prov["frame_kind"] == "book"
+    assert prov["declared_best_bid"] is None
+    assert prov["declared_best_ask"] is None
+    assert prov["book"]["best_bid"] == 0.48
+
+
+def test_price_change_frame_records_declared_quotes():
+    """A `price_change` entry with declared quotes is gateable provenance."""
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{
+            "asset_id": "tok", "side": "BUY", "price": "0.48", "size": "10",
+            "best_bid": "0.48", "best_ask": "0.52",
+        }],
+    }))
+    prov = client.book_snapshot_provenance("tok")
+    assert prov is not None
+    assert prov["frame_kind"] == "price_change"
+    assert prov["declared_best_bid"] == 0.48
+    assert prov["declared_best_ask"] == 0.52
+
+
+def test_price_change_without_declared_quotes_stays_blind():
+    """Declared quotes missing from the entry means blind, not gated."""
+    client = CLOBMarketWSClient()
+    client.apply_price_change("tok", "BUY", 0.48, 10.0)
+    prov = client.book_snapshot_provenance("tok")
+    assert prov is not None
+    assert prov["frame_kind"] == "price_change"
+    assert prov["declared_best_bid"] is None
+    assert prov["declared_best_ask"] is None
+
+
+def test_best_bid_ask_frame_records_declared_quotes():
+    """A `best_bid_ask` frame is gateable provenance for the live split."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.48", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    client.handle_raw_message(json.dumps({
+        "event_type": "best_bid_ask", "asset_id": "tok",
+        "best_bid": "0.48", "best_ask": "0.52",
+    }))
+    prov = client.book_snapshot_provenance("tok")
+    assert prov is not None
+    assert prov["frame_kind"] == "best_bid_ask"
+    assert prov["declared_best_bid"] == 0.48
+    assert prov["declared_best_ask"] == 0.52
+
+
+def test_last_trade_print_records_blind_provenance():
+    """A trade print is not a quote — blind by construction."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.48", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    client.record_trade("tok", {"price": "0.50", "size": "5", "side": "BUY",
+                                "timestamp": 1700000000000})
+    prov = client.book_snapshot_provenance("tok")
+    assert prov is not None
+    assert prov["frame_kind"] == "last_trade_price"
+    assert prov["declared_best_bid"] is None
+    assert prov["declared_best_ask"] is None
+
+
+def test_provenance_book_is_isolated_from_mutation():
+    """The provenance book copy freezes like `book_snapshot` does."""
+    client = CLOBMarketWSClient()
+    client.apply_book_snapshot("tok", [{"price": "0.48", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    prov = client.book_snapshot_provenance("tok")
+    client.apply_price_change("tok", "BUY", 0.49, 25.0)
+    assert prov["book"]["bids"] == {0.48: 10.0}
+    assert prov["frame_kind"] == "book"
+
+
+def test_rotated_out_tokens_drop_their_provenance():
+    """Provenance dies with the subscription, like books and buffers do."""
+    client = CLOBMarketWSClient(token_ids=["tok_old"])
+    client.apply_book_snapshot("tok_old", [{"price": "0.48", "size": "10"}],
+                               [{"price": "0.52", "size": "10"}])
+    assert client.book_snapshot_provenance("tok_old") is not None
+    client.update_tokens(["tok_new"])
+    assert client.book_snapshot_provenance("tok_old") is None

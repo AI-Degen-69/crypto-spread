@@ -454,6 +454,10 @@ class CLOBMarketWSClient:
         self.books: Dict[str, Dict[str, Any]] = {}
         self.top_of_book: Dict[str, Dict[str, Optional[float]]] = {}
         self.tick_sizes: Dict[str, float] = {}
+        #: Last frame kind + declared quotes per token (Issue #440): what the
+        #: live gated/blind split classifies each comparison with. Written
+        #: wherever the book is mutated, read by `book_snapshot_provenance`.
+        self._last_frame: Dict[str, Dict[str, Any]] = {}
         self.is_connected: bool = False
         self.reconnect_count: int = 0
         self.consecutive_failures: int = 0
@@ -477,6 +481,26 @@ class CLOBMarketWSClient:
         """True while at least one streamed print is waiting to be drained."""
         with self._buffer_lock:
             return any(self._trade_buffer.values())
+
+    def _record_frame(self, token_id: str, kind: str,
+                      declared_best_bid: Optional[float] = None,
+                      declared_best_ask: Optional[float] = None) -> None:
+        """Remember what kind of frame last touched a token (Issue #440).
+
+        Only valid quotes are kept: a frame declaring garbage proves nothing,
+        so it classifies as blind downstream. The lock is re-entrant, so this
+        is safe inside the `apply_*` critical sections and outside them.
+        """
+        bb = declared_best_bid if (declared_best_bid is not None
+                                   and _valid_quote(declared_best_bid)) else None
+        ba = declared_best_ask if (declared_best_ask is not None
+                                   and _valid_quote(declared_best_ask)) else None
+        with self._state_lock:
+            self._last_frame[token_id] = {
+                "kind": kind,
+                "declared_best_bid": bb,
+                "declared_best_ask": ba,
+            }
 
     def apply_book_snapshot(self, token_id: str, raw_bids: List[Any], raw_asks: List[Any]) -> None:
         """Full replacement of local book state from snapshot."""
@@ -513,6 +537,11 @@ class CLOBMarketWSClient:
                 "best_bid": best_bid,
                 "best_ask": best_ask,
                 "last_updated": time.time(),
+            }
+            self._last_frame[token_id] = {
+                "kind": "book",
+                "declared_best_bid": None,
+                "declared_best_ask": None,
             }
 
         if self.on_book_update:
@@ -565,6 +594,9 @@ class CLOBMarketWSClient:
             bb, ba = _opt("best_bid"), _opt("best_ask")
             if bb is not None or ba is not None:
                 self.apply_best_bid_ask(token_id, bb, ba)
+            # The frame was a `price_change`: the quote record above must not
+            # relabel it, or provenance would claim a frame that never arrived.
+            self._record_frame(token_id, "price_change", bb, ba)
 
     def apply_price_change(self, token_id: str, side: str, price: float, size: float,
                            *, declared_best_bid: Optional[float] = None,
@@ -604,6 +636,8 @@ class CLOBMarketWSClient:
             book["best_ask"] = min(book["asks"].keys()) if book["asks"] else None
             book["last_updated"] = time.time()
             bids, asks = book["bids"], book["asks"]
+            self._record_frame(token_id, "price_change",
+                               declared_best_bid, declared_best_ask)
 
         if self.on_book_update:
             self.on_book_update(token_id, bids, asks)
@@ -612,6 +646,7 @@ class CLOBMarketWSClient:
         """Record the venue's own top-of-book quote for a token."""
         with self._state_lock:
             self.top_of_book[token_id] = {"best_bid": best_bid, "best_ask": best_ask}
+        self._record_frame(token_id, "best_bid_ask", best_bid, best_ask)
 
     def book_snapshot(self, token_id: str) -> Optional[Dict[str, Any]]:
         """Return a book isolated from further worker-thread mutation.
@@ -625,6 +660,26 @@ class CLOBMarketWSClient:
             if not book:
                 return None
             return {**book, "bids": dict(book["bids"]), "asks": dict(book["asks"])}
+
+    def book_snapshot_provenance(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Book plus the classification the live metric needs (Issue #440).
+
+        Returns the isolated book copy `book_snapshot` returns, together with
+        the last frame kind that touched the token and the declared quotes it
+        carried. `frame_kind` None (or quotes None on a gateable kind) means
+        the pair is unclassifiable: the caller must exclude it, never count it.
+        """
+        with self._state_lock:
+            book = self.books.get(token_id)
+            if not book:
+                return None
+            frame = self._last_frame.get(token_id) or {}
+            return {
+                "book": {**book, "bids": dict(book["bids"]), "asks": dict(book["asks"])},
+                "frame_kind": frame.get("kind"),
+                "declared_best_bid": frame.get("declared_best_bid"),
+                "declared_best_ask": frame.get("declared_best_ask"),
+            }
 
     def record_trade(self, token_id: str, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse one `last_trade_price` event into the per-token trade buffer.
@@ -664,6 +719,7 @@ class CLOBMarketWSClient:
             if overflow > 0:
                 del buf[:overflow]
                 self.trades_dropped += overflow
+        self._record_frame(token_id, "last_trade_price")
         if self.on_trade:
             try:
                 self.on_trade(trade)
@@ -769,6 +825,7 @@ class CLOBMarketWSClient:
                 self.books.pop(tid, None)
                 self.top_of_book.pop(tid, None)
                 self.tick_sizes.pop(tid, None)
+                self._last_frame.pop(tid, None)
 
     def subscription_payload(self) -> str:
         """Build the market-channel subscription frame for the current tokens."""
