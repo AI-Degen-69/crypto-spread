@@ -275,3 +275,32 @@ reference to compare against.
   and cannot separate a moderate population from the violent tail. Recorded as N2 in
   `docs/issues/438-noticed-but-not-touching.md`; not changed here.
 
+## 8. Pre-registered reading rule (Issue #440 — locked before any measurement)
+
+The socket-authoritative switch is re-gated on the CORRECTED metric (§7 re-scoped in #440:
+gated/blind populations separate, magnitude in venue ticks, reference age first-class,
+exclusions counted). The rule below is written before the measurement run in §9 and may not
+be edited after the numbers exist. It is stated on the gated population only — the blind
+population can never clear a gate by construction (§7.3).
+
+- **Material divergence:** a best-quote gap strictly greater than one venue tick
+  (`> $0.001 + EPSILON`, i.e. buckets `1_3_ticks` and above). Exactly one tick is
+  agreement: it cannot move a price we would send beyond grid rounding, and float
+  subtraction parks exact-tick gaps on both sides of the boundary.
+- **GO threshold:** gated material-divergence rate ≤ 1.0%.
+- **Sample size:** `n_gated ≥ 5,000`. At 1% the standard error is ≈0.14%, so a single
+  additional divergence moves the rate by 0.02% — the bar is a population statement,
+  not one event.
+- **Max tolerated single gap:** $0.02. Reasoning: twice the typical 1¢ grid move; anything
+  larger on a ~$0.50 leg is book corruption, not skew, and a single such gap vetoes GO
+  regardless of the rate.
+- **Skew correction:** if the blind population repeats the §7.4 age gradient (young cells
+  ≈0%, old cells >0%), blind divergences are read as staleness and stay out of the gate —
+  that is the correction, applied by construction since the gate reads gated only.
+- **Escape hatch:** any divergence on fully-gated pairs (fresh reference AND declared-quote
+  check) is a socket defect, fails the gate, and gets its own issue — it is not averaged away.
+
+Verdict is recorded in §9 either way: GO only if every bullet above holds on the run.
+
+## 9. Measurement run against the §8 rule (Issue #440 — filled by the run, not edited after)
+

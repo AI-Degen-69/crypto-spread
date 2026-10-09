@@ -57,6 +57,8 @@ proved the book internally consistent (0 in-frame divergences / 70,869
 - Dashboard compat: manifest keeps `divergence_rate` redefined as the gated
       rate + `tolerance` until the badge consumes the gated keys; badge shows
       the gated rate by end of issue (no global headline anywhere).
+      `comparisons`/`divergent` stay as legacy all-population totals for
+      old-manifest readers; the rates are never averaged across populations.
 
 ## Out of scope (explicit)
 

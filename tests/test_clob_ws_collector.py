@@ -1872,3 +1872,126 @@ def test_bridge_provenance_reaches_the_shadow_split():
     s = stats["book_shadow"]
     assert s["comparisons_gated"] == 1
     assert s["divergent_gated"] == 0
+
+# --------------------------------------------------------------------------
+# Issue #440: the gate reads a proved instrument (cross-check, parity, off)
+# --------------------------------------------------------------------------
+
+def test_live_and_replay_report_the_same_population():
+    """Cross-check: one shared capture, both instruments, identical verdict.
+
+    Tolerance is stated, not asserted: population counts must match exactly,
+    rates within 1e-9. Separate timestamps per side are fine — each instrument
+    measures its own observation times; what must agree is the population.
+    """
+    import scripts.collect_ticks as ct
+    from scripts.replay_socket_reconciliation import SocketReconciler
+
+    token = "tok_xcheck"
+    rest = {"best_bid": 0.50, "best_ask": 0.52,
+            "bids": {"0.50": "100"}, "asks": {"0.52": "100"}}
+
+    # Live side through the real client and the real shadow comparison.
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": token,
+        "bids": [{"price": "0.50", "size": "100"}],
+        "asks": [{"price": "0.52", "size": "100"}],
+    }))
+    prov_book = client.book_snapshot_provenance(token)
+    client.handle_raw_message(json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{
+            "asset_id": token, "side": "BUY", "price": "0.50", "size": "10",
+            "best_bid": "0.50", "best_ask": "0.52",
+        }],
+    }))
+    prov_pc = client.book_snapshot_provenance(token)
+
+    stats: dict = {}
+    rx_book = prov_book["book"]["last_updated"]
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", token, rest, prov_book,
+                            rest_rx=rx_book, ws_rx=rx_book)
+    rx_pc = prov_pc["book"]["last_updated"]
+    ct.shadow_compare_book(stats, "btc-up-or-down-5m", token, rest, prov_pc,
+                            rest_rx=rx_pc, ws_rx=rx_pc)
+    s = stats["book_shadow"]
+
+    # Replay side over the same frames with fixed capture timestamps.
+    rec = SocketReconciler()
+    rec.feed_line(json.dumps({"type": "rest", "rx": 100.0,
+                              "series": "btc-up-or-down-5m", "token": token,
+                              "book": rest}))
+    rec.feed_line(json.dumps({"type": "ws", "rx": 100.0, "ev": {
+        "event_type": "book", "asset_id": token,
+        "bids": [{"price": "0.50", "size": "100"}],
+        "asks": [{"price": "0.52", "size": "100"}]}}))
+    rec.feed_line(json.dumps({"type": "ws", "rx": 100.0, "ev": {
+        "event_type": "price_change", "price_changes": [{
+            "asset_id": token, "side": "BUY", "price": "0.50", "size": "10",
+            "best_bid": "0.50", "best_ask": "0.52"}]}}))
+    rep = rec.report
+
+    assert (s["comparisons_gated"], s["divergent_gated"]) == \
+        (rep.gated_comparisons, rep.gated_divergences) == (1, 0)
+    assert (s["comparisons_blind"], s["divergent_blind"]) == \
+        (rep.blind_comparisons, rep.blind_divergences) == (1, 0)
+    assert abs(s["divergence_rate_gated"] - 0.0) < 1e-9
+    assert s["excluded"] == dict(rep.excluded) == {}
+
+
+def test_recorded_and_live_ticks_read_through_the_same_book_math():
+    """Parity: a recorded book and the live book price identically (#440)."""
+    from strategy import book_math
+
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": "tok",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+    }))
+    live = client.book_snapshot("tok")
+    recorded = {"best_bid": 0.48, "best_ask": 0.52,
+                "bids": {0.48: 10.0}, "asks": {0.52: 10.0}}
+    assert book_math.mid(live) == book_math.mid(recorded) == 0.50
+
+
+def test_authority_defaults_off_without_the_bridge():
+    """Flag off means REST: disabled bridge and dead socket never authorize."""
+    import scripts.collect_ticks as ct
+
+    assert ct.start_ws_bridge(disabled=True) is None
+    w = {"ws_ready_at": {}, "ws_last_print": {}}
+    assert ct.ws_leg_authoritative(w, "tok", time.time(), False) is False
+
+
+def test_authority_requires_warmup_and_fresh_prints():
+    """The switch earns each leg: warm-up served plus a recent print (#440)."""
+    import scripts.collect_ticks as ct
+
+    now = time.time()
+    warm = {"ws_ready_at": {"tok": now - 100.0}, "ws_last_print": {"tok": now}}
+    assert ct.ws_leg_authoritative(warm, "tok", now, True) is True
+    cold = {"ws_ready_at": {}, "ws_last_print": {}}
+    assert ct.ws_leg_authoritative(cold, "tok", now, True) is False
+    stale = {"ws_ready_at": {"tok": now - 100.0},
+             "ws_last_print": {"tok": now - 1000.0}}
+    assert ct.ws_leg_authoritative(stale, "tok", now, True) is False
+
+
+def test_book_freshness_is_stamped_at_frame_arrival():
+    """Freshness follows venue publication, not the poll loop (#440).
+
+    The stamp lands when the frame is applied — the measured figure the gate
+    reads — so a quiet token visibly ages instead of looking freshly polled.
+    """
+    before = time.time()
+    client = CLOBMarketWSClient()
+    client.handle_raw_message(json.dumps({
+        "event_type": "book", "asset_id": "tok",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+    }))
+    snap = client.book_snapshot("tok")
+    assert snap is not None
+    assert before <= snap["last_updated"] <= time.time()

@@ -60,7 +60,7 @@ T1 and T2 are independent — build T1 first, then T2.
 
 ## Tasks
 
-### T1 [Metric/Replay] — M — gated/blind split + exclusion ledger in the replay
+### T1 [Metric/Replay] — M — gated/blind split + exclusion ledger in the replay [x]
 Files: `scripts/replay_socket_reconciliation.py`, `tests/test_replay_socket_reconciliation.py`.
 Build: checkability tagging per pair; `excluded` reason ledger; fallback + `rest_books`
 deletion; summary `gated_rate/blind_rate` + `excluded`; per-type rows kept; one-tick
@@ -69,7 +69,7 @@ Helper skills: `test-driven-development`, `incremental-implementation`.
 Depends on: none.
 Verify: `python -m pytest tests/test_replay_socket_reconciliation.py -q`.
 
-### T2 [Streaming/API] — S — frame-kind + declared-quote provenance
+### T2 [Streaming/API] — S — frame-kind + declared-quote provenance [x]
 Files: `strategy/streaming.py`, `tests/test_clob_ws_collector.py`.
 Build: additive `book_snapshot_provenance`; per-token last-frame record under lock;
 `book_snapshot()` byte-for-byte behavior unchanged (existing tests unmodified and green).
@@ -77,7 +77,7 @@ Helper skills: `test-driven-development`, `incremental-implementation`.
 Depends on: none.
 Verify: `python -m pytest tests/test_clob_ws_collector.py -q`.
 
-### T3 [Collector/Live] — M — timestamped live instrument + manifest bound
+### T3 [Collector/Live] — M — timestamped live instrument + manifest bound [x]
 Files: `scripts/collect_ticks.py`, `server/osc_dash.py` (badge → gated rate),
 `tests/test_clob_ws_collector.py`, `tests/test_osc_dash_integration.py`.
 Build: required keyword-only timestamps; freshness bound; gated/blind split via T2
