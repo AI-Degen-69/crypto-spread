@@ -275,3 +275,63 @@ reference to compare against.
   and cannot separate a moderate population from the violent tail. Recorded as N2 in
   `docs/issues/438-noticed-but-not-touching.md`; not changed here.
 
+## 8. Pre-registered reading rule (Issue #440 — locked before any measurement)
+
+The socket-authoritative switch is re-gated on the CORRECTED metric (§7 re-scoped in #440:
+gated/blind populations separate, magnitude in venue ticks, reference age first-class,
+exclusions counted). The rule below is written before the measurement run in §9 and may not
+be edited after the numbers exist. It is stated on the gated population only — the blind
+population can never clear a gate by construction (§7.3).
+
+- **Material divergence:** a best-quote gap strictly greater than one venue tick
+  (`> $0.001 + EPSILON`, i.e. buckets `1_3_ticks` and above). Exactly one tick is
+  agreement: it cannot move a price we would send beyond grid rounding, and float
+  subtraction parks exact-tick gaps on both sides of the boundary.
+- **GO threshold:** gated material-divergence rate ≤ 1.0%.
+- **Sample size:** `n_gated ≥ 5,000`. At 1% the standard error is ≈0.14%, so a single
+  additional divergence moves the rate by 0.02% — the bar is a population statement,
+  not one event.
+- **Max tolerated single gap:** $0.02. Reasoning: twice the typical 1¢ grid move; anything
+  larger on a ~$0.50 leg is book corruption, not skew, and a single such gap vetoes GO
+  regardless of the rate.
+- **Skew correction:** if the blind population repeats the §7.4 age gradient (young cells
+  ≈0%, old cells >0%), blind divergences are read as staleness and stay out of the gate —
+  that is the correction, applied by construction since the gate reads gated only.
+- **Escape hatch:** any divergence on fully-gated pairs (fresh reference AND declared-quote
+  check) is a socket defect, fails the gate, and gets its own issue — it is not averaged away.
+
+Verdict is recorded in §9 either way: GO only if every bullet above holds on the run.
+
+## 9. Measurement run against the §8 rule (Issue #440 — filled by the run, not edited after)
+
+Run: corrected instrument (commit `d08d56b` + T1–T4 code) over
+`run/diag_ws/raw_session_2026-10-07_00-42-10.jsonl`
+(72,370 lines; 71,690 WS events; 680 REST snapshots; all 10 series).
+Rule §8 was locked before this run (same commit); the run below is the first
+measurement the corrected instrument ever produced.
+
+- Gated: **0 material divergences / 27,127** → rate **0.0%** (bar ≤ 1.0%) ✓
+- Sample: `n_gated = 27,127` (bar ≥ 5,000) ✓
+- Max single gated gap: **$0.0000** (veto above $0.02) ✓
+- Blind: 46/158 (29.1%) with the §7.4 age gradient intact (0 below 100 ms,
+  rising to 0.3% at ≤500 ms) → read as staleness per the skew-correction
+  bullet, kept out of the gate ✓
+- Escape hatch: zero divergences on fully-gated pairs ✓
+- Excluded, now counted instead of silent: 103,094 `outside_freshness_window`,
+  10,878 `guard_reject`, 1,302 `no_snapshot`
+
+**Verdict: GO — the gate clears on the corrected metric.**
+
+Freshness mechanism (criterion 10): quoting reads the socket book's
+`last_updated`, stamped at frame arrival in the same critical section as the
+mutation — bounded by venue publication, not the 1 s poll loop. Pinned by test
+(`test_book_freshness_is_stamped_at_frame_arrival`: stamp lands inside
+[frame arrival, now]); a quiet token visibly ages instead of looking polled.
+
+Caveat, recorded so the verdict cannot be over-read: the §8 thresholds were set
+with knowledge of §7's old-instrument measurements on this same capture (the
+issue body quotes them), so this is a confirmation run on known data, not an
+out-of-sample trial. Recommended before acting on it: one fresh-capture
+confirmation run against the unchanged §8 rule. Flipping the Phase 2 switch
+itself is out of scope here; the standing NO-GO is untouched by this verdict.
+

@@ -14,6 +14,7 @@ from scripts.replay_socket_reconciliation import (
     SocketReconciler,
     _load_fixture_object,
     age_bucket,
+    checkability,
     extract_fixture,
     replay_file,
     replay_fixture,
@@ -776,3 +777,197 @@ def test_an_in_frame_fixture_omits_the_rest_reference(tmp_path):
     assert "rest_reference" not in data
     assert "ws_rx" not in data
 
+
+# --- Issue #440: the metric reports its own population, not one percentage ---
+
+
+def _feed_book(reconciler: SocketReconciler, token: str, rx: float, bb: str, ba: str) -> None:
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": rx,
+        "ev": {
+            "event_type": "book",
+            "asset_id": token,
+            "bids": [{"price": bb, "size": "100"}],
+            "asks": [{"price": ba, "size": "100"}],
+        },
+    }))
+
+
+def _feed_rest(reconciler: SocketReconciler, token: str, rx: float, bb: float, ba: float) -> None:
+    reconciler.feed_line(json.dumps({
+        "type": "rest",
+        "rx": rx,
+        "series": "btc-up-or-down-5m",
+        "token": token,
+        "book": {
+            "best_bid": bb,
+            "best_ask": ba,
+            "bids": {str(bb): "100"},
+            "asks": {str(ba): "100"},
+        },
+    }))
+
+
+def _feed_price_change(
+    reconciler: SocketReconciler, token: str, rx: float,
+    decl_bb: str | None, decl_ba: str | None,
+) -> None:
+    entry: dict = {
+        "asset_id": token,
+        "side": "BUY",
+        "price": "0.50",
+        "size": "10",
+    }
+    if decl_bb is not None:
+        entry["best_bid"] = decl_bb
+    if decl_ba is not None:
+        entry["best_ask"] = decl_ba
+    reconciler.feed_line(json.dumps({
+        "type": "ws",
+        "rx": rx,
+        "ev": {"event_type": "price_change", "price_changes": [entry]},
+    }))
+
+
+def test_checkability_splits_gated_from_blind():
+    """Only a frame carrying the venue's own declared quotes can be gated."""
+    assert checkability("price_change", 0.50, 0.52) == "gated"
+    assert checkability("best_bid_ask", 0.50, None) == "gated"
+    assert checkability("price_change", None, None) == "blind"
+    assert checkability("book", None, None) == "blind"
+    assert checkability("last_trade_price", None, None) == "blind"
+    assert checkability("book", 0.50, 0.52) == "blind"
+
+
+def test_gated_and_blind_comparisons_are_counted_separately():
+    """A gated agreement and a blind agreement land in different denominators."""
+    reconciler = SocketReconciler()
+    token = "tok_gated_blind"
+    _feed_rest(reconciler, token, 100.0, 0.50, 0.52)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+    _feed_price_change(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    assert rep.gated_comparisons == 1
+    assert rep.gated_divergences == 0
+    assert rep.blind_comparisons == 1
+    assert rep.blind_divergences == 0
+
+
+def test_price_change_without_declared_quotes_is_blind():
+    """A `price_change` entry without declared quotes cannot gate anything."""
+    reconciler = SocketReconciler()
+    token = "tok_no_declared"
+    _feed_rest(reconciler, token, 100.0, 0.50, 0.52)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+    _feed_price_change(reconciler, token, 100.0, None, None)
+
+    rep = reconciler.report
+    assert rep.gated_comparisons == 0
+    assert rep.blind_comparisons == 2
+
+
+def test_freshness_window_rejections_are_counted_as_excluded():
+    """A REST read 10 s away is no reference at all — counted, never rated."""
+    reconciler = SocketReconciler()
+    token = "tok_stale"
+    _feed_rest(reconciler, token, 90.0, 0.50, 0.52)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    assert rep.excluded == {"outside_freshness_window": 1}
+    assert rep.comparisons_by_type == {}
+    assert rep.summary_dict()["excluded"] == {"outside_freshness_window": 1}
+
+
+def test_token_without_rest_records_is_excluded_not_counted():
+    """No REST record means no comparison — and the miss is on the ledger."""
+    reconciler = SocketReconciler()
+    token = "tok_no_rest"
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+    _feed_price_change(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    # Both WS events attempt one comparison each — and both are kept out.
+    assert rep.excluded == {"no_snapshot": 2}
+    assert rep.comparisons_by_type == {}
+    assert rep.gated_comparisons == 0
+    assert rep.blind_comparisons == 0
+
+
+def test_guard_rejections_are_counted_as_excluded():
+    """A REST read the frame's own quotes contradict is a rejected reference."""
+    reconciler = SocketReconciler()
+    token = "tok_guard"
+    _feed_rest(reconciler, token, 100.0, 0.60, 0.62)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+    _feed_price_change(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    assert rep.excluded == {"guard_reject": 1}
+    assert rep.gated_comparisons == 0
+
+
+def test_summary_dict_exposes_gated_blind_and_excluded():
+    """The serializable summary carries both populations plus the ledger."""
+    rep = ReconciliationReport()
+    rep.note_checked("gated", False)
+    rep.note_checked("gated", True)
+    rep.note_checked("blind", False)
+    rep.note_excluded("outside_freshness_window")
+
+    summary = rep.summary_dict()
+    assert summary["gated"] == {"comparisons": 2, "divergences": 1, "rate": 0.5}
+    assert summary["blind"] == {"comparisons": 1, "divergences": 0, "rate": 0.0}
+    assert summary["excluded"] == {"outside_freshness_window": 1}
+    # No evidence is not a clean pass: empty denominators report None (#440 review).
+    empty = ReconciliationReport().summary_dict()
+    assert empty["gated"]["rate"] is None
+    assert empty["blind"]["rate"] is None
+
+
+def test_one_tick_gap_is_agreement_and_middle_bucket_populable():
+    """Exactly one tick is agreement (sub_tick); two ticks fill the middle bucket."""
+    assert tick_bucket(0.001) == "sub_tick"
+    assert tick_bucket(0.002) == "1_3_ticks"
+
+    reconciler = SocketReconciler()
+    token = "tok_one_tick"
+    _feed_rest(reconciler, token, 100.0, 0.501, 0.52)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    assert rep.blind_comparisons == 1
+    assert rep.blind_divergences == 0
+    assert rep.magnitude_buckets.get("sub_tick", 0) >= 1
+
+
+def test_quoteless_books_are_excluded_not_counted():
+    """A REST record carrying no quotes gives the pair nothing to compare."""
+    reconciler = SocketReconciler()
+    token = "tok_no_quotes"
+    reconciler.feed_line(json.dumps({
+        "type": "rest", "rx": 100.0, "series": "btc-up-or-down-5m",
+        "token": token,
+        "book": {"bids": {}, "asks": {}},
+    }))
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+
+    rep = reconciler.report
+    assert rep.excluded == {"no_comparable_quotes": 1}
+    assert rep.comparisons_by_type == {}
+
+
+def test_divergence_records_carry_their_population():
+    """Rest-sourced records say whether they were gated — debuggable later."""
+    reconciler = SocketReconciler()
+    token = "tok_rec_check"
+    _feed_rest(reconciler, token, 100.0, 0.60, 0.62)
+    _feed_book(reconciler, token, 100.0, "0.50", "0.52")
+    _feed_price_change(reconciler, token, 100.0, "0.50", "0.52")
+
+    recs = [r for r in reconciler.report.all_divergences if r.source == "rest"]
+    assert len(recs) == 1
+    assert recs[0].event_type == "book"
+    assert recs[0].checkability == "blind"

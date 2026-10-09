@@ -65,6 +65,38 @@ DIVERGENCE_EDGE = TOLERANCE + EPSILON
 AGE_UNKNOWN = "unknown"
 AGE_BUCKETS = ("le_50ms", "le_100ms", "le_250ms", "le_500ms", AGE_UNKNOWN)
 
+#: Event types whose frames carry the venue's own declared top-of-book quotes,
+#: so a REST comparison on them can be checked against those quotes (Issue #440).
+#: Every other frame type is structurally blind: the concordance guard has
+#: nothing to compare the REST read against.
+GATED_EVENT_TYPES = ("price_change", "best_bid_ask")
+
+#: Maximum |REST rx - WS rx| for a pair to count as one comparison (Issue #440).
+#: A reference further away is no reference at all — it is excluded, not rated.
+FRESHNESS_WINDOW_S = 0.5
+
+#: Exclusion reasons: pairs that never became comparisons (Issue #440).
+EXCLUDED_NO_SNAPSHOT = "no_snapshot"
+EXCLUDED_STALE = "outside_freshness_window"
+EXCLUDED_GUARD = "guard_reject"
+EXCLUDED_NO_QUOTES = "no_comparable_quotes"
+
+
+def checkability(
+    ev_type: str,
+    declared_bb: Optional[float],
+    declared_ba: Optional[float],
+) -> str:
+    """Classify one REST comparison as `gated` or `blind` (Issue #440).
+
+    Gated means the frame carried the venue's own declared quotes, so the
+    concordance guard could verify the REST read. Anything else is blind —
+    including a `price_change` entry without declared quotes.
+    """
+    if ev_type in GATED_EVENT_TYPES and (declared_bb is not None or declared_ba is not None):
+        return "gated"
+    return "blind"
+
 
 def age_bucket(age: Optional[float]) -> str:
     """Bucket the age of the REST reference behind one comparison.
@@ -140,6 +172,7 @@ class DivergenceRecord:
     rest_rx: Optional[float] = None
     tick_bucket: str = ""
     age_s: Optional[float] = None
+    checkability: str = ""  # "gated" or "blind" for rest-sourced records
 
 
 @dataclass
@@ -161,6 +194,28 @@ class ReconciliationReport:
     age_buckets_all: Dict[str, int] = field(default_factory=dict)
     age_buckets_divergent: Dict[str, int] = field(default_factory=dict)
     per_series: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    #: Gated vs blind populations, each with its own denominator (Issue #440).
+    gated_comparisons: int = 0
+    gated_divergences: int = 0
+    blind_comparisons: int = 0
+    blind_divergences: int = 0
+    #: Pairs that never became comparisons, by reason (Issue #440).
+    excluded: Dict[str, int] = field(default_factory=dict)
+
+    def note_checked(self, check: str, divergent: bool) -> None:
+        """Count one REST comparison into its own population's denominator."""
+        if check == "gated":
+            self.gated_comparisons += 1
+            if divergent:
+                self.gated_divergences += 1
+        else:
+            self.blind_comparisons += 1
+            if divergent:
+                self.blind_divergences += 1
+
+    def note_excluded(self, reason: str) -> None:
+        """Count one candidate pair the freshness rules kept out of the rates."""
+        self.excluded[reason] = self.excluded.get(reason, 0) + 1
 
     def note_magnitude(self, gap: float) -> None:
         """Count one comparable pair into its magnitude bucket (issue #438)."""
@@ -256,6 +311,22 @@ class ReconciliationReport:
             "total_ws_events": self.total_ws_events,
             "total_rest_snapshots": self.total_rest_snapshots,
             "by_type": type_stats,
+            "gated": {
+                "comparisons": self.gated_comparisons,
+                "divergences": self.gated_divergences,
+                # No evidence is not a clean pass: None, never 0.0, on an
+                # empty denominator (review: the #349 badge rule applies to
+                # machine-readable summaries too).
+                "rate": round(self.gated_divergences / self.gated_comparisons, 4)
+                if self.gated_comparisons else None,
+            },
+            "blind": {
+                "comparisons": self.blind_comparisons,
+                "divergences": self.blind_divergences,
+                "rate": round(self.blind_divergences / self.blind_comparisons, 4)
+                if self.blind_comparisons else None,
+            },
+            "excluded": dict(self.excluded),
             "magnitude_buckets": dict(self.magnitude_buckets),
             "skew_buckets": dict(self.skew_buckets),
             "age_buckets_all": dict(self.age_buckets_all),
@@ -296,7 +367,6 @@ class SocketReconciler:
         """
         self.client = CLOBMarketWSClient(
             token_ids=list(token_ids)) if token_ids else CLOBMarketWSClient()
-        self.rest_books: Dict[str, Dict[str, Any]] = {}
         self.rest_snapshots: Dict[str, List[RestSnapshotRecord]] = collections.defaultdict(list)
         self.report = ReconciliationReport()
         self.history_buffer_size = history_buffer_size
@@ -331,7 +401,6 @@ class SocketReconciler:
         book = record.get("book") or {}
         rx = _num(record.get("rx")) or 0.0
         if tok and book:
-            self.rest_books[tok] = book
             self.rest_snapshots[tok].append(RestSnapshotRecord(rx=rx, book=book))
             series = str(record.get("series") or "")
             if series:
@@ -352,17 +421,22 @@ class SocketReconciler:
         compared against) from genuine disagreement (issue #438). The
         in-frame-disagreement guard is unchanged: a REST read that contradicts
         the frame's own declared quotes is skipped rather than counted.
+
+        Every skip is ledgered in `report.excluded` with its reason, so the
+        pairs the freshness rules keep out are counted, never silently dropped
+        (issue #440).
         """
         snapshots = self.rest_snapshots.get(tok)
         if not snapshots:
-            fallback = self.rest_books.get(tok)
-            return (fallback, None) if fallback else None
+            self.report.note_excluded(EXCLUDED_NO_SNAPSHOT)
+            return None
 
         if ws_rx <= 0.0:
             candidate, cand_rx = snapshots[-1].book, snapshots[-1].rx
         else:
             best = min(snapshots, key=lambda s: abs(s.rx - ws_rx))
-            if abs(best.rx - ws_rx) > 0.5:
+            if abs(best.rx - ws_rx) > FRESHNESS_WINDOW_S:
+                self.report.note_excluded(EXCLUDED_STALE)
                 return None
             candidate, cand_rx = best.book, best.rx
 
@@ -373,6 +447,7 @@ class SocketReconciler:
                 (in_bb is not None and cand_bb is not None and abs(in_bb - cand_bb) > TOLERANCE + EPSILON)
                 or (in_ba is not None and cand_ba is not None and abs(in_ba - cand_ba) > TOLERANCE + EPSILON)
             ):
+                self.report.note_excluded(EXCLUDED_GUARD)
                 return None
 
         return candidate, cand_rx
@@ -472,63 +547,70 @@ class SocketReconciler:
 
             # 2. Concurrent REST reconciliation
             selected = self._select_rest_book(tok, ws_rx, declared_bb, declared_ba)
-            if selected:
-                rest_book, rest_rx = selected
-                rest_bb = _num(rest_book.get("best_bid"))
-                rest_ba = _num(rest_book.get("best_ask"))
-                if (rest_bb is not None or rest_ba is not None) and (ws_bb is not None or ws_ba is not None):
-                    self.report.comparisons_by_type[ev_type] = (
-                        self.report.comparisons_by_type.get(ev_type, 0) + 1
-                    )
-                    d_bb_rest = (
-                        abs(ws_bb - rest_bb) if (ws_bb is not None and rest_bb is not None) else None
-                    )
-                    d_ba_rest = (
-                        abs(ws_ba - rest_ba) if (ws_ba is not None and rest_ba is not None) else None
-                    )
-                    divergent_rest = any(
-                        d is not None and d > TOLERANCE + EPSILON for d in (d_bb_rest, d_ba_rest)
-                    )
-                    deltas_rest = [d for d in (d_bb_rest, d_ba_rest) if d is not None]
-                    gap_rest = max(deltas_rest) if deltas_rest else None
-                    age_s = (ws_rx - rest_rx) if (rest_rx is not None and ws_rx > 0) else None
-                    if gap_rest is not None:
-                        self.report.note_magnitude(gap_rest)
-                        self.report.note_skew(rest_rx, ws_rx)
-                    self.report.note_series(
-                        self.token_series.get(tok, "unknown"), divergent_rest, gap_rest)
-                    self.report.note_age(age_s, divergent_rest)
-                    if divergent_rest:
-                        self.report.rest_divergences[ev_type] = (
-                            self.report.rest_divergences.get(ev_type, 0) + 1
-                        )
-                        max_d_rest = max(deltas_rest)
-                        self.report.max_gap_by_type[ev_type] = max(
-                            self.report.max_gap_by_type.get(ev_type, 0.0), max_d_rest
-                        )
-                        div_rec_rest = DivergenceRecord(
-                            ws_rx=ws_rx,
-                            rest_rx=rest_rx,
-                            tick_bucket=tick_bucket(max_d_rest),
-                            age_s=age_s,
-                            event_index=self.report.total_ws_events,
-                            event_type=ev_type,
-                            token=tok,
-                            source="rest",
-                            ws_bb=ws_bb,
-                            ws_ba=ws_ba,
-                            ref_bb=rest_bb,
-                            ref_ba=rest_ba,
-                            bb_delta=d_bb_rest,
-                            ba_delta=d_ba_rest,
-                            max_gap=max_d_rest,
-                            event=ev,
-                            preceding_events=history_copy,
-                            book_snapshot_before=snapshots_before.get(tok),
-                        )
-                        if not self.report.first_divergence:
-                            self.report.first_divergence = div_rec_rest
-                        self.report.all_divergences.append(div_rec_rest)
+            if not selected:
+                continue
+            rest_book, rest_rx = selected
+            rest_bb = _num(rest_book.get("best_bid"))
+            rest_ba = _num(rest_book.get("best_ask"))
+            if ((rest_bb is None and rest_ba is None)
+                    or (ws_bb is None and ws_ba is None)):
+                self.report.note_excluded(EXCLUDED_NO_QUOTES)
+                continue
+            check = checkability(ev_type, declared_bb, declared_ba)
+            self.report.comparisons_by_type[ev_type] = (
+                self.report.comparisons_by_type.get(ev_type, 0) + 1
+            )
+            d_bb_rest = (
+                abs(ws_bb - rest_bb) if (ws_bb is not None and rest_bb is not None) else None
+            )
+            d_ba_rest = (
+                abs(ws_ba - rest_ba) if (ws_ba is not None and rest_ba is not None) else None
+            )
+            divergent_rest = any(
+                d is not None and d > TOLERANCE + EPSILON for d in (d_bb_rest, d_ba_rest)
+            )
+            deltas_rest = [d for d in (d_bb_rest, d_ba_rest) if d is not None]
+            gap_rest = max(deltas_rest) if deltas_rest else None
+            age_s = (ws_rx - rest_rx) if (rest_rx is not None and ws_rx > 0) else None
+            if gap_rest is not None:
+                self.report.note_magnitude(gap_rest)
+                self.report.note_skew(rest_rx, ws_rx)
+            self.report.note_series(
+                self.token_series.get(tok, "unknown"), divergent_rest, gap_rest)
+            self.report.note_age(age_s, divergent_rest)
+            self.report.note_checked(check, divergent_rest)
+            if divergent_rest:
+                self.report.rest_divergences[ev_type] = (
+                    self.report.rest_divergences.get(ev_type, 0) + 1
+                )
+                max_d_rest = max(deltas_rest)
+                self.report.max_gap_by_type[ev_type] = max(
+                    self.report.max_gap_by_type.get(ev_type, 0.0), max_d_rest
+                )
+                div_rec_rest = DivergenceRecord(
+                    ws_rx=ws_rx,
+                    rest_rx=rest_rx,
+                    tick_bucket=tick_bucket(max_d_rest),
+                    age_s=age_s,
+                    checkability=check,
+                    event_index=self.report.total_ws_events,
+                    event_type=ev_type,
+                    token=tok,
+                    source="rest",
+                    ws_bb=ws_bb,
+                    ws_ba=ws_ba,
+                    ref_bb=rest_bb,
+                    ref_ba=rest_ba,
+                    bb_delta=d_bb_rest,
+                    ba_delta=d_ba_rest,
+                    max_gap=max_d_rest,
+                    event=ev,
+                    preceding_events=history_copy,
+                    book_snapshot_before=snapshots_before.get(tok),
+                )
+                if not self.report.first_divergence:
+                    self.report.first_divergence = div_rec_rest
+                self.report.all_divergences.append(div_rec_rest)
 
 
 def replay_file(file_path: Path, history_buffer_size: int = 15) -> ReconciliationReport:
@@ -644,6 +726,19 @@ def print_report_table(report: ReconciliationReport) -> None:
             f"{ev_type:<18} | {s['events']:<8} | {s['in_frame_divergences']:<12} | "
             f"{s['comparisons']:<10} | {s['rest_divergences']:<9} | {rate_str:<9} | {gap_str}"
         )
+    if report.gated_comparisons or report.blind_comparisons:
+        print("-" * 80)
+        print("GATED vs BLIND (Issue #440: each rate over its own population):")
+        for label, comps, divs in (
+            ("gated", report.gated_comparisons, report.gated_divergences),
+            ("blind", report.blind_comparisons, report.blind_divergences),
+        ):
+            rate = f"{divs / comps * 100:.1f}%" if comps else "N/A"
+            print(f"  {label:<12} comps={comps:<7} div={divs:<6} rate={rate}")
+    if report.excluded:
+        print("EXCLUDED (never compared; counted by reason, Issue #440):")
+        for reason, count in sorted(report.excluded.items()):
+            print(f"  {reason:<24} {count}")
     if report.magnitude_buckets:
         print("-" * 80)
         print("MAGNITUDE BUCKETS (every comparable pair; one tick = $0.001):")
